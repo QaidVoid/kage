@@ -1,14 +1,21 @@
 //! Anthropic provider.
 //!
-//! Implements the Messages API (`POST /v1/messages`) using `ureq`. T2.3 covers
-//! the non-streaming request path and the wire-format helpers; streaming via
-//! SSE lands in T2.4.
+//! Implements the Messages API (`POST /v1/messages`) using `ureq`. The
+//! non-streaming `request` method buffers and decodes the full response;
+//! the `Provider::stream` impl reads server-sent events line by line and
+//! yields [`ProviderEvent`]s as they arrive.
+
+use std::collections::{HashMap, VecDeque};
+use std::io::{BufRead, BufReader, Read};
 
 use kage_core::{CancelFlag, Content, Message, Role, TokenUsage, ToolCallId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{ProviderError, ProviderMetadata, StopReason, StreamRequest, ToolSpec};
+use crate::{
+    EventStream, Provider, ProviderError, ProviderEvent, ProviderMetadata, StopReason,
+    StreamRequest, ToolSpec,
+};
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -319,6 +326,334 @@ fn map_ureq_error(err: ureq::Error) -> ProviderError {
     }
 }
 
+impl Provider for AnthropicProvider {
+    fn metadata(&self) -> &ProviderMetadata {
+        &self.metadata
+    }
+
+    fn stream(
+        &self,
+        req: StreamRequest,
+        cancel: &CancelFlag,
+    ) -> Result<EventStream, ProviderError> {
+        if cancel.is_cancelled() {
+            return Err(ProviderError::Cancelled);
+        }
+        let body = build_request_body(&req, true);
+        let url = format!("{}/v1/messages", self.base_url);
+        let response = self
+            .agent
+            .post(&url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .header("content-type", "application/json")
+            .send_json(&body)
+            .map_err(map_ureq_error)?;
+
+        let reader: Box<dyn Read + Send> = Box::new(response.into_body().into_reader());
+        Ok(Box::new(AnthropicStream::new(reader, cancel.clone())))
+    }
+}
+
+/// Iterator over a streaming Anthropic Messages response.
+///
+/// Drives an SSE reader and translates Anthropic's event vocabulary
+/// (`message_start`, `content_block_*`, `message_delta`, `message_stop`)
+/// into our generic [`ProviderEvent`] alphabet. Polls the [`CancelFlag`]
+/// between each SSE event.
+pub struct AnthropicStream {
+    reader: BufReader<Box<dyn Read + Send>>,
+    cancel: CancelFlag,
+    state: StreamState,
+    pending: VecDeque<Result<ProviderEvent, ProviderError>>,
+    done: bool,
+}
+
+#[derive(Default)]
+struct StreamState {
+    blocks: HashMap<usize, BlockBuilder>,
+    usage: TokenUsage,
+    stop_reason: StopReason,
+}
+
+enum BlockBuilder {
+    Text,
+    Thinking,
+    ToolUse {
+        id: ToolCallId,
+        partial_input: String,
+    },
+}
+
+impl AnthropicStream {
+    /// Construct a stream from any byte source carrying Anthropic SSE.
+    #[must_use]
+    pub fn new(reader: Box<dyn Read + Send>, cancel: CancelFlag) -> Self {
+        Self {
+            reader: BufReader::new(reader),
+            cancel,
+            state: StreamState::default(),
+            pending: VecDeque::new(),
+            done: false,
+        }
+    }
+
+    fn process_event(&mut self, name: &str, data: &str) {
+        let value: Value = match serde_json::from_str(data) {
+            Ok(v) => v,
+            Err(e) => {
+                self.pending
+                    .push_back(Err(ProviderError::Decode(e.to_string())));
+                return;
+            }
+        };
+        match name {
+            "message_start" => {
+                self.pending.push_back(Ok(ProviderEvent::MessageStart));
+                if let Some(usage) = value.pointer("/message/usage") {
+                    self.absorb_usage(usage);
+                }
+            }
+            "content_block_start" => self.on_block_start(&value),
+            "content_block_delta" => self.on_block_delta(&value),
+            "content_block_stop" => self.on_block_stop(&value),
+            "message_delta" => {
+                if let Some(stop) = value.pointer("/delta/stop_reason").and_then(Value::as_str) {
+                    self.state.stop_reason = parse_stop_reason(stop);
+                }
+                if let Some(usage) = value.pointer("/usage") {
+                    self.absorb_usage(usage);
+                }
+            }
+            "message_stop" => {
+                self.pending.push_back(Ok(ProviderEvent::MessageEnd {
+                    stop_reason: self.state.stop_reason,
+                    usage: self.state.usage,
+                }));
+                self.done = true;
+            }
+            "error" => {
+                let msg = value
+                    .pointer("/error/message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("provider error")
+                    .to_owned();
+                self.pending.push_back(Err(ProviderError::Decode(msg)));
+                self.done = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn absorb_usage(&mut self, usage: &Value) {
+        if let Some(v) = usage.get("input_tokens").and_then(Value::as_u64) {
+            self.state.usage.input = v;
+        }
+        if let Some(v) = usage.get("output_tokens").and_then(Value::as_u64) {
+            self.state.usage.output = v;
+        }
+        if let Some(v) = usage
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64)
+        {
+            self.state.usage.cache_write = v;
+        }
+        if let Some(v) = usage.get("cache_read_input_tokens").and_then(Value::as_u64) {
+            self.state.usage.cache_read = v;
+        }
+    }
+
+    fn on_block_start(&mut self, value: &Value) {
+        let index = block_index(value);
+        let Some(block) = value.get("content_block") else {
+            return;
+        };
+        let kind = block.get("type").and_then(Value::as_str).unwrap_or("");
+        match kind {
+            "text" => {
+                self.state.blocks.insert(index, BlockBuilder::Text);
+            }
+            "thinking" => {
+                self.state.blocks.insert(index, BlockBuilder::Thinking);
+            }
+            "tool_use" => {
+                let id_str = block
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                let name = block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                let id = ToolCallId::new(id_str);
+                self.state.blocks.insert(
+                    index,
+                    BlockBuilder::ToolUse {
+                        id: id.clone(),
+                        partial_input: String::new(),
+                    },
+                );
+                self.pending
+                    .push_back(Ok(ProviderEvent::ToolCallStart { id, name }));
+            }
+            _ => {}
+        }
+    }
+
+    fn on_block_delta(&mut self, value: &Value) {
+        let index = block_index(value);
+        let Some(delta) = value.get("delta") else {
+            return;
+        };
+        let dtype = delta.get("type").and_then(Value::as_str).unwrap_or("");
+        match dtype {
+            "text_delta" => {
+                let text = delta
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                self.pending
+                    .push_back(Ok(ProviderEvent::TextDelta { delta: text }));
+            }
+            "thinking_delta" => {
+                let text = delta
+                    .get("thinking")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                self.pending
+                    .push_back(Ok(ProviderEvent::ThinkingDelta { delta: text }));
+            }
+            "input_json_delta" => {
+                let partial = delta
+                    .get("partial_json")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                if let Some(BlockBuilder::ToolUse { id, partial_input }) =
+                    self.state.blocks.get_mut(&index)
+                {
+                    partial_input.push_str(&partial);
+                    self.pending.push_back(Ok(ProviderEvent::ToolCallArgsDelta {
+                        id: id.clone(),
+                        partial,
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn on_block_stop(&mut self, value: &Value) {
+        let index = block_index(value);
+        if let Some(BlockBuilder::ToolUse { id, partial_input }) = self.state.blocks.remove(&index)
+        {
+            let input = if partial_input.is_empty() {
+                Value::Object(serde_json::Map::new())
+            } else {
+                serde_json::from_str(&partial_input).unwrap_or(Value::Null)
+            };
+            self.pending
+                .push_back(Ok(ProviderEvent::ToolCallEnd { id, input }));
+        }
+    }
+}
+
+impl Iterator for AnthropicStream {
+    type Item = Result<ProviderEvent, ProviderError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(ev) = self.pending.pop_front() {
+                return Some(ev);
+            }
+            if self.done {
+                return None;
+            }
+            if self.cancel.is_cancelled() {
+                self.done = true;
+                return Some(Err(ProviderError::Cancelled));
+            }
+            match read_sse_event(&mut self.reader) {
+                Ok(Some(event)) => self.process_event(&event.name, &event.data),
+                Ok(None) => {
+                    self.done = true;
+                    return None;
+                }
+                Err(e) => {
+                    self.done = true;
+                    return Some(Err(e));
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SseEvent {
+    name: String,
+    data: String,
+}
+
+fn read_sse_event<R: BufRead>(reader: &mut R) -> Result<Option<SseEvent>, ProviderError> {
+    let mut name = String::new();
+    let mut data = String::new();
+    let mut have_content = false;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let n = reader
+            .read_line(&mut line)
+            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+        if n == 0 {
+            if have_content {
+                return Ok(Some(SseEvent { name, data }));
+            }
+            return Ok(None);
+        }
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        if trimmed.is_empty() {
+            if have_content {
+                return Ok(Some(SseEvent { name, data }));
+            }
+            continue;
+        }
+        if trimmed.starts_with(':') {
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("event:") {
+            rest.trim_start().clone_into(&mut name);
+            have_content = true;
+        } else if let Some(rest) = trimmed.strip_prefix("data:") {
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(rest.trim_start());
+            have_content = true;
+        }
+    }
+}
+
+fn block_index(value: &Value) -> usize {
+    value
+        .get("index")
+        .and_then(Value::as_u64)
+        .map_or(0, |v| usize::try_from(v).unwrap_or(0))
+}
+
+fn parse_stop_reason(value: &str) -> StopReason {
+    match value {
+        "end_turn" => StopReason::EndTurn,
+        "max_tokens" => StopReason::MaxTokens,
+        "stop_sequence" => StopReason::StopSequence,
+        "tool_use" => StopReason::ToolUse,
+        _ => StopReason::Other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -541,5 +876,130 @@ mod tests {
         assert_eq!(stop, StopReason::ToolUse);
         assert_eq!(usage.cache_read, 80);
         assert_eq!(usage.cache_write, 50);
+    }
+
+    fn stream_from_bytes(bytes: &'static [u8]) -> AnthropicStream {
+        AnthropicStream::new(Box::new(std::io::Cursor::new(bytes)), CancelFlag::new())
+    }
+
+    fn collect_ok(stream: AnthropicStream) -> Vec<ProviderEvent> {
+        stream.map(|r| r.expect("stream item is Ok")).collect()
+    }
+
+    #[test]
+    fn sse_parser_extracts_event_and_data() {
+        let bytes: &[u8] = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let mut reader = std::io::BufReader::new(std::io::Cursor::new(bytes));
+        let first = read_sse_event(&mut reader).unwrap().unwrap();
+        assert_eq!(first.name, "message_start");
+        assert!(first.data.contains("input_tokens"));
+        let second = read_sse_event(&mut reader).unwrap().unwrap();
+        assert_eq!(second.name, "message_stop");
+        assert!(read_sse_event(&mut reader).unwrap().is_none());
+    }
+
+    #[test]
+    fn sse_parser_ignores_comments_and_blank_lines() {
+        let bytes: &[u8] =
+            b": this is a comment\n\nevent: ping\ndata: {}\n\nevent: ping\ndata: {}\n\n";
+        let mut reader = std::io::BufReader::new(std::io::Cursor::new(bytes));
+        let first = read_sse_event(&mut reader).unwrap().unwrap();
+        assert_eq!(first.name, "ping");
+        let second = read_sse_event(&mut reader).unwrap().unwrap();
+        assert_eq!(second.name, "ping");
+    }
+
+    #[test]
+    fn stream_emits_text_deltas() {
+        let bytes: &[u8] = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":5,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let events = collect_ok(stream_from_bytes(bytes));
+        assert!(matches!(events[0], ProviderEvent::MessageStart));
+        assert!(
+            matches!(&events[1], ProviderEvent::TextDelta { delta } if delta == "hello"),
+            "got {:?}",
+            events[1]
+        );
+        assert!(
+            matches!(&events[2], ProviderEvent::TextDelta { delta } if delta == " world"),
+            "got {:?}",
+            events[2]
+        );
+        if let ProviderEvent::MessageEnd { stop_reason, usage } = events.last().unwrap() {
+            assert_eq!(*stop_reason, StopReason::EndTurn);
+            assert_eq!(usage.input, 5);
+            assert_eq!(usage.output, 2);
+        } else {
+            panic!("expected MessageEnd at end, got {:?}", events.last());
+        }
+    }
+
+    #[test]
+    fn stream_emits_thinking_delta() {
+        let bytes: &[u8] = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"reasoning...\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let events = collect_ok(stream_from_bytes(bytes));
+        assert!(events.iter().any(
+            |e| matches!(e, ProviderEvent::ThinkingDelta { delta } if delta == "reasoning...")
+        ));
+    }
+
+    #[test]
+    fn stream_assembles_tool_call() {
+        let bytes: &[u8] = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"read\",\"input\":{}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\"/tmp\\\"}\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":3}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let events = collect_ok(stream_from_bytes(bytes));
+
+        let start_idx = events
+            .iter()
+            .position(|e| matches!(e, ProviderEvent::ToolCallStart { .. }))
+            .expect("ToolCallStart present");
+        if let ProviderEvent::ToolCallStart { id, name } = &events[start_idx] {
+            assert_eq!(id.0, "call_1");
+            assert_eq!(name, "read");
+        }
+
+        let args_count = events
+            .iter()
+            .filter(|e| matches!(e, ProviderEvent::ToolCallArgsDelta { .. }))
+            .count();
+        assert_eq!(args_count, 2);
+
+        let end = events
+            .iter()
+            .find(|e| matches!(e, ProviderEvent::ToolCallEnd { .. }))
+            .expect("ToolCallEnd present");
+        if let ProviderEvent::ToolCallEnd { id, input } = end {
+            assert_eq!(id.0, "call_1");
+            assert_eq!(input["path"], "/tmp");
+        }
+
+        if let Some(ProviderEvent::MessageEnd { stop_reason, .. }) = events.last() {
+            assert_eq!(*stop_reason, StopReason::ToolUse);
+        } else {
+            panic!("expected MessageEnd");
+        }
+    }
+
+    #[test]
+    fn stream_yields_cancelled_when_flag_set() {
+        let bytes: &[u8] = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let cancel = CancelFlag::new();
+        cancel.cancel();
+        let stream = AnthropicStream::new(Box::new(std::io::Cursor::new(bytes)), cancel);
+        let mut events = stream;
+        let first = events.next();
+        assert!(matches!(first, Some(Err(ProviderError::Cancelled))));
+        assert!(events.next().is_none());
+    }
+
+    #[test]
+    fn stream_propagates_error_event() {
+        let bytes: &[u8] = b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"servers are overloaded\"}}\n\n";
+        let mut events = stream_from_bytes(bytes);
+        let first = events.next().unwrap();
+        match first {
+            Err(ProviderError::Decode(msg)) => {
+                assert!(msg.contains("overloaded"), "got {msg}");
+            }
+            other => panic!("expected Decode error, got {other:?}"),
+        }
     }
 }

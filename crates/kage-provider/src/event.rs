@@ -7,7 +7,7 @@ use kage_core::{TokenUsage, ToolCallId};
 use serde::{Deserialize, Serialize};
 
 /// Why a provider's stream ended.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
     /// Model decided the turn was complete.
@@ -19,6 +19,7 @@ pub enum StopReason {
     /// Stopped because the model emitted tool calls awaiting execution.
     ToolUse,
     /// Anything else (refusal, internal stop, unknown).
+    #[default]
     Other,
 }
 

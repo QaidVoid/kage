@@ -20,9 +20,10 @@ pub mod testing;
 
 pub use error::ProviderError;
 pub use event::{ProviderEvent, StopReason};
+pub use kage_core::ToolSpec;
 pub use metadata::ProviderMetadata;
 pub use registry::{ProviderRegistry, ResolvedProvider};
-pub use request::{StreamRequest, ThinkingConfig, ToolSpec};
+pub use request::{StreamRequest, ThinkingConfig};
 
 use kage_core::CancelFlag;
 

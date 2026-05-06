@@ -1,18 +1,7 @@
 //! Streaming request shape passed to [`Provider::stream`](crate::Provider::stream).
 
-use kage_core::Message;
+use kage_core::{Message, ToolSpec};
 use serde::{Deserialize, Serialize};
-
-/// One tool surfaced to the provider for the current turn.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ToolSpec {
-    /// Tool name (`snake_case`).
-    pub name: String,
-    /// Short, model-readable description.
-    pub description: String,
-    /// JSON Schema describing the tool's input.
-    pub schema: serde_json::Value,
-}
 
 /// Optional thinking-budget configuration.
 ///

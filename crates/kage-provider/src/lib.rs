@@ -4,6 +4,7 @@
 //! HTTP and parse SSE responses by reading the body line by line. There
 //! is no tokio, no async-trait, and no `Pin<Box<dyn Stream>>`.
 
+pub mod anthropic;
 pub mod error;
 pub mod event;
 pub mod metadata;

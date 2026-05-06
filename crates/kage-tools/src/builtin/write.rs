@@ -5,14 +5,13 @@
 //! content visible. The destination must already have an existing parent
 //! directory; the tool does not create directories.
 
-use std::fs::{self, OpenOptions};
-use std::io::Write as _;
 use std::path::Path;
 
 use kage_core::{Risk, ToolOutput};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use crate::atomic::atomic_write;
 use crate::{Tool, ToolContext, ToolError, resolve_under, schema_for};
 
 /// Input shape for the `write` tool.
@@ -80,19 +79,7 @@ impl Tool for WriteTool {
             });
         }
 
-        let temp = temp_sibling(&target);
-        {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp)?;
-            file.write_all(input.content.as_bytes())?;
-            file.sync_all()?;
-        }
-        if let Err(e) = fs::rename(&temp, &target) {
-            let _ = fs::remove_file(&temp);
-            return Err(ToolError::Io(e));
-        }
+        atomic_write(&target, input.content.as_bytes())?;
 
         let bytes = input.content.len();
         Ok(ToolOutput {
@@ -103,18 +90,10 @@ impl Tool for WriteTool {
     }
 }
 
-fn temp_sibling(target: &Path) -> std::path::PathBuf {
-    let parent = target.parent().unwrap_or_else(|| Path::new("."));
-    let suffix = ulid::Ulid::new().to_string();
-    let name = match target.file_name() {
-        Some(n) => format!(".{}.{suffix}.tmp", n.to_string_lossy()),
-        None => format!(".kage-{suffix}.tmp"),
-    };
-    parent.join(name)
-}
-
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use kage_core::CancelFlag;
 
     use super::*;

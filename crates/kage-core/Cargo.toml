@@ -9,13 +9,13 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-chrono = { version = "0.4.44", features = ["serde"] }
-dirs = "6.0.0"
-figment = { version = "0.10.19", features = ["toml", "env"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
-thiserror = "2.0.18"
-ulid = { version = "1.2.1", features = ["serde"] }
+chrono.workspace = true
+dirs.workspace = true
+figment.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ulid.workspace = true
 
 [dev-dependencies]
-figment = { version = "0.10.19", features = ["test"] }
+figment = { workspace = true, features = ["test"] }

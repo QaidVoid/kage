@@ -1,5 +1,6 @@
 //! Tool trait, registry, and built-in tools.
 
+pub mod builtin;
 pub mod error;
 pub mod path;
 pub mod registry;

@@ -7,11 +7,13 @@
 pub mod error;
 pub mod event;
 pub mod metadata;
+pub mod registry;
 pub mod request;
 
 pub use error::ProviderError;
 pub use event::{ProviderEvent, StopReason};
 pub use metadata::ProviderMetadata;
+pub use registry::{ProviderRegistry, ResolvedProvider};
 pub use request::{StreamRequest, ThinkingConfig, ToolSpec};
 
 use kage_core::CancelFlag;
@@ -30,7 +32,7 @@ pub type EventStream =
 /// the request has been accepted, then return an iterator the caller
 /// drains for events. Cancellation is cooperative through `cancel`; the
 /// iterator polls it at safe points (between SSE events).
-pub trait Provider: Send + Sync {
+pub trait Provider: Send + Sync + std::fmt::Debug {
     /// Static metadata describing this provider.
     fn metadata(&self) -> &ProviderMetadata;
 

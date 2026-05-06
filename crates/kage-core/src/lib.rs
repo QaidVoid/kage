@@ -4,6 +4,7 @@ pub mod config;
 pub mod error;
 pub mod event;
 pub mod message;
+pub mod risk;
 
 pub use config::{
     Config, KeybindingsConfig, PluginsConfig, ProviderConfig, SandboxBackend, SandboxConfig,
@@ -12,3 +13,4 @@ pub use config::{
 pub use error::{Error, Result};
 pub use event::{LoopError, LoopEvent, TokenUsage, ToolOutput};
 pub use message::{Content, ImageSource, Message, MessageId, Role, ToolCallId};
+pub use risk::{Risk, classify};

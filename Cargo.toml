@@ -1,0 +1,23 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/kage-acp",
+    "crates/kage-cli",
+    "crates/kage-core",
+    "crates/kage-loop",
+    "crates/kage-mcp",
+    "crates/kage-plugin",
+    "crates/kage-provider",
+    "crates/kage-sandbox",
+    "crates/kage-session",
+    "crates/kage-tools",
+    "crates/kage-tui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]

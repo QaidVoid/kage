@@ -744,6 +744,7 @@ version = "0.1.0"
 name = "kage-tools"
 version = "0.1.0"
 dependencies = [
+ "globset",
  "grep",
  "ignore",
  "kage-core",

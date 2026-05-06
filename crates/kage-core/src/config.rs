@@ -12,6 +12,8 @@ use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
 use serde::{Deserialize, Serialize};
 
+use crate::error::Result;
+
 /// Top-level configuration for a kage process.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -40,25 +42,23 @@ impl Config {
     /// Load configuration from `path`, merging with defaults and env overrides.
     ///
     /// A missing file is not an error: defaults plus env are returned.
-    pub fn load(path: &Path) -> Result<Self, Box<figment::Error>> {
-        Figment::new()
+    pub fn load(path: &Path) -> Result<Self> {
+        Ok(Figment::new()
             .merge(Serialized::defaults(Self::default()))
             .merge(Toml::file(path))
             .merge(Env::prefixed("KAGE_").split("__"))
-            .extract()
-            .map_err(Box::new)
+            .extract()?)
     }
 
     /// Load configuration from [`Self::default_path`], or pure defaults plus
     /// env if no home directory is available.
-    pub fn load_default() -> Result<Self, Box<figment::Error>> {
+    pub fn load_default() -> Result<Self> {
         match Self::default_path() {
             Some(p) => Self::load(&p),
-            None => Figment::new()
+            None => Ok(Figment::new()
                 .merge(Serialized::defaults(Self::default()))
                 .merge(Env::prefixed("KAGE_").split("__"))
-                .extract()
-                .map_err(Box::new),
+                .extract()?),
         }
     }
 }

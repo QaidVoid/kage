@@ -273,6 +273,7 @@ dependencies = [
  "figment",
  "serde",
  "serde_json",
+ "thiserror",
  "ulid",
 ]
 

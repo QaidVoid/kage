@@ -8,3 +8,6 @@ rust-version.workspace = true
 [[bin]]
 name = "kage"
 path = "src/main.rs"
+
+[lints]
+workspace = true

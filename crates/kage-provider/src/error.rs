@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 /// Failure modes shared by all providers.
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 pub enum ProviderError {
     /// Authentication failed (bad or missing API key).
     #[error("authentication failed: {0}")]

@@ -14,6 +14,9 @@ pub mod registry;
 pub mod request;
 pub mod zai;
 
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
+
 pub use error::ProviderError;
 pub use event::{ProviderEvent, StopReason};
 pub use metadata::ProviderMetadata;

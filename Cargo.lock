@@ -292,6 +292,12 @@ version = "0.1.0"
 [[package]]
 name = "kage-provider"
 version = "0.1.0"
+dependencies = [
+ "kage-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "kage-sandbox"

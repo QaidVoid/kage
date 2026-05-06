@@ -95,12 +95,21 @@ impl AnthropicProvider {
 }
 
 /// Build the JSON body for a Messages API request.
+///
+/// Adds Anthropic prompt-cache breakpoints (`cache_control: ephemeral`) to
+/// the system prompt and to the last block of the final message. This caches
+/// the system prompt + tool definitions + entire prior conversation, so the
+/// next turn pays read-rate (~10% of input rate) for everything before the
+/// new user message.
 pub(crate) fn build_request_body(req: &StreamRequest, stream: bool) -> Value {
-    let messages: Vec<Value> = req
+    let mut messages: Vec<Value> = req
         .messages
         .iter()
         .filter_map(internal_message_to_anthropic)
         .collect();
+    if let Some(last) = messages.last_mut() {
+        mark_last_block_for_caching(last);
+    }
 
     let mut body = serde_json::json!({
         "model": req.model,
@@ -110,7 +119,11 @@ pub(crate) fn build_request_body(req: &StreamRequest, stream: bool) -> Value {
     });
 
     if let Some(system) = &req.system {
-        body["system"] = Value::String(system.clone());
+        body["system"] = serde_json::json!([{
+            "type": "text",
+            "text": system,
+            "cache_control": {"type": "ephemeral"},
+        }]);
     }
     if !req.tools.is_empty() {
         body["tools"] = serde_json::to_value(
@@ -131,6 +144,22 @@ pub(crate) fn build_request_body(req: &StreamRequest, stream: bool) -> Value {
         });
     }
     body
+}
+
+fn mark_last_block_for_caching(message: &mut Value) {
+    let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let Some(last) = content.last_mut() else {
+        return;
+    };
+    let Some(obj) = last.as_object_mut() else {
+        return;
+    };
+    obj.insert(
+        "cache_control".into(),
+        serde_json::json!({"type": "ephemeral"}),
+    );
 }
 
 fn tool_spec_to_anthropic(spec: &ToolSpec) -> Value {
@@ -684,11 +713,36 @@ mod tests {
     }
 
     #[test]
-    fn body_promotes_system_to_top_level() {
+    fn body_promotes_system_to_cached_array() {
         let mut req = StreamRequest::new("m", vec![user_msg("hi")]);
         req.system = Some("you are kage".into());
         let body = build_request_body(&req, false);
-        assert_eq!(body["system"], "you are kage");
+        let system = body["system"].as_array().expect("system is array");
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0]["type"], "text");
+        assert_eq!(system[0]["text"], "you are kage");
+        assert_eq!(system[0]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn body_marks_last_message_block_for_caching() {
+        let req = StreamRequest::new("m", vec![user_msg("hello"), user_msg("again")]);
+        let body = build_request_body(&req, false);
+        let messages = body["messages"].as_array().unwrap();
+        let last = &messages[messages.len() - 1];
+        let blocks = last["content"].as_array().unwrap();
+        let last_block = &blocks[blocks.len() - 1];
+        assert_eq!(last_block["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn body_does_not_mark_earlier_messages() {
+        let req = StreamRequest::new("m", vec![user_msg("first"), user_msg("second")]);
+        let body = build_request_body(&req, false);
+        let messages = body["messages"].as_array().unwrap();
+        let first = &messages[0];
+        let blocks = first["content"].as_array().unwrap();
+        assert!(blocks[0].get("cache_control").is_none());
     }
 
     #[test]

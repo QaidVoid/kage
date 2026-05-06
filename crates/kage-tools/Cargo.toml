@@ -10,5 +10,6 @@ workspace = true
 
 [dependencies]
 kage-core.workspace = true
+schemars.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

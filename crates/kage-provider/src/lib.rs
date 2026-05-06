@@ -12,6 +12,7 @@ pub mod metadata;
 pub mod openai;
 pub mod registry;
 pub mod request;
+pub mod zai;
 
 pub use error::ProviderError;
 pub use event::{ProviderEvent, StopReason};

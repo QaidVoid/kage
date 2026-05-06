@@ -15,7 +15,7 @@ use crate::{
     StreamRequest, ToolSpec,
 };
 
-const DEFAULT_BASE_URL: &str = "https://api.openai.com";
+const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4_096;
 
 /// `OpenAI` Chat Completions provider.
@@ -37,16 +37,35 @@ impl OpenAiProvider {
     /// Construct a provider against a custom base URL.
     #[must_use]
     pub fn with_base_url(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
-        Self {
-            api_key: api_key.into(),
-            base_url: base_url.into(),
-            metadata: ProviderMetadata {
+        Self::compatible(
+            api_key,
+            base_url,
+            ProviderMetadata {
                 id: "openai".into(),
-                display_name: "`OpenAI`".into(),
+                display_name: "OpenAI".into(),
                 supports_caching: false,
                 supports_thinking: false,
                 supports_tool_use: true,
             },
+        )
+    }
+
+    /// Construct an `OpenAI`-compatible provider with caller-supplied metadata.
+    ///
+    /// Used by adapters for OpenAI-compatible APIs (ZAI, Mistral, Groq,
+    /// `OpenRouter`, Cerebras, ...). The `base_url` should include any path
+    /// segments before `/chat/completions` (for `OpenAI` itself, that is
+    /// the trailing `/v1`).
+    #[must_use]
+    pub fn compatible(
+        api_key: impl Into<String>,
+        base_url: impl Into<String>,
+        metadata: ProviderMetadata,
+    ) -> Self {
+        Self {
+            api_key: api_key.into(),
+            base_url: base_url.into(),
+            metadata,
             agent: ureq::Agent::new_with_defaults(),
         }
     }
@@ -66,7 +85,7 @@ impl Provider for OpenAiProvider {
             return Err(ProviderError::Cancelled);
         }
         let body = build_request_body(&req, true);
-        let url = format!("{}/v1/chat/completions", self.base_url);
+        let url = format!("{}/chat/completions", self.base_url);
         let response = self
             .agent
             .post(&url)

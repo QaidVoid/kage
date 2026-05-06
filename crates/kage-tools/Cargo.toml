@@ -9,6 +9,8 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+grep = "0.4.1"
+ignore = "0.4.25"
 kage-core.workspace = true
 schemars.workspace = true
 serde.workspace = true

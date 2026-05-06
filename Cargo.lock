@@ -596,6 +596,7 @@ dependencies = [
  "kage-core",
  "schemars",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 

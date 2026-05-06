@@ -586,6 +586,11 @@ version = "0.1.0"
 [[package]]
 name = "kage-tools"
 version = "0.1.0"
+dependencies = [
+ "kage-core",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "kage-tui"

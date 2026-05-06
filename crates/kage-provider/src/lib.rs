@@ -12,6 +12,7 @@ pub mod metadata;
 pub mod openai;
 pub mod registry;
 pub mod request;
+pub mod tokens;
 pub mod zai;
 
 #[cfg(any(test, feature = "testing"))]

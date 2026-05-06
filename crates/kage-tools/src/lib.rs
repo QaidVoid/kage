@@ -8,6 +8,7 @@ pub mod registry;
 pub mod schema;
 pub mod tool;
 
+pub use builtin::builtin_registry;
 pub use error::ToolError;
 pub use path::resolve_under;
 pub use registry::ToolRegistry;

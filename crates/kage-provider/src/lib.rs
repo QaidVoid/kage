@@ -7,6 +7,7 @@
 pub mod anthropic;
 pub mod error;
 pub mod event;
+pub mod gemini;
 pub mod metadata;
 pub mod openai;
 pub mod registry;

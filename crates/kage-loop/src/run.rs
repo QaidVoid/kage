@@ -208,6 +208,15 @@ mod tests {
         }
     }
 
+    struct OneShotFollowup {
+        text: Option<String>,
+    }
+    impl Hooks for OneShotFollowup {
+        fn get_followup(&mut self) -> Option<String> {
+            self.text.take()
+        }
+    }
+
     struct Steering(bool);
     impl Hooks for Steering {
         fn get_steering(&mut self) -> Option<String> {
@@ -381,6 +390,42 @@ mod tests {
                 structured: None,
             })
         }
+    }
+
+    #[test]
+    fn followup_text_appears_in_next_provider_request() {
+        let mock = MockProvider::sequence(vec![
+            vec![Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            })],
+            vec![Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            })],
+        ]);
+
+        let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
+        cx.history.push(user_msg("first ask"));
+        let cfg = LoopConfig::default();
+        let mut hooks = OneShotFollowup {
+            text: Some("now also do this".into()),
+        };
+        let cancel = CancelFlag::new();
+        let registry = ToolRegistry::new();
+
+        let res = run(&mock, &registry, &mut cx, &cfg, &mut hooks, &cancel, |_| {});
+        assert!(res.is_ok());
+        assert_eq!(mock.call_count(), 2);
+
+        // The second request must include the followup as the most recent user message.
+        let req2 = mock.requests().into_iter().nth(1).unwrap();
+        let last = req2.messages.last().unwrap();
+        assert_eq!(last.role, Role::User);
+        assert!(matches!(
+            &last.content[0],
+            Content::Text { text } if text == "now also do this"
+        ));
     }
 
     #[test]

@@ -24,12 +24,12 @@ use crate::error::TuiError;
 
 static PANIC_HOOK: Once = Once::new();
 
-/// The keyboard-enhancement flags we request. Disambiguating escape
-/// codes lets the terminal report `Shift+Enter`, `Ctrl+I` vs `Tab`, and
-/// modified function keys distinctly. Reporting all keys as escape codes
-/// keeps reporting consistent across plain and modified keys.
-const KITTY_FLAGS: KeyboardEnhancementFlags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-    .union(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES);
+/// The keyboard-enhancement flags we request. We only ask for the bare
+/// minimum that buys `Shift+Enter` and `Ctrl+I` vs `Tab` disambiguation.
+/// Pushing more aggressive flags (`REPORT_ALL_KEYS_AS_ESCAPE_CODES`,
+/// `REPORT_EVENT_TYPES`) caused some terminals to ignore the entire
+/// request, dropping Shift+Enter back to plain Enter.
+const KITTY_FLAGS: KeyboardEnhancementFlags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
 
 /// Owns the terminal while the TUI is running. Restoring is automatic on
 /// drop and via a panic hook so a crashing run never strands the tty.

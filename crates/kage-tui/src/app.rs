@@ -7,6 +7,7 @@
 //! responsible for spawning the agent loop on a worker thread and
 //! pushing its events into the same `SharedBuffer` via [`TuiHooks`].
 
+use std::io::Write;
 use std::sync::mpsc::{Sender, TrySendError};
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,48 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 
 /// Lines scrolled per mouse wheel notch.
 const MOUSE_SCROLL_LINES: i32 = 3;
+
+/// When `KAGE_DEBUG_KEYS` is set to a non-empty value, every press is
+/// appended to the file at that path (or `$XDG_STATE_HOME/kage/keys.log`
+/// when the value is `1`). Lets us diagnose terminal-specific quirks
+/// like "Shift+Enter doesn't transmit" without instrumenting the host.
+fn log_key_event(key: &ratatui::crossterm::event::KeyEvent) {
+    let Ok(value) = std::env::var("KAGE_DEBUG_KEYS") else {
+        return;
+    };
+    if value.is_empty() {
+        return;
+    }
+    let path = if value == "1" {
+        let Some(home) = std::env::var_os("XDG_STATE_HOME").or_else(|| {
+            std::env::var_os("HOME").map(|h| {
+                let mut p = std::path::PathBuf::from(h);
+                p.push(".local/state");
+                p.into_os_string()
+            })
+        }) else {
+            return;
+        };
+        let mut p = std::path::PathBuf::from(home);
+        p.push("kage");
+        let _ = std::fs::create_dir_all(&p);
+        p.push("keys.log");
+        p
+    } else {
+        std::path::PathBuf::from(value)
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(
+            f,
+            "{:?}  modifiers={:?}  kind={:?}",
+            key.code, key.modifiers, key.kind
+        );
+    }
+}
 
 /// Request the host should act on. Either the user submitted a prompt
 /// (the host runs the agent loop in a worker thread), the user asked
@@ -102,6 +145,7 @@ impl App {
                 if event::poll(remaining)? {
                     match event::read()? {
                         Event::Key(key) if key.kind == KeyEventKind::Press => {
+                            log_key_event(&key);
                             if let Some(exit) = self.dispatch_key(key) {
                                 return Ok(exit);
                             }

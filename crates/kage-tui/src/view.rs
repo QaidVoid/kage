@@ -15,7 +15,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block as RtBlock, Borders, Paragraph, Wrap};
 
-use crate::buffer::{Block, Buffer};
+use crate::buffer::{Block, Buffer, CharVisualState};
 use crate::cmdline::CommandLine;
 use crate::input::{InputState, Mode};
 use crate::layout::Regions;
@@ -465,13 +465,24 @@ fn render_buffer(
             &consumed_results,
             &call_idx_for_result,
         );
+        // Char-visual on this block forces a plain rendering: the
+        // selection cursor is in logical-line space and the cached
+        // (possibly fenced) render would misalign overlays. Skip
+        // the cache for the active block and apply the selection
+        // bg before slicing.
+        let char_visual_here = buffer.char_visual().filter(|cv| cv.block_idx == idx);
         // Reuse the cached render only when there's no extra
         // emphasis to bake in - cached lines were built with
         // `Emphasis::None`, so a focused/selected/match block has to
         // rebuild to pick up the rule glyph and accent color. The
         // common case (most blocks unfocused on screen) falls into
         // the cheap branch.
-        let block_lines: Vec<Line<'static>> = if emp == Emphasis::None
+        let block_lines: Vec<Line<'static>> = if let Some(cv) = char_visual_here {
+            let text = buffer.char_visual_text(idx).unwrap_or("");
+            let mut lines = plain_lines(text, assistant_style());
+            apply_char_visual_overlay(&mut lines, cv);
+            lines
+        } else if emp == Emphasis::None
             && let Some(cached) = buffer.cached_render_lines(idx, width)
         {
             cached.as_ref().clone()
@@ -532,6 +543,7 @@ fn render_buffer(
         })
         .collect();
     buffer.set_last_block_screen_rows(screen_rows);
+    buffer.set_last_area_geometry(area.x, area.width);
 
     let paragraph = Paragraph::new(emitted_lines).wrap(Wrap { trim: false });
     frame.render_widget(paragraph.scroll((paragraph_scroll, 0)), regions.buffer);
@@ -570,6 +582,67 @@ fn emphasis_for(
         }
     }
     e
+}
+
+/// Paint a selection bg onto the chars covered by `state`. Splits
+/// each affected span at the selection edges so the resulting Line
+/// renders exactly the selected slice with `selection_color` bg and
+/// the rest of the spans untouched. Lines are expected to be plain
+/// (one per logical text line); the renderer guarantees this by
+/// rebuilding the active char-visual block via `plain_lines` rather
+/// than reusing the syntax-highlighted cache.
+fn apply_char_visual_overlay(lines: &mut Vec<Line<'static>>, state: CharVisualState) {
+    let (start, end) = state.range();
+    let theme = crate::theme::current();
+    let overlay = Style::default().bg(theme.selection_color).fg(Color::Black);
+    for (line_idx, line) in lines.iter_mut().enumerate() {
+        if line_idx < start.0 || line_idx > end.0 {
+            continue;
+        }
+        let line_chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+        let from = if line_idx == start.0 { start.1 } else { 0 };
+        let to = if line_idx == end.0 {
+            end.1.min(line_chars)
+        } else {
+            line_chars
+        };
+        if from >= to {
+            continue;
+        }
+        let spans = std::mem::take(&mut line.spans);
+        let mut out: Vec<Span<'static>> = Vec::with_capacity(spans.len() + 2);
+        let mut cursor = 0usize;
+        for span in spans {
+            let span_chars = span.content.chars().count();
+            let span_start = cursor;
+            let span_end = cursor + span_chars;
+            cursor = span_end;
+            if to <= span_start || from >= span_end {
+                out.push(span);
+                continue;
+            }
+            let local_from = from.saturating_sub(span_start);
+            let local_to = (to - span_start).min(span_chars);
+            let chars: Vec<char> = span.content.chars().collect();
+            if local_from > 0 {
+                out.push(Span::styled(
+                    chars[..local_from].iter().collect::<String>(),
+                    span.style,
+                ));
+            }
+            out.push(Span::styled(
+                chars[local_from..local_to].iter().collect::<String>(),
+                span.style.patch(overlay),
+            ));
+            if local_to < chars.len() {
+                out.push(Span::styled(
+                    chars[local_to..].iter().collect::<String>(),
+                    span.style,
+                ));
+            }
+        }
+        line.spans = out;
+    }
 }
 
 /// Approximate wrapped-row count for one [`Line`] at `width`, used
@@ -1424,6 +1497,7 @@ fn mode_label(mode: Mode) -> &'static str {
         Mode::Normal => "NOR",
         Mode::Insert => "INS",
         Mode::Visual => "VIS",
+        Mode::CharVisual => "CHR",
     }
 }
 
@@ -1431,7 +1505,7 @@ fn mode_style(mode: Mode) -> Style {
     let bg = match mode {
         Mode::Normal => Color::Blue,
         Mode::Insert => Color::Green,
-        Mode::Visual => Color::Magenta,
+        Mode::Visual | Mode::CharVisual => Color::Magenta,
     };
     Style::default()
         .fg(Color::White)

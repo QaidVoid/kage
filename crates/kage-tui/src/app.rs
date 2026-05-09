@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use ratatui::crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
 
+use crate::buffer::Buffer;
 use crate::cmdline::{CommandLine, CommandLineEvent};
 use crate::error::TuiError;
 use crate::events::SharedBuffer;
@@ -304,10 +305,10 @@ impl App {
                             MouseEventKind::ScrollUp => self.scroll_by(-MOUSE_SCROLL_LINES),
                             MouseEventKind::ScrollDown => self.scroll_by(MOUSE_SCROLL_LINES),
                             MouseEventKind::Down(ratatui::crossterm::event::MouseButton::Left) => {
-                                self.mouse_down(mouse.row);
+                                self.mouse_down(mouse.row, mouse.column);
                             }
                             MouseEventKind::Drag(ratatui::crossterm::event::MouseButton::Left) => {
-                                self.mouse_drag(mouse.row);
+                                self.mouse_drag(mouse.row, mouse.column);
                             }
                             MouseEventKind::Up(ratatui::crossterm::event::MouseButton::Left) => {
                                 self.mouse_up(mouse.row);
@@ -759,7 +760,13 @@ impl App {
                 Mode::Normal | Mode::Insert => {
                     if let Ok(mut buf) = self.buffer.lock() {
                         buf.set_visual_anchor(None);
+                        buf.clear_char_visual();
                     }
+                }
+                Mode::CharVisual => {
+                    // EnterMode(CharVisual) is dispatched by the
+                    // EnterCharVisual branch below after the mode
+                    // switch succeeds; no extra work here.
                 }
             },
             InputAction::Yank => {
@@ -770,8 +777,71 @@ impl App {
             }
             InputAction::SearchNext => self.jump_to_search_match(true),
             InputAction::SearchPrev => self.jump_to_search_match(false),
+            InputAction::EnterCharVisual => self.try_enter_char_visual(),
+            InputAction::CharVisualLeft => self.move_char_visual(0, -1),
+            InputAction::CharVisualRight => self.move_char_visual(0, 1),
+            InputAction::CharVisualUp => self.move_char_visual(-1, 0),
+            InputAction::CharVisualDown => self.move_char_visual(1, 0),
+            InputAction::CharVisualLineStart => {
+                if let Ok(mut buf) = self.buffer.lock() {
+                    buf.char_visual_line_start();
+                }
+            }
+            InputAction::CharVisualLineEnd => {
+                if let Ok(mut buf) = self.buffer.lock() {
+                    buf.char_visual_line_end();
+                }
+            }
+            InputAction::CharVisualYank => self.yank_char_visual_selection(),
         }
         None
+    }
+
+    /// Try to switch into char-visual on whatever block is currently
+    /// focused. Silently no-ops (and stays in Normal) if the block
+    /// doesn't have plain-text content the renderer can map.
+    fn try_enter_char_visual(&mut self) {
+        let started = if let Ok(mut buf) = self.buffer.lock() {
+            buf.effective_focus()
+                .is_some_and(|idx| buf.begin_char_visual(idx))
+        } else {
+            false
+        };
+        if started {
+            self.input.switch_mode(Mode::CharVisual);
+        }
+    }
+
+    fn move_char_visual(&mut self, dline: i32, dcol: i32) {
+        if let Ok(mut buf) = self.buffer.lock() {
+            buf.move_char_visual_cursor(dline, dcol);
+        }
+    }
+
+    /// OSC52-yank the active char-visual selection and exit back to
+    /// Normal mode. Mirror of [`Self::yank_visual_selection`] for
+    /// the block-level selection path.
+    fn yank_char_visual_selection(&mut self) {
+        let text = match self.buffer.lock() {
+            Ok(buf) => buf.char_visual_selection_text(),
+            Err(_) => return,
+        };
+        if !text.is_empty() {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&text);
+            let mut stdout = std::io::stdout();
+            let _ = write!(stdout, "\x1b]52;c;{encoded}\x07");
+            let _ = stdout.flush();
+        }
+        if let Ok(mut buf) = self.buffer.lock() {
+            buf.clear_char_visual();
+            if !text.is_empty() {
+                buf.push_custom(
+                    "kage:notify",
+                    format!("yanked {} chars to clipboard", text.chars().count()),
+                    false,
+                );
+            }
+        }
     }
 
     fn send_request(&mut self, req: RunRequest) -> Result<(), TrySendError<RunRequest>> {
@@ -782,40 +852,58 @@ impl App {
     }
 
     /// Mouse left-button press: latch the press as a potential
-    /// drag-start and put focus on the clicked block. The actual fold
-    /// toggle waits for [`Self::mouse_up`] so a press-then-drag
-    /// gesture doesn't accidentally fold the anchor block.
-    fn mouse_down(&mut self, row: u16) {
+    /// drag-start and put focus on the clicked block. For text-only
+    /// blocks (Assistant/User/Custom) the press also primes a
+    /// char-visual selection at the clicked char, so a subsequent
+    /// drag extends a precise text range rather than a block range.
+    /// The fold-toggle on a non-dragged release in [`Self::mouse_up`]
+    /// stays intact for blocks that don't enter char-visual.
+    fn mouse_down(&mut self, row: u16, col: u16) {
         if let Ok(mut buf) = self.buffer.lock()
             && let Some(idx) = buf.block_at_screen_row(row)
         {
             buf.set_focus(Some(idx));
             buf.set_visual_anchor(None);
+            buf.clear_char_visual();
+            if buf.is_char_visual_eligible(idx)
+                && let Some(point) = char_pos_at(&buf, idx, row, col)
+            {
+                buf.begin_char_visual(idx);
+                buf.set_char_visual_point(point);
+                self.input.switch_mode(Mode::CharVisual);
+            }
             self.mouse_drag_anchor = Some((row, idx, false));
         }
     }
 
-    /// Mouse drag while left-button is held: move focus to whichever
-    /// block sits under the cursor and start (or extend) a visual
-    /// selection from the anchor block. Tracks `dragged=true` so the
-    /// matching [`Self::mouse_up`] knows to skip the click-to-fold
-    /// branch.
-    fn mouse_drag(&mut self, row: u16) {
+    /// Mouse drag while left-button is held: extend the active
+    /// selection. Char-visual blocks update the cursor in
+    /// `(line, col)` space; non-eligible blocks fall back to
+    /// block-level visual selection.
+    fn mouse_drag(&mut self, row: u16, col: u16) {
         let Some((down_row, anchor_idx, ref mut dragged)) = self.mouse_drag_anchor else {
             return;
         };
-        if let Ok(mut buf) = self.buffer.lock()
-            && let Some(idx) = buf.block_at_screen_row(row)
-        {
-            if !*dragged && idx == anchor_idx && row == down_row {
-                return;
+        if let Ok(mut buf) = self.buffer.lock() {
+            if buf.char_visual().is_some() {
+                if let Some(idx) = buf.block_at_screen_row(row)
+                    && idx == anchor_idx
+                    && let Some(point) = char_pos_at(&buf, idx, row, col)
+                {
+                    *dragged = true;
+                    buf.set_char_visual_cursor(point);
+                }
+            } else if let Some(idx) = buf.block_at_screen_row(row) {
+                if !*dragged && idx == anchor_idx && row == down_row {
+                    return;
+                }
+                *dragged = true;
+                if buf.visual_anchor().is_none() {
+                    buf.set_visual_anchor(Some(anchor_idx));
+                    self.input.switch_mode(Mode::Visual);
+                }
+                buf.set_focus(Some(idx));
             }
-            *dragged = true;
-            if buf.visual_anchor().is_none() {
-                buf.set_visual_anchor(Some(anchor_idx));
-                self.input.switch_mode(Mode::Visual);
-            }
-            buf.set_focus(Some(idx));
         }
     }
 
@@ -918,6 +1006,47 @@ impl App {
     }
 }
 
+/// Translate an absolute terminal `(row, col)` mouse position to a
+/// `(logical_line, char_column)` inside the block at `idx`. Walks the
+/// block's text the same way the renderer does (split on `\n`, wrap
+/// every `width` chars), so the returned position lines up with what
+/// the user clicks. Returns `None` when the click is outside the
+/// block's painted region or the block has no text content.
+fn char_pos_at(buffer: &Buffer, idx: usize, row: u16, col: u16) -> Option<(usize, usize)> {
+    let screen_top = buffer.screen_top_of(idx)?;
+    if row < screen_top {
+        return None;
+    }
+    let area_x = buffer.last_area_x();
+    let area_width = buffer.last_area_width();
+    if area_width == 0 {
+        return None;
+    }
+    let usable = usize::from(area_width).max(1);
+    let block_col = usize::from(col.saturating_sub(area_x)).min(usable);
+    let relative_row = usize::from(row - screen_top);
+    let text = buffer.char_visual_text(idx)?;
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut acc_rows = 0usize;
+    for (line_idx, line) in lines.iter().enumerate() {
+        let chars = line.chars().count();
+        let line_rows = if chars == 0 {
+            1
+        } else {
+            chars.div_ceil(usable).max(1)
+        };
+        if acc_rows.saturating_add(line_rows) > relative_row {
+            let row_in_line = relative_row.saturating_sub(acc_rows);
+            let col_in_line = row_in_line.saturating_mul(usable).saturating_add(block_col);
+            return Some((line_idx, col_in_line.min(chars)));
+        }
+        acc_rows = acc_rows.saturating_add(line_rows);
+    }
+    let last_line = lines.len().saturating_sub(1);
+    let last_chars = lines.get(last_line).map_or(0, |l| l.chars().count());
+    Some((last_line, last_chars))
+}
+
 /// Best-effort label for the current mode, exposed for the host's
 /// status-bar widget.
 #[must_use]
@@ -926,6 +1055,7 @@ pub fn mode_label(mode: Mode) -> &'static str {
         Mode::Normal => "normal",
         Mode::Insert => "insert",
         Mode::Visual => "visual",
+        Mode::CharVisual => "char",
     }
 }
 

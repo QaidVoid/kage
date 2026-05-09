@@ -19,8 +19,13 @@ pub enum Mode {
     Normal,
     /// Free-text insert mode for the prompt input.
     Insert,
-    /// Visual selection over conversation lines.
+    /// Block-level visual selection across conversation blocks.
     Visual,
+    /// Char-level visual selection within a single block. Cursor is
+    /// `(line, col)` measured in chars (not bytes); `h`/`l` move
+    /// within a line, `j`/`k` between lines, `0`/`$` to line edges,
+    /// `y` yanks the range, `Esc` exits.
+    CharVisual,
 }
 
 /// Side effect produced by a key press.
@@ -66,6 +71,24 @@ pub enum InputAction {
     SearchNext,
     /// Jump focus to the previous block matching the active search.
     SearchPrev,
+    /// Enter char-level visual on the focused block (only valid if
+    /// the block has plain-text content the renderer can map back
+    /// to a `(line, col)` cursor).
+    EnterCharVisual,
+    /// Move the char-visual cursor by one column.
+    CharVisualLeft,
+    /// Move the char-visual cursor by one column.
+    CharVisualRight,
+    /// Move the char-visual cursor by one logical line.
+    CharVisualUp,
+    /// Move the char-visual cursor by one logical line.
+    CharVisualDown,
+    /// Snap the char-visual cursor to column 0.
+    CharVisualLineStart,
+    /// Snap the char-visual cursor to the end of the current line.
+    CharVisualLineEnd,
+    /// Yank the active char-visual selection to the clipboard.
+    CharVisualYank,
 }
 
 /// Cap on retained history entries. The host's persistence layer is
@@ -196,6 +219,7 @@ impl InputState {
             Mode::Normal => self.handle_normal(key),
             Mode::Insert => self.handle_insert(key),
             Mode::Visual => self.handle_visual(key),
+            Mode::CharVisual => self.handle_char_visual(key),
         }
     }
 
@@ -207,6 +231,11 @@ impl InputState {
         match key.code {
             KeyCode::Char('i' | 'a') => self.enter_mode(Mode::Insert),
             KeyCode::Char('v') => self.enter_mode(Mode::Visual),
+            // Capital V in normal mode jumps straight into char-level
+            // visual on whatever block currently has focus. Vim's `V`
+            // is line-visual; we repurpose it because line-visual on
+            // block-rendered chat content isn't a useful abstraction.
+            KeyCode::Char('V') => vec![InputAction::EnterCharVisual],
             KeyCode::Char('j') | KeyCode::Down => vec![InputAction::Scroll(1)],
             KeyCode::Char('k') | KeyCode::Up => vec![InputAction::Scroll(-1)],
             KeyCode::Char('h' | 'l') | KeyCode::Left | KeyCode::Right => {
@@ -339,6 +368,24 @@ impl InputState {
             // gesture; the anchor stays put.
             KeyCode::Char('j') | KeyCode::Down => vec![InputAction::FocusNext],
             KeyCode::Char('k') | KeyCode::Up => vec![InputAction::FocusPrev],
+            _ => Vec::new(),
+        }
+    }
+
+    fn handle_char_visual(&mut self, key: KeyEvent) -> Vec<InputAction> {
+        match key.code {
+            KeyCode::Esc => self.enter_mode(Mode::Normal),
+            KeyCode::Char('y') => {
+                let mut actions = vec![InputAction::CharVisualYank];
+                actions.extend(self.enter_mode(Mode::Normal));
+                actions
+            }
+            KeyCode::Char('h') | KeyCode::Left => vec![InputAction::CharVisualLeft],
+            KeyCode::Char('l') | KeyCode::Right => vec![InputAction::CharVisualRight],
+            KeyCode::Char('j') | KeyCode::Down => vec![InputAction::CharVisualDown],
+            KeyCode::Char('k') | KeyCode::Up => vec![InputAction::CharVisualUp],
+            KeyCode::Char('0') | KeyCode::Home => vec![InputAction::CharVisualLineStart],
+            KeyCode::Char('$') | KeyCode::End => vec![InputAction::CharVisualLineEnd],
             _ => Vec::new(),
         }
     }

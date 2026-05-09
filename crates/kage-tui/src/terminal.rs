@@ -79,6 +79,34 @@ impl Tui {
     pub fn terminal(&mut self) -> &mut DefaultTerminal {
         &mut self.terminal
     }
+
+    /// Toggle mouse capture at runtime. With capture off the host
+    /// receives no [`crossterm`] mouse events, but the terminal's
+    /// native selection (drag to highlight, double-click word, etc.)
+    /// becomes available again - the user can copy any visible text
+    /// via the terminal's own clipboard binding without the TUI
+    /// having to map row/col into block coordinates. Returns the new
+    /// state.
+    pub fn set_mouse_capture(&mut self, enable: bool) -> bool {
+        if enable
+            && !self.mouse_capture_active
+            && execute!(io::stdout(), EnableMouseCapture).is_ok()
+        {
+            self.mouse_capture_active = true;
+        } else if !enable
+            && self.mouse_capture_active
+            && execute!(io::stdout(), DisableMouseCapture).is_ok()
+        {
+            self.mouse_capture_active = false;
+        }
+        self.mouse_capture_active
+    }
+
+    /// Whether mouse capture is currently on.
+    #[must_use]
+    pub fn mouse_capture(&self) -> bool {
+        self.mouse_capture_active
+    }
 }
 
 impl Drop for Tui {

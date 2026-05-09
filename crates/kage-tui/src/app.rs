@@ -143,6 +143,10 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("fold all", "fold every foldable block"),
     ("unfold all", "unfold every foldable block"),
     ("theme", "switch palette (use `:theme list` to enumerate)"),
+    (
+        "mouse",
+        "toggle mouse capture (`mouse off` lets the terminal handle text selection)",
+    ),
 ];
 
 fn builtin_command_picker_items() -> Vec<PickItem> {
@@ -191,6 +195,11 @@ pub struct App {
     /// Plugin-registered command names + descriptions for palette
     /// display. Builtin names take precedence on collision.
     plugin_commands: Vec<(String, String)>,
+    /// Pending request to toggle terminal mouse capture, applied by
+    /// `run` between iterations. `None` means leave the capture state
+    /// as-is. The indirection exists because `run_command` can't
+    /// reach `Tui` directly; only [`Self::run`] holds it.
+    pending_mouse_capture: Option<bool>,
     /// In-progress mouse gesture started by a left-button press. The
     /// tuple is `(down_row, down_block_idx, dragged)`. `dragged` flips
     /// to true the first time a drag event reports a different block
@@ -220,6 +229,7 @@ impl App {
             search_line: None,
             search_pattern: None,
             mouse_drag_anchor: None,
+            pending_mouse_capture: None,
         }
     }
 
@@ -273,6 +283,9 @@ impl App {
         let mut last_buffer_version = self.buffer_version();
         let mut needs_redraw = true;
         loop {
+            if let Some(enable) = self.pending_mouse_capture.take() {
+                tui.set_mouse_capture(enable);
+            }
             if needs_redraw {
                 self.draw(tui)?;
                 last_buffer_version = self.buffer_version();
@@ -537,6 +550,10 @@ impl App {
                 self.run_theme_command(rest);
                 None
             }
+            "mouse" => {
+                self.run_mouse_command(rest);
+                None
+            }
             "help" => {
                 self.push_help();
                 None
@@ -600,6 +617,8 @@ impl App {
                     :fold all       fold every foldable block\n  \
                     :unfold all     unfold every foldable block\n  \
                     :theme <name>   switch palette (use `:theme list` to enumerate)\n  \
+                    :mouse off      release mouse capture so the terminal can select/copy text\n  \
+                    :mouse on       re-enable kage's mouse handling (click-to-fold, drag-select)\n  \
                     :help           show this help";
         if let Ok(mut buf) = self.buffer.lock() {
             buf.push_custom("kage:help", body, false);
@@ -654,6 +673,28 @@ impl App {
     fn notify(&mut self, msg: impl Into<String>) {
         if let Ok(mut buf) = self.buffer.lock() {
             buf.push_custom("kage:notify", msg, false);
+        }
+    }
+
+    fn run_mouse_command(&mut self, rest: &str) {
+        match rest {
+            "off" | "disable" => {
+                self.pending_mouse_capture = Some(false);
+                self.notify("mouse capture off - drag selects via the terminal's native clipboard");
+            }
+            "on" | "enable" => {
+                self.pending_mouse_capture = Some(true);
+                self.notify("mouse capture on - drag selects blocks inside kage");
+            }
+            "toggle" | "" => {
+                let now_enabled = !self.pending_mouse_capture.unwrap_or(true);
+                self.pending_mouse_capture = Some(now_enabled);
+                let state = if now_enabled { "on" } else { "off" };
+                self.notify(format!("mouse capture {state}"));
+            }
+            other => {
+                self.push_error(format!("mouse: unknown arg `{other}` (try on/off/toggle)"));
+            }
         }
     }
 

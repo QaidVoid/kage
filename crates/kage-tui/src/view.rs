@@ -146,14 +146,18 @@ fn render_buffer(frame: &mut Frame, regions: Regions, buffer: &mut Buffer) {
     let focus = buffer.effective_focus();
     let mut consumed_results: std::collections::HashSet<usize> = std::collections::HashSet::new();
     // (block_idx, line_start, line_end_exclusive) so we can recenter
-    // scroll on the focused block when focus changes.
+    // scroll on the focused block when focus changes. For merged
+    // tool-call+result pairs, both indices point at the same line
+    // range so focus on either half resolves cleanly.
     let mut block_ranges: Vec<(usize, usize, usize)> = Vec::new();
     for (idx, cur) in blocks.iter().enumerate() {
         let line_start = lines.len();
+        let mut paired_result_idx: Option<usize> = None;
         match cur {
             Block::ToolCall { call_id, .. } => {
                 if let Some(&result_idx) = result_by_call.get(call_id.as_str()) {
                     consumed_results.insert(result_idx);
+                    paired_result_idx = Some(result_idx);
                     let focused = focus == Some(idx) || focus == Some(result_idx);
                     for line in
                         tool_pair_to_lines(cur, &blocks[result_idx], regions.buffer.width, focused)
@@ -176,7 +180,11 @@ fn render_buffer(frame: &mut Frame, regions: Regions, buffer: &mut Buffer) {
             }
         }
         lines.push(Line::raw(""));
-        block_ranges.push((idx, line_start, lines.len()));
+        let line_end = lines.len();
+        block_ranges.push((idx, line_start, line_end));
+        if let Some(rid) = paired_result_idx {
+            block_ranges.push((rid, line_start, line_end));
+        }
     }
     // Build the paragraph and ask it how many rendered rows it
     // actually occupies given the current width. `line_count` walks

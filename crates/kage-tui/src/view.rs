@@ -412,6 +412,10 @@ fn render_buffer(
     let mut acc = 0usize;
     let mut intra_scroll = 0usize;
     let mut emitted_any = false;
+    // (block_idx, virtual_top, virtual_bottom) collected during this
+    // pass; converted to absolute terminal rows below so mouse
+    // handlers can translate a click row into a block.
+    let mut block_layout: Vec<(usize, usize, usize)> = Vec::new();
     for (idx, h) in heights.iter().copied().enumerate() {
         if consumed_results.contains(&idx) {
             continue;
@@ -443,12 +447,34 @@ fn render_buffer(
         let block_lines = build_block_lines(buffer, idx, width, &result_by_call, emp);
         emitted_lines.extend(block_lines);
         emitted_lines.push(Line::raw(""));
+        block_layout.push((idx, block_top, block_bot));
         acc = acc.saturating_add(block_advance);
     }
 
     if let Some(pattern) = search_pattern {
         highlight_matches_in_lines(&mut emitted_lines, pattern);
     }
+
+    // Translate the virtual layout into absolute terminal rows, clamped
+    // to the buffer area. Skip blocks fully outside the area (defensive;
+    // pass 2 already filtered them, but the screen clamp is what
+    // matters for mouse hit-testing).
+    let area = regions.buffer;
+    let area_y = area.y;
+    let area_bottom = area.y.saturating_add(area.height);
+    let screen_rows: Vec<(usize, u16, u16)> = block_layout
+        .into_iter()
+        .filter_map(|(idx, vtop, vbot)| {
+            let virt_view_top = vtop.saturating_sub(visible_top);
+            let virt_view_bot = vbot.saturating_sub(visible_top);
+            let top = area_y.saturating_add(u16::try_from(virt_view_top).unwrap_or(u16::MAX));
+            let bot = area_y.saturating_add(u16::try_from(virt_view_bot).unwrap_or(u16::MAX));
+            let top = top.min(area_bottom);
+            let bot = bot.min(area_bottom);
+            (top < bot).then_some((idx, top, bot))
+        })
+        .collect();
+    buffer.set_last_block_screen_rows(screen_rows);
 
     let scroll_u16 = u16::try_from(intra_scroll).unwrap_or(u16::MAX);
     let paragraph = Paragraph::new(emitted_lines).wrap(Wrap { trim: false });

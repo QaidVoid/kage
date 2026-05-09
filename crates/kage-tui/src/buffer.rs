@@ -219,6 +219,12 @@ pub struct Buffer {
     /// to avoid stale data; this is what lets virtualized rendering
     /// skip building [`ratatui::text::Line`]s for off-screen blocks.
     block_heights: Vec<Option<(u16, u16)>>,
+    /// Map of "what block currently sits under each screen row in
+    /// the buffer area": `(block_idx, screen_top, screen_bottom)` in
+    /// absolute terminal coordinates. The renderer rewrites this
+    /// each frame; mouse handlers read it to translate a click row
+    /// into a block. Cleared whenever the buffer is empty.
+    last_block_screen_rows: Vec<(usize, u16, u16)>,
 }
 
 impl Buffer {
@@ -322,6 +328,35 @@ impl Buffer {
         for slot in &mut self.block_heights {
             *slot = None;
         }
+    }
+
+    /// Renderer hook: replace the absolute screen-row layout it just
+    /// painted. The vec is sorted by `screen_top`; entries don't
+    /// overlap. Used by mouse handlers to translate a click into a
+    /// block index.
+    pub fn set_last_block_screen_rows(&mut self, rows: Vec<(usize, u16, u16)>) {
+        self.last_block_screen_rows = rows;
+    }
+
+    /// Find the block painted under absolute terminal row `y` from
+    /// the most recent frame. Returns `None` when the row is outside
+    /// any block (separator gap, empty buffer, off-screen) or when
+    /// the renderer hasn't painted a frame yet.
+    #[must_use]
+    pub fn block_at_screen_row(&self, y: u16) -> Option<usize> {
+        self.last_block_screen_rows
+            .iter()
+            .find_map(|(idx, top, bot)| (y >= *top && y < *bot).then_some(*idx))
+    }
+
+    /// Top screen row of the block at `idx` from the most recent
+    /// frame. Used by mouse handlers to detect "click on header row"
+    /// (whose row matches this top).
+    #[must_use]
+    pub fn screen_top_of(&self, idx: usize) -> Option<u16> {
+        self.last_block_screen_rows
+            .iter()
+            .find_map(|(i, top, _)| (*i == idx).then_some(*top))
     }
 
     fn invalidate_height(&mut self, idx: usize) {
@@ -865,6 +900,29 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_at_screen_row_returns_block_under_click() {
+        let mut buf = Buffer::new();
+        buf.push_user("hi");
+        buf.push_user("hello");
+        buf.set_last_block_screen_rows(vec![(0, 5, 8), (1, 8, 12)]);
+        assert_eq!(buf.block_at_screen_row(5), Some(0));
+        assert_eq!(buf.block_at_screen_row(7), Some(0));
+        assert_eq!(buf.block_at_screen_row(8), Some(1));
+        assert_eq!(buf.block_at_screen_row(11), Some(1));
+        assert_eq!(buf.block_at_screen_row(12), None);
+        assert_eq!(buf.block_at_screen_row(4), None);
+    }
+
+    #[test]
+    fn screen_top_of_returns_first_row_for_idx() {
+        let mut buf = Buffer::new();
+        buf.push_user("first");
+        buf.set_last_block_screen_rows(vec![(0, 10, 14)]);
+        assert_eq!(buf.screen_top_of(0), Some(10));
+        assert_eq!(buf.screen_top_of(1), None);
+    }
 
     #[test]
     fn cached_height_misses_when_width_differs() {

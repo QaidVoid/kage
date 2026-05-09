@@ -281,6 +281,9 @@ impl App {
                         Event::Mouse(mouse) => match mouse.kind {
                             MouseEventKind::ScrollUp => self.scroll_by(-MOUSE_SCROLL_LINES),
                             MouseEventKind::ScrollDown => self.scroll_by(MOUSE_SCROLL_LINES),
+                            MouseEventKind::Down(ratatui::crossterm::event::MouseButton::Left) => {
+                                self.click_at_row(mouse.row)
+                            }
                             _ => {}
                         },
                         Event::Resize(_, _) => {
@@ -698,6 +701,23 @@ impl App {
         match self.requests.send(req) {
             Ok(()) => Ok(()),
             Err(err) => Err(TrySendError::Disconnected(err.0)),
+        }
+    }
+
+    /// Translate a click on absolute terminal row `row` to a buffer
+    /// gesture. The click sets focus on whichever block currently
+    /// occupies that row. If the click landed on the block's top
+    /// (header) row and the block is foldable, also toggle its fold
+    /// state - matches what the user intuitively expects from
+    /// clicking a `+`/`-` style header.
+    fn click_at_row(&mut self, row: u16) {
+        if let Ok(mut buf) = self.buffer.lock()
+            && let Some(idx) = buf.block_at_screen_row(row)
+        {
+            buf.set_focus(Some(idx));
+            if buf.screen_top_of(idx) == Some(row) {
+                buf.toggle_fold(idx);
+            }
         }
     }
 

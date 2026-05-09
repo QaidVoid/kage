@@ -520,7 +520,9 @@ mod tests {
             for x in 0..buf.area.width {
                 row.push_str(buf[(x, y)].symbol());
             }
-            if row.contains("> hello") {
+            // The bubble pads the text with surrounding spaces; the
+            // exact prefix glyph is renderer-internal.
+            if row.contains(" hello ") {
                 found_user = true;
             }
         }

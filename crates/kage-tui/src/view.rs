@@ -191,7 +191,7 @@ fn input_cursor_position(
 #[must_use]
 pub fn block_to_lines(block: &Block) -> Vec<Line<'static>> {
     match block {
-        Block::User { text } => prefixed_lines(">", text, user_style()),
+        Block::User { text } => user_block_lines(text),
         Block::Assistant { text, .. } => plain_lines(text, assistant_style()),
         Block::Thinking { text, folded, .. } => {
             let mut out = Vec::new();
@@ -270,18 +270,28 @@ pub fn block_to_lines(block: &Block) -> Vec<Line<'static>> {
     }
 }
 
-fn prefixed_lines(prefix: &str, text: &str, style: Style) -> Vec<Line<'static>> {
-    let mut out = Vec::new();
-    let mut first = true;
-    for raw in text.split('\n') {
-        let p = if first { prefix } else { " " };
-        first = false;
-        out.push(Line::from(vec![
-            Span::styled(format!("{p} "), style.add_modifier(Modifier::BOLD)),
-            Span::styled(raw.to_owned(), style),
-        ]));
-    }
-    out
+/// Render a user prompt as a tinted "chat bubble". Each visual line of
+/// the prompt is drawn against a slightly darker background so the
+/// prompt visually pops out of the surrounding flow. A thin left-edge
+/// rule (`U+258E LEFT ONE QUARTER BLOCK`) anchors the bubble; the text
+/// is bracketed by spaces so the tinted region reads as a pad even
+/// when ratatui's Paragraph doesn't extend the bg to end-of-line.
+fn user_block_lines(text: &str) -> Vec<Line<'static>> {
+    let rule = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let body = Style::default()
+        .fg(Color::White)
+        .bg(Color::Indexed(236))
+        .add_modifier(Modifier::BOLD);
+    text.split('\n')
+        .map(|raw| {
+            Line::from(vec![
+                Span::styled("\u{258e}".to_owned(), rule),
+                Span::styled(format!(" {raw} "), body),
+            ])
+        })
+        .collect()
 }
 
 fn plain_lines(text: &str, style: Style) -> Vec<Line<'static>> {
@@ -648,10 +658,6 @@ fn mode_style(mode: Mode) -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
-fn user_style() -> Style {
-    Style::default().fg(Color::Cyan)
-}
-
 fn assistant_style() -> Style {
     Style::default().fg(Color::White)
 }
@@ -747,12 +753,15 @@ mod tests {
     }
 
     #[test]
-    fn user_block_has_prefix() {
+    fn user_block_renders_with_padded_bubble() {
         let mut buffer = Buffer::new();
         buffer.push_user("hello");
         let input = InputState::new();
         let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 40, 5));
-        assert!(lines.iter().any(|l| l.contains("> hello")));
+        // Bubble keeps the prompt text intact; trailing whitespace is
+        // trimmed by the test's snapshot helper.
+        assert!(lines.iter().any(|l| l.contains("hello")));
+        assert!(!lines.iter().any(|l| l.contains("> hello")));
     }
 
     #[test]

@@ -261,6 +261,7 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         session_header.as_ref(),
                         &buffer,
                     );
+                    let context_window = cx_guard.context_window;
                     let ok = run_with_hooks(
                         provider.as_ref(),
                         &tools,
@@ -271,18 +272,10 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         plugin_runtime.as_ref(),
                         writer_for_turn,
                         &user_msg,
+                        session_usage.clone(),
+                        qualified.clone(),
+                        context_window,
                     );
-                    // Update the modeline snapshot from the loop's
-                    // post-turn budget. Done while we still hold the
-                    // context lock so partial reads are impossible.
-                    if let Ok(mut snap) = session_usage.lock() {
-                        snap.model.clone_from(&qualified);
-                        snap.context_window = cx_guard.context_window;
-                        snap.input_tokens = cx_guard.budget.used_input;
-                        snap.output_tokens = cx_guard.budget.used_output;
-                        snap.cache_read_tokens = cx_guard.budget.used_cache_read;
-                        snap.cache_write_tokens = cx_guard.budget.used_cache_write;
-                    }
                     if ok && let Err(err) = crate::state::record_last_model(&qualified) {
                         if let Ok(mut buf) = buffer.lock() {
                             buf.push_custom("kage:error", format!("state: {err}"), false);
@@ -431,8 +424,10 @@ fn open_writer_for_turn(
 
 /// Run the agent loop with the right hook chain: TUI display innermost,
 /// optional session recording in the middle, optional plugin dispatch
-/// outermost. Returns whether the loop completed successfully so the
-/// caller knows whether to bump `last_model` state.
+/// outermost, plus the [`UsageHooks`] wrapper at the very edge so the
+/// modeline updates every `MessageEnd`. Returns whether the loop
+/// completed successfully so the caller knows whether to bump
+/// `last_model` state.
 #[allow(clippy::too_many_arguments)]
 fn run_with_hooks(
     provider: &dyn kage_provider::Provider,
@@ -444,33 +439,44 @@ fn run_with_hooks(
     plugin_runtime: Option<&Arc<PluginRuntime>>,
     writer: Option<SessionWriter>,
     user_msg: &Message,
+    session_usage: SharedSessionUsage,
+    qualified_model: String,
+    context_window: u64,
 ) -> bool {
+    use crate::usage_hooks::UsageHooks;
     let tui_hooks = TuiHooks::new(NoopHooks, buffer.clone());
     match (writer, plugin_runtime) {
         (Some(w), Some(rt)) => {
             let mut recorded = SessionRecordingHooks::new(tui_hooks, w);
             recorded.record_user_message(user_msg);
-            let mut hooks = PluginEventHooks::new(recorded, Arc::clone(rt));
-            hooks.dispatch_agent_start();
-            let res = run(provider, tools, cx, loop_cfg, &mut hooks, cancel, |_| {});
-            hooks.dispatch_agent_end(res.is_ok());
+            let plugin_hooks = PluginEventHooks::new(recorded, Arc::clone(rt));
+            plugin_hooks.dispatch_agent_start();
+            let mut wrapped =
+                UsageHooks::new(plugin_hooks, session_usage, qualified_model, context_window);
+            let res = run(provider, tools, cx, loop_cfg, &mut wrapped, cancel, |_| {});
+            wrapped.into_inner().dispatch_agent_end(res.is_ok());
             res.is_ok()
         }
         (Some(w), None) => {
-            let mut hooks = SessionRecordingHooks::new(tui_hooks, w);
-            hooks.record_user_message(user_msg);
-            run(provider, tools, cx, loop_cfg, &mut hooks, cancel, |_| {}).is_ok()
+            let mut recorded = SessionRecordingHooks::new(tui_hooks, w);
+            recorded.record_user_message(user_msg);
+            let mut wrapped =
+                UsageHooks::new(recorded, session_usage, qualified_model, context_window);
+            run(provider, tools, cx, loop_cfg, &mut wrapped, cancel, |_| {}).is_ok()
         }
         (None, Some(rt)) => {
-            let mut hooks = PluginEventHooks::new(tui_hooks, Arc::clone(rt));
-            hooks.dispatch_agent_start();
-            let res = run(provider, tools, cx, loop_cfg, &mut hooks, cancel, |_| {});
-            hooks.dispatch_agent_end(res.is_ok());
+            let plugin_hooks = PluginEventHooks::new(tui_hooks, Arc::clone(rt));
+            plugin_hooks.dispatch_agent_start();
+            let mut wrapped =
+                UsageHooks::new(plugin_hooks, session_usage, qualified_model, context_window);
+            let res = run(provider, tools, cx, loop_cfg, &mut wrapped, cancel, |_| {});
+            wrapped.into_inner().dispatch_agent_end(res.is_ok());
             res.is_ok()
         }
         (None, None) => {
-            let mut hooks = tui_hooks;
-            run(provider, tools, cx, loop_cfg, &mut hooks, cancel, |_| {}).is_ok()
+            let mut wrapped =
+                UsageHooks::new(tui_hooks, session_usage, qualified_model, context_window);
+            run(provider, tools, cx, loop_cfg, &mut wrapped, cancel, |_| {}).is_ok()
         }
     }
 }

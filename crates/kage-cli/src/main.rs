@@ -12,6 +12,7 @@ mod runtime_env;
 mod session;
 mod state;
 mod tui;
+mod usage_hooks;
 
 use std::io::{self, Write};
 use std::path::PathBuf;

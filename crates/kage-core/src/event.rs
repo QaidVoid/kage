@@ -42,15 +42,17 @@ pub struct ToolOutput {
 /// Carried inside events so it can travel across the rpc boundary without
 /// losing the variant. Hosts pattern-match on the variant; the trailing
 /// `message` fields are human-readable but not API-stable.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LoopError {
     /// Provider request or stream failed.
+    #[error("provider error: {message}")]
     Provider {
         /// Human-readable detail.
         message: String,
     },
     /// A tool invocation raised an error the loop could not recover from.
+    #[error("tool '{name}' error: {message}")]
     Tool {
         /// Tool name.
         name: String,
@@ -58,11 +60,14 @@ pub enum LoopError {
         message: String,
     },
     /// The loop was cancelled via its cancellation token.
+    #[error("cancelled")]
     Cancelled,
     /// The conversation history exceeded the context window even after
     /// compaction.
+    #[error("context overflow: history exceeds the model's window even after compaction")]
     ContextOverflow,
     /// Anything not covered above.
+    #[error("{message}")]
     Other {
         /// Human-readable detail.
         message: String,

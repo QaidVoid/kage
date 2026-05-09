@@ -85,12 +85,11 @@ fn main() -> ExitCode {
     );
     let _ = writeln!(stdout);
 
+    // The loop emits errors as terminal `LoopEvent::Error`s, which `print_event`
+    // already renders. Don't double-print on the `Err` return; just exit non-zero.
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("kage: {err:?}");
-            ExitCode::from(1)
-        }
+        Err(_) => ExitCode::from(1),
     }
 }
 
@@ -153,7 +152,7 @@ fn print_event<W: Write>(out: &mut W, event: &LoopEvent) {
             let _ = out.flush();
         }
         LoopEvent::Error { kind } => {
-            let _ = writeln!(out, "\n[error: {kind:?}]");
+            let _ = writeln!(out, "\n[error] {kind}");
             let _ = out.flush();
         }
         _ => {}

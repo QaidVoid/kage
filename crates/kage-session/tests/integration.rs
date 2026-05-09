@@ -232,6 +232,9 @@ fn search_indexes_assistant_text_and_user_prompts() {
 
     let hits = search(dir.path(), "migration").unwrap();
     assert_eq!(hits.len(), 2);
-    let parsed: Vec<_> = hits.iter().filter_map(kage_session::SearchHit::entry).collect();
+    let parsed: Vec<_> = hits
+        .iter()
+        .filter_map(kage_session::SearchHit::entry)
+        .collect();
     assert_eq!(parsed.len(), 2);
 }

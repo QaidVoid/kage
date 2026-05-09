@@ -21,17 +21,26 @@
 //! plugin code; it is not a security boundary against actively malicious
 //! Lua. Only run plugins you trust.
 
+use std::sync::{Arc, Mutex, MutexGuard};
+
 use mlua::Lua;
 
 use crate::api::{self, SharedHostLog, default_host_log};
 use crate::error::PluginError;
 use crate::events;
+use crate::tools::{self, RegisteredTools, registered_tools};
+
+/// Shared, mutex-guarded handle to the Lua state. Plugin-defined tools
+/// hold one of these so they can call back into Lua from the host's tool
+/// dispatch path.
+pub type SharedLua = Arc<Mutex<Lua>>;
 
 /// A Lua VM with the dangerous standard-library bindings stripped and
 /// the `kage` API table installed.
 pub struct PluginRuntime {
-    lua: Lua,
+    lua: SharedLua,
     sink: SharedHostLog,
+    tools: RegisteredTools,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -57,17 +66,31 @@ impl PluginRuntime {
         }
     }
 
-    /// Borrow the underlying Lua state. Useful for tests and for higher
-    /// layers in this crate that wire in additional API surface.
+    /// Lock the underlying Lua state. Held only as long as the returned
+    /// guard is alive; the Tool dispatch path uses this same lock so
+    /// plugin-defined tools serialize against runtime calls.
+    pub fn lock_lua(&self) -> MutexGuard<'_, Lua> {
+        self.lua.lock().expect("plugin lua mutex poisoned")
+    }
+
+    /// Cloneable handle to the shared Lua state, for tool implementations
+    /// that need to live independently of the runtime borrow.
     #[must_use]
-    pub fn lua(&self) -> &Lua {
-        &self.lua
+    pub fn shared_lua(&self) -> SharedLua {
+        Arc::clone(&self.lua)
+    }
+
+    /// Cloneable handle to the host log sink.
+    #[must_use]
+    pub fn sink(&self) -> SharedHostLog {
+        Arc::clone(&self.sink)
     }
 
     /// Execute a chunk of Lua source against this runtime. Returns the
     /// chunk's return value as a Lua [`mlua::Value`].
     pub fn eval(&self, source: &str) -> Result<mlua::Value, PluginError> {
-        Ok(self.lua.load(source).eval::<mlua::Value>()?)
+        let lua = self.lock_lua();
+        Ok(lua.load(source).eval::<mlua::Value>()?)
     }
 
     /// Fire every handler subscribed to `event_name` with `payload`.
@@ -76,13 +99,26 @@ impl PluginRuntime {
         event_name: &str,
         payload: &serde_json::Value,
     ) -> Result<(), PluginError> {
-        events::dispatch(&self.lua, event_name, payload, &self.sink)
+        let lua = self.lock_lua();
+        events::dispatch(&lua, event_name, payload, &self.sink)
     }
 
     /// Number of handlers subscribed to `event_name`.
     #[must_use]
     pub fn handler_count(&self, event_name: &str) -> usize {
-        events::handler_count(&self.lua, event_name)
+        let lua = self.lock_lua();
+        events::handler_count(&lua, event_name)
+    }
+
+    /// Snapshot the tools registered by plugins so far. Each call returns
+    /// a fresh `Vec`; the underlying `Arc<dyn Tool>` entries are shared
+    /// with the runtime's internal registry.
+    #[must_use]
+    pub fn registered_tools(&self) -> Vec<Arc<dyn kage_tools::Tool>> {
+        self.tools
+            .lock()
+            .expect("plugin tools mutex poisoned")
+            .clone()
     }
 }
 
@@ -117,16 +153,28 @@ impl PluginRuntimeBuilder {
     }
 
     /// Finalize the runtime: build the Lua state, apply sandbox removals,
-    /// install the `kage` API table, and wire `kage.on` for event
-    /// subscriptions.
+    /// install the `kage` API table, and wire `kage.on` and
+    /// `kage.register_tool`.
     pub fn build(self) -> Result<PluginRuntime, PluginError> {
         let lua = Lua::new();
         apply_sandbox(&lua)?;
         api::install(&lua, self.sink.clone(), self.config)?;
         events::install_subscriptions(&lua)?;
+        let shared_lua: SharedLua = Arc::new(Mutex::new(lua));
+        let tool_registry = registered_tools();
+        {
+            let lua_guard = shared_lua.lock().expect("plugin lua mutex poisoned");
+            tools::install_register_tool(
+                &lua_guard,
+                Arc::clone(&shared_lua),
+                self.sink.clone(),
+                Arc::clone(&tool_registry),
+            )?;
+        }
         Ok(PluginRuntime {
-            lua,
+            lua: shared_lua,
             sink: self.sink,
+            tools: tool_registry,
         })
     }
 }
@@ -187,7 +235,8 @@ mod tests {
             } else {
                 format!("return {path} == nil or {path}.{key} == nil")
             };
-            let v: bool = rt.lua().load(&chunk).eval().unwrap_or(false);
+            let lua = rt.lock_lua();
+            let v: bool = lua.load(&chunk).eval().unwrap_or(false);
             assert!(v, "sandbox failed to remove {path}.{key}");
         }
     }
@@ -195,25 +244,27 @@ mod tests {
     #[test]
     fn benign_library_functions_still_work() {
         let rt = PluginRuntime::new().unwrap();
-        let v: i64 = rt.lua().load("return string.len('hello')").eval().unwrap();
+        let lua = rt.lock_lua();
+        let v: i64 = lua.load("return string.len('hello')").eval().unwrap();
         assert_eq!(v, 5);
-        let v: f64 = rt.lua().load("return math.sqrt(81)").eval().unwrap();
+        let v: f64 = lua.load("return math.sqrt(81)").eval().unwrap();
         assert!((v - 9.0).abs() < 1e-9);
     }
 
     #[test]
     fn os_execute_call_errors_after_sandboxing() {
         let rt = PluginRuntime::new().unwrap();
-        let res: Result<mlua::Value, _> = rt.lua().load("return os.execute('echo hi')").eval();
-        // The function pointer was nil'd, so calling it raises.
+        let lua = rt.lock_lua();
+        let res: Result<mlua::Value, _> = lua.load("return os.execute('echo hi')").eval();
         assert!(res.is_err());
     }
 
     #[test]
     fn dofile_and_loadfile_are_unreachable() {
         let rt = PluginRuntime::new().unwrap();
+        let lua = rt.lock_lua();
         for chunk in ["dofile('/etc/passwd')", "loadfile('/etc/passwd')"] {
-            let res: Result<mlua::Value, _> = rt.lua().load(chunk).eval();
+            let res: Result<mlua::Value, _> = lua.load(chunk).eval();
             assert!(res.is_err(), "expected error from {chunk}");
         }
     }

@@ -19,9 +19,10 @@
 //! tool dispatch in T4.4.
 
 use kage_core::{CancelFlag, LoopError, LoopEvent};
-use kage_provider::{Provider, ProviderEvent, StreamRequest};
+use kage_provider::{Provider, StopReason, StreamRequest};
 use kage_tools::ToolRegistry;
 
+use crate::stream::collect_turn;
 use crate::{AgentContext, Hooks, LoopConfig};
 
 /// Drive one agent run to completion.
@@ -101,20 +102,25 @@ where
                 }
             };
 
-            let outcome = match drive_stream(stream, cancel) {
-                Ok(o) => o,
+            let parent = cx.history.last().map(|m| m.id);
+            let turn = match collect_turn(parent, stream, cancel, hooks, &mut emit) {
+                Ok(t) => t,
                 Err(kind) => {
                     emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
                     return Err(kind);
                 }
             };
-            // T4.4 replaces the panic on ToolCalls with real dispatch + `continue`.
-            match outcome {
-                TurnOutcome::Final => break,
-                TurnOutcome::ToolCalls => {
-                    panic!("T4.2 shell does not yet dispatch tool calls; T4.4 fills this in");
-                }
-            }
+
+            cx.budget.add(turn.usage);
+            let had_tool_calls = !turn.tool_calls.is_empty();
+            cx.history.push(turn.message);
+
+            // T4.4 replaces the panic with real dispatch + `continue`.
+            assert!(
+                !(had_tool_calls || turn.stop_reason == StopReason::ToolUse),
+                "T4.3 shell does not yet dispatch tool calls; T4.4 fills this in",
+            );
+            break;
         }
 
         let Some(text) = hooks.get_followup() else {
@@ -128,22 +134,16 @@ where
     }
 }
 
-fn emit_one<F: FnMut(LoopEvent)>(hooks: &mut dyn Hooks, emit: &mut F, event: LoopEvent) {
+/// Emit one event to both the host's `Hooks::on_event` and the user emit
+/// callback, in that order.
+pub(crate) fn emit_one<F: FnMut(LoopEvent)>(hooks: &mut dyn Hooks, emit: &mut F, event: LoopEvent) {
     hooks.on_event(&event);
     emit(event);
 }
 
-/// Outcome of one inner-loop iteration.
-enum TurnOutcome {
-    /// Model finished its turn with no tool calls. Break inner loop.
-    Final,
-    /// Model emitted at least one tool call. Real dispatch arrives in T4.4.
-    ToolCalls,
-}
-
 /// Construct the next [`StreamRequest`] from the current agent context.
 ///
-/// Tools list is omitted in the T4.2 shell; T4.4 plugs in
+/// Tools list is omitted in the T4.3 shell; T4.4 plugs in
 /// `tools.list_for_provider()`.
 fn build_request(cx: &AgentContext) -> StreamRequest {
     let mut req = StreamRequest::new(&cx.model, cx.history.clone());
@@ -151,35 +151,6 @@ fn build_request(cx: &AgentContext) -> StreamRequest {
         req.system = Some(cx.system_prompt.clone());
     }
     req
-}
-
-/// Drain one provider stream. T4.2 placeholder: returns `Final` if no tool
-/// calls were observed, `ToolCalls` if any `ToolCallStart` came through.
-/// T4.3 replaces this with full event translation + message assembly.
-fn drive_stream(
-    stream: kage_provider::EventStream,
-    cancel: &CancelFlag,
-) -> Result<TurnOutcome, LoopError> {
-    let mut saw_tool_call = false;
-    for event in stream {
-        if cancel.is_cancelled() {
-            return Err(LoopError::Cancelled);
-        }
-        match event {
-            Ok(ProviderEvent::ToolCallStart { .. }) => saw_tool_call = true,
-            Ok(_) => {}
-            Err(e) => {
-                return Err(LoopError::Provider {
-                    message: e.to_string(),
-                });
-            }
-        }
-    }
-    Ok(if saw_tool_call {
-        TurnOutcome::ToolCalls
-    } else {
-        TurnOutcome::Final
-    })
 }
 
 fn finish_cancelled<F: FnMut(LoopEvent)>(
@@ -363,8 +334,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "T4.2 shell does not yet dispatch tool calls")]
-    fn shell_panics_on_tool_call_per_t42_contract() {
+    #[should_panic(expected = "T4.3 shell does not yet dispatch tool calls")]
+    fn shell_panics_on_tool_call_per_t43_contract() {
         let mock = MockProvider::replaying(vec![
             Ok(ProviderEvent::ToolCallStart {
                 id: kage_core::ToolCallId::new("call_1"),

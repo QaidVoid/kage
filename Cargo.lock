@@ -734,6 +734,7 @@ dependencies = [
 name = "kage-loop"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "kage-core",
  "kage-provider",
  "kage-tools",

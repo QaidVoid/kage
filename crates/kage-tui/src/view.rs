@@ -19,6 +19,7 @@ use crate::buffer::{Block, Buffer};
 use crate::cmdline::CommandLine;
 use crate::input::{InputState, Mode, Pane};
 use crate::layout::Regions;
+use crate::usage::SessionUsage;
 
 /// Read-only snapshot of the live state the status bar needs to
 /// paint. Built fresh each frame from whatever the host has wired in.
@@ -108,11 +109,12 @@ pub fn render(
     status: &StatusCtx<'_>,
     screen_selection: Option<((usize, u16), (usize, u16))>,
     captured_rows: &mut std::collections::BTreeMap<usize, Vec<CapturedCell>>,
+    session_usage: Option<&SessionUsage>,
 ) {
     render_status(frame, regions, input, cmdline, status);
     render_buffer(frame, regions, buffer, status.search_pattern);
     render_input(frame, regions, input);
-    render_modeline(frame, regions, input);
+    render_modeline(frame, regions, session_usage);
     if let Some(cl) = cmdline {
         place_cmdline_cursor(frame, regions, cl);
     } else if let Some(sl) = status.search_line {
@@ -952,24 +954,84 @@ fn build_input_body_lines(
     out
 }
 
-/// Paint the bottom modeline. Reserved for plugin status widgets
-/// (PE.A) and editing-state secondary signals; for Stage A it only
-/// fills the row with the modeline background so the chrome reads as
-/// a single coherent strip rather than an empty terminal row. We
-/// deliberately do *not* echo the mode here: the colored pill on the
-/// input border is the canonical mode display.
-fn render_modeline(frame: &mut Frame, regions: Regions, _input: &InputState) {
+/// Paint the bottom modeline. When the host has registered a
+/// [`SessionUsage`] handle, the row shows the active model, the
+/// running token totals (input / output) and the context-window
+/// fill. Otherwise the row is filled with the modeline background
+/// so the chrome reads as a coherent strip rather than an unstyled
+/// terminal row. Mode is intentionally absent here - the colored
+/// pill on the input border is the canonical mode display.
+fn render_modeline(frame: &mut Frame, regions: Regions, usage: Option<&SessionUsage>) {
     let area = regions.status_bottom;
     if area.height == 0 || area.width == 0 {
         return;
     }
     let theme = crate::theme::current();
     let bg = Style::default().bg(theme.modeline_bg);
-    let pad = usize::from(area.width);
-    let line = Paragraph::new(Line::from(Span::styled(" ".repeat(pad), bg)))
+    let fg = Style::default().fg(theme.modeline_fg).bg(theme.modeline_bg);
+    let dim = fg.add_modifier(Modifier::DIM);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if let Some(u) = usage
+        && (!u.model.is_empty() || u.total_tokens() > 0)
+    {
+        spans.push(Span::styled(" ", bg));
+        if !u.model.is_empty() {
+            spans.push(Span::styled(
+                u.model.clone(),
+                fg.add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled("  ::  ", dim));
+        }
+        spans.push(Span::styled(
+            format!(
+                "{} in / {} out",
+                format_token_count(u.input_tokens),
+                format_token_count(u.output_tokens)
+            ),
+            fg,
+        ));
+        if u.context_window > 0 {
+            spans.push(Span::styled("  ::  ", dim));
+            #[allow(clippy::cast_precision_loss)]
+            let pct = (u.total_tokens() as f64 / u.context_window as f64 * 100.0).clamp(0.0, 999.9);
+            spans.push(Span::styled(
+                format!(
+                    "{} / {} ({:.0}%)",
+                    format_token_count(u.total_tokens()),
+                    format_token_count(u.context_window),
+                    pct
+                ),
+                fg,
+            ));
+        }
+    }
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let pad = usize::from(area.width).saturating_sub(used);
+    if pad > 0 {
+        spans.push(Span::styled(" ".repeat(pad), bg));
+    }
+    let line = Paragraph::new(Line::from(spans))
         .alignment(Alignment::Left)
         .style(bg);
     frame.render_widget(line, area);
+}
+
+/// Format a token count compactly so the modeline doesn't blow past
+/// 80 columns: under 1k as raw digits, otherwise `<n>.<n>k` (no
+/// `M` suffix - million-token windows still read fine as `1024k`).
+fn format_token_count(n: u64) -> String {
+    if n < 1_000 {
+        return n.to_string();
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let value = n as f64 / 1_000.0;
+    if value >= 100.0 {
+        format!("{value:.0}k")
+    } else if value >= 10.0 {
+        format!("{value:.1}k")
+    } else {
+        format!("{value:.2}k")
+    }
 }
 
 fn mode_border_color(theme: &crate::theme::Theme, mode: Mode) -> Color {
@@ -1797,6 +1859,7 @@ mod tests {
                     &StatusCtx::default(),
                     None,
                     &mut captured,
+                    None,
                 );
             })
             .unwrap();

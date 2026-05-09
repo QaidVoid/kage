@@ -20,8 +20,8 @@ use kage_provider::ProviderRegistry;
 use kage_session::{SessionSummary, SessionWriter};
 use kage_tools::ToolRegistry;
 use kage_tui::{
-    App, PickItem, RunRequest, SharedBuffer, Tui, TuiHooks, buffer_host_log, populate_from_history,
-    shared_buffer,
+    App, PickItem, RunRequest, SharedBuffer, SharedSessionUsage, Tui, TuiHooks, buffer_host_log,
+    populate_from_history, shared_buffer, shared_session_usage,
 };
 
 use crate::plugins::{PluginEventHooks, setup_runtime_with_sink};
@@ -122,6 +122,15 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         }
     }
 
+    let session_usage = shared_session_usage();
+    // Seed initial usage snapshot so the modeline shows the model
+    // and the catalog-reported context window before any turn runs.
+    if let Ok(mut snap) = session_usage.lock()
+        && let Ok(cx_guard) = cx.lock()
+    {
+        snap.model.clone_from(&qualified_model);
+        snap.context_window = cx_guard.context_window;
+    }
     let worker = spawn_worker(WorkerConfig {
         registry: Arc::clone(&registry),
         active_qualified: Arc::clone(&active_qualified),
@@ -133,6 +142,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         rx,
         session_path: session_path.clone(),
         session_header: session_header.clone(),
+        session_usage: session_usage.clone(),
     });
 
     let mut tui = match Tui::enter() {
@@ -147,6 +157,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     app.set_history(crate::history::load());
     app.set_status_model(Arc::clone(&active_qualified));
     app.set_plugin_commands(plugin_command_listing);
+    app.set_session_usage(session_usage);
     if let Some(p) = session_path.as_ref() {
         let path = p.lock().expect("session path mutex poisoned").clone();
         if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
@@ -186,6 +197,10 @@ struct WorkerConfig {
     /// created. After creation, this is taken (`Some(_) -> None`) and
     /// subsequent turns reopen the existing file in append mode.
     session_header: Option<Arc<Mutex<Option<kage_session::Header>>>>,
+    /// Shared session-usage snapshot the modeline reads from. The
+    /// worker updates it after every turn from `cx.budget` so the
+    /// modeline reflects live token totals without polling.
+    session_usage: SharedSessionUsage,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -202,6 +217,7 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
             rx,
             session_path,
             session_header,
+            session_usage,
         } = cfg;
         let loop_cfg = LoopConfig::default();
 
@@ -256,6 +272,17 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         writer_for_turn,
                         &user_msg,
                     );
+                    // Update the modeline snapshot from the loop's
+                    // post-turn budget. Done while we still hold the
+                    // context lock so partial reads are impossible.
+                    if let Ok(mut snap) = session_usage.lock() {
+                        snap.model.clone_from(&qualified);
+                        snap.context_window = cx_guard.context_window;
+                        snap.input_tokens = cx_guard.budget.used_input;
+                        snap.output_tokens = cx_guard.budget.used_output;
+                        snap.cache_read_tokens = cx_guard.budget.used_cache_read;
+                        snap.cache_write_tokens = cx_guard.budget.used_cache_write;
+                    }
                     if ok && let Err(err) = crate::state::record_last_model(&qualified) {
                         if let Ok(mut buf) = buffer.lock() {
                             buf.push_custom("kage:error", format!("state: {err}"), false);

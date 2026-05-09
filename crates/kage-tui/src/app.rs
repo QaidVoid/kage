@@ -229,6 +229,12 @@ pub struct App {
     /// identical, avoiding a flicker on terminals that briefly hide
     /// the cursor when the style is reapplied.
     last_cursor_style: Option<(Mode, bool)>,
+    /// Optional shared snapshot of the current session's running
+    /// token totals + context window. When `Some`, the renderer
+    /// claims a one-row modeline below the input card and paints
+    /// `model :: in/out :: total/window (pct)`. Updated by the host
+    /// worker thread after every turn.
+    session_usage: Option<crate::usage::SharedSessionUsage>,
 }
 
 impl App {
@@ -255,7 +261,32 @@ impl App {
             screen_selection: None,
             captured_rows: std::collections::BTreeMap::new(),
             last_cursor_style: None,
+            session_usage: None,
         }
+    }
+
+    /// Hand the App a shared session-usage snapshot. While set, the
+    /// renderer reserves a one-row modeline below the input card and
+    /// paints the snapshot's model + token totals + context-window
+    /// fill. Pass `None` (or never call this) to keep the modeline
+    /// collapsed.
+    pub fn set_session_usage(&mut self, usage: crate::usage::SharedSessionUsage) {
+        self.session_usage = Some(usage);
+    }
+
+    /// Whether the host has registered a session-usage handle. Used
+    /// by the layout split to decide if the modeline row claims a
+    /// line of vertical space.
+    fn modeline_visible(&self) -> bool {
+        self.session_usage.is_some()
+    }
+
+    /// Snapshot the session-usage handle, returning `None` when the
+    /// host has not registered one or the lock is poisoned.
+    fn session_usage_snapshot(&self) -> Option<crate::usage::SessionUsage> {
+        self.session_usage
+            .as_ref()
+            .and_then(|h| h.lock().ok().map(|g| g.clone()))
     }
 
     /// Register the plugin commands the host wants exposed in the
@@ -463,10 +494,16 @@ impl App {
         };
         let screen_selection = self.screen_selection;
         let mut captured_rows = std::mem::take(&mut self.captured_rows);
-        let input = &self.input;
+        let session_usage = self.session_usage_snapshot();
+        let bottom = if self.modeline_visible() {
+            crate::layout::STATUS_BOTTOM_LINES_DEFAULT
+        } else {
+            0
+        };
         let picker = self.picker.as_mut();
+        let input = &self.input;
         tui.terminal().draw(|frame| {
-            let regions = split(frame.area(), input_height, 0);
+            let regions = split(frame.area(), input_height, bottom);
             view::render(
                 frame,
                 regions,
@@ -476,6 +513,7 @@ impl App {
                 &status,
                 screen_selection,
                 &mut captured_rows,
+                session_usage.as_ref(),
             );
             if let Some(picker) = picker {
                 picker.render(frame, frame.area());
@@ -1204,12 +1242,17 @@ impl App {
         let mut buffer = self.buffer.lock().expect("buffer mutex poisoned");
         let input_text_lines = u16::try_from(text_row_count(self.input.text())).unwrap_or(u16::MAX);
         let input_height = input_height_for(input_text_lines);
-        let picker = self.picker.as_mut();
-        let cmdline = self.cmdline.as_ref();
+        let session_usage = self.session_usage_snapshot();
+        let bottom = if self.modeline_visible() {
+            crate::layout::STATUS_BOTTOM_LINES_DEFAULT
+        } else {
+            0
+        };
         let model_snapshot = self
             .status_model
             .as_ref()
             .and_then(|m| m.lock().ok().map(|g| g.clone()));
+        let cmdline = self.cmdline.as_ref();
         let status = view::StatusCtx {
             model: model_snapshot.as_deref(),
             session_id: self.status_session_id.as_deref(),
@@ -1219,10 +1262,11 @@ impl App {
         };
         let screen_selection = self.screen_selection;
         let mut captured_rows = std::mem::take(&mut self.captured_rows);
+        let picker = self.picker.as_mut();
         let input = &self.input;
         terminal
             .draw(|frame| {
-                let regions = split(frame.area(), input_height, 0);
+                let regions = split(frame.area(), input_height, bottom);
                 view::render(
                     frame,
                     regions,
@@ -1232,6 +1276,7 @@ impl App {
                     &status,
                     screen_selection,
                     &mut captured_rows,
+                    session_usage.as_ref(),
                 );
                 if let Some(picker) = picker {
                     picker.render(frame, frame.area());

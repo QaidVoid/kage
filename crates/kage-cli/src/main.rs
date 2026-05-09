@@ -8,6 +8,7 @@
 mod auth;
 mod plugins;
 mod session;
+mod state;
 mod tui;
 
 use std::io::{self, Write};
@@ -206,14 +207,16 @@ fn main() -> ExitCode {
         }
     };
 
-    execute_print_run(
+    let exit = execute_print_run(
         resolved.provider.as_ref(),
         &tools,
         &mut cx,
         &user_msg,
         writer,
         plugin_runtime,
-    )
+    );
+    state::record_last_model(&model);
+    exit
 }
 
 /// Drive one print-mode run. Streams loop events to stdout and, when a
@@ -421,14 +424,16 @@ fn run_resume(
     );
     cx.history.push(user_msg.clone());
 
-    execute_print_run(
+    let exit = execute_print_run(
         resolved.provider.as_ref(),
         &tools,
         &mut cx,
         &user_msg,
         Some(writer),
         plugin_runtime,
-    )
+    );
+    state::record_last_model(&model);
+    exit
 }
 
 /// Implement `kage search <query>`: regex-grep across the sessions dir and
@@ -568,6 +573,11 @@ fn resolve_resume_target(
 /// Resolve `$XDG_DATA_HOME/kage` (default `~/.local/share/kage`).
 pub(crate) fn data_root() -> Result<PathBuf, String> {
     Ok(xdg_dir("XDG_DATA_HOME", ".local/share")?.join("kage"))
+}
+
+/// Resolve `$XDG_STATE_HOME/kage` (default `~/.local/state/kage`).
+pub(crate) fn state_root() -> Result<PathBuf, String> {
+    Ok(xdg_dir("XDG_STATE_HOME", ".local/state")?.join("kage"))
 }
 
 /// Resolve the XDG-style directory holding session files:
@@ -710,8 +720,16 @@ fn lookup_key(provider: &str, store: &auth::AuthStore) -> Option<String> {
     store.get(provider).map(str::to_owned)
 }
 
-/// Pick a sensible default model based on what providers are registered.
+/// Pick a sensible default model: prefer the last model the user
+/// successfully ran (when it still resolves through `registry`), fall
+/// back to a per-provider best guess.
 fn default_model(registry: &ProviderRegistry) -> String {
+    let saved = state::State::load().last_model;
+    if let Some(model) = saved
+        && registry.resolve(&model).is_ok()
+    {
+        return model;
+    }
     if registry.get("zai").is_some() {
         return "zai:glm-4.6".to_owned();
     }

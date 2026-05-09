@@ -50,7 +50,7 @@ impl AuthStore {
     /// Path on disk: `$XDG_DATA_HOME/kage/auth.json`. Returns an error
     /// if the home directory cannot be resolved.
     pub fn default_path() -> Result<PathBuf, String> {
-        Ok(crate::data_root()?.join("kage").join("auth.json"))
+        Ok(crate::data_root()?.join("auth.json"))
     }
 
     /// Load the store from `path`. Returns an empty store when the file

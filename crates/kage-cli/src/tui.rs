@@ -42,6 +42,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     };
     let provider = Arc::clone(resolved.provider);
     let bare_model = resolved.model.clone();
+    let qualified_model = model.to_owned();
 
     // The buffer must exist before we build the plugin runtime so we can
     // hand the runtime a sink that routes notify/log into the buffer
@@ -92,6 +93,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         cancel: cancel.clone(),
         plugin_runtime,
         rx,
+        qualified_model: qualified_model.clone(),
     });
 
     let mut tui = match Tui::enter() {
@@ -124,6 +126,7 @@ struct WorkerConfig {
     cancel: CancelFlag,
     plugin_runtime: Option<Arc<PluginRuntime>>,
     rx: mpsc::Receiver<RunRequest>,
+    qualified_model: String,
 }
 
 fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
@@ -136,6 +139,7 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
             cancel,
             plugin_runtime,
             rx,
+            qualified_model,
         } = cfg;
         let loop_cfg = LoopConfig::default();
 
@@ -150,7 +154,7 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         vec![Content::Text { text }],
                         parent,
                     ));
-                    if let Some(rt) = plugin_runtime.as_ref() {
+                    let ok = if let Some(rt) = plugin_runtime.as_ref() {
                         let inner = TuiHooks::new(NoopHooks, buffer.clone());
                         let mut hooks = PluginEventHooks::new(inner, Arc::clone(rt));
                         hooks.dispatch_agent_start();
@@ -164,9 +168,10 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                             |_| {},
                         );
                         hooks.dispatch_agent_end(res.is_ok());
+                        res.is_ok()
                     } else {
                         let mut hooks = TuiHooks::new(NoopHooks, buffer.clone());
-                        let _ = run(
+                        run(
                             provider.as_ref(),
                             &tools,
                             &mut cx_guard,
@@ -174,7 +179,11 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                             &mut hooks,
                             &cancel,
                             |_| {},
-                        );
+                        )
+                        .is_ok()
+                    };
+                    if ok {
+                        crate::state::record_last_model(&qualified_model);
                     }
                 }
                 RunRequest::Cancel => cancel.cancel(),

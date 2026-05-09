@@ -6,7 +6,7 @@
 //!   nix develop --command cargo run -p kage-provider --example hello
 //!
 //! # ZAI coding plan
-//! ZAI_CODING_API_KEY=... KAGE_PROVIDER=zai-coding \
+//! ZAI_CODING_API_KEY=... KAGE_PROVIDER=zai-coding-plan \
 //!   nix develop --command cargo run -p kage-provider --example hello
 //!
 //! # Anthropic
@@ -45,14 +45,14 @@ fn main() {
         "openai" => Box::new(OpenAiProvider::new(must_env("OPENAI_API_KEY"))),
         "gemini" => Box::new(GeminiProvider::new(must_env("GEMINI_API_KEY"))),
         "zai" => Box::new(kage_provider::zai::provider(must_env("ZAI_API_KEY"))),
-        "zai-coding" => {
+        "zai-coding-plan" => {
             let key =
                 std::env::var("ZAI_CODING_API_KEY").unwrap_or_else(|_| must_env("ZAI_API_KEY"));
             Box::new(kage_provider::zai::coding_plan(key))
         }
         other => {
             eprintln!(
-                "unknown KAGE_PROVIDER `{other}`; expected one of: anthropic, openai, gemini, zai, zai-coding"
+                "unknown KAGE_PROVIDER `{other}`; expected one of: anthropic, openai, gemini, zai, zai-coding-plan"
             );
             std::process::exit(2);
         }
@@ -127,7 +127,7 @@ fn default_model(provider: &str) -> String {
         "openai" => "gpt-4o-mini".into(),
         "gemini" => "gemini-2.0-flash".into(),
         "zai" => "glm-4.5-air".into(),
-        "zai-coding" => "glm-4.6".into(),
+        "zai-coding-plan" => "glm-4.6".into(),
         _ => "model".into(),
     }
 }

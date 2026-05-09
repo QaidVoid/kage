@@ -891,6 +891,7 @@ name = "kage-session"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "grep",
  "kage-core",
  "serde",
  "serde_json",

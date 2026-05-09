@@ -82,6 +82,11 @@ enum Command {
         #[arg(long = "at")]
         at: String,
     },
+    /// Regex-search recorded sessions.
+    Search {
+        /// Regex query, ripgrep-style.
+        query: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -96,6 +101,7 @@ fn main() -> ExitCode {
             model,
         }) => return run_resume(id.as_deref(), last, print.as_deref(), model.as_deref()),
         Some(Command::Fork { id, at }) => return run_fork(&id, &at),
+        Some(Command::Search { query }) => return run_search(&query),
         None => {}
     }
 
@@ -268,6 +274,83 @@ fn run_resume(
         &user_msg,
         Some(writer),
     )
+}
+
+/// Implement `kage search <query>`: regex-grep across the sessions dir and
+/// render each hit as `<file>:<line>: <text>`.
+fn run_search(query: &str) -> ExitCode {
+    let dir = match sessions_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("kage: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let hits = match kage_session::search(&dir, query) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("kage: search failed: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    if hits.is_empty() {
+        eprintln!("kage: no matches in {}", dir.display());
+        return ExitCode::SUCCESS;
+    }
+    let mut stdout = io::stdout().lock();
+    for hit in &hits {
+        let name = hit
+            .path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_else(|| hit.path.to_str().unwrap_or("?"));
+        let preview = render_hit_preview(hit);
+        let _ = writeln!(stdout, "{name}:{}: {preview}", hit.line_no);
+    }
+    ExitCode::SUCCESS
+}
+
+/// One-line preview text for a search hit. Decodes the matched JSONL into
+/// a `SessionEntry` when possible and surfaces only the human-readable
+/// fragments; raw lines fall through unchanged.
+fn render_hit_preview(hit: &kage_session::SearchHit) -> String {
+    let Some(entry) = hit.entry() else {
+        return hit.line.clone();
+    };
+    match entry {
+        kage_session::SessionEntry::Header(h) => format!("[header] model={}", h.model),
+        kage_session::SessionEntry::Message(m) => {
+            let role = match m.message.role {
+                Role::User => "user",
+                Role::Assistant => "assistant",
+                Role::ToolResult => "tool",
+                Role::System => "system",
+            };
+            let text = first_text_block(&m.message).unwrap_or_else(|| "(no text)".to_owned());
+            format!("[{role}] {}", truncate_one_line(&text, 120))
+        }
+        kage_session::SessionEntry::Compaction(c) => {
+            format!("[compaction] kept={} summarized={}", c.kept, c.summarized)
+        }
+        kage_session::SessionEntry::Label(l) => format!("[label] {}", l.text),
+        kage_session::SessionEntry::ModelChange(m) => format!("[model_change] {}", m.model),
+        kage_session::SessionEntry::ThinkingLevelChange(t) => {
+            format!("[thinking_level] {}", t.level)
+        }
+        kage_session::SessionEntry::Custom(c) => format!("[custom:{}]", c.kind),
+    }
+}
+
+fn first_text_block(message: &Message) -> Option<String> {
+    for block in &message.content {
+        if let Content::Text { text } = block {
+            return Some(text.clone());
+        }
+        if let Content::ToolResultBlock { output, .. } = block {
+            return Some(output.clone());
+        }
+    }
+    None
 }
 
 /// Implement `kage fork`: copy a session up through a chosen entry into a

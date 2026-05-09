@@ -12,6 +12,7 @@ pub mod fork;
 pub mod list;
 pub mod reader;
 pub mod resume;
+pub mod search;
 pub mod writer;
 
 pub use entry::{
@@ -23,4 +24,5 @@ pub use fork::{fork, resolve_entry_prefix};
 pub use list::{SessionSummary, list};
 pub use reader::SessionReader;
 pub use resume::{ReplayResult, find_by_prefix, find_last, replay};
+pub use search::{SearchHit, search};
 pub use writer::SessionWriter;

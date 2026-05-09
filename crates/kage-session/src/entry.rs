@@ -1,0 +1,336 @@
+//! Append-only JSONL session entry types.
+//!
+//! A session is a flat JSONL file. The first line is a [`SessionEntry::Header`];
+//! subsequent lines are entries appended in order. Each entry has its own id
+//! and timestamp so forks can branch from any point.
+
+use std::fmt;
+use std::path::PathBuf;
+
+use chrono::{DateTime, Utc};
+use kage_core::Message;
+use serde::{Deserialize, Serialize};
+use ulid::Ulid;
+
+/// Current on-disk session format version.
+///
+/// Bumped (and migrated via [`crate::migrate`]) whenever the entry schema
+/// changes in a non-additive way. v1 is the initial schema.
+pub const FORMAT_VERSION: u32 = 1;
+
+/// Stable identifier for a single session file.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionId(pub Ulid);
+
+impl SessionId {
+    /// Generate a fresh session id.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Ulid::new())
+    }
+}
+
+impl Default for SessionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Stable identifier for a single entry within a session.
+///
+/// Used as the cut point for [`fork`](crate::fork): a forked child copies
+/// every entry up to and including the named id.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct EntryId(pub Ulid);
+
+impl EntryId {
+    /// Generate a fresh entry id.
+    #[must_use]
+    pub fn new() -> Self {
+        Self(Ulid::new())
+    }
+}
+
+impl Default for EntryId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl fmt::Display for EntryId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// One JSONL line in a session file.
+///
+/// The `Header` variant must appear exactly once, on the first line. All
+/// other variants may appear any number of times in any order. The reader
+/// preserves order on disk and the writer never rewrites prior lines.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SessionEntry {
+    /// First line of every session file. Carries identity and provenance.
+    Header(Header),
+    /// A reassembled conversation message (user, assistant, or tool result).
+    Message(MessageEntry),
+    /// The model's thinking budget was changed mid-session.
+    ThinkingLevelChange(ThinkingLevelChange),
+    /// The active model was switched mid-session.
+    ModelChange(ModelChange),
+    /// Older turns were summarized into a synthetic message.
+    Compaction(Compaction),
+    /// A user-supplied bookmark anchored at a specific entry.
+    Label(Label),
+    /// A plugin-defined entry the core does not interpret.
+    Custom(Custom),
+}
+
+impl SessionEntry {
+    /// Id assigned to this entry at append time.
+    #[must_use]
+    pub fn id(&self) -> EntryId {
+        match self {
+            Self::Header(h) => h.id,
+            Self::Message(m) => m.id,
+            Self::ThinkingLevelChange(t) => t.id,
+            Self::ModelChange(m) => m.id,
+            Self::Compaction(c) => c.id,
+            Self::Label(l) => l.id,
+            Self::Custom(c) => c.id,
+        }
+    }
+
+    /// UTC timestamp at which this entry was appended.
+    #[must_use]
+    pub fn ts(&self) -> DateTime<Utc> {
+        match self {
+            Self::Header(h) => h.ts,
+            Self::Message(m) => m.ts,
+            Self::ThinkingLevelChange(t) => t.ts,
+            Self::ModelChange(m) => m.ts,
+            Self::Compaction(c) => c.ts,
+            Self::Label(l) => l.ts,
+            Self::Custom(c) => c.ts,
+        }
+    }
+}
+
+/// Identity and provenance of a session file. Always the first entry.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Header {
+    /// On-disk schema version. See [`FORMAT_VERSION`].
+    pub version: u32,
+    /// This session's unique id.
+    pub session: SessionId,
+    /// Entry id assigned to the header itself.
+    pub id: EntryId,
+    /// Creation timestamp.
+    pub ts: DateTime<Utc>,
+    /// Working directory at session creation.
+    pub cwd: PathBuf,
+    /// Provider-qualified model id (`provider:model`) at creation.
+    pub model: String,
+    /// System prompt at creation. Subsequent changes are not reflected here.
+    pub system_prompt: String,
+    /// Parent session, if this session was forked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session: Option<SessionId>,
+    /// Entry id within `parent_session` that this fork branched from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_entry: Option<EntryId>,
+}
+
+/// A reassembled conversation message persisted as a session entry.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MessageEntry {
+    /// Entry id.
+    pub id: EntryId,
+    /// Append time.
+    pub ts: DateTime<Utc>,
+    /// The full message including role, content blocks, and message id.
+    pub message: Message,
+}
+
+/// Records a change to the model's thinking budget.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ThinkingLevelChange {
+    /// Entry id.
+    pub id: EntryId,
+    /// Append time.
+    pub ts: DateTime<Utc>,
+    /// New thinking budget level. Plugin-defined; the loop forwards it as is.
+    pub level: String,
+}
+
+/// Records a switch to a different provider-qualified model.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelChange {
+    /// Entry id.
+    pub id: EntryId,
+    /// Append time.
+    pub ts: DateTime<Utc>,
+    /// New provider-qualified model id (`provider:model`).
+    pub model: String,
+}
+
+/// Records a history compaction performed by the loop.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Compaction {
+    /// Entry id.
+    pub id: EntryId,
+    /// Append time.
+    pub ts: DateTime<Utc>,
+    /// Number of recent turns kept verbatim after compaction.
+    pub kept: usize,
+    /// Number of older turns replaced by the summary.
+    pub summarized: usize,
+    /// Synthetic summary text inserted in place of the summarized turns.
+    pub summary: String,
+}
+
+/// User-supplied label/bookmark anchored to a specific entry.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Label {
+    /// Entry id of the label itself.
+    pub id: EntryId,
+    /// Append time.
+    pub ts: DateTime<Utc>,
+    /// Free-form label text shown by `kage list` and search.
+    pub text: String,
+    /// The entry the label is attached to.
+    pub anchor: EntryId,
+}
+
+/// Plugin-defined entry. The core neither validates nor interprets `data`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Custom {
+    /// Entry id.
+    pub id: EntryId,
+    /// Append time.
+    pub ts: DateTime<Utc>,
+    /// Plugin-defined kind tag, namespaced like `plugin:tps`.
+    pub kind: String,
+    /// Arbitrary JSON payload.
+    pub data: serde_json::Value,
+}
+
+#[cfg(test)]
+mod tests {
+    use kage_core::{Content, Role};
+
+    use super::*;
+
+    #[test]
+    fn header_round_trips() {
+        let header = SessionEntry::Header(Header {
+            version: FORMAT_VERSION,
+            session: SessionId::new(),
+            id: EntryId::new(),
+            ts: Utc::now(),
+            cwd: PathBuf::from("/tmp/work"),
+            model: "anthropic:claude-sonnet-4-6".into(),
+            system_prompt: "You are kage.".into(),
+            parent_session: None,
+            parent_entry: None,
+        });
+        let line = serde_json::to_string(&header).unwrap();
+        let back: SessionEntry = serde_json::from_str(&line).unwrap();
+        assert_eq!(header, back);
+    }
+
+    #[test]
+    fn header_skips_none_parents() {
+        let header = SessionEntry::Header(Header {
+            version: FORMAT_VERSION,
+            session: SessionId::new(),
+            id: EntryId::new(),
+            ts: Utc::now(),
+            cwd: PathBuf::from("/tmp"),
+            model: "x:y".into(),
+            system_prompt: String::new(),
+            parent_session: None,
+            parent_entry: None,
+        });
+        let json = serde_json::to_value(&header).unwrap();
+        assert!(json.get("parent_session").is_none());
+        assert!(json.get("parent_entry").is_none());
+    }
+
+    #[test]
+    fn message_entry_round_trips() {
+        let entry = SessionEntry::Message(MessageEntry {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            message: Message::new(Role::User, vec![Content::Text { text: "hi".into() }], None),
+        });
+        let line = serde_json::to_string(&entry).unwrap();
+        let back: SessionEntry = serde_json::from_str(&line).unwrap();
+        assert_eq!(entry, back);
+    }
+
+    #[test]
+    fn entry_carries_type_tag() {
+        let entry = SessionEntry::Label(Label {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            text: "milestone".into(),
+            anchor: EntryId::new(),
+        });
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["type"], "label");
+        assert_eq!(json["text"], "milestone");
+    }
+
+    #[test]
+    fn compaction_round_trips() {
+        let entry = SessionEntry::Compaction(Compaction {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            kept: 4,
+            summarized: 12,
+            summary: "[summary of 12 earlier turns]\nuser asked about X.".into(),
+        });
+        let line = serde_json::to_string(&entry).unwrap();
+        let back: SessionEntry = serde_json::from_str(&line).unwrap();
+        assert_eq!(entry, back);
+    }
+
+    #[test]
+    fn custom_round_trips() {
+        let entry = SessionEntry::Custom(Custom {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            kind: "plugin:notes".into(),
+            data: serde_json::json!({ "note": "remember to test" }),
+        });
+        let line = serde_json::to_string(&entry).unwrap();
+        let back: SessionEntry = serde_json::from_str(&line).unwrap();
+        assert_eq!(entry, back);
+    }
+
+    #[test]
+    fn entry_id_helpers() {
+        let id = EntryId::new();
+        let entry = SessionEntry::ThinkingLevelChange(ThinkingLevelChange {
+            id,
+            ts: Utc::now(),
+            level: "high".into(),
+        });
+        assert_eq!(entry.id(), id);
+    }
+
+    #[test]
+    fn format_version_is_one() {
+        assert_eq!(FORMAT_VERSION, 1);
+    }
+}

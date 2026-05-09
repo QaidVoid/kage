@@ -9,6 +9,7 @@ pub mod commands;
 pub mod error;
 pub mod events;
 pub mod fs;
+pub mod http;
 pub mod loader;
 pub mod providers;
 pub mod runtime;

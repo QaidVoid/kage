@@ -31,6 +31,7 @@ use crate::commands::{self, LuaCommand, RegisteredCommands, registered_commands}
 use crate::error::PluginError;
 use crate::events;
 use crate::fs as plugin_fs;
+use crate::http;
 use crate::providers::{self, LuaProvider, RegisteredProviders, registered_providers};
 use crate::tools::{self, RegisteredTools, registered_tools};
 
@@ -198,6 +199,7 @@ impl PluginRuntimeBuilder {
         api::install(&lua, self.sink.clone(), self.config)?;
         events::install_subscriptions(&lua)?;
         plugin_fs::install_fs(&lua, self.workdir.clone())?;
+        http::install_http(&lua)?;
         let shared_lua: SharedLua = Arc::new(Mutex::new(lua));
         let tool_registry = registered_tools();
         let command_registry = registered_commands();

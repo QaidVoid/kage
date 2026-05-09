@@ -884,6 +884,8 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "ureq",
+ "url",
 ]
 
 [[package]]

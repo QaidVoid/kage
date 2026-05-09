@@ -6,6 +6,7 @@ pub mod error;
 pub mod path;
 pub mod registry;
 pub mod schema;
+pub mod ssrf;
 pub mod tool;
 
 pub use builtin::builtin_registry;

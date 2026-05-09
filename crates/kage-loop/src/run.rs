@@ -64,14 +64,6 @@ where
             return finish_cancelled(hooks, &mut emit);
         }
 
-        if let Some(steering) = hooks.get_steering() {
-            cx.history.push(kage_core::Message::new(
-                kage_core::Role::User,
-                vec![kage_core::Content::Text { text: steering }],
-                cx.history.last().map(|m| m.id),
-            ));
-        }
-
         loop {
             iterations = iterations.saturating_add(1);
             if iterations > config.max_iterations {
@@ -84,6 +76,14 @@ where
 
             if cancel.is_cancelled() {
                 return finish_cancelled(hooks, &mut emit);
+            }
+
+            if let Some(steering) = hooks.get_steering() {
+                cx.history.push(kage_core::Message::new(
+                    kage_core::Role::User,
+                    vec![kage_core::Content::Text { text: steering }],
+                    cx.history.last().map(|m| m.id),
+                ));
             }
 
             let req = build_request(cx, tools);
@@ -217,6 +217,17 @@ mod tests {
             } else {
                 None
             }
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingSteering {
+        polls: u32,
+    }
+    impl Hooks for CountingSteering {
+        fn get_steering(&mut self) -> Option<String> {
+            self.polls = self.polls.saturating_add(1);
+            None
         }
     }
 
@@ -370,6 +381,43 @@ mod tests {
                 structured: None,
             })
         }
+    }
+
+    #[test]
+    fn steering_is_polled_before_every_inner_turn() {
+        // Two-turn run: first turn returns a tool call, second turn ends.
+        let call_id = kage_core::ToolCallId::new("call_x");
+        let mock = MockProvider::sequence(vec![
+            vec![
+                Ok(ProviderEvent::ToolCallStart {
+                    id: call_id.clone(),
+                    name: "static".into(),
+                }),
+                Ok(ProviderEvent::ToolCallEnd {
+                    id: call_id.clone(),
+                    input: serde_json::json!({}),
+                }),
+                Ok(ProviderEvent::MessageEnd {
+                    stop_reason: StopReason::ToolUse,
+                    usage: TokenUsage::default(),
+                }),
+            ],
+            vec![Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            })],
+        ]);
+
+        let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
+        cx.history.push(user_msg("go"));
+        let cfg = LoopConfig::default();
+        let mut hooks = CountingSteering::default();
+        let cancel = CancelFlag::new();
+        let registry = ToolRegistry::new().with(std::sync::Arc::new(StaticTool));
+
+        let res = run(&mock, &registry, &mut cx, &cfg, &mut hooks, &cancel, |_| {});
+        assert!(res.is_ok(), "loop failed: {res:?}");
+        assert_eq!(hooks.polls, 2, "steering polled once per inner-loop turn");
     }
 
     #[derive(Debug, Clone)]

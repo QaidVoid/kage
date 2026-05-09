@@ -22,6 +22,7 @@ kage-plugin.workspace = true
 kage-provider.workspace = true
 kage-session.workspace = true
 kage-tools.workspace = true
+kage-tui.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

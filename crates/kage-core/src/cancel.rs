@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Clonable cancellation flag.
 ///
-/// All clones share the same atomic; cancelling one cancels them all. The
-/// flag latches: once set, it stays set for the lifetime of the handle.
+/// All clones share the same atomic; cancelling one cancels them all.
+/// The flag latches once set, but the host can clear it via
+/// [`CancelFlag::reset`] when reusing the same handle across turns.
 #[derive(Clone, Debug, Default)]
 pub struct CancelFlag(Arc<AtomicBool>);
 
@@ -25,6 +26,13 @@ impl CancelFlag {
     /// Mark the flag as cancelled. Idempotent.
     pub fn cancel(&self) {
         self.0.store(true, Ordering::Release);
+    }
+
+    /// Clear a previously-cancelled flag so the same handle can be
+    /// reused for the next operation. Hosts that want each operation
+    /// to own a fresh handle should prefer [`Self::new`] instead.
+    pub fn reset(&self) {
+        self.0.store(false, Ordering::Release);
     }
 
     /// Whether the flag has been set.
@@ -64,5 +72,14 @@ mod tests {
     fn flag_is_send_and_sync() {
         fn check_send_sync<T: Send + Sync>(_: &T) {}
         check_send_sync(&CancelFlag::new());
+    }
+
+    #[test]
+    fn reset_clears_a_cancelled_flag() {
+        let f = CancelFlag::new();
+        f.cancel();
+        assert!(f.is_cancelled());
+        f.reset();
+        assert!(!f.is_cancelled());
     }
 }

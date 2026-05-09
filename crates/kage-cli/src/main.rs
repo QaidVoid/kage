@@ -7,6 +7,7 @@
 
 mod plugins;
 mod session;
+mod tui;
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -109,8 +110,12 @@ fn main() -> ExitCode {
     }
 
     let Some(prompt) = cli.print else {
-        eprintln!("kage: -p/--print is required in this build");
-        return ExitCode::from(2);
+        // No subcommand and no `-p`: drop into the interactive TUI.
+        let registry_for_default = build_provider_registry();
+        let model = cli
+            .model
+            .unwrap_or_else(|| default_model(&registry_for_default));
+        return tui::run_tui(&model, &cli.system);
     };
 
     let registry = build_provider_registry();

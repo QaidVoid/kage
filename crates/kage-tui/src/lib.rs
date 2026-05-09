@@ -1,5 +1,6 @@
 //! Modal raw-view terminal UI with differential rendering.
 
+pub mod app;
 pub mod buffer;
 pub mod error;
 pub mod events;
@@ -8,6 +9,7 @@ pub mod layout;
 pub mod terminal;
 pub mod view;
 
+pub use app::{App, AppExit, RunRequest};
 pub use buffer::{Block, Buffer};
 pub use error::TuiError;
 pub use events::{SharedBuffer, TuiHooks, shared_buffer};

@@ -1226,6 +1226,7 @@ dependencies = [
  "kage-provider",
  "kage-session",
  "kage-tools",
+ "kage-tui",
  "serde_json",
  "tempfile",
 ]

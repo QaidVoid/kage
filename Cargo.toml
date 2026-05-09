@@ -27,6 +27,7 @@ kage-plugin = { path = "crates/kage-plugin" }
 kage-provider = { path = "crates/kage-provider" }
 kage-session = { path = "crates/kage-session" }
 kage-tools = { path = "crates/kage-tools" }
+kage-tui = { path = "crates/kage-tui" }
 
 clap = { version = "4.6.1", features = ["derive"] }
 

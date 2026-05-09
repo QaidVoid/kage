@@ -146,6 +146,39 @@ impl PluginRuntime {
             .expect("plugin providers mutex poisoned")
             .clone()
     }
+
+    /// Drop every registration that came from plugins (event handlers,
+    /// tools, commands, providers) and replay every `*.lua` file in
+    /// `dir`. Designed for hot reload between turns: a stale plugin
+    /// snapshot does not survive after this call.
+    ///
+    /// Tools, commands, and providers that the host has already handed
+    /// to other registries via [`Self::registered_tools`] etc. continue
+    /// to exist; this method only clears the runtime's own snapshot.
+    /// The host is responsible for re-publishing the new snapshot.
+    pub fn reload_dir(
+        &self,
+        dir: &std::path::Path,
+    ) -> Result<crate::loader::LoadReport, PluginError> {
+        {
+            let lua = self.lock_lua();
+            let handlers: mlua::Table = lua.named_registry_value("kage._handlers")?;
+            handlers.clear()?;
+        }
+        self.tools
+            .lock()
+            .expect("plugin tools mutex poisoned")
+            .clear();
+        self.commands
+            .lock()
+            .expect("plugin commands mutex poisoned")
+            .clear();
+        self.providers
+            .lock()
+            .expect("plugin providers mutex poisoned")
+            .clear();
+        crate::loader::load_dir(dir, self)
+    }
 }
 
 /// Builder for [`PluginRuntime`]. Lets the host inject a custom host-log
@@ -330,5 +363,30 @@ mod tests {
         let rt = PluginRuntime::new().unwrap();
         let v: mlua::Value = rt.eval("return 21 * 2").unwrap();
         assert_eq!(v.as_integer(), Some(42));
+    }
+
+    #[test]
+    fn reload_dir_clears_prior_registrations() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.lua"),
+            "kage.register_command({ name='a', description='', handler=function() end })",
+        )
+        .unwrap();
+        let rt = PluginRuntime::new().unwrap();
+        rt.reload_dir(dir.path()).unwrap();
+        assert_eq!(rt.registered_commands().len(), 1);
+
+        // Replace the plugin with one that registers a different command.
+        fs::write(
+            dir.path().join("a.lua"),
+            "kage.register_command({ name='b', description='', handler=function() end })",
+        )
+        .unwrap();
+        rt.reload_dir(dir.path()).unwrap();
+        let cmds = rt.registered_commands();
+        assert_eq!(cmds.len(), 1, "old registration should not survive");
+        assert_eq!(cmds[0].name(), "b");
     }
 }

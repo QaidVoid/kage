@@ -96,6 +96,7 @@ impl App {
                                 return Ok(exit);
                             }
                         }
+                        Event::Paste(text) => self.input.paste(&text),
                         Event::Resize(_, _) => {
                             // Re-render on the next iteration.
                             break;

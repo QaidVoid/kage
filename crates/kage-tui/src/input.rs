@@ -223,6 +223,18 @@ impl InputState {
         self.cursor += s.len();
     }
 
+    /// Insert pasted text at the cursor when in [`Mode::Insert`]. No-op
+    /// in other modes so a stray paste in normal mode does not mutate
+    /// the prompt. The paste is preserved verbatim, including newlines,
+    /// so a multi-line paste does not auto-submit.
+    pub fn paste(&mut self, text: &str) {
+        if self.mode != Mode::Insert {
+            return;
+        }
+        self.text.insert_str(self.cursor, text);
+        self.cursor += text.len();
+    }
+
     fn backspace(&mut self) {
         if self.cursor == 0 {
             return;
@@ -423,6 +435,23 @@ mod tests {
         assert_eq!(state.cursor(), 1);
         state.handle_key(key(KeyCode::Char('X')));
         assert_eq!(state.text(), "aXbc");
+    }
+
+    #[test]
+    fn paste_in_insert_inserts_verbatim_with_newlines() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.handle_key(key(KeyCode::Char('a')));
+        state.paste("multi\nline\npaste");
+        state.handle_key(key(KeyCode::Char('z')));
+        assert_eq!(state.text(), "amulti\nline\npastez");
+    }
+
+    #[test]
+    fn paste_in_normal_is_ignored() {
+        let mut state = InputState::new();
+        state.paste("oops");
+        assert_eq!(state.text(), "");
     }
 
     #[test]

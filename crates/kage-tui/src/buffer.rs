@@ -238,11 +238,11 @@ impl Buffer {
     }
 
     /// Effective focus: the explicit user selection if any, otherwise
-    /// the index of the last foldable block in the buffer. `None` when
-    /// there are no foldable blocks at all.
+    /// the index of the last selectable block in the buffer. `None`
+    /// when there are no selectable blocks at all.
     #[must_use]
     pub fn effective_focus(&self) -> Option<usize> {
-        self.focus.or_else(|| self.last_foldable_index())
+        self.focus.or_else(|| self.last_selectable_index())
     }
 
     /// What focus value the renderer painted last frame. The renderer
@@ -260,24 +260,19 @@ impl Buffer {
     }
 
     /// Replace the explicit focus. `None` clears it (renderer falls
-    /// back to last-foldable). Out-of-range or non-foldable indices
-    /// are silently dropped.
+    /// back to the last selectable block). Out-of-range indices are
+    /// silently dropped.
     pub fn set_focus(&mut self, idx: Option<usize>) {
-        self.focus = idx.filter(|i| {
-            self.blocks
-                .get(*i)
-                .is_some_and(crate::buffer::Block::is_foldable)
-        });
+        self.focus = idx.filter(|i| self.blocks.get(*i).is_some());
     }
 
-    /// Move focus to the previous (older) foldable block. Wraps to the
-    /// last when called with no foldable currently focused. Returns
+    /// Move focus to the previous (older) selectable block. Returns
     /// `true` if focus changed.
     pub fn focus_prev(&mut self) -> bool {
         let current = self.effective_focus();
         let next = match current {
             None => return false,
-            Some(idx) => self.foldable_index_before(idx),
+            Some(idx) => self.selectable_index_before(idx),
         };
         match next {
             Some(n) if Some(n) != current => {
@@ -288,13 +283,13 @@ impl Buffer {
         }
     }
 
-    /// Move focus to the next (newer) foldable block. Returns `true`
-    /// if focus changed.
+    /// Move focus to the next (newer) selectable block. Returns
+    /// `true` if focus changed.
     pub fn focus_next(&mut self) -> bool {
         let current = self.effective_focus();
         let next = match current {
             None => return false,
-            Some(idx) => self.foldable_index_after(idx),
+            Some(idx) => self.selectable_index_after(idx),
         };
         match next {
             Some(n) if Some(n) != current => {
@@ -305,30 +300,33 @@ impl Buffer {
         }
     }
 
-    fn last_foldable_index(&self) -> Option<usize> {
-        self.blocks
-            .iter()
-            .enumerate()
-            .rfind(|(_, b)| b.is_foldable())
-            .map(|(i, _)| i)
+    /// Whether `idx` is something `[` / `]` should land on. Every
+    /// block kind is selectable except a `ToolResult` whose matching
+    /// `ToolCall` exists earlier in the buffer (the renderer merges
+    /// the pair into one composite, so landing on the result would
+    /// look like a no-op visual).
+    fn is_selectable(&self, idx: usize) -> bool {
+        match self.blocks.get(idx) {
+            Some(Block::ToolResult { call_id, .. }) => !self.blocks[..idx]
+                .iter()
+                .any(|b| matches!(b, Block::ToolCall { call_id: cid, .. } if cid == call_id)),
+            Some(_) => true,
+            None => false,
+        }
     }
 
-    fn foldable_index_before(&self, idx: usize) -> Option<usize> {
-        self.blocks
-            .iter()
-            .enumerate()
-            .take(idx)
-            .rfind(|(_, b)| b.is_foldable())
-            .map(|(i, _)| i)
+    fn last_selectable_index(&self) -> Option<usize> {
+        (0..self.blocks.len())
+            .rev()
+            .find(|i| self.is_selectable(*i))
     }
 
-    fn foldable_index_after(&self, idx: usize) -> Option<usize> {
-        self.blocks
-            .iter()
-            .enumerate()
-            .skip(idx + 1)
-            .find(|(_, b)| b.is_foldable())
-            .map(|(i, _)| i)
+    fn selectable_index_before(&self, idx: usize) -> Option<usize> {
+        (0..idx).rev().find(|i| self.is_selectable(*i))
+    }
+
+    fn selectable_index_after(&self, idx: usize) -> Option<usize> {
+        (idx + 1..self.blocks.len()).find(|i| self.is_selectable(*i))
     }
 
     /// Push a fully-formed user prompt.
@@ -666,36 +664,42 @@ mod tests {
     }
 
     #[test]
-    fn focus_walks_only_foldable_blocks() {
+    fn focus_walks_all_blocks_skipping_merged_results() {
         let mut buf = Buffer::new();
-        buf.push_user("hi"); // 0: not foldable
-        buf.push_tool_call("c1", "read", "a.rs", "{}"); // 1
-        buf.append_assistant_delta("ok"); // 2: not foldable (Assistant)
+        buf.push_user("hi"); // 0: User (selectable)
+        buf.push_tool_call("c1", "read", "a.rs", "{}"); // 1: Call
+        buf.push_tool_result("c1", "out", false); // 2: Result paired with 1, NOT selectable
+        buf.append_assistant_delta("ok"); // 3: Assistant
         buf.finish_streaming();
-        buf.push_tool_call("c2", "read", "b.rs", "{}"); // 3
-        // No explicit focus -> effective is the last foldable.
-        assert_eq!(buf.effective_focus(), Some(3));
-        // Walk back: skips index 2 (Assistant) and lands on 1.
+        buf.push_tool_call("c2", "read", "b.rs", "{}"); // 4
+        // No explicit focus -> last selectable.
+        assert_eq!(buf.effective_focus(), Some(4));
+        // Walk back: 4 -> 3 -> 1 -> 0 (skipping 2).
+        assert!(buf.focus_prev());
+        assert_eq!(buf.focus(), Some(3));
         assert!(buf.focus_prev());
         assert_eq!(buf.focus(), Some(1));
-        // No more foldable before index 1.
+        assert!(buf.focus_prev());
+        assert_eq!(buf.focus(), Some(0));
+        // No more before 0.
         assert!(!buf.focus_prev());
+        // Walk forward, also skipping 2.
+        assert!(buf.focus_next());
         assert_eq!(buf.focus(), Some(1));
-        // Walk forward again.
         assert!(buf.focus_next());
         assert_eq!(buf.focus(), Some(3));
     }
 
     #[test]
-    fn set_focus_rejects_non_foldable_index() {
+    fn set_focus_only_rejects_out_of_range() {
         let mut buf = Buffer::new();
         buf.push_user("hi");
         buf.push_tool_call("c1", "ls", ".", "{}");
-        buf.set_focus(Some(0)); // user block, not foldable
-        assert_eq!(buf.focus(), None);
-        buf.set_focus(Some(1)); // tool call
+        buf.set_focus(Some(0));
+        assert_eq!(buf.focus(), Some(0));
+        buf.set_focus(Some(1));
         assert_eq!(buf.focus(), Some(1));
-        buf.set_focus(None);
+        buf.set_focus(Some(99));
         assert_eq!(buf.focus(), None);
     }
 

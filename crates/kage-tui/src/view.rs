@@ -325,8 +325,10 @@ fn input_cursor_position(
 #[must_use]
 pub fn block_to_lines(block: &Block, width: u16, focused: bool) -> Vec<Line<'static>> {
     match block {
-        Block::User { text } => user_block_lines(text, width),
-        Block::Assistant { text, .. } => plain_lines(text, assistant_style()),
+        Block::User { text } => user_block_lines(text, width, focused),
+        Block::Assistant { text, .. } => {
+            mark_focused(plain_lines(text, assistant_style()), focused)
+        }
         Block::Thinking { text, folded, .. } => {
             let mut out = Vec::new();
             out.push(header_line(
@@ -340,7 +342,7 @@ pub fn block_to_lines(block: &Block, width: u16, focused: bool) -> Vec<Line<'sta
                     out.push(prefix_line("  ", body_line));
                 }
             }
-            out
+            mark_focused(out, focused)
         }
         Block::ToolCall {
             name,
@@ -398,7 +400,7 @@ pub fn block_to_lines(block: &Block, width: u16, focused: bool) -> Vec<Line<'sta
                     out.push(prefix_line("  ", body_line));
                 }
             }
-            out
+            mark_focused(out, focused)
         }
         Block::Custom {
             kind, text, folded, ..
@@ -415,7 +417,7 @@ pub fn block_to_lines(block: &Block, width: u16, focused: bool) -> Vec<Line<'sta
                     out.push(prefix_line("  ", body_line));
                 }
             }
-            out
+            mark_focused(out, focused)
         }
     }
 }
@@ -441,7 +443,7 @@ const TOOL_PENDING_BG: Color = Color::Rgb(54, 42, 22);
 /// Render a user prompt as a tinted full-width "chat bubble" with a
 /// thin cyan left-edge rule and one row of padding above and below the
 /// text.
-fn user_block_lines(text: &str, width: u16) -> Vec<Line<'static>> {
+fn user_block_lines(text: &str, width: u16, focused: bool) -> Vec<Line<'static>> {
     let mut content: Vec<Line<'static>> = Vec::new();
     for raw in text.split('\n') {
         content.push(Line::from(Span::styled(
@@ -451,7 +453,29 @@ fn user_block_lines(text: &str, width: u16) -> Vec<Line<'static>> {
                 .add_modifier(Modifier::BOLD),
         )));
     }
-    wrap_in_bubble(content, Color::Cyan, USER_BUBBLE_BG, width)
+    wrap_in_bubble_focused(content, Color::Cyan, USER_BUBBLE_BG, width, focused)
+}
+
+/// Prepend a left-edge focus marker to every line of an already-built
+/// block's render. Used for non-bubbled blocks (Assistant text,
+/// Thinking, Custom, standalone `ToolResult`) so block-level navigation
+/// has the same visual feedback the bubble blocks already get from
+/// their tinted rule.
+fn mark_focused(lines: Vec<Line<'static>>, focused: bool) -> Vec<Line<'static>> {
+    if !focused {
+        return lines;
+    }
+    let mark_style = Style::default()
+        .fg(Color::White)
+        .add_modifier(Modifier::BOLD);
+    lines
+        .into_iter()
+        .map(|line| {
+            let mut spans = vec![Span::styled("\u{258c} ".to_owned(), mark_style)];
+            spans.extend(line.spans);
+            Line::from(spans)
+        })
+        .collect()
 }
 
 /// Wrap a vector of content lines in a full-width "bubble": each row
@@ -466,15 +490,6 @@ fn user_block_lines(text: &str, width: u16) -> Vec<Line<'static>> {
 ///
 /// Spans inside `content` are reused as-is except their background is
 /// overridden with `bg` so the bubble reads as a uniform block.
-fn wrap_in_bubble(
-    content: Vec<Line<'static>>,
-    rule_color: Color,
-    bg: Color,
-    width: u16,
-) -> Vec<Line<'static>> {
-    wrap_in_bubble_focused(content, rule_color, bg, width, false)
-}
-
 fn wrap_in_bubble_focused(
     content: Vec<Line<'static>>,
     rule_color: Color,

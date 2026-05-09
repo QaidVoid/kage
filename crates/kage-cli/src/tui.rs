@@ -512,7 +512,7 @@ fn handle_resume(
     }
     if let Ok(mut buf) = buffer.lock() {
         buf.clear();
-        populate_from_history(&mut buf, &replay.history);
+        populate_from_history(&mut buf, &replay.history, &replay.tool_durations);
         let id = replay.header.session.to_string();
         let short: String = id.chars().take(8).collect();
         buf.push_custom(

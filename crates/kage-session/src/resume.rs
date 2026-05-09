@@ -10,8 +10,10 @@
 //! [`find_by_prefix`] and [`find_last`] resolve a session file path from a
 //! directory either by id prefix or by most-recent header timestamp.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use kage_core::{Content, Message, MessageId, Role};
 
 use crate::entry::{Header, SessionEntry};
@@ -30,6 +32,10 @@ pub struct ReplayResult {
     /// Active model id at the end of the session, taking any
     /// [`SessionEntry::ModelChange`] entries into account.
     pub model: String,
+    /// Tool-call durations recovered from the entry timestamps. Key is
+    /// the `ToolCallId` as a string; value is milliseconds from the
+    /// call's `MessageEntry.ts` to the matching result's `ts`.
+    pub tool_durations: HashMap<String, u64>,
 }
 
 /// Replay every entry of `path`, returning the final history.
@@ -48,6 +54,13 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
 
     let mut model = header.model.clone();
     let mut history: Vec<Message> = Vec::new();
+    // `call_starts` tracks the wall-clock time each ToolCall was
+    // appended; on a matching ToolResult we compute the elapsed
+    // duration so resumed sessions can show real `Took Xms` instead
+    // of `Took 0ms` (which the renderer would otherwise compute from
+    // back-to-back replay pushes).
+    let mut call_starts: HashMap<String, DateTime<Utc>> = HashMap::new();
+    let mut tool_durations: HashMap<String, u64> = HashMap::new();
     for item in reader {
         let entry = item?;
         match entry {
@@ -61,7 +74,29 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
                     .unwrap_err(),
                 });
             }
-            SessionEntry::Message(m) => history.push(m.message),
+            SessionEntry::Message(m) => {
+                let ts = m.ts;
+                for block in &m.message.content {
+                    match block {
+                        Content::ToolCall { id, .. } => {
+                            call_starts.insert(id.to_string(), ts);
+                        }
+                        Content::ToolResultBlock { call_id, .. } => {
+                            if let Some(start) = call_starts.remove(&call_id.to_string()) {
+                                let delta = ts.signed_duration_since(start).num_milliseconds();
+                                if delta >= 0 {
+                                    tool_durations.insert(
+                                        call_id.to_string(),
+                                        u64::try_from(delta).unwrap_or(u64::MAX),
+                                    );
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                history.push(m.message);
+            }
             SessionEntry::Compaction(c) => {
                 let split = c.summarized.min(history.len());
                 history.drain(..split);
@@ -86,6 +121,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
         header,
         history,
         model,
+        tool_durations,
     })
 }
 

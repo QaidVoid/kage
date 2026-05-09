@@ -120,10 +120,15 @@ fn apply_event(buf: &mut Buffer, event: &LoopEvent) {
 /// The translator walks each message in order: user prompts become user
 /// bubbles, assistant text/thinking blocks become their respective
 /// streamed-and-finished blocks, tool calls and tool results become the
-/// merged tool composites the renderer pairs at draw time. Timing
-/// information from the original session is not preserved (replay
-/// blocks render `Took --`).
-pub fn populate_from_history(buf: &mut Buffer, messages: &[Message]) {
+/// merged tool composites the renderer pairs at draw time. Pass
+/// `tool_durations` to recover real `Took Xms` values from session
+/// entry timestamps; an empty map renders as `Took --`.
+#[allow(clippy::implicit_hasher)]
+pub fn populate_from_history(
+    buf: &mut Buffer,
+    messages: &[Message],
+    tool_durations: &std::collections::HashMap<String, u64>,
+) {
     for msg in messages {
         match msg.role {
             Role::User => {
@@ -162,15 +167,16 @@ pub fn populate_from_history(buf: &mut Buffer, messages: &[Message]) {
                         is_error,
                     } = block
                     {
-                        // Replay: timing is not persisted in the
-                        // session format, so pass `None` rather than
-                        // computing a misleading sub-millisecond
-                        // duration from the just-replayed call.
+                        // Replay: real timing is recovered from the
+                        // session's per-entry `ts` deltas via
+                        // `tool_durations`. A miss yields `None`,
+                        // rendered as `Took --`.
+                        let duration = tool_durations.get(&call_id.to_string()).copied();
                         buf.push_tool_result_with_duration(
                             call_id.to_string(),
                             output.clone(),
                             *is_error,
-                            None,
+                            duration,
                         );
                     }
                 }
@@ -473,7 +479,7 @@ mod tests {
                 None,
             ),
         ];
-        populate_from_history(&mut buf, &history);
+        populate_from_history(&mut buf, &history, &std::collections::HashMap::new());
         let blocks = buf.blocks();
         assert!(matches!(blocks[0], Block::User { .. }));
         assert!(matches!(blocks[1], Block::Thinking { .. }));

@@ -39,6 +39,25 @@ pub struct StatusCtx<'a> {
     pub search_match_count: Option<(usize, usize)>,
 }
 
+/// `Modifier` bit reserved as the per-cell "decoration" tag - the
+/// renderer's bubble/rule/padding code OR's this onto every span it
+/// paints purely for chrome, and the cell-based selection path
+/// queries it to skip non-selectable cells. Plays the same role as
+/// `selectable={false}` in `OpenTUI`'s virtual DOM, but lives on the
+/// already-rendered cell grid so we don't need a parallel scene
+/// graph. `SLOW_BLINK` is unused by everything else in this crate
+/// and most terminal emulators ignore it visually, so it's a safe
+/// hijack.
+pub(crate) const DECORATION_MARKER: Modifier = Modifier::SLOW_BLINK;
+
+/// True when a cell's modifier carries the decoration marker. Used
+/// by [`capture_and_overlay`] to skip overlay painting on chrome
+/// cells and by the host's yank path to filter them out of clipboard
+/// text.
+fn cell_is_decoration(modifier: Modifier) -> bool {
+    modifier.contains(DECORATION_MARKER)
+}
+
 /// What kind of attention a block should draw on this frame: the
 /// navigation head (white rule), a search match (yellow rule), or
 /// neither. `Ord` is implemented so merged tool pairs pick `max`
@@ -88,7 +107,7 @@ pub fn render(
     cmdline: Option<&CommandLine>,
     status: &StatusCtx<'_>,
     screen_selection: Option<((usize, u16), (usize, u16))>,
-    captured_rows: &mut std::collections::BTreeMap<usize, Vec<char>>,
+    captured_rows: &mut std::collections::BTreeMap<usize, Vec<CapturedCell>>,
 ) {
     render_status(frame, regions, input, cmdline, status);
     render_buffer(frame, regions, buffer, status.search_pattern);
@@ -567,24 +586,34 @@ fn emphasis_for(
     e
 }
 
-/// True for chars the renderer paints purely for decoration:
-/// bubble rule glyphs (`U+258E` / `U+258C`).
-fn is_decoration_char(c: char) -> bool {
-    matches!(c, '\u{258e}' | '\u{258c}')
+/// One captured cell from the rendered frame: the char that was
+/// painted plus whether the renderer marked it as decoration. The
+/// host's yank path filters out non-selectable cells using this
+/// flag so clipboard text matches what the user logically owns.
+#[derive(Clone, Copy, Debug)]
+pub struct CapturedCell {
+    /// First `char` of the cell's symbol. Multi-`char` graphemes
+    /// collapse to their first; OK for clipboard-style yank where
+    /// exact display width doesn't matter.
+    pub ch: char,
+    /// `true` if the renderer tagged this cell as chrome via
+    /// [`DECORATION_MARKER`].
+    pub decoration: bool,
 }
 
-/// Walk the buffer area's cell rows once: for each visible row,
-/// store its char content into `captured_rows` keyed by virtual row,
-/// and apply the selection bg overlay for rows in the selection
-/// range. Skips decoration glyphs (rule chars) so the highlight
-/// doesn't bleed onto block borders, and stays in virtual-row space
-/// so selection survives subsequent scrolls.
+/// Walk the buffer area's cell rows once: store each visible row's
+/// captured cells into `captured_rows` keyed by virtual row, and
+/// apply the selection bg overlay for rows in the selection range.
+/// Skips cells the renderer flagged with [`DECORATION_MARKER`] so
+/// the overlay doesn't bleed onto borders/padding and yank doesn't
+/// pull chrome into the clipboard. Stays in virtual-row space so
+/// selection survives subsequent scrolls.
 fn capture_and_overlay(
     frame: &mut Frame,
     regions: Regions,
     buffer: &Buffer,
     selection: Option<((usize, u16), (usize, u16))>,
-    captured_rows: &mut std::collections::BTreeMap<usize, Vec<char>>,
+    captured_rows: &mut std::collections::BTreeMap<usize, Vec<CapturedCell>>,
 ) {
     let area = regions.buffer;
     if area.width == 0 || area.height == 0 {
@@ -603,38 +632,51 @@ fn capture_and_overlay(
     };
     for screen_row in area.y..area.y.saturating_add(area.height) {
         let vrow = virtual_top.saturating_add(usize::from(screen_row - area.y));
-        let mut row_chars: Vec<char> = Vec::with_capacity(usize::from(area.width));
+        let mut row_cells: Vec<CapturedCell> = Vec::with_capacity(usize::from(area.width));
         for col in area.x..area.x.saturating_add(area.width) {
-            let ch = buf[(col, screen_row)]
-                .symbol()
-                .chars()
-                .next()
-                .unwrap_or(' ');
-            row_chars.push(ch);
+            let cell = &buf[(col, screen_row)];
+            let ch = cell.symbol().chars().next().unwrap_or(' ');
+            let decoration = cell_is_decoration(cell.modifier);
+            row_cells.push(CapturedCell { ch, decoration });
         }
         if let (Some(s), Some(e)) = (start, end)
             && vrow >= s.0
             && vrow <= e.0
         {
-            let from_col = if vrow == s.0 { s.1 } else { area.x };
-            let to_col = if vrow == e.0 { e.1 } else { last_col };
-            let lo = from_col.max(area.x);
-            let hi = to_col.min(last_col);
-            if hi >= lo {
-                for col in lo..=hi {
-                    let local_idx = usize::from(col - area.x);
-                    if let Some(ch) = row_chars.get(local_idx)
-                        && is_decoration_char(*ch)
-                    {
-                        continue;
+            // Cap each row's overlay at the last cell that's neither
+            // chrome nor a trailing pad space: whitespace beyond the
+            // last real char looks like a long trailing highlight
+            // strip otherwise. `rposition` walks from the right, so
+            // mid-line spaces (code indentation, prose between
+            // words) still get painted - only the trailing run is
+            // trimmed.
+            let last_real_local = row_cells
+                .iter()
+                .rposition(|cell| !cell.decoration && cell.ch != ' ');
+            if let Some(last_real_idx) = last_real_local {
+                let last_real_col = area
+                    .x
+                    .saturating_add(u16::try_from(last_real_idx).unwrap_or(u16::MAX));
+                let from_col = if vrow == s.0 { s.1 } else { area.x };
+                let to_col = if vrow == e.0 { e.1 } else { last_col };
+                let lo = from_col.max(area.x);
+                let hi = to_col.min(last_col).min(last_real_col);
+                if hi >= lo {
+                    for col in lo..=hi {
+                        let local_idx = usize::from(col - area.x);
+                        if let Some(cell_meta) = row_cells.get(local_idx)
+                            && cell_meta.decoration
+                        {
+                            continue;
+                        }
+                        let cell = &mut buf[(col, screen_row)];
+                        cell.set_bg(highlight_bg);
+                        cell.set_fg(on_select_fg);
                     }
-                    let cell = &mut buf[(col, screen_row)];
-                    cell.set_bg(highlight_bg);
-                    cell.set_fg(on_select_fg);
                 }
             }
         }
-        captured_rows.insert(vrow, row_chars);
+        captured_rows.insert(vrow, row_cells);
     }
 }
 
@@ -959,7 +1001,8 @@ fn mark_emphasis(lines: Vec<Line<'static>>, emphasis: Emphasis) -> Vec<Line<'sta
     }
     let mark_style = Style::default()
         .fg(emphasis.rule_color(Color::White))
-        .add_modifier(Modifier::BOLD);
+        .add_modifier(Modifier::BOLD)
+        .add_modifier(DECORATION_MARKER);
     lines
         .into_iter()
         .map(|line| {
@@ -1000,9 +1043,13 @@ fn wrap_in_bubble_focused(
     let rule_style = Style::default()
         .fg(emphasis.rule_color(rule_color))
         .bg(bg)
-        .add_modifier(Modifier::BOLD);
+        .add_modifier(Modifier::BOLD)
+        .add_modifier(DECORATION_MARKER);
     let rule_glyph = emphasis.rule_glyph();
-    let bg_only = Style::default().bg(bg);
+    // Padding cells (top/bottom rows, leading space after rule,
+    // trailing fill spaces) are pure chrome - tag them with the
+    // decoration marker so cell-based selection skips them.
+    let bg_only = Style::default().bg(bg).add_modifier(DECORATION_MARKER);
     let pad_row = || -> Line<'static> {
         Line::from(vec![
             Span::styled(rule_glyph.to_owned(), rule_style),
@@ -1019,6 +1066,9 @@ fn wrap_in_bubble_focused(
             spans.push(Span::styled(rule_glyph.to_owned(), rule_style));
             spans.push(Span::styled(" ".repeat(LEFT_PAD), bg_only));
             for s in visual_spans {
+                // Content spans keep their original modifiers - any
+                // bg the bubble paints around them stays selectable
+                // since it sits under user-visible text.
                 spans.push(Span::styled(s.content, s.style.bg(bg)));
             }
             let used = LEFT_PAD + used_chars;
@@ -1543,7 +1593,7 @@ mod tests {
     fn snapshot_lines(buffer: &mut Buffer, input: &InputState, area: Rect) -> Vec<String> {
         let backend = TestBackend::new(area.width, area.height);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut captured: std::collections::BTreeMap<usize, Vec<char>> =
+        let mut captured: std::collections::BTreeMap<usize, Vec<CapturedCell>> =
             std::collections::BTreeMap::new();
         terminal
             .draw(|frame| {

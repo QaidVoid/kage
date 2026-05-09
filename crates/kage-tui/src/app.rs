@@ -215,13 +215,14 @@ pub struct App {
     /// scroll: rows that go off-screen stay selected, and their
     /// previously-captured text remains available for yank.
     screen_selection: Option<((usize, u16), (usize, u16))>,
-    /// Text accumulated for every virtual row the user has dragged
-    /// through during the current selection. Indexed by virtual row;
-    /// each entry is the row's char content as captured at the
-    /// moment it was visible. Cleared on `MouseDown` (new selection)
-    /// or after a yank. Lets `y` recover the full selected text
-    /// even when part of the selection has scrolled off-screen.
-    captured_rows: std::collections::BTreeMap<usize, Vec<char>>,
+    /// Cell snapshots accumulated for every virtual row the user has
+    /// dragged through during the current selection. Indexed by
+    /// virtual row; each entry stores the row's painted chars and
+    /// per-cell decoration flag as captured when it was visible.
+    /// Cleared on `MouseDown` (new selection) or after a yank. Lets
+    /// `y` recover the full selected text even when part of the
+    /// selection has scrolled off-screen.
+    captured_rows: std::collections::BTreeMap<usize, Vec<view::CapturedCell>>,
 }
 
 impl App {
@@ -673,7 +674,8 @@ impl App {
             }
             let slice: String = grid_row[from_col..to_col]
                 .iter()
-                .filter(|&&c| !is_decoration_char(c))
+                .filter(|cell| !cell.decoration)
+                .map(|cell| cell.ch)
                 .collect();
             if !out.is_empty() {
                 out.push('\n');
@@ -1051,15 +1053,6 @@ impl App {
         self.captured_rows = captured_rows;
         Ok(())
     }
-}
-
-/// True for chars the renderer paints purely for decoration: bubble
-/// rule glyphs, fence-line markers, etc. Selection overlay skips
-/// these so the highlight doesn't bleed onto borders, and yank
-/// filters them out so the clipboard text is just the user-visible
-/// content.
-fn is_decoration_char(c: char) -> bool {
-    matches!(c, '\u{258e}' | '\u{258c}')
 }
 
 /// Translate an absolute terminal `(row, col)` mouse position to a

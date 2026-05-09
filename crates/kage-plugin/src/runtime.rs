@@ -21,6 +21,7 @@
 //! plugin code; it is not a security boundary against actively malicious
 //! Lua. Only run plugins you trust.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use mlua::Lua;
@@ -29,6 +30,7 @@ use crate::api::{self, SharedHostLog, default_host_log};
 use crate::commands::{self, LuaCommand, RegisteredCommands, registered_commands};
 use crate::error::PluginError;
 use crate::events;
+use crate::fs as plugin_fs;
 use crate::providers::{self, LuaProvider, RegisteredProviders, registered_providers};
 use crate::tools::{self, RegisteredTools, registered_tools};
 
@@ -67,6 +69,7 @@ impl PluginRuntime {
         PluginRuntimeBuilder {
             sink: default_host_log(),
             config: serde_json::Value::Object(serde_json::Map::new()),
+            workdir: PathBuf::from("."),
         }
     }
 
@@ -145,16 +148,18 @@ impl PluginRuntime {
 }
 
 /// Builder for [`PluginRuntime`]. Lets the host inject a custom host-log
-/// sink and a config snapshot before the runtime is sealed.
+/// sink, a config snapshot, and the workdir that gates `kage.fs.*`.
 pub struct PluginRuntimeBuilder {
     sink: SharedHostLog,
     config: serde_json::Value,
+    workdir: PathBuf,
 }
 
 impl std::fmt::Debug for PluginRuntimeBuilder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PluginRuntimeBuilder")
             .field("config", &self.config)
+            .field("workdir", &self.workdir)
             .finish_non_exhaustive()
     }
 }
@@ -174,15 +179,25 @@ impl PluginRuntimeBuilder {
         self
     }
 
+    /// Set the workdir that `kage.fs.*` helpers anchor at. All paths the
+    /// plugin passes are resolved through `kage_tools::resolve_under` with
+    /// this root.
+    #[must_use]
+    pub fn workdir(mut self, workdir: PathBuf) -> Self {
+        self.workdir = workdir;
+        self
+    }
+
     /// Finalize the runtime: build the Lua state, apply sandbox removals,
-    /// install the `kage` API table, and wire `kage.on`,
-    /// `kage.register_tool`, `kage.register_command`, and
-    /// `kage.register_provider`.
+    /// install the `kage` API table, wire `kage.on`,
+    /// `kage.register_tool`, `kage.register_command`,
+    /// `kage.register_provider`, and `kage.fs.*`.
     pub fn build(self) -> Result<PluginRuntime, PluginError> {
         let lua = Lua::new();
         apply_sandbox(&lua)?;
         api::install(&lua, self.sink.clone(), self.config)?;
         events::install_subscriptions(&lua)?;
+        plugin_fs::install_fs(&lua, self.workdir.clone())?;
         let shared_lua: SharedLua = Arc::new(Mutex::new(lua));
         let tool_registry = registered_tools();
         let command_registry = registered_commands();

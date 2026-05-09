@@ -8,6 +8,7 @@ pub mod api;
 pub mod commands;
 pub mod error;
 pub mod events;
+pub mod fs;
 pub mod loader;
 pub mod providers;
 pub mod runtime;

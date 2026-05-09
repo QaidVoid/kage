@@ -341,6 +341,46 @@ mod tests {
     }
 
     #[test]
+    fn folded_tool_call_renders_one_header_line() {
+        let mut buffer = Buffer::new();
+        buffer.push_tool_call("c1", "bash", "ls -la", "{\n  \"cmd\": \"ls -la\"\n}");
+        // Tool calls start folded.
+        let input = InputState::new();
+        let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 60, 6));
+        let header_line = lines
+            .iter()
+            .find(|l| l.contains("[tool]"))
+            .expect("tool header present");
+        assert!(header_line.contains("bash(ls -la)"));
+        assert!(!lines.iter().any(|l| l.contains("\"cmd\"")));
+    }
+
+    #[test]
+    fn unfolded_tool_call_shows_full_input_body() {
+        let mut buffer = Buffer::new();
+        buffer.push_tool_call("c1", "bash", "ls -la", "{\n  \"cmd\": \"ls -la\"\n}");
+        assert!(buffer.toggle_fold(0));
+        let input = InputState::new();
+        let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 60, 12));
+        assert!(lines.iter().any(|l| l.contains("[tool]")));
+        assert!(lines.iter().any(|l| l.contains("\"cmd\"")));
+    }
+
+    #[test]
+    fn tool_result_error_renders_distinct_header() {
+        let mut buffer = Buffer::new();
+        buffer.push_tool_call("c1", "bash", "false", "{}");
+        buffer.push_tool_result("c1", "exit 1", true);
+        let input = InputState::new();
+        let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 60, 12));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("[result]") && l.contains("error"))
+        );
+    }
+
+    #[test]
     fn status_bar_shows_mode_label() {
         let buffer = Buffer::new();
         let mut input = InputState::new();

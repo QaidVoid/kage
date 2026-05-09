@@ -2,7 +2,8 @@
 //!
 //! Print mode (`-p`) runs a single prompt through the agent loop and streams
 //! the assistant's text to stdout, then exits. The `list` subcommand prints
-//! a table of recorded sessions stored under `~/.kage/sessions/`.
+//! a table of recorded sessions stored under
+//! `$XDG_DATA_HOME/kage/sessions/` (default `~/.local/share/kage/sessions/`).
 
 mod session;
 
@@ -48,14 +49,14 @@ struct Cli {
     system: String,
 
     /// Disable session recording. By default every run writes a JSONL
-    /// session file under `~/.kage/sessions/<session-id>.jsonl`.
+    /// session file under `$XDG_DATA_HOME/kage/sessions/<session-id>.jsonl`.
     #[arg(long = "no-session")]
     no_session: bool,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// List recorded sessions in `~/.kage/sessions/`.
+    /// List recorded sessions in `$XDG_DATA_HOME/kage/sessions/`.
     List,
     /// Resume a recorded session, appending new entries to the same file.
     Resume {
@@ -410,10 +411,33 @@ fn resolve_resume_target(
         .ok_or_else(|| format!("no session matches prefix '{prefix}'"))
 }
 
-/// Resolve the directory holding session files: `~/.kage/sessions/`.
+/// Resolve the XDG-style directory holding session files:
+/// `$XDG_DATA_HOME/kage/sessions` (default `~/.local/share/kage/sessions`).
 fn sessions_dir() -> Result<PathBuf, String> {
+    Ok(xdg_dir("XDG_DATA_HOME", ".local/share")?
+        .join("kage")
+        .join("sessions"))
+}
+
+/// Resolve the XDG-style plugin directory:
+/// `$XDG_CONFIG_HOME/kage/plugins` (default `~/.config/kage/plugins`).
+#[allow(dead_code)] // Wired into the loop in T6.12.
+fn plugins_dir() -> Result<PathBuf, String> {
+    Ok(xdg_dir("XDG_CONFIG_HOME", ".config")?
+        .join("kage")
+        .join("plugins"))
+}
+
+/// Resolve an XDG base directory: prefers `$ENV_VAR` if set and non-empty,
+/// otherwise falls back to `$HOME/<fallback_subpath>`.
+fn xdg_dir(env_var: &str, fallback_subpath: &str) -> Result<PathBuf, String> {
+    if let Ok(v) = std::env::var(env_var)
+        && !v.is_empty()
+    {
+        return Ok(PathBuf::from(v));
+    }
     let home = dirs::home_dir().ok_or_else(|| "no home directory".to_owned())?;
-    Ok(home.join(".kage").join("sessions"))
+    Ok(home.join(fallback_subpath))
 }
 
 /// Implement `kage list`: print one row per recorded session.
@@ -471,10 +495,9 @@ fn truncate_one_line(text: &str, max: usize) -> String {
     format!("{head}...")
 }
 
-/// Create a fresh session file under `~/.kage/sessions/`.
+/// Create a fresh session file under [`sessions_dir`].
 fn open_session(model: &str, system_prompt: &str) -> Result<SessionWriter, String> {
-    let home = dirs::home_dir().ok_or_else(|| "no home directory".to_owned())?;
-    let dir = home.join(".kage").join("sessions");
+    let dir = sessions_dir()?;
     let session = SessionId::new();
     let path = build_session_path(&dir, session);
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));

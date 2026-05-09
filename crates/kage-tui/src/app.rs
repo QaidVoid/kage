@@ -28,6 +28,14 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 /// Lines scrolled per mouse wheel notch.
 const MOUSE_SCROLL_LINES: i32 = 3;
 
+/// Number of rows the input text occupies, counting a trailing newline
+/// as a fresh empty row. `String::lines()` would drop that row, which
+/// would leave the input area undersized after `Shift+Enter` until the
+/// user types a visible character.
+fn text_row_count(text: &str) -> usize {
+    text.split('\n').count()
+}
+
 /// When `KAGE_DEBUG_KEYS` is set to a non-empty value, every press is
 /// appended to the file at that path (or `$XDG_STATE_HOME/kage/keys.log`
 /// when the value is `1`). Lets us diagnose terminal-specific quirks
@@ -169,8 +177,7 @@ impl App {
 
     fn draw(&mut self, tui: &mut Tui) -> Result<(), TuiError> {
         let buffer = self.buffer.lock().expect("buffer mutex poisoned");
-        let input_text_lines =
-            u16::try_from(self.input.text().lines().count().max(1)).unwrap_or(u16::MAX);
+        let input_text_lines = u16::try_from(text_row_count(self.input.text())).unwrap_or(u16::MAX);
         let input_height = input_height_for(input_text_lines + 1);
         tui.terminal().draw(|frame| {
             let regions = split(frame.area(), input_height);
@@ -320,8 +327,7 @@ impl App {
         B::Error: std::error::Error + Send + Sync + 'static,
     {
         let buffer = self.buffer.lock().expect("buffer mutex poisoned");
-        let input_text_lines =
-            u16::try_from(self.input.text().lines().count().max(1)).unwrap_or(u16::MAX);
+        let input_text_lines = u16::try_from(text_row_count(self.input.text())).unwrap_or(u16::MAX);
         let input_height = input_height_for(input_text_lines + 1);
         let picker = self.picker.as_mut();
         terminal

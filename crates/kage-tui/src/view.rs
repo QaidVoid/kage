@@ -66,11 +66,12 @@ impl Emphasis {
     }
 
     fn rule_color(self, base: Color) -> Color {
+        let t = crate::theme::current();
         match self {
             Self::None => base,
-            Self::Focused => Color::White,
-            Self::Selected => Color::Magenta,
-            Self::Match => Color::Yellow,
+            Self::Focused => t.focus_color,
+            Self::Selected => t.selection_color,
+            Self::Match => t.match_color,
         }
     }
 }
@@ -108,6 +109,7 @@ fn render_status(
     cmdline: Option<&CommandLine>,
     status: &StatusCtx<'_>,
 ) {
+    let theme = crate::theme::current();
     if let Some(cl) = cmdline {
         let line = Line::from(vec![
             Span::styled(":", Style::default().add_modifier(Modifier::BOLD)),
@@ -115,7 +117,7 @@ fn render_status(
         ]);
         let paragraph = Paragraph::new(line)
             .alignment(Alignment::Left)
-            .style(Style::default().bg(Color::DarkGray));
+            .style(Style::default().bg(theme.status_bg));
         frame.render_widget(paragraph, regions.status);
         return;
     }
@@ -124,23 +126,23 @@ fn render_status(
             Span::styled(
                 "/",
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(theme.match_color)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(sl.text().to_owned()),
         ]);
         let paragraph = Paragraph::new(line)
             .alignment(Alignment::Left)
-            .style(Style::default().bg(Color::DarkGray));
+            .style(Style::default().bg(theme.status_bg));
         frame.render_widget(paragraph, regions.status);
         return;
     }
 
-    let bg_style = Style::default().bg(Color::DarkGray);
+    let bg_style = Style::default().bg(theme.status_bg);
     let mode = mode_label(input.mode());
     let dim = Style::default()
-        .fg(Color::Gray)
-        .bg(Color::DarkGray)
+        .fg(theme.status_dim_fg)
+        .bg(theme.status_bg)
         .add_modifier(Modifier::DIM);
     let mut left_spans = vec![
         Span::styled(format!(" {mode} "), mode_style(input.mode())),
@@ -164,8 +166,8 @@ fn render_status(
         right_spans.push(Span::styled(
             format!("{label}  "),
             Style::default()
-                .fg(Color::Yellow)
-                .bg(Color::DarkGray)
+                .fg(theme.match_color)
+                .bg(theme.status_bg)
                 .add_modifier(Modifier::BOLD),
         ));
     }
@@ -243,7 +245,7 @@ fn split_span_for_match(span: Span<'static>, needle: &str) -> Vec<Span<'static>>
     }
     let hit = span.style.patch(
         Style::default()
-            .bg(Color::Yellow)
+            .bg(crate::theme::current().match_color)
             .fg(Color::Black)
             .add_modifier(Modifier::BOLD)
             .add_modifier(Modifier::REVERSED),
@@ -582,6 +584,7 @@ fn input_cursor_position(
 /// the header plus the body. Assistant text has no header; it is the
 /// content directly. Thinking text is rendered dimmed.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn block_to_lines(block: &Block, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
     match block {
         Block::User { text } => user_block_lines(text, width, emphasis),
@@ -639,7 +642,14 @@ pub fn block_to_lines(block: &Block, width: u16, emphasis: Emphasis) -> Vec<Line
                     content.push(body_line);
                 }
             }
-            wrap_in_bubble_focused(content, Color::Yellow, TOOL_PENDING_BG, width, emphasis)
+            let theme = crate::theme::current();
+            wrap_in_bubble_focused(
+                content,
+                theme.tool_rule,
+                theme.tool_pending_bg,
+                width,
+                emphasis,
+            )
         }
         Block::ToolResult {
             name,
@@ -682,38 +692,21 @@ pub fn block_to_lines(block: &Block, width: u16, emphasis: Emphasis) -> Vec<Line
     }
 }
 
-/// Background color for the user-prompt bubble. A muted slate that
-/// reads as "tinted" against most terminal backgrounds.
-const USER_BUBBLE_BG: Color = Color::Rgb(45, 53, 70);
-
-/// Background color for completed (non-error) tool-block bubbles.
-/// Cooler/dimmer than the user bubble so the two read as distinct
-/// units in a stacked conversation.
-const TOOL_BUBBLE_BG: Color = Color::Rgb(30, 34, 44);
-
-/// Background tint for tool blocks that errored. A muted maroon, dark
-/// enough to keep dim foreground text readable but distinct from the
-/// neutral block.
-const TOOL_ERROR_BG: Color = Color::Rgb(58, 22, 28);
-
-/// Background tint for tool blocks that haven't received a result yet
-/// (in-flight). A muted amber suggests "working on it".
-const TOOL_PENDING_BG: Color = Color::Rgb(54, 42, 22);
-
 /// Render a user prompt as a tinted full-width "chat bubble" with a
-/// thin cyan left-edge rule and one row of padding above and below the
-/// text.
+/// thin themed left-edge rule and one row of padding above and below
+/// the text.
 fn user_block_lines(text: &str, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
+    let theme = crate::theme::current();
     let mut content: Vec<Line<'static>> = Vec::new();
     for raw in text.split('\n') {
         content.push(Line::from(Span::styled(
             raw.to_owned(),
             Style::default()
-                .fg(Color::White)
+                .fg(theme.focus_color)
                 .add_modifier(Modifier::BOLD),
         )));
     }
-    wrap_in_bubble_focused(content, Color::Cyan, USER_BUBBLE_BG, width, emphasis)
+    wrap_in_bubble_focused(content, theme.user_rule, theme.user_bg, width, emphasis)
 }
 
 /// Prepend a left-edge emphasis marker to every line of an
@@ -955,12 +948,13 @@ fn tool_pair_to_lines(
             content.push(body_line);
         }
     }
+    let theme = crate::theme::current();
     let bg = if is_error {
-        TOOL_ERROR_BG
+        theme.tool_error_bg
     } else {
-        TOOL_BUBBLE_BG
+        theme.tool_bg
     };
-    wrap_in_bubble_focused(content, Color::Yellow, bg, width, emphasis)
+    wrap_in_bubble_focused(content, theme.tool_rule, bg, width, emphasis)
 }
 
 /// Lines and bytes shown in a folded tool block's preview. Trades
@@ -1273,29 +1267,31 @@ fn mode_style(mode: Mode) -> Style {
 }
 
 fn assistant_style() -> Style {
-    Style::default().fg(Color::White)
+    Style::default().fg(crate::theme::current().assistant_fg)
 }
 
 fn thinking_style() -> Style {
     Style::default()
-        .fg(Color::Gray)
+        .fg(crate::theme::current().thinking_fg)
         .add_modifier(Modifier::DIM | Modifier::ITALIC)
 }
 
 fn tool_call_style() -> Style {
-    Style::default().fg(Color::Yellow)
+    Style::default().fg(crate::theme::current().tool_rule)
 }
 
 fn tool_result_style() -> Style {
-    Style::default().fg(Color::Gray)
+    Style::default().fg(crate::theme::current().tool_result_fg)
 }
 
 fn tool_error_style() -> Style {
-    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    Style::default()
+        .fg(crate::theme::current().tool_error_fg)
+        .add_modifier(Modifier::BOLD)
 }
 
 fn custom_style() -> Style {
-    Style::default().fg(Color::Magenta)
+    Style::default().fg(crate::theme::current().custom_fg)
 }
 
 #[cfg(test)]

@@ -144,6 +144,7 @@ const BUILTIN_COMMANDS: &[(&str, &str)] = &[
     ("model", "switch to provider:model (takes one arg)"),
     ("fold all", "fold every foldable block"),
     ("unfold all", "unfold every foldable block"),
+    ("theme", "switch palette (use `:theme list` to enumerate)"),
 ];
 
 fn builtin_command_picker_items() -> Vec<PickItem> {
@@ -451,6 +452,10 @@ impl App {
                 self.set_all_folds(false);
                 None
             }
+            "theme" => {
+                self.run_theme_command(rest);
+                None
+            }
             "help" => {
                 self.push_help();
                 None
@@ -513,9 +518,61 @@ impl App {
                     :model <id>     switch to provider:model (e.g. anthropic:claude-sonnet-4-5)\n  \
                     :fold all       fold every foldable block\n  \
                     :unfold all     unfold every foldable block\n  \
+                    :theme <name>   switch palette (use `:theme list` to enumerate)\n  \
                     :help           show this help";
         if let Ok(mut buf) = self.buffer.lock() {
             buf.push_custom("kage:help", body, false);
+        }
+    }
+
+    fn run_theme_command(&mut self, rest: &str) {
+        match rest {
+            "" => {
+                let cur = crate::theme::current().name;
+                self.notify(format!("theme: {cur} (try `:theme list`)"));
+            }
+            "list" => {
+                let cur = crate::theme::current().name;
+                let names = crate::theme::Theme::bundled_names()
+                    .iter()
+                    .map(|n| {
+                        if *n == cur {
+                            format!("* {n}")
+                        } else {
+                            format!("  {n}")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if let Ok(mut buf) = self.buffer.lock() {
+                    buf.push_custom("kage:theme", format!("themes:\n{names}"), false);
+                }
+            }
+            name => {
+                let names = crate::theme::Theme::bundled_names();
+                if !names.contains(&name) {
+                    self.push_error(format!("unknown theme: {name} (try `:theme list`)"));
+                    return;
+                }
+                let theme = crate::theme::Theme::by_name(name);
+                crate::theme::set_current(theme);
+                if let Ok(mut buf) = self.buffer.lock() {
+                    // Force a fresh layout pass: every block's
+                    // cached height was measured against the prior
+                    // theme's bubble background, which doesn't
+                    // change geometry but invalidating is cheap and
+                    // protects against future theme-driven height
+                    // tweaks (different rule glyph widths, etc.).
+                    buf.invalidate_all_heights();
+                }
+                self.notify(format!("theme: {name}"));
+            }
+        }
+    }
+
+    fn notify(&mut self, msg: impl Into<String>) {
+        if let Ok(mut buf) = self.buffer.lock() {
+            buf.push_custom("kage:notify", msg, false);
         }
     }
 

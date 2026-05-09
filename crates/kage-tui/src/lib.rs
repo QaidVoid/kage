@@ -12,6 +12,7 @@ pub mod overlay;
 pub mod picker;
 pub mod syntax;
 pub mod terminal;
+pub mod theme;
 pub mod view;
 
 pub use app::{App, AppExit, RunRequest, SessionLister};
@@ -26,4 +27,5 @@ pub use layout::{INPUT_MAX_LINES, INPUT_MIN_LINES, Regions, input_height_for, sp
 pub use overlay::{OverlayPicker, PickerEvent};
 pub use picker::{PickItem, pick};
 pub use terminal::Tui;
+pub use theme::{Theme, current as current_theme, set_current as set_current_theme};
 pub use view::StatusCtx;

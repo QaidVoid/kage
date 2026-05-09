@@ -6,8 +6,39 @@
 //! variants ([`Theme::tokyo_night`], [`Theme::catppuccin_mocha`]) give
 //! the user a couple of recognisable palettes out of the box without
 //! needing a TOML loader yet.
+//!
+//! The renderer reads the active theme via [`current`] (returns a
+//! cheap clone of the global). The host process picks one with
+//! [`set_current`] - typically once at startup, but `:theme set <name>`
+//! also goes through this path so a swap takes effect on the next
+//! frame without restarting the TUI.
+
+use std::sync::RwLock;
 
 use ratatui::style::Color;
+
+static CURRENT: RwLock<Option<Theme>> = RwLock::new(None);
+
+/// Snapshot of the active theme. Returns the default palette when no
+/// host has called [`set_current`] yet, so leaf style helpers don't
+/// need to special-case startup ordering.
+#[must_use]
+pub fn current() -> Theme {
+    CURRENT
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone())
+        .unwrap_or_default()
+}
+
+/// Replace the process-wide theme. Subsequent renders pick up the
+/// new palette; in-flight frames continue with the snapshot they
+/// already captured.
+pub fn set_current(theme: Theme) {
+    if let Ok(mut guard) = CURRENT.write() {
+        *guard = Some(theme);
+    }
+}
 
 /// Every color the TUI renderer might paint with. Add entries when a
 /// new visual element shows up; never reach for a hardcoded `Color`

@@ -73,6 +73,15 @@ enum Command {
         #[arg(short = 'm', long = "model")]
         model: Option<String>,
     },
+    /// Fork a recorded session at a specific entry into a new session file.
+    Fork {
+        /// Source session id or unique prefix.
+        id: String,
+        /// Entry id (or unique prefix) to fork at; everything up through
+        /// this entry is copied into the new session.
+        #[arg(long = "at")]
+        at: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -86,6 +95,7 @@ fn main() -> ExitCode {
             print,
             model,
         }) => return run_resume(id.as_deref(), last, print.as_deref(), model.as_deref()),
+        Some(Command::Fork { id, at }) => return run_fork(&id, &at),
         None => {}
     }
 
@@ -258,6 +268,46 @@ fn run_resume(
         &user_msg,
         Some(writer),
     )
+}
+
+/// Implement `kage fork`: copy a session up through a chosen entry into a
+/// fresh file with a new session id, linked back to the source via the
+/// header's `parent_session` and `parent_entry` fields.
+fn run_fork(src_id_prefix: &str, at_prefix: &str) -> ExitCode {
+    let dir = match sessions_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("kage: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let src_path = match kage_session::find_by_prefix(&dir, src_id_prefix) {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            eprintln!("kage: no session matches prefix '{src_id_prefix}'");
+            return ExitCode::from(1);
+        }
+        Err(e) => {
+            eprintln!("kage: failed to resolve session id: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let at = match kage_session::resolve_entry_prefix(&src_path, at_prefix) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("kage: failed to resolve entry id: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let new_session = SessionId::new();
+    let dst = dir.join(format!("{new_session}.jsonl"));
+    if let Err(e) = kage_session::fork(&src_path, &dst, new_session, at) {
+        eprintln!("kage: fork failed: {e}");
+        return ExitCode::from(1);
+    }
+    println!("{new_session}");
+    eprintln!("kage: forked {} into {}", src_path.display(), dst.display());
+    ExitCode::SUCCESS
 }
 
 /// Resolve which session file to resume based on cli flags.

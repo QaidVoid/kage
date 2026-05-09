@@ -157,7 +157,13 @@ fn count_lines(text: &str) -> usize {
     text.split('\n').count()
 }
 
-/// Append-only conversation history with a scroll offset.
+/// Append-only conversation history with a scroll offset measured as
+/// "rows scrolled up from the bottom". `scroll == 0` means the viewport
+/// is pinned to the latest content (auto-follow on streaming); larger
+/// values walk backwards through history. New content arriving while
+/// the user is scrolled back leaves their position alone, so the
+/// "follow while idle, freeze while reading" behavior emerges from the
+/// scroll model rather than a separate flag.
 #[derive(Debug, Default)]
 pub struct Buffer {
     blocks: Vec<Block>,
@@ -183,13 +189,22 @@ impl Buffer {
         self.blocks.iter().map(Block::line_count).sum()
     }
 
-    /// Current scroll offset in logical lines from the top.
+    /// Rows scrolled up from the bottom. Zero means "follow newest".
     #[must_use]
     pub fn scroll(&self) -> usize {
         self.scroll
     }
 
-    /// Set the scroll offset, clamping to `[0, total_lines]`.
+    /// True when the viewport is pinned to the bottom; auto-follows
+    /// streaming content.
+    #[must_use]
+    pub fn is_following(&self) -> bool {
+        self.scroll == 0
+    }
+
+    /// Set the scroll offset (rows up from the bottom). Clamped at the
+    /// model layer to `[0, total_lines]`; the renderer further clamps
+    /// against the viewport height each frame.
     pub fn set_scroll(&mut self, scroll: usize) {
         self.scroll = scroll.min(self.total_lines());
     }
@@ -461,6 +476,33 @@ mod tests {
         } else {
             panic!("expected fresh thinking after assistant");
         }
+    }
+
+    #[test]
+    fn fresh_buffer_is_following() {
+        let buf = Buffer::new();
+        assert!(buf.is_following());
+        assert_eq!(buf.scroll(), 0);
+    }
+
+    #[test]
+    fn append_does_not_disturb_user_scroll_position() {
+        let mut buf = Buffer::new();
+        buf.push_user("aa\nbb\ncc");
+        buf.set_scroll(2);
+        assert!(!buf.is_following());
+        buf.append_assistant_delta("hi\nthere\nyou");
+        assert_eq!(buf.scroll(), 2);
+        assert!(!buf.is_following());
+    }
+
+    #[test]
+    fn returning_to_zero_scroll_re_enables_follow() {
+        let mut buf = Buffer::new();
+        buf.push_user("aa\nbb\ncc");
+        buf.set_scroll(2);
+        buf.set_scroll(0);
+        assert!(buf.is_following());
     }
 
     #[test]

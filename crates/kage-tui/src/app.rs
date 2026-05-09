@@ -179,8 +179,8 @@ impl App {
                 let _ = self.send_request(RunRequest::Submit(text));
             }
             InputAction::Scroll(delta) => self.scroll_by(delta),
-            InputAction::ScrollToTop => self.set_scroll(0),
-            InputAction::ScrollToBottom => self.scroll_to_bottom(),
+            InputAction::ScrollToTop => self.set_scroll(usize::MAX),
+            InputAction::ScrollToBottom => self.set_scroll(0),
             InputAction::ToggleFold => self.toggle_last_fold(),
             InputAction::UnfoldAll => self.set_all_folds(false),
             InputAction::FoldAll => self.set_all_folds(true),
@@ -212,9 +212,11 @@ impl App {
 
     fn scroll_by(&mut self, delta: i32) {
         if let Ok(mut buf) = self.buffer.lock() {
+            // Positive delta = move toward newest (decrement rows-up);
+            // negative = move toward oldest (increment rows-up).
             let current = i64::try_from(buf.scroll()).unwrap_or(i64::MAX);
-            let target = current + i64::from(delta);
-            let clamped = usize::try_from(target.max(0)).unwrap_or(0);
+            let target = (current - i64::from(delta)).max(0);
+            let clamped = usize::try_from(target).unwrap_or(0);
             buf.set_scroll(clamped);
         }
     }
@@ -222,13 +224,6 @@ impl App {
     fn set_scroll(&mut self, scroll: usize) {
         if let Ok(mut buf) = self.buffer.lock() {
             buf.set_scroll(scroll);
-        }
-    }
-
-    fn scroll_to_bottom(&mut self) {
-        if let Ok(mut buf) = self.buffer.lock() {
-            let total = buf.total_lines();
-            buf.set_scroll(total);
         }
     }
 

@@ -47,7 +47,15 @@ fn render_buffer(frame: &mut Frame, regions: Regions, buffer: &Buffer) {
         // Blank separator between blocks.
         lines.push(Line::raw(""));
     }
-    let scroll = u16::try_from(buffer.scroll()).unwrap_or(u16::MAX);
+    let total_lines = lines.len();
+    let visible = usize::from(regions.buffer.height);
+    // [`Buffer::scroll`] is rows from the bottom; the Paragraph wants
+    // rows from the top. Translate, clamping so the viewport never
+    // drops past the last line of content.
+    let max_scroll_back = total_lines.saturating_sub(visible);
+    let scroll_back = buffer.scroll().min(max_scroll_back);
+    let top_offset = max_scroll_back - scroll_back;
+    let scroll = u16::try_from(top_offset).unwrap_or(u16::MAX);
     let paragraph = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .scroll((scroll, 0));

@@ -18,7 +18,7 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-rust-version = "1.85"
+rust-version = "1.86"
 
 [workspace.dependencies]
 kage-core = { path = "crates/kage-core" }
@@ -39,6 +39,7 @@ html2text = "0.17.1"
 ignore = "0.4.25"
 mlua = { version = "0.11.6", features = ["lua54", "vendored", "send"] }
 notify = "8.2.0"
+ratatui = "0.30.0"
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"

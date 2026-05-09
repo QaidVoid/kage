@@ -209,18 +209,24 @@ fn render_buffer(frame: &mut Frame, regions: Regions, buffer: &mut Buffer) {
         let rendered_start = head_paragraph.line_count(regions.buffer.width);
         let rendered_height = block_paragraph.line_count(regions.buffer.width);
         let rendered_end = rendered_start + rendered_height;
-        // Rows-from-bottom scroll values that keep block visible:
+        // Rows-from-bottom scroll values that bracket the in-view
+        // range. `scroll_to_top` lands the block's top row at the top
+        // of the viewport; `scroll_to_bottom` lands its bottom row at
+        // the bottom. The block is in view iff scroll_back falls
+        // anywhere between these (inclusive).
         let scroll_to_top = total_rendered.saturating_sub(rendered_start + visible);
         let scroll_to_bottom = total_rendered.saturating_sub(rendered_end);
         let current = buffer.scroll().min(max_scroll_back);
-        // Already in view: don't disturb.
-        if scroll_to_bottom > current || current > scroll_to_top {
-            // Pick "bottom of block at bottom of viewport" if block
-            // fits, else "top of block at top of viewport".
-            let target = if rendered_height <= visible {
-                scroll_to_bottom
-            } else {
+        let in_view = current >= scroll_to_top && current <= scroll_to_bottom;
+        if !in_view {
+            let target = if rendered_height > visible || current < scroll_to_top {
+                // Block is below the viewport (or doesn't fit at all)
+                // - park its top at the viewport top.
                 scroll_to_top
+            } else {
+                // Block is above the viewport - park its bottom at the
+                // viewport bottom.
+                scroll_to_bottom
             };
             buffer.set_scroll(target.min(max_scroll_back));
         }

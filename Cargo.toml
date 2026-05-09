@@ -12,6 +12,7 @@ members = [
     "crates/kage-session",
     "crates/kage-tools",
     "crates/kage-tui",
+    "xtask",
 ]
 
 [workspace.package]

@@ -5,6 +5,7 @@
 //! is no tokio, no async-trait, and no `Pin<Box<dyn Stream>>`.
 
 pub mod anthropic;
+pub mod catalog;
 pub mod error;
 pub mod event;
 pub mod gemini;
@@ -18,6 +19,7 @@ pub mod zai;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
+pub use catalog::{ModelInfo, PROVIDERS, ProviderInfo};
 pub use error::ProviderError;
 pub use event::{ProviderEvent, StopReason};
 pub use kage_core::ToolSpec;

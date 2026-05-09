@@ -225,7 +225,13 @@ fn select_provider(arg: Option<&str>) -> Result<String, String> {
         .iter()
         .map(|p| {
             let badge = if store.get(p).is_some() { '*' } else { '-' };
-            kage_tui::PickItem::simple(*p).with_badge(badge)
+            let label = match kage_provider::catalog::provider(p) {
+                Some(info) => format!("{} ({}, {} models)", info.name, p, info.models.len()),
+                // `zai-coding` and any future kage-only ids without a
+                // models.dev entry just render their id.
+                None => (*p).to_owned(),
+            };
+            kage_tui::PickItem::simple(*p).with_label(label).with_badge(badge)
         })
         .collect();
     match kage_tui::pick("Select a provider", &items) {

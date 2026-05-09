@@ -11,19 +11,41 @@ use std::sync::Arc;
 
 use kage_core::{LoopEvent, ToolOutput};
 use kage_loop::Hooks;
-use kage_plugin::{LogLevel, PluginRuntime};
+use kage_plugin::{LogLevel, PluginRuntime, SharedHostLog, default_host_log};
 use serde_json::json;
 
 /// Construct a plugin runtime, load `*.lua` files from `plugins_dir`, and
 /// return the runtime if at least one plugin loaded successfully. Returns
-/// `Ok(None)` when the directory is missing or empty.
+/// `Ok(None)` when the directory is missing or empty. Uses the default
+/// stderr-backed sink; use [`setup_runtime_with_sink`] when the host owns
+/// the alt screen and stderr writes would corrupt the rendered frame.
 pub fn setup_runtime(
     plugins_dir: &Path,
     workdir: &Path,
     model: &str,
     system_prompt: &str,
 ) -> Result<Option<Arc<PluginRuntime>>, String> {
+    setup_runtime_with_sink(
+        plugins_dir,
+        workdir,
+        model,
+        system_prompt,
+        default_host_log(),
+    )
+}
+
+/// Same as [`setup_runtime`] but with a caller-supplied `HostLog` sink.
+/// The TUI uses [`kage_tui::buffer_host_log`] to route plugin output
+/// into the conversation buffer instead of stderr.
+pub fn setup_runtime_with_sink(
+    plugins_dir: &Path,
+    workdir: &Path,
+    model: &str,
+    system_prompt: &str,
+    sink: SharedHostLog,
+) -> Result<Option<Arc<PluginRuntime>>, String> {
     let runtime = PluginRuntime::builder()
+        .sink(sink)
         .workdir(workdir.to_path_buf())
         .config(json!({
             "model": model,

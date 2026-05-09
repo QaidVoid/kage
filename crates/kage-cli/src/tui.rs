@@ -18,9 +18,9 @@ use kage_loop::{AgentContext, LoopConfig, NoopHooks, run};
 use kage_plugin::PluginRuntime;
 use kage_provider::Provider;
 use kage_tools::ToolRegistry;
-use kage_tui::{App, RunRequest, SharedBuffer, Tui, TuiHooks, shared_buffer};
+use kage_tui::{App, RunRequest, SharedBuffer, Tui, TuiHooks, buffer_host_log, shared_buffer};
 
-use crate::plugins::{PluginEventHooks, setup_runtime};
+use crate::plugins::{PluginEventHooks, setup_runtime_with_sink};
 
 /// Drop into the interactive TUI. Returns the appropriate process exit
 /// code once the user quits.
@@ -43,17 +43,31 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     let provider = Arc::clone(resolved.provider);
     let bare_model = resolved.model.clone();
 
+    // The buffer must exist before we build the plugin runtime so we can
+    // hand the runtime a sink that routes notify/log into the buffer
+    // instead of stderr (which would corrupt the alt screen).
+    let buffer = shared_buffer();
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let plugin_runtime = match crate::plugins_dir() {
-        Ok(dir) => match setup_runtime(&dir, &workdir, model, system) {
+        Ok(dir) => match setup_runtime_with_sink(
+            &dir,
+            &workdir,
+            model,
+            system,
+            buffer_host_log(buffer.clone()),
+        ) {
             Ok(rt) => rt,
             Err(e) => {
-                eprintln!("kage: {e}");
+                if let Ok(mut buf) = buffer.lock() {
+                    buf.push_custom("kage:error", e, false);
+                }
                 None
             }
         },
         Err(e) => {
-            eprintln!("kage: {e}");
+            if let Ok(mut buf) = buffer.lock() {
+                buf.push_custom("kage:error", e, false);
+            }
             None
         }
     };
@@ -64,8 +78,6 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
             tools.register(tool);
         }
     }
-
-    let buffer = shared_buffer();
     let cancel = CancelFlag::new();
     let cx = Arc::new(Mutex::new(
         AgentContext::new(bare_model, system).with_workdir(&workdir),

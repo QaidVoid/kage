@@ -42,6 +42,11 @@ pub struct SessionUsage {
     /// Effective context window for `model`, in tokens. `0` when
     /// unknown (renderer hides the percentage in that case).
     pub context_window: u64,
+    /// `true` while the agent loop is mid-flight on a turn (provider
+    /// streaming, tool dispatch, or compaction). The modeline
+    /// reads this to paint a spinner; the host worker thread sets
+    /// it `true` on `run_with_hooks` entry and `false` on return.
+    pub working: bool,
 }
 
 impl SessionUsage {

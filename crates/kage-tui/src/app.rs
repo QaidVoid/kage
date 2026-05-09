@@ -400,11 +400,23 @@ impl App {
             // Periodic-wake fallthrough: if a streaming tool call is
             // in-flight, repaint anyway so the elapsed-time pill
             // ticks visibly. Cheap because the renderer's height
-            // cache is hot at this point.
-            if !needs_redraw && self.has_running_tool_call() {
+            // cache is hot at this point. Same for the modeline
+            // spinner while the agent is mid-turn.
+            if !needs_redraw && (self.has_running_tool_call() || self.is_working()) {
                 needs_redraw = true;
             }
         }
+    }
+
+    /// True when the worker has marked the [`crate::usage::SessionUsage`]
+    /// snapshot as `working`. The render path uses it to drive the
+    /// modeline spinner; the event loop uses it to force periodic
+    /// redraws so the spinner animates.
+    fn is_working(&self) -> bool {
+        self.session_usage
+            .as_ref()
+            .and_then(|h| h.lock().ok().map(|g| g.working))
+            .unwrap_or(false)
     }
 
     /// Read the buffer's current mutation counter without holding

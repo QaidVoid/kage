@@ -262,6 +262,9 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         &buffer,
                     );
                     let context_window = cx_guard.context_window;
+                    if let Ok(mut snap) = session_usage.lock() {
+                        snap.working = true;
+                    }
                     let ok = run_with_hooks(
                         provider.as_ref(),
                         &tools,
@@ -276,6 +279,9 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         qualified.clone(),
                         context_window,
                     );
+                    if let Ok(mut snap) = session_usage.lock() {
+                        snap.working = false;
+                    }
                     if ok && let Err(err) = crate::state::record_last_model(&qualified) {
                         if let Ok(mut buf) = buffer.lock() {
                             buf.push_custom("kage:error", format!("state: {err}"), false);

@@ -636,9 +636,16 @@ fn capture_and_overlay(
         let vrow = virtual_top.saturating_add(usize::from(screen_row - area.y));
         let mut row_cells: Vec<CapturedCell> = Vec::with_capacity(usize::from(area.width));
         for col in area.x..area.x.saturating_add(area.width) {
-            let cell = &buf[(col, screen_row)];
+            let cell = &mut buf[(col, screen_row)];
             let ch = cell.symbol().chars().next().unwrap_or(' ');
             let decoration = cell_is_decoration(cell.modifier);
+            // The renderer hijacks `Modifier::SLOW_BLINK` as the
+            // chrome-marker bit; capture the flag here, then strip
+            // it so the terminal never paints an actual blink.
+            // Most emulators ignore the attribute; some (kitty, a
+            // few VTE forks, Windows Terminal in some modes) do not,
+            // and the user reported a steady visible blink.
+            cell.modifier.remove(DECORATION_MARKER);
             row_cells.push(CapturedCell { ch, decoration });
         }
         if let (Some(s), Some(e)) = (start, end)
@@ -1025,9 +1032,22 @@ fn render_modeline(frame: &mut Frame, regions: Regions, usage: Option<&SessionUs
     let dim = fg.add_modifier(Modifier::DIM);
     let mut spans: Vec<Span<'static>> = Vec::new();
     if let Some(u) = usage
-        && (!u.model.is_empty() || u.total_tokens() > 0 || u.current_context > 0)
+        && (!u.model.is_empty() || u.total_tokens() > 0 || u.current_context > 0 || u.working)
     {
         spans.push(Span::styled(" ", bg));
+        // Working spinner: a 10-frame braille ticker keyed off
+        // wall-clock time so it animates without a frame counter
+        // on the App. When idle, paint a single dim dot so the
+        // strip width stays stable across transitions.
+        if u.working {
+            let frame = spinner_frame();
+            spans.push(Span::styled(
+                format!("{frame} "),
+                fg.add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            spans.push(Span::styled("  ", bg));
+        }
         if !u.model.is_empty() {
             spans.push(Span::styled(
                 u.model.clone(),
@@ -1096,6 +1116,23 @@ fn format_token_count(n: u64) -> String {
     } else {
         format!("{value:.2}k")
     }
+}
+
+/// Pick a braille spinner glyph keyed off wall-clock time so the
+/// modeline ticks while the agent is working without us having to
+/// thread a frame counter through `App::draw`. Cycle period ~= 1
+/// second (10 frames at 100 ms each).
+fn spinner_frame() -> &'static str {
+    const FRAMES: &[&str] = &[
+        "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}", "\u{2834}", "\u{2826}",
+        "\u{2827}", "\u{2807}", "\u{280F}",
+    ];
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    #[allow(clippy::cast_possible_truncation)]
+    let idx = ((now / 100) as usize) % FRAMES.len();
+    FRAMES[idx]
 }
 
 fn mode_border_color(theme: &crate::theme::Theme, mode: Mode) -> Color {
@@ -1244,8 +1281,23 @@ pub fn block_to_lines(block: &Block, width: u16, emphasis: Emphasis) -> Vec<Line
                 thinking_style(),
             ));
             if !*folded {
+                // Each body line gets a left-rule glyph in the
+                // thinking fg color so the thinking section is
+                // visibly distinct from assistant text even on
+                // terminals that don't render italic. The glyph
+                // itself is decoration so cell-based selection
+                // skips it on yank.
+                let rule = Span::styled(
+                    "\u{258e} ",
+                    Style::default()
+                        .fg(crate::theme::current().thinking_fg)
+                        .add_modifier(DECORATION_MARKER),
+                );
                 for body_line in plain_lines(text, thinking_style()) {
-                    out.push(prefix_line("  ", body_line));
+                    let mut spans = Vec::with_capacity(body_line.spans.len() + 1);
+                    spans.push(rule.clone());
+                    spans.extend(body_line.spans);
+                    out.push(Line::from(spans));
                 }
             }
             mark_emphasis(out, emphasis)

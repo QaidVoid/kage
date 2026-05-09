@@ -26,6 +26,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use mlua::Lua;
 
 use crate::api::{self, SharedHostLog, default_host_log};
+use crate::commands::{self, LuaCommand, RegisteredCommands, registered_commands};
 use crate::error::PluginError;
 use crate::events;
 use crate::tools::{self, RegisteredTools, registered_tools};
@@ -41,6 +42,7 @@ pub struct PluginRuntime {
     lua: SharedLua,
     sink: SharedHostLog,
     tools: RegisteredTools,
+    commands: RegisteredCommands,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -120,6 +122,15 @@ impl PluginRuntime {
             .expect("plugin tools mutex poisoned")
             .clone()
     }
+
+    /// Snapshot the slash commands registered by plugins so far.
+    #[must_use]
+    pub fn registered_commands(&self) -> Vec<Arc<LuaCommand>> {
+        self.commands
+            .lock()
+            .expect("plugin commands mutex poisoned")
+            .clone()
+    }
 }
 
 /// Builder for [`PluginRuntime`]. Lets the host inject a custom host-log
@@ -153,8 +164,8 @@ impl PluginRuntimeBuilder {
     }
 
     /// Finalize the runtime: build the Lua state, apply sandbox removals,
-    /// install the `kage` API table, and wire `kage.on` and
-    /// `kage.register_tool`.
+    /// install the `kage` API table, and wire `kage.on`,
+    /// `kage.register_tool`, and `kage.register_command`.
     pub fn build(self) -> Result<PluginRuntime, PluginError> {
         let lua = Lua::new();
         apply_sandbox(&lua)?;
@@ -162,6 +173,7 @@ impl PluginRuntimeBuilder {
         events::install_subscriptions(&lua)?;
         let shared_lua: SharedLua = Arc::new(Mutex::new(lua));
         let tool_registry = registered_tools();
+        let command_registry = registered_commands();
         {
             let lua_guard = shared_lua.lock().expect("plugin lua mutex poisoned");
             tools::install_register_tool(
@@ -170,11 +182,18 @@ impl PluginRuntimeBuilder {
                 self.sink.clone(),
                 Arc::clone(&tool_registry),
             )?;
+            commands::install_register_command(
+                &lua_guard,
+                Arc::clone(&shared_lua),
+                self.sink.clone(),
+                Arc::clone(&command_registry),
+            )?;
         }
         Ok(PluginRuntime {
             lua: shared_lua,
             sink: self.sink,
             tools: tool_registry,
+            commands: command_registry,
         })
     }
 }

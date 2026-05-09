@@ -71,6 +71,31 @@ fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {
         .wrap(Wrap { trim: false })
         .block(RtBlock::default().title(title).borders(Borders::TOP));
     frame.render_widget(body, regions.input);
+    if input.mode() == Mode::Insert {
+        if let Some(pos) = input_cursor_position(input, regions.input) {
+            frame.set_cursor_position(pos);
+        }
+    }
+}
+
+/// Compute the screen position of the prompt cursor inside the input
+/// region. Returns `None` if the input has no inner area (a one-row
+/// region collapses to the title border alone).
+fn input_cursor_position(input: &InputState, area: ratatui::layout::Rect) -> Option<(u16, u16)> {
+    if area.height < 2 || area.width == 0 {
+        return None;
+    }
+    let inner_x = area.x;
+    let inner_y = area.y + 1;
+    let max_x = area.x + area.width - 1;
+    let max_y = area.y + area.height - 1;
+    let prefix = input.text().get(..input.cursor()).unwrap_or("");
+    let row_offset = u16::try_from(prefix.matches('\n').count()).unwrap_or(u16::MAX);
+    let last_line = prefix.rsplit('\n').next().unwrap_or("");
+    let col_offset = u16::try_from(last_line.chars().count()).unwrap_or(u16::MAX);
+    let cx = inner_x.saturating_add(col_offset).min(max_x);
+    let cy = inner_y.saturating_add(row_offset).min(max_y);
+    Some((cx, cy))
 }
 
 /// Convert one [`Block`] into its rendered [`Line`]s.
@@ -386,6 +411,40 @@ mod tests {
                 .iter()
                 .any(|l| l.contains("[result]") && l.contains("error"))
         );
+    }
+
+    #[test]
+    fn cursor_position_advances_with_typed_text() {
+        let area = Rect::new(0, 4, 40, 4);
+        let mut input = InputState::new();
+        input.handle_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char('i'),
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        for c in "hello".chars() {
+            input.handle_key(ratatui::crossterm::event::KeyEvent::new(
+                ratatui::crossterm::event::KeyCode::Char(c),
+                ratatui::crossterm::event::KeyModifiers::NONE,
+            ));
+        }
+        let pos = super::input_cursor_position(&input, area).unwrap();
+        // Inner row = area.y + 1 = 5; cursor column = 5 chars into row.
+        assert_eq!(pos, (5, 5));
+    }
+
+    #[test]
+    fn cursor_position_walks_to_next_row_on_newline() {
+        let area = Rect::new(0, 0, 20, 5);
+        let mut input = InputState::new();
+        input.handle_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char('i'),
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        // Paste pre-builds multi-line content cheaply.
+        input.paste("ab\ncd");
+        let pos = super::input_cursor_position(&input, area).unwrap();
+        // Two rows below the title border -> y = 0 + 1 + 1 = 2; col = 2.
+        assert_eq!(pos, (2, 2));
     }
 
     #[test]

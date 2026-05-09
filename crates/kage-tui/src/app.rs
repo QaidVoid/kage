@@ -105,12 +105,14 @@ pub enum AppExit {
 }
 
 /// Which overlay picker is currently open. Determines how
-/// [`PickerEvent::Picked`] is dispatched: a model id triggers a switch
-/// while a session path triggers a resume.
+/// [`PickerEvent::Picked`] is dispatched: a model id triggers a switch,
+/// a session path triggers a resume, a command name runs the same
+/// handler the `:` command line uses.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PickerKind {
     Model,
     Session,
+    Command,
 }
 
 /// Closure that returns the current set of resumable sessions on
@@ -118,6 +120,28 @@ enum PickerKind {
 /// `Ctrl+R`, so a fresh scan reflects any sessions written elsewhere
 /// since the TUI started.
 pub type SessionLister = Box<dyn Fn() -> Vec<PickItem> + Send + 'static>;
+
+/// Built-in commands offered by the slash palette and the `:` line.
+/// `(name, description)`. Plugin commands will join this set later.
+const BUILTIN_COMMANDS: &[(&str, &str)] = &[
+    ("help", "show available commands"),
+    ("q", "quit"),
+    ("quit", "quit"),
+    ("cancel", "cancel the in-flight turn"),
+    ("model", "switch to provider:model (takes one arg)"),
+    ("fold all", "fold every foldable block"),
+    ("unfold all", "unfold every foldable block"),
+];
+
+fn builtin_command_picker_items() -> Vec<PickItem> {
+    BUILTIN_COMMANDS
+        .iter()
+        .map(|(name, desc)| {
+            let label = format!("{name:<14}  {desc}");
+            PickItem::simple((*name).to_owned()).with_label(label)
+        })
+        .collect()
+}
 
 /// Runtime state for the interactive TUI loop.
 pub struct App {
@@ -345,14 +369,20 @@ impl App {
                 let kind = self.picker_kind;
                 self.picker = None;
                 self.picker_kind = None;
-                let req = match kind {
-                    Some(PickerKind::Model) => RunRequest::SwitchModel(value),
-                    Some(PickerKind::Session) => {
-                        RunRequest::ResumeSession(std::path::PathBuf::from(value))
+                match kind {
+                    Some(PickerKind::Model) => {
+                        let _ = self.send_request(RunRequest::SwitchModel(value));
                     }
-                    None => return None,
-                };
-                let _ = self.send_request(req);
+                    Some(PickerKind::Session) => {
+                        let _ = self.send_request(RunRequest::ResumeSession(
+                            std::path::PathBuf::from(value),
+                        ));
+                    }
+                    Some(PickerKind::Command) => {
+                        return self.run_command(&value);
+                    }
+                    None => {}
+                }
             }
         }
         None
@@ -385,6 +415,13 @@ impl App {
                         self.model_choices.clone(),
                     ));
                     self.picker_kind = Some(PickerKind::Model);
+                }
+            }
+            InputAction::OpenCommandPalette => {
+                let items = builtin_command_picker_items();
+                if !items.is_empty() {
+                    self.picker = Some(OverlayPicker::new("Run command", items));
+                    self.picker_kind = Some(PickerKind::Command);
                 }
             }
             InputAction::FocusPrev => {

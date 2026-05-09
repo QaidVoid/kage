@@ -59,6 +59,9 @@ pub enum InputAction {
     FocusPrev,
     /// Move focus to the next (newer) foldable block.
     FocusNext,
+    /// Open the slash command palette overlay (leading `/` typed in
+    /// Insert mode against an empty prompt).
+    OpenCommandPalette,
 }
 
 /// Cap on retained history entries. The host's persistence layer is
@@ -304,6 +307,9 @@ impl InputState {
             KeyCode::End => {
                 self.cursor = self.text.len();
                 Vec::new()
+            }
+            KeyCode::Char('/') if self.text.is_empty() => {
+                vec![InputAction::OpenCommandPalette]
             }
             KeyCode::Char(c) => {
                 self.reset_history_navigation();

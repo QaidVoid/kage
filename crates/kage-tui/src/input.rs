@@ -352,7 +352,74 @@ impl InputState {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn handle_insert(&mut self, key: KeyEvent) -> Vec<InputAction> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+
+        // Readline / Emacs-style word and line edits. Match shells
+        // (bash, zsh, fish): Ctrl+W deletes back to whitespace
+        // ("unix-word-rubout"), Alt+Backspace deletes back to the
+        // previous alphanumeric boundary ("backward-kill-word"),
+        // Alt+d deletes forward, Alt+b/Alt+f move by word, and
+        // Ctrl+a/e/u/k operate on the current visual line.
+        if ctrl && !alt {
+            match key.code {
+                KeyCode::Char('w') => {
+                    self.reset_history_navigation();
+                    let to = unix_word_rubout_start(&self.text, self.cursor);
+                    self.delete_range(to, self.cursor);
+                    return Vec::new();
+                }
+                KeyCode::Char('a') => {
+                    self.cursor = current_line_start(&self.text, self.cursor);
+                    return Vec::new();
+                }
+                KeyCode::Char('e') => {
+                    self.cursor = current_line_end(&self.text, self.cursor);
+                    return Vec::new();
+                }
+                KeyCode::Char('u') => {
+                    self.reset_history_navigation();
+                    let start = current_line_start(&self.text, self.cursor);
+                    self.delete_range(start, self.cursor);
+                    return Vec::new();
+                }
+                KeyCode::Char('k') => {
+                    self.reset_history_navigation();
+                    let end = current_line_end(&self.text, self.cursor);
+                    self.delete_range(self.cursor, end);
+                    return Vec::new();
+                }
+                _ => {}
+            }
+        }
+        if alt && !ctrl {
+            match key.code {
+                KeyCode::Backspace => {
+                    self.reset_history_navigation();
+                    let to = backward_word_start(&self.text, self.cursor);
+                    self.delete_range(to, self.cursor);
+                    return Vec::new();
+                }
+                KeyCode::Delete | KeyCode::Char('d') => {
+                    self.reset_history_navigation();
+                    let to = forward_word_end(&self.text, self.cursor);
+                    self.delete_range(self.cursor, to);
+                    return Vec::new();
+                }
+                KeyCode::Char('b') | KeyCode::Left => {
+                    self.cursor = backward_word_start(&self.text, self.cursor);
+                    return Vec::new();
+                }
+                KeyCode::Char('f') | KeyCode::Right => {
+                    self.cursor = forward_word_end(&self.text, self.cursor);
+                    return Vec::new();
+                }
+                _ => {}
+            }
+        }
+
         match key.code {
             KeyCode::Esc => {
                 self.reset_history_navigation();
@@ -428,6 +495,20 @@ impl InputState {
                 Vec::new()
             }
             _ => Vec::new(),
+        }
+    }
+
+    /// Remove `text[start..end]` and clamp the cursor to the deletion
+    /// point. Used by the Emacs-style edits in [`Self::handle_insert`].
+    fn delete_range(&mut self, start: usize, end: usize) {
+        if start >= end || end > self.text.len() {
+            return;
+        }
+        self.text.drain(start..end);
+        if self.cursor >= end {
+            self.cursor -= end - start;
+        } else if self.cursor > start {
+            self.cursor = start;
         }
     }
 
@@ -555,6 +636,110 @@ fn byte_offset_at_column(line: &str, col: usize) -> usize {
     line.char_indices()
         .nth(col)
         .map_or(line.len(), |(idx, _)| idx)
+}
+
+/// True for "word constituent" chars in the readline / Emacs sense:
+/// alphanumerics plus underscore. Word boundary motions (`Alt+b`,
+/// `Alt+f`) and `Alt+Backspace` / `Alt+d` use this.
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Char immediately before byte position `byte`, plus its UTF-8 width.
+/// `None` when `byte == 0`.
+fn prev_char(text: &str, byte: usize) -> Option<(char, usize)> {
+    text[..byte].chars().next_back().map(|c| (c, c.len_utf8()))
+}
+
+/// Char at byte position `byte`, plus its UTF-8 width. `None` at
+/// end-of-text.
+fn char_at(text: &str, byte: usize) -> Option<(char, usize)> {
+    text[byte..].chars().next().map(|c| (c, c.len_utf8()))
+}
+
+/// Position of the start of the word containing or immediately
+/// preceding `cursor`. Walks left over non-word chars first, then
+/// over word chars, mirroring readline's `backward-word`.
+pub(crate) fn backward_word_start(text: &str, cursor: usize) -> usize {
+    let mut i = cursor;
+    while i > 0 {
+        let Some((c, w)) = prev_char(text, i) else {
+            break;
+        };
+        if is_word_char(c) {
+            break;
+        }
+        i -= w;
+    }
+    while i > 0 {
+        let Some((c, w)) = prev_char(text, i) else {
+            break;
+        };
+        if !is_word_char(c) {
+            break;
+        }
+        i -= w;
+    }
+    i
+}
+
+/// Position one past the end of the word containing or immediately
+/// following `cursor`. Walks right over non-word chars first, then
+/// over word chars, mirroring readline's `forward-word`.
+pub(crate) fn forward_word_end(text: &str, cursor: usize) -> usize {
+    let mut i = cursor;
+    while let Some((c, w)) = char_at(text, i) {
+        if is_word_char(c) {
+            break;
+        }
+        i += w;
+    }
+    while let Some((c, w)) = char_at(text, i) {
+        if !is_word_char(c) {
+            break;
+        }
+        i += w;
+    }
+    i
+}
+
+/// Position of the start of the run of non-whitespace immediately
+/// before `cursor`, mirroring readline's `unix-word-rubout` (the one
+/// `Ctrl+W` uses in shells: it splits on whitespace only, so
+/// `foo-bar` is one word).
+pub(crate) fn unix_word_rubout_start(text: &str, cursor: usize) -> usize {
+    let mut i = cursor;
+    while i > 0 {
+        let Some((c, w)) = prev_char(text, i) else {
+            break;
+        };
+        if !c.is_whitespace() {
+            break;
+        }
+        i -= w;
+    }
+    while i > 0 {
+        let Some((c, w)) = prev_char(text, i) else {
+            break;
+        };
+        if c.is_whitespace() {
+            break;
+        }
+        i -= w;
+    }
+    i
+}
+
+/// Byte offset of the start of the visual line (between newlines)
+/// containing `cursor`.
+pub(crate) fn current_line_start(text: &str, cursor: usize) -> usize {
+    text[..cursor].rfind('\n').map_or(0, |i| i + 1)
+}
+
+/// Byte offset of the end of the visual line (between newlines)
+/// containing `cursor`. The newline itself is not included.
+pub(crate) fn current_line_end(text: &str, cursor: usize) -> usize {
+    text[cursor..].find('\n').map_or(text.len(), |i| cursor + i)
 }
 
 #[cfg(test)]
@@ -924,5 +1109,107 @@ mod tests {
         assert!(!state.set_focused_pane(Pane::Input)); // no change
         assert!(state.set_focused_pane(Pane::Buffer));
         assert!(!state.set_focused_pane(Pane::Buffer)); // no change
+    }
+
+    fn alt(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
+    }
+
+    fn alt_code(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::ALT)
+    }
+
+    #[test]
+    fn alt_backspace_kills_word_back_in_insert() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("hello world");
+        state.handle_key(alt_code(KeyCode::Backspace));
+        assert_eq!(state.text(), "hello ");
+        assert_eq!(state.cursor(), 6);
+        // Again deletes the trailing space and the prior word.
+        state.handle_key(alt_code(KeyCode::Backspace));
+        assert_eq!(state.text(), "");
+        assert_eq!(state.cursor(), 0);
+    }
+
+    #[test]
+    fn ctrl_w_kills_back_to_whitespace() {
+        // unix-word-rubout: hyphen is part of the word, only spaces
+        // separate.
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("foo-bar baz");
+        state.handle_key(ctrl('w'));
+        assert_eq!(state.text(), "foo-bar ");
+        state.handle_key(ctrl('w'));
+        assert_eq!(state.text(), "");
+    }
+
+    #[test]
+    fn alt_d_kills_word_forward() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("hello world");
+        // Move cursor to start.
+        for _ in 0..11 {
+            state.handle_key(key(KeyCode::Left));
+        }
+        state.handle_key(alt('d'));
+        assert_eq!(state.text(), " world");
+    }
+
+    #[test]
+    fn alt_b_alt_f_navigate_words() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("foo bar baz");
+        // Cursor at end. Alt+b lands at start of "baz".
+        state.handle_key(alt('b'));
+        assert_eq!(state.cursor(), 8);
+        state.handle_key(alt('b'));
+        assert_eq!(state.cursor(), 4);
+        state.handle_key(alt('b'));
+        assert_eq!(state.cursor(), 0);
+        state.handle_key(alt('f'));
+        assert_eq!(state.cursor(), 3);
+        state.handle_key(alt('f'));
+        assert_eq!(state.cursor(), 7);
+    }
+
+    #[test]
+    fn ctrl_a_e_jump_to_line_edges() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("first\nsecond line");
+        // Cursor at end. Ctrl+a -> start of current line ("second...").
+        state.handle_key(ctrl('a'));
+        assert_eq!(state.cursor(), 6);
+        state.handle_key(ctrl('e'));
+        assert_eq!(state.cursor(), state.text().len());
+    }
+
+    #[test]
+    fn ctrl_u_deletes_to_line_start() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("first\nsecond line");
+        state.handle_key(ctrl('u'));
+        assert_eq!(state.text(), "first\n");
+        assert_eq!(state.cursor(), 6);
+    }
+
+    #[test]
+    fn ctrl_k_deletes_to_line_end() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("first\nsecond");
+        // Move cursor to start of "second".
+        for _ in 0..6 {
+            state.handle_key(key(KeyCode::Left));
+        }
+        assert_eq!(state.cursor(), 6);
+        state.handle_key(ctrl('k'));
+        assert_eq!(state.text(), "first\n");
     }
 }

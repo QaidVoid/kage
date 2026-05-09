@@ -235,7 +235,16 @@ impl InputState {
                 self.enter_mode(Mode::Normal)
             }
             KeyCode::Enter => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
+                // Many terminals (wezterm, ghostty in default config,
+                // some xterm variants) transmit `Shift+Enter` as
+                // `Esc<Enter>` which crossterm decodes as `Alt+Enter`.
+                // Accept either modifier so the user-visible Shift+Enter
+                // gesture inserts a newline regardless of which mapping
+                // the terminal uses.
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+                {
                     self.insert_char('\n');
                     Vec::new()
                 } else if self.text.is_empty() {
@@ -368,6 +377,10 @@ mod tests {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)
     }
 
+    fn alt_enter() -> KeyEvent {
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)
+    }
+
     #[test]
     fn i_enters_insert_then_esc_returns_to_normal() {
         let mut state = InputState::new();
@@ -423,6 +436,16 @@ mod tests {
         state.handle_key(key(KeyCode::Char('i')));
         state.handle_key(key(KeyCode::Char('a')));
         state.handle_key(shift_enter());
+        state.handle_key(key(KeyCode::Char('b')));
+        assert_eq!(state.text(), "a\nb");
+    }
+
+    #[test]
+    fn alt_enter_also_inserts_a_newline_for_terminals_that_remap_shift_enter() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.handle_key(key(KeyCode::Char('a')));
+        state.handle_key(alt_enter());
         state.handle_key(key(KeyCode::Char('b')));
         assert_eq!(state.text(), "a\nb");
     }

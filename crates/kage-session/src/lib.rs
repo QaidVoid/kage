@@ -7,8 +7,12 @@
 //! transported by ordinary file copy.
 
 pub mod entry;
+pub mod error;
+pub mod writer;
 
 pub use entry::{
     Compaction, Custom, EntryId, FORMAT_VERSION, Header, Label, MessageEntry, ModelChange,
     SessionEntry, SessionId, ThinkingLevelChange,
 };
+pub use error::SessionError;
+pub use writer::SessionWriter;

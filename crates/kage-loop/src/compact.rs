@@ -82,19 +82,34 @@ fn should_compact(cx: &AgentContext, config: &LoopConfig) -> bool {
     cx.budget.used_input >= threshold
 }
 
+/// Trailing user message appended to every summarize request so the
+/// last role is always `User`. Without this, OpenAI-compatible
+/// providers (ZAI, `OpenAI`, Mistral) reject the request with
+/// `"messages parameter is illegal"` because the conversation ends
+/// on an assistant turn and there's nothing to respond to.
+const SUMMARIZE_INSTRUCTION: &str = "Summarize the conversation above into a concise narrative. Capture decisions, outstanding \
+     questions, file paths, and any tool results that future turns will need. Plain text, no \
+     headings, no markdown, no bullet lists. Preserve any concrete identifiers verbatim \
+     (commit hashes, file paths, error codes).";
+
 fn summarize(
     provider: &dyn Provider,
     model: &str,
     messages: &[Message],
     cancel: &CancelFlag,
 ) -> Result<String, LoopError> {
-    let mut req = StreamRequest::new(model, messages.to_vec());
-    req.system = Some(
-        "Summarize the conversation above into a concise narrative. Capture decisions, \
-         outstanding questions, and any tool results that future turns will need. Plain \
-         text, no headings, no markdown."
-            .into(),
-    );
+    let mut payload: Vec<Message> = messages.to_vec();
+    payload.push(Message::new(
+        kage_core::Role::User,
+        vec![Content::Text {
+            text: SUMMARIZE_INSTRUCTION.to_owned(),
+        }],
+        payload.last().map(|m| m.id),
+    ));
+    let mut req = StreamRequest::new(model, payload);
+    // System prompt repeats the instruction so providers that
+    // privilege `system` over user content still honour it.
+    req.system = Some(SUMMARIZE_INSTRUCTION.to_owned());
     let stream = provider
         .stream(req, cancel)
         .map_err(|e| LoopError::Provider {

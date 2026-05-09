@@ -1025,7 +1025,7 @@ fn render_modeline(frame: &mut Frame, regions: Regions, usage: Option<&SessionUs
     let dim = fg.add_modifier(Modifier::DIM);
     let mut spans: Vec<Span<'static>> = Vec::new();
     if let Some(u) = usage
-        && (!u.model.is_empty() || u.total_tokens() > 0)
+        && (!u.model.is_empty() || u.total_tokens() > 0 || u.current_context > 0)
     {
         spans.push(Span::styled(" ", bg));
         if !u.model.is_empty() {
@@ -1035,28 +1035,31 @@ fn render_modeline(frame: &mut Frame, regions: Regions, usage: Option<&SessionUs
             ));
             spans.push(Span::styled("  ::  ", dim));
         }
-        spans.push(Span::styled(
-            format!(
-                "{} in / {} out",
-                format_token_count(u.input_tokens),
-                format_token_count(u.output_tokens)
-            ),
-            fg,
-        ));
         if u.context_window > 0 {
-            spans.push(Span::styled("  ::  ", dim));
             #[allow(clippy::cast_precision_loss)]
-            let pct = (u.total_tokens() as f64 / u.context_window as f64 * 100.0).clamp(0.0, 999.9);
+            let pct =
+                (u.current_context as f64 / u.context_window as f64 * 100.0).clamp(0.0, 999.9);
             spans.push(Span::styled(
                 format!(
-                    "{} / {} ({:.0}%)",
-                    format_token_count(u.total_tokens()),
+                    "ctx {} / {} ({:.0}%)",
+                    format_token_count(u.current_context),
                     format_token_count(u.context_window),
                     pct
                 ),
                 fg,
             ));
+            spans.push(Span::styled("  ::  ", dim));
+        } else if u.current_context > 0 {
+            spans.push(Span::styled(
+                format!("ctx {}", format_token_count(u.current_context)),
+                fg,
+            ));
+            spans.push(Span::styled("  ::  ", dim));
         }
+        spans.push(Span::styled(
+            format!("{} out", format_token_count(u.output_tokens)),
+            fg,
+        ));
     }
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let pad = usize::from(area.width).saturating_sub(used);

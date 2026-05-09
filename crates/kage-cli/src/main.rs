@@ -435,6 +435,7 @@ fn run_resume(
     cx.budget.used_output = replay.usage_total.output;
     cx.budget.used_cache_read = replay.usage_total.cache_read;
     cx.budget.used_cache_write = replay.usage_total.cache_write;
+    cx.budget.current_context = replay.usage_total.last_context;
     let user_msg = Message::new(
         Role::User,
         vec![Content::Text {

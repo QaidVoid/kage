@@ -289,6 +289,7 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         &cx,
                         &buffer,
                         session_path.as_ref(),
+                        &session_usage,
                         &path,
                     );
                 }
@@ -531,12 +532,14 @@ fn truncate(s: &str, max: usize) -> String {
 /// resume keeps the currently active model rather than failing. The
 /// replay history still loads so the substitute model continues with
 /// full context; a `kage:notify` flags the substitution.
+#[allow(clippy::too_many_arguments)]
 fn handle_resume(
     registry: &Arc<ProviderRegistry>,
     active_qualified: &Arc<Mutex<String>>,
     cx: &Arc<Mutex<AgentContext>>,
     buffer: &SharedBuffer,
     session_path: Option<&Arc<Mutex<PathBuf>>>,
+    session_usage: &SharedSessionUsage,
     path: &std::path::Path,
 ) {
     let replay = match kage_session::replay(path) {
@@ -579,6 +582,7 @@ fn handle_resume(
             }
         },
     };
+    let context_window;
     {
         let mut cx_guard = cx.lock().expect("agent context mutex poisoned");
         cx_guard.history.clone_from(&replay.history);
@@ -587,6 +591,17 @@ fn handle_resume(
         cx_guard.budget.used_output = replay.usage_total.output;
         cx_guard.budget.used_cache_read = replay.usage_total.cache_read;
         cx_guard.budget.used_cache_write = replay.usage_total.cache_write;
+        cx_guard.budget.current_context = replay.usage_total.last_context;
+        context_window = cx_guard.context_window;
+    }
+    if let Ok(mut snap) = session_usage.lock() {
+        snap.model.clone_from(&qualified_model);
+        snap.context_window = context_window;
+        snap.input_tokens = replay.usage_total.input;
+        snap.output_tokens = replay.usage_total.output;
+        snap.cache_read_tokens = replay.usage_total.cache_read;
+        snap.cache_write_tokens = replay.usage_total.cache_write;
+        snap.current_context = replay.usage_total.last_context;
     }
     active_qualified
         .lock()

@@ -79,7 +79,11 @@ fn should_compact(cx: &AgentContext, config: &LoopConfig) -> bool {
         .context_window
         .saturating_mul(permille)
         .saturating_div(1000);
-    cx.budget.used_input >= threshold
+    // Compare the *most recent* turn's full prompt size to the
+    // window. Summing `used_input` would triple-count history
+    // because each turn's `usage.input` already contains the entire
+    // prior conversation.
+    cx.budget.current_context >= threshold
 }
 
 /// Trailing user message appended to every summarize request so the
@@ -167,6 +171,11 @@ mod tests {
         let mut cx = AgentContext::new("mock:m", "");
         cx.budget = TokenBudget {
             used_input,
+            // The compaction check now compares the *most recent*
+            // turn's context fill to the threshold; mirror
+            // `used_input` here so existing tests (which were
+            // written before the split) keep their original intent.
+            current_context: used_input,
             ..Default::default()
         };
         for i in 0..history_len {

@@ -44,7 +44,8 @@ pub struct ReplayResult {
     pub usage_total: ReplayUsage,
 }
 
-/// Cumulative token totals replayed from a session file.
+/// Cumulative token totals replayed from a session file, plus the
+/// most recent turn's full prompt size for context-fill display.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ReplayUsage {
     /// Sum of `usage.input` across all assistant turns.
@@ -55,6 +56,11 @@ pub struct ReplayUsage {
     pub cache_read: u64,
     /// Sum of `usage.cache_write` across all assistant turns.
     pub cache_write: u64,
+    /// Sum of `input + output + cache_read + cache_write` of the
+    /// last assistant turn that recorded usage. Compared to the
+    /// model's context window for the modeline percentage on
+    /// resume; `0` until a turn with usage is found.
+    pub last_context: u64,
 }
 
 /// Replay every entry of `path`, returning the final history.
@@ -100,6 +106,11 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
                     usage_total.output = usage_total.output.saturating_add(u.output);
                     usage_total.cache_read = usage_total.cache_read.saturating_add(u.cache_read);
                     usage_total.cache_write = usage_total.cache_write.saturating_add(u.cache_write);
+                    usage_total.last_context = u
+                        .input
+                        .saturating_add(u.output)
+                        .saturating_add(u.cache_read)
+                        .saturating_add(u.cache_write);
                 }
                 let ts = m.ts;
                 for block in &m.message.content {

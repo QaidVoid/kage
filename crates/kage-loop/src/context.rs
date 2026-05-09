@@ -8,8 +8,15 @@ use serde::{Deserialize, Serialize};
 /// Running token totals consumed and produced over the life of an agent run.
 ///
 /// Updated after every assistant turn from the provider-reported [`TokenUsage`].
-/// The loop reads `total()` against the model's context window to decide when
-/// to compact older turns.
+/// The cumulative `used_*` fields are session-wide sums for cost and audit
+/// purposes; [`Self::current_context`] is the most recent turn's
+/// `input + output + cache_read + cache_write` and is what the compaction
+/// threshold and the modeline percentage compare against the model's
+/// context window. The two are different because providers report each
+/// turn's `usage.input` as the *full prompt size* for that request - which
+/// already includes the entire prior conversation - so summing across
+/// turns triple-counts history. The `OpenCode` project takes the same
+/// per-turn snapshot approach in `session/overflow.ts`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TokenBudget {
     /// Cumulative input tokens charged across all turns.
@@ -20,6 +27,11 @@ pub struct TokenBudget {
     pub used_cache_read: u64,
     /// Cumulative cache-write tokens.
     pub used_cache_write: u64,
+    /// Approximate active-context fill from the most recent turn:
+    /// `input + output + cache_read + cache_write` of that single
+    /// turn. Compaction and the modeline percentage compare this to
+    /// the model's context window.
+    pub current_context: u64,
 }
 
 impl TokenBudget {
@@ -29,12 +41,18 @@ impl TokenBudget {
         self.used_input.saturating_add(self.used_output)
     }
 
-    /// Fold one turn's [`TokenUsage`] into the running totals.
+    /// Fold one turn's [`TokenUsage`] into the running totals and
+    /// snapshot the per-turn context fill into [`Self::current_context`].
     pub fn add(&mut self, usage: TokenUsage) {
         self.used_input = self.used_input.saturating_add(usage.input);
         self.used_output = self.used_output.saturating_add(usage.output);
         self.used_cache_read = self.used_cache_read.saturating_add(usage.cache_read);
         self.used_cache_write = self.used_cache_write.saturating_add(usage.cache_write);
+        self.current_context = usage
+            .input
+            .saturating_add(usage.output)
+            .saturating_add(usage.cache_read)
+            .saturating_add(usage.cache_write);
     }
 }
 

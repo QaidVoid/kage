@@ -75,6 +75,14 @@ impl<H: Hooks> Hooks for UsageHooks<H> {
             snap.output_tokens = snap.output_tokens.saturating_add(usage.output);
             snap.cache_read_tokens = snap.cache_read_tokens.saturating_add(usage.cache_read);
             snap.cache_write_tokens = snap.cache_write_tokens.saturating_add(usage.cache_write);
+            // Replace, not add: this is a snapshot of the most recent
+            // turn's full prompt size. Summing would triple-count
+            // history (see [`SessionUsage::current_context`]).
+            snap.current_context = usage
+                .input
+                .saturating_add(usage.output)
+                .saturating_add(usage.cache_read)
+                .saturating_add(usage.cache_write);
         }
         self.inner.on_event(event);
     }

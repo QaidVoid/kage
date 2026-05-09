@@ -14,30 +14,40 @@ use std::sync::{Arc, Mutex};
 /// Snapshot of one session's running token totals plus the active
 /// model and its context window. The host produces this from
 /// [`kage_loop::AgentContext`] after every turn.
+///
+/// Two scalars track tokens: [`Self::current_context`] is the most
+/// recent turn's full prompt size (`input + output + cache_*`) and
+/// drives the context-window fill percentage; the cumulative
+/// `*_tokens` fields are session-wide sums for cost / audit
+/// display. They differ because providers report each turn's
+/// `usage.input` as the entire prompt (including all prior history),
+/// so summing across turns triple-counts.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SessionUsage {
     /// Provider-qualified model id (`anthropic:claude-sonnet-4-6`).
-    /// Bare model id (e.g. `claude-sonnet-4-6`) is acceptable for
-    /// hosts that prefer the shorter form; the renderer will display
-    /// whatever it is given.
     pub model: String,
     /// Cumulative input tokens charged across every turn.
     pub input_tokens: u64,
     /// Cumulative output tokens emitted across every turn.
     pub output_tokens: u64,
-    /// Cumulative cache-read tokens (already counted into
-    /// `input_tokens` by most providers, kept separately for display).
+    /// Cumulative cache-read tokens.
     pub cache_read_tokens: u64,
     /// Cumulative cache-write tokens.
     pub cache_write_tokens: u64,
+    /// Sum of `input + output + cache_read + cache_write` for the
+    /// most recent assistant turn. Compared to [`Self::context_window`]
+    /// for the modeline percentage; left at `0` until the first turn
+    /// finishes.
+    pub current_context: u64,
     /// Effective context window for `model`, in tokens. `0` when
     /// unknown (renderer hides the percentage in that case).
     pub context_window: u64,
 }
 
 impl SessionUsage {
-    /// Total tokens (`input + output`) the session has consumed so
-    /// far, used to drive the context-window percentage.
+    /// Total tokens consumed (cumulative `input + output`), used as
+    /// a session-wide running tally separate from the per-turn
+    /// context fill in [`Self::current_context`].
     #[must_use]
     pub fn total_tokens(&self) -> u64 {
         self.input_tokens.saturating_add(self.output_tokens)

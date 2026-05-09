@@ -178,25 +178,15 @@ pub fn block_to_lines(block: &Block) -> Vec<Line<'static>> {
             folded,
             ..
         } => {
-            let style = if *is_error {
-                tool_error_style()
-            } else {
-                tool_result_style()
-            };
             let mut out = Vec::new();
-            let header_text = if *is_error {
-                format!("{name} (error)")
-            } else {
-                name.clone()
-            };
-            out.push(header_line(
-                fold_indicator(*folded),
-                "result",
-                Some(header_text),
-                style,
-            ));
+            out.push(tool_result_header_line(*folded, name, output, *is_error));
             if !*folded {
-                for body_line in plain_lines(output, style) {
+                let body_style = if *is_error {
+                    tool_error_style()
+                } else {
+                    tool_result_style()
+                };
+                for body_line in plain_lines(output, body_style) {
                     out.push(prefix_line("  ", body_line));
                 }
             }
@@ -258,6 +248,80 @@ fn tool_header_line(indicator: char, name: &str, summary: &str, style: Style) ->
         spans.push(Span::styled(summary.to_owned(), style));
     }
     Line::from(spans)
+}
+
+/// Header for a tool-result block. Folded results inline a size pill
+/// (or `ERROR` glyph) and a one-line preview of the output so the user
+/// sees the gist without expanding. Unfolded results keep just the
+/// name + size and rely on the body for detail.
+fn tool_result_header_line(
+    folded: bool,
+    name: &str,
+    output: &str,
+    is_error: bool,
+) -> Line<'static> {
+    let indicator = if folded { '<' } else { 'v' };
+    let style = if is_error {
+        tool_error_style()
+    } else {
+        tool_result_style()
+    };
+    let mut spans = vec![
+        Span::styled(format!("{indicator} "), style.add_modifier(Modifier::BOLD)),
+        Span::styled(name.to_owned(), style.add_modifier(Modifier::BOLD)),
+    ];
+    spans.push(Span::raw("  "));
+    if is_error {
+        spans.push(Span::styled(
+            "ERROR".to_owned(),
+            tool_error_style().add_modifier(Modifier::BOLD),
+        ));
+    } else {
+        spans.push(Span::styled(
+            human_size(output.len()),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ));
+    }
+    if folded && let Some(preview) = first_line_preview(output, 60) {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("· {preview}"),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// Render a byte count as a short human-readable string. Used for the
+/// `(1.2 KB)` style annotation in tool result headers.
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+fn human_size(bytes: usize) -> String {
+    const KB: usize = 1024;
+    const MB: usize = KB * 1024;
+    if bytes < KB {
+        format!("{bytes} B")
+    } else if bytes < MB {
+        format!("{:.1} KB", bytes as f64 / KB as f64)
+    } else {
+        format!("{:.1} MB", bytes as f64 / MB as f64)
+    }
+}
+
+/// First non-empty line of `text`, trimmed and truncated to `max`
+/// characters. Returns `None` when there is no non-empty content.
+fn first_line_preview(text: &str, max: usize) -> Option<String> {
+    let line = text.lines().find(|l| !l.trim().is_empty())?;
+    let trimmed = line.trim();
+    if trimmed.chars().count() <= max {
+        return Some(trimmed.to_owned());
+    }
+    let cut: String = trimmed.chars().take(max.saturating_sub(3)).collect();
+    Some(format!("{cut}..."))
 }
 
 fn header_line(indicator: char, tag: &str, detail: Option<String>, style: Style) -> Line<'static> {
@@ -438,17 +502,54 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_error_renders_distinct_header() {
+    fn tool_result_error_renders_error_glyph_in_header() {
         let mut buffer = Buffer::new();
         buffer.push_tool_call("c1", "bash", "false", "{}");
         buffer.push_tool_result("c1", "exit 1", true);
         let input = InputState::new();
         let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 60, 12));
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.contains("[result]") && l.contains("error"))
+        let header = lines
+            .iter()
+            .find(|l| l.starts_with("< bash"))
+            .expect("result header for bash");
+        assert!(header.contains("ERROR"));
+        assert!(!header.contains("[result]"));
+    }
+
+    #[test]
+    fn folded_tool_result_inlines_size_and_preview() {
+        let mut buffer = Buffer::new();
+        buffer.push_tool_call("c1", "read", "README.md", "{}");
+        buffer.push_tool_result("c1", "first line of file\nsecond line\nthird line", false);
+        let input = InputState::new();
+        let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 80, 12));
+        let header = lines
+            .iter()
+            .find(|l| l.starts_with("< read"))
+            .expect("folded result header");
+        assert!(header.contains("first line of file"));
+        // Length of our test output is 41 bytes, well under 1 KB.
+        assert!(header.contains(" B"), "expected bytes pill, got: {header}");
+    }
+
+    #[test]
+    fn human_size_formats_units() {
+        assert_eq!(super::human_size(512), "512 B");
+        assert_eq!(super::human_size(2048), "2.0 KB");
+        assert_eq!(super::human_size(1_500_000), "1.4 MB");
+    }
+
+    #[test]
+    fn first_line_preview_skips_empty_leading_lines_and_truncates() {
+        assert_eq!(
+            super::first_line_preview("\n\nhello world", 20).as_deref(),
+            Some("hello world")
         );
+        assert_eq!(
+            super::first_line_preview(&"a".repeat(80), 20).as_deref(),
+            Some(&*format!("{}...", "a".repeat(17)))
+        );
+        assert_eq!(super::first_line_preview("\n\n  \n", 10), None);
     }
 
     #[test]

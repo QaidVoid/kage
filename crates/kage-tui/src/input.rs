@@ -660,6 +660,14 @@ impl InputState {
                 self.undo();
                 Vec::new()
             }
+            KeyCode::Char('p') => {
+                self.paste_after(count);
+                Vec::new()
+            }
+            KeyCode::Char('P') => {
+                self.paste_before(count);
+                Vec::new()
+            }
             // Vim's line-shorthand operators.
             KeyCode::Char('D') => self.apply_op_charwise(
                 Operator::Delete,
@@ -862,6 +870,63 @@ impl InputState {
                 self.cursor = s;
                 self.enter_mode(Mode::Insert)
             }
+        }
+    }
+
+    /// Paste the contents of [`Self::register`] after the cursor
+    /// (vim's `p`). Linewise registers paste below the current line;
+    /// charwise registers paste inline after the char under the
+    /// cursor. Cursor lands on the last char of the pasted text.
+    fn paste_after(&mut self, count: usize) {
+        if self.register.is_empty() {
+            return;
+        }
+        let count = count.max(1);
+        self.snapshot_for_undo();
+        let payload = self.register.repeat(count);
+        if self.register_linewise {
+            // Insert as a new line *below* the current line. If the
+            // current line is the last (no trailing newline), prepend
+            // a newline so the pasted block lands on its own row.
+            let line_end = current_line_end(&self.text, self.cursor);
+            let insert_pos = if line_end < self.text.len() {
+                line_end + 1
+            } else {
+                // At end of last line: insert newline first.
+                self.text.push('\n');
+                self.text.len()
+            };
+            self.text.insert_str(insert_pos, &payload);
+            self.cursor = insert_pos;
+        } else {
+            let insert_pos = if let Some((_, w)) = char_at(&self.text, self.cursor) {
+                self.cursor + w
+            } else {
+                self.cursor
+            };
+            self.text.insert_str(insert_pos, &payload);
+            self.cursor = last_char_offset(&self.text, insert_pos + payload.len());
+        }
+    }
+
+    /// Paste the contents of [`Self::register`] before the cursor
+    /// (vim's `P`). Linewise registers paste above the current line;
+    /// charwise registers paste at the cursor.
+    fn paste_before(&mut self, count: usize) {
+        if self.register.is_empty() {
+            return;
+        }
+        let count = count.max(1);
+        self.snapshot_for_undo();
+        let payload = self.register.repeat(count);
+        if self.register_linewise {
+            let line_start = current_line_start(&self.text, self.cursor);
+            self.text.insert_str(line_start, &payload);
+            self.cursor = line_start;
+        } else {
+            let insert_pos = self.cursor;
+            self.text.insert_str(insert_pos, &payload);
+            self.cursor = last_char_offset(&self.text, insert_pos + payload.len());
         }
     }
 
@@ -1248,6 +1313,20 @@ fn prev_char(text: &str, byte: usize) -> Option<(char, usize)> {
 /// end-of-text.
 fn char_at(text: &str, byte: usize) -> Option<(char, usize)> {
     text[byte..].chars().next().map(|c| (c, c.len_utf8()))
+}
+
+/// Byte offset of the last char before `end_exclusive`. Used by the
+/// paste path to land the cursor on the final char of the pasted
+/// region. Returns `end_exclusive` when there is no preceding char
+/// (empty range, multi-byte boundary at the start of text).
+fn last_char_offset(text: &str, end_exclusive: usize) -> usize {
+    if end_exclusive == 0 {
+        return 0;
+    }
+    text[..end_exclusive]
+        .char_indices()
+        .next_back()
+        .map_or(end_exclusive, |(idx, _)| idx)
 }
 
 /// Position of the start of the word containing or immediately
@@ -2201,6 +2280,55 @@ mod tests {
         assert_eq!(state.text(), "second");
         state.handle_key(ctrl('r')); // redo - nothing to redo
         assert_eq!(state.text(), "second");
+    }
+
+    #[test]
+    fn p_pastes_charwise_register_after_cursor() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("hello world");
+        state.handle_key(key(KeyCode::Esc));
+        state.handle_key(key(KeyCode::Char('0')));
+        state.handle_key(key(KeyCode::Char('y')));
+        state.handle_key(key(KeyCode::Char('w')));
+        // Register holds "hello ". Cursor still at 0 (yank is non-mutating).
+        // Paste after cursor.
+        state.handle_key(key(KeyCode::Char('p')));
+        // Insert position = 0 + 1 (char 'h'). New text:
+        // "h" + "hello " + "ello world" = "hhello ello world"
+        assert_eq!(state.text(), "hhello ello world");
+    }
+
+    #[test]
+    fn capital_p_pastes_linewise_register_above() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("first\nsecond");
+        state.handle_key(key(KeyCode::Esc));
+        // Yank current line into linewise register.
+        state.handle_key(key(KeyCode::Char('y')));
+        state.handle_key(key(KeyCode::Char('y')));
+        // Cursor is on line 2 ("second"). P pastes above.
+        assert_eq!(state.register, "second");
+        assert!(state.register_linewise);
+        state.handle_key(key(KeyCode::Char('P')));
+        assert_eq!(state.text(), "first\nsecondsecond");
+    }
+
+    #[test]
+    fn p_pastes_linewise_register_below() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("first\nsecond");
+        state.handle_key(key(KeyCode::Esc));
+        // Cursor on "second" line.
+        state.handle_key(key(KeyCode::Char('y')));
+        state.handle_key(key(KeyCode::Char('y')));
+        state.handle_key(key(KeyCode::Char('p')));
+        // Register "second" (linewise) pastes below the current line.
+        // Current line is "second" (last line, no trailing newline).
+        // Paste-after appends a newline + register.
+        assert_eq!(state.text(), "first\nsecond\nsecond");
     }
 
     #[test]

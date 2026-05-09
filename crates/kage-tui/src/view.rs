@@ -80,9 +80,27 @@ fn place_cmdline_cursor(frame: &mut Frame, regions: Regions, cmdline: &CommandLi
 
 fn render_buffer(frame: &mut Frame, regions: Regions, buffer: &Buffer) {
     let mut lines: Vec<Line<'_>> = Vec::new();
-    for block in buffer.blocks() {
-        for line in block_to_lines(block) {
-            lines.push(line);
+    let blocks = buffer.blocks();
+    let mut idx = 0;
+    while idx < blocks.len() {
+        let cur = &blocks[idx];
+        let merged_next = matches!(
+            (cur, blocks.get(idx + 1)),
+            (
+                Block::ToolCall { call_id: cid_call, .. },
+                Some(Block::ToolResult { call_id: cid_result, .. }),
+            ) if cid_call == cid_result
+        );
+        if merged_next {
+            for line in tool_pair_to_lines(cur, &blocks[idx + 1]) {
+                lines.push(line);
+            }
+            idx += 2;
+        } else {
+            for line in block_to_lines(cur) {
+                lines.push(line);
+            }
+            idx += 1;
         }
         // Blank separator between blocks.
         lines.push(Line::raw(""));
@@ -273,6 +291,187 @@ fn plain_lines(text: &str, style: Style) -> Vec<Line<'static>> {
     text.split('\n')
         .map(|line| Line::from(Span::styled(line.to_owned(), style)))
         .collect()
+}
+
+/// Render a paired `ToolCall` + `ToolResult` as one composite block.
+///
+/// Layout (folded → just the header):
+/// ```text
+/// > read README.md                    <- header
+///                                     <- blank
+///   ... (12 earlier lines)            <- truncation hint
+///   matching first visible line       <- body (tail-truncated)
+///   matching second visible line
+///                                     <- blank
+///   Took 23ms · 1.2 KB                <- dim footer
+/// ```
+fn tool_pair_to_lines(call: &Block, result: &Block) -> Vec<Line<'static>> {
+    let (name, input_summary, input_pretty, folded) = match call {
+        Block::ToolCall {
+            name,
+            input_summary,
+            input_pretty,
+            folded,
+            ..
+        } => (name, input_summary, input_pretty, *folded),
+        _ => return Vec::new(),
+    };
+    let (output, is_error, duration_ms) = match result {
+        Block::ToolResult {
+            output,
+            is_error,
+            duration_ms,
+            ..
+        } => (output, *is_error, *duration_ms),
+        _ => return Vec::new(),
+    };
+
+    let style = tool_call_style();
+    let mut out = Vec::new();
+    out.push(tool_header_line(
+        fold_indicator(folded),
+        name,
+        input_summary,
+        style,
+    ));
+
+    if folded {
+        // Folded: append a compact status pill so the user gets at
+        // least the gist (size or ERROR) without expanding, plus a
+        // dim first-line preview when there's room.
+        let dim = Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM);
+        let mut tail = vec![Span::raw("  ")];
+        if is_error {
+            tail.push(Span::styled(
+                "ERROR".to_owned(),
+                tool_error_style().add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            tail.push(Span::styled(human_size(output.len()), dim));
+        }
+        if let Some(footer) = duration_footer(duration_ms) {
+            tail.push(Span::raw("  "));
+            tail.push(Span::styled(footer, dim));
+        }
+        if let Some(preview) = first_line_preview(output, 60) {
+            tail.push(Span::raw("  "));
+            tail.push(Span::styled(format!("· {preview}"), dim));
+        }
+        if let Some(last) = out.last_mut() {
+            last.spans.extend(tail);
+        }
+        return out;
+    }
+
+    // Unfolded: header, blank, optional input recap (only when it's
+    // information beyond the header summary - i.e. multi-line bash
+    // commands), output body, blank, footer.
+    out.push(Line::raw(""));
+    if input_recap_worth_showing(name, input_summary, input_pretty) {
+        for body_line in plain_lines(input_pretty, style) {
+            out.push(prefix_line("  ", body_line));
+        }
+        out.push(Line::raw(""));
+    }
+    let body_style = if is_error {
+        tool_error_style()
+    } else {
+        tool_result_style()
+    };
+    for body_line in tail_truncated_body(output, body_style) {
+        out.push(prefix_line("  ", body_line));
+    }
+    out.push(Line::raw(""));
+    out.push(prefix_line(
+        "  ",
+        Line::from(Span::styled(
+            footer_text(output.len(), is_error, duration_ms),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        )),
+    ));
+    out
+}
+
+/// Heuristic: should we show the pretty-printed input above the output
+/// body? Skip it when the header summary already conveys the call (the
+/// common case for `read README.md`, `find *.rs`, etc.) and only show
+/// it when the user might genuinely want to inspect arguments
+/// (multi-line bash, complex JSON inputs).
+fn input_recap_worth_showing(name: &str, summary: &str, pretty: &str) -> bool {
+    // Bash commands often span multiple lines via embedded newlines;
+    // showing the full pretty version is useful there.
+    if matches!(name, "bash" | "shell") && summary.contains('\n') {
+        return true;
+    }
+    // For any other tool, skip the recap when the pretty form is just
+    // the same JSON we already summarized to. The summary covers it.
+    let pretty_compact = pretty.replace([' ', '\n'], "");
+    pretty_compact.len() > 80 && !pretty_compact.contains(summary.replace(' ', "").as_str())
+}
+
+/// `Took 12ms` style timing string, or `None` when timing is unknown.
+#[allow(clippy::cast_precision_loss)]
+fn duration_footer(ms: Option<u64>) -> Option<String> {
+    let ms = ms?;
+    if ms < 1000 {
+        Some(format!("Took {ms}ms"))
+    } else {
+        let secs = ms as f64 / 1000.0;
+        Some(format!("Took {secs:.1}s"))
+    }
+}
+
+fn footer_text(byte_count: usize, is_error: bool, duration_ms: Option<u64>) -> String {
+    let mut parts = Vec::new();
+    if let Some(d) = duration_footer(duration_ms) {
+        parts.push(d);
+    }
+    if is_error {
+        parts.push("ERROR".to_owned());
+    } else {
+        parts.push(human_size(byte_count));
+    }
+    parts.join("  ·  ")
+}
+
+/// Render `output` showing its **last** N lines (with a `... ({n}
+/// earlier lines)` marker on top). Tools like `find`, `grep`, and
+/// `bash` typically have the most relevant content near the tail; we
+/// follow pi's convention of preserving that.
+fn tail_truncated_body(output: &str, style: Style) -> Vec<Line<'static>> {
+    if output.is_empty() {
+        return Vec::new();
+    }
+    let lines: Vec<&str> = output.split('\n').collect();
+    let total = lines.len();
+    let mut bytes = 0usize;
+    let mut shown = Vec::new();
+    for line in lines.iter().rev() {
+        if shown.len() >= MAX_BODY_LINES || bytes >= MAX_BODY_BYTES {
+            break;
+        }
+        bytes += line.len() + 1;
+        shown.push(*line);
+    }
+    shown.reverse();
+    let elided = total - shown.len();
+    let mut out = Vec::new();
+    if elided > 0 {
+        out.push(Line::from(Span::styled(
+            format!("... ({elided} earlier lines, ctrl+o to expand)"),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        )));
+    }
+    for line in shown {
+        out.push(Line::from(Span::styled(line.to_owned(), style)));
+    }
+    out
 }
 
 /// Header for a tool-call block: `{indicator} {name} {summary}` with no
@@ -584,34 +783,80 @@ mod tests {
     }
 
     #[test]
-    fn tool_result_error_renders_error_glyph_in_header() {
+    fn folded_merged_pair_inlines_status_and_preview() {
         let mut buffer = Buffer::new();
         buffer.push_tool_call("c1", "bash", "false", "{}");
         buffer.push_tool_result("c1", "exit 1", true);
         let input = InputState::new();
-        let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 60, 12));
+        let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 80, 12));
         let header = lines
             .iter()
-            .find(|l| l.starts_with("< bash"))
-            .expect("result header for bash");
+            .find(|l| l.starts_with("> bash"))
+            .expect("merged tool header");
         assert!(header.contains("ERROR"));
-        assert!(!header.contains("[result]"));
+        // Old standalone-result tag should be gone.
+        assert!(!lines.iter().any(|l| l.contains("[result]")));
     }
 
     #[test]
-    fn folded_tool_result_inlines_size_and_preview() {
+    fn folded_merged_pair_shows_size_and_preview_for_success() {
         let mut buffer = Buffer::new();
         buffer.push_tool_call("c1", "read", "README.md", "{}");
         buffer.push_tool_result("c1", "first line of file\nsecond line\nthird line", false);
         let input = InputState::new();
-        let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 80, 12));
+        let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 90, 12));
         let header = lines
             .iter()
-            .find(|l| l.starts_with("< read"))
-            .expect("folded result header");
+            .find(|l| l.starts_with("> read"))
+            .expect("merged folded read header");
         assert!(header.contains("first line of file"));
-        // Length of our test output is 41 bytes, well under 1 KB.
-        assert!(header.contains(" B"), "expected bytes pill, got: {header}");
+        assert!(header.contains(" B"), "expected size pill, got: {header}");
+    }
+
+    #[test]
+    fn unfolded_merged_pair_shows_body_and_footer() {
+        let mut buffer = Buffer::new();
+        buffer.push_tool_call("c1", "ls", ".", "{}");
+        buffer.push_tool_result("c1", "a.rs\nb.rs\nc.rs", false);
+        // Toggling either half flips both, so unfolding via the call
+        // (idx 0) leaves the merged renderer with full body + footer.
+        assert!(buffer.toggle_fold(0));
+        let input = InputState::new();
+        let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 60, 16));
+        // Unfolded fold indicator is `v`.
+        assert!(lines.iter().any(|l| l.starts_with("v ls")));
+        assert!(lines.iter().any(|l| l.contains("a.rs")));
+        assert!(lines.iter().any(|l| l.contains("c.rs")));
+        let footer = lines
+            .iter()
+            .find(|l| l.contains("Took"))
+            .expect("merged footer present");
+        assert!(footer.contains("·"));
+    }
+
+    #[test]
+    fn toggling_either_half_of_a_pair_flips_both() {
+        let mut buffer = Buffer::new();
+        buffer.push_tool_call("c1", "ls", ".", "{}");
+        buffer.push_tool_result("c1", "a", false);
+        assert!(matches!(
+            buffer.blocks()[0],
+            Block::ToolCall { folded: true, .. }
+        ));
+        assert!(matches!(
+            buffer.blocks()[1],
+            Block::ToolResult { folded: true, .. }
+        ));
+        // Toggle the result; the call should flip too.
+        assert!(buffer.toggle_fold(1));
+        assert!(matches!(
+            buffer.blocks()[0],
+            Block::ToolCall { folded: false, .. }
+        ));
+        assert!(matches!(
+            buffer.blocks()[1],
+            Block::ToolResult { folded: false, .. }
+        ));
     }
 
     #[test]

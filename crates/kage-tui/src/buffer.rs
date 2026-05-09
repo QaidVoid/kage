@@ -10,6 +10,7 @@
 //! blocks and tool calls without losing their content.
 
 use std::mem;
+use std::time::Instant;
 
 /// One renderable region of the conversation.
 #[derive(Clone, Debug, PartialEq)]
@@ -50,6 +51,10 @@ pub enum Block {
         input_pretty: String,
         /// Whether the user has collapsed the body.
         folded: bool,
+        /// Wall-clock instant when the call was registered. Used by
+        /// the renderer to compute and show duration once the matching
+        /// [`Block::ToolResult`] arrives.
+        started_at: Instant,
     },
     /// Output of a previously-issued tool call.
     ToolResult {
@@ -63,6 +68,10 @@ pub enum Block {
         is_error: bool,
         /// Whether the user has collapsed the body.
         folded: bool,
+        /// Milliseconds elapsed between the matching call's
+        /// `started_at` and when this result was pushed. `None` when
+        /// the call was missing (orphan result).
+        duration_ms: Option<u64>,
     },
     /// Plugin-defined block the core does not interpret.
     Custom {
@@ -267,12 +276,14 @@ impl Buffer {
             input_summary: input_summary.into(),
             input_pretty: input_pretty.into(),
             folded: true,
+            started_at: Instant::now(),
         });
     }
 
     /// Add a tool-result block. Looks up the matching tool call (by id)
     /// and copies its name into the result so the renderer can display
-    /// the output under the right header.
+    /// the output under the right header. Records the elapsed time
+    /// since the call was issued so the renderer can show `Took 12ms`.
     pub fn push_tool_result(
         &mut self,
         call_id: impl Into<String>,
@@ -280,23 +291,30 @@ impl Buffer {
         is_error: bool,
     ) {
         let call_id = call_id.into();
-        let name = self
-            .blocks
-            .iter()
-            .rev()
-            .find_map(|b| match b {
-                Block::ToolCall {
-                    call_id: cid, name, ..
-                } if cid == &call_id => Some(name.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
+        let mut name = String::new();
+        let mut duration_ms = None;
+        for block in self.blocks.iter().rev() {
+            if let Block::ToolCall {
+                call_id: cid,
+                name: n,
+                started_at,
+                ..
+            } = block
+                && cid == &call_id
+            {
+                name.clone_from(n);
+                duration_ms =
+                    Some(u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX));
+                break;
+            }
+        }
         self.blocks.push(Block::ToolResult {
             call_id,
             name,
             output: output.into(),
             is_error,
             folded: true,
+            duration_ms,
         });
     }
 
@@ -320,6 +338,12 @@ impl Buffer {
     /// Toggle the fold state of the block at `index`. Returns whether
     /// the toggle had any effect (false if `index` is out of range or
     /// the block is not foldable).
+    ///
+    /// When the toggled block is one half of a tool-call/result pair,
+    /// the matching half is set to the same fold state. This keeps the
+    /// merged renderer's view consistent with the user gesture: one
+    /// `zo` collapses or expands the visible composite, not just one
+    /// of its two source blocks.
     pub fn toggle_fold(&mut self, index: usize) -> bool {
         let Some(block) = self.blocks.get_mut(index) else {
             return false;
@@ -328,6 +352,32 @@ impl Buffer {
             return false;
         }
         block.toggle_fold();
+        let pair_id = match &self.blocks[index] {
+            Block::ToolCall { call_id, .. } | Block::ToolResult { call_id, .. } => {
+                Some(call_id.clone())
+            }
+            _ => None,
+        };
+        let new_state = matches!(
+            &self.blocks[index],
+            Block::ToolCall { folded: true, .. } | Block::ToolResult { folded: true, .. }
+        );
+        if let Some(pid) = pair_id {
+            for (i, b) in self.blocks.iter_mut().enumerate() {
+                if i == index {
+                    continue;
+                }
+                match b {
+                    Block::ToolCall {
+                        call_id, folded, ..
+                    } if *call_id == pid => *folded = new_state,
+                    Block::ToolResult {
+                        call_id, folded, ..
+                    } if *call_id == pid => *folded = new_state,
+                    _ => {}
+                }
+            }
+        }
         true
     }
 

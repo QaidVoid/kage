@@ -8,6 +8,7 @@
 
 pub mod entry;
 pub mod error;
+pub mod list;
 pub mod reader;
 pub mod writer;
 
@@ -16,5 +17,6 @@ pub use entry::{
     SessionEntry, SessionId, ThinkingLevelChange,
 };
 pub use error::SessionError;
+pub use list::{SessionSummary, list};
 pub use reader::SessionReader;
 pub use writer::SessionWriter;

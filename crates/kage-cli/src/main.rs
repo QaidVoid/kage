@@ -1,7 +1,8 @@
 //! kage CLI binary.
 //!
-//! Phase 4 ships only print mode (`-p`). Run a single prompt through the
-//! agent loop and stream the assistant's text to stdout, then exit.
+//! Print mode (`-p`) runs a single prompt through the agent loop and streams
+//! the assistant's text to stdout, then exits. The `list` subcommand prints
+//! a table of recorded sessions stored under `~/.kage/sessions/`.
 
 mod session;
 
@@ -11,11 +12,11 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use chrono::Utc;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use kage_core::{CancelFlag, Content, LoopEvent, Message, Role};
 use kage_loop::{AgentContext, LoopConfig, NoopHooks, run};
 use kage_provider::{ProviderRegistry, anthropic, gemini, openai, zai};
-use kage_session::{EntryId, FORMAT_VERSION, Header, SessionId, SessionWriter};
+use kage_session::{EntryId, FORMAT_VERSION, Header, SessionId, SessionSummary, SessionWriter};
 use kage_tools::builtin_registry;
 
 use crate::session::SessionRecordingHooks;
@@ -24,6 +25,10 @@ use crate::session::SessionRecordingHooks;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Cli {
+    /// Subcommand. Omitting one requires `-p/--print` and runs print mode.
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Run a single prompt through the agent loop and stream the response
     /// to stdout. Required in Phase 4 (the interactive TUI lands later).
     #[arg(short = 'p', long = "print")]
@@ -48,8 +53,19 @@ struct Cli {
     no_session: bool,
 }
 
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// List recorded sessions in `~/.kage/sessions/`.
+    List,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
+
+    if let Some(Command::List) = cli.command {
+        return run_list();
+    }
+
     let Some(prompt) = cli.print else {
         eprintln!("kage: -p/--print is required in this build");
         return ExitCode::from(2);
@@ -124,6 +140,67 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::from(1),
     }
+}
+
+/// Resolve the directory holding session files: `~/.kage/sessions/`.
+fn sessions_dir() -> Result<PathBuf, String> {
+    let home = dirs::home_dir().ok_or_else(|| "no home directory".to_owned())?;
+    Ok(home.join(".kage").join("sessions"))
+}
+
+/// Implement `kage list`: print one row per recorded session.
+fn run_list() -> ExitCode {
+    let dir = match sessions_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("kage: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let summaries = match kage_session::list(&dir) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("kage: failed to list sessions: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    if summaries.is_empty() {
+        eprintln!("kage: no sessions found in {}", dir.display());
+        return ExitCode::SUCCESS;
+    }
+    print_session_table(&mut io::stdout().lock(), &summaries);
+    ExitCode::SUCCESS
+}
+
+fn print_session_table<W: Write>(out: &mut W, summaries: &[SessionSummary]) {
+    let id_h = "ID";
+    let created_h = "CREATED";
+    let model_h = "MODEL";
+    let prompt_h = "PROMPT";
+    let _ = writeln!(
+        out,
+        "{id_h:<10}  {created_h:<19}  {model_h:<32}  {prompt_h}"
+    );
+    for s in summaries {
+        let id = s.id.to_string();
+        let id_short: String = id.chars().take(10).collect();
+        let created = s.created_at.format("%Y-%m-%d %H:%M:%S").to_string();
+        let model = &s.model;
+        let prompt = match &s.last_user_prompt {
+            Some(text) => truncate_one_line(text, 60),
+            None => "(no user prompt)".to_owned(),
+        };
+        let _ = writeln!(out, "{id_short:<10}  {created:<19}  {model:<32}  {prompt}");
+    }
+}
+
+fn truncate_one_line(text: &str, max: usize) -> String {
+    let single_line = text.lines().next().unwrap_or("").trim();
+    if single_line.chars().count() <= max {
+        return single_line.to_owned();
+    }
+    let head: String = single_line.chars().take(max - 3).collect();
+    format!("{head}...")
 }
 
 /// Create a fresh session file under `~/.kage/sessions/`.

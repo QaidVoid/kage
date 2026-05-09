@@ -142,6 +142,22 @@ pub enum InputAction {
 /// expected to truncate to the same bound when it serializes.
 pub const HISTORY_MAX: usize = 1000;
 
+/// Cap on retained undo / redo entries. Each entry stores a complete
+/// snapshot of the input text plus cursor position; capping keeps
+/// memory bounded for pathological inputs.
+const UNDO_MAX: usize = 100;
+
+/// One step on the undo or redo stack. We snapshot full text +
+/// cursor rather than diff-encode because input bodies are small
+/// (capped to a handful of KB by the host) and snapshot semantics
+/// make undo deterministic regardless of which mutation produced
+/// the change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EditSnapshot {
+    text: String,
+    cursor: usize,
+}
+
 /// Vim-style operator pending after `d`, `c`, or `y`. Combines with
 /// a motion or a doubled key (`dd`, `cc`, `yy`) to act on a range.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -202,6 +218,14 @@ pub struct InputState {
     /// etc.), so `p` pastes on a new line below the cursor instead of
     /// inserting inline.
     register_linewise: bool,
+    /// Undo stack: snapshots taken before each mutating op. Vim
+    /// groups one Insert session as a single undo unit, so the
+    /// snapshot is taken once at insert-entry time, not per
+    /// keystroke.
+    undo_stack: Vec<EditSnapshot>,
+    /// Redo stack: filled by [`Self::undo`], cleared by any new
+    /// mutation. Vim's `<C-r>` pops from here.
+    redo_stack: Vec<EditSnapshot>,
 }
 
 impl InputState {
@@ -260,6 +284,53 @@ impl InputState {
     pub fn toggle_focused_pane(&mut self) -> bool {
         self.focused_pane = self.focused_pane.opposite();
         true
+    }
+
+    /// Push the current `(text, cursor)` onto the undo stack and
+    /// drop the redo stack (any forward history is invalidated by
+    /// taking a new branch). Call this *before* a mutation so undo
+    /// can return to the pre-mutation state.
+    fn snapshot_for_undo(&mut self) {
+        self.undo_stack.push(EditSnapshot {
+            text: self.text.clone(),
+            cursor: self.cursor,
+        });
+        if self.undo_stack.len() > UNDO_MAX {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+    }
+
+    /// Pop one undo snapshot, push the current state to redo, and
+    /// restore the popped state. Skips snapshots that match the
+    /// current state (which can happen when an Insert session
+    /// produced no actual mutations).
+    pub fn undo(&mut self) {
+        while let Some(snap) = self.undo_stack.pop() {
+            if snap.text == self.text && snap.cursor == self.cursor {
+                continue;
+            }
+            self.redo_stack.push(EditSnapshot {
+                text: std::mem::take(&mut self.text),
+                cursor: self.cursor,
+            });
+            self.text = snap.text;
+            self.cursor = snap.cursor;
+            return;
+        }
+    }
+
+    /// Pop one redo snapshot, push the current state to undo, and
+    /// restore the popped state.
+    pub fn redo(&mut self) {
+        if let Some(snap) = self.redo_stack.pop() {
+            self.undo_stack.push(EditSnapshot {
+                text: std::mem::take(&mut self.text),
+                cursor: self.cursor,
+            });
+            self.text = snap.text;
+            self.cursor = snap.cursor;
+        }
     }
 
     /// Read-only slice of history entries, oldest first.
@@ -384,7 +455,6 @@ impl InputState {
             KeyCode::Char('w') if ctrl => return vec![InputAction::CyclePane],
             KeyCode::Char('c') if ctrl => return vec![InputAction::Cancel],
             KeyCode::Char('p') if ctrl => return vec![InputAction::OpenModelPicker],
-            KeyCode::Char('r') if ctrl => return vec![InputAction::OpenSessionPicker],
             KeyCode::Char('[') => return vec![InputAction::FocusPrev],
             KeyCode::Char(']') => return vec![InputAction::FocusNext],
             KeyCode::Char('n') => return vec![InputAction::SearchNext],
@@ -455,9 +525,14 @@ impl InputState {
     /// entry from here auto-switches focus to the input pane so the
     /// user lands in a typable card.
     fn handle_normal_buffer(&mut self, key: KeyEvent) -> Vec<InputAction> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && matches!(key.code, KeyCode::Char('r')) {
+            return vec![InputAction::OpenSessionPicker];
+        }
         match key.code {
             KeyCode::Char('i' | 'a') => {
                 self.focused_pane = Pane::Input;
+                self.snapshot_for_undo();
                 self.enter_mode(Mode::Insert)
             }
             KeyCode::Char('v') => vec![InputAction::EnterVisual],
@@ -483,12 +558,18 @@ impl InputState {
     /// (`h`/`l`/`0`/`$`/`^`/`w`/`b`/`e`/`j`/`k`/`G`), single-char
     /// edits (`x`/`X`/`r`/`D`/`C`/`Y`), operator entry (`d`/`c`/`y`
     /// followed by a motion or doubled key), the count prefix
-    /// (`3dw`, `5j`), and the insert-entry variants
-    /// (`i`/`a`/`I`/`A`/`o`/`O`). Cursor movement and edits mutate
-    /// state in place; mode transitions return an [`InputAction`]
-    /// for the host to react to.
+    /// (`3dw`, `5j`), undo / redo (`u`, `<C-r>`), and the insert-
+    /// entry variants (`i`/`a`/`I`/`A`/`o`/`O`). Cursor movement and
+    /// edits mutate state in place; mode transitions return an
+    /// [`InputAction`] for the host to react to.
     #[allow(clippy::too_many_lines)]
     fn handle_normal_input(&mut self, key: KeyEvent) -> Vec<InputAction> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && matches!(key.code, KeyCode::Char('r')) {
+            self.redo();
+            return Vec::new();
+        }
+
         // Count prefix: digits 1-9 always, `0` only after a count has
         // already started (otherwise `0` is the "go to line start"
         // motion).
@@ -523,45 +604,60 @@ impl InputState {
             // Insert-entry variants. Vim doesn't repeat insert-entry
             // by count in a meaningful way for our use, so we drop
             // the count silently.
-            KeyCode::Char('i') => self.enter_mode(Mode::Insert),
+            KeyCode::Char('i') => {
+                self.snapshot_for_undo();
+                self.enter_mode(Mode::Insert)
+            }
             KeyCode::Char('a') => {
+                self.snapshot_for_undo();
                 if let Some((_, w)) = char_at(&self.text, self.cursor) {
                     self.cursor += w;
                 }
                 self.enter_mode(Mode::Insert)
             }
             KeyCode::Char('I') => {
+                self.snapshot_for_undo();
                 let start = current_line_start(&self.text, self.cursor);
                 self.cursor = first_non_whitespace_at(&self.text, start);
                 self.enter_mode(Mode::Insert)
             }
             KeyCode::Char('A') => {
+                self.snapshot_for_undo();
                 self.cursor = current_line_end(&self.text, self.cursor);
                 self.enter_mode(Mode::Insert)
             }
             KeyCode::Char('o') => {
+                self.snapshot_for_undo();
                 let end = current_line_end(&self.text, self.cursor);
                 self.text.insert(end, '\n');
                 self.cursor = end + 1;
                 self.enter_mode(Mode::Insert)
             }
             KeyCode::Char('O') => {
+                self.snapshot_for_undo();
                 let start = current_line_start(&self.text, self.cursor);
                 self.text.insert(start, '\n');
                 self.cursor = start;
                 self.enter_mode(Mode::Insert)
             }
-            // Single-char edits.
+            // Single-char edits. Snapshot once per `x`/`X` press so a
+            // count repeats inside a single undo unit.
             KeyCode::Char('x') => {
+                self.snapshot_for_undo();
                 for _ in 0..count {
                     self.delete_char_at_cursor();
                 }
                 Vec::new()
             }
             KeyCode::Char('X') => {
+                self.snapshot_for_undo();
                 for _ in 0..count {
                     self.backspace();
                 }
+                Vec::new()
+            }
+            KeyCode::Char('u') => {
+                self.undo();
                 Vec::new()
             }
             // Vim's line-shorthand operators.
@@ -663,6 +759,7 @@ impl InputState {
         let Some((_, w)) = char_at(&self.text, self.cursor) else {
             return;
         };
+        self.snapshot_for_undo();
         let mut buf = [0u8; 4];
         let s = c.encode_utf8(&mut buf);
         self.text.replace_range(self.cursor..self.cursor + w, s);
@@ -754,11 +851,13 @@ impl InputState {
         match op {
             Operator::Yank => Vec::new(),
             Operator::Delete => {
+                self.snapshot_for_undo();
                 self.text.drain(s..e);
                 self.cursor = s;
                 Vec::new()
             }
             Operator::Change => {
+                self.snapshot_for_undo();
                 self.text.drain(s..e);
                 self.cursor = s;
                 self.enter_mode(Mode::Insert)
@@ -789,11 +888,13 @@ impl InputState {
         match op {
             Operator::Yank => Vec::new(),
             Operator::Delete => {
+                self.snapshot_for_undo();
                 self.text.drain(line_start..end);
                 self.cursor = line_start.min(self.text.len());
                 Vec::new()
             }
             Operator::Change => {
+                self.snapshot_for_undo();
                 self.text.drain(line_start..end);
                 self.cursor = line_start;
                 self.enter_mode(Mode::Insert)
@@ -2047,6 +2148,67 @@ mod tests {
         assert_eq!(state.text(), "Boo");
         // Mode unchanged.
         assert_eq!(state.mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn undo_reverts_last_insert_session() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("hello");
+        state.handle_key(key(KeyCode::Esc));
+        assert_eq!(state.text(), "hello");
+        state.handle_key(key(KeyCode::Char('u')));
+        assert_eq!(state.text(), "");
+    }
+
+    #[test]
+    fn undo_reverts_dw_delete() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("foo bar");
+        state.handle_key(key(KeyCode::Esc));
+        state.handle_key(key(KeyCode::Char('0')));
+        state.handle_key(key(KeyCode::Char('d')));
+        state.handle_key(key(KeyCode::Char('w')));
+        assert_eq!(state.text(), "bar");
+        state.handle_key(key(KeyCode::Char('u')));
+        assert_eq!(state.text(), "foo bar");
+    }
+
+    #[test]
+    fn redo_replays_undone_change() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("ab");
+        state.handle_key(key(KeyCode::Esc));
+        state.handle_key(key(KeyCode::Char('u'))); // undo
+        assert_eq!(state.text(), "");
+        state.handle_key(ctrl('r')); // redo
+        assert_eq!(state.text(), "ab");
+    }
+
+    #[test]
+    fn new_change_after_undo_clears_redo_stack() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("first");
+        state.handle_key(key(KeyCode::Esc));
+        state.handle_key(key(KeyCode::Char('u'))); // undo to ""
+        // New change branches off - redo stack is invalidated.
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("second");
+        state.handle_key(key(KeyCode::Esc));
+        assert_eq!(state.text(), "second");
+        state.handle_key(ctrl('r')); // redo - nothing to redo
+        assert_eq!(state.text(), "second");
+    }
+
+    #[test]
+    fn ctrl_r_in_buffer_pane_opens_session_picker() {
+        let mut state = InputState::new();
+        state.set_focused_pane(Pane::Buffer);
+        let acts = state.handle_key(ctrl('r'));
+        assert_eq!(acts, vec![InputAction::OpenSessionPicker]);
     }
 
     #[test]

@@ -669,7 +669,7 @@ fn truncate_one_line(text: &str, max: usize) -> String {
 }
 
 /// Create a fresh session file under [`sessions_dir`].
-fn open_session(model: &str, system_prompt: &str) -> Result<SessionWriter, String> {
+pub(crate) fn open_session(model: &str, system_prompt: &str) -> Result<SessionWriter, String> {
     let dir = sessions_dir()?;
     let session = SessionId::new();
     let path = build_session_path(&dir, session);

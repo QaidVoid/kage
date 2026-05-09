@@ -17,7 +17,7 @@ use kage_core::{CancelFlag, Content, Message, Role};
 use kage_loop::{AgentContext, LoopConfig, NoopHooks, run};
 use kage_plugin::PluginRuntime;
 use kage_provider::ProviderRegistry;
-use kage_session::SessionSummary;
+use kage_session::{SessionSummary, SessionWriter};
 use kage_tools::ToolRegistry;
 use kage_tui::{
     App, PickItem, RunRequest, SharedBuffer, Tui, TuiHooks, buffer_host_log, populate_from_history,
@@ -25,9 +25,11 @@ use kage_tui::{
 };
 
 use crate::plugins::{PluginEventHooks, setup_runtime_with_sink};
+use crate::session::SessionRecordingHooks;
 
 /// Drop into the interactive TUI. Returns the appropriate process exit
 /// code once the user quits.
+#[allow(clippy::too_many_lines)]
 pub fn run_tui(model: &str, system: &str) -> ExitCode {
     let registry = Arc::new(crate::build_provider_registry());
     if registry.ids().count() == 0 {
@@ -88,6 +90,29 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     ));
     let (tx, rx) = mpsc::channel::<RunRequest>();
 
+    // Open a session file so this TUI run is recorded the same way
+    // print mode is. Failures are non-fatal; we just won't write.
+    let session_path = match crate::open_session(model, system) {
+        Ok(writer) => {
+            let path = writer.path().to_path_buf();
+            if let Ok(mut buf) = buffer.lock() {
+                buf.push_custom(
+                    "kage:notify",
+                    format!("recording session to {}", path.display()),
+                    true,
+                );
+            }
+            drop(writer);
+            Some(Arc::new(Mutex::new(path)))
+        }
+        Err(e) => {
+            if let Ok(mut buf) = buffer.lock() {
+                buf.push_custom("kage:error", format!("session: {e}"), false);
+            }
+            None
+        }
+    };
+
     let active_qualified = Arc::new(Mutex::new(qualified_model.clone()));
     let model_choices = available_model_items(&registry, &qualified_model);
     if let Err(err) = crate::state::record_last_model(&qualified_model) {
@@ -105,6 +130,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         cancel: cancel.clone(),
         plugin_runtime,
         rx,
+        session_path: session_path.clone(),
     });
 
     let mut tui = match Tui::enter() {
@@ -143,6 +169,9 @@ struct WorkerConfig {
     cancel: CancelFlag,
     plugin_runtime: Option<Arc<PluginRuntime>>,
     rx: mpsc::Receiver<RunRequest>,
+    /// Path to the session file the worker appends to. Shared with
+    /// the resume handler so `Ctrl+R` can swap the file in place.
+    session_path: Option<Arc<Mutex<PathBuf>>>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -157,6 +186,7 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
             cancel,
             plugin_runtime,
             rx,
+            session_path,
         } = cfg;
         let loop_cfg = LoopConfig::default();
 
@@ -193,39 +223,20 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                     let mut cx_guard = cx.lock().expect("agent context mutex poisoned");
                     cx_guard.model = bare_model;
                     let parent = cx_guard.history.last().map(|m| m.id);
-                    cx_guard.history.push(Message::new(
-                        Role::User,
-                        vec![Content::Text { text }],
-                        parent,
-                    ));
-                    let ok = if let Some(rt) = plugin_runtime.as_ref() {
-                        let inner = TuiHooks::new(NoopHooks, buffer.clone());
-                        let mut hooks = PluginEventHooks::new(inner, Arc::clone(rt));
-                        hooks.dispatch_agent_start();
-                        let res = run(
-                            provider.as_ref(),
-                            &tools,
-                            &mut cx_guard,
-                            &loop_cfg,
-                            &mut hooks,
-                            &cancel,
-                            |_| {},
-                        );
-                        hooks.dispatch_agent_end(res.is_ok());
-                        res.is_ok()
-                    } else {
-                        let mut hooks = TuiHooks::new(NoopHooks, buffer.clone());
-                        run(
-                            provider.as_ref(),
-                            &tools,
-                            &mut cx_guard,
-                            &loop_cfg,
-                            &mut hooks,
-                            &cancel,
-                            |_| {},
-                        )
-                        .is_ok()
-                    };
+                    let user_msg = Message::new(Role::User, vec![Content::Text { text }], parent);
+                    cx_guard.history.push(user_msg.clone());
+                    let writer_for_turn = open_writer_for_turn(session_path.as_ref(), &buffer);
+                    let ok = run_with_hooks(
+                        provider.as_ref(),
+                        &tools,
+                        &mut cx_guard,
+                        &loop_cfg,
+                        &cancel,
+                        &buffer,
+                        plugin_runtime.as_ref(),
+                        writer_for_turn,
+                        &user_msg,
+                    );
                     if ok && let Err(err) = crate::state::record_last_model(&qualified) {
                         if let Ok(mut buf) = buffer.lock() {
                             buf.push_custom("kage:error", format!("state: {err}"), false);
@@ -233,7 +244,14 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                     }
                 }
                 RunRequest::ResumeSession(path) => {
-                    handle_resume(&registry, &active_qualified, &cx, &buffer, &path);
+                    handle_resume(
+                        &registry,
+                        &active_qualified,
+                        &cx,
+                        &buffer,
+                        session_path.as_ref(),
+                        &path,
+                    );
                 }
                 RunRequest::Cancel => cancel.cancel(),
                 RunRequest::SwitchModel(new_model) => {
@@ -272,6 +290,79 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
             }
         }
     })
+}
+
+/// Reopen the worker's session file in append mode for the duration
+/// of one turn. `None` either means recording was disabled at startup
+/// or the open failed (already reported into the buffer).
+fn open_writer_for_turn(
+    session_path: Option<&Arc<Mutex<PathBuf>>>,
+    buffer: &SharedBuffer,
+) -> Option<SessionWriter> {
+    let path_arc = session_path?;
+    let path = path_arc
+        .lock()
+        .expect("session path mutex poisoned")
+        .clone();
+    match SessionWriter::open(&path) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            if let Ok(mut buf) = buffer.lock() {
+                buf.push_custom(
+                    "kage:error",
+                    format!("session: open {}: {e}", path.display()),
+                    false,
+                );
+            }
+            None
+        }
+    }
+}
+
+/// Run the agent loop with the right hook chain: TUI display innermost,
+/// optional session recording in the middle, optional plugin dispatch
+/// outermost. Returns whether the loop completed successfully so the
+/// caller knows whether to bump `last_model` state.
+#[allow(clippy::too_many_arguments)]
+fn run_with_hooks(
+    provider: &dyn kage_provider::Provider,
+    tools: &ToolRegistry,
+    cx: &mut AgentContext,
+    loop_cfg: &LoopConfig,
+    cancel: &CancelFlag,
+    buffer: &SharedBuffer,
+    plugin_runtime: Option<&Arc<PluginRuntime>>,
+    writer: Option<SessionWriter>,
+    user_msg: &Message,
+) -> bool {
+    let tui_hooks = TuiHooks::new(NoopHooks, buffer.clone());
+    match (writer, plugin_runtime) {
+        (Some(w), Some(rt)) => {
+            let mut recorded = SessionRecordingHooks::new(tui_hooks, w);
+            recorded.record_user_message(user_msg);
+            let mut hooks = PluginEventHooks::new(recorded, Arc::clone(rt));
+            hooks.dispatch_agent_start();
+            let res = run(provider, tools, cx, loop_cfg, &mut hooks, cancel, |_| {});
+            hooks.dispatch_agent_end(res.is_ok());
+            res.is_ok()
+        }
+        (Some(w), None) => {
+            let mut hooks = SessionRecordingHooks::new(tui_hooks, w);
+            hooks.record_user_message(user_msg);
+            run(provider, tools, cx, loop_cfg, &mut hooks, cancel, |_| {}).is_ok()
+        }
+        (None, Some(rt)) => {
+            let mut hooks = PluginEventHooks::new(tui_hooks, Arc::clone(rt));
+            hooks.dispatch_agent_start();
+            let res = run(provider, tools, cx, loop_cfg, &mut hooks, cancel, |_| {});
+            hooks.dispatch_agent_end(res.is_ok());
+            res.is_ok()
+        }
+        (None, None) => {
+            let mut hooks = tui_hooks;
+            run(provider, tools, cx, loop_cfg, &mut hooks, cancel, |_| {}).is_ok()
+        }
+    }
 }
 
 /// Build the picker rows for the `Ctrl+R` session picker. Listing
@@ -315,15 +406,21 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 /// Replay `path` into the live TUI: clear the buffer, replace
-/// `cx.history` with the recorded one, point `active_qualified` at the
-/// session's model (validating it resolves), and repopulate the
-/// buffer so the user sees the prior conversation rendered with the
-/// current TUI styling.
+/// `cx.history` with the recorded one, point the worker at this file
+/// for future appends, and repopulate the buffer so the user sees the
+/// prior conversation rendered with the current TUI styling.
+///
+/// If the session's recorded model is no longer resolvable (provider
+/// not authed in this run, model removed from the catalog), the
+/// resume keeps the currently active model rather than failing. The
+/// replay history still loads so the substitute model continues with
+/// full context; a `kage:notify` flags the substitution.
 fn handle_resume(
     registry: &Arc<ProviderRegistry>,
     active_qualified: &Arc<Mutex<String>>,
     cx: &Arc<Mutex<AgentContext>>,
     buffer: &SharedBuffer,
+    session_path: Option<&Arc<Mutex<PathBuf>>>,
     path: &std::path::Path,
 ) {
     let replay = match kage_session::replay(path) {
@@ -339,28 +436,47 @@ fn handle_resume(
             return;
         }
     };
-    let resolved = match registry.resolve(&replay.model) {
-        Ok(r) => r,
-        Err(e) => {
-            if let Ok(mut buf) = buffer.lock() {
-                buf.push_custom(
-                    "kage:error",
-                    format!("resume: model {} unavailable: {e}", replay.model),
-                    false,
-                );
+    let active_now = active_qualified
+        .lock()
+        .expect("active model mutex poisoned")
+        .clone();
+    let (qualified_model, bare_model, fallback_note) = match registry.resolve(&replay.model) {
+        Ok(r) => (replay.model.clone(), r.model.clone(), None),
+        Err(_) => match registry.resolve(&active_now) {
+            Ok(r) => (
+                active_now.clone(),
+                r.model.clone(),
+                Some(format!(
+                    "session model {} unavailable; using {} instead",
+                    replay.model, active_now
+                )),
+            ),
+            Err(e) => {
+                if let Ok(mut buf) = buffer.lock() {
+                    buf.push_custom(
+                        "kage:error",
+                        format!("resume: no resolvable model ({e})"),
+                        false,
+                    );
+                }
+                return;
             }
-            return;
-        }
+        },
     };
     {
         let mut cx_guard = cx.lock().expect("agent context mutex poisoned");
         cx_guard.history.clone_from(&replay.history);
-        cx_guard.model.clone_from(&resolved.model);
+        cx_guard.model = bare_model;
     }
     active_qualified
         .lock()
         .expect("active model mutex poisoned")
-        .clone_from(&replay.model);
+        .clone_from(&qualified_model);
+    if let Some(sp) = session_path {
+        sp.lock()
+            .expect("session path mutex poisoned")
+            .clone_from(&path.to_path_buf());
+    }
     if let Ok(mut buf) = buffer.lock() {
         buf.clear();
         populate_from_history(&mut buf, &replay.history);
@@ -368,9 +484,12 @@ fn handle_resume(
         let short: String = id.chars().take(8).collect();
         buf.push_custom(
             "kage:notify",
-            format!("resumed session {short} on {}", replay.model),
+            format!("resumed session {short} on {qualified_model}"),
             false,
         );
+        if let Some(note) = fallback_note {
+            buf.push_custom("kage:notify", note, false);
+        }
     }
 }
 

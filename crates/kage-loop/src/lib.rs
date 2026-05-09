@@ -5,6 +5,7 @@
 //! async traits, no `Pin<Box<dyn Stream>>`. Hosts subscribe to streaming
 //! [`LoopEvent`](kage_core::LoopEvent)s through a single emit callback.
 
+mod compact;
 pub mod config;
 pub mod context;
 mod dispatch;

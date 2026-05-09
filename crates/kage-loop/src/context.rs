@@ -55,6 +55,10 @@ pub struct AgentContext {
     pub system_prompt: String,
     /// Working directory all filesystem-touching tools must scope under.
     pub workdir: PathBuf,
+    /// Effective context window for the active model, in tokens. Used
+    /// together with [`crate::LoopConfig::compaction_threshold`] to decide
+    /// when to summarize older turns. Default is 200,000.
+    pub context_window: u64,
     /// Running token totals.
     pub budget: TokenBudget,
 }
@@ -69,6 +73,7 @@ impl AgentContext {
             model: model.into(),
             system_prompt: system_prompt.into(),
             workdir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            context_window: 200_000,
             budget: TokenBudget::default(),
         }
     }
@@ -77,6 +82,13 @@ impl AgentContext {
     #[must_use]
     pub fn with_workdir(mut self, workdir: impl Into<PathBuf>) -> Self {
         self.workdir = workdir.into();
+        self
+    }
+
+    /// Override the model's context window in tokens.
+    #[must_use]
+    pub fn with_context_window(mut self, window: u64) -> Self {
+        self.context_window = window;
         self
     }
 }

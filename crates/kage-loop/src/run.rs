@@ -22,6 +22,7 @@ use kage_core::{CancelFlag, LoopError, LoopEvent};
 use kage_provider::{Provider, StreamRequest};
 use kage_tools::ToolRegistry;
 
+use crate::compact::maybe_compact;
 use crate::dispatch::{dispatch_tool_calls, dispatch_tool_calls_parallel};
 use crate::stream::collect_turn;
 use crate::{AgentContext, Hooks, LoopConfig};
@@ -84,6 +85,11 @@ where
                     vec![kage_core::Content::Text { text: steering }],
                     cx.history.last().map(|m| m.id),
                 ));
+            }
+
+            if let Err(kind) = maybe_compact(cx, config, provider, cancel, hooks, &mut emit) {
+                emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
+                return Err(kind);
             }
 
             let req = build_request(cx, tools);

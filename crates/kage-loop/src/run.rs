@@ -372,6 +372,71 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Clone)]
+    struct CancellingTool {
+        cancel: kage_core::CancelFlag,
+    }
+
+    impl kage_tools::Tool for CancellingTool {
+        fn name(&self) -> &'static str {
+            "cancel_now"
+        }
+        fn description(&self) -> &'static str {
+            "trips the loop's cancel flag mid-run"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn risk(&self) -> kage_core::Risk {
+            kage_core::Risk::Read
+        }
+        fn execute(
+            &self,
+            _input: serde_json::Value,
+            _cx: &kage_tools::ToolContext<'_>,
+        ) -> Result<kage_core::ToolOutput, kage_tools::ToolError> {
+            self.cancel.cancel();
+            Ok(kage_core::ToolOutput {
+                is_error: false,
+                text: "cancelled".into(),
+                structured: None,
+            })
+        }
+    }
+
+    #[test]
+    fn cancellation_triggered_inside_tool_terminates_run_before_next_turn() {
+        let call_id = kage_core::ToolCallId::new("call_1");
+        let mock = MockProvider::sequence(vec![vec![
+            Ok(ProviderEvent::ToolCallStart {
+                id: call_id.clone(),
+                name: "cancel_now".into(),
+            }),
+            Ok(ProviderEvent::ToolCallEnd {
+                id: call_id.clone(),
+                input: serde_json::json!({}),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::ToolUse,
+                usage: TokenUsage::default(),
+            }),
+        ]]);
+
+        let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
+        cx.history.push(user_msg("go"));
+        let cfg = LoopConfig::default();
+        let mut hooks = NoopHooks;
+        let cancel = CancelFlag::new();
+        let registry = ToolRegistry::new().with(std::sync::Arc::new(CancellingTool {
+            cancel: cancel.clone(),
+        }));
+
+        let res = run(&mock, &registry, &mut cx, &cfg, &mut hooks, &cancel, |_| {});
+        assert!(matches!(res, Err(LoopError::Cancelled)));
+        // First turn ran (provider called once); second never did.
+        assert_eq!(mock.call_count(), 1);
+    }
+
     #[test]
     fn end_to_end_tool_call_loop() {
         // Turn 1: model emits a tool call. Turn 2: model emits final text.

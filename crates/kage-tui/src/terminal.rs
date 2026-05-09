@@ -1,9 +1,11 @@
 //! Acquire and release the terminal in raw alt-screen mode.
 //!
 //! [`Tui`] wraps [`ratatui::DefaultTerminal`] with a small lifecycle
-//! helper that also enables bracketed paste and installs a panic hook so
-//! a crashing run never strands the user's tty in raw mode. Drop reverses
-//! every state change in the right order.
+//! helper that also enables bracketed paste, opts into the kitty
+//! keyboard protocol (so `Shift+Enter` and other modified keys are
+//! transmitted reliably), and installs a panic hook so a crashing run
+//! never strands the user's tty in raw mode. Drop reverses every state
+//! change in the right order.
 //!
 //! Tests render against [`ratatui::backend::TestBackend`] directly; the
 //! lifecycle wrapper is only meaningful with a real tty.
@@ -12,23 +14,36 @@ use std::io::{self, Write};
 use std::sync::Once;
 
 use ratatui::DefaultTerminal;
-use ratatui::crossterm::{event, execute};
+use ratatui::crossterm::event::{
+    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
+use ratatui::crossterm::execute;
 
 use crate::error::TuiError;
 
 static PANIC_HOOK: Once = Once::new();
+
+/// The keyboard-enhancement flags we request. Disambiguating escape
+/// codes lets the terminal report `Shift+Enter`, `Ctrl+I` vs `Tab`, and
+/// modified function keys distinctly. Reporting all keys as escape codes
+/// keeps reporting consistent across plain and modified keys.
+const KITTY_FLAGS: KeyboardEnhancementFlags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+    .union(KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES);
 
 /// Owns the terminal while the TUI is running. Restoring is automatic on
 /// drop and via a panic hook so a crashing run never strands the tty.
 pub struct Tui {
     terminal: DefaultTerminal,
     bracketed_paste_active: bool,
+    kitty_flags_active: bool,
 }
 
 impl std::fmt::Debug for Tui {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Tui")
             .field("bracketed_paste_active", &self.bracketed_paste_active)
+            .field("kitty_flags_active", &self.kitty_flags_active)
             .finish_non_exhaustive()
     }
 }
@@ -40,16 +55,19 @@ impl Tui {
     pub fn enter() -> Result<Self, TuiError> {
         install_panic_hook();
         let terminal = ratatui::try_init()?;
-        let bracketed_paste_active = match execute!(io::stdout(), event::EnableBracketedPaste) {
+        let bracketed_paste_active = match execute!(io::stdout(), EnableBracketedPaste) {
             Ok(()) => true,
             Err(err) => {
                 ratatui::restore();
                 return Err(err.into());
             }
         };
+        let kitty_flags_active =
+            execute!(io::stdout(), PushKeyboardEnhancementFlags(KITTY_FLAGS)).is_ok();
         Ok(Self {
             terminal,
             bracketed_paste_active,
+            kitty_flags_active,
         })
     }
 
@@ -61,8 +79,12 @@ impl Tui {
 
 impl Drop for Tui {
     fn drop(&mut self) {
+        if self.kitty_flags_active {
+            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+            self.kitty_flags_active = false;
+        }
         if self.bracketed_paste_active {
-            let _ = execute!(io::stdout(), event::DisableBracketedPaste);
+            let _ = execute!(io::stdout(), DisableBracketedPaste);
             self.bracketed_paste_active = false;
         }
         let _ = io::stdout().flush();
@@ -76,7 +98,8 @@ fn install_panic_hook() {
     PANIC_HOOK.call_once(|| {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            let _ = execute!(io::stdout(), event::DisableBracketedPaste);
+            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+            let _ = execute!(io::stdout(), DisableBracketedPaste);
             ratatui::restore();
             prev(info);
         }));

@@ -352,6 +352,17 @@ impl InputState {
         vec![InputAction::EnterMode(mode)]
     }
 
+    /// Set the editing mode externally (e.g. mouse drag entering
+    /// visual mode). Returns whether the mode actually changed.
+    pub fn switch_mode(&mut self, mode: Mode) -> bool {
+        if self.mode == mode {
+            return false;
+        }
+        self.mode = mode;
+        self.pending = None;
+        true
+    }
+
     fn insert_char(&mut self, c: char) {
         let mut buf = [0u8; 4];
         let s = c.encode_utf8(&mut buf);

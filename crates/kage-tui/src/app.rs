@@ -193,6 +193,13 @@ pub struct App {
     /// Plugin-registered command names + descriptions for palette
     /// display. Builtin names take precedence on collision.
     plugin_commands: Vec<(String, String)>,
+    /// In-progress mouse gesture started by a left-button press. The
+    /// tuple is `(down_row, down_block_idx, dragged)`. `dragged` flips
+    /// to true the first time a drag event reports a different block
+    /// than the anchor; on `Up`, a non-dragged click on the block's
+    /// header row toggles its fold, while a dragged release leaves
+    /// the visual selection in place for the user to yank with `y`.
+    mouse_drag_anchor: Option<(u16, usize, bool)>,
 }
 
 impl App {
@@ -214,6 +221,7 @@ impl App {
             plugin_commands: Vec::new(),
             search_line: None,
             search_pattern: None,
+            mouse_drag_anchor: None,
         }
     }
 
@@ -282,7 +290,13 @@ impl App {
                             MouseEventKind::ScrollUp => self.scroll_by(-MOUSE_SCROLL_LINES),
                             MouseEventKind::ScrollDown => self.scroll_by(MOUSE_SCROLL_LINES),
                             MouseEventKind::Down(ratatui::crossterm::event::MouseButton::Left) => {
-                                self.click_at_row(mouse.row)
+                                self.mouse_down(mouse.row);
+                            }
+                            MouseEventKind::Drag(ratatui::crossterm::event::MouseButton::Left) => {
+                                self.mouse_drag(mouse.row);
+                            }
+                            MouseEventKind::Up(ratatui::crossterm::event::MouseButton::Left) => {
+                                self.mouse_up(mouse.row);
                             }
                             _ => {}
                         },
@@ -704,20 +718,58 @@ impl App {
         }
     }
 
-    /// Translate a click on absolute terminal row `row` to a buffer
-    /// gesture. The click sets focus on whichever block currently
-    /// occupies that row. If the click landed on the block's top
-    /// (header) row and the block is foldable, also toggle its fold
-    /// state - matches what the user intuitively expects from
-    /// clicking a `+`/`-` style header.
-    fn click_at_row(&mut self, row: u16) {
+    /// Mouse left-button press: latch the press as a potential
+    /// drag-start and put focus on the clicked block. The actual fold
+    /// toggle waits for [`Self::mouse_up`] so a press-then-drag
+    /// gesture doesn't accidentally fold the anchor block.
+    fn mouse_down(&mut self, row: u16) {
         if let Ok(mut buf) = self.buffer.lock()
             && let Some(idx) = buf.block_at_screen_row(row)
         {
             buf.set_focus(Some(idx));
-            if buf.screen_top_of(idx) == Some(row) {
-                buf.toggle_fold(idx);
+            buf.set_visual_anchor(None);
+            self.mouse_drag_anchor = Some((row, idx, false));
+        }
+    }
+
+    /// Mouse drag while left-button is held: move focus to whichever
+    /// block sits under the cursor and start (or extend) a visual
+    /// selection from the anchor block. Tracks `dragged=true` so the
+    /// matching [`Self::mouse_up`] knows to skip the click-to-fold
+    /// branch.
+    fn mouse_drag(&mut self, row: u16) {
+        let Some((down_row, anchor_idx, ref mut dragged)) = self.mouse_drag_anchor else {
+            return;
+        };
+        if let Ok(mut buf) = self.buffer.lock()
+            && let Some(idx) = buf.block_at_screen_row(row)
+        {
+            if !*dragged && idx == anchor_idx && row == down_row {
+                return;
             }
+            *dragged = true;
+            if buf.visual_anchor().is_none() {
+                buf.set_visual_anchor(Some(anchor_idx));
+                self.input.switch_mode(Mode::Visual);
+            }
+            buf.set_focus(Some(idx));
+        }
+    }
+
+    /// Mouse left-button release: a non-dragged release on a block's
+    /// header row toggles fold; a dragged release leaves the visual
+    /// selection in place so the user can `y` to copy it.
+    fn mouse_up(&mut self, row: u16) {
+        let Some((_down_row, anchor_idx, dragged)) = self.mouse_drag_anchor.take() else {
+            return;
+        };
+        if dragged {
+            return;
+        }
+        if let Ok(mut buf) = self.buffer.lock()
+            && buf.screen_top_of(anchor_idx) == Some(row)
+        {
+            buf.toggle_fold(anchor_idx);
         }
     }
 

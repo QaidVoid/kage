@@ -8,7 +8,9 @@
 pub mod config;
 pub mod context;
 pub mod hooks;
+pub mod run;
 
 pub use config::LoopConfig;
 pub use context::{AgentContext, TokenBudget};
 pub use hooks::{Hooks, NoopHooks};
+pub use run::run;

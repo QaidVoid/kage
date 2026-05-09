@@ -735,6 +735,8 @@ name = "kage-loop"
 version = "0.1.0"
 dependencies = [
  "kage-core",
+ "kage-provider",
+ "kage-tools",
  "serde",
  "serde_json",
 ]

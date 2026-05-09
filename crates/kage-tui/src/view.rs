@@ -1056,8 +1056,16 @@ fn render_modeline(frame: &mut Frame, regions: Regions, usage: Option<&SessionUs
             ));
             spans.push(Span::styled("  ::  ", dim));
         }
+        // Cumulative session totals: what the user has been charged
+        // for since the session started. Distinct from `ctx` above,
+        // which is just the current turn's prompt fill against the
+        // window.
         spans.push(Span::styled(
-            format!("{} out", format_token_count(u.output_tokens)),
+            format!(
+                "{} in / {} out",
+                format_token_count(u.input_tokens),
+                format_token_count(u.output_tokens)
+            ),
             fg,
         ));
     }

@@ -81,28 +81,42 @@ fn place_cmdline_cursor(frame: &mut Frame, regions: Regions, cmdline: &CommandLi
 fn render_buffer(frame: &mut Frame, regions: Regions, buffer: &Buffer) {
     let mut lines: Vec<Line<'_>> = Vec::new();
     let blocks = buffer.blocks();
-    let mut idx = 0;
-    while idx < blocks.len() {
-        let cur = &blocks[idx];
-        let merged_next = matches!(
-            (cur, blocks.get(idx + 1)),
-            (
-                Block::ToolCall { call_id: cid_call, .. },
-                Some(Block::ToolResult { call_id: cid_result, .. }),
-            ) if cid_call == cid_result
-        );
-        if merged_next {
-            for line in tool_pair_to_lines(cur, &blocks[idx + 1]) {
-                lines.push(line);
-            }
-            idx += 2;
-        } else {
-            for line in block_to_lines(cur) {
-                lines.push(line);
-            }
-            idx += 1;
+    // Index every ToolResult by its call_id so we can pair with a
+    // possibly-non-adjacent ToolCall. Parallel tool batches arrive as
+    // call/call/call/.../result/result/result; without this lookup the
+    // merge would only catch trailing adjacent pairs and parallel calls
+    // would render as bare flat lines.
+    let mut result_by_call: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::new();
+    for (i, b) in blocks.iter().enumerate() {
+        if let Block::ToolResult { call_id, .. } = b {
+            result_by_call.entry(call_id).or_insert(i);
         }
-        // Blank separator between blocks.
+    }
+    let mut consumed_results: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for (idx, cur) in blocks.iter().enumerate() {
+        match cur {
+            Block::ToolCall { call_id, .. } => {
+                if let Some(&result_idx) = result_by_call.get(call_id.as_str()) {
+                    consumed_results.insert(result_idx);
+                    for line in tool_pair_to_lines(cur, &blocks[result_idx], regions.buffer.width) {
+                        lines.push(line);
+                    }
+                } else {
+                    for line in block_to_lines(cur, regions.buffer.width) {
+                        lines.push(line);
+                    }
+                }
+            }
+            Block::ToolResult { .. } if consumed_results.contains(&idx) => {
+                continue;
+            }
+            _ => {
+                for line in block_to_lines(cur, regions.buffer.width) {
+                    lines.push(line);
+                }
+            }
+        }
         lines.push(Line::raw(""));
     }
     let total_lines = lines.len();
@@ -185,13 +199,17 @@ fn input_cursor_position(
 
 /// Convert one [`Block`] into its rendered [`Line`]s.
 ///
+/// `width` is the rendering area's column count, used by blocks that
+/// pad to a full-width visual block (`User` bubble). Other blocks
+/// ignore it.
+///
 /// Folded blocks contribute one header line. Unfolded blocks contribute
 /// the header plus the body. Assistant text has no header; it is the
 /// content directly. Thinking text is rendered dimmed.
 #[must_use]
-pub fn block_to_lines(block: &Block) -> Vec<Line<'static>> {
+pub fn block_to_lines(block: &Block, width: u16) -> Vec<Line<'static>> {
     match block {
-        Block::User { text } => user_block_lines(text),
+        Block::User { text } => user_block_lines(text, width),
         Block::Assistant { text, .. } => plain_lines(text, assistant_style()),
         Block::Thinking { text, folded, .. } => {
             let mut out = Vec::new();
@@ -270,28 +288,124 @@ pub fn block_to_lines(block: &Block) -> Vec<Line<'static>> {
     }
 }
 
-/// Render a user prompt as a tinted "chat bubble". Each visual line of
-/// the prompt is drawn against a slightly darker background so the
-/// prompt visually pops out of the surrounding flow. A thin left-edge
-/// rule (`U+258E LEFT ONE QUARTER BLOCK`) anchors the bubble; the text
-/// is bracketed by spaces so the tinted region reads as a pad even
-/// when ratatui's Paragraph doesn't extend the bg to end-of-line.
-fn user_block_lines(text: &str) -> Vec<Line<'static>> {
-    let rule = Style::default()
-        .fg(Color::Cyan)
+/// Background color for the user-prompt bubble. A muted slate that
+/// reads as "tinted" against most terminal backgrounds.
+const USER_BUBBLE_BG: Color = Color::Rgb(45, 53, 70);
+
+/// Background color for tool-block bubbles. Slightly cooler and dimmer
+/// than the user bubble so the two read as distinct units in a stacked
+/// conversation.
+const TOOL_BUBBLE_BG: Color = Color::Rgb(30, 34, 44);
+
+/// Render a user prompt as a tinted full-width "chat bubble" with a
+/// thin cyan left-edge rule and one row of padding above and below the
+/// text.
+fn user_block_lines(text: &str, width: u16) -> Vec<Line<'static>> {
+    let mut content: Vec<Line<'static>> = Vec::new();
+    for raw in text.split('\n') {
+        content.push(Line::from(Span::styled(
+            raw.to_owned(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+    wrap_in_bubble(content, Color::Cyan, USER_BUBBLE_BG, width)
+}
+
+/// Wrap a vector of content lines in a full-width "bubble": each row
+/// starts with a colored left-edge rule, every cell is given the
+/// background color, and a one-row pad sits above and below.
+///
+/// Each input line is truncated to fit on exactly one visual row; if
+/// the content would have overflowed the buffer width and wrapped,
+/// the wrap would break the bubble's visual cohesion (the wrapped
+/// continuation has no leading rule and no trailing pad). Trade off:
+/// the user can expand the block to read the full content.
+///
+/// Spans inside `content` are reused as-is except their background is
+/// overridden with `bg` so the bubble reads as a uniform block.
+fn wrap_in_bubble(
+    content: Vec<Line<'static>>,
+    rule_color: Color,
+    bg: Color,
+    width: u16,
+) -> Vec<Line<'static>> {
+    const RULE_WIDTH: usize = 1;
+    const LEFT_PAD: usize = 1;
+    const RIGHT_PAD: usize = 1;
+    let total = usize::from(width);
+    let interior = total
+        .saturating_sub(RULE_WIDTH)
+        .max(LEFT_PAD + RIGHT_PAD + 1);
+    let max_content = interior.saturating_sub(LEFT_PAD + RIGHT_PAD);
+    let rule_style = Style::default()
+        .fg(rule_color)
+        .bg(bg)
         .add_modifier(Modifier::BOLD);
-    let body = Style::default()
-        .fg(Color::White)
-        .bg(Color::Indexed(236))
-        .add_modifier(Modifier::BOLD);
-    text.split('\n')
-        .map(|raw| {
-            Line::from(vec![
-                Span::styled("\u{258e}".to_owned(), rule),
-                Span::styled(format!(" {raw} "), body),
-            ])
-        })
-        .collect()
+    let bg_only = Style::default().bg(bg);
+    let pad_row = || -> Line<'static> {
+        Line::from(vec![
+            Span::styled("\u{258e}".to_owned(), rule_style),
+            Span::styled(" ".repeat(interior), bg_only),
+        ])
+    };
+
+    let mut out: Vec<Line<'static>> = Vec::with_capacity(content.len() + 2);
+    out.push(pad_row());
+    for line in content {
+        let truncated = truncate_spans(line.spans, max_content);
+        let used_chars: usize = truncated.iter().map(|s| s.content.chars().count()).sum();
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(truncated.len() + 3);
+        spans.push(Span::styled("\u{258e}".to_owned(), rule_style));
+        spans.push(Span::styled(" ".repeat(LEFT_PAD), bg_only));
+        for s in truncated {
+            spans.push(Span::styled(s.content, s.style.bg(bg)));
+        }
+        let used = LEFT_PAD + used_chars;
+        if used < interior {
+            spans.push(Span::styled(" ".repeat(interior - used), bg_only));
+        }
+        out.push(Line::from(spans));
+    }
+    out.push(pad_row());
+    out
+}
+
+/// Truncate a sequence of styled spans so the combined char count is
+/// at most `max`, appending a single-character ellipsis if any span
+/// was clipped. Each span keeps its own style; the ellipsis inherits
+/// the style of the span it lands on.
+fn truncate_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::with_capacity(spans.len());
+    let mut used = 0usize;
+    let mut span_iter = spans.into_iter().peekable();
+    while let Some(s) = span_iter.next() {
+        let len = s.content.chars().count();
+        if used + len <= max {
+            used += len;
+            out.push(s);
+            continue;
+        }
+        // Need to clip this span (and drop any remaining).
+        let avail = max.saturating_sub(used);
+        if avail > 0 {
+            let cut: String = s.content.chars().take(avail.saturating_sub(1)).collect();
+            out.push(Span::styled(format!("{cut}\u{2026}"), s.style));
+        } else if let Some(last) = out.last_mut() {
+            // Trim one char from the previous span to make room for `…`.
+            let mut chars: Vec<char> = last.content.chars().collect();
+            if !chars.is_empty() {
+                chars.pop();
+            }
+            chars.push('\u{2026}');
+            last.content = chars.into_iter().collect::<String>().into();
+        }
+        // Drain remaining spans — they don't fit.
+        for _ in span_iter.by_ref() {}
+        break;
+    }
+    out
 }
 
 fn plain_lines(text: &str, style: Style) -> Vec<Line<'static>> {
@@ -315,7 +429,7 @@ fn plain_lines(text: &str, style: Style) -> Vec<Line<'static>> {
 ///                                     <- blank
 ///   Took 23ms · 1.2 KB                <- dim footer
 /// ```
-fn tool_pair_to_lines(call: &Block, result: &Block) -> Vec<Line<'static>> {
+fn tool_pair_to_lines(call: &Block, result: &Block, width: u16) -> Vec<Line<'static>> {
     let (name, input_summary, input_pretty, folded) = match call {
         Block::ToolCall {
             name,
@@ -337,74 +451,76 @@ fn tool_pair_to_lines(call: &Block, result: &Block) -> Vec<Line<'static>> {
     };
 
     let style = tool_call_style();
-    let mut out = Vec::new();
-    out.push(tool_header_line(
-        fold_indicator(folded),
-        name,
-        input_summary,
-        style,
-    ));
+    let dim = Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::DIM);
+    let mut content: Vec<Line<'static>> = Vec::new();
 
-    if folded {
-        // Folded: append a compact status pill so the user gets at
-        // least the gist (size or ERROR) without expanding, plus a
-        // dim first-line preview when there's room.
-        let dim = Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::DIM);
-        let mut tail = vec![Span::raw("  ")];
-        if is_error {
-            tail.push(Span::styled(
-                "ERROR".to_owned(),
-                tool_error_style().add_modifier(Modifier::BOLD),
-            ));
-        } else {
-            tail.push(Span::styled(human_size(output.len()), dim));
-        }
-        if let Some(footer) = duration_footer(duration_ms) {
-            tail.push(Span::raw("  "));
-            tail.push(Span::styled(footer, dim));
-        }
-        if let Some(preview) = first_line_preview(output, 60) {
-            tail.push(Span::raw("  "));
-            tail.push(Span::styled(format!("· {preview}"), dim));
-        }
-        if let Some(last) = out.last_mut() {
-            last.spans.extend(tail);
-        }
-        return out;
+    // Header: `<fold> <name> <summary>  <size>  Took <ms>` packs the
+    // most-useful at-a-glance info on a single row regardless of fold
+    // state. The body preview grows below it.
+    let mut header_spans = vec![
+        Span::styled(
+            format!("{} ", fold_indicator(folded)),
+            style.add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(name.to_owned(), style.add_modifier(Modifier::BOLD)),
+    ];
+    if !input_summary.is_empty() {
+        header_spans.push(Span::raw(" "));
+        header_spans.push(Span::styled(input_summary.to_owned(), style));
     }
+    header_spans.push(Span::raw("  "));
+    if is_error {
+        header_spans.push(Span::styled(
+            "ERROR".to_owned(),
+            tool_error_style().add_modifier(Modifier::BOLD),
+        ));
+    } else {
+        header_spans.push(Span::styled(human_size(output.len()), dim));
+    }
+    if let Some(footer) = duration_footer(duration_ms) {
+        header_spans.push(Span::raw("  "));
+        header_spans.push(Span::styled(footer, dim));
+    }
+    content.push(Line::from(header_spans));
 
-    // Unfolded: header, blank, optional input recap (only when it's
-    // information beyond the header summary - i.e. multi-line bash
-    // commands), output body, blank, footer.
-    out.push(Line::raw(""));
-    if input_recap_worth_showing(name, input_summary, input_pretty) {
-        for body_line in plain_lines(input_pretty, style) {
-            out.push(prefix_line("  ", body_line));
-        }
-        out.push(Line::raw(""));
-    }
+    // Body: tail-truncated. Folded gets a small preview window;
+    // unfolded shows much more. Unfolded with hundreds of huge tool
+    // outputs hurts frame time so the cap is intentional in both.
+    let (cap_lines, cap_bytes) = if folded {
+        (FOLDED_PREVIEW_LINES, FOLDED_PREVIEW_BYTES)
+    } else {
+        (MAX_BODY_LINES, MAX_BODY_BYTES)
+    };
     let body_style = if is_error {
         tool_error_style()
     } else {
         tool_result_style()
     };
-    for body_line in tail_truncated_body(output, body_style) {
-        out.push(prefix_line("  ", body_line));
+    let body = tail_truncated_body(output, body_style, cap_lines, cap_bytes);
+    if !body.is_empty() {
+        content.push(Line::raw(""));
+        for line in body {
+            content.push(line);
+        }
     }
-    out.push(Line::raw(""));
-    out.push(prefix_line(
-        "  ",
-        Line::from(Span::styled(
-            footer_text(output.len(), is_error, duration_ms),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
-        )),
-    ));
-    out
+    if !folded && input_recap_worth_showing(name, input_summary, input_pretty) {
+        content.push(Line::raw(""));
+        content.push(Line::from(Span::styled("input:".to_owned(), dim)));
+        for body_line in plain_lines(input_pretty, style) {
+            content.push(body_line);
+        }
+    }
+    wrap_in_bubble(content, Color::Yellow, TOOL_BUBBLE_BG, width)
 }
+
+/// Lines and bytes shown in a folded tool block's preview. Trades
+/// completeness for screen real estate; the user expands with `zo` to
+/// see more.
+const FOLDED_PREVIEW_LINES: usize = 6;
+/// Byte cap that complements [`FOLDED_PREVIEW_LINES`].
+const FOLDED_PREVIEW_BYTES: usize = 2 * 1024;
 
 /// Heuristic: should we show the pretty-printed input above the output
 /// body? Skip it when the header summary already conveys the call (the
@@ -435,24 +551,16 @@ fn duration_footer(ms: Option<u64>) -> Option<String> {
     }
 }
 
-fn footer_text(byte_count: usize, is_error: bool, duration_ms: Option<u64>) -> String {
-    let mut parts = Vec::new();
-    if let Some(d) = duration_footer(duration_ms) {
-        parts.push(d);
-    }
-    if is_error {
-        parts.push("ERROR".to_owned());
-    } else {
-        parts.push(human_size(byte_count));
-    }
-    parts.join("  ·  ")
-}
-
 /// Render `output` showing its **last** N lines (with a `... ({n}
 /// earlier lines)` marker on top). Tools like `find`, `grep`, and
 /// `bash` typically have the most relevant content near the tail; we
 /// follow pi's convention of preserving that.
-fn tail_truncated_body(output: &str, style: Style) -> Vec<Line<'static>> {
+fn tail_truncated_body(
+    output: &str,
+    style: Style,
+    cap_lines: usize,
+    cap_bytes: usize,
+) -> Vec<Line<'static>> {
     if output.is_empty() {
         return Vec::new();
     }
@@ -461,7 +569,7 @@ fn tail_truncated_body(output: &str, style: Style) -> Vec<Line<'static>> {
     let mut bytes = 0usize;
     let mut shown = Vec::new();
     for line in lines.iter().rev() {
-        if shown.len() >= MAX_BODY_LINES || bytes >= MAX_BODY_BYTES {
+        if shown.len() >= cap_lines || bytes >= cap_bytes {
             break;
         }
         bytes += line.len() + 1;
@@ -472,7 +580,7 @@ fn tail_truncated_body(output: &str, style: Style) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     if elided > 0 {
         out.push(Line::from(Span::styled(
-            format!("... ({elided} earlier lines, ctrl+o to expand)"),
+            format!("... ({elided} earlier lines, zo to expand)"),
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::DIM),
@@ -800,7 +908,7 @@ mod tests {
         let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 80, 12));
         let header = lines
             .iter()
-            .find(|l| l.starts_with("> bash"))
+            .find(|l| l.contains("> bash"))
             .expect("merged tool header");
         assert!(header.contains("ERROR"));
         // Old standalone-result tag should be gone.
@@ -808,7 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn folded_merged_pair_shows_size_and_preview_for_success() {
+    fn folded_merged_pair_shows_size_pill_and_body_preview() {
         let mut buffer = Buffer::new();
         buffer.push_tool_call("c1", "read", "README.md", "{}");
         buffer.push_tool_result("c1", "first line of file\nsecond line\nthird line", false);
@@ -816,31 +924,39 @@ mod tests {
         let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 90, 12));
         let header = lines
             .iter()
-            .find(|l| l.starts_with("> read"))
+            .find(|l| l.contains("> read"))
             .expect("merged folded read header");
-        assert!(header.contains("first line of file"));
         assert!(header.contains(" B"), "expected size pill, got: {header}");
+        assert!(
+            lines.iter().any(|l| l.contains("first line of file")),
+            "expected body preview line"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("third line")),
+            "expected body preview line"
+        );
     }
 
     #[test]
-    fn unfolded_merged_pair_shows_body_and_footer() {
+    fn unfolded_merged_pair_shows_body_and_inline_status() {
         let mut buffer = Buffer::new();
         buffer.push_tool_call("c1", "ls", ".", "{}");
         buffer.push_tool_result("c1", "a.rs\nb.rs\nc.rs", false);
         // Toggling either half flips both, so unfolding via the call
-        // (idx 0) leaves the merged renderer with full body + footer.
+        // (idx 0) leaves the merged renderer with full body visible.
         assert!(buffer.toggle_fold(0));
         let input = InputState::new();
         let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 60, 16));
         // Unfolded fold indicator is `v`.
-        assert!(lines.iter().any(|l| l.starts_with("v ls")));
+        let header = lines
+            .iter()
+            .find(|l| l.contains("v ls"))
+            .expect("unfolded ls header");
+        // Header carries the size + Took inline.
+        assert!(header.contains(" B"), "expected size pill, got: {header}");
+        assert!(header.contains("Took"), "expected Took, got: {header}");
         assert!(lines.iter().any(|l| l.contains("a.rs")));
         assert!(lines.iter().any(|l| l.contains("c.rs")));
-        let footer = lines
-            .iter()
-            .find(|l| l.contains("Took"))
-            .expect("merged footer present");
-        assert!(footer.contains("·"));
     }
 
     #[test]

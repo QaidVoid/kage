@@ -161,6 +161,43 @@ pub fn kimi_for_coding(api_key: impl Into<String>) -> OpenAiProvider {
     )
 }
 
+/// Construct a Z.AI standard-plan provider.
+///
+/// Registers under the `zai` id; resolve as `zai:<model>`.
+#[must_use]
+pub fn zai(api_key: impl Into<String>) -> OpenAiProvider {
+    OpenAiProvider::compatible(
+        api_key,
+        "https://api.z.ai/api/paas/v4",
+        ProviderMetadata {
+            id: "zai".into(),
+            display_name: "Z.AI".into(),
+            supports_caching: false,
+            supports_thinking: false,
+            supports_tool_use: true,
+        },
+    )
+}
+
+/// Construct a Z.AI coding-plan provider.
+///
+/// Registers under the `zai-coding-plan` id; resolve as
+/// `zai-coding-plan:<model>`.
+#[must_use]
+pub fn zai_coding_plan(api_key: impl Into<String>) -> OpenAiProvider {
+    OpenAiProvider::compatible(
+        api_key,
+        "https://api.z.ai/api/coding/paas/v4",
+        ProviderMetadata {
+            id: "zai-coding-plan".into(),
+            display_name: "Z.AI Coding Plan".into(),
+            supports_caching: false,
+            supports_thinking: false,
+            supports_tool_use: true,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

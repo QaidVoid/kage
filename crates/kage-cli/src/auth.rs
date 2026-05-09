@@ -218,8 +218,10 @@ pub fn run_list() -> ExitCode {
         }
     };
     let mut stdout = io::stdout().lock();
-    let _ = writeln!(stdout, "{:<14}  {:<8}  source", "PROVIDER", "STATUS");
-    for provider in KNOWN_PROVIDERS {
+    let _ = writeln!(stdout, "{:<18}  {:<8}  source", "PROVIDER", "STATUS");
+    let mut providers: Vec<&str> = KNOWN_PROVIDERS.to_vec();
+    providers.sort_unstable();
+    for provider in providers {
         let env = env_var_for(provider);
         let from_env = !env.is_empty() && std::env::var(env).is_ok_and(|v| !v.is_empty());
         let from_store = store.get(provider).is_some();
@@ -230,7 +232,7 @@ pub fn run_list() -> ExitCode {
             (false, true) => "auth.json".to_owned(),
             (false, false) => "(unset)".to_owned(),
         };
-        let _ = writeln!(stdout, "{provider:<14}  {status:<8}  {source}");
+        let _ = writeln!(stdout, "{provider:<18}  {status:<8}  {source}");
     }
     ExitCode::SUCCESS
 }

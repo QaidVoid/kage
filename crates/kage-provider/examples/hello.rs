@@ -44,11 +44,11 @@ fn main() {
         "anthropic" => Box::new(AnthropicProvider::new(must_env("ANTHROPIC_API_KEY"))),
         "openai" => Box::new(OpenAiProvider::new(must_env("OPENAI_API_KEY"))),
         "gemini" => Box::new(GeminiProvider::new(must_env("GEMINI_API_KEY"))),
-        "zai" => Box::new(kage_provider::zai::provider(must_env("ZAI_API_KEY"))),
+        "zai" => Box::new(kage_provider::compat::zai(must_env("ZAI_API_KEY"))),
         "zai-coding-plan" => {
             let key =
                 std::env::var("ZAI_CODING_API_KEY").unwrap_or_else(|_| must_env("ZAI_API_KEY"));
-            Box::new(kage_provider::zai::coding_plan(key))
+            Box::new(kage_provider::compat::zai_coding_plan(key))
         }
         other => {
             eprintln!(

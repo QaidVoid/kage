@@ -20,7 +20,7 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use kage_core::{CancelFlag, Content, LoopEvent, Message, Role};
 use kage_loop::{AgentContext, Hooks, LoopConfig, NoopHooks, run};
-use kage_provider::{ProviderRegistry, anthropic, compat, gemini, openai, zai};
+use kage_provider::{ProviderRegistry, anthropic, compat, gemini, openai};
 use kage_session::{EntryId, FORMAT_VERSION, Header, SessionId, SessionSummary, SessionWriter};
 use kage_tools::builtin_registry;
 
@@ -702,10 +702,10 @@ fn build_provider_registry() -> ProviderRegistry {
         registry.register(Arc::new(gemini::GeminiProvider::new(key)));
     }
     if let Some(key) = lookup_key("zai", &store) {
-        registry.register(Arc::new(zai::provider(key)));
+        registry.register(Arc::new(compat::zai(key)));
     }
     if let Some(key) = lookup_key("zai-coding-plan", &store) {
-        registry.register(Arc::new(zai::coding_plan(key)));
+        registry.register(Arc::new(compat::zai_coding_plan(key)));
     }
     if let Some(key) = lookup_key("deepseek", &store) {
         registry.register(Arc::new(compat::deepseek(key)));
@@ -738,9 +738,7 @@ fn build_provider_registry() -> ProviderRegistry {
 }
 
 /// Look up `provider`'s API key, preferring the env var declared by
-/// [`auth::env_var_for`] and falling back to the auth store. For the
-/// rename `zai-coding` -> `zai-coding-plan` we also accept the old id
-/// in the store so existing saves keep working.
+/// [`auth::env_var_for`] and falling back to the auth store.
 fn lookup_key(provider: &str, store: &auth::AuthStore) -> Option<String> {
     let env = auth::env_var_for(provider);
     if !env.is_empty() {
@@ -750,38 +748,48 @@ fn lookup_key(provider: &str, store: &auth::AuthStore) -> Option<String> {
             }
         }
     }
-    if let Some(k) = store.get(provider) {
-        return Some(k.to_owned());
-    }
-    if provider == "zai-coding-plan" {
-        return store.get("zai-coding").map(str::to_owned);
-    }
-    None
+    store.get(provider).map(str::to_owned)
 }
 
-/// Pick a sensible default model: prefer the last model the user
-/// successfully ran (when it still resolves through `registry`), fall
-/// back to a per-provider best guess.
+/// Order in which `default_model` falls back when there is no saved
+/// last-used model: most-popular providers first.
+const DEFAULT_MODEL_PRIORITY: &[&str] = &[
+    "anthropic",
+    "openai",
+    "zai-coding-plan",
+    "zai",
+    "gemini",
+    "deepseek",
+    "groq",
+    "mistral",
+    "cerebras",
+    "xai",
+    "openrouter",
+    "fireworks-ai",
+    "moonshotai",
+    "kimi-for-coding",
+];
+
+/// Pick a sensible default model. Prefers the last model the user
+/// successfully ran (when it still resolves), then walks
+/// [`DEFAULT_MODEL_PRIORITY`], asking the catalog for each registered
+/// provider's preferred model. Returns an empty string when nothing
+/// is wired up; callers are expected to handle that as "no credentials".
 fn default_model(registry: &ProviderRegistry) -> String {
-    let saved = state::State::load().last_model;
-    if let Some(model) = saved
+    if let Some(model) = state::State::load().last_model
         && registry.resolve(&model).is_ok()
     {
         return model;
     }
-    if registry.get("zai").is_some() {
-        return "zai:glm-4.6".to_owned();
+    for candidate in DEFAULT_MODEL_PRIORITY {
+        if registry.get(candidate).is_none() {
+            continue;
+        }
+        if let Some(model) = kage_provider::catalog::preferred_model(candidate) {
+            return format!("{candidate}:{}", model.id);
+        }
     }
-    if registry.get("anthropic").is_some() {
-        return "anthropic:claude-sonnet-4-6".to_owned();
-    }
-    if registry.get("openai").is_some() {
-        return "openai:gpt-4o-mini".to_owned();
-    }
-    if registry.get("gemini").is_some() {
-        return "gemini:gemini-2.0-flash".to_owned();
-    }
-    "zai:glm-4.6".to_owned()
+    String::new()
 }
 
 /// Render one streaming event to stdout. Only text-bearing events produce

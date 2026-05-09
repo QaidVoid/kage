@@ -67,21 +67,46 @@ fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {
         " prompt [{}] ",
         mode_label(input.mode()).to_lowercase()
     ));
+    let scroll_off = input_scroll_offset(input, regions.input);
     let body = Paragraph::new(input.text())
         .wrap(Wrap { trim: false })
+        .scroll((scroll_off, 0))
         .block(RtBlock::default().title(title).borders(Borders::TOP));
     frame.render_widget(body, regions.input);
     if input.mode() == Mode::Insert {
-        if let Some(pos) = input_cursor_position(input, regions.input) {
+        if let Some(pos) = input_cursor_position(input, regions.input, scroll_off) {
             frame.set_cursor_position(pos);
         }
     }
 }
 
+/// How many rows to scroll the input Paragraph so that the cursor row
+/// always stays inside the visible content area. Once the prompt has
+/// more rows than the input area can fit (`INPUT_MAX_LINES = 8`),
+/// scrolling is the only way to keep typing visible.
+fn input_scroll_offset(input: &InputState, area: ratatui::layout::Rect) -> u16 {
+    if area.height < 2 {
+        return 0;
+    }
+    let content_height = usize::from(area.height - 1);
+    if content_height == 0 {
+        return 0;
+    }
+    let prefix = input.text().get(..input.cursor()).unwrap_or("");
+    let cursor_row = prefix.matches('\n').count();
+    let max_visible_row = content_height - 1;
+    let off = cursor_row.saturating_sub(max_visible_row);
+    u16::try_from(off).unwrap_or(u16::MAX)
+}
+
 /// Compute the screen position of the prompt cursor inside the input
 /// region. Returns `None` if the input has no inner area (a one-row
 /// region collapses to the title border alone).
-fn input_cursor_position(input: &InputState, area: ratatui::layout::Rect) -> Option<(u16, u16)> {
+fn input_cursor_position(
+    input: &InputState,
+    area: ratatui::layout::Rect,
+    scroll_off: u16,
+) -> Option<(u16, u16)> {
     if area.height < 2 || area.width == 0 {
         return None;
     }
@@ -90,7 +115,9 @@ fn input_cursor_position(input: &InputState, area: ratatui::layout::Rect) -> Opt
     let max_x = area.x + area.width - 1;
     let max_y = area.y + area.height - 1;
     let prefix = input.text().get(..input.cursor()).unwrap_or("");
-    let row_offset = u16::try_from(prefix.matches('\n').count()).unwrap_or(u16::MAX);
+    let row_offset = u16::try_from(prefix.matches('\n').count())
+        .unwrap_or(u16::MAX)
+        .saturating_sub(scroll_off);
     let last_line = prefix.rsplit('\n').next().unwrap_or("");
     let col_offset = u16::try_from(last_line.chars().count()).unwrap_or(u16::MAX);
     let cx = inner_x.saturating_add(col_offset).min(max_x);
@@ -427,7 +454,7 @@ mod tests {
                 ratatui::crossterm::event::KeyModifiers::NONE,
             ));
         }
-        let pos = super::input_cursor_position(&input, area).unwrap();
+        let pos = super::input_cursor_position(&input, area, 0).unwrap();
         // Inner row = area.y + 1 = 5; cursor column = 5 chars into row.
         assert_eq!(pos, (5, 5));
     }
@@ -442,9 +469,40 @@ mod tests {
         ));
         // Paste pre-builds multi-line content cheaply.
         input.paste("ab\ncd");
-        let pos = super::input_cursor_position(&input, area).unwrap();
+        let pos = super::input_cursor_position(&input, area, 0).unwrap();
         // Two rows below the title border -> y = 0 + 1 + 1 = 2; col = 2.
         assert_eq!(pos, (2, 2));
+    }
+
+    #[test]
+    fn input_scrolls_when_cursor_row_exceeds_visible_height() {
+        // Area height = 4 rows -> 1 border + 3 content rows.
+        let area = Rect::new(0, 0, 40, 4);
+        let mut input = InputState::new();
+        input.handle_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char('i'),
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        // Five rows of content; cursor lands on row 4 (last line).
+        input.paste("a\nb\nc\nd\ne");
+        let off = super::input_scroll_offset(&input, area);
+        // cursor_row=4, max_visible_row=2 -> scroll by 2.
+        assert_eq!(off, 2);
+        // Cursor renders on the last visible row of the area (y = 3).
+        let pos = super::input_cursor_position(&input, area, off).unwrap();
+        assert_eq!(pos.1, 3);
+    }
+
+    #[test]
+    fn input_does_not_scroll_when_text_fits() {
+        let area = Rect::new(0, 0, 40, 6);
+        let mut input = InputState::new();
+        input.handle_key(ratatui::crossterm::event::KeyEvent::new(
+            ratatui::crossterm::event::KeyCode::Char('i'),
+            ratatui::crossterm::event::KeyModifiers::NONE,
+        ));
+        input.paste("a\nb\nc");
+        assert_eq!(super::input_scroll_offset(&input, area), 0);
     }
 
     #[test]

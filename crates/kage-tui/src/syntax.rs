@@ -11,6 +11,9 @@
 //! and bring in ~150 syntaxes, so we deliberately avoid re-init per
 //! call.
 
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
 use std::sync::OnceLock;
 
 use ratatui::style::{Color, Modifier, Style};
@@ -22,6 +25,72 @@ use syntect::util::LinesWithEndings;
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
+
+/// Cache size cap. Holds up to this many distinct highlight results;
+/// older entries get evicted in FIFO order. Sized for "a session's
+/// worth of assistant blocks plus their tool reads", not unbounded.
+const CACHE_CAP: usize = 64;
+
+thread_local! {
+    /// Per-thread cache of highlight results keyed by a 64-bit hash
+    /// of `(text, marker)` where `marker` distinguishes fenced-text
+    /// vs extension-keyed renders. Rendering happens on the main
+    /// thread so a `RefCell` is sufficient; we deliberately avoid a
+    /// Mutex to keep the per-frame cost minimal.
+    static HIGHLIGHT_CACHE: RefCell<HighlightCache> = RefCell::new(HighlightCache::new());
+}
+
+struct HighlightCache {
+    entries: std::collections::HashMap<u64, Vec<Line<'static>>>,
+    order: VecDeque<u64>,
+}
+
+impl HighlightCache {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn get(&self, key: u64) -> Option<Vec<Line<'static>>> {
+        self.entries.get(&key).cloned()
+    }
+
+    fn insert(&mut self, key: u64, lines: Vec<Line<'static>>) {
+        if self.entries.contains_key(&key) {
+            return;
+        }
+        while self.order.len() >= CACHE_CAP {
+            if let Some(stale) = self.order.pop_front() {
+                self.entries.remove(&stale);
+            }
+        }
+        self.order.push_back(key);
+        self.entries.insert(key, lines);
+    }
+}
+
+fn cache_key(text: &str, marker: &str) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    marker.hash(&mut h);
+    h.finish()
+}
+
+fn cached_or<F>(key: u64, build: F) -> Vec<Line<'static>>
+where
+    F: FnOnce() -> Vec<Line<'static>>,
+{
+    HIGHLIGHT_CACHE.with(|c| {
+        if let Some(hit) = c.borrow().get(key) {
+            return hit;
+        }
+        let computed = build();
+        c.borrow_mut().insert(key, computed.clone());
+        computed
+    })
+}
 
 fn syntax_set() -> &'static SyntaxSet {
     SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
@@ -37,21 +106,37 @@ fn theme() -> &'static Theme {
 /// Render `code` using the syntax for the given file extension (no
 /// leading dot). Falls back to plain text styled with `fallback` when
 /// the extension is unknown. Each input line becomes one [`Line`].
+///
+/// Results are cached per-thread on `(code, extension)`; identical
+/// inputs reuse a previous render rather than re-running syntect each
+/// frame. Cache caps at [`CACHE_CAP`] entries with FIFO eviction.
 #[must_use]
 pub fn highlight_extension(code: &str, extension: &str, fallback: Style) -> Vec<Line<'static>> {
-    let ss = syntax_set();
-    let Some(syntax) = ss.find_syntax_by_extension(extension) else {
-        return plain_lines(code, fallback);
-    };
-    highlight_with_syntax(code, syntax, fallback)
+    let key = cache_key(code, extension);
+    cached_or(key, || {
+        let ss = syntax_set();
+        match ss.find_syntax_by_extension(extension) {
+            Some(syntax) => highlight_with_syntax(code, syntax, fallback),
+            None => plain_lines(code, fallback),
+        }
+    })
 }
 
 /// Walk `text` looking for fenced code blocks (```` ```lang ... ``` ````).
 /// Inside each fence the body is highlighted; outside, the text is
 /// rendered with `fallback` style. Lines are split on `\n`; the fence
 /// markers themselves render as dim borders.
+///
+/// Cached per-thread on `(text, "fenced")`. Repeated frames with the
+/// same assistant text reuse the previous render instead of re-running
+/// syntect on every fenced block.
 #[must_use]
 pub fn highlight_fenced(text: &str, fallback: Style) -> Vec<Line<'static>> {
+    let key = cache_key(text, "fenced");
+    cached_or(key, || highlight_fenced_uncached(text, fallback))
+}
+
+fn highlight_fenced_uncached(text: &str, fallback: Style) -> Vec<Line<'static>> {
     let ss = syntax_set();
     let dim = Style::default()
         .fg(Color::DarkGray)

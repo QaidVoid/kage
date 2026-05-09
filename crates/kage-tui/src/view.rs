@@ -145,7 +145,11 @@ fn render_buffer(frame: &mut Frame, regions: Regions, buffer: &mut Buffer) {
     }
     let focus = buffer.effective_focus();
     let mut consumed_results: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // (block_idx, line_start, line_end_exclusive) so we can recenter
+    // scroll on the focused block when focus changes.
+    let mut block_ranges: Vec<(usize, usize, usize)> = Vec::new();
     for (idx, cur) in blocks.iter().enumerate() {
+        let line_start = lines.len();
         match cur {
             Block::ToolCall { call_id, .. } => {
                 if let Some(&result_idx) = result_by_call.get(call_id.as_str()) {
@@ -172,6 +176,7 @@ fn render_buffer(frame: &mut Frame, regions: Regions, buffer: &mut Buffer) {
             }
         }
         lines.push(Line::raw(""));
+        block_ranges.push((idx, line_start, lines.len()));
     }
     // Build the paragraph and ask it how many rendered rows it
     // actually occupies given the current width. `line_count` walks
@@ -181,19 +186,54 @@ fn render_buffer(frame: &mut Frame, regions: Regions, buffer: &mut Buffer) {
     // longer than the buffer area, making the earliest content
     // unreachable.
     let visible = usize::from(regions.buffer.height);
-    let paragraph_full = Paragraph::new(lines).wrap(Wrap { trim: false });
+    // Build a paragraph snapshot we can reuse: counting wrapped rows
+    // and rendering both walk the same span list.
+    let paragraph_full = Paragraph::new(lines.clone()).wrap(Wrap { trim: false });
     let total_rendered = paragraph_full.line_count(regions.buffer.width);
     let max_scroll_back = total_rendered.saturating_sub(visible);
+
+    // Auto-scroll to bring a newly focused block into view. Only
+    // fires when focus changed since the last paint; otherwise the
+    // user keeps full scroll control.
+    if focus != buffer.last_drawn_focus()
+        && let Some(focus_idx) = focus
+        && let Some(&(_, line_start, line_end)) =
+            block_ranges.iter().find(|(i, _, _)| *i == focus_idx)
+    {
+        // Translate the focused block's line range to rendered rows
+        // by counting wrap-aware lines for everything above it.
+        let head_paragraph =
+            Paragraph::new(lines[..line_start].to_vec()).wrap(Wrap { trim: false });
+        let block_paragraph =
+            Paragraph::new(lines[line_start..line_end].to_vec()).wrap(Wrap { trim: false });
+        let rendered_start = head_paragraph.line_count(regions.buffer.width);
+        let rendered_height = block_paragraph.line_count(regions.buffer.width);
+        let rendered_end = rendered_start + rendered_height;
+        // Rows-from-bottom scroll values that keep block visible:
+        let scroll_to_top = total_rendered.saturating_sub(rendered_start + visible);
+        let scroll_to_bottom = total_rendered.saturating_sub(rendered_end);
+        let current = buffer.scroll().min(max_scroll_back);
+        // Already in view: don't disturb.
+        if scroll_to_bottom > current || current > scroll_to_top {
+            // Pick "bottom of block at bottom of viewport" if block
+            // fits, else "top of block at top of viewport".
+            let target = if rendered_height <= visible {
+                scroll_to_bottom
+            } else {
+                scroll_to_top
+            };
+            buffer.set_scroll(target.min(max_scroll_back));
+        }
+    }
+
     let scroll_back = buffer.scroll().min(max_scroll_back);
-    // Persist the clamp so user-driven scroll (which can inflate past
-    // max) re-anchors to a real value; otherwise `j` after `k k k k`
-    // appears unresponsive until the inflated count drains.
     if scroll_back != buffer.scroll() {
         buffer.set_scroll(scroll_back);
     }
     let top_offset = max_scroll_back - scroll_back;
     let scroll = u16::try_from(top_offset).unwrap_or(u16::MAX);
     frame.render_widget(paragraph_full.scroll((scroll, 0)), regions.buffer);
+    buffer.set_last_drawn_focus(focus);
 }
 
 fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {
@@ -592,10 +632,13 @@ fn tool_pair_to_lines(
     // Body: tail-truncated. Folded gets a small preview window;
     // unfolded shows much more. Unfolded with hundreds of huge tool
     // outputs hurts frame time so the cap is intentional in both.
+    // Folded: tight preview cap. Unfolded: no cap. The user
+    // intentionally expanded this block; honor the request. Huge
+    // outputs may cost frame time but that's the trade they chose.
     let (cap_lines, cap_bytes) = if folded {
         (FOLDED_PREVIEW_LINES, FOLDED_PREVIEW_BYTES)
     } else {
-        (MAX_BODY_LINES, MAX_BODY_BYTES)
+        (usize::MAX, usize::MAX)
     };
     let body_style = if is_error {
         tool_error_style()

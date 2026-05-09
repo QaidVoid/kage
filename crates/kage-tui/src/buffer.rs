@@ -181,6 +181,10 @@ pub struct Buffer {
     /// "no explicit selection"; the renderer falls back to the last
     /// foldable block in the buffer for fold-toggle gestures.
     focus: Option<usize>,
+    /// The focus value the renderer last painted. The renderer
+    /// compares this to the current effective focus each frame; when
+    /// they differ, it scrolls so the newly focused block is in view.
+    last_drawn_focus: Option<usize>,
 }
 
 impl Buffer {
@@ -239,6 +243,20 @@ impl Buffer {
     #[must_use]
     pub fn effective_focus(&self) -> Option<usize> {
         self.focus.or_else(|| self.last_foldable_index())
+    }
+
+    /// What focus value the renderer painted last frame. The renderer
+    /// uses this to detect focus changes and auto-scroll the newly
+    /// focused block into view.
+    #[must_use]
+    pub fn last_drawn_focus(&self) -> Option<usize> {
+        self.last_drawn_focus
+    }
+
+    /// Renderer hook: stash the focus value used while painting this
+    /// frame so the next frame can compare and react.
+    pub fn set_last_drawn_focus(&mut self, value: Option<usize>) {
+        self.last_drawn_focus = value;
     }
 
     /// Replace the explicit focus. `None` clears it (renderer falls

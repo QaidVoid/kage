@@ -275,6 +275,89 @@ mod tests {
     }
 
     #[test]
+    fn before_tool_call_can_short_circuit_execution() {
+        struct Allowlist;
+        impl Hooks for Allowlist {
+            fn before_tool_call(
+                &mut self,
+                name: &str,
+                _input: &serde_json::Value,
+            ) -> Option<ToolOutput> {
+                if name == "err" {
+                    Some(ToolOutput {
+                        is_error: true,
+                        text: "blocked by host policy".into(),
+                        structured: None,
+                    })
+                } else {
+                    None
+                }
+            }
+        }
+
+        let tools = registry_with_echo();
+        let cancel = CancelFlag::new();
+        let parent = MessageId::new();
+        let mut hooks = Allowlist;
+
+        let results = dispatch_tool_calls(
+            vec![pending("err", serde_json::json!({}))],
+            &tools,
+            std::path::Path::new("/tmp"),
+            &cancel,
+            parent,
+            &mut hooks,
+            &mut |_| {},
+        )
+        .unwrap();
+
+        assert_eq!(results.len(), 1);
+        match &results[0].content[0] {
+            Content::ToolResultBlock {
+                output, is_error, ..
+            } => {
+                assert!(*is_error);
+                assert_eq!(output, "blocked by host policy");
+            }
+            other => panic!("unexpected content: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn after_tool_call_can_rewrite_output() {
+        struct Redact;
+        impl Hooks for Redact {
+            fn after_tool_call(&mut self, _name: &str, mut output: ToolOutput) -> ToolOutput {
+                output.text = format!("[redacted] {}", output.text);
+                output
+            }
+        }
+
+        let tools = registry_with_echo();
+        let cancel = CancelFlag::new();
+        let parent = MessageId::new();
+        let mut hooks = Redact;
+
+        let results = dispatch_tool_calls(
+            vec![pending("echo", serde_json::json!({"x": 1}))],
+            &tools,
+            std::path::Path::new("/tmp"),
+            &cancel,
+            parent,
+            &mut hooks,
+            &mut |_| {},
+        )
+        .unwrap();
+
+        match &results[0].content[0] {
+            Content::ToolResultBlock { output, .. } => {
+                assert!(output.starts_with("[redacted] "));
+            }
+            other => panic!("unexpected content: {other:?}"),
+        }
+    }
+
+    #[test]
     fn cancellation_aborts_dispatch() {
         let tools = registry_with_echo();
         let cancel = CancelFlag::new();

@@ -589,7 +589,7 @@ pub(crate) fn state_root() -> Result<PathBuf, String> {
 
 /// Resolve the XDG-style directory holding session files:
 /// `$XDG_DATA_HOME/kage/sessions` (default `~/.local/share/kage/sessions`).
-fn sessions_dir() -> Result<PathBuf, String> {
+pub(crate) fn sessions_dir() -> Result<PathBuf, String> {
     Ok(data_root()?.join("sessions"))
 }
 

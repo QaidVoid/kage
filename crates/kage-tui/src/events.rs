@@ -11,7 +11,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use kage_core::{LoopEvent, ToolOutput};
+use kage_core::{Content, LoopEvent, Message, Role, ToolOutput};
 use kage_loop::Hooks;
 
 use crate::buffer::Buffer;
@@ -112,6 +112,70 @@ fn apply_event(buf: &mut Buffer, event: &LoopEvent) {
             buf.push_custom("kage:error", format!("[error] {kind}"), false);
         }
     }
+}
+
+/// Pour a replayed `Vec<Message>` into a fresh [`Buffer`] so the user
+/// sees the prior conversation rendered with the current TUI styling.
+///
+/// The translator walks each message in order: user prompts become user
+/// bubbles, assistant text/thinking blocks become their respective
+/// streamed-and-finished blocks, tool calls and tool results become the
+/// merged tool composites the renderer pairs at draw time. Timing
+/// information from the original session is not preserved (replay
+/// blocks render `Took --`).
+pub fn populate_from_history(buf: &mut Buffer, messages: &[Message]) {
+    for msg in messages {
+        match msg.role {
+            Role::User => {
+                if let Some(text) = first_text(msg) {
+                    buf.push_user(text);
+                }
+            }
+            Role::Assistant => {
+                for block in &msg.content {
+                    match block {
+                        Content::Text { text } => {
+                            buf.append_assistant_delta(text);
+                            buf.finish_streaming();
+                        }
+                        Content::Thinking { text } => {
+                            buf.append_thinking_delta(text);
+                            buf.finish_streaming();
+                        }
+                        Content::ToolCall { id, name, input } => {
+                            let summary = summarize_input(name, input);
+                            let pretty = serde_json::to_string_pretty(input)
+                                .unwrap_or_else(|_| input.to_string());
+                            buf.push_tool_call(id.to_string(), name, summary, pretty);
+                        }
+                        Content::ToolResultBlock { .. }
+                        | Content::Image { .. }
+                        | Content::Custom { .. } => {}
+                    }
+                }
+            }
+            Role::ToolResult => {
+                for block in &msg.content {
+                    if let Content::ToolResultBlock {
+                        call_id,
+                        output,
+                        is_error,
+                    } = block
+                    {
+                        buf.push_tool_result(call_id.to_string(), output.clone(), *is_error);
+                    }
+                }
+            }
+            Role::System => {}
+        }
+    }
+}
+
+fn first_text(msg: &Message) -> Option<String> {
+    msg.content.iter().find_map(|c| match c {
+        Content::Text { text } => Some(text.clone()),
+        _ => None,
+    })
 }
 
 /// One-line summary of a tool's input shown in the folded header.
@@ -359,6 +423,60 @@ mod tests {
             }
             other => panic!("expected Custom, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn populate_from_history_translates_user_assistant_and_tools() {
+        use kage_core::ToolCallId;
+        let mut buf = Buffer::new();
+        let history = vec![
+            Message::new(
+                Role::User,
+                vec![Content::Text {
+                    text: "list files".into(),
+                }],
+                None,
+            ),
+            Message::new(
+                Role::Assistant,
+                vec![
+                    Content::Thinking {
+                        text: "use ls".into(),
+                    },
+                    Content::Text {
+                        text: "looking now".into(),
+                    },
+                    Content::ToolCall {
+                        id: ToolCallId::new("c1"),
+                        name: "ls".into(),
+                        input: json!({"path": "."}),
+                    },
+                ],
+                None,
+            ),
+            Message::new(
+                Role::ToolResult,
+                vec![Content::ToolResultBlock {
+                    call_id: ToolCallId::new("c1"),
+                    output: "a.rs\nb.rs".into(),
+                    is_error: false,
+                }],
+                None,
+            ),
+        ];
+        populate_from_history(&mut buf, &history);
+        let blocks = buf.blocks();
+        assert!(matches!(blocks[0], Block::User { .. }));
+        assert!(matches!(blocks[1], Block::Thinking { .. }));
+        assert!(matches!(blocks[2], Block::Assistant { .. }));
+        assert!(matches!(
+            &blocks[3],
+            Block::ToolCall { name, .. } if name == "ls"
+        ));
+        assert!(matches!(
+            &blocks[4],
+            Block::ToolResult { output, .. } if output == "a.rs\nb.rs"
+        ));
     }
 
     #[test]

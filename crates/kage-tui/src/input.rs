@@ -52,6 +52,9 @@ pub enum InputAction {
     Cancel,
     /// Open the in-TUI model picker overlay.
     OpenModelPicker,
+    /// Open the in-TUI session picker overlay so the user can resume
+    /// an earlier conversation in place.
+    OpenSessionPicker,
 }
 
 /// Cap on retained history entries. The host's persistence layer is
@@ -214,6 +217,7 @@ impl InputState {
             KeyCode::Char('/') => vec![InputAction::BeginSearch],
             KeyCode::Char('c') if ctrl => vec![InputAction::Cancel],
             KeyCode::Char('p') if ctrl => vec![InputAction::OpenModelPicker],
+            KeyCode::Char('r') if ctrl => vec![InputAction::OpenSessionPicker],
             _ => Vec::new(),
         }
     }

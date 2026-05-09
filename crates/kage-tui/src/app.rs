@@ -81,7 +81,8 @@ fn log_key_event(key: &ratatui::crossterm::event::KeyEvent) {
 
 /// Request the host should act on. Either the user submitted a prompt
 /// (the host runs the agent loop in a worker thread), the user asked
-/// to cancel the in-flight turn, or the user picked a different model.
+/// to cancel the in-flight turn, the user picked a different model,
+/// or the user picked a prior session to resume into the current TUI.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RunRequest {
     /// New user prompt to submit to the agent loop.
@@ -90,6 +91,10 @@ pub enum RunRequest {
     Cancel,
     /// Switch to a different `provider:model` for subsequent turns.
     SwitchModel(String),
+    /// Replay the session at the given path into the conversation
+    /// buffer and pre-load its history into the agent context. The
+    /// next [`RunRequest::Submit`] continues from that history.
+    ResumeSession(std::path::PathBuf),
 }
 
 /// Outcome of [`App::run`].
@@ -98,6 +103,21 @@ pub enum AppExit {
     /// User pressed `Ctrl+Q` / `:q` to leave the TUI cleanly.
     Quit,
 }
+
+/// Which overlay picker is currently open. Determines how
+/// [`PickerEvent::Picked`] is dispatched: a model id triggers a switch
+/// while a session path triggers a resume.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PickerKind {
+    Model,
+    Session,
+}
+
+/// Closure that returns the current set of resumable sessions on
+/// demand. Listing happens on the main thread when the user presses
+/// `Ctrl+R`, so a fresh scan reflects any sessions written elsewhere
+/// since the TUI started.
+pub type SessionLister = Box<dyn Fn() -> Vec<PickItem> + Send + 'static>;
 
 /// Runtime state for the interactive TUI loop.
 pub struct App {
@@ -110,6 +130,12 @@ pub struct App {
     /// Active modal overlay, if any. Drives both render and input
     /// routing while present.
     picker: Option<OverlayPicker>,
+    /// Which picker is open, mirroring [`Self::picker`]. Used to
+    /// dispatch the picked value to the right `RunRequest`.
+    picker_kind: Option<PickerKind>,
+    /// Provider of resumable sessions for the session picker. None
+    /// disables the picker (Ctrl+R is a no-op).
+    session_lister: Option<SessionLister>,
     /// Open `:` command line, if any. While present it owns key input
     /// and replaces the status bar's mode pill.
     cmdline: Option<CommandLine>,
@@ -126,6 +152,8 @@ impl App {
             requests,
             model_choices: Vec::new(),
             picker: None,
+            picker_kind: None,
+            session_lister: None,
             cmdline: None,
         }
     }
@@ -142,6 +170,12 @@ impl App {
     /// recent.
     pub fn set_history(&mut self, entries: Vec<String>) {
         self.input.set_history(entries);
+    }
+
+    /// Register the closure that produces the session picker's items
+    /// at the moment of opening. Without this, `Ctrl+R` is a no-op.
+    pub fn set_session_lister(&mut self, lister: SessionLister) {
+        self.session_lister = Some(lister);
     }
 
     /// Drive the event loop until the user quits. Returns the exit
@@ -305,10 +339,20 @@ impl App {
             PickerEvent::Pending => {}
             PickerEvent::Cancelled => {
                 self.picker = None;
+                self.picker_kind = None;
             }
             PickerEvent::Picked(value) => {
+                let kind = self.picker_kind;
                 self.picker = None;
-                let _ = self.send_request(RunRequest::SwitchModel(value));
+                self.picker_kind = None;
+                let req = match kind {
+                    Some(PickerKind::Model) => RunRequest::SwitchModel(value),
+                    Some(PickerKind::Session) => {
+                        RunRequest::ResumeSession(std::path::PathBuf::from(value))
+                    }
+                    None => return None,
+                };
+                let _ = self.send_request(req);
             }
         }
         None
@@ -340,6 +384,16 @@ impl App {
                         "Switch model",
                         self.model_choices.clone(),
                     ));
+                    self.picker_kind = Some(PickerKind::Model);
+                }
+            }
+            InputAction::OpenSessionPicker => {
+                if let Some(lister) = self.session_lister.as_ref() {
+                    let items = lister();
+                    if !items.is_empty() {
+                        self.picker = Some(OverlayPicker::new("Resume session", items));
+                        self.picker_kind = Some(PickerKind::Session);
+                    }
                 }
             }
             InputAction::BeginCommand => {

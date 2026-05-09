@@ -17,8 +17,12 @@ use kage_core::{CancelFlag, Content, Message, Role};
 use kage_loop::{AgentContext, LoopConfig, NoopHooks, run};
 use kage_plugin::PluginRuntime;
 use kage_provider::ProviderRegistry;
+use kage_session::SessionSummary;
 use kage_tools::ToolRegistry;
-use kage_tui::{App, RunRequest, SharedBuffer, Tui, TuiHooks, buffer_host_log, shared_buffer};
+use kage_tui::{
+    App, PickItem, RunRequest, SharedBuffer, Tui, TuiHooks, buffer_host_log, populate_from_history,
+    shared_buffer,
+};
 
 use crate::plugins::{PluginEventHooks, setup_runtime_with_sink};
 
@@ -113,6 +117,9 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     let mut app = App::new(buffer, tx);
     app.set_model_choices(model_choices);
     app.set_history(crate::history::load());
+    if let Ok(dir) = crate::sessions_dir() {
+        app.set_session_lister(Box::new(move || list_session_choices(&dir)));
+    }
     let result = app.run(&mut tui);
     drop(tui);
     drop(app);
@@ -225,6 +232,9 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         }
                     }
                 }
+                RunRequest::ResumeSession(path) => {
+                    handle_resume(&registry, &active_qualified, &cx, &buffer, &path);
+                }
                 RunRequest::Cancel => cancel.cancel(),
                 RunRequest::SwitchModel(new_model) => {
                     // Validate before switching so a typo doesn't break
@@ -262,6 +272,106 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
             }
         }
     })
+}
+
+/// Build the picker rows for the `Ctrl+R` session picker. Listing
+/// happens at picker-open time so newly recorded sessions appear
+/// without needing to restart the TUI.
+fn list_session_choices(dir: &std::path::Path) -> Vec<PickItem> {
+    let Ok(summaries) = kage_session::list(dir) else {
+        return Vec::new();
+    };
+    summaries
+        .into_iter()
+        .map(|s| {
+            let label = format_session_label(&s);
+            PickItem::simple(s.path.to_string_lossy().into_owned()).with_label(label)
+        })
+        .collect()
+}
+
+/// One-line description of a session for the picker: short id, last
+/// user prompt (truncated), and an updated-at timestamp.
+fn format_session_label(s: &SessionSummary) -> String {
+    let id = s.id.to_string();
+    let short_id: String = id.chars().take(8).collect();
+    let preview = s.last_user_prompt.as_deref().map_or_else(
+        || "(no user prompt)".to_owned(),
+        |t| {
+            let single_line = t.replace('\n', " ");
+            truncate(&single_line, 60)
+        },
+    );
+    let updated = s.updated_at.format("%Y-%m-%d %H:%M");
+    format!("{short_id}  {preview:<60}  {updated}")
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_owned();
+    }
+    let cut: String = s.chars().take(max.saturating_sub(3)).collect();
+    format!("{cut}...")
+}
+
+/// Replay `path` into the live TUI: clear the buffer, replace
+/// `cx.history` with the recorded one, point `active_qualified` at the
+/// session's model (validating it resolves), and repopulate the
+/// buffer so the user sees the prior conversation rendered with the
+/// current TUI styling.
+fn handle_resume(
+    registry: &Arc<ProviderRegistry>,
+    active_qualified: &Arc<Mutex<String>>,
+    cx: &Arc<Mutex<AgentContext>>,
+    buffer: &SharedBuffer,
+    path: &std::path::Path,
+) {
+    let replay = match kage_session::replay(path) {
+        Ok(r) => r,
+        Err(e) => {
+            if let Ok(mut buf) = buffer.lock() {
+                buf.push_custom(
+                    "kage:error",
+                    format!("resume {}: {e}", path.display()),
+                    false,
+                );
+            }
+            return;
+        }
+    };
+    let resolved = match registry.resolve(&replay.model) {
+        Ok(r) => r,
+        Err(e) => {
+            if let Ok(mut buf) = buffer.lock() {
+                buf.push_custom(
+                    "kage:error",
+                    format!("resume: model {} unavailable: {e}", replay.model),
+                    false,
+                );
+            }
+            return;
+        }
+    };
+    {
+        let mut cx_guard = cx.lock().expect("agent context mutex poisoned");
+        cx_guard.history.clone_from(&replay.history);
+        cx_guard.model.clone_from(&resolved.model);
+    }
+    active_qualified
+        .lock()
+        .expect("active model mutex poisoned")
+        .clone_from(&replay.model);
+    if let Ok(mut buf) = buffer.lock() {
+        buf.clear();
+        populate_from_history(&mut buf, &replay.history);
+        let id = replay.header.session.to_string();
+        let short: String = id.chars().take(8).collect();
+        buf.push_custom(
+            "kage:notify",
+            format!("resumed session {short} on {}", replay.model),
+            false,
+        );
+    }
 }
 
 /// Build the picker rows the App offers when the user hits `Ctrl+P`.

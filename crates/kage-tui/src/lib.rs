@@ -13,10 +13,11 @@ pub mod picker;
 pub mod terminal;
 pub mod view;
 
-pub use app::{App, AppExit, RunRequest};
+pub use app::{App, AppExit, RunRequest, SessionLister};
 pub use buffer::{Block, Buffer};
 pub use cmdline::{CommandLine, CommandLineEvent};
 pub use error::TuiError;
+pub use events::populate_from_history;
 pub use events::{SharedBuffer, TuiHooks, shared_buffer};
 pub use hostlog::buffer_host_log;
 pub use input::{HISTORY_MAX, InputAction, InputState, Mode};

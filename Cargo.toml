@@ -41,7 +41,7 @@ html2text = "0.17.1"
 ignore = "0.4.25"
 mlua = { version = "0.11.6", features = ["lua54", "vendored", "send"] }
 notify = "8.2.0"
-ratatui = "0.30.0"
+ratatui = { version = "0.30.0", features = ["unstable-rendered-line-info"] }
 rpassword = "7.5.2"
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }

@@ -215,13 +215,13 @@ impl App {
     }
 
     fn draw(&mut self, tui: &mut Tui) -> Result<(), TuiError> {
-        let buffer = self.buffer.lock().expect("buffer mutex poisoned");
+        let mut buffer = self.buffer.lock().expect("buffer mutex poisoned");
         let input_text_lines = u16::try_from(text_row_count(self.input.text())).unwrap_or(u16::MAX);
         let input_height = input_height_for(input_text_lines + 1);
         let cmdline = self.cmdline.as_ref();
         tui.terminal().draw(|frame| {
             let regions = split(frame.area(), input_height);
-            view::render(frame, regions, &buffer, &self.input, cmdline);
+            view::render(frame, regions, &mut buffer, &self.input, cmdline);
             if let Some(picker) = self.picker.as_mut() {
                 picker.render(frame, frame.area());
             }
@@ -469,7 +469,7 @@ impl App {
         B: ratatui::backend::Backend,
         B::Error: std::error::Error + Send + Sync + 'static,
     {
-        let buffer = self.buffer.lock().expect("buffer mutex poisoned");
+        let mut buffer = self.buffer.lock().expect("buffer mutex poisoned");
         let input_text_lines = u16::try_from(text_row_count(self.input.text())).unwrap_or(u16::MAX);
         let input_height = input_height_for(input_text_lines + 1);
         let picker = self.picker.as_mut();
@@ -477,7 +477,7 @@ impl App {
         terminal
             .draw(|frame| {
                 let regions = split(frame.area(), input_height);
-                view::render(frame, regions, &buffer, &self.input, cmdline);
+                view::render(frame, regions, &mut buffer, &self.input, cmdline);
                 if let Some(picker) = picker {
                     picker.render(frame, frame.area());
                 }

@@ -21,10 +21,17 @@ use crate::input::{InputState, Mode};
 use crate::layout::Regions;
 
 /// Paint the entire TUI for one frame.
+///
+/// Takes `buffer` mutably so the renderer can write back the clamped
+/// scroll position. Without this, when `Buffer::scroll` inflates past
+/// the actual max (because the user kept pressing `k`), pressing `j`
+/// has no visible effect until the inflated count drains down to the
+/// renderer-clamped value. Persisting the clamp here keeps user input
+/// in sync with what's on screen.
 pub fn render(
     frame: &mut Frame,
     regions: Regions,
-    buffer: &Buffer,
+    buffer: &mut Buffer,
     input: &InputState,
     cmdline: Option<&CommandLine>,
 ) {
@@ -78,7 +85,7 @@ fn place_cmdline_cursor(frame: &mut Frame, regions: Regions, cmdline: &CommandLi
     frame.set_cursor_position((cx, row.y));
 }
 
-fn render_buffer(frame: &mut Frame, regions: Regions, buffer: &Buffer) {
+fn render_buffer(frame: &mut Frame, regions: Regions, buffer: &mut Buffer) {
     let mut lines: Vec<Line<'_>> = Vec::new();
     let blocks = buffer.blocks();
     // Index every ToolResult by its call_id so we can pair with a
@@ -119,19 +126,27 @@ fn render_buffer(frame: &mut Frame, regions: Regions, buffer: &Buffer) {
         }
         lines.push(Line::raw(""));
     }
-    let total_lines = lines.len();
+    // Build the paragraph and ask it how many rendered rows it
+    // actually occupies given the current width. `line_count` walks
+    // the same WordWrapper logic the renderer uses, so wrapped long
+    // lines are counted at their true visual height. Without this we
+    // used `lines.len()` which underestimates whenever any line is
+    // longer than the buffer area, making the earliest content
+    // unreachable.
     let visible = usize::from(regions.buffer.height);
-    // [`Buffer::scroll`] is rows from the bottom; the Paragraph wants
-    // rows from the top. Translate, clamping so the viewport never
-    // drops past the last line of content.
-    let max_scroll_back = total_lines.saturating_sub(visible);
+    let paragraph_full = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let total_rendered = paragraph_full.line_count(regions.buffer.width);
+    let max_scroll_back = total_rendered.saturating_sub(visible);
     let scroll_back = buffer.scroll().min(max_scroll_back);
+    // Persist the clamp so user-driven scroll (which can inflate past
+    // max) re-anchors to a real value; otherwise `j` after `k k k k`
+    // appears unresponsive until the inflated count drains.
+    if scroll_back != buffer.scroll() {
+        buffer.set_scroll(scroll_back);
+    }
     let top_offset = max_scroll_back - scroll_back;
     let scroll = u16::try_from(top_offset).unwrap_or(u16::MAX);
-    let paragraph = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
-    frame.render_widget(paragraph, regions.buffer);
+    frame.render_widget(paragraph_full.scroll((scroll, 0)), regions.buffer);
 }
 
 fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {
@@ -379,58 +394,56 @@ fn wrap_in_bubble(
     let mut out: Vec<Line<'static>> = Vec::with_capacity(content.len() + 2);
     out.push(pad_row());
     for line in content {
-        let truncated = truncate_spans(line.spans, max_content);
-        let used_chars: usize = truncated.iter().map(|s| s.content.chars().count()).sum();
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(truncated.len() + 3);
-        spans.push(Span::styled("\u{258e}".to_owned(), rule_style));
-        spans.push(Span::styled(" ".repeat(LEFT_PAD), bg_only));
-        for s in truncated {
-            spans.push(Span::styled(s.content, s.style.bg(bg)));
+        for visual_spans in split_line_into_rows(line, max_content) {
+            let used_chars: usize = visual_spans.iter().map(|s| s.content.chars().count()).sum();
+            let mut spans: Vec<Span<'static>> = Vec::with_capacity(visual_spans.len() + 3);
+            spans.push(Span::styled("\u{258e}".to_owned(), rule_style));
+            spans.push(Span::styled(" ".repeat(LEFT_PAD), bg_only));
+            for s in visual_spans {
+                spans.push(Span::styled(s.content, s.style.bg(bg)));
+            }
+            let used = LEFT_PAD + used_chars;
+            if used < interior {
+                spans.push(Span::styled(" ".repeat(interior - used), bg_only));
+            }
+            out.push(Line::from(spans));
         }
-        let used = LEFT_PAD + used_chars;
-        if used < interior {
-            spans.push(Span::styled(" ".repeat(interior - used), bg_only));
-        }
-        out.push(Line::from(spans));
     }
     out.push(pad_row());
     out
 }
 
-/// Truncate a sequence of styled spans so the combined char count is
-/// at most `max`, appending a single-character ellipsis if any span
-/// was clipped. Each span keeps its own style; the ellipsis inherits
-/// the style of the span it lands on.
-fn truncate_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
-    let mut out = Vec::with_capacity(spans.len());
-    let mut used = 0usize;
-    let mut span_iter = spans.into_iter().peekable();
-    while let Some(s) = span_iter.next() {
-        let len = s.content.chars().count();
-        if used + len <= max {
-            used += len;
-            out.push(s);
-            continue;
-        }
-        // Need to clip this span (and drop any remaining).
-        let avail = max.saturating_sub(used);
-        if avail > 0 {
-            let cut: String = s.content.chars().take(avail.saturating_sub(1)).collect();
-            out.push(Span::styled(format!("{cut}\u{2026}"), s.style));
-        } else if let Some(last) = out.last_mut() {
-            // Trim one char from the previous span to make room for `…`.
-            let mut chars: Vec<char> = last.content.chars().collect();
-            if !chars.is_empty() {
-                chars.pop();
-            }
-            chars.push('\u{2026}');
-            last.content = chars.into_iter().collect::<String>().into();
-        }
-        // Drain remaining spans — they don't fit.
-        for _ in span_iter.by_ref() {}
-        break;
+/// Split one logical line into one or more visual rows, each holding
+/// at most `max` characters across its spans. Style is preserved per
+/// span; long spans are chunked. Empty input yields one empty row.
+///
+/// This is character-wise, not word-wise: it never breaks mid-word at
+/// a fancy boundary, just at exactly `max` chars. Trade off: simple
+/// math, OK for code/path content; English prose can mid-word break.
+fn split_line_into_rows(line: Line<'static>, max: usize) -> Vec<Vec<Span<'static>>> {
+    if max == 0 || line.spans.is_empty() {
+        return vec![Vec::new()];
     }
-    out
+    let mut rows: Vec<Vec<Span<'static>>> = vec![Vec::new()];
+    let mut row_used = 0usize;
+    for span in line.spans {
+        let style = span.style;
+        let chars: Vec<char> = span.content.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if row_used >= max {
+                rows.push(Vec::new());
+                row_used = 0;
+            }
+            let avail = max - row_used;
+            let take = avail.min(chars.len() - i);
+            let piece: String = chars[i..i + take].iter().collect();
+            rows.last_mut().unwrap().push(Span::styled(piece, style));
+            i += take;
+            row_used += take;
+        }
+    }
+    rows
 }
 
 fn plain_lines(text: &str, style: Style) -> Vec<Line<'static>> {
@@ -854,7 +867,7 @@ mod tests {
     use super::*;
     use crate::buffer::Buffer;
 
-    fn snapshot_lines(buffer: &Buffer, input: &InputState, area: Rect) -> Vec<String> {
+    fn snapshot_lines(buffer: &mut Buffer, input: &InputState, area: Rect) -> Vec<String> {
         let backend = TestBackend::new(area.width, area.height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -884,7 +897,7 @@ mod tests {
         // doesn't make it to the screen.
         assert!(buffer.toggle_fold(0));
         let input = InputState::new();
-        let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 40, 6));
+        let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 40, 6));
         assert!(lines.iter().any(|l| l.contains("[thinking]")));
         assert!(!lines.iter().any(|l| l.contains("step 1")));
     }
@@ -895,7 +908,7 @@ mod tests {
         buffer.append_thinking_delta("step 1\nstep 2");
         buffer.finish_streaming();
         let input = InputState::new();
-        let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 40, 8));
+        let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 40, 8));
         assert!(lines.iter().any(|l| l.contains("[thinking]")));
         assert!(lines.iter().any(|l| l.contains("step 1")));
         assert!(lines.iter().any(|l| l.contains("step 2")));
@@ -907,7 +920,7 @@ mod tests {
         buffer.append_assistant_delta("hi there");
         buffer.finish_streaming();
         let input = InputState::new();
-        let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 40, 5));
+        let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 40, 5));
         assert!(lines.iter().any(|l| l.contains("hi there")));
         // No `[assistant]` header tag.
         assert!(!lines.iter().any(|l| l.contains("[assistant]")));
@@ -918,7 +931,7 @@ mod tests {
         let mut buffer = Buffer::new();
         buffer.push_user("hello");
         let input = InputState::new();
-        let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 40, 5));
+        let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 40, 5));
         // Bubble keeps the prompt text intact; trailing whitespace is
         // trimmed by the test's snapshot helper.
         assert!(lines.iter().any(|l| l.contains("hello")));
@@ -930,7 +943,7 @@ mod tests {
         let mut buffer = Buffer::new();
         buffer.push_tool_call("c1", "bash", "ls -la", "{\n  \"cmd\": \"ls -la\"\n}");
         let input = InputState::new();
-        let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 60, 6));
+        let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 6));
         let header = lines
             .iter()
             .find(|l| l.contains("bash"))
@@ -947,7 +960,7 @@ mod tests {
         buffer.push_tool_call("c1", "bash", "ls -la", "{\n  \"cmd\": \"ls -la\"\n}");
         assert!(buffer.toggle_fold(0));
         let input = InputState::new();
-        let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 60, 12));
+        let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 12));
         assert!(lines.iter().any(|l| l.contains("bash")));
         assert!(lines.iter().any(|l| l.contains("\"cmd\"")));
     }
@@ -958,7 +971,7 @@ mod tests {
         buffer.push_tool_call("c1", "bash", "false", "{}");
         buffer.push_tool_result("c1", "exit 1", true);
         let input = InputState::new();
-        let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 80, 12));
+        let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 80, 12));
         let header = lines
             .iter()
             .find(|l| l.contains("> bash"))
@@ -974,7 +987,7 @@ mod tests {
         buffer.push_tool_call("c1", "read", "README.md", "{}");
         buffer.push_tool_result("c1", "first line of file\nsecond line\nthird line", false);
         let input = InputState::new();
-        let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 90, 12));
+        let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 90, 12));
         let header = lines
             .iter()
             .find(|l| l.contains("> read"))
@@ -999,7 +1012,7 @@ mod tests {
         // (idx 0) leaves the merged renderer with full body visible.
         assert!(buffer.toggle_fold(0));
         let input = InputState::new();
-        let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 60, 16));
+        let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 16));
         // Unfolded fold indicator is `v`.
         let header = lines
             .iter()
@@ -1161,13 +1174,13 @@ mod tests {
 
     #[test]
     fn status_bar_shows_mode_label() {
-        let buffer = Buffer::new();
+        let mut buffer = Buffer::new();
         let mut input = InputState::new();
         input.handle_key(ratatui::crossterm::event::KeyEvent::new(
             ratatui::crossterm::event::KeyCode::Char('i'),
             ratatui::crossterm::event::KeyModifiers::NONE,
         ));
-        let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 20, 4));
+        let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 20, 4));
         assert!(lines[0].contains("INS"));
     }
 }

@@ -211,11 +211,13 @@ impl Buffer {
         self.scroll == 0
     }
 
-    /// Set the scroll offset (rows up from the bottom). Clamped at the
-    /// model layer to `[0, total_lines]`; the renderer further clamps
-    /// against the viewport height each frame.
+    /// Set the scroll offset (rows up from the bottom). No model-layer
+    /// cap is applied here because the model doesn't know about line
+    /// wrapping: a logical line may render as multiple visual rows
+    /// once Paragraph wraps it. The renderer holds the authoritative
+    /// max each frame and clamps there.
     pub fn set_scroll(&mut self, scroll: usize) {
-        self.scroll = scroll.min(self.total_lines());
+        self.scroll = scroll;
     }
 
     /// Push a fully-formed user prompt.
@@ -507,11 +509,13 @@ mod tests {
     }
 
     #[test]
-    fn scroll_clamps_to_total_lines() {
+    fn set_scroll_does_not_cap_at_logical_total_lines() {
         let mut buf = Buffer::new();
         buf.push_user("a\nb\nc");
+        // The model does not clamp; the renderer will, since only it
+        // knows how many visual rows the wrapped paragraph occupies.
         buf.set_scroll(99);
-        assert_eq!(buf.scroll(), 3);
+        assert_eq!(buf.scroll(), 99);
     }
 
     #[test]

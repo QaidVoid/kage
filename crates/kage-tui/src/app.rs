@@ -96,6 +96,17 @@ pub enum RunRequest {
     /// buffer and pre-load its history into the agent context. The
     /// next [`RunRequest::Submit`] continues from that history.
     ResumeSession(std::path::PathBuf),
+    /// Invoke a plugin-registered command by name with the trailing
+    /// argument string. The host runs it on the worker thread (so the
+    /// main thread keeps painting) and pushes its output as a custom
+    /// block.
+    InvokePluginCommand {
+        /// Plugin command name (without the leading `/` or `:`).
+        name: String,
+        /// Whatever followed the command on the cmdline; an empty
+        /// string when the command takes no arguments.
+        args: String,
+    },
 }
 
 /// Outcome of [`App::run`].
@@ -170,6 +181,9 @@ pub struct App {
     /// switches mid-session).
     status_model: Option<Arc<Mutex<String>>>,
     status_session_id: Option<String>,
+    /// Plugin-registered command names + descriptions for palette
+    /// display. Builtin names take precedence on collision.
+    plugin_commands: Vec<(String, String)>,
 }
 
 impl App {
@@ -188,7 +202,17 @@ impl App {
             cmdline: None,
             status_model: None,
             status_session_id: None,
+            plugin_commands: Vec::new(),
         }
+    }
+
+    /// Register the plugin commands the host wants exposed in the
+    /// palette and on the `:` line. Pairs are `(name, description)`.
+    /// Names that collide with built-ins are dropped; the host should
+    /// log a warning at registration time.
+    pub fn set_plugin_commands(&mut self, mut commands: Vec<(String, String)>) {
+        commands.retain(|(n, _)| !BUILTIN_COMMANDS.iter().any(|(b, _)| *b == n));
+        self.plugin_commands = commands;
     }
 
     /// Hand the App a shared handle on the active `provider:model`
@@ -361,7 +385,14 @@ impl App {
             }
             "" => None,
             other => {
-                self.push_error(format!("unknown command: {other}"));
+                if self.plugin_commands.iter().any(|(n, _)| n == other) {
+                    let _ = self.send_request(RunRequest::InvokePluginCommand {
+                        name: other.to_owned(),
+                        args: rest.to_owned(),
+                    });
+                } else {
+                    self.push_error(format!("unknown command: {other}"));
+                }
                 None
             }
         }
@@ -447,7 +478,11 @@ impl App {
                 }
             }
             InputAction::OpenCommandPalette => {
-                let items = builtin_command_picker_items();
+                let mut items = builtin_command_picker_items();
+                for (name, desc) in &self.plugin_commands {
+                    let label = format!("{name:<14}  {desc}  [plugin]");
+                    items.push(PickItem::simple(name.clone()).with_label(label));
+                }
                 if !items.is_empty() {
                     self.picker = Some(OverlayPicker::new("Run command", items));
                     self.picker_kind = Some(PickerKind::Command);

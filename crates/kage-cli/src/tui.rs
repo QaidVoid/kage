@@ -79,9 +79,13 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     };
 
     let mut tools = kage_tools::builtin_registry();
+    let mut plugin_command_listing: Vec<(String, String)> = Vec::new();
     if let Some(rt) = plugin_runtime.as_ref() {
         for tool in rt.registered_tools() {
             tools.register(tool);
+        }
+        for cmd in rt.registered_commands() {
+            plugin_command_listing.push((cmd.name().to_owned(), cmd.description().to_owned()));
         }
     }
     let cancel = CancelFlag::new();
@@ -138,6 +142,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     app.set_model_choices(model_choices);
     app.set_history(crate::history::load());
     app.set_status_model(Arc::clone(&active_qualified));
+    app.set_plugin_commands(plugin_command_listing);
     if let Some(p) = session_path.as_ref() {
         let path = p.lock().expect("session path mutex poisoned").clone();
         if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
@@ -262,6 +267,47 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         session_path.as_ref(),
                         &path,
                     );
+                }
+                RunRequest::InvokePluginCommand { name, args } => {
+                    if let Some(rt) = plugin_runtime.as_ref() {
+                        let cmd = rt
+                            .registered_commands()
+                            .into_iter()
+                            .find(|c| c.name() == name);
+                        if let Some(cmd) = cmd {
+                            match cmd.invoke(&args, &serde_json::Value::Null) {
+                                Ok(out) if !out.text.is_empty() => {
+                                    if let Ok(mut buf) = buffer.lock() {
+                                        buf.push_custom(
+                                            if out.is_error {
+                                                "kage:error"
+                                            } else {
+                                                "kage:plugin"
+                                            },
+                                            out.text,
+                                            false,
+                                        );
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    if let Ok(mut buf) = buffer.lock() {
+                                        buf.push_custom(
+                                            "kage:error",
+                                            format!("plugin command {name}: {e}"),
+                                            false,
+                                        );
+                                    }
+                                }
+                            }
+                        } else if let Ok(mut buf) = buffer.lock() {
+                            buf.push_custom(
+                                "kage:error",
+                                format!("no plugin command: {name}"),
+                                false,
+                            );
+                        }
+                    }
                 }
                 RunRequest::Cancel => cancel.cancel(),
                 RunRequest::SwitchModel(new_model) => {

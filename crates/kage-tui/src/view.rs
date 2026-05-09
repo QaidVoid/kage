@@ -30,6 +30,40 @@ pub struct StatusCtx<'a> {
     pub session_id: Option<&'a str>,
 }
 
+/// What kind of attention a block should draw on this frame: the
+/// navigation head (white rule), part of a visual selection (magenta
+/// rule), or neither. `Ord` is implemented so merged tool pairs can
+/// pick `max` across both halves; Focused outranks Selected outranks
+/// None.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Emphasis {
+    /// No special highlight.
+    None,
+    /// Block is inside the visual selection range, but isn't the
+    /// navigation head.
+    Selected,
+    /// Block is the navigation head (and possibly also in a visual
+    /// selection - it always is, since the head is in range).
+    Focused,
+}
+
+impl Emphasis {
+    fn rule_glyph(self) -> &'static str {
+        match self {
+            Self::None => "\u{258e}",
+            Self::Focused | Self::Selected => "\u{258c}",
+        }
+    }
+
+    fn rule_color(self, base: Color) -> Color {
+        match self {
+            Self::None => base,
+            Self::Focused => Color::White,
+            Self::Selected => Color::Magenta,
+        }
+    }
+}
+
 /// Paint the entire TUI for one frame.
 ///
 /// Takes `buffer` mutably so the renderer can write back the clamped
@@ -128,6 +162,7 @@ fn place_cmdline_cursor(frame: &mut Frame, regions: Regions, cmdline: &CommandLi
     frame.set_cursor_position((cx, row.y));
 }
 
+#[allow(clippy::too_many_lines)]
 fn render_buffer(frame: &mut Frame, regions: Regions, buffer: &mut Buffer) {
     let mut lines: Vec<Line<'_>> = Vec::new();
     let blocks = buffer.blocks();
@@ -144,6 +179,18 @@ fn render_buffer(frame: &mut Frame, regions: Regions, buffer: &mut Buffer) {
         }
     }
     let focus = buffer.effective_focus();
+    let visual_range = buffer.visual_range();
+    let in_selection =
+        |idx: usize| -> bool { visual_range.is_some_and(|(lo, hi)| idx >= lo && idx <= hi) };
+    let emphasis = |idx: usize| -> Emphasis {
+        if focus == Some(idx) {
+            Emphasis::Focused
+        } else if in_selection(idx) {
+            Emphasis::Selected
+        } else {
+            Emphasis::None
+        }
+    };
     let mut consumed_results: std::collections::HashSet<usize> = std::collections::HashSet::new();
     // (block_idx, line_start, line_end_exclusive) so we can recenter
     // scroll on the focused block when focus changes. For merged
@@ -158,14 +205,20 @@ fn render_buffer(frame: &mut Frame, regions: Regions, buffer: &mut Buffer) {
                 if let Some(&result_idx) = result_by_call.get(call_id.as_str()) {
                     consumed_results.insert(result_idx);
                     paired_result_idx = Some(result_idx);
-                    let focused = focus == Some(idx) || focus == Some(result_idx);
-                    for line in
-                        tool_pair_to_lines(cur, &blocks[result_idx], regions.buffer.width, focused)
-                    {
+                    // The merged composite picks the strongest signal
+                    // across the pair: Focused beats Selected beats
+                    // None.
+                    let pair_emphasis = emphasis(idx).max(emphasis(result_idx));
+                    for line in tool_pair_to_lines(
+                        cur,
+                        &blocks[result_idx],
+                        regions.buffer.width,
+                        pair_emphasis,
+                    ) {
                         lines.push(line);
                     }
                 } else {
-                    for line in block_to_lines(cur, regions.buffer.width, focus == Some(idx)) {
+                    for line in block_to_lines(cur, regions.buffer.width, emphasis(idx)) {
                         lines.push(line);
                     }
                 }
@@ -174,7 +227,7 @@ fn render_buffer(frame: &mut Frame, regions: Regions, buffer: &mut Buffer) {
                 continue;
             }
             _ => {
-                for line in block_to_lines(cur, regions.buffer.width, focus == Some(idx)) {
+                for line in block_to_lines(cur, regions.buffer.width, emphasis(idx)) {
                     lines.push(line);
                 }
             }
@@ -323,11 +376,11 @@ fn input_cursor_position(
 /// the header plus the body. Assistant text has no header; it is the
 /// content directly. Thinking text is rendered dimmed.
 #[must_use]
-pub fn block_to_lines(block: &Block, width: u16, focused: bool) -> Vec<Line<'static>> {
+pub fn block_to_lines(block: &Block, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
     match block {
-        Block::User { text } => user_block_lines(text, width, focused),
+        Block::User { text } => user_block_lines(text, width, emphasis),
         Block::Assistant { text, .. } => {
-            mark_focused(plain_lines(text, assistant_style()), focused)
+            mark_emphasis(plain_lines(text, assistant_style()), emphasis)
         }
         Block::Thinking { text, folded, .. } => {
             let mut out = Vec::new();
@@ -342,7 +395,7 @@ pub fn block_to_lines(block: &Block, width: u16, focused: bool) -> Vec<Line<'sta
                     out.push(prefix_line("  ", body_line));
                 }
             }
-            mark_focused(out, focused)
+            mark_emphasis(out, emphasis)
         }
         Block::ToolCall {
             name,
@@ -379,7 +432,7 @@ pub fn block_to_lines(block: &Block, width: u16, focused: bool) -> Vec<Line<'sta
                     content.push(body_line);
                 }
             }
-            wrap_in_bubble_focused(content, Color::Yellow, TOOL_PENDING_BG, width, focused)
+            wrap_in_bubble_focused(content, Color::Yellow, TOOL_PENDING_BG, width, emphasis)
         }
         Block::ToolResult {
             name,
@@ -400,7 +453,7 @@ pub fn block_to_lines(block: &Block, width: u16, focused: bool) -> Vec<Line<'sta
                     out.push(prefix_line("  ", body_line));
                 }
             }
-            mark_focused(out, focused)
+            mark_emphasis(out, emphasis)
         }
         Block::Custom {
             kind, text, folded, ..
@@ -417,7 +470,7 @@ pub fn block_to_lines(block: &Block, width: u16, focused: bool) -> Vec<Line<'sta
                     out.push(prefix_line("  ", body_line));
                 }
             }
-            mark_focused(out, focused)
+            mark_emphasis(out, emphasis)
         }
     }
 }
@@ -443,7 +496,7 @@ const TOOL_PENDING_BG: Color = Color::Rgb(54, 42, 22);
 /// Render a user prompt as a tinted full-width "chat bubble" with a
 /// thin cyan left-edge rule and one row of padding above and below the
 /// text.
-fn user_block_lines(text: &str, width: u16, focused: bool) -> Vec<Line<'static>> {
+fn user_block_lines(text: &str, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
     let mut content: Vec<Line<'static>> = Vec::new();
     for raw in text.split('\n') {
         content.push(Line::from(Span::styled(
@@ -453,20 +506,20 @@ fn user_block_lines(text: &str, width: u16, focused: bool) -> Vec<Line<'static>>
                 .add_modifier(Modifier::BOLD),
         )));
     }
-    wrap_in_bubble_focused(content, Color::Cyan, USER_BUBBLE_BG, width, focused)
+    wrap_in_bubble_focused(content, Color::Cyan, USER_BUBBLE_BG, width, emphasis)
 }
 
-/// Prepend a left-edge focus marker to every line of an already-built
-/// block's render. Used for non-bubbled blocks (Assistant text,
-/// Thinking, Custom, standalone `ToolResult`) so block-level navigation
-/// has the same visual feedback the bubble blocks already get from
-/// their tinted rule.
-fn mark_focused(lines: Vec<Line<'static>>, focused: bool) -> Vec<Line<'static>> {
-    if !focused {
+/// Prepend a left-edge emphasis marker to every line of an
+/// already-built block's render. Used for non-bubbled blocks
+/// (Assistant text, Thinking, Custom, standalone `ToolResult`) so
+/// block-level navigation has the same visual feedback the bubble
+/// blocks already get from their tinted rule.
+fn mark_emphasis(lines: Vec<Line<'static>>, emphasis: Emphasis) -> Vec<Line<'static>> {
+    if emphasis == Emphasis::None {
         return lines;
     }
     let mark_style = Style::default()
-        .fg(Color::White)
+        .fg(emphasis.rule_color(Color::White))
         .add_modifier(Modifier::BOLD);
     lines
         .into_iter()
@@ -495,7 +548,7 @@ fn wrap_in_bubble_focused(
     rule_color: Color,
     bg: Color,
     width: u16,
-    focused: bool,
+    emphasis: Emphasis,
 ) -> Vec<Line<'static>> {
     const RULE_WIDTH: usize = 1;
     const LEFT_PAD: usize = 1;
@@ -505,14 +558,11 @@ fn wrap_in_bubble_focused(
         .saturating_sub(RULE_WIDTH)
         .max(LEFT_PAD + RIGHT_PAD + 1);
     let max_content = interior.saturating_sub(LEFT_PAD + RIGHT_PAD);
-    // Focused blocks use a thicker half-block rule glyph with a
-    // brighter (white) accent so the user sees which block the next
-    // `zo` toggles.
     let rule_style = Style::default()
-        .fg(if focused { Color::White } else { rule_color })
+        .fg(emphasis.rule_color(rule_color))
         .bg(bg)
         .add_modifier(Modifier::BOLD);
-    let rule_glyph = if focused { "\u{258c}" } else { "\u{258e}" };
+    let rule_glyph = emphasis.rule_glyph();
     let bg_only = Style::default().bg(bg);
     let pad_row = || -> Line<'static> {
         Line::from(vec![
@@ -601,7 +651,7 @@ fn tool_pair_to_lines(
     call: &Block,
     result: &Block,
     width: u16,
-    focused: bool,
+    emphasis: Emphasis,
 ) -> Vec<Line<'static>> {
     let (name, input_summary, input_pretty, folded) = match call {
         Block::ToolCall {
@@ -699,7 +749,7 @@ fn tool_pair_to_lines(
     } else {
         TOOL_BUBBLE_BG
     };
-    wrap_in_bubble_focused(content, Color::Yellow, bg, width, focused)
+    wrap_in_bubble_focused(content, Color::Yellow, bg, width, emphasis)
 }
 
 /// Lines and bytes shown in a folded tool block's preview. Trades

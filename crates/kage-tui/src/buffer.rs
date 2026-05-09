@@ -185,6 +185,10 @@ pub struct Buffer {
     /// compares this to the current effective focus each frame; when
     /// they differ, it scrolls so the newly focused block is in view.
     last_drawn_focus: Option<usize>,
+    /// Visual-mode selection anchor. Set when the user pressed `v`;
+    /// cleared on `Esc` or `y`. Selection range is `[min, max]` of
+    /// `(visual_anchor, effective_focus)`.
+    visual_anchor: Option<usize>,
 }
 
 impl Buffer {
@@ -259,6 +263,99 @@ impl Buffer {
         self.last_drawn_focus = value;
     }
 
+    /// Set the visual-selection anchor. `None` clears (exits visual).
+    /// Out-of-range indices are silently dropped.
+    pub fn set_visual_anchor(&mut self, idx: Option<usize>) {
+        self.visual_anchor = idx.filter(|i| self.blocks.get(*i).is_some());
+    }
+
+    /// Currently set visual anchor.
+    #[must_use]
+    pub fn visual_anchor(&self) -> Option<usize> {
+        self.visual_anchor
+    }
+
+    /// `(min, max)` block-index range when visual selection is active,
+    /// derived from the anchor and the current focus head. `None` when
+    /// the user isn't selecting.
+    #[must_use]
+    pub fn visual_range(&self) -> Option<(usize, usize)> {
+        let anchor = self.visual_anchor?;
+        let head = self.effective_focus()?;
+        Some((anchor.min(head), anchor.max(head)))
+    }
+
+    /// Concatenate the plain-text content of blocks in the inclusive
+    /// range `[start, end]` for clipboard yank. Skips renderer-only
+    /// decoration (rule glyphs, padding, status pills). Tool calls
+    /// merge with their matching result; thinking blocks are omitted
+    /// (they're hidden chain-of-thought, not user-meaningful prose).
+    #[must_use]
+    pub fn selection_text(&self, start: usize, end: usize) -> String {
+        let lo = start.min(end);
+        let hi = start.max(end).min(self.blocks.len().saturating_sub(1));
+        let mut out = String::new();
+        let mut consumed: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let push_separator = |s: &mut String| {
+            if !s.is_empty() {
+                s.push_str("\n\n");
+            }
+        };
+        for i in lo..=hi {
+            if consumed.contains(&i) {
+                continue;
+            }
+            match &self.blocks[i] {
+                Block::User { text } => {
+                    push_separator(&mut out);
+                    out.push_str("> ");
+                    out.push_str(text);
+                }
+                Block::Assistant { text, .. } | Block::Custom { text, .. } => {
+                    push_separator(&mut out);
+                    out.push_str(text);
+                }
+                Block::Thinking { .. } => {}
+                Block::ToolCall {
+                    call_id,
+                    name,
+                    input_summary,
+                    ..
+                } => {
+                    push_separator(&mut out);
+                    out.push_str("$ ");
+                    out.push_str(name);
+                    if !input_summary.is_empty() {
+                        out.push(' ');
+                        out.push_str(input_summary);
+                    }
+                    if let Some((result_idx, output)) =
+                        self.blocks.iter().enumerate().find_map(|(j, b)| match b {
+                            Block::ToolResult {
+                                call_id: cid,
+                                output,
+                                ..
+                            } if cid == call_id => Some((j, output.as_str())),
+                            _ => None,
+                        })
+                        && !output.is_empty()
+                    {
+                        if result_idx <= hi {
+                            consumed.insert(result_idx);
+                        }
+                        out.push('\n');
+                        out.push_str(output);
+                    }
+                }
+                Block::ToolResult { output, .. } => {
+                    push_separator(&mut out);
+                    out.push_str(output);
+                }
+            }
+        }
+        out
+    }
+
     /// Replace the explicit focus. `None` clears it (renderer falls
     /// back to the last selectable block). Out-of-range indices are
     /// silently dropped.
@@ -266,15 +363,13 @@ impl Buffer {
         self.focus = idx.filter(|i| self.blocks.get(*i).is_some());
     }
 
-    /// Move focus to the previous (older) selectable block. Returns
-    /// `true` if focus changed.
+    /// Move focus to the previous (older) foldable block, skipping
+    /// non-foldable kinds (User/Assistant). Returns `true` if focus
+    /// changed.
     pub fn focus_prev(&mut self) -> bool {
         let current = self.effective_focus();
-        let next = match current {
-            None => return false,
-            Some(idx) => self.selectable_index_before(idx),
-        };
-        match next {
+        let Some(idx) = current else { return false };
+        match self.foldable_index_before(idx) {
             Some(n) if Some(n) != current => {
                 self.focus = Some(n);
                 true
@@ -283,21 +378,58 @@ impl Buffer {
         }
     }
 
-    /// Move focus to the next (newer) selectable block. Returns
+    /// Move focus to the next (newer) foldable block. Returns
     /// `true` if focus changed.
     pub fn focus_next(&mut self) -> bool {
         let current = self.effective_focus();
-        let next = match current {
-            None => return false,
-            Some(idx) => self.selectable_index_after(idx),
-        };
-        match next {
+        let Some(idx) = current else { return false };
+        match self.foldable_index_after(idx) {
             Some(n) if Some(n) != current => {
                 self.focus = Some(n);
                 true
             }
             _ => false,
         }
+    }
+
+    /// Move focus to the previous selectable block, walking *every*
+    /// kind (used by visual-mode head extension). Returns `true` if
+    /// focus changed.
+    pub fn focus_prev_any(&mut self) -> bool {
+        let current = self.effective_focus();
+        let Some(idx) = current else { return false };
+        match self.selectable_index_before(idx) {
+            Some(n) if Some(n) != current => {
+                self.focus = Some(n);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Move focus to the next selectable block, walking *every*
+    /// kind. Returns `true` if focus changed.
+    pub fn focus_next_any(&mut self) -> bool {
+        let current = self.effective_focus();
+        let Some(idx) = current else { return false };
+        match self.selectable_index_after(idx) {
+            Some(n) if Some(n) != current => {
+                self.focus = Some(n);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn foldable_index_before(&self, idx: usize) -> Option<usize> {
+        (0..idx)
+            .rev()
+            .find(|i| self.is_selectable(*i) && self.blocks[*i].is_foldable())
+    }
+
+    fn foldable_index_after(&self, idx: usize) -> Option<usize> {
+        (idx + 1..self.blocks.len())
+            .find(|i| self.is_selectable(*i) && self.blocks[*i].is_foldable())
     }
 
     /// Whether `idx` is something `[` / `]` should land on. Every
@@ -664,30 +796,41 @@ mod tests {
     }
 
     #[test]
-    fn focus_walks_all_blocks_skipping_merged_results() {
+    fn focus_prev_next_walks_only_foldable_blocks() {
         let mut buf = Buffer::new();
-        buf.push_user("hi"); // 0: User (selectable)
-        buf.push_tool_call("c1", "read", "a.rs", "{}"); // 1: Call
-        buf.push_tool_result("c1", "out", false); // 2: Result paired with 1, NOT selectable
-        buf.append_assistant_delta("ok"); // 3: Assistant
+        buf.push_user("hi"); // 0: not foldable
+        buf.push_tool_call("c1", "read", "a.rs", "{}"); // 1
+        buf.push_tool_result("c1", "out", false); // 2: paired with 1, skipped
+        buf.append_assistant_delta("ok"); // 3: not foldable
         buf.finish_streaming();
         buf.push_tool_call("c2", "read", "b.rs", "{}"); // 4
-        // No explicit focus -> last selectable.
         assert_eq!(buf.effective_focus(), Some(4));
-        // Walk back: 4 -> 3 -> 1 -> 0 (skipping 2).
-        assert!(buf.focus_prev());
-        assert_eq!(buf.focus(), Some(3));
+        // Foldable-only walk: 4 -> 1 -> stop.
         assert!(buf.focus_prev());
         assert_eq!(buf.focus(), Some(1));
-        assert!(buf.focus_prev());
-        assert_eq!(buf.focus(), Some(0));
-        // No more before 0.
         assert!(!buf.focus_prev());
-        // Walk forward, also skipping 2.
         assert!(buf.focus_next());
-        assert_eq!(buf.focus(), Some(1));
-        assert!(buf.focus_next());
+        assert_eq!(buf.focus(), Some(4));
+    }
+
+    #[test]
+    fn focus_any_walks_every_block_skipping_merged_results() {
+        let mut buf = Buffer::new();
+        buf.push_user("hi"); // 0
+        buf.push_tool_call("c1", "read", "a.rs", "{}"); // 1
+        buf.push_tool_result("c1", "out", false); // 2: skipped
+        buf.append_assistant_delta("ok"); // 3
+        buf.finish_streaming();
+        buf.push_tool_call("c2", "read", "b.rs", "{}"); // 4
+        assert_eq!(buf.effective_focus(), Some(4));
+        // 4 -> 3 -> 1 -> 0 (2 always skipped because merged with 1).
+        assert!(buf.focus_prev_any());
         assert_eq!(buf.focus(), Some(3));
+        assert!(buf.focus_prev_any());
+        assert_eq!(buf.focus(), Some(1));
+        assert!(buf.focus_prev_any());
+        assert_eq!(buf.focus(), Some(0));
+        assert!(!buf.focus_prev_any());
     }
 
     #[test]

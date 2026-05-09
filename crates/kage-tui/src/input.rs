@@ -328,8 +328,11 @@ impl InputState {
                 actions.extend(self.enter_mode(Mode::Normal));
                 actions
             }
-            KeyCode::Char('j') | KeyCode::Down => vec![InputAction::Scroll(1)],
-            KeyCode::Char('k') | KeyCode::Up => vec![InputAction::Scroll(-1)],
+            // Extend selection by walking the head one block at a
+            // time. Up/Down arrows mirror j/k for a more discoverable
+            // gesture; the anchor stays put.
+            KeyCode::Char('j') | KeyCode::Down => vec![InputAction::FocusNext],
+            KeyCode::Char('k') | KeyCode::Up => vec![InputAction::FocusPrev],
             _ => Vec::new(),
         }
     }

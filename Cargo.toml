@@ -30,6 +30,7 @@ kage-session = { path = "crates/kage-session" }
 kage-tools = { path = "crates/kage-tools" }
 kage-tui = { path = "crates/kage-tui" }
 
+base64 = "0.22.1"
 clap = { version = "4.6.1", features = ["derive"] }
 
 chrono = { version = "0.4.44", features = ["serde"] }

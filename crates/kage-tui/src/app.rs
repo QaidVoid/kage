@@ -12,6 +12,7 @@ use std::sync::mpsc::{Sender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
 use ratatui::crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
 
 use crate::cmdline::{CommandLine, CommandLineEvent};
@@ -404,6 +405,36 @@ impl App {
         }
     }
 
+    /// Copy the current visual selection to the system clipboard via
+    /// OSC52. The escape sequence is emitted directly to stdout (we
+    /// own the alt screen). A `kage:notify` block confirms the yank
+    /// so the user knows the gesture worked even when the terminal's
+    /// clipboard support is silent.
+    fn yank_visual_selection(&mut self) {
+        let text = match self.buffer.lock() {
+            Ok(buf) => buf
+                .visual_range()
+                .map(|(lo, hi)| buf.selection_text(lo, hi))
+                .unwrap_or_default(),
+            Err(_) => return,
+        };
+        if text.is_empty() {
+            return;
+        }
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&text);
+        let mut stdout = std::io::stdout();
+        let _ = write!(stdout, "\x1b]52;c;{encoded}\x07");
+        let _ = stdout.flush();
+        if let Ok(mut buf) = self.buffer.lock() {
+            buf.set_visual_anchor(None);
+            buf.push_custom(
+                "kage:notify",
+                format!("yanked {} chars to clipboard", text.chars().count()),
+                false,
+            );
+        }
+    }
+
     fn push_help(&mut self) {
         let body = "available commands:\n  \
                     :q, :quit       leave the TUI\n  \
@@ -490,12 +521,12 @@ impl App {
             }
             InputAction::FocusPrev => {
                 if let Ok(mut buf) = self.buffer.lock() {
-                    buf.focus_prev();
+                    buf.focus_prev_any();
                 }
             }
             InputAction::FocusNext => {
                 if let Ok(mut buf) = self.buffer.lock() {
-                    buf.focus_next();
+                    buf.focus_next_any();
                 }
             }
             InputAction::OpenSessionPicker => {
@@ -510,7 +541,23 @@ impl App {
             InputAction::BeginCommand => {
                 self.cmdline = Some(CommandLine::new());
             }
-            InputAction::EnterMode(_) | InputAction::BeginSearch | InputAction::Yank => {}
+            InputAction::EnterMode(mode) => match mode {
+                Mode::Visual => {
+                    if let Ok(mut buf) = self.buffer.lock() {
+                        let anchor = buf.effective_focus();
+                        buf.set_visual_anchor(anchor);
+                    }
+                }
+                Mode::Normal | Mode::Insert => {
+                    if let Ok(mut buf) = self.buffer.lock() {
+                        buf.set_visual_anchor(None);
+                    }
+                }
+            },
+            InputAction::Yank => {
+                self.yank_visual_selection();
+            }
+            InputAction::BeginSearch => {}
         }
         None
     }

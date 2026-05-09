@@ -1333,6 +1333,7 @@ dependencies = [
 name = "kage-tui"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "kage-core",
  "kage-loop",
  "kage-plugin",

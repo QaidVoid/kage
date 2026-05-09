@@ -347,16 +347,27 @@ fn render_buffer(
             heights.push(0);
             continue;
         }
+        // Live (streaming) blocks change every frame, so caching is
+        // pointless and a precise measure runs syntect/wrap over a
+        // text that's about to be invalidated. Approximate them.
+        // Stable blocks measure-and-cache once; subsequent frames
+        // hit the cache. This is the contract scroll math depends
+        // on - approximations and real measurements can't share the
+        // same coordinate space, so anything that's emitted in pass
+        // 2 needs an exact height here.
         let h = if let Some(cached) = buffer.cached_height(idx, width) {
             usize::from(cached)
+        } else if buffer.is_live(idx) {
+            approximate_block_height(buffer, idx, width)
         } else {
             let block_lines =
                 build_block_lines(buffer, idx, width, &result_by_call, Emphasis::None);
-            let measured = Paragraph::new(block_lines)
+            let measured = Paragraph::new(block_lines.clone())
                 .wrap(Wrap { trim: false })
                 .line_count(width);
             let stored = u16::try_from(measured).unwrap_or(u16::MAX);
             buffer.set_cached_height(idx, width, stored);
+            buffer.set_cached_render_lines(idx, width, std::sync::Arc::new(block_lines));
             measured
         };
         heights.push(h);
@@ -410,8 +421,13 @@ fn render_buffer(
 
     let mut emitted_lines: Vec<Line<'static>> = Vec::new();
     let mut acc = 0usize;
-    let mut intra_scroll = 0usize;
+    let mut paragraph_scroll = 0u16;
+    let mut emitted_rows = 0usize;
     let mut emitted_any = false;
+    // Stop once we've covered the viewport plus a small margin for
+    // wrap surprises. Skipping ahead saves the per-line clone cost
+    // for huge unfolded blocks during fast scrolling.
+    let row_budget = visible.saturating_add(32);
     // (block_idx, virtual_top, virtual_bottom) collected during this
     // pass; converted to absolute terminal rows below so mouse
     // handlers can translate a click row into a block.
@@ -431,10 +447,15 @@ fn render_buffer(
         if block_top >= visible_bot {
             break;
         }
-        if !emitted_any {
-            intra_scroll = visible_top.saturating_sub(block_top);
-            emitted_any = true;
+        if emitted_rows >= row_budget {
+            break;
         }
+        let intra_block_skip = if emitted_any {
+            0
+        } else {
+            emitted_any = true;
+            visible_top.saturating_sub(block_top)
+        };
         let emp = emphasis_for(
             buffer,
             idx,
@@ -444,9 +465,45 @@ fn render_buffer(
             &consumed_results,
             &call_idx_for_result,
         );
-        let block_lines = build_block_lines(buffer, idx, width, &result_by_call, emp);
-        emitted_lines.extend(block_lines);
+        // Reuse the cached render only when there's no extra
+        // emphasis to bake in - cached lines were built with
+        // `Emphasis::None`, so a focused/selected/match block has to
+        // rebuild to pick up the rule glyph and accent color. The
+        // common case (most blocks unfocused on screen) falls into
+        // the cheap branch.
+        let block_lines: Vec<Line<'static>> = if emp == Emphasis::None
+            && let Some(cached) = buffer.cached_render_lines(idx, width)
+        {
+            cached.as_ref().clone()
+        } else {
+            let built = build_block_lines(buffer, idx, width, &result_by_call, emp);
+            if emp == Emphasis::None {
+                let measured = Paragraph::new(built.clone())
+                    .wrap(Wrap { trim: false })
+                    .line_count(width);
+                let stored = u16::try_from(measured).unwrap_or(u16::MAX);
+                buffer.set_cached_height(idx, width, stored);
+                buffer.set_cached_render_lines(idx, width, std::sync::Arc::new(built.clone()));
+            }
+            built
+        };
+        let take_rows = row_budget.saturating_sub(emitted_rows);
+        let (sliced, slice_offset) =
+            slice_lines_for_window(&block_lines, width, intra_block_skip, take_rows);
+        // The first emitted block sets the paragraph-level scroll;
+        // subsequent blocks always slice from row 0 so no further
+        // adjustment is needed.
+        if emitted_lines.is_empty() {
+            paragraph_scroll = slice_offset;
+        }
+        let sliced_rows: usize = sliced
+            .iter()
+            .map(|l| wrap_rows(l, usize::from(width).max(1)))
+            .sum();
+        emitted_lines.extend(sliced);
+        emitted_rows = emitted_rows.saturating_add(sliced_rows);
         emitted_lines.push(Line::raw(""));
+        emitted_rows = emitted_rows.saturating_add(1);
         block_layout.push((idx, block_top, block_bot));
         acc = acc.saturating_add(block_advance);
     }
@@ -476,9 +533,8 @@ fn render_buffer(
         .collect();
     buffer.set_last_block_screen_rows(screen_rows);
 
-    let scroll_u16 = u16::try_from(intra_scroll).unwrap_or(u16::MAX);
     let paragraph = Paragraph::new(emitted_lines).wrap(Wrap { trim: false });
-    frame.render_widget(paragraph.scroll((scroll_u16, 0)), regions.buffer);
+    frame.render_widget(paragraph.scroll((paragraph_scroll, 0)), regions.buffer);
     buffer.set_last_drawn_focus(focus);
 }
 
@@ -514,6 +570,87 @@ fn emphasis_for(
         }
     }
     e
+}
+
+/// Approximate wrapped-row count for one [`Line`] at `width`, used
+/// by [`slice_lines_for_window`] to walk a cached vector of lines and
+/// land on the slice that intersects the visible window. Counts
+/// `char` instances rather than display width, so wide-char content
+/// (CJK, emoji) under-counts; the rendered viewport just shows
+/// slightly fewer rows than expected, no scroll-drift bug.
+fn wrap_rows(line: &Line<'_>, width: usize) -> usize {
+    let chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
+    if chars == 0 {
+        1
+    } else {
+        chars.div_ceil(width).max(1)
+    }
+}
+
+/// Walk `lines` accumulating wrap rows; produce the smallest
+/// contiguous prefix that covers `[skip_rows, skip_rows + take_rows]`
+/// and a Paragraph-level scroll offset to land the viewport on the
+/// right row of the first emitted line. Used in pass 2 to avoid
+/// cloning every line of a giant unfolded block when only the
+/// viewport is actually visible.
+fn slice_lines_for_window(
+    lines: &[Line<'static>],
+    width: u16,
+    skip_rows: usize,
+    take_rows: usize,
+) -> (Vec<Line<'static>>, u16) {
+    let usable = usize::from(width).max(1);
+    let mut rows_seen = 0usize;
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut paragraph_offset = 0u16;
+    let mut started = false;
+    for line in lines {
+        let lh = wrap_rows(line, usable);
+        if started {
+            out.push(line.clone());
+        } else if rows_seen.saturating_add(lh) > skip_rows {
+            started = true;
+            paragraph_offset =
+                u16::try_from(skip_rows.saturating_sub(rows_seen)).unwrap_or(u16::MAX);
+            out.push(line.clone());
+        }
+        rows_seen = rows_seen.saturating_add(lh);
+        if rows_seen >= skip_rows.saturating_add(take_rows).saturating_add(16) {
+            break;
+        }
+    }
+    (out, paragraph_offset)
+}
+
+/// Cheap height estimate for a streaming block. Counts logical
+/// newlines and divides each line's char count by the available
+/// width. Off vs. the real wrap-aware count when content has long
+/// lines that `WordWrapper` would break on word boundaries; that
+/// inaccuracy only shifts auto-follow scroll math by a few rows on
+/// an in-flight block, so it's an acceptable cost for skipping the
+/// per-frame wrap pass on a block whose text changes 30 times a
+/// second.
+fn approximate_block_height(buffer: &Buffer, idx: usize, width: u16) -> usize {
+    let blocks = buffer.blocks();
+    let Some(block) = blocks.get(idx) else {
+        return 0;
+    };
+    let usable = usize::from(width).max(1);
+    let text: &str = match block {
+        Block::User { text }
+        | Block::Assistant { text, .. }
+        | Block::Thinking { text, .. }
+        | Block::Custom { text, .. } => text,
+        Block::ToolCall { input_pretty, .. } => input_pretty,
+        Block::ToolResult { output, .. } => output,
+    };
+    let mut rows = 0usize;
+    for logical in text.split('\n') {
+        let chars = logical.chars().count();
+        rows = rows.saturating_add(chars.div_ceil(usable).max(1));
+    }
+    // Most block kinds add at least a header line beyond the body.
+    rows.saturating_add(1)
 }
 
 /// Build the rendered lines for the block at `idx`, automatically
@@ -614,10 +751,20 @@ fn input_cursor_position(
 pub fn block_to_lines(block: &Block, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
     match block {
         Block::User { text } => user_block_lines(text, width, emphasis),
-        Block::Assistant { text, .. } => mark_emphasis(
-            crate::syntax::highlight_fenced(text, assistant_style()),
-            emphasis,
-        ),
+        Block::Assistant { text, live } => {
+            // Skip syntect while the block is still streaming. Each
+            // delta changes the text, so the syntect cache would miss
+            // on every frame and we'd re-highlight the whole growing
+            // body 30 times a second. Once the stream finishes the
+            // text is stable, the cache hits, and we syntect-highlight
+            // for free.
+            let lines = if *live {
+                plain_lines(text, assistant_style())
+            } else {
+                crate::syntax::highlight_fenced(text, assistant_style())
+            };
+            mark_emphasis(lines, emphasis)
+        }
         Block::Thinking { text, folded, .. } => {
             let mut out = Vec::new();
             out.push(header_line(

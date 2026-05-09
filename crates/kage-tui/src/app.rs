@@ -25,9 +25,6 @@ use crate::picker::PickItem;
 use crate::terminal::Tui;
 use crate::view;
 
-/// One frame target; ratatui handles diffing so a higher rate is fine.
-const FRAME_INTERVAL: Duration = Duration::from_millis(33);
-
 /// Lines scrolled per mouse wheel notch.
 const MOUSE_SCROLL_LINES: i32 = 3;
 
@@ -270,14 +267,31 @@ impl App {
     /// reason. The caller is expected to drop the [`Tui`] (which
     /// restores the terminal) before printing anything to stdout.
     pub fn run(&mut self, tui: &mut Tui) -> Result<AppExit, TuiError> {
+        // First frame is unconditional - we always paint once before
+        // entering the steady-state event loop.
+        let mut last_buffer_version = self.buffer_version();
+        let mut needs_redraw = true;
         loop {
-            self.draw(tui)?;
-            let deadline = Instant::now() + FRAME_INTERVAL;
+            if needs_redraw {
+                self.draw(tui)?;
+                last_buffer_version = self.buffer_version();
+                needs_redraw = false;
+            }
+            // Wake periodically to repaint streaming tool-call
+            // timers ("running 1.2s") and to pick up worker-thread
+            // mutations that race ahead of any input event.
+            let deadline = Instant::now() + Duration::from_secs(1);
             while Instant::now() < deadline {
                 let remaining = deadline
                     .checked_duration_since(Instant::now())
                     .unwrap_or_default();
                 if event::poll(remaining)? {
+                    // Any handled event might have altered something
+                    // user-visible (cursor in picker, mode switch,
+                    // input edit, scroll). Tracking each potential
+                    // change site is brittle; mark for redraw and
+                    // let the next iteration paint.
+                    needs_redraw = true;
                     match event::read()? {
                         Event::Key(key) if key.kind == KeyEventKind::Press => {
                             log_key_event(&key);
@@ -301,14 +315,63 @@ impl App {
                             _ => {}
                         },
                         Event::Resize(_, _) => {
-                            // Re-render on the next iteration.
-                            break;
+                            // Width changed; every cached height is
+                            // measured against the prior width and is
+                            // now stale.
+                            if let Ok(mut buf) = self.buffer.lock() {
+                                buf.invalidate_all_heights();
+                            }
                         }
                         _ => {}
                     }
+                    break;
+                }
+                // No event arrived; check the worker thread for
+                // buffer mutations (streaming deltas, tool results)
+                // and break out to repaint if the version moved.
+                let v = self.buffer_version();
+                if v != last_buffer_version {
+                    needs_redraw = true;
+                    break;
                 }
             }
+            // Periodic-wake fallthrough: if a streaming tool call is
+            // in-flight, repaint anyway so the elapsed-time pill
+            // ticks visibly. Cheap because the renderer's height
+            // cache is hot at this point.
+            if !needs_redraw && self.has_running_tool_call() {
+                needs_redraw = true;
+            }
         }
+    }
+
+    /// Read the buffer's current mutation counter without holding
+    /// the lock across the rest of the loop.
+    fn buffer_version(&self) -> u64 {
+        self.buffer.lock().map_or(0, |b| b.version())
+    }
+
+    /// True when there's at least one in-flight tool call (a
+    /// `ToolCall` block whose matching `ToolResult` hasn't arrived).
+    /// The renderer paints "running Xs" for these and we want it to
+    /// tick even on an otherwise idle event loop.
+    fn has_running_tool_call(&self) -> bool {
+        let Ok(buf) = self.buffer.lock() else {
+            return false;
+        };
+        let blocks = buf.blocks();
+        let mut pending: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for b in blocks {
+            if let crate::buffer::Block::ToolCall { call_id, .. } = b {
+                pending.insert(call_id.as_str());
+            }
+        }
+        for b in blocks {
+            if let crate::buffer::Block::ToolResult { call_id, .. } = b {
+                pending.remove(call_id.as_str());
+            }
+        }
+        !pending.is_empty()
     }
 
     fn draw(&mut self, tui: &mut Tui) -> Result<(), TuiError> {

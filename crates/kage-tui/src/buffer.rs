@@ -10,7 +10,10 @@
 //! blocks and tool calls without losing their content.
 
 use std::mem;
+use std::sync::Arc;
 use std::time::Instant;
+
+use ratatui::text::Line;
 
 /// One renderable region of the conversation.
 #[derive(Clone, Debug, PartialEq)]
@@ -219,6 +222,23 @@ pub struct Buffer {
     /// to avoid stale data; this is what lets virtualized rendering
     /// skip building [`ratatui::text::Line`]s for off-screen blocks.
     block_heights: Vec<Option<(u16, u16)>>,
+    /// Per-block rendered-line cache, indexed parallel to
+    /// [`Self::blocks`]. Each entry stores
+    /// `(width, Arc<Vec<Line<'static>>>)` captured at the same time
+    /// as [`Self::block_heights`]. Renderers reuse the lines when
+    /// the block is unfocused (no emphasis-driven rebuild), turning
+    /// the per-frame cost of a re-render into a `Vec<Line>` clone.
+    /// Stored behind `Arc` so the mutex isn't holding a clone of a
+    /// possibly-huge vector while the renderer is still using it.
+    block_render_lines: Vec<Option<(u16, Arc<Vec<Line<'static>>>)>>,
+    /// Monotonically increasing counter bumped by every mutation
+    /// (push, append, fold, focus, scroll). The render loop reads
+    /// this to decide whether to repaint: an unchanged version means
+    /// nothing user-visible has shifted, so the previous frame is
+    /// still correct and we can sleep instead of redrawing at the
+    /// full 30 Hz target. Wraps at `u64::MAX`, which won't happen in
+    /// any realistic session lifetime.
+    version: u64,
     /// Map of "what block currently sits under each screen row in
     /// the buffer area": `(block_idx, screen_top, screen_bottom)` in
     /// absolute terminal coordinates. The renderer rewrites this
@@ -265,7 +285,10 @@ impl Buffer {
     /// once Paragraph wraps it. The renderer holds the authoritative
     /// max each frame and clamps there.
     pub fn set_scroll(&mut self, scroll: usize) {
-        self.scroll = scroll;
+        if self.scroll != scroll {
+            self.scroll = scroll;
+            self.bump_version();
+        }
     }
 
     /// Currently focused foldable block index, if the user has
@@ -275,6 +298,19 @@ impl Buffer {
     #[must_use]
     pub fn focus(&self) -> Option<usize> {
         self.focus
+    }
+
+    /// Whether the block at `idx` is still streaming. Used by the
+    /// renderer to skip the expensive measure-and-cache path for
+    /// blocks whose content changes every frame; an approximate
+    /// height suffices while the model is mid-emit, and a real
+    /// measure runs once on `finish_streaming`.
+    #[must_use]
+    pub fn is_live(&self, idx: usize) -> bool {
+        matches!(
+            self.blocks.get(idx),
+            Some(Block::Assistant { live: true, .. } | Block::Thinking { live: true, .. })
+        )
     }
 
     /// Effective focus: the explicit user selection if any, otherwise
@@ -328,6 +364,36 @@ impl Buffer {
         for slot in &mut self.block_heights {
             *slot = None;
         }
+        for slot in &mut self.block_render_lines {
+            *slot = None;
+        }
+    }
+
+    /// Cached rendered lines for the block at `idx`, but only if the
+    /// cache entry was captured at the given `width`. The lines were
+    /// rendered with `Emphasis::None`; callers that need a focused or
+    /// selection-emphasised render must rebuild.
+    #[must_use]
+    pub fn cached_render_lines(&self, idx: usize, width: u16) -> Option<Arc<Vec<Line<'static>>>> {
+        self.block_render_lines
+            .get(idx)
+            .and_then(Clone::clone)
+            .and_then(|(w, lines)| (w == width).then_some(lines))
+    }
+
+    /// Renderer hook: store the rendered lines it just built for the
+    /// block at `idx`, paired with the width used. Held behind `Arc`
+    /// so the renderer's emit pass can clone the handle without
+    /// duplicating the line vector.
+    pub fn set_cached_render_lines(
+        &mut self,
+        idx: usize,
+        width: u16,
+        lines: Arc<Vec<Line<'static>>>,
+    ) {
+        if let Some(slot) = self.block_render_lines.get_mut(idx) {
+            *slot = Some((width, lines));
+        }
     }
 
     /// Renderer hook: replace the absolute screen-row layout it just
@@ -359,10 +425,48 @@ impl Buffer {
             .find_map(|(i, top, _)| (*i == idx).then_some(*top))
     }
 
+    /// Current mutation counter. Render loops compare consecutive
+    /// reads to decide if anything has changed and a repaint is
+    /// warranted.
+    #[must_use]
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    fn bump_version(&mut self) {
+        self.version = self.version.wrapping_add(1);
+    }
+
+    fn push_block_caches(&mut self) {
+        self.block_heights.push(None);
+        self.block_render_lines.push(None);
+        self.bump_version();
+    }
+
+    fn invalidate_last_block_caches(&mut self) {
+        if let Some(slot) = self.block_heights.last_mut() {
+            *slot = None;
+        }
+        if let Some(slot) = self.block_render_lines.last_mut() {
+            *slot = None;
+        }
+        self.bump_version();
+    }
+
+    fn clear_block_caches(&mut self) {
+        self.block_heights.clear();
+        self.block_render_lines.clear();
+        self.bump_version();
+    }
+
     fn invalidate_height(&mut self, idx: usize) {
         if let Some(slot) = self.block_heights.get_mut(idx) {
             *slot = None;
         }
+        if let Some(slot) = self.block_render_lines.get_mut(idx) {
+            *slot = None;
+        }
+        self.bump_version();
     }
 
     fn invalidate_pair_height(&mut self, call_id: &str) {
@@ -374,6 +478,9 @@ impl Buffer {
                     if let Some(slot) = self.block_heights.get_mut(i) {
                         *slot = None;
                     }
+                    if let Some(slot) = self.block_render_lines.get_mut(i) {
+                        *slot = None;
+                    }
                 }
                 _ => {}
             }
@@ -383,7 +490,11 @@ impl Buffer {
     /// Set the visual-selection anchor. `None` clears (exits visual).
     /// Out-of-range indices are silently dropped.
     pub fn set_visual_anchor(&mut self, idx: Option<usize>) {
-        self.visual_anchor = idx.filter(|i| self.blocks.get(*i).is_some());
+        let new = idx.filter(|i| self.blocks.get(*i).is_some());
+        if self.visual_anchor != new {
+            self.visual_anchor = new;
+            self.bump_version();
+        }
     }
 
     /// Currently set visual anchor.
@@ -542,7 +653,11 @@ impl Buffer {
     /// back to the last selectable block). Out-of-range indices are
     /// silently dropped.
     pub fn set_focus(&mut self, idx: Option<usize>) {
-        self.focus = idx.filter(|i| self.blocks.get(*i).is_some());
+        let new = idx.filter(|i| self.blocks.get(*i).is_some());
+        if self.focus != new {
+            self.focus = new;
+            self.bump_version();
+        }
     }
 
     /// Move focus to the previous (older) foldable block, skipping
@@ -646,7 +761,7 @@ impl Buffer {
     /// Push a fully-formed user prompt.
     pub fn push_user(&mut self, text: impl Into<String>) {
         self.blocks.push(Block::User { text: text.into() });
-        self.block_heights.push(None);
+        self.push_block_caches();
     }
 
     /// Begin a streaming assistant block. Subsequent deltas append to it
@@ -656,7 +771,7 @@ impl Buffer {
             text: String::new(),
             live: true,
         });
-        self.block_heights.push(None);
+        self.push_block_caches();
     }
 
     /// Append text to the most recent assistant block. If no live
@@ -668,9 +783,7 @@ impl Buffer {
         if let Some(Block::Assistant { text, .. }) = self.blocks.last_mut() {
             text.push_str(delta);
         }
-        if let Some(slot) = self.block_heights.last_mut() {
-            *slot = None;
-        }
+        self.invalidate_last_block_caches();
     }
 
     /// Begin a streaming thinking block.
@@ -680,7 +793,7 @@ impl Buffer {
             folded: false,
             live: true,
         });
-        self.block_heights.push(None);
+        self.push_block_caches();
     }
 
     /// Append text to the most recent thinking block.
@@ -691,9 +804,7 @@ impl Buffer {
         if let Some(Block::Thinking { text, .. }) = self.blocks.last_mut() {
             text.push_str(delta);
         }
-        if let Some(slot) = self.block_heights.last_mut() {
-            *slot = None;
-        }
+        self.invalidate_last_block_caches();
     }
 
     /// Add a tool-call block to the buffer.
@@ -712,7 +823,7 @@ impl Buffer {
             folded: true,
             started_at: Instant::now(),
         });
-        self.block_heights.push(None);
+        self.push_block_caches();
     }
 
     /// Add a tool-result block. Looks up the matching tool call (by id)
@@ -773,7 +884,7 @@ impl Buffer {
             folded: true,
             duration_ms,
         });
-        self.block_heights.push(None);
+        self.push_block_caches();
         // The matching ToolCall now renders as a merged composite, so
         // its previously-cached unmerged height is wrong; invalidate
         // both halves so the next layout pass remeasures.
@@ -787,7 +898,7 @@ impl Buffer {
             text: text.into(),
             folded,
         });
-        self.block_heights.push(None);
+        self.push_block_caches();
     }
 
     /// Mark the most recent live (assistant or thinking) block as
@@ -799,9 +910,7 @@ impl Buffer {
         // The `live` flag doesn't currently change rendered height,
         // but invalidate anyway so a future renderer change that
         // styles "stream done" differently picks up cleanly.
-        if let Some(slot) = self.block_heights.last_mut() {
-            *slot = None;
-        }
+        self.invalidate_last_block_caches();
     }
 
     /// Toggle the fold state of the block at `index`. Returns whether
@@ -854,6 +963,7 @@ impl Buffer {
 
     /// Set the fold state on every foldable block.
     pub fn set_all_folded(&mut self, folded: bool) {
+        let mut invalidated: Vec<usize> = Vec::new();
         for (i, block) in self.blocks.iter_mut().enumerate() {
             match block {
                 Block::Thinking { folded: f, .. }
@@ -861,12 +971,13 @@ impl Buffer {
                 | Block::ToolResult { folded: f, .. }
                 | Block::Custom { folded: f, .. } => {
                     *f = folded;
-                    if let Some(slot) = self.block_heights.get_mut(i) {
-                        *slot = None;
-                    }
+                    invalidated.push(i);
                 }
                 _ => {}
             }
+        }
+        for i in invalidated {
+            self.invalidate_height(i);
         }
     }
 
@@ -874,14 +985,14 @@ impl Buffer {
     /// `kage resume` and tests.
     pub fn clear(&mut self) {
         self.blocks.clear();
-        self.block_heights.clear();
+        self.clear_block_caches();
         self.scroll = 0;
     }
 
     /// Take ownership of the blocks, leaving the buffer empty.
     pub fn take(&mut self) -> Vec<Block> {
         self.scroll = 0;
-        self.block_heights.clear();
+        self.clear_block_caches();
         mem::take(&mut self.blocks)
     }
 

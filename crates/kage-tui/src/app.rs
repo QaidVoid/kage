@@ -341,8 +341,17 @@ impl App {
             }
             // Wake periodically to repaint streaming tool-call
             // timers ("running 1.2s") and to pick up worker-thread
-            // mutations that race ahead of any input event.
-            let deadline = Instant::now() + Duration::from_secs(1);
+            // mutations that race ahead of any input event. While
+            // the agent is mid-turn we shorten the wake interval to
+            // ~one spinner frame so the modeline tick stays smooth
+            // even with no streaming deltas (e.g. waiting on a slow
+            // first token from the provider).
+            let tick = if self.is_working() || self.has_running_tool_call() {
+                Duration::from_millis(100)
+            } else {
+                Duration::from_secs(1)
+            };
+            let deadline = Instant::now() + tick;
             while Instant::now() < deadline {
                 let remaining = deadline
                     .checked_duration_since(Instant::now())

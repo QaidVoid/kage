@@ -15,8 +15,8 @@ use std::sync::Once;
 
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{
-    DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
 
@@ -37,6 +37,7 @@ pub struct Tui {
     terminal: DefaultTerminal,
     bracketed_paste_active: bool,
     kitty_flags_active: bool,
+    mouse_capture_active: bool,
 }
 
 impl std::fmt::Debug for Tui {
@@ -44,6 +45,7 @@ impl std::fmt::Debug for Tui {
         f.debug_struct("Tui")
             .field("bracketed_paste_active", &self.bracketed_paste_active)
             .field("kitty_flags_active", &self.kitty_flags_active)
+            .field("mouse_capture_active", &self.mouse_capture_active)
             .finish_non_exhaustive()
     }
 }
@@ -64,10 +66,12 @@ impl Tui {
         };
         let kitty_flags_active =
             execute!(io::stdout(), PushKeyboardEnhancementFlags(KITTY_FLAGS)).is_ok();
+        let mouse_capture_active = execute!(io::stdout(), EnableMouseCapture).is_ok();
         Ok(Self {
             terminal,
             bracketed_paste_active,
             kitty_flags_active,
+            mouse_capture_active,
         })
     }
 
@@ -79,6 +83,10 @@ impl Tui {
 
 impl Drop for Tui {
     fn drop(&mut self) {
+        if self.mouse_capture_active {
+            let _ = execute!(io::stdout(), DisableMouseCapture);
+            self.mouse_capture_active = false;
+        }
         if self.kitty_flags_active {
             let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
             self.kitty_flags_active = false;
@@ -98,6 +106,7 @@ fn install_panic_hook() {
     PANIC_HOOK.call_once(|| {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
+            let _ = execute!(io::stdout(), DisableMouseCapture);
             let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
             let _ = execute!(io::stdout(), DisableBracketedPaste);
             ratatui::restore();

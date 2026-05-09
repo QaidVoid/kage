@@ -10,7 +10,7 @@
 use std::sync::mpsc::{Sender, TrySendError};
 use std::time::{Duration, Instant};
 
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
 
 use crate::error::TuiError;
 use crate::events::SharedBuffer;
@@ -23,6 +23,9 @@ use crate::view;
 
 /// One frame target; ratatui handles diffing so a higher rate is fine.
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
+
+/// Lines scrolled per mouse wheel notch.
+const MOUSE_SCROLL_LINES: i32 = 3;
 
 /// Request the host should act on. Either the user submitted a prompt
 /// (the host runs the agent loop in a worker thread), the user asked
@@ -97,6 +100,11 @@ impl App {
                             }
                         }
                         Event::Paste(text) => self.input.paste(&text),
+                        Event::Mouse(mouse) => match mouse.kind {
+                            MouseEventKind::ScrollUp => self.scroll_by(-MOUSE_SCROLL_LINES),
+                            MouseEventKind::ScrollDown => self.scroll_by(MOUSE_SCROLL_LINES),
+                            _ => {}
+                        },
                         Event::Resize(_, _) => {
                             // Re-render on the next iteration.
                             break;

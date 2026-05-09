@@ -9,6 +9,7 @@ mod compact;
 pub mod config;
 pub mod context;
 mod dispatch;
+mod doom;
 pub mod hooks;
 pub mod run;
 mod stream;

@@ -24,6 +24,7 @@ use kage_tools::ToolRegistry;
 
 use crate::compact::maybe_compact;
 use crate::dispatch::{dispatch_tool_calls, dispatch_tool_calls_parallel};
+use crate::doom::DoomTracker;
 use crate::stream::collect_turn;
 use crate::{AgentContext, Hooks, LoopConfig};
 
@@ -46,6 +47,7 @@ use crate::{AgentContext, Hooks, LoopConfig};
 /// Returns the same [`LoopError`] variant that was emitted as the terminal
 /// [`LoopEvent::Error`], so callers can react programmatically without
 /// re-parsing events.
+#[allow(clippy::too_many_lines)]
 pub fn run<F>(
     provider: &dyn Provider,
     tools: &ToolRegistry,
@@ -59,6 +61,7 @@ where
     F: FnMut(LoopEvent),
 {
     let mut iterations: u32 = 0;
+    let mut doom = DoomTracker::default();
 
     loop {
         if cancel.is_cancelled() {
@@ -115,7 +118,7 @@ where
 
             cx.budget.add(turn.usage);
             let assistant_id = turn.message.id;
-            let pending = turn.tool_calls;
+            let pending = turn.tool_calls.clone();
             cx.history.push(turn.message);
 
             if pending.is_empty() {
@@ -129,7 +132,7 @@ where
                 dispatch_tool_calls
             };
             let results = match dispatch(
-                pending,
+                pending.clone(),
                 tools,
                 &workdir,
                 cancel,
@@ -143,7 +146,25 @@ where
                     return Err(kind);
                 }
             };
+
+            let mut steering = None;
+            for (call, result) in pending.iter().zip(&results) {
+                let is_error = matches!(
+                    result.content.first(),
+                    Some(kage_core::Content::ToolResultBlock { is_error: true, .. })
+                );
+                if let Some(msg) = doom.observe(&call.name, &call.input, is_error) {
+                    steering = Some(msg);
+                }
+            }
             cx.history.extend(results);
+            if let Some(text) = steering {
+                cx.history.push(kage_core::Message::new(
+                    kage_core::Role::User,
+                    vec![kage_core::Content::Text { text }],
+                    cx.history.last().map(|m| m.id),
+                ));
+            }
         }
 
         let Some(text) = hooks.get_followup() else {
@@ -539,6 +560,99 @@ mod tests {
         assert!(matches!(res, Err(LoopError::Cancelled)));
         // First turn ran (provider called once); second never did.
         assert_eq!(mock.call_count(), 1);
+    }
+
+    #[derive(Debug)]
+    struct AlwaysFailTool;
+
+    impl kage_tools::Tool for AlwaysFailTool {
+        fn name(&self) -> &'static str {
+            "always_fail"
+        }
+        fn description(&self) -> &'static str {
+            "always returns is_error=true"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn risk(&self) -> kage_core::Risk {
+            kage_core::Risk::Read
+        }
+        fn execute(
+            &self,
+            _input: serde_json::Value,
+            _cx: &kage_tools::ToolContext<'_>,
+        ) -> Result<kage_core::ToolOutput, kage_tools::ToolError> {
+            Ok(kage_core::ToolOutput {
+                is_error: true,
+                text: "boom".into(),
+                structured: None,
+            })
+        }
+    }
+
+    #[test]
+    fn doom_loop_steers_after_three_repeat_failures() {
+        // Four turns: each emits the same failing tool call. After the third
+        // dispatch, the doom tracker injects steering before the fourth
+        // provider call.
+        let mut counter = 0u32;
+        let mut make_turn = || {
+            counter += 1;
+            let id = kage_core::ToolCallId::new(format!("call_{counter}"));
+            vec![
+                Ok(ProviderEvent::ToolCallStart {
+                    id: id.clone(),
+                    name: "always_fail".into(),
+                }),
+                Ok(ProviderEvent::ToolCallEnd {
+                    id,
+                    input: serde_json::json!({"x": 1}),
+                }),
+                Ok(ProviderEvent::MessageEnd {
+                    stop_reason: StopReason::ToolUse,
+                    usage: TokenUsage::default(),
+                }),
+            ]
+        };
+        let mock = MockProvider::sequence(vec![
+            make_turn(),
+            make_turn(),
+            make_turn(),
+            // Fourth turn ends the loop without another tool call.
+            vec![
+                Ok(ProviderEvent::TextDelta {
+                    delta: "ok stopping".into(),
+                }),
+                Ok(ProviderEvent::MessageEnd {
+                    stop_reason: StopReason::EndTurn,
+                    usage: TokenUsage::default(),
+                }),
+            ],
+        ]);
+
+        let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
+        cx.history.push(user_msg("try the thing"));
+        let cfg = LoopConfig::default();
+        let mut hooks = NoopHooks;
+        let cancel = CancelFlag::new();
+        let registry = ToolRegistry::new().with(std::sync::Arc::new(AlwaysFailTool));
+
+        let res = run(&mock, &registry, &mut cx, &cfg, &mut hooks, &cancel, |_| {});
+        assert!(res.is_ok(), "loop failed: {res:?}");
+
+        // The fourth provider request should have a steering user message in
+        // its tail (after the last tool result).
+        let req4 = mock.requests().into_iter().nth(3).unwrap();
+        let tail = req4.messages.last().unwrap();
+        assert_eq!(tail.role, Role::User);
+        match &tail.content[0] {
+            Content::Text { text } => {
+                assert!(text.contains("'always_fail'"));
+                assert!(text.contains("different approach"));
+            }
+            other => panic!("expected steering Text, got {other:?}"),
+        }
     }
 
     #[test]

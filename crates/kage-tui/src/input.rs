@@ -260,11 +260,18 @@ impl InputState {
                 }
             }
             KeyCode::Up => {
-                self.history_prev();
+                // Multi-line input: walk a row up first; only fall
+                // through to history when the cursor is already on the
+                // top row of the current draft.
+                if !self.move_cursor_up() {
+                    self.history_prev();
+                }
                 Vec::new()
             }
             KeyCode::Down => {
-                self.history_next();
+                if !self.move_cursor_down() {
+                    self.history_next();
+                }
                 Vec::new()
             }
             KeyCode::Backspace => {
@@ -359,6 +366,49 @@ impl InputState {
             self.cursor = pos.min(self.text.len());
         }
     }
+
+    /// Move the cursor up one row inside the current text. Returns true
+    /// if a move happened; false when the cursor is already on the top
+    /// row (caller falls through to history navigation).
+    fn move_cursor_up(&mut self) -> bool {
+        let prefix = &self.text[..self.cursor];
+        let Some(curr_line_start) = prefix.rfind('\n').map(|i| i + 1) else {
+            return false;
+        };
+        let col_chars = self.text[curr_line_start..self.cursor].chars().count();
+        let prev_line_end = curr_line_start - 1;
+        let prev_line_start = self.text[..prev_line_end].rfind('\n').map_or(0, |i| i + 1);
+        self.cursor = byte_offset_at_column(&self.text[prev_line_start..prev_line_end], col_chars)
+            + prev_line_start;
+        true
+    }
+
+    /// Move the cursor down one row inside the current text. Returns
+    /// true if a move happened; false when the cursor is on the last
+    /// row (caller falls through to history navigation).
+    fn move_cursor_down(&mut self) -> bool {
+        let curr_line_start = self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1);
+        let col_chars = self.text[curr_line_start..self.cursor].chars().count();
+        let curr_line_end = self.text[self.cursor..].find('\n').map(|i| self.cursor + i);
+        let Some(end) = curr_line_end else {
+            return false;
+        };
+        let next_line_start = end + 1;
+        let next_line_end = self.text[next_line_start..]
+            .find('\n')
+            .map_or(self.text.len(), |i| next_line_start + i);
+        self.cursor = byte_offset_at_column(&self.text[next_line_start..next_line_end], col_chars)
+            + next_line_start;
+        true
+    }
+}
+
+/// Byte offset on `line` where the visual column `col` falls. Clamps to
+/// the line's length when the column is past the end.
+fn byte_offset_at_column(line: &str, col: usize) -> usize {
+    line.char_indices()
+        .nth(col)
+        .map_or(line.len(), |(idx, _)| idx)
 }
 
 #[cfg(test)]
@@ -609,6 +659,51 @@ mod tests {
         assert_eq!(state.text(), "two");
         state.handle_key(key(KeyCode::Down));
         assert_eq!(state.text(), "draft");
+    }
+
+    #[test]
+    fn up_in_multiline_input_moves_cursor_within_text_first() {
+        let mut state = InputState::new();
+        state.set_history(vec!["history-entry".into()]);
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("first\nsecond");
+        // Cursor is at end of "second" (col 6). Up should land on row 0.
+        state.handle_key(key(KeyCode::Up));
+        assert_eq!(state.text(), "first\nsecond", "text untouched");
+        // Now another Up — already on row 0, should walk history.
+        state.handle_key(key(KeyCode::Up));
+        assert_eq!(state.text(), "history-entry");
+    }
+
+    #[test]
+    fn down_in_multiline_input_moves_cursor_before_walking_history() {
+        let mut state = InputState::new();
+        state.set_history(vec!["older".into(), "newer".into()]);
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("aa\nbb");
+        // Move cursor to start of first row.
+        state.handle_key(key(KeyCode::Home));
+        for _ in 0..5 {
+            // Reach top row, col 0 — but we already are there after Home.
+        }
+        // Down — moves cursor to row 1, no history walk.
+        state.handle_key(key(KeyCode::Down));
+        assert_eq!(state.text(), "aa\nbb");
+        // Down again — last row reached, history walks forward (no
+        // cursor was set up by a prior Up so this is a no-op).
+        state.handle_key(key(KeyCode::Down));
+        assert_eq!(state.text(), "aa\nbb");
+    }
+
+    #[test]
+    fn up_clamps_column_to_shorter_previous_row() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("hi\nlonger-line");
+        // Cursor at end of "longer-line" (col 11). Previous row is "hi"
+        // (2 chars). Up should land at the end of "hi" (col 2 = byte 2).
+        state.handle_key(key(KeyCode::Up));
+        assert_eq!(state.cursor(), 2);
     }
 
     #[test]

@@ -298,19 +298,59 @@ impl InputState {
 
     fn handle_normal(&mut self, key: KeyEvent) -> Vec<InputAction> {
         if let Some(prev) = self.pending.take() {
-            return Self::handle_pending(prev, key);
+            return self.handle_pending(prev, key);
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+        // Cross-pane keys: behaviour is identical regardless of which
+        // pane has window focus.
         match key.code {
-            KeyCode::Char('i' | 'a') => self.enter_mode(Mode::Insert),
+            KeyCode::Esc => return vec![InputAction::ClearSelection],
+            KeyCode::Char(':') => return vec![InputAction::BeginCommand],
+            KeyCode::Char('/') => return vec![InputAction::BeginSearch],
+            KeyCode::Char('o') if ctrl => return vec![InputAction::ToggleFold],
+            KeyCode::Char('w') if ctrl => return vec![InputAction::CyclePane],
+            KeyCode::Char('c') if ctrl => return vec![InputAction::Cancel],
+            KeyCode::Char('p') if ctrl => return vec![InputAction::OpenModelPicker],
+            KeyCode::Char('r') if ctrl => return vec![InputAction::OpenSessionPicker],
+            KeyCode::Char('[') => return vec![InputAction::FocusPrev],
+            KeyCode::Char(']') => return vec![InputAction::FocusNext],
+            KeyCode::Char('n') => return vec![InputAction::SearchNext],
+            KeyCode::Char('N') => return vec![InputAction::SearchPrev],
+            KeyCode::Char('g') => {
+                self.pending = Some('g');
+                return Vec::new();
+            }
+            KeyCode::Char('z') => {
+                self.pending = Some('z');
+                return Vec::new();
+            }
+            _ => {}
+        }
+
+        match self.focused_pane {
+            Pane::Buffer => self.handle_normal_buffer(key),
+            Pane::Input => self.handle_normal_input(key),
+        }
+    }
+
+    /// Normal-mode keys that act on the conversation buffer (scroll,
+    /// fold, yank-selection, enter buffer-cell visual). Insert-mode
+    /// entry from here auto-switches focus to the input pane so the
+    /// user lands in a typable card.
+    fn handle_normal_buffer(&mut self, key: KeyEvent) -> Vec<InputAction> {
+        match key.code {
+            KeyCode::Char('i' | 'a') => {
+                self.focused_pane = Pane::Input;
+                self.enter_mode(Mode::Insert)
+            }
             KeyCode::Char('v') => vec![InputAction::EnterVisual],
             // Lowercase `y` yanks an existing selection (mouse or
             // visual mode left it behind). Capital `Y` yanks the
-            // focused block whole, vim's "yank line" gesture
-            // adapted for our block-stream layout.
+            // focused block whole, vim's "yank line" gesture adapted
+            // for our block-stream layout.
             KeyCode::Char('y') => vec![InputAction::Yank],
             KeyCode::Char('Y') => vec![InputAction::YankFocusedBlock],
-            KeyCode::Esc => vec![InputAction::ClearSelection],
             KeyCode::Char('j') | KeyCode::Down => vec![InputAction::Scroll(1)],
             KeyCode::Char('k') | KeyCode::Up => vec![InputAction::Scroll(-1)],
             KeyCode::Char('h' | 'l') | KeyCode::Left | KeyCode::Right => {
@@ -319,36 +359,149 @@ impl InputState {
             KeyCode::PageDown => vec![InputAction::Scroll(10)],
             KeyCode::PageUp => vec![InputAction::Scroll(-10)],
             KeyCode::Char('G') => vec![InputAction::ScrollToBottom],
-            KeyCode::Char('g') => {
-                self.pending = Some('g');
-                Vec::new()
-            }
-            KeyCode::Char('z') => {
-                self.pending = Some('z');
-                Vec::new()
-            }
-            KeyCode::Char('o') if ctrl => vec![InputAction::ToggleFold],
-            KeyCode::Char('w') if ctrl => vec![InputAction::CyclePane],
-            KeyCode::Char(':') => vec![InputAction::BeginCommand],
-            KeyCode::Char('/') => vec![InputAction::BeginSearch],
-            KeyCode::Char('c') if ctrl => vec![InputAction::Cancel],
-            KeyCode::Char('p') if ctrl => vec![InputAction::OpenModelPicker],
-            KeyCode::Char('r') if ctrl => vec![InputAction::OpenSessionPicker],
-            KeyCode::Char('[') => vec![InputAction::FocusPrev],
-            KeyCode::Char(']') => vec![InputAction::FocusNext],
-            KeyCode::Char('n') => vec![InputAction::SearchNext],
-            KeyCode::Char('N') => vec![InputAction::SearchPrev],
             _ => Vec::new(),
         }
     }
 
-    fn handle_pending(prev: char, key: KeyEvent) -> Vec<InputAction> {
+    /// Normal-mode keys that act on the input card: vim-style motions
+    /// (`h`/`l`/`0`/`$`/`^`/`w`/`b`/`e`/`j`/`k`/`G`), single-char
+    /// edits (`x`/`X`), and the insert-entry variants
+    /// (`i`/`a`/`I`/`A`/`o`/`O`). Cursor movement and edits mutate
+    /// state in place; mode transitions return an [`InputAction`]
+    /// for the host to react to.
+    #[allow(clippy::too_many_lines)]
+    fn handle_normal_input(&mut self, key: KeyEvent) -> Vec<InputAction> {
+        match key.code {
+            KeyCode::Char('i') => self.enter_mode(Mode::Insert),
+            KeyCode::Char('a') => {
+                if let Some((_, w)) = char_at(&self.text, self.cursor) {
+                    self.cursor += w;
+                }
+                self.enter_mode(Mode::Insert)
+            }
+            KeyCode::Char('I') => {
+                let start = current_line_start(&self.text, self.cursor);
+                self.cursor = first_non_whitespace_at(&self.text, start);
+                self.enter_mode(Mode::Insert)
+            }
+            KeyCode::Char('A') => {
+                self.cursor = current_line_end(&self.text, self.cursor);
+                self.enter_mode(Mode::Insert)
+            }
+            KeyCode::Char('o') => {
+                let end = current_line_end(&self.text, self.cursor);
+                self.text.insert(end, '\n');
+                self.cursor = end + 1;
+                self.enter_mode(Mode::Insert)
+            }
+            KeyCode::Char('O') => {
+                let start = current_line_start(&self.text, self.cursor);
+                self.text.insert(start, '\n');
+                self.cursor = start;
+                self.enter_mode(Mode::Insert)
+            }
+            KeyCode::Char('x') => {
+                self.delete_char_at_cursor();
+                Vec::new()
+            }
+            KeyCode::Char('X') => {
+                self.backspace();
+                Vec::new()
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.move_cursor(-1);
+                Vec::new()
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.move_cursor(1);
+                Vec::new()
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.move_cursor_down();
+                Vec::new()
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.move_cursor_up();
+                Vec::new()
+            }
+            KeyCode::Char('0') | KeyCode::Home => {
+                self.cursor = current_line_start(&self.text, self.cursor);
+                Vec::new()
+            }
+            KeyCode::Char('$') | KeyCode::End => {
+                self.cursor = current_line_end(&self.text, self.cursor);
+                Vec::new()
+            }
+            KeyCode::Char('^') => {
+                let start = current_line_start(&self.text, self.cursor);
+                self.cursor = first_non_whitespace_at(&self.text, start);
+                Vec::new()
+            }
+            KeyCode::Char('w') => {
+                self.cursor = vim_word_forward(&self.text, self.cursor);
+                Vec::new()
+            }
+            KeyCode::Char('b') => {
+                self.cursor = backward_word_start(&self.text, self.cursor);
+                Vec::new()
+            }
+            KeyCode::Char('e') => {
+                self.cursor = vim_word_end(&self.text, self.cursor);
+                Vec::new()
+            }
+            KeyCode::Char('G') => {
+                self.cursor = self.text.len();
+                Vec::new()
+            }
+            KeyCode::Char('v') => vec![InputAction::EnterVisual],
+            KeyCode::Char('y') => vec![InputAction::Yank],
+            KeyCode::Char('Y') => vec![InputAction::YankFocusedBlock],
+            KeyCode::PageDown => vec![InputAction::Scroll(10)],
+            KeyCode::PageUp => vec![InputAction::Scroll(-10)],
+            _ => Vec::new(),
+        }
+    }
+
+    fn handle_pending(&mut self, prev: char, key: KeyEvent) -> Vec<InputAction> {
         match (prev, key.code) {
-            ('g', KeyCode::Char('g')) => vec![InputAction::ScrollToTop],
+            ('g', KeyCode::Char('g')) => match self.focused_pane {
+                Pane::Buffer => vec![InputAction::ScrollToTop],
+                Pane::Input => {
+                    self.cursor = 0;
+                    Vec::new()
+                }
+            },
+            // `gw` is an ergonomic alternative to `<C-w>` for users
+            // who'd rather not press a modifier; both toggle pane.
+            ('g', KeyCode::Char('w')) => vec![InputAction::CyclePane],
             ('z', KeyCode::Char('o' | 'c')) => vec![InputAction::ToggleFold],
             ('z', KeyCode::Char('R')) => vec![InputAction::UnfoldAll],
             ('z', KeyCode::Char('M')) => vec![InputAction::FoldAll],
             _ => Vec::new(),
+        }
+    }
+
+    /// Vim-style `x`: delete the char at the cursor. If the deletion
+    /// leaves the cursor past the end of its line, snap it to the
+    /// last char on that line (vim convention).
+    fn delete_char_at_cursor(&mut self) {
+        let Some((c, w)) = char_at(&self.text, self.cursor) else {
+            return;
+        };
+        if c == '\n' {
+            // Vim's `x` does not eat newlines; ignore.
+            return;
+        }
+        self.text.drain(self.cursor..self.cursor + w);
+        let line_end = current_line_end(&self.text, self.cursor);
+        let line_start = current_line_start(&self.text, self.cursor);
+        if self.cursor > line_end {
+            self.cursor = line_end;
+        }
+        if self.cursor == line_end && line_end > line_start {
+            if let Some((_, pw)) = prev_char(&self.text, self.cursor) {
+                self.cursor -= pw;
+            }
         }
     }
 
@@ -742,6 +895,69 @@ pub(crate) fn current_line_end(text: &str, cursor: usize) -> usize {
     text[cursor..].find('\n').map_or(text.len(), |i| cursor + i)
 }
 
+/// Byte offset of the first non-whitespace char at or after `start`,
+/// staying on the same logical line. Used by vim's `^` motion.
+pub(crate) fn first_non_whitespace_at(text: &str, start: usize) -> usize {
+    let mut i = start;
+    while let Some((c, w)) = char_at(text, i) {
+        if c == '\n' || !c.is_whitespace() {
+            return i;
+        }
+        i += w;
+    }
+    i
+}
+
+/// Vim-style `w`: forward to the start of the next word. From the
+/// cursor's current word, skip remaining word chars, then skip
+/// non-word chars (whitespace and punctuation), and land on the
+/// first char of the next word.
+pub(crate) fn vim_word_forward(text: &str, cursor: usize) -> usize {
+    let mut i = cursor;
+    while let Some((c, w)) = char_at(text, i) {
+        if !is_word_char(c) {
+            break;
+        }
+        i += w;
+    }
+    while let Some((c, w)) = char_at(text, i) {
+        if is_word_char(c) {
+            break;
+        }
+        i += w;
+    }
+    i
+}
+
+/// Vim-style `e`: forward to the *end* of the current word. Vim
+/// places the cursor on the last char of the word (not after it),
+/// so the byte offset returned is the last word-char's start, not
+/// the position past it.
+pub(crate) fn vim_word_end(text: &str, cursor: usize) -> usize {
+    if cursor >= text.len() {
+        return cursor;
+    }
+    let mut i = cursor;
+    if let Some((_, w)) = char_at(text, i) {
+        i += w;
+    }
+    while let Some((c, w)) = char_at(text, i) {
+        if is_word_char(c) {
+            break;
+        }
+        i += w;
+    }
+    let mut last_word_pos = i;
+    while let Some((c, w)) = char_at(text, i) {
+        if !is_word_char(c) {
+            break;
+        }
+        last_word_pos = i;
+        i += w;
+    }
+    last_word_pos
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -832,8 +1048,12 @@ mod tests {
     }
 
     #[test]
-    fn jk_scroll_in_normal() {
+    fn jk_scroll_in_normal_when_buffer_focused() {
+        // Stage C made j/k pane-aware: they only emit Scroll(...)
+        // when the buffer pane has window focus. With default Input
+        // focus they move the input cursor instead.
         let mut state = InputState::new();
+        state.set_focused_pane(Pane::Buffer);
         assert_eq!(
             state.handle_key(key(KeyCode::Char('j'))),
             vec![InputAction::Scroll(1)]
@@ -845,8 +1065,24 @@ mod tests {
     }
 
     #[test]
-    fn gg_scrolls_to_top_only_after_second_g() {
+    fn jk_move_input_cursor_when_input_focused() {
         let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("first\nsecond");
+        state.handle_key(key(KeyCode::Esc));
+        // Cursor at end of "second" (byte 12). j is no-op (no line
+        // below); k goes up one row at the same column.
+        assert!(state.handle_key(key(KeyCode::Char('j'))).is_empty());
+        assert_eq!(state.cursor(), 12);
+        let acts = state.handle_key(key(KeyCode::Char('k')));
+        assert!(acts.is_empty());
+        assert_eq!(state.cursor(), 5);
+    }
+
+    #[test]
+    fn gg_scrolls_to_top_when_buffer_focused() {
+        let mut state = InputState::new();
+        state.set_focused_pane(Pane::Buffer);
         let first = state.handle_key(key(KeyCode::Char('g')));
         assert!(first.is_empty());
         assert!(state.has_pending());
@@ -856,12 +1092,41 @@ mod tests {
     }
 
     #[test]
-    fn capital_g_scrolls_to_bottom_immediately() {
+    fn gg_jumps_input_cursor_to_start_when_input_focused() {
         let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("hello");
+        state.handle_key(key(KeyCode::Esc));
+        assert_eq!(state.cursor(), 5);
+        state.handle_key(key(KeyCode::Char('g')));
+        let acts = state.handle_key(key(KeyCode::Char('g')));
+        assert!(acts.is_empty());
+        assert_eq!(state.cursor(), 0);
+    }
+
+    #[test]
+    fn capital_g_scrolls_to_bottom_when_buffer_focused() {
+        let mut state = InputState::new();
+        state.set_focused_pane(Pane::Buffer);
         assert_eq!(
             state.handle_key(key(KeyCode::Char('G'))),
             vec![InputAction::ScrollToBottom]
         );
+    }
+
+    #[test]
+    fn capital_g_jumps_input_cursor_to_end_when_input_focused() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("hello world");
+        state.handle_key(key(KeyCode::Esc));
+        // After Esc cursor moves to byte 11 (end of "world"); but
+        // vim's `G` jumps to text end regardless. Verify by moving
+        // back first.
+        state.handle_key(key(KeyCode::Char('h')));
+        assert!(state.cursor() < 11);
+        state.handle_key(key(KeyCode::Char('G')));
+        assert_eq!(state.cursor(), 11);
     }
 
     #[test]
@@ -1197,6 +1462,134 @@ mod tests {
         state.handle_key(ctrl('u'));
         assert_eq!(state.text(), "first\n");
         assert_eq!(state.cursor(), 6);
+    }
+
+    #[test]
+    fn h_l_move_cursor_in_input_pane() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("abcd");
+        state.handle_key(key(KeyCode::Esc));
+        // Esc keeps cursor where it was. Move left twice with `h`.
+        state.handle_key(key(KeyCode::Char('h')));
+        state.handle_key(key(KeyCode::Char('h')));
+        assert_eq!(state.cursor(), 2);
+        state.handle_key(key(KeyCode::Char('l')));
+        assert_eq!(state.cursor(), 3);
+    }
+
+    #[test]
+    fn dollar_zero_caret_jump_to_line_edges_in_input_pane() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("  hello world");
+        state.handle_key(key(KeyCode::Esc));
+        state.handle_key(key(KeyCode::Char('0')));
+        assert_eq!(state.cursor(), 0);
+        state.handle_key(key(KeyCode::Char('^')));
+        assert_eq!(state.cursor(), 2);
+        state.handle_key(key(KeyCode::Char('$')));
+        assert_eq!(state.cursor(), state.text().len());
+    }
+
+    #[test]
+    fn vim_w_b_e_word_motions_in_input_pane() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("foo bar baz");
+        state.handle_key(key(KeyCode::Esc));
+        // Cursor at end after Esc + at-end clamp = 11.
+        state.handle_key(key(KeyCode::Char('0')));
+        assert_eq!(state.cursor(), 0);
+        state.handle_key(key(KeyCode::Char('w')));
+        assert_eq!(state.cursor(), 4);
+        state.handle_key(key(KeyCode::Char('e')));
+        assert_eq!(state.cursor(), 6);
+        state.handle_key(key(KeyCode::Char('b')));
+        assert_eq!(state.cursor(), 4);
+    }
+
+    #[test]
+    fn x_deletes_char_at_cursor_in_input_pane() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("abcd");
+        state.handle_key(key(KeyCode::Esc));
+        state.handle_key(key(KeyCode::Char('0')));
+        state.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(state.text(), "bcd");
+        assert_eq!(state.cursor(), 0);
+    }
+
+    #[test]
+    fn capital_x_deletes_char_before_cursor_in_input_pane() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("abcd");
+        state.handle_key(key(KeyCode::Esc));
+        state.handle_key(key(KeyCode::Char('X')));
+        assert_eq!(state.text(), "abc");
+    }
+
+    #[test]
+    fn lowercase_a_advances_cursor_then_inserts() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("ab");
+        state.handle_key(key(KeyCode::Esc));
+        state.handle_key(key(KeyCode::Char('0')));
+        // After Esc + 0, cursor at start. `a` advances by one then enters Insert.
+        state.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(state.mode(), Mode::Insert);
+        assert_eq!(state.cursor(), 1);
+        state.handle_key(key(KeyCode::Char('X')));
+        assert_eq!(state.text(), "aXb");
+    }
+
+    #[test]
+    fn capital_a_jumps_to_end_of_line_then_inserts() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("hello\nworld");
+        state.handle_key(key(KeyCode::Esc));
+        state.handle_key(key(KeyCode::Char('k')));
+        state.handle_key(key(KeyCode::Char('0')));
+        state.handle_key(key(KeyCode::Char('A')));
+        assert_eq!(state.mode(), Mode::Insert);
+        assert_eq!(state.cursor(), 5); // end of "hello"
+    }
+
+    #[test]
+    fn capital_o_opens_line_above() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("hello");
+        state.handle_key(key(KeyCode::Esc));
+        state.handle_key(key(KeyCode::Char('O')));
+        assert_eq!(state.mode(), Mode::Insert);
+        // Text now starts with a newline.
+        assert!(state.text().starts_with('\n'));
+        assert_eq!(state.cursor(), 0);
+    }
+
+    #[test]
+    fn lowercase_o_opens_line_below() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("hello");
+        state.handle_key(key(KeyCode::Esc));
+        state.handle_key(key(KeyCode::Char('o')));
+        assert_eq!(state.mode(), Mode::Insert);
+        assert_eq!(state.text(), "hello\n");
+        assert_eq!(state.cursor(), 6);
+    }
+
+    #[test]
+    fn gw_in_normal_emits_cycle_pane() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('g')));
+        let acts = state.handle_key(key(KeyCode::Char('w')));
+        assert_eq!(acts, vec![InputAction::CyclePane]);
     }
 
     #[test]

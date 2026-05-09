@@ -1378,6 +1378,10 @@ mod tests {
         }
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(buffer.clone(), tx);
+        // Stage C made k/j/G pane-aware: switch to buffer pane so
+        // scrolling keys hit the buffer instead of moving the input
+        // cursor.
+        app.input.set_focused_pane(Pane::Buffer);
         // User scrolls up by 5 from the bottom.
         for _ in 0..5 {
             app.handle_key(key('k'));

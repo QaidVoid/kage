@@ -1,0 +1,344 @@
+//! `kage` Lua module: small surface plugins use to ask the host for
+//! anything they cannot do safely on their own.
+//!
+//! v0.1 ships four entries:
+//! * `kage.now_ms()` returns wall-clock milliseconds since the Unix epoch.
+//! * `kage.notify(message)` surfaces a one-line user-visible notification.
+//! * `kage.log(level, message)` records a structured log line; `level` is
+//!   one of `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`.
+//! * `kage.config()` returns a copy of the host-supplied configuration
+//!   table.
+
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use mlua::{Lua, Table, Value};
+use serde_json::json;
+
+use crate::error::PluginError;
+
+/// Severity tier for [`HostLog::log`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LogLevel {
+    /// Tracing-grade verbosity.
+    Trace,
+    /// Debug-grade information.
+    Debug,
+    /// Routine progress messages.
+    Info,
+    /// Recoverable concerns the user might want to know about.
+    Warn,
+    /// Failures the host should surface prominently.
+    Error,
+}
+
+impl LogLevel {
+    /// Parse a Lua-supplied level string. Unknown values map to
+    /// [`LogLevel::Info`] so a typo never silently drops a log line.
+    #[must_use]
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "trace" => Self::Trace,
+            "debug" => Self::Debug,
+            "warn" | "warning" => Self::Warn,
+            "error" => Self::Error,
+            _ => Self::Info,
+        }
+    }
+}
+
+/// Host sink for plugin notifications and log lines.
+pub trait HostLog: Send {
+    /// Show a short user-visible message. Print mode renders these to
+    /// stderr; the TUI will pop a transient overlay.
+    fn notify(&mut self, message: &str);
+    /// Record a structured log line.
+    fn log(&mut self, level: LogLevel, message: &str);
+}
+
+/// Default sink that writes notifications to stderr and drops log lines.
+#[derive(Debug, Default)]
+pub struct StderrHostLog;
+
+impl HostLog for StderrHostLog {
+    fn notify(&mut self, message: &str) {
+        eprintln!("kage: {message}");
+    }
+    fn log(&mut self, level: LogLevel, message: &str) {
+        eprintln!("kage [{level:?}] {message}");
+    }
+}
+
+/// Shared, mutable handle to a [`HostLog`] used by Lua callbacks.
+pub type SharedHostLog = Arc<Mutex<Box<dyn HostLog + Send>>>;
+
+/// Construct a default shared host log backed by [`StderrHostLog`].
+#[must_use]
+pub fn default_host_log() -> SharedHostLog {
+    Arc::new(Mutex::new(
+        Box::new(StderrHostLog) as Box<dyn HostLog + Send>
+    ))
+}
+
+/// Install the `kage` table on `lua`'s globals, wired to `sink` for
+/// plugin-driven notifications and to `config` for `kage.config()`.
+pub fn install(
+    lua: &Lua,
+    sink: SharedHostLog,
+    config: serde_json::Value,
+) -> Result<(), PluginError> {
+    let kage = lua.create_table()?;
+
+    kage.set("now_ms", lua.create_function(now_ms)?)?;
+
+    let notify_sink = sink.clone();
+    kage.set(
+        "notify",
+        lua.create_function(move |_, msg: String| {
+            if let Ok(mut s) = notify_sink.lock() {
+                s.notify(&msg);
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let log_sink = sink;
+    kage.set(
+        "log",
+        lua.create_function(move |_, (level, msg): (String, String)| {
+            if let Ok(mut s) = log_sink.lock() {
+                s.log(LogLevel::parse(&level), &msg);
+            }
+            Ok(())
+        })?,
+    )?;
+
+    let config_for_lua = config;
+    kage.set(
+        "config",
+        lua.create_function(move |lua, ()| json_to_lua(lua, &config_for_lua))?,
+    )?;
+
+    lua.globals().set("kage", kage)?;
+    Ok(())
+}
+
+fn now_ms(_: &Lua, (): ()) -> mlua::Result<i64> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| mlua::Error::external(e.to_string()))?;
+    let ms = u128::from(now.as_secs()) * 1000 + u128::from(now.subsec_millis());
+    i64::try_from(ms).map_err(|_| mlua::Error::external("timestamp overflows i64"))
+}
+
+/// Convert a `serde_json::Value` into the equivalent Lua [`Value`].
+///
+/// JSON arrays become 1-indexed Lua tables. Object keys are stringified.
+/// Numeric values that fit in `i64` are returned as integers; anything
+/// else falls through to `f64`.
+pub fn json_to_lua(lua: &Lua, value: &serde_json::Value) -> mlua::Result<Value> {
+    Ok(match value {
+        serde_json::Value::Null => Value::Nil,
+        serde_json::Value::Bool(b) => Value::Boolean(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Integer(i)
+            } else {
+                Value::Number(n.as_f64().unwrap_or(0.0))
+            }
+        }
+        serde_json::Value::String(s) => Value::String(lua.create_string(s)?),
+        serde_json::Value::Array(items) => {
+            let table = lua.create_table()?;
+            for (idx, item) in items.iter().enumerate() {
+                table.set(idx + 1, json_to_lua(lua, item)?)?;
+            }
+            Value::Table(table)
+        }
+        serde_json::Value::Object(map) => {
+            let table = lua.create_table()?;
+            for (k, v) in map {
+                table.set(k.as_str(), json_to_lua(lua, v)?)?;
+            }
+            Value::Table(table)
+        }
+    })
+}
+
+/// Convert a Lua [`Value`] back into `serde_json::Value`. Functions,
+/// userdata, light userdata, threads, and errors are unsupported and
+/// surface as `serde_json::Value::Null`.
+pub fn lua_to_json(value: Value) -> mlua::Result<serde_json::Value> {
+    Ok(match value {
+        Value::Boolean(b) => json!(b),
+        Value::Integer(i) => json!(i),
+        Value::Number(n) => json!(n),
+        Value::String(s) => json!(s.to_str()?.to_owned()),
+        Value::Table(t) => table_to_json(&t)?,
+        Value::Error(err) => json!(err.to_string()),
+        Value::Nil
+        | Value::Function(_)
+        | Value::Thread(_)
+        | Value::UserData(_)
+        | Value::LightUserData(_)
+        | Value::Other(_) => serde_json::Value::Null,
+    })
+}
+
+fn table_to_json(table: &Table) -> mlua::Result<serde_json::Value> {
+    // A Lua table is "arrayish" when all keys are positive integers from
+    // 1..=N. Otherwise, treat it as an object with stringified keys.
+    let len = table.raw_len();
+    if len > 0 {
+        let mut all_dense = true;
+        for i in 1..=len {
+            let v: Value = table.raw_get(i)?;
+            if matches!(v, Value::Nil) {
+                all_dense = false;
+                break;
+            }
+        }
+        if all_dense {
+            let mut arr = Vec::with_capacity(len);
+            for i in 1..=len {
+                arr.push(lua_to_json(table.raw_get(i)?)?);
+            }
+            return Ok(serde_json::Value::Array(arr));
+        }
+    }
+    let mut map = serde_json::Map::new();
+    for pair in table.clone().pairs::<Value, Value>() {
+        let (k, v) = pair?;
+        let key = match k {
+            Value::String(s) => s.to_str()?.to_owned(),
+            Value::Integer(i) => i.to_string(),
+            Value::Number(n) => n.to_string(),
+            other => format!("{other:?}"),
+        };
+        map.insert(key, lua_to_json(v)?);
+    }
+    Ok(serde_json::Value::Object(map))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use mlua::Lua;
+    use serde_json::json;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct Recording {
+        notifies: Vec<String>,
+        logs: Vec<(LogLevel, String)>,
+    }
+    impl HostLog for Recording {
+        fn notify(&mut self, message: &str) {
+            self.notifies.push(message.to_owned());
+        }
+        fn log(&mut self, level: LogLevel, message: &str) {
+            self.logs.push((level, message.to_owned()));
+        }
+    }
+
+    fn install_recording(lua: &Lua) -> Arc<Mutex<Recording>> {
+        let rec = Arc::new(Mutex::new(Recording::default()));
+        let sink: SharedHostLog = {
+            #[derive(Clone)]
+            struct Forwarder(Arc<Mutex<Recording>>);
+            impl HostLog for Forwarder {
+                fn notify(&mut self, message: &str) {
+                    self.0.lock().unwrap().notify(message);
+                }
+                fn log(&mut self, level: LogLevel, message: &str) {
+                    self.0.lock().unwrap().log(level, message);
+                }
+            }
+            Arc::new(Mutex::new(
+                Box::new(Forwarder(rec.clone())) as Box<dyn HostLog + Send>
+            ))
+        };
+        install(
+            lua,
+            sink,
+            json!({"model": "anthropic:claude", "cwd": "/work"}),
+        )
+        .unwrap();
+        rec
+    }
+
+    #[test]
+    fn now_ms_returns_recent_timestamp() {
+        let lua = Lua::new();
+        install(&lua, default_host_log(), json!({})).unwrap();
+        let ms: i64 = lua.load("return kage.now_ms()").eval().unwrap();
+        // After 2020-01-01.
+        assert!(ms > 1_577_836_800_000);
+    }
+
+    #[test]
+    fn notify_and_log_route_to_sink() {
+        let lua = Lua::new();
+        let rec = install_recording(&lua);
+        lua.load("kage.notify('hello'); kage.log('warn', 'careful')")
+            .exec()
+            .unwrap();
+        let r = rec.lock().unwrap();
+        assert_eq!(r.notifies, vec!["hello".to_owned()]);
+        assert_eq!(r.logs, vec![(LogLevel::Warn, "careful".to_owned())]);
+    }
+
+    #[test]
+    fn config_returns_table_view_of_host_config() {
+        let lua = Lua::new();
+        install_recording(&lua);
+        let model: String = lua.load("return kage.config().model").eval().unwrap();
+        assert_eq!(model, "anthropic:claude");
+        let cwd: String = lua.load("return kage.config().cwd").eval().unwrap();
+        assert_eq!(cwd, "/work");
+    }
+
+    #[test]
+    fn config_round_trips_nested_structures() {
+        let lua = Lua::new();
+        install(
+            &lua,
+            default_host_log(),
+            json!({"nested": {"flags": [true, false]}}),
+        )
+        .unwrap();
+        let v: bool = lua
+            .load("return kage.config().nested.flags[1]")
+            .eval()
+            .unwrap();
+        assert!(v);
+    }
+
+    #[test]
+    fn unknown_log_level_falls_back_to_info() {
+        assert_eq!(LogLevel::parse("zzz"), LogLevel::Info);
+        assert_eq!(LogLevel::parse("warning"), LogLevel::Warn);
+    }
+
+    #[test]
+    fn lua_table_round_trips_through_json_helpers() {
+        let lua = Lua::new();
+        let table: mlua::Table = lua
+            .load("return { name = 'kage', tags = { 'rust', 'lua' } }")
+            .eval()
+            .unwrap();
+        let json = lua_to_json(mlua::Value::Table(table)).unwrap();
+        assert_eq!(json["name"], "kage");
+        assert_eq!(json["tags"][0], "rust");
+        let back = json_to_lua(&lua, &json).unwrap();
+        if let mlua::Value::Table(t) = back {
+            let name: String = t.get("name").unwrap();
+            assert_eq!(name, "kage");
+        } else {
+            panic!("expected table");
+        }
+    }
+}

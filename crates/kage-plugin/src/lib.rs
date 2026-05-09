@@ -4,8 +4,10 @@
 //! per process, evaluates plugin scripts against it, and dispatches loop
 //! events through the runtime so plugins can react.
 
+pub mod api;
 pub mod error;
 pub mod runtime;
 
+pub use api::{HostLog, LogLevel, SharedHostLog, StderrHostLog, default_host_log};
 pub use error::PluginError;
-pub use runtime::{PluginRuntime, SANDBOX_REMOVALS};
+pub use runtime::{PluginRuntime, PluginRuntimeBuilder, SANDBOX_REMOVALS};

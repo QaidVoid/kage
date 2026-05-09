@@ -23,27 +23,35 @@
 
 use mlua::Lua;
 
+use crate::api::{self, SharedHostLog, default_host_log};
 use crate::error::PluginError;
 
-/// A Lua VM with the dangerous standard-library bindings stripped.
+/// A Lua VM with the dangerous standard-library bindings stripped and
+/// the `kage` API table installed.
 #[derive(Debug)]
 pub struct PluginRuntime {
     lua: Lua,
 }
 
 impl PluginRuntime {
-    /// Build a fresh runtime with all kage sandbox restrictions applied.
-    ///
-    /// The standard library is loaded first, then the entries listed in
-    /// [`SANDBOX_REMOVALS`] are deleted from the globals tree.
+    /// Build a runtime with default host log + empty config. Equivalent to
+    /// `PluginRuntime::builder().build()`.
     pub fn new() -> Result<Self, PluginError> {
-        let lua = Lua::new();
-        apply_sandbox(&lua)?;
-        Ok(Self { lua })
+        Self::builder().build()
+    }
+
+    /// Begin configuring a runtime. The returned builder picks a default
+    /// host log and empty config; either can be replaced before `build`.
+    #[must_use]
+    pub fn builder() -> PluginRuntimeBuilder {
+        PluginRuntimeBuilder {
+            sink: default_host_log(),
+            config: serde_json::Value::Object(serde_json::Map::new()),
+        }
     }
 
     /// Borrow the underlying Lua state. Useful for tests and for higher
-    /// layers in this crate that wire in the `kage` API table.
+    /// layers in this crate that wire in additional API surface.
     #[must_use]
     pub fn lua(&self) -> &Lua {
         &self.lua
@@ -53,6 +61,46 @@ impl PluginRuntime {
     /// chunk's return value as a Lua [`mlua::Value`].
     pub fn eval(&self, source: &str) -> Result<mlua::Value, PluginError> {
         Ok(self.lua.load(source).eval::<mlua::Value>()?)
+    }
+}
+
+/// Builder for [`PluginRuntime`]. Lets the host inject a custom host-log
+/// sink and a config snapshot before the runtime is sealed.
+pub struct PluginRuntimeBuilder {
+    sink: SharedHostLog,
+    config: serde_json::Value,
+}
+
+impl std::fmt::Debug for PluginRuntimeBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PluginRuntimeBuilder")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PluginRuntimeBuilder {
+    /// Replace the default [`crate::api::HostLog`] sink.
+    #[must_use]
+    pub fn sink(mut self, sink: SharedHostLog) -> Self {
+        self.sink = sink;
+        self
+    }
+
+    /// Replace the value returned by `kage.config()` in plugins.
+    #[must_use]
+    pub fn config(mut self, config: serde_json::Value) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Finalize the runtime: build the Lua state, apply sandbox removals,
+    /// and install the `kage` API table.
+    pub fn build(self) -> Result<PluginRuntime, PluginError> {
+        let lua = Lua::new();
+        apply_sandbox(&lua)?;
+        api::install(&lua, self.sink, self.config)?;
+        Ok(PluginRuntime { lua })
     }
 }
 

@@ -50,7 +50,7 @@ impl AnthropicProvider {
                 supports_thinking: true,
                 supports_tool_use: true,
             },
-            agent: ureq::Agent::new_with_defaults(),
+            agent: crate::openai::build_agent(),
         }
     }
 
@@ -85,6 +85,11 @@ impl AnthropicProvider {
             .header("content-type", "application/json")
             .send_json(&body)
             .map_err(map_ureq_error)?;
+
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(crate::openai::read_error_body(status, response));
+        }
 
         let parsed: AnthropicMessage = response
             .into_body()
@@ -378,6 +383,11 @@ impl Provider for AnthropicProvider {
             .header("content-type", "application/json")
             .send_json(&body)
             .map_err(map_ureq_error)?;
+
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(crate::openai::read_error_body(status, response));
+        }
 
         let reader: Box<dyn Read + Send> = Box::new(response.into_body().into_reader());
         Ok(Box::new(AnthropicStream::new(reader, cancel.clone())))

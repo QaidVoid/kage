@@ -66,9 +66,19 @@ impl OpenAiProvider {
             api_key: api_key.into(),
             base_url: base_url.into(),
             metadata,
-            agent: ureq::Agent::new_with_defaults(),
+            agent: build_agent(),
         }
     }
+}
+
+/// Construct a [`ureq::Agent`] with status-code-as-error disabled so we can
+/// surface the upstream response body in [`ProviderError::Http`] instead of
+/// throwing it away.
+pub(crate) fn build_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .build()
+        .new_agent()
 }
 
 impl Provider for OpenAiProvider {
@@ -94,9 +104,34 @@ impl Provider for OpenAiProvider {
             .send_json(&body)
             .map_err(map_ureq_error)?;
 
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(read_error_body(status, response));
+        }
+
         let reader: Box<dyn Read + Send> = Box::new(response.into_body().into_reader());
         Ok(Box::new(OpenAiStream::new(reader, cancel.clone())))
     }
+}
+
+/// Read the body of a non-2xx response into [`ProviderError::Http`].
+///
+/// Caps the body at 8 KiB so a misbehaving upstream cannot blow up our error
+/// strings; what we keep is enough to surface the JSON error payload that
+/// every major provider returns for 4xx/5xx.
+pub(crate) fn read_error_body(
+    status: u16,
+    response: ureq::http::Response<ureq::Body>,
+) -> ProviderError {
+    use std::io::Read as _;
+    let mut buf = Vec::new();
+    let _ = response
+        .into_body()
+        .into_reader()
+        .take(8 * 1024)
+        .read_to_end(&mut buf);
+    let body = String::from_utf8_lossy(&buf).into_owned();
+    ProviderError::Http { status, body }
 }
 
 /// Build the JSON body for a Chat Completions request.

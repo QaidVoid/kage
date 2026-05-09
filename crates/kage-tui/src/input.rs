@@ -1,13 +1,17 @@
-//! Modal input state machine: Normal / Insert / Visual.
+//! Modal input state machine: Normal / Insert.
 //!
 //! Vim-flavoured key handling: `i` enters insert, `Esc` returns to
-//! normal, `j`/`k`/`gg`/`G` scroll the buffer, `v` enters visual, `y`
-//! yanks the selection, `/` starts a search, `:` starts a command. Each
-//! key resolves to zero or more [`InputAction`]s the host applies to
-//! its [`crate::Buffer`] / clipboard / command runner.
+//! normal, `j`/`k`/`gg`/`G` scroll the buffer, `y` copies the active
+//! screen-cell selection, `/` starts a search, `:` starts a command.
+//! Each key resolves to zero or more [`InputAction`]s the host applies
+//! to its [`crate::Buffer`] / clipboard / command runner.
 //!
 //! The state machine is intentionally pure: input is a [`KeyEvent`],
 //! output is a [`Vec<InputAction>`]. Side effects live in the host.
+//!
+//! Selection lives outside this state machine: the host paints a
+//! cell-based screen overlay driven by mouse drag. `Esc` clears the
+//! selection through [`InputAction::ClearSelection`].
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -19,13 +23,6 @@ pub enum Mode {
     Normal,
     /// Free-text insert mode for the prompt input.
     Insert,
-    /// Block-level visual selection across conversation blocks.
-    Visual,
-    /// Char-level visual selection within a single block. Cursor is
-    /// `(line, col)` measured in chars (not bytes); `h`/`l` move
-    /// within a line, `j`/`k` between lines, `0`/`$` to line edges,
-    /// `y` yanks the range, `Esc` exits.
-    CharVisual,
 }
 
 /// Side effect produced by a key press.
@@ -51,8 +48,14 @@ pub enum InputAction {
     BeginCommand,
     /// Begin a `/` search. Host opens a search overlay.
     BeginSearch,
-    /// Yank the current visual selection into the OSC52 clipboard.
+    /// Yank the active screen-cell selection into the OSC52
+    /// clipboard. The host walks its rendered cell grid to extract
+    /// the text, so the copy matches what's painted (including
+    /// across tool blocks).
     Yank,
+    /// Drop the active screen-cell selection without copying.
+    /// Triggered by `Esc` when the user wants to abandon a drag.
+    ClearSelection,
     /// Cancel the in-flight turn.
     Cancel,
     /// Open the in-TUI model picker overlay.
@@ -71,24 +74,6 @@ pub enum InputAction {
     SearchNext,
     /// Jump focus to the previous block matching the active search.
     SearchPrev,
-    /// Enter char-level visual on the focused block (only valid if
-    /// the block has plain-text content the renderer can map back
-    /// to a `(line, col)` cursor).
-    EnterCharVisual,
-    /// Move the char-visual cursor by one column.
-    CharVisualLeft,
-    /// Move the char-visual cursor by one column.
-    CharVisualRight,
-    /// Move the char-visual cursor by one logical line.
-    CharVisualUp,
-    /// Move the char-visual cursor by one logical line.
-    CharVisualDown,
-    /// Snap the char-visual cursor to column 0.
-    CharVisualLineStart,
-    /// Snap the char-visual cursor to the end of the current line.
-    CharVisualLineEnd,
-    /// Yank the active char-visual selection to the clipboard.
-    CharVisualYank,
 }
 
 /// Cap on retained history entries. The host's persistence layer is
@@ -218,8 +203,6 @@ impl InputState {
         match self.mode {
             Mode::Normal => self.handle_normal(key),
             Mode::Insert => self.handle_insert(key),
-            Mode::Visual => self.handle_visual(key),
-            Mode::CharVisual => self.handle_char_visual(key),
         }
     }
 
@@ -230,12 +213,8 @@ impl InputState {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('i' | 'a') => self.enter_mode(Mode::Insert),
-            KeyCode::Char('v') => self.enter_mode(Mode::Visual),
-            // Capital V in normal mode jumps straight into char-level
-            // visual on whatever block currently has focus. Vim's `V`
-            // is line-visual; we repurpose it because line-visual on
-            // block-rendered chat content isn't a useful abstraction.
-            KeyCode::Char('V') => vec![InputAction::EnterCharVisual],
+            KeyCode::Char('y') => vec![InputAction::Yank],
+            KeyCode::Esc => vec![InputAction::ClearSelection],
             KeyCode::Char('j') | KeyCode::Down => vec![InputAction::Scroll(1)],
             KeyCode::Char('k') | KeyCode::Up => vec![InputAction::Scroll(-1)],
             KeyCode::Char('h' | 'l') | KeyCode::Left | KeyCode::Right => {
@@ -351,41 +330,6 @@ impl InputState {
                 self.insert_char(c);
                 Vec::new()
             }
-            _ => Vec::new(),
-        }
-    }
-
-    fn handle_visual(&mut self, key: KeyEvent) -> Vec<InputAction> {
-        match key.code {
-            KeyCode::Esc => self.enter_mode(Mode::Normal),
-            KeyCode::Char('y') => {
-                let mut actions = vec![InputAction::Yank];
-                actions.extend(self.enter_mode(Mode::Normal));
-                actions
-            }
-            // Extend selection by walking the head one block at a
-            // time. Up/Down arrows mirror j/k for a more discoverable
-            // gesture; the anchor stays put.
-            KeyCode::Char('j') | KeyCode::Down => vec![InputAction::FocusNext],
-            KeyCode::Char('k') | KeyCode::Up => vec![InputAction::FocusPrev],
-            _ => Vec::new(),
-        }
-    }
-
-    fn handle_char_visual(&mut self, key: KeyEvent) -> Vec<InputAction> {
-        match key.code {
-            KeyCode::Esc => self.enter_mode(Mode::Normal),
-            KeyCode::Char('y') => {
-                let mut actions = vec![InputAction::CharVisualYank];
-                actions.extend(self.enter_mode(Mode::Normal));
-                actions
-            }
-            KeyCode::Char('h') | KeyCode::Left => vec![InputAction::CharVisualLeft],
-            KeyCode::Char('l') | KeyCode::Right => vec![InputAction::CharVisualRight],
-            KeyCode::Char('j') | KeyCode::Down => vec![InputAction::CharVisualDown],
-            KeyCode::Char('k') | KeyCode::Up => vec![InputAction::CharVisualUp],
-            KeyCode::Char('0') | KeyCode::Home => vec![InputAction::CharVisualLineStart],
-            KeyCode::Char('$') | KeyCode::End => vec![InputAction::CharVisualLineEnd],
             _ => Vec::new(),
         }
     }
@@ -651,15 +595,17 @@ mod tests {
     }
 
     #[test]
-    fn visual_mode_y_yanks_and_returns_to_normal() {
+    fn normal_y_emits_yank() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('v')));
-        assert_eq!(state.mode(), Mode::Visual);
         let acts = state.handle_key(key(KeyCode::Char('y')));
-        assert_eq!(
-            acts,
-            vec![InputAction::Yank, InputAction::EnterMode(Mode::Normal),]
-        );
+        assert_eq!(acts, vec![InputAction::Yank]);
+    }
+
+    #[test]
+    fn normal_esc_emits_clear_selection() {
+        let mut state = InputState::new();
+        let acts = state.handle_key(key(KeyCode::Esc));
+        assert_eq!(acts, vec![InputAction::ClearSelection]);
     }
 
     #[test]

@@ -15,7 +15,6 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use ratatui::crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
 
-use crate::buffer::Buffer;
 use crate::cmdline::{CommandLine, CommandLineEvent};
 use crate::error::TuiError;
 use crate::events::SharedBuffer;
@@ -202,11 +201,24 @@ pub struct App {
     pending_mouse_capture: Option<bool>,
     /// In-progress mouse gesture started by a left-button press. The
     /// tuple is `(down_row, down_block_idx, dragged)`. `dragged` flips
-    /// to true the first time a drag event reports a different block
-    /// than the anchor; on `Up`, a non-dragged click on the block's
-    /// header row toggles its fold, while a dragged release leaves
-    /// the visual selection in place for the user to yank with `y`.
+    /// to true the first time a drag event arrives; on `Up`, a
+    /// non-dragged click on the block's header row toggles its fold,
+    /// while a dragged release leaves the screen selection in place
+    /// for the user to yank with `y`.
     mouse_drag_anchor: Option<(u16, usize, bool)>,
+    /// Active screen-cell selection: `(anchor, cursor)` in absolute
+    /// terminal `(row, col)` coordinates. Painted as a bg overlay
+    /// over whatever the renderer drew, so it covers tool blocks and
+    /// chrome equally without changing layout. `y` in normal mode
+    /// extracts the underlying text from
+    /// [`Self::last_screen_text`] and OSC52-copies it.
+    screen_selection: Option<((u16, u16), (u16, u16))>,
+    /// 2D char grid extracted from the most recent painted frame,
+    /// indexed `[row][col]`. Used by [`Self::yank_screen_selection`]
+    /// to recover the text the user actually saw when they made
+    /// their drag selection. Cleared between frames so the indexes
+    /// always line up with the latest paint.
+    last_screen_text: Vec<Vec<char>>,
 }
 
 impl App {
@@ -230,6 +242,8 @@ impl App {
             search_pattern: None,
             mouse_drag_anchor: None,
             pending_mouse_capture: None,
+            screen_selection: None,
+            last_screen_text: Vec::new(),
         }
     }
 
@@ -408,13 +422,27 @@ impl App {
             search_line: self.search_line.as_ref(),
             search_match_count,
         };
+        let screen_selection = self.screen_selection;
+        let mut screen_text_grid = std::mem::take(&mut self.last_screen_text);
+        let input = &self.input;
+        let picker = self.picker.as_mut();
         tui.terminal().draw(|frame| {
             let regions = split(frame.area(), input_height);
-            view::render(frame, regions, &mut buffer, &self.input, cmdline, &status);
-            if let Some(picker) = self.picker.as_mut() {
+            view::render(
+                frame,
+                regions,
+                &mut buffer,
+                input,
+                cmdline,
+                &status,
+                screen_selection,
+                &mut screen_text_grid,
+            );
+            if let Some(picker) = picker {
                 picker.render(frame, frame.area());
             }
         })?;
+        self.last_screen_text = screen_text_grid;
         Ok(())
     }
 
@@ -579,34 +607,66 @@ impl App {
         }
     }
 
-    /// Copy the current visual selection to the system clipboard via
-    /// OSC52. The escape sequence is emitted directly to stdout (we
-    /// own the alt screen). A `kage:notify` block confirms the yank
-    /// so the user knows the gesture worked even when the terminal's
-    /// clipboard support is silent.
-    fn yank_visual_selection(&mut self) {
-        let text = match self.buffer.lock() {
-            Ok(buf) => buf
-                .visual_range()
-                .map(|(lo, hi)| buf.selection_text(lo, hi))
-                .unwrap_or_default(),
-            Err(_) => return,
-        };
+    /// Copy the active screen-cell selection to the system clipboard
+    /// via OSC52. Walks the cell text grid extracted by the renderer
+    /// (so the copy matches what's painted, including across tool
+    /// blocks), strips trailing whitespace per row, joins with `\n`,
+    /// and clears the selection.
+    fn yank_screen_selection(&mut self) {
+        let text = self.extract_selection_text();
         if text.is_empty() {
+            self.screen_selection = None;
             return;
         }
         let encoded = base64::engine::general_purpose::STANDARD.encode(&text);
         let mut stdout = std::io::stdout();
         let _ = write!(stdout, "\x1b]52;c;{encoded}\x07");
         let _ = stdout.flush();
-        if let Ok(mut buf) = self.buffer.lock() {
-            buf.set_visual_anchor(None);
-            buf.push_custom(
-                "kage:notify",
-                format!("yanked {} chars to clipboard", text.chars().count()),
-                false,
-            );
+        self.screen_selection = None;
+        self.notify(format!(
+            "yanked {} chars to clipboard",
+            text.chars().count()
+        ));
+    }
+
+    fn extract_selection_text(&self) -> String {
+        let Some(((a_row, a_col), (c_row, c_col))) = self.screen_selection else {
+            return String::new();
+        };
+        let (start, end) = if (a_row, a_col) <= (c_row, c_col) {
+            ((a_row, a_col), (c_row, c_col))
+        } else {
+            ((c_row, c_col), (a_row, a_col))
+        };
+        let mut out = String::new();
+        for row in start.0..=end.0 {
+            let Some(grid_row) = self.last_screen_text.get(usize::from(row)) else {
+                continue;
+            };
+            let from_col = if row == start.0 {
+                usize::from(start.1)
+            } else {
+                0
+            };
+            let to_col = if row == end.0 {
+                usize::from(end.1).saturating_add(1)
+            } else {
+                grid_row.len()
+            };
+            let to_col = to_col.min(grid_row.len());
+            if from_col >= to_col {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                continue;
+            }
+            let slice: String = grid_row[from_col..to_col].iter().collect::<String>();
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(slice.trim_end());
         }
+        out
     }
 
     fn push_help(&mut self) {
@@ -791,98 +851,18 @@ impl App {
             InputAction::BeginCommand => {
                 self.cmdline = Some(CommandLine::new());
             }
-            InputAction::EnterMode(mode) => match mode {
-                Mode::Visual => {
-                    if let Ok(mut buf) = self.buffer.lock() {
-                        let anchor = buf.effective_focus();
-                        buf.set_visual_anchor(anchor);
-                    }
-                }
-                Mode::Normal | Mode::Insert => {
-                    if let Ok(mut buf) = self.buffer.lock() {
-                        buf.set_visual_anchor(None);
-                        buf.clear_char_visual();
-                    }
-                }
-                Mode::CharVisual => {
-                    // EnterMode(CharVisual) is dispatched by the
-                    // EnterCharVisual branch below after the mode
-                    // switch succeeds; no extra work here.
-                }
-            },
-            InputAction::Yank => {
-                self.yank_visual_selection();
+            InputAction::EnterMode(_) => {}
+            InputAction::Yank => self.yank_screen_selection(),
+            InputAction::ClearSelection => {
+                self.screen_selection = None;
             }
             InputAction::BeginSearch => {
                 self.search_line = Some(CommandLine::new());
             }
             InputAction::SearchNext => self.jump_to_search_match(true),
             InputAction::SearchPrev => self.jump_to_search_match(false),
-            InputAction::EnterCharVisual => self.try_enter_char_visual(),
-            InputAction::CharVisualLeft => self.move_char_visual(0, -1),
-            InputAction::CharVisualRight => self.move_char_visual(0, 1),
-            InputAction::CharVisualUp => self.move_char_visual(-1, 0),
-            InputAction::CharVisualDown => self.move_char_visual(1, 0),
-            InputAction::CharVisualLineStart => {
-                if let Ok(mut buf) = self.buffer.lock() {
-                    buf.char_visual_line_start();
-                }
-            }
-            InputAction::CharVisualLineEnd => {
-                if let Ok(mut buf) = self.buffer.lock() {
-                    buf.char_visual_line_end();
-                }
-            }
-            InputAction::CharVisualYank => self.yank_char_visual_selection(),
         }
         None
-    }
-
-    /// Try to switch into char-visual on whatever block is currently
-    /// focused. Silently no-ops (and stays in Normal) if the block
-    /// doesn't have plain-text content the renderer can map.
-    fn try_enter_char_visual(&mut self) {
-        let started = if let Ok(mut buf) = self.buffer.lock() {
-            buf.effective_focus()
-                .is_some_and(|idx| buf.begin_char_visual(idx))
-        } else {
-            false
-        };
-        if started {
-            self.input.switch_mode(Mode::CharVisual);
-        }
-    }
-
-    fn move_char_visual(&mut self, dline: i32, dcol: i32) {
-        if let Ok(mut buf) = self.buffer.lock() {
-            buf.move_char_visual_cursor(dline, dcol);
-        }
-    }
-
-    /// OSC52-yank the active char-visual selection and exit back to
-    /// Normal mode. Mirror of [`Self::yank_visual_selection`] for
-    /// the block-level selection path.
-    fn yank_char_visual_selection(&mut self) {
-        let text = match self.buffer.lock() {
-            Ok(buf) => buf.char_visual_selection_text(),
-            Err(_) => return,
-        };
-        if !text.is_empty() {
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&text);
-            let mut stdout = std::io::stdout();
-            let _ = write!(stdout, "\x1b]52;c;{encoded}\x07");
-            let _ = stdout.flush();
-        }
-        if let Ok(mut buf) = self.buffer.lock() {
-            buf.clear_char_visual();
-            if !text.is_empty() {
-                buf.push_custom(
-                    "kage:notify",
-                    format!("yanked {} chars to clipboard", text.chars().count()),
-                    false,
-                );
-            }
-        }
     }
 
     fn send_request(&mut self, req: RunRequest) -> Result<(), TrySendError<RunRequest>> {
@@ -892,65 +872,40 @@ impl App {
         }
     }
 
-    /// Mouse left-button press: latch the press as a potential
-    /// drag-start and put focus on the clicked block. For text-only
-    /// blocks (Assistant/User/Custom) the press also primes a
-    /// char-visual selection at the clicked char, so a subsequent
-    /// drag extends a precise text range rather than a block range.
-    /// The fold-toggle on a non-dragged release in [`Self::mouse_up`]
-    /// stays intact for blocks that don't enter char-visual.
+    /// Mouse left-button press: anchor a screen-cell selection at the
+    /// click position. Any prior selection is replaced. Focus is
+    /// snapped to whichever block sits under the click so subsequent
+    /// keyboard gestures (fold toggle, scroll) act on it.
     fn mouse_down(&mut self, row: u16, col: u16) {
+        self.screen_selection = Some(((row, col), (row, col)));
         if let Ok(mut buf) = self.buffer.lock()
             && let Some(idx) = buf.block_at_screen_row(row)
         {
             buf.set_focus(Some(idx));
-            buf.set_visual_anchor(None);
-            buf.clear_char_visual();
-            if buf.is_char_visual_eligible(idx)
-                && let Some(point) = char_pos_at(&buf, idx, row, col)
-            {
-                buf.begin_char_visual(idx);
-                buf.set_char_visual_point(point);
-                self.input.switch_mode(Mode::CharVisual);
-            }
             self.mouse_drag_anchor = Some((row, idx, false));
+        } else {
+            self.mouse_drag_anchor = None;
         }
     }
 
-    /// Mouse drag while left-button is held: extend the active
-    /// selection. Char-visual blocks update the cursor in
-    /// `(line, col)` space; non-eligible blocks fall back to
-    /// block-level visual selection.
+    /// Mouse drag while left-button is held: extend the screen-cell
+    /// selection's cursor end to `(row, col)`. The selection is in
+    /// raw terminal-cell coordinates so it covers anything the user
+    /// can see, including across multiple blocks.
     fn mouse_drag(&mut self, row: u16, col: u16) {
-        let Some((down_row, anchor_idx, ref mut dragged)) = self.mouse_drag_anchor else {
+        let Some(((anchor_row, anchor_col), _)) = self.screen_selection else {
             return;
         };
-        if let Ok(mut buf) = self.buffer.lock() {
-            if buf.char_visual().is_some() {
-                if let Some(idx) = buf.block_at_screen_row(row)
-                    && idx == anchor_idx
-                    && let Some(point) = char_pos_at(&buf, idx, row, col)
-                {
-                    *dragged = true;
-                    buf.set_char_visual_cursor(point);
-                }
-            } else if let Some(idx) = buf.block_at_screen_row(row) {
-                if !*dragged && idx == anchor_idx && row == down_row {
-                    return;
-                }
-                *dragged = true;
-                if buf.visual_anchor().is_none() {
-                    buf.set_visual_anchor(Some(anchor_idx));
-                    self.input.switch_mode(Mode::Visual);
-                }
-                buf.set_focus(Some(idx));
-            }
+        self.screen_selection = Some(((anchor_row, anchor_col), (row, col)));
+        if let Some((_, _, ref mut dragged)) = self.mouse_drag_anchor {
+            *dragged = true;
         }
     }
 
     /// Mouse left-button release: a non-dragged release on a block's
-    /// header row toggles fold; a dragged release leaves the visual
-    /// selection in place so the user can `y` to copy it.
+    /// header row toggles fold and clears the just-anchored
+    /// zero-width selection; a dragged release leaves the selection
+    /// in place so the user can `y` to copy it.
     fn mouse_up(&mut self, row: u16) {
         let Some((_down_row, anchor_idx, dragged)) = self.mouse_drag_anchor.take() else {
             return;
@@ -958,6 +913,9 @@ impl App {
         if dragged {
             return;
         }
+        // Plain click: clear the zero-width selection we anchored on
+        // press, then maybe toggle a fold on the header row.
+        self.screen_selection = None;
         if let Ok(mut buf) = self.buffer.lock()
             && buf.screen_top_of(anchor_idx) == Some(row)
         {
@@ -1034,60 +992,33 @@ impl App {
             search_line: self.search_line.as_ref(),
             search_match_count,
         };
+        let screen_selection = self.screen_selection;
+        let mut screen_text_grid = std::mem::take(&mut self.last_screen_text);
+        let input = &self.input;
         terminal
             .draw(|frame| {
                 let regions = split(frame.area(), input_height);
-                view::render(frame, regions, &mut buffer, &self.input, cmdline, &status);
+                view::render(
+                    frame,
+                    regions,
+                    &mut buffer,
+                    input,
+                    cmdline,
+                    &status,
+                    screen_selection,
+                    &mut screen_text_grid,
+                );
                 if let Some(picker) = picker {
                     picker.render(frame, frame.area());
                 }
             })
             .map_err(|err| TuiError::Io(std::io::Error::other(err.to_string())))?;
+        self.last_screen_text = screen_text_grid;
         Ok(())
     }
 }
 
 /// Translate an absolute terminal `(row, col)` mouse position to a
-/// `(logical_line, char_column)` inside the block at `idx`. Walks the
-/// block's text the same way the renderer does (split on `\n`, wrap
-/// every `width` chars), so the returned position lines up with what
-/// the user clicks. Returns `None` when the click is outside the
-/// block's painted region or the block has no text content.
-fn char_pos_at(buffer: &Buffer, idx: usize, row: u16, col: u16) -> Option<(usize, usize)> {
-    let screen_top = buffer.screen_top_of(idx)?;
-    if row < screen_top {
-        return None;
-    }
-    let area_x = buffer.last_area_x();
-    let area_width = buffer.last_area_width();
-    if area_width == 0 {
-        return None;
-    }
-    let usable = usize::from(area_width).max(1);
-    let block_col = usize::from(col.saturating_sub(area_x)).min(usable);
-    let relative_row = usize::from(row - screen_top);
-    let text = buffer.char_visual_text(idx)?;
-    let lines: Vec<&str> = text.split('\n').collect();
-    let mut acc_rows = 0usize;
-    for (line_idx, line) in lines.iter().enumerate() {
-        let chars = line.chars().count();
-        let line_rows = if chars == 0 {
-            1
-        } else {
-            chars.div_ceil(usable).max(1)
-        };
-        if acc_rows.saturating_add(line_rows) > relative_row {
-            let row_in_line = relative_row.saturating_sub(acc_rows);
-            let col_in_line = row_in_line.saturating_mul(usable).saturating_add(block_col);
-            return Some((line_idx, col_in_line.min(chars)));
-        }
-        acc_rows = acc_rows.saturating_add(line_rows);
-    }
-    let last_line = lines.len().saturating_sub(1);
-    let last_chars = lines.get(last_line).map_or(0, |l| l.chars().count());
-    Some((last_line, last_chars))
-}
-
 /// Best-effort label for the current mode, exposed for the host's
 /// status-bar widget.
 #[must_use]
@@ -1095,8 +1026,6 @@ pub fn mode_label(mode: Mode) -> &'static str {
     match mode {
         Mode::Normal => "normal",
         Mode::Insert => "insert",
-        Mode::Visual => "visual",
-        Mode::CharVisual => "char",
     }
 }
 

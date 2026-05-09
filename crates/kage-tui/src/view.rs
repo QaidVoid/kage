@@ -15,7 +15,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block as RtBlock, Borders, Paragraph, Wrap};
 
-use crate::buffer::{Block, Buffer, CharVisualState};
+use crate::buffer::{Block, Buffer};
 use crate::cmdline::CommandLine;
 use crate::input::{InputState, Mode};
 use crate::layout::Regions;
@@ -40,19 +40,15 @@ pub struct StatusCtx<'a> {
 }
 
 /// What kind of attention a block should draw on this frame: the
-/// navigation head (white rule), part of a visual selection (magenta
-/// rule), a search match (yellow rule), or neither. `Ord` is
-/// implemented so merged tool pairs can pick `max` across both halves;
-/// Focused beats Selected beats Match beats None.
+/// navigation head (white rule), a search match (yellow rule), or
+/// neither. `Ord` is implemented so merged tool pairs pick `max`
+/// across both halves; Focused beats Match beats None.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Emphasis {
     /// No special highlight.
     None,
     /// Block contains a hit for the active search pattern.
     Match,
-    /// Block is inside the visual selection range, but isn't the
-    /// navigation head.
-    Selected,
     /// Block is the navigation head.
     Focused,
 }
@@ -61,7 +57,7 @@ impl Emphasis {
     fn rule_glyph(self) -> &'static str {
         match self {
             Self::None => "\u{258e}",
-            Self::Match | Self::Focused | Self::Selected => "\u{258c}",
+            Self::Match | Self::Focused => "\u{258c}",
         }
     }
 
@@ -70,7 +66,6 @@ impl Emphasis {
         match self {
             Self::None => base,
             Self::Focused => t.focus_color,
-            Self::Selected => t.selection_color,
             Self::Match => t.match_color,
         }
     }
@@ -84,6 +79,7 @@ impl Emphasis {
 /// has no visible effect until the inflated count drains down to the
 /// renderer-clamped value. Persisting the clamp here keeps user input
 /// in sync with what's on screen.
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     frame: &mut Frame,
     regions: Regions,
@@ -91,6 +87,8 @@ pub fn render(
     input: &InputState,
     cmdline: Option<&CommandLine>,
     status: &StatusCtx<'_>,
+    screen_selection: Option<((u16, u16), (u16, u16))>,
+    screen_text_grid: &mut Vec<Vec<char>>,
 ) {
     render_status(frame, regions, input, cmdline, status);
     render_buffer(frame, regions, buffer, status.search_pattern);
@@ -99,6 +97,10 @@ pub fn render(
         place_cmdline_cursor(frame, regions, cl);
     } else if let Some(sl) = status.search_line {
         place_search_cursor(frame, regions, sl);
+    }
+    capture_screen_text(frame, screen_text_grid);
+    if let Some(sel) = screen_selection {
+        apply_screen_selection_overlay(frame, sel);
     }
 }
 
@@ -333,7 +335,6 @@ fn render_buffer(
     }
 
     let focus = buffer.effective_focus();
-    let visual_range = buffer.visual_range();
 
     // Pass 1: gather per-block heights. Cached entries return
     // immediately; misses build the block's lines once, measure with
@@ -460,29 +461,17 @@ fn render_buffer(
             buffer,
             idx,
             focus,
-            visual_range,
             search_pattern,
             &consumed_results,
             &call_idx_for_result,
         );
-        // Char-visual on this block forces a plain rendering: the
-        // selection cursor is in logical-line space and the cached
-        // (possibly fenced) render would misalign overlays. Skip
-        // the cache for the active block and apply the selection
-        // bg before slicing.
-        let char_visual_here = buffer.char_visual().filter(|cv| cv.block_idx == idx);
         // Reuse the cached render only when there's no extra
         // emphasis to bake in - cached lines were built with
-        // `Emphasis::None`, so a focused/selected/match block has to
-        // rebuild to pick up the rule glyph and accent color. The
-        // common case (most blocks unfocused on screen) falls into
-        // the cheap branch.
-        let block_lines: Vec<Line<'static>> = if let Some(cv) = char_visual_here {
-            let text = buffer.char_visual_text(idx).unwrap_or("");
-            let mut lines = plain_lines(text, assistant_style());
-            apply_char_visual_overlay(&mut lines, cv);
-            lines
-        } else if emp == Emphasis::None
+        // `Emphasis::None`, so a focused/match block has to rebuild
+        // to pick up the rule glyph and accent color. The common
+        // case (most blocks unfocused on screen) falls into the
+        // cheap branch.
+        let block_lines: Vec<Line<'static>> = if emp == Emphasis::None
             && let Some(cached) = buffer.cached_render_lines(idx, width)
         {
             cached.as_ref().clone()
@@ -557,7 +546,6 @@ fn emphasis_for(
     buffer: &Buffer,
     idx: usize,
     focus: Option<usize>,
-    visual_range: Option<(usize, usize)>,
     search_pattern: Option<&str>,
     consumed_results: &std::collections::HashSet<usize>,
     call_idx_for_result: &std::collections::HashMap<usize, usize>,
@@ -565,8 +553,6 @@ fn emphasis_for(
     let single = |i: usize| -> Emphasis {
         if focus == Some(i) {
             Emphasis::Focused
-        } else if visual_range.is_some_and(|(lo, hi)| i >= lo && i <= hi) {
-            Emphasis::Selected
         } else if search_pattern.is_some_and(|p| buffer.block_contains(i, p)) {
             Emphasis::Match
         } else {
@@ -584,64 +570,60 @@ fn emphasis_for(
     e
 }
 
-/// Paint a selection bg onto the chars covered by `state`. Splits
-/// each affected span at the selection edges so the resulting Line
-/// renders exactly the selected slice with `selection_color` bg and
-/// the rest of the spans untouched. Lines are expected to be plain
-/// (one per logical text line); the renderer guarantees this by
-/// rebuilding the active char-visual block via `plain_lines` rather
-/// than reusing the syntax-highlighted cache.
-fn apply_char_visual_overlay(lines: &mut Vec<Line<'static>>, state: CharVisualState) {
-    let (start, end) = state.range();
+/// Extract the painted char grid into `out`, indexed `[row][col]`,
+/// covering the entire frame area. Multi-`char` symbols (combining
+/// marks, wide glyphs) collapse to their first `char`; the host uses
+/// this for clipboard yank where exact display width doesn't matter.
+fn capture_screen_text(frame: &mut Frame, out: &mut Vec<Vec<char>>) {
+    let area = frame.area();
+    let buf = frame.buffer_mut();
+    out.clear();
+    out.reserve(usize::from(area.height));
+    for row in area.y..area.y.saturating_add(area.height) {
+        let mut line = Vec::with_capacity(usize::from(area.width));
+        for col in area.x..area.x.saturating_add(area.width) {
+            let ch = buf[(col, row)].symbol().chars().next().unwrap_or(' ');
+            line.push(ch);
+        }
+        out.push(line);
+    }
+}
+
+/// Paint a selection bg over every cell inside the rectangle bounded
+/// by `(anchor, cursor)`. Operates directly on the frame's cell buffer
+/// so it sits on top of whatever the renderer drew - including tool
+/// blocks and chrome - without needing the per-block coordinate math
+/// that broke earlier attempts.
+fn apply_screen_selection_overlay(frame: &mut Frame, selection: ((u16, u16), (u16, u16))) {
+    let (anchor, cursor) = selection;
+    let (start, end) = if anchor <= cursor {
+        (anchor, cursor)
+    } else {
+        (cursor, anchor)
+    };
+    let area = frame.area();
     let theme = crate::theme::current();
-    let overlay = Style::default().bg(theme.selection_color).fg(Color::Black);
-    for (line_idx, line) in lines.iter_mut().enumerate() {
-        if line_idx < start.0 || line_idx > end.0 {
+    let bg = theme.selection_color;
+    let fg = Color::Black;
+    let buf = frame.buffer_mut();
+    let last_row = area.y.saturating_add(area.height).saturating_sub(1);
+    let last_col = area.x.saturating_add(area.width).saturating_sub(1);
+    for row in start.0..=end.0 {
+        if row > last_row {
+            break;
+        }
+        let from_col = if row == start.0 { start.1 } else { area.x };
+        let to_col = if row == end.0 { end.1 } else { last_col };
+        let lo = from_col.max(area.x);
+        let hi = to_col.min(last_col);
+        if hi < lo {
             continue;
         }
-        let line_chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-        let from = if line_idx == start.0 { start.1 } else { 0 };
-        let to = if line_idx == end.0 {
-            end.1.min(line_chars)
-        } else {
-            line_chars
-        };
-        if from >= to {
-            continue;
+        for col in lo..=hi {
+            let cell = &mut buf[(col, row)];
+            cell.set_bg(bg);
+            cell.set_fg(fg);
         }
-        let spans = std::mem::take(&mut line.spans);
-        let mut out: Vec<Span<'static>> = Vec::with_capacity(spans.len() + 2);
-        let mut cursor = 0usize;
-        for span in spans {
-            let span_chars = span.content.chars().count();
-            let span_start = cursor;
-            let span_end = cursor + span_chars;
-            cursor = span_end;
-            if to <= span_start || from >= span_end {
-                out.push(span);
-                continue;
-            }
-            let local_from = from.saturating_sub(span_start);
-            let local_to = (to - span_start).min(span_chars);
-            let chars: Vec<char> = span.content.chars().collect();
-            if local_from > 0 {
-                out.push(Span::styled(
-                    chars[..local_from].iter().collect::<String>(),
-                    span.style,
-                ));
-            }
-            out.push(Span::styled(
-                chars[local_from..local_to].iter().collect::<String>(),
-                span.style.patch(overlay),
-            ));
-            if local_to < chars.len() {
-                out.push(Span::styled(
-                    chars[local_to..].iter().collect::<String>(),
-                    span.style,
-                ));
-            }
-        }
-        line.spans = out;
     }
 }
 
@@ -1496,8 +1478,6 @@ fn mode_label(mode: Mode) -> &'static str {
     match mode {
         Mode::Normal => "NOR",
         Mode::Insert => "INS",
-        Mode::Visual => "VIS",
-        Mode::CharVisual => "CHR",
     }
 }
 
@@ -1505,7 +1485,6 @@ fn mode_style(mode: Mode) -> Style {
     let bg = match mode {
         Mode::Normal => Color::Blue,
         Mode::Insert => Color::Green,
-        Mode::Visual | Mode::CharVisual => Color::Magenta,
     };
     Style::default()
         .fg(Color::White)
@@ -1553,10 +1532,20 @@ mod tests {
     fn snapshot_lines(buffer: &mut Buffer, input: &InputState, area: Rect) -> Vec<String> {
         let backend = TestBackend::new(area.width, area.height);
         let mut terminal = Terminal::new(backend).unwrap();
+        let mut grid = Vec::new();
         terminal
             .draw(|frame| {
                 let regions = crate::layout::split(frame.area(), 1);
-                render(frame, regions, buffer, input, None, &StatusCtx::default());
+                render(
+                    frame,
+                    regions,
+                    buffer,
+                    input,
+                    None,
+                    &StatusCtx::default(),
+                    None,
+                    &mut grid,
+                );
             })
             .unwrap();
         let buf = terminal.backend().buffer();

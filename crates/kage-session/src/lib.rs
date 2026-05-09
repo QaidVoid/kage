@@ -24,6 +24,6 @@ pub use error::SessionError;
 pub use fork::{fork, resolve_entry_prefix};
 pub use list::{SessionSummary, list};
 pub use reader::SessionReader;
-pub use resume::{ReplayResult, find_by_prefix, find_last, replay};
+pub use resume::{ReplayResult, ReplayUsage, find_by_prefix, find_last, replay};
 pub use search::{SearchHit, search};
 pub use writer::SessionWriter;

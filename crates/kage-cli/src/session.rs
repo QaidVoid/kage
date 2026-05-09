@@ -91,6 +91,7 @@ impl<H: Hooks> SessionRecordingHooks<H> {
             id: EntryId::new(),
             ts: Utc::now(),
             message: message.clone(),
+            usage: None,
         }));
     }
 
@@ -155,14 +156,16 @@ impl<H: Hooks> Hooks for SessionRecordingHooks<H> {
                     id: EntryId::new(),
                     ts: Utc::now(),
                     message: msg,
+                    usage: None,
                 }));
             }
-            LoopEvent::MessageEnd { .. } => {
+            LoopEvent::MessageEnd { usage, .. } => {
                 if let Some(msg) = self.pending.finalize() {
                     self.append(&SessionEntry::Message(MessageEntry {
                         id: EntryId::new(),
                         ts: Utc::now(),
                         message: msg,
+                        usage: Some(*usage),
                     }));
                 }
             }

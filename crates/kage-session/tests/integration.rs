@@ -36,6 +36,7 @@ fn header_always_carries_explicit_version() {
         id: EntryId::new(),
         ts: Utc::now(),
         message: Message::new(Role::User, vec![Content::Text { text: "hi".into() }], None),
+        usage: None,
     }))
     .unwrap();
     w.append(&SessionEntry::Compaction(Compaction {
@@ -72,6 +73,7 @@ fn full_round_trip_preserves_every_entry_kind() {
         id: EntryId::new(),
         ts: Utc::now(),
         message: Message::new(Role::User, vec![Content::Text { text: "go".into() }], None),
+        usage: None,
     };
     let assistant = MessageEntry {
         id: EntryId::new(),
@@ -93,6 +95,7 @@ fn full_round_trip_preserves_every_entry_kind() {
             ],
             None,
         ),
+        usage: None,
     };
     let tool_result = MessageEntry {
         id: EntryId::new(),
@@ -106,6 +109,7 @@ fn full_round_trip_preserves_every_entry_kind() {
             }],
             None,
         ),
+        usage: None,
     };
     let label = Label {
         id: EntryId::new(),
@@ -153,6 +157,7 @@ fn fork_is_self_consistent_with_replay() {
         id: EntryId::new(),
         ts: Utc::now(),
         message: Message::new(Role::User, vec![Content::Text { text: "ask".into() }], None),
+        usage: None,
     };
     let m2 = MessageEntry {
         id: EntryId::new(),
@@ -164,6 +169,7 @@ fn fork_is_self_consistent_with_replay() {
             }],
             None,
         ),
+        usage: None,
     };
     let m3 = MessageEntry {
         id: EntryId::new(),
@@ -175,6 +181,7 @@ fn fork_is_self_consistent_with_replay() {
             }],
             None,
         ),
+        usage: None,
     };
     {
         let mut w = SessionWriter::create(&src_path, header).unwrap();
@@ -214,6 +221,7 @@ fn search_indexes_assistant_text_and_user_prompts() {
             }],
             None,
         ),
+        usage: None,
     }))
     .unwrap();
     w.append(&SessionEntry::Message(MessageEntry {
@@ -226,6 +234,7 @@ fn search_indexes_assistant_text_and_user_prompts() {
             }],
             None,
         ),
+        usage: None,
     }))
     .unwrap();
     drop(w);

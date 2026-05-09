@@ -341,6 +341,7 @@ impl Hooks for BoxedHooks {
 
 /// Implement `kage resume`: replay an existing session and append a new
 /// user prompt before re-running the loop.
+#[allow(clippy::too_many_lines)]
 fn run_resume(
     id: Option<&str>,
     last: bool,
@@ -430,6 +431,10 @@ fn run_resume(
         cx = cx.with_context_window(window);
     }
     cx.history = replay.history;
+    cx.budget.used_input = replay.usage_total.input;
+    cx.budget.used_output = replay.usage_total.output;
+    cx.budget.used_cache_read = replay.usage_total.cache_read;
+    cx.budget.used_cache_write = replay.usage_total.cache_write;
     let user_msg = Message::new(
         Role::User,
         vec![Content::Text {

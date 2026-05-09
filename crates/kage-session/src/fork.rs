@@ -169,6 +169,7 @@ mod tests {
                 }],
                 None,
             ),
+            usage: None,
         })
     }
 

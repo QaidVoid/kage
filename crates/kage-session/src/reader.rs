@@ -153,6 +153,7 @@ mod tests {
             id: EntryId::new(),
             ts: Utc::now(),
             message: Message::new(Role::User, vec![Content::Text { text: "hi".into() }], None),
+            usage: None,
         }))
         .unwrap();
         w.append(&label("b")).unwrap();

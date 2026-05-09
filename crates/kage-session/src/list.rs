@@ -166,6 +166,7 @@ mod tests {
                     }],
                     None,
                 ),
+                usage: None,
             }))
             .unwrap();
         writer

@@ -583,6 +583,10 @@ fn handle_resume(
         let mut cx_guard = cx.lock().expect("agent context mutex poisoned");
         cx_guard.history.clone_from(&replay.history);
         cx_guard.model = bare_model;
+        cx_guard.budget.used_input = replay.usage_total.input;
+        cx_guard.budget.used_output = replay.usage_total.output;
+        cx_guard.budget.used_cache_read = replay.usage_total.cache_read;
+        cx_guard.budget.used_cache_write = replay.usage_total.cache_write;
     }
     active_qualified
         .lock()

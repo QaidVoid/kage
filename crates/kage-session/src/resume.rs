@@ -36,6 +36,25 @@ pub struct ReplayResult {
     /// the `ToolCallId` as a string; value is milliseconds from the
     /// call's `MessageEntry.ts` to the matching result's `ts`.
     pub tool_durations: HashMap<String, u64>,
+    /// Sum of every persisted [`MessageEntry::usage`] across the
+    /// session, post-compaction. Returned as four scalars instead of
+    /// a `TokenUsage` to keep this crate's public surface free of
+    /// `kage-core` types in result-only positions; the host folds it
+    /// into `AgentContext::budget` on resume.
+    pub usage_total: ReplayUsage,
+}
+
+/// Cumulative token totals replayed from a session file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReplayUsage {
+    /// Sum of `usage.input` across all assistant turns.
+    pub input: u64,
+    /// Sum of `usage.output` across all assistant turns.
+    pub output: u64,
+    /// Sum of `usage.cache_read` across all assistant turns.
+    pub cache_read: u64,
+    /// Sum of `usage.cache_write` across all assistant turns.
+    pub cache_write: u64,
 }
 
 /// Replay every entry of `path`, returning the final history.
@@ -61,6 +80,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
     // back-to-back replay pushes).
     let mut call_starts: HashMap<String, DateTime<Utc>> = HashMap::new();
     let mut tool_durations: HashMap<String, u64> = HashMap::new();
+    let mut usage_total = ReplayUsage::default();
     for item in reader {
         let entry = item?;
         match entry {
@@ -75,6 +95,12 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
                 });
             }
             SessionEntry::Message(m) => {
+                if let Some(u) = m.usage {
+                    usage_total.input = usage_total.input.saturating_add(u.input);
+                    usage_total.output = usage_total.output.saturating_add(u.output);
+                    usage_total.cache_read = usage_total.cache_read.saturating_add(u.cache_read);
+                    usage_total.cache_write = usage_total.cache_write.saturating_add(u.cache_write);
+                }
                 let ts = m.ts;
                 for block in &m.message.content {
                     match block {
@@ -122,6 +148,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
         history,
         model,
         tool_durations,
+        usage_total,
     })
 }
 
@@ -209,6 +236,7 @@ mod tests {
                 }],
                 None,
             ),
+            usage: None,
         })
     }
 
@@ -242,6 +270,7 @@ mod tests {
                         }],
                         None,
                     ),
+                    usage: None,
                 }),
                 message_entry(Role::Assistant, "4"),
             ],

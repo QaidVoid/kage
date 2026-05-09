@@ -8,7 +8,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
-use kage_core::Message;
+use kage_core::{Message, TokenUsage};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
@@ -151,6 +151,12 @@ pub struct Header {
 }
 
 /// A reassembled conversation message persisted as a session entry.
+///
+/// Assistant messages may carry a [`TokenUsage`] snapshot from the
+/// turn's `MessageEnd` event. User and tool-result messages set
+/// `usage` to `None`. Older session files written before the field
+/// existed deserialize cleanly: `serde(default)` falls back to
+/// `None`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MessageEntry {
     /// Entry id.
@@ -159,6 +165,10 @@ pub struct MessageEntry {
     pub ts: DateTime<Utc>,
     /// The full message including role, content blocks, and message id.
     pub message: Message,
+    /// Provider-reported token usage for this turn, when available.
+    /// Optional and defaulted to `None` so old sessions still parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TokenUsage>,
 }
 
 /// Records a change to the model's thinking budget.
@@ -272,6 +282,7 @@ mod tests {
             id: EntryId::new(),
             ts: Utc::now(),
             message: Message::new(Role::User, vec![Content::Text { text: "hi".into() }], None),
+            usage: None,
         });
         let line = serde_json::to_string(&entry).unwrap();
         let back: SessionEntry = serde_json::from_str(&line).unwrap();

@@ -186,7 +186,7 @@ pub fn block_to_lines(block: &Block) -> Vec<Line<'static>> {
                 } else {
                     tool_result_style()
                 };
-                for body_line in plain_lines(output, body_style) {
+                for body_line in truncated_body_lines(output, body_style) {
                     out.push(prefix_line("  ", body_line));
                 }
             }
@@ -310,6 +310,48 @@ fn human_size(bytes: usize) -> String {
     } else {
         format!("{:.1} MB", bytes as f64 / MB as f64)
     }
+}
+
+/// Cap on the rendered body of a tool result. Beyond either limit the
+/// body is truncated and a one-line marker tells the user how many
+/// rows were elided. Tool outputs from `find`, `grep`, or large file
+/// reads otherwise dominate the screen and slow each frame down.
+const MAX_BODY_LINES: usize = 200;
+/// Byte cap that complements [`MAX_BODY_LINES`] for outputs with very
+/// long lines (e.g., a single-line JSON dump).
+const MAX_BODY_BYTES: usize = 16 * 1024;
+
+/// Render `output` as a list of styled lines, capping at
+/// [`MAX_BODY_LINES`] / [`MAX_BODY_BYTES`] and appending a
+/// `... (N more lines)` marker when content was elided. The full text
+/// stays in the buffer's `Block` so a future "expand fully" gesture
+/// can show the rest without rerunning the tool.
+fn truncated_body_lines(output: &str, style: Style) -> Vec<Line<'static>> {
+    if output.is_empty() {
+        return Vec::new();
+    }
+    let total_lines = output.split('\n').count();
+    let mut bytes = 0usize;
+    let mut shown = 0usize;
+    let mut out: Vec<Line<'static>> = Vec::new();
+    for line in output.split('\n') {
+        if shown >= MAX_BODY_LINES || bytes >= MAX_BODY_BYTES {
+            break;
+        }
+        bytes += line.len() + 1;
+        out.push(Line::from(Span::styled(line.to_owned(), style)));
+        shown += 1;
+    }
+    if shown < total_lines {
+        let remaining = total_lines - shown;
+        out.push(Line::from(Span::styled(
+            format!("... ({remaining} more lines)"),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM),
+        )));
+    }
+    out
 }
 
 /// First non-empty line of `text`, trimmed and truncated to `max`
@@ -530,6 +572,43 @@ mod tests {
         assert!(header.contains("first line of file"));
         // Length of our test output is 41 bytes, well under 1 KB.
         assert!(header.contains(" B"), "expected bytes pill, got: {header}");
+    }
+
+    #[test]
+    fn small_tool_output_is_not_truncated() {
+        let style = Style::default();
+        let lines = super::truncated_body_lines("a\nb\nc", style);
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn over_200_line_output_is_capped_with_marker() {
+        let style = Style::default();
+        let raw: String = (0..250)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lines = super::truncated_body_lines(&raw, style);
+        // 200 capped lines + 1 marker.
+        assert_eq!(lines.len(), 201);
+        let last = format!("{}", lines.last().unwrap().spans[0].content);
+        assert!(last.contains("more lines"), "got: {last}");
+        assert!(last.contains("50"));
+    }
+
+    #[test]
+    fn many_short_lines_past_byte_budget_are_capped() {
+        let style = Style::default();
+        // 5000 lines of 8 chars each = ~45 KB, exceeds the 16 KB cap.
+        let raw: String = (0..5000)
+            .map(|i| format!("line{i:04}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lines = super::truncated_body_lines(&raw, style);
+        // We hit MAX_BODY_BYTES well before MAX_BODY_LINES; the body
+        // ends with a "... (N more lines)" marker.
+        let last = format!("{}", lines.last().unwrap().spans[0].content);
+        assert!(last.contains("more lines"), "got: {last}");
     }
 
     #[test]

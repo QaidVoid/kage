@@ -233,19 +233,35 @@ pub fn block_to_lines(block: &Block, width: u16) -> Vec<Line<'static>> {
             folded,
             ..
         } => {
-            let mut out = Vec::new();
-            out.push(tool_header_line(
-                fold_indicator(*folded),
-                name,
-                input_summary,
-                tool_call_style(),
-            ));
+            // No matching result yet: render as a pending bubble so
+            // the user sees in-flight calls visually distinct from
+            // completed ones.
+            let dim = Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::DIM);
+            let mut content: Vec<Line<'static>> = Vec::new();
+            let style = tool_call_style();
+            let mut header_spans = vec![
+                Span::styled(
+                    format!("{} ", fold_indicator(*folded)),
+                    style.add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(name.to_owned(), style.add_modifier(Modifier::BOLD)),
+            ];
+            if !input_summary.is_empty() {
+                header_spans.push(Span::raw(" "));
+                header_spans.push(Span::styled(input_summary.to_owned(), style));
+            }
+            header_spans.push(Span::raw("  "));
+            header_spans.push(Span::styled("running...".to_owned(), dim));
+            content.push(Line::from(header_spans));
             if !*folded {
-                for body_line in plain_lines(input_pretty, tool_call_style()) {
-                    out.push(prefix_line("  ", body_line));
+                content.push(Line::raw(""));
+                for body_line in plain_lines(input_pretty, style) {
+                    content.push(body_line);
                 }
             }
-            out
+            wrap_in_bubble(content, Color::Yellow, TOOL_PENDING_BG, width)
         }
         Block::ToolResult {
             name,
@@ -292,10 +308,19 @@ pub fn block_to_lines(block: &Block, width: u16) -> Vec<Line<'static>> {
 /// reads as "tinted" against most terminal backgrounds.
 const USER_BUBBLE_BG: Color = Color::Rgb(45, 53, 70);
 
-/// Background color for tool-block bubbles. Slightly cooler and dimmer
-/// than the user bubble so the two read as distinct units in a stacked
-/// conversation.
+/// Background color for completed (non-error) tool-block bubbles.
+/// Cooler/dimmer than the user bubble so the two read as distinct
+/// units in a stacked conversation.
 const TOOL_BUBBLE_BG: Color = Color::Rgb(30, 34, 44);
+
+/// Background tint for tool blocks that errored. A muted maroon, dark
+/// enough to keep dim foreground text readable but distinct from the
+/// neutral block.
+const TOOL_ERROR_BG: Color = Color::Rgb(58, 22, 28);
+
+/// Background tint for tool blocks that haven't received a result yet
+/// (in-flight). A muted amber suggests "working on it".
+const TOOL_PENDING_BG: Color = Color::Rgb(54, 42, 22);
 
 /// Render a user prompt as a tinted full-width "chat bubble" with a
 /// thin cyan left-edge rule and one row of padding above and below the
@@ -498,7 +523,13 @@ fn tool_pair_to_lines(call: &Block, result: &Block, width: u16) -> Vec<Line<'sta
     } else {
         tool_result_style()
     };
-    let body = tail_truncated_body(output, body_style, cap_lines, cap_bytes);
+    let body = truncated_body(
+        output,
+        body_style,
+        cap_lines,
+        cap_bytes,
+        body_trim_for(name),
+    );
     if !body.is_empty() {
         content.push(Line::raw(""));
         for line in body {
@@ -512,7 +543,12 @@ fn tool_pair_to_lines(call: &Block, result: &Block, width: u16) -> Vec<Line<'sta
             content.push(body_line);
         }
     }
-    wrap_in_bubble(content, Color::Yellow, TOOL_BUBBLE_BG, width)
+    let bg = if is_error {
+        TOOL_ERROR_BG
+    } else {
+        TOOL_BUBBLE_BG
+    };
+    wrap_in_bubble(content, Color::Yellow, bg, width)
 }
 
 /// Lines and bytes shown in a folded tool block's preview. Trades
@@ -555,11 +591,29 @@ fn duration_footer(ms: Option<u64>) -> Option<String> {
 /// earlier lines)` marker on top). Tools like `find`, `grep`, and
 /// `bash` typically have the most relevant content near the tail; we
 /// follow pi's convention of preserving that.
-fn tail_truncated_body(
+/// Whether a tool's body preview should keep the head (start) or
+/// tail (end) of the output when truncated. Reading a file means the
+/// top is most useful; running `find`/`grep`/`bash` means the most
+/// recent / final lines carry the result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BodyTrim {
+    Head,
+    Tail,
+}
+
+fn body_trim_for(tool: &str) -> BodyTrim {
+    match tool {
+        "read" | "view" => BodyTrim::Head,
+        _ => BodyTrim::Tail,
+    }
+}
+
+fn truncated_body(
     output: &str,
     style: Style,
     cap_lines: usize,
     cap_bytes: usize,
+    trim: BodyTrim,
 ) -> Vec<Line<'static>> {
     if output.is_empty() {
         return Vec::new();
@@ -567,27 +621,38 @@ fn tail_truncated_body(
     let lines: Vec<&str> = output.split('\n').collect();
     let total = lines.len();
     let mut bytes = 0usize;
-    let mut shown = Vec::new();
-    for line in lines.iter().rev() {
-        if shown.len() >= cap_lines || bytes >= cap_bytes {
+    let take_iter: Box<dyn Iterator<Item = &&str>> = match trim {
+        BodyTrim::Head => Box::new(lines.iter()),
+        BodyTrim::Tail => Box::new(lines.iter().rev()),
+    };
+    let mut taken: Vec<&str> = Vec::new();
+    for line in take_iter {
+        if taken.len() >= cap_lines || bytes >= cap_bytes {
             break;
         }
         bytes += line.len() + 1;
-        shown.push(*line);
+        taken.push(*line);
     }
-    shown.reverse();
-    let elided = total - shown.len();
+    if matches!(trim, BodyTrim::Tail) {
+        taken.reverse();
+    }
+    let elided = total - taken.len();
+    let dim = Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::DIM);
+    let elision = match trim {
+        BodyTrim::Head => format!("... ({elided} more lines, zo to expand)"),
+        BodyTrim::Tail => format!("... ({elided} earlier lines, zo to expand)"),
+    };
     let mut out = Vec::new();
-    if elided > 0 {
-        out.push(Line::from(Span::styled(
-            format!("... ({elided} earlier lines, zo to expand)"),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
-        )));
+    if matches!(trim, BodyTrim::Tail) && elided > 0 {
+        out.push(Line::from(Span::styled(elision.clone(), dim)));
     }
-    for line in shown {
+    for line in taken {
         out.push(Line::from(Span::styled(line.to_owned(), style)));
+    }
+    if matches!(trim, BodyTrim::Head) && elided > 0 {
+        out.push(Line::from(Span::styled(elision, dim)));
     }
     out
 }
@@ -595,18 +660,6 @@ fn tail_truncated_body(
 /// Header for a tool-call block: `{indicator} {name} {summary}` with no
 /// bracketed tag. The summary is bold so the tool name and the salient
 /// argument both pop, but the surrounding line stays compact.
-fn tool_header_line(indicator: char, name: &str, summary: &str, style: Style) -> Line<'static> {
-    let mut spans = vec![
-        Span::styled(format!("{indicator} "), style.add_modifier(Modifier::BOLD)),
-        Span::styled(name.to_owned(), style.add_modifier(Modifier::BOLD)),
-    ];
-    if !summary.is_empty() {
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(summary.to_owned(), style));
-    }
-    Line::from(spans)
-}
-
 /// Header for a tool-result block. Folded results inline a size pill
 /// (or `ERROR` glyph) and a one-line preview of the output so the user
 /// sees the gist without expanding. Unfolded results keep just the

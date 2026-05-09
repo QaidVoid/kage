@@ -387,6 +387,77 @@ mod tests {
         assert!(found_user);
     }
 
+    fn snapshot_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        let buf = terminal.backend().buffer();
+        let mut out = Vec::new();
+        for y in 0..buf.area.height {
+            let mut row = String::new();
+            for x in 0..buf.area.width {
+                row.push_str(buf[(x, y)].symbol());
+            }
+            out.push(row.trim_end().to_owned());
+        }
+        out
+    }
+
+    #[test]
+    fn pasted_text_lands_in_input_area_with_newline_preserved() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        app.handle_key(key('i'));
+        app.input.paste("first\nsecond");
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        app.render_into(&mut terminal).unwrap();
+        let rows = snapshot_rows(&terminal);
+        assert!(rows.iter().any(|r| r.contains("first")));
+        assert!(rows.iter().any(|r| r.contains("second")));
+    }
+
+    #[test]
+    fn scrolling_up_freezes_viewport_when_more_content_arrives() {
+        let buffer = shared_buffer();
+        if let Ok(mut buf) = buffer.lock() {
+            for i in 0..20 {
+                buf.push_user(format!("line{i}"));
+            }
+        }
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer.clone(), tx);
+        // User scrolls up by 5 from the bottom.
+        for _ in 0..5 {
+            app.handle_key(key('k'));
+        }
+        let scroll_after_user = buffer.lock().unwrap().scroll();
+        assert_eq!(scroll_after_user, 5);
+        // Streaming delta arrives.
+        if let Ok(mut buf) = buffer.lock() {
+            buf.append_assistant_delta("new\nstreaming\ncontent");
+        }
+        // User's scroll position is preserved.
+        assert_eq!(buffer.lock().unwrap().scroll(), 5);
+        // Pressing G snaps back to bottom (auto-follow rearmed).
+        app.handle_key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::NONE));
+        assert_eq!(buffer.lock().unwrap().scroll(), 0);
+        assert!(buffer.lock().unwrap().is_following());
+    }
+
+    #[test]
+    fn history_walk_replaces_input_text() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        app.set_history(vec!["older".into(), "newer".into()]);
+        app.handle_key(key('i'));
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.input().text(), "newer");
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+        assert_eq!(app.input().text(), "older");
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        assert_eq!(app.input().text(), "newer");
+    }
+
     #[test]
     fn fold_all_then_unfold_all_toggles_folds() {
         let buffer = shared_buffer();

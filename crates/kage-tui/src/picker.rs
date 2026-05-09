@@ -172,7 +172,8 @@ fn max_visible_rows() -> usize {
 /// accounts for any "N more above"/"N more below" indicator rows the
 /// renderer will draw, so the caller can iterate exactly that many
 /// items without going past the visible region.
-fn compute_window(
+#[must_use]
+pub fn compute_window(
     scroll: usize,
     selected: usize,
     total: usize,
@@ -203,7 +204,11 @@ fn compute_window(
     (s, window)
 }
 
-fn filter(items: &[PickItem], search: &str) -> Vec<usize> {
+/// Indexes of items whose value or label contains `search`
+/// (case-insensitive). Public so the in-TUI overlay picker can
+/// reuse the exact same matcher.
+#[must_use]
+pub fn filter(items: &[PickItem], search: &str) -> Vec<usize> {
     if search.is_empty() {
         return (0..items.len()).collect();
     }

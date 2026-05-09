@@ -50,6 +50,8 @@ pub enum InputAction {
     Yank,
     /// Cancel the in-flight turn.
     Cancel,
+    /// Open the in-TUI model picker overlay.
+    OpenModelPicker,
 }
 
 /// Tracks the editing mode, the prompt text, and any pending leader key
@@ -131,6 +133,7 @@ impl InputState {
             KeyCode::Char(':') => vec![InputAction::BeginCommand],
             KeyCode::Char('/') => vec![InputAction::BeginSearch],
             KeyCode::Char('c') if ctrl => vec![InputAction::Cancel],
+            KeyCode::Char('p') if ctrl => vec![InputAction::OpenModelPicker],
             _ => Vec::new(),
         }
     }

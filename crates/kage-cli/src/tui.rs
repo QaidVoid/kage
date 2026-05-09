@@ -16,7 +16,7 @@ use std::thread;
 use kage_core::{CancelFlag, Content, Message, Role};
 use kage_loop::{AgentContext, LoopConfig, NoopHooks, run};
 use kage_plugin::PluginRuntime;
-use kage_provider::Provider;
+use kage_provider::ProviderRegistry;
 use kage_tools::ToolRegistry;
 use kage_tui::{App, RunRequest, SharedBuffer, Tui, TuiHooks, buffer_host_log, shared_buffer};
 
@@ -25,7 +25,7 @@ use crate::plugins::{PluginEventHooks, setup_runtime_with_sink};
 /// Drop into the interactive TUI. Returns the appropriate process exit
 /// code once the user quits.
 pub fn run_tui(model: &str, system: &str) -> ExitCode {
-    let registry = crate::build_provider_registry();
+    let registry = Arc::new(crate::build_provider_registry());
     if registry.ids().count() == 0 {
         eprintln!(
             "kage: no provider credentials found. Run `kage auth login` to save \
@@ -34,15 +34,13 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         );
         return ExitCode::from(1);
     }
-    let resolved = match registry.resolve(model) {
-        Ok(r) => r,
+    let bare_model = match registry.resolve(model) {
+        Ok(r) => r.model.clone(),
         Err(e) => {
             eprintln!("kage: cannot resolve model {model}: {e}");
             return ExitCode::from(1);
         }
     };
-    let provider = Arc::clone(resolved.provider);
-    let bare_model = resolved.model.clone();
     let qualified_model = model.to_owned();
 
     // The buffer must exist before we build the plugin runtime so we can
@@ -86,15 +84,18 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     ));
     let (tx, rx) = mpsc::channel::<RunRequest>();
 
+    let active_qualified = Arc::new(Mutex::new(qualified_model.clone()));
+    let model_choices = available_model_items(&registry, &qualified_model);
+
     let worker = spawn_worker(WorkerConfig {
-        provider,
+        registry: Arc::clone(&registry),
+        active_qualified: Arc::clone(&active_qualified),
         tools,
         cx: Arc::clone(&cx),
         buffer: buffer.clone(),
         cancel: cancel.clone(),
         plugin_runtime,
         rx,
-        qualified_model: qualified_model.clone(),
     });
 
     let mut tui = match Tui::enter() {
@@ -105,6 +106,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         }
     };
     let mut app = App::new(buffer, tx);
+    app.set_model_choices(model_choices);
     let result = app.run(&mut tui);
     drop(tui);
     drop(app);
@@ -120,27 +122,28 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
 }
 
 struct WorkerConfig {
-    provider: Arc<dyn Provider>,
+    registry: Arc<ProviderRegistry>,
+    active_qualified: Arc<Mutex<String>>,
     tools: ToolRegistry,
     cx: Arc<Mutex<AgentContext>>,
     buffer: SharedBuffer,
     cancel: CancelFlag,
     plugin_runtime: Option<Arc<PluginRuntime>>,
     rx: mpsc::Receiver<RunRequest>,
-    qualified_model: String,
 }
 
+#[allow(clippy::too_many_lines)]
 fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let WorkerConfig {
-            provider,
+            registry,
+            active_qualified,
             tools,
             cx,
             buffer,
             cancel,
             plugin_runtime,
             rx,
-            qualified_model,
         } = cfg;
         let loop_cfg = LoopConfig::default();
 
@@ -148,7 +151,29 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
             match req {
                 RunRequest::Submit(text) => {
                     cancel.reset();
+                    // Re-resolve the model on every turn so a switch
+                    // request between turns takes effect immediately.
+                    let qualified = active_qualified
+                        .lock()
+                        .expect("active model mutex poisoned")
+                        .clone();
+                    let resolved = match registry.resolve(&qualified) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            if let Ok(mut buf) = buffer.lock() {
+                                buf.push_custom(
+                                    "kage:error",
+                                    format!("model {qualified} unavailable: {e}"),
+                                    false,
+                                );
+                            }
+                            continue;
+                        }
+                    };
+                    let provider = Arc::clone(resolved.provider);
+                    let bare_model = resolved.model.clone();
                     let mut cx_guard = cx.lock().expect("agent context mutex poisoned");
+                    cx_guard.model = bare_model;
                     let parent = cx_guard.history.last().map(|m| m.id);
                     cx_guard.history.push(Message::new(
                         Role::User,
@@ -184,11 +209,64 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         .is_ok()
                     };
                     if ok {
-                        crate::state::record_last_model(&qualified_model);
+                        crate::state::record_last_model(&qualified);
                     }
                 }
                 RunRequest::Cancel => cancel.cancel(),
+                RunRequest::SwitchModel(new_model) => {
+                    // Validate before switching so a typo doesn't break
+                    // the next turn silently.
+                    match registry.resolve(&new_model) {
+                        Ok(_) => {
+                            active_qualified
+                                .lock()
+                                .expect("active model mutex poisoned")
+                                .clone_from(&new_model);
+                            if let Ok(mut buf) = buffer.lock() {
+                                buf.push_custom(
+                                    "kage:notify",
+                                    format!("switched to {new_model}"),
+                                    false,
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            if let Ok(mut buf) = buffer.lock() {
+                                buf.push_custom(
+                                    "kage:error",
+                                    format!("cannot switch to {new_model}: {e}"),
+                                    false,
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
     })
+}
+
+/// Build the picker rows the App offers when the user hits `Ctrl+P`.
+/// Iterates registered providers and pulls each one's catalog model
+/// list; the active model is marked with `*`.
+fn available_model_items(registry: &ProviderRegistry, active: &str) -> Vec<kage_tui::PickItem> {
+    let mut items: Vec<kage_tui::PickItem> = Vec::new();
+    let mut provider_ids: Vec<&str> = registry.ids().collect();
+    provider_ids.sort_unstable();
+    for provider_id in provider_ids {
+        let catalog_provider = kage_provider::catalog::provider(provider_id);
+        let display_name = catalog_provider.map_or(provider_id, |p| p.name);
+        let models = catalog_provider.map_or::<&[_], _>(&[], |p| p.models);
+        for model in models {
+            let value = format!("{provider_id}:{}", model.id);
+            let label = format!("{display_name:<20}  {}", model.name);
+            let badge = if value == active { '*' } else { ' ' };
+            items.push(
+                kage_tui::PickItem::simple(value)
+                    .with_label(label)
+                    .with_badge(badge),
+            );
+        }
+    }
+    items
 }

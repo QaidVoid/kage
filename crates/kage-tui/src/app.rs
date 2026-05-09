@@ -16,6 +16,8 @@ use crate::error::TuiError;
 use crate::events::SharedBuffer;
 use crate::input::{InputAction, InputState, Mode};
 use crate::layout::{input_height_for, split};
+use crate::overlay::{OverlayPicker, PickerEvent};
+use crate::picker::PickItem;
 use crate::terminal::Tui;
 use crate::view;
 
@@ -23,14 +25,16 @@ use crate::view;
 const FRAME_INTERVAL: Duration = Duration::from_millis(33);
 
 /// Request the host should act on. Either the user submitted a prompt
-/// (the host runs the agent loop in a worker thread) or the user asked
-/// to cancel the in-flight turn.
+/// (the host runs the agent loop in a worker thread), the user asked
+/// to cancel the in-flight turn, or the user picked a different model.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RunRequest {
     /// New user prompt to submit to the agent loop.
     Submit(String),
     /// Trip the agent loop's cancellation flag.
     Cancel,
+    /// Switch to a different `provider:model` for subsequent turns.
+    SwitchModel(String),
 }
 
 /// Outcome of [`App::run`].
@@ -45,6 +49,12 @@ pub struct App {
     buffer: SharedBuffer,
     input: InputState,
     requests: Sender<RunRequest>,
+    /// Available `provider:model` ids the model picker offers. Empty
+    /// when the host has not registered any models with the App.
+    model_choices: Vec<PickItem>,
+    /// Active modal overlay, if any. Drives both render and input
+    /// routing while present.
+    picker: Option<OverlayPicker>,
 }
 
 impl App {
@@ -56,7 +66,16 @@ impl App {
             buffer,
             input: InputState::new(),
             requests,
+            model_choices: Vec::new(),
+            picker: None,
         }
+    }
+
+    /// Replace the model list shown when the user opens the in-TUI
+    /// picker. The host computes this from its provider registry +
+    /// catalog.
+    pub fn set_model_choices(&mut self, choices: Vec<PickItem>) {
+        self.model_choices = choices;
     }
 
     /// Drive the event loop until the user quits. Returns the exit
@@ -88,7 +107,7 @@ impl App {
         }
     }
 
-    fn draw(&self, tui: &mut Tui) -> Result<(), TuiError> {
+    fn draw(&mut self, tui: &mut Tui) -> Result<(), TuiError> {
         let buffer = self.buffer.lock().expect("buffer mutex poisoned");
         let input_text_lines =
             u16::try_from(self.input.text().lines().count().max(1)).unwrap_or(u16::MAX);
@@ -96,21 +115,44 @@ impl App {
         tui.terminal().draw(|frame| {
             let regions = split(frame.area(), input_height);
             view::render(frame, regions, &buffer, &self.input);
+            if let Some(picker) = self.picker.as_mut() {
+                picker.render(frame, frame.area());
+            }
         })?;
         Ok(())
     }
 
     fn dispatch_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> Option<AppExit> {
-        // Global escape hatches before passing to the modal state.
+        // Global escape hatches before passing to any modal layer.
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('q')) {
             return Some(AppExit::Quit);
+        }
+
+        // When the picker overlay is open, it owns the keyboard.
+        if self.picker.is_some() {
+            return self.dispatch_picker_key(key);
         }
 
         let actions = self.input.handle_key(key);
         for action in actions {
             if let Some(exit) = self.apply(action) {
                 return Some(exit);
+            }
+        }
+        None
+    }
+
+    fn dispatch_picker_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> Option<AppExit> {
+        let picker = self.picker.as_mut()?;
+        match picker.handle_key(key) {
+            PickerEvent::Pending => {}
+            PickerEvent::Cancelled => {
+                self.picker = None;
+            }
+            PickerEvent::Picked(value) => {
+                self.picker = None;
+                let _ = self.send_request(RunRequest::SwitchModel(value));
             }
         }
         None
@@ -135,6 +177,14 @@ impl App {
             InputAction::FoldAll => self.set_all_folds(true),
             InputAction::Cancel => {
                 let _ = self.send_request(RunRequest::Cancel);
+            }
+            InputAction::OpenModelPicker => {
+                if !self.model_choices.is_empty() {
+                    self.picker = Some(OverlayPicker::new(
+                        "Switch model",
+                        self.model_choices.clone(),
+                    ));
+                }
             }
             InputAction::EnterMode(_)
             | InputAction::BeginCommand
@@ -209,7 +259,7 @@ impl App {
 
     /// Force a redraw onto an arbitrary terminal. Tests use this with
     /// [`ratatui::backend::TestBackend`] to capture the rendered frame.
-    pub fn render_into<B>(&self, terminal: &mut ratatui::Terminal<B>) -> Result<(), TuiError>
+    pub fn render_into<B>(&mut self, terminal: &mut ratatui::Terminal<B>) -> Result<(), TuiError>
     where
         B: ratatui::backend::Backend,
         B::Error: std::error::Error + Send + Sync + 'static,
@@ -218,10 +268,14 @@ impl App {
         let input_text_lines =
             u16::try_from(self.input.text().lines().count().max(1)).unwrap_or(u16::MAX);
         let input_height = input_height_for(input_text_lines + 1);
+        let picker = self.picker.as_mut();
         terminal
             .draw(|frame| {
                 let regions = split(frame.area(), input_height);
                 view::render(frame, regions, &buffer, &self.input);
+                if let Some(picker) = picker {
+                    picker.render(frame, frame.area());
+                }
             })
             .map_err(|err| TuiError::Io(std::io::Error::other(err.to_string())))?;
         Ok(())
@@ -304,7 +358,7 @@ mod tests {
             buf.push_user("hello");
         }
         let (tx, _rx) = mpsc::channel();
-        let app = App::new(buffer, tx);
+        let mut app = App::new(buffer, tx);
         let backend = TestBackend::new(40, 8);
         let mut terminal = Terminal::new(backend).unwrap();
         app.render_into(&mut terminal).unwrap();

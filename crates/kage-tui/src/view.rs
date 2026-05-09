@@ -877,10 +877,10 @@ fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {
         } else {
             None
         };
-        let lines = build_input_body_lines(input.text(), visual_range, &theme);
-        let body = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((scroll_off, 0));
+        // Lines are pre-wrapped at body_width chars to match
+        // input_visual_cursor exactly; no Paragraph::wrap needed.
+        let lines = build_input_body_lines(input.text(), visual_range, &theme, body_width);
+        let body = Paragraph::new(lines).scroll((scroll_off, 0));
         frame.render_widget(body, body_area);
     }
 
@@ -898,60 +898,113 @@ fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {
     }
 }
 
-/// Build the [`Line`]s for the input body, optionally splitting the
-/// text into pre-selection / selected / post-selection spans so the
-/// renderer can paint a vim-style highlight on the active char-visual
-/// range. `visual_range` is `(start, end_exclusive)` in byte offsets
-/// over the full input text.
+/// Build the [`Line`]s for the input body using explicit char-based
+/// hard-wrap at `body_width`. Pre-wrapping (rather than letting
+/// `Paragraph::wrap` do it) keeps the visual layout perfectly in
+/// sync with [`input_visual_cursor`]: both walk chars in fixed-width
+/// chunks, so the cursor lands exactly under the char it indexes.
+/// Word-aware wrap would put breaks at spaces, leaving the cursor
+/// off-by-N relative to the painted text.
+///
+/// When `visual_range` is `Some`, the chunk for each visual row is
+/// further split into pre-selection / selected / post-selection
+/// spans so the highlight paints across wrap boundaries cleanly.
 fn build_input_body_lines(
     text: &str,
     visual_range: Option<(usize, usize)>,
     theme: &crate::theme::Theme,
+    body_width: u16,
 ) -> Vec<Line<'static>> {
     let highlight = Style::default().bg(theme.selection_color);
-    let Some((vs, ve)) = visual_range else {
-        return text
-            .split('\n')
-            .map(|line| Line::from(Span::raw(line.to_owned())))
-            .collect();
-    };
+    let bw = usize::from(body_width.max(1));
     let mut out = Vec::new();
     let mut byte_offset = 0usize;
     for line in text.split('\n') {
-        let line_start = byte_offset;
-        let line_end = line_start + line.len();
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        let sel_start_in_line = vs.saturating_sub(line_start).min(line.len());
-        let sel_end_in_line = ve.saturating_sub(line_start).min(line.len());
-        let sel_start_in_line = if vs >= line_end {
-            line.len()
-        } else {
-            sel_start_in_line
-        };
-        let sel_end_in_line = if ve >= line_end {
-            line.len()
-        } else {
-            sel_end_in_line
-        };
-        if sel_start_in_line > 0 {
-            spans.push(Span::raw(line[..sel_start_in_line].to_owned()));
+        let line_start_abs = byte_offset;
+        let line_bytes = line.len();
+        // Walk chars in chunks of `bw`. Track the absolute byte
+        // offset into `text` so the visual_range projection lines up.
+        let mut chunk_start_abs = line_start_abs;
+        let mut chunk_chars = 0usize;
+        for (idx, _) in line.char_indices() {
+            let abs = line_start_abs + idx;
+            if chunk_chars == bw {
+                push_input_row(
+                    &mut out,
+                    text,
+                    chunk_start_abs,
+                    abs,
+                    visual_range,
+                    highlight,
+                );
+                chunk_start_abs = abs;
+                chunk_chars = 0;
+            }
+            chunk_chars += 1;
         }
-        if sel_end_in_line > sel_start_in_line {
+        // Final chunk for this logical line, including the empty
+        // trailing chunk so an empty logical line still produces one
+        // visual row.
+        push_input_row(
+            &mut out,
+            text,
+            chunk_start_abs,
+            line_start_abs + line_bytes,
+            visual_range,
+            highlight,
+        );
+        byte_offset = line_start_abs + line_bytes + 1;
+    }
+    out
+}
+
+/// Append one wrapped visual row spanning `text[start..end]` to
+/// `out`, splitting into selection-aware spans when `visual_range`
+/// overlaps the slice.
+fn push_input_row(
+    out: &mut Vec<Line<'static>>,
+    text: &str,
+    start: usize,
+    end: usize,
+    visual_range: Option<(usize, usize)>,
+    highlight: Style,
+) {
+    let chunk = &text[start..end];
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    if let Some((vs, ve)) = visual_range {
+        let sel_start = if vs <= start {
+            0
+        } else if vs >= end {
+            chunk.len()
+        } else {
+            vs - start
+        };
+        let sel_end = if ve <= start {
+            0
+        } else if ve >= end {
+            chunk.len()
+        } else {
+            ve - start
+        };
+        if sel_start > 0 {
+            spans.push(Span::raw(chunk[..sel_start].to_owned()));
+        }
+        if sel_end > sel_start {
             spans.push(Span::styled(
-                line[sel_start_in_line..sel_end_in_line].to_owned(),
+                chunk[sel_start..sel_end].to_owned(),
                 highlight,
             ));
         }
-        if sel_end_in_line < line.len() {
-            spans.push(Span::raw(line[sel_end_in_line..].to_owned()));
+        if sel_end < chunk.len() {
+            spans.push(Span::raw(chunk[sel_end..].to_owned()));
         }
-        if spans.is_empty() {
-            spans.push(Span::raw(String::new()));
-        }
-        out.push(Line::from(spans));
-        byte_offset = line_end + 1;
+    } else {
+        spans.push(Span::raw(chunk.to_owned()));
     }
-    out
+    if spans.is_empty() {
+        spans.push(Span::raw(String::new()));
+    }
+    out.push(Line::from(spans));
 }
 
 /// Paint the bottom modeline. When the host has registered a

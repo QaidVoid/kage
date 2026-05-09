@@ -86,6 +86,11 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
 
     let active_qualified = Arc::new(Mutex::new(qualified_model.clone()));
     let model_choices = available_model_items(&registry, &qualified_model);
+    if let Err(err) = crate::state::record_last_model(&qualified_model) {
+        if let Ok(mut buf) = buffer.lock() {
+            buf.push_custom("kage:error", format!("state: {err}"), false);
+        }
+    }
 
     let worker = spawn_worker(WorkerConfig {
         registry: Arc::clone(&registry),
@@ -208,8 +213,10 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         )
                         .is_ok()
                     };
-                    if ok {
-                        crate::state::record_last_model(&qualified);
+                    if ok && let Err(err) = crate::state::record_last_model(&qualified) {
+                        if let Ok(mut buf) = buffer.lock() {
+                            buf.push_custom("kage:error", format!("state: {err}"), false);
+                        }
                     }
                 }
                 RunRequest::Cancel => cancel.cancel(),
@@ -228,6 +235,11 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                                     format!("switched to {new_model}"),
                                     false,
                                 );
+                            }
+                            if let Err(err) = crate::state::record_last_model(&new_model)
+                                && let Ok(mut buf) = buffer.lock()
+                            {
+                                buf.push_custom("kage:error", format!("state: {err}"), false);
                             }
                         }
                         Err(e) => {

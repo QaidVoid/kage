@@ -77,18 +77,18 @@ impl State {
     }
 }
 
-/// Update the saved last-used model. Best-effort: failures are logged
-/// to stderr but never propagate (so a transient I/O hiccup doesn't
-/// abort an otherwise-successful agent run).
-pub fn record_last_model(model: &str) {
+/// Update the saved last-used model. Returns `Ok(true)` if the file
+/// was written, `Ok(false)` if `model` already matched the saved
+/// value, or an error string on I/O failure. Callers decide how to
+/// surface failures: print mode logs to stderr, the TUI pushes a
+/// `kage:error` block (stderr would corrupt the alt screen).
+pub fn record_last_model(model: &str) -> Result<bool, String> {
     let mut state = State::load();
     if state.last_model.as_deref() == Some(model) {
-        return;
+        return Ok(false);
     }
     state.last_model = Some(model.to_owned());
-    if let Err(err) = state.save() {
-        eprintln!("kage: {err}");
-    }
+    state.save().map(|()| true)
 }
 
 #[cfg(test)]

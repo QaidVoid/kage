@@ -216,7 +216,9 @@ fn main() -> ExitCode {
         writer,
         plugin_runtime,
     );
-    state::record_last_model(&model);
+    if let Err(err) = state::record_last_model(&model) {
+        eprintln!("kage: {err}");
+    }
     exit
 }
 
@@ -434,7 +436,9 @@ fn run_resume(
         Some(writer),
         plugin_runtime,
     );
-    state::record_last_model(&model);
+    if let Err(err) = state::record_last_model(&model) {
+        eprintln!("kage: {err}");
+    }
     exit
 }
 

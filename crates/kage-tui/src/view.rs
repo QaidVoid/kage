@@ -112,6 +112,7 @@ pub fn render(
     render_status(frame, regions, input, cmdline, status);
     render_buffer(frame, regions, buffer, status.search_pattern);
     render_input(frame, regions, input);
+    render_modeline(frame, regions, input);
     if let Some(cl) = cmdline {
         place_cmdline_cursor(frame, regions, cl);
     } else if let Some(sl) = status.search_line {
@@ -123,7 +124,7 @@ pub fn render(
 fn render_status(
     frame: &mut Frame,
     regions: Regions,
-    input: &InputState,
+    _input: &InputState,
     cmdline: Option<&CommandLine>,
     status: &StatusCtx<'_>,
 ) {
@@ -157,15 +158,14 @@ fn render_status(
     }
 
     let bg_style = Style::default().bg(theme.status_bg);
-    let mode = mode_label(input.mode());
     let dim = Style::default()
         .fg(theme.status_dim_fg)
         .bg(theme.status_bg)
         .add_modifier(Modifier::DIM);
-    let mut left_spans = vec![
-        Span::styled(format!(" {mode} "), mode_style(input.mode())),
-        Span::styled(" kage".to_owned(), bg_style),
-    ];
+    let mut left_spans = vec![Span::styled(
+        " kage".to_owned(),
+        bg_style.add_modifier(Modifier::BOLD),
+    )];
     if let Some(model) = status.model
         && !model.is_empty()
     {
@@ -782,66 +782,183 @@ fn build_block_lines(
     block_to_lines(cur, width, emphasis)
 }
 
+/// Width in cells of the leading prompt glyph plus its trailing
+/// space. Painted on the first content row only; subsequent rows
+/// (multi-line draft, soft-wrapped continuation) align under the
+/// glyph slot but stay blank.
+const INPUT_GLYPH_WIDTH: u16 = 2;
+
+/// Single-character prompt glyph painted at the start of the input
+/// content. Plain ASCII so it renders the same in every terminal and
+/// doesn't trigger our "no fancy chars" lint when grep'd.
+const INPUT_GLYPH: &str = ">";
+
+/// Default placeholder text shown when the input is empty.
+const INPUT_PLACEHOLDER_INSERT: &str = "ask kage anything...";
+const INPUT_PLACEHOLDER_NORMAL: &str = "press i to insert  ::  : ex command  ::  / search";
+
 fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {
-    let title = Line::from(format!(
-        " prompt [{}] ",
-        mode_label(input.mode()).to_lowercase()
-    ));
-    let scroll_off = input_scroll_offset(input, regions.input);
-    let body = Paragraph::new(input.text())
-        .wrap(Wrap { trim: false })
-        .scroll((scroll_off, 0))
-        .block(RtBlock::default().title(title).borders(Borders::TOP));
-    frame.render_widget(body, regions.input);
-    if input.mode() == Mode::Insert {
-        if let Some(pos) = input_cursor_position(input, regions.input, scroll_off) {
+    let area = regions.input;
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let theme = crate::theme::current();
+    let mode = input.mode();
+    let border_color = mode_border_color(&theme, mode);
+    let pill_style = mode_pill_style(&theme, mode);
+
+    let mut top_line: Vec<Span<'static>> =
+        vec![Span::styled(format!(" {} ", mode_label(mode)), pill_style)];
+    let hint = mode_hint_text(mode);
+    if !hint.is_empty() {
+        top_line.push(Span::raw(" "));
+        top_line.push(Span::styled(hint, Style::default().fg(theme.input_hint_fg)));
+    }
+
+    let block = RtBlock::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .title(Line::from(top_line));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let glyph_width = INPUT_GLYPH_WIDTH.min(inner.width);
+    let body_width = inner.width.saturating_sub(glyph_width);
+    let body_area = ratatui::layout::Rect::new(
+        inner.x.saturating_add(glyph_width),
+        inner.y,
+        body_width,
+        inner.height,
+    );
+    let scroll_off = input_scroll_offset(input, body_area);
+
+    let glyph_area = ratatui::layout::Rect::new(inner.x, inner.y, glyph_width, 1);
+    if glyph_width >= INPUT_GLYPH_WIDTH {
+        let glyph = Paragraph::new(Line::from(Span::styled(
+            format!("{INPUT_GLYPH} "),
+            Style::default().fg(theme.input_glyph_fg),
+        )));
+        frame.render_widget(glyph, glyph_area);
+    }
+
+    if input.text().is_empty() {
+        if let Some(text) = placeholder_for(mode) {
+            let placeholder = Paragraph::new(Line::from(Span::styled(
+                text,
+                Style::default()
+                    .fg(theme.input_placeholder_fg)
+                    .add_modifier(Modifier::ITALIC),
+            )));
+            frame.render_widget(placeholder, body_area);
+        }
+    } else if body_width > 0 {
+        let body = Paragraph::new(input.text())
+            .wrap(Wrap { trim: false })
+            .scroll((scroll_off, 0));
+        frame.render_widget(body, body_area);
+    }
+
+    if mode == Mode::Insert {
+        if let Some(pos) = input_cursor_position(input, body_area, scroll_off) {
             frame.set_cursor_position(pos);
         }
     }
 }
 
+/// Paint the bottom modeline. Reserved for plugin status widgets
+/// (PE.A) and editing-state secondary signals; for Stage A it only
+/// fills the row with the modeline background so the chrome reads as
+/// a single coherent strip rather than an empty terminal row. We
+/// deliberately do *not* echo the mode here: the colored pill on the
+/// input border is the canonical mode display.
+fn render_modeline(frame: &mut Frame, regions: Regions, _input: &InputState) {
+    let area = regions.status_bottom;
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let theme = crate::theme::current();
+    let bg = Style::default().bg(theme.modeline_bg);
+    let pad = usize::from(area.width);
+    let line = Paragraph::new(Line::from(Span::styled(" ".repeat(pad), bg)))
+        .alignment(Alignment::Left)
+        .style(bg);
+    frame.render_widget(line, area);
+}
+
+fn mode_border_color(theme: &crate::theme::Theme, mode: Mode) -> Color {
+    match mode {
+        Mode::Normal => theme.input_border_normal,
+        Mode::Insert => theme.input_border_insert,
+        Mode::Visual => theme.input_border_visual,
+    }
+}
+
+fn mode_pill_style(theme: &crate::theme::Theme, mode: Mode) -> Style {
+    let (bg, fg) = match mode {
+        Mode::Normal => (theme.input_pill_normal_bg, theme.input_pill_normal_fg),
+        Mode::Insert => (theme.input_pill_insert_bg, theme.input_pill_insert_fg),
+        Mode::Visual => (theme.input_pill_visual_bg, theme.input_pill_visual_fg),
+    };
+    Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD)
+}
+
+fn mode_hint_text(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Insert => "Enter send  ::  Shift+Enter newline  ::  Esc normal",
+        Mode::Normal => "i insert  ::  :ex  ::  /search  ::  j/k scroll",
+        Mode::Visual => "y yank  ::  Esc cancel",
+    }
+}
+
+fn placeholder_for(mode: Mode) -> Option<&'static str> {
+    match mode {
+        Mode::Insert => Some(INPUT_PLACEHOLDER_INSERT),
+        Mode::Normal => Some(INPUT_PLACEHOLDER_NORMAL),
+        Mode::Visual => None,
+    }
+}
+
 /// How many rows to scroll the input Paragraph so that the cursor row
 /// always stays inside the visible content area. Once the prompt has
-/// more rows than the input area can fit (`INPUT_MAX_LINES = 8`),
-/// scrolling is the only way to keep typing visible.
-fn input_scroll_offset(input: &InputState, area: ratatui::layout::Rect) -> u16 {
-    if area.height < 2 {
+/// more rows than the input area can fit ([`INPUT_CONTENT_MAX_LINES`]
+/// from `layout.rs`), scrolling is the only way to keep typing
+/// visible.
+fn input_scroll_offset(input: &InputState, body_area: ratatui::layout::Rect) -> u16 {
+    if body_area.height == 0 {
         return 0;
     }
-    let content_height = usize::from(area.height - 1);
-    if content_height == 0 {
-        return 0;
-    }
+    let content_height = usize::from(body_area.height);
     let prefix = input.text().get(..input.cursor()).unwrap_or("");
     let cursor_row = prefix.matches('\n').count();
-    let max_visible_row = content_height - 1;
+    let max_visible_row = content_height.saturating_sub(1);
     let off = cursor_row.saturating_sub(max_visible_row);
     u16::try_from(off).unwrap_or(u16::MAX)
 }
 
 /// Compute the screen position of the prompt cursor inside the input
-/// region. Returns `None` if the input has no inner area (a one-row
-/// region collapses to the title border alone).
+/// body area. Returns `None` if `body_area` is empty.
 fn input_cursor_position(
     input: &InputState,
-    area: ratatui::layout::Rect,
+    body_area: ratatui::layout::Rect,
     scroll_off: u16,
 ) -> Option<(u16, u16)> {
-    if area.height < 2 || area.width == 0 {
+    if body_area.height == 0 || body_area.width == 0 {
         return None;
     }
-    let inner_x = area.x;
-    let inner_y = area.y + 1;
-    let max_x = area.x + area.width - 1;
-    let max_y = area.y + area.height - 1;
+    let max_x = body_area.x + body_area.width - 1;
+    let max_y = body_area.y + body_area.height - 1;
     let prefix = input.text().get(..input.cursor()).unwrap_or("");
     let row_offset = u16::try_from(prefix.matches('\n').count())
         .unwrap_or(u16::MAX)
         .saturating_sub(scroll_off);
     let last_line = prefix.rsplit('\n').next().unwrap_or("");
     let col_offset = u16::try_from(last_line.chars().count()).unwrap_or(u16::MAX);
-    let cx = inner_x.saturating_add(col_offset).min(max_x);
-    let cy = inner_y.saturating_add(row_offset).min(max_y);
+    let cx = body_area.x.saturating_add(col_offset).min(max_x);
+    let cy = body_area.y.saturating_add(row_offset).min(max_y);
     Some((cx, cy))
 }
 
@@ -1543,18 +1660,6 @@ fn mode_label(mode: Mode) -> &'static str {
     }
 }
 
-fn mode_style(mode: Mode) -> Style {
-    let bg = match mode {
-        Mode::Normal => Color::Blue,
-        Mode::Insert => Color::Green,
-        Mode::Visual => Color::Magenta,
-    };
-    Style::default()
-        .fg(Color::White)
-        .bg(bg)
-        .add_modifier(Modifier::BOLD)
-}
-
 fn assistant_style() -> Style {
     Style::default().fg(crate::theme::current().assistant_fg)
 }
@@ -1599,7 +1704,7 @@ mod tests {
             std::collections::BTreeMap::new();
         terminal
             .draw(|frame| {
-                let regions = crate::layout::split(frame.area(), 1);
+                let regions = crate::layout::split(frame.area(), 1, 0);
                 render(
                     frame,
                     regions,
@@ -1656,7 +1761,7 @@ mod tests {
         buffer.append_assistant_delta("hi there");
         buffer.finish_streaming();
         let input = InputState::new();
-        let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 40, 5));
+        let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 40, 8));
         assert!(lines.iter().any(|l| l.contains("hi there")));
         // No `[assistant]` header tag.
         assert!(!lines.iter().any(|l| l.contains("[assistant]")));
@@ -1667,7 +1772,7 @@ mod tests {
         let mut buffer = Buffer::new();
         buffer.push_user("hello");
         let input = InputState::new();
-        let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 40, 5));
+        let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 40, 8));
         // Bubble keeps the prompt text intact; trailing whitespace is
         // trimmed by the test's snapshot helper.
         assert!(lines.iter().any(|l| l.contains("hello")));
@@ -1679,7 +1784,7 @@ mod tests {
         let mut buffer = Buffer::new();
         buffer.push_tool_call("c1", "bash", "ls -la", "{\n  \"cmd\": \"ls -la\"\n}");
         let input = InputState::new();
-        let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 6));
+        let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 8));
         let header = lines
             .iter()
             .find(|l| l.contains("bash"))
@@ -1843,9 +1948,24 @@ mod tests {
         assert_eq!(super::first_line_preview("\n\n  \n", 10), None);
     }
 
+    /// Mirror what [`super::render_input`] does to derive the inner
+    /// content rect (`body_area`) from a full input region rect: inset
+    /// by one cell on every side for the bordered card, then by
+    /// [`super::INPUT_GLYPH_WIDTH`] columns on the left for the prompt
+    /// glyph.
+    fn body_area_for(region: Rect) -> Rect {
+        Rect::new(
+            region.x + 1 + super::INPUT_GLYPH_WIDTH,
+            region.y + 1,
+            region.width.saturating_sub(2 + super::INPUT_GLYPH_WIDTH),
+            region.height.saturating_sub(2),
+        )
+    }
+
     #[test]
     fn cursor_position_advances_with_typed_text() {
-        let area = Rect::new(0, 4, 40, 4);
+        let region = Rect::new(0, 4, 40, 4);
+        let body = body_area_for(region);
         let mut input = InputState::new();
         input.handle_key(ratatui::crossterm::event::KeyEvent::new(
             ratatui::crossterm::event::KeyCode::Char('i'),
@@ -1857,14 +1977,16 @@ mod tests {
                 ratatui::crossterm::event::KeyModifiers::NONE,
             ));
         }
-        let pos = super::input_cursor_position(&input, area, 0).unwrap();
-        // Inner row = area.y + 1 = 5; cursor column = 5 chars into row.
-        assert_eq!(pos, (5, 5));
+        let pos = super::input_cursor_position(&input, body, 0).unwrap();
+        // body.x = 3 (border + glyph), body.y = 5 (skip top border);
+        // 5 chars typed -> col 8, row 5.
+        assert_eq!(pos, (body.x + 5, body.y));
     }
 
     #[test]
     fn cursor_position_walks_to_next_row_on_newline() {
-        let area = Rect::new(0, 0, 20, 5);
+        let region = Rect::new(0, 0, 20, 5);
+        let body = body_area_for(region);
         let mut input = InputState::new();
         input.handle_key(ratatui::crossterm::event::KeyEvent::new(
             ratatui::crossterm::event::KeyCode::Char('i'),
@@ -1872,15 +1994,17 @@ mod tests {
         ));
         // Paste pre-builds multi-line content cheaply.
         input.paste("ab\ncd");
-        let pos = super::input_cursor_position(&input, area, 0).unwrap();
-        // Two rows below the title border -> y = 0 + 1 + 1 = 2; col = 2.
-        assert_eq!(pos, (2, 2));
+        let pos = super::input_cursor_position(&input, body, 0).unwrap();
+        // Second logical row, 2 chars in -> col body.x + 2, row body.y + 1.
+        assert_eq!(pos, (body.x + 2, body.y + 1));
     }
 
     #[test]
     fn input_scrolls_when_cursor_row_exceeds_visible_height() {
-        // Area height = 4 rows -> 1 border + 3 content rows.
-        let area = Rect::new(0, 0, 40, 4);
+        // Region height = 5 rows -> 2 chrome + 3 content rows.
+        let region = Rect::new(0, 0, 40, 5);
+        let body = body_area_for(region);
+        assert_eq!(body.height, 3);
         let mut input = InputState::new();
         input.handle_key(ratatui::crossterm::event::KeyEvent::new(
             ratatui::crossterm::event::KeyCode::Char('i'),
@@ -1888,35 +2012,44 @@ mod tests {
         ));
         // Five rows of content; cursor lands on row 4 (last line).
         input.paste("a\nb\nc\nd\ne");
-        let off = super::input_scroll_offset(&input, area);
+        let off = super::input_scroll_offset(&input, body);
         // cursor_row=4, max_visible_row=2 -> scroll by 2.
         assert_eq!(off, 2);
-        // Cursor renders on the last visible row of the area (y = 3).
-        let pos = super::input_cursor_position(&input, area, off).unwrap();
-        assert_eq!(pos.1, 3);
+        // Cursor renders on the last visible row of the body area.
+        let pos = super::input_cursor_position(&input, body, off).unwrap();
+        assert_eq!(pos.1, body.y + body.height - 1);
     }
 
     #[test]
     fn input_does_not_scroll_when_text_fits() {
-        let area = Rect::new(0, 0, 40, 6);
+        let region = Rect::new(0, 0, 40, 6);
+        let body = body_area_for(region);
         let mut input = InputState::new();
         input.handle_key(ratatui::crossterm::event::KeyEvent::new(
             ratatui::crossterm::event::KeyCode::Char('i'),
             ratatui::crossterm::event::KeyModifiers::NONE,
         ));
         input.paste("a\nb\nc");
-        assert_eq!(super::input_scroll_offset(&input, area), 0);
+        assert_eq!(super::input_scroll_offset(&input, body), 0);
     }
 
     #[test]
-    fn status_bar_shows_mode_label() {
+    fn input_card_shows_mode_pill() {
+        // Mode display lives on the input card's top border now (not
+        // on the top status bar). Frame is wide enough so the pill
+        // fits inside the card border.
         let mut buffer = Buffer::new();
         let mut input = InputState::new();
         input.handle_key(ratatui::crossterm::event::KeyEvent::new(
             ratatui::crossterm::event::KeyCode::Char('i'),
             ratatui::crossterm::event::KeyModifiers::NONE,
         ));
-        let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 20, 4));
-        assert!(lines[0].contains("INS"));
+        let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 8));
+        assert!(
+            lines.iter().any(|l| l.contains("INS")),
+            "expected mode pill INS somewhere on screen, got: {lines:#?}"
+        );
+        // Top status bar no longer carries the mode pill; just kage label.
+        assert!(!lines[0].contains("INS"));
     }
 }

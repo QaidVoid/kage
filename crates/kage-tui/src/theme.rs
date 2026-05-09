@@ -79,6 +79,37 @@ pub struct Theme {
     pub selection_color: Color,
     /// Focus emphasis color (always `White` by convention).
     pub focus_color: Color,
+    /// Border color of the input card while [`crate::Mode::Normal`].
+    pub input_border_normal: Color,
+    /// Border color of the input card while [`crate::Mode::Insert`].
+    pub input_border_insert: Color,
+    /// Border color of the input card while [`crate::Mode::Visual`].
+    pub input_border_visual: Color,
+    /// Background of the mode pill rendered on the input card's top
+    /// border, keyed by mode.
+    pub input_pill_normal_bg: Color,
+    /// Foreground of the mode pill on the input card, keyed by mode.
+    pub input_pill_normal_fg: Color,
+    /// Background of the mode pill while [`crate::Mode::Insert`].
+    pub input_pill_insert_bg: Color,
+    /// Foreground of the mode pill while [`crate::Mode::Insert`].
+    pub input_pill_insert_fg: Color,
+    /// Background of the mode pill while [`crate::Mode::Visual`].
+    pub input_pill_visual_bg: Color,
+    /// Foreground of the mode pill while [`crate::Mode::Visual`].
+    pub input_pill_visual_fg: Color,
+    /// Color of the leading prompt glyph (`>`) inside the input card.
+    pub input_glyph_fg: Color,
+    /// Foreground of the dim placeholder text shown when the input is
+    /// empty.
+    pub input_placeholder_fg: Color,
+    /// Foreground of the contextual hint shown on the right side of
+    /// the input card's top border.
+    pub input_hint_fg: Color,
+    /// Background of the bottom modeline.
+    pub modeline_bg: Color,
+    /// Foreground of the bottom modeline's text.
+    pub modeline_fg: Color,
 }
 
 impl Default for Theme {
@@ -110,6 +141,20 @@ impl Theme {
             match_color: Color::Yellow,
             selection_color: Color::Magenta,
             focus_color: Color::White,
+            input_border_normal: Color::Rgb(80, 92, 120),
+            input_border_insert: Color::Cyan,
+            input_border_visual: Color::Magenta,
+            input_pill_normal_bg: Color::Blue,
+            input_pill_normal_fg: Color::White,
+            input_pill_insert_bg: Color::Cyan,
+            input_pill_insert_fg: Color::Black,
+            input_pill_visual_bg: Color::Magenta,
+            input_pill_visual_fg: Color::White,
+            input_glyph_fg: Color::Cyan,
+            input_placeholder_fg: Color::DarkGray,
+            input_hint_fg: Color::Gray,
+            modeline_bg: Color::Rgb(24, 28, 38),
+            modeline_fg: Color::Gray,
         }
     }
 
@@ -135,6 +180,20 @@ impl Theme {
             match_color: Color::Rgb(224, 175, 104),
             selection_color: Color::Rgb(187, 154, 247),
             focus_color: Color::Rgb(192, 202, 245),
+            input_border_normal: Color::Rgb(86, 95, 137),
+            input_border_insert: Color::Rgb(125, 207, 255),
+            input_border_visual: Color::Rgb(187, 154, 247),
+            input_pill_normal_bg: Color::Rgb(86, 95, 137),
+            input_pill_normal_fg: Color::Rgb(192, 202, 245),
+            input_pill_insert_bg: Color::Rgb(125, 207, 255),
+            input_pill_insert_fg: Color::Rgb(20, 22, 34),
+            input_pill_visual_bg: Color::Rgb(187, 154, 247),
+            input_pill_visual_fg: Color::Rgb(20, 22, 34),
+            input_glyph_fg: Color::Rgb(125, 207, 255),
+            input_placeholder_fg: Color::Rgb(86, 95, 137),
+            input_hint_fg: Color::Rgb(108, 119, 165),
+            modeline_bg: Color::Rgb(22, 24, 38),
+            modeline_fg: Color::Rgb(108, 119, 165),
         }
     }
 
@@ -159,6 +218,20 @@ impl Theme {
             match_color: Color::Rgb(249, 226, 175),
             selection_color: Color::Rgb(203, 166, 247),
             focus_color: Color::Rgb(205, 214, 244),
+            input_border_normal: Color::Rgb(108, 112, 134),
+            input_border_insert: Color::Rgb(137, 220, 235),
+            input_border_visual: Color::Rgb(203, 166, 247),
+            input_pill_normal_bg: Color::Rgb(108, 112, 134),
+            input_pill_normal_fg: Color::Rgb(205, 214, 244),
+            input_pill_insert_bg: Color::Rgb(137, 220, 235),
+            input_pill_insert_fg: Color::Rgb(24, 24, 37),
+            input_pill_visual_bg: Color::Rgb(203, 166, 247),
+            input_pill_visual_fg: Color::Rgb(24, 24, 37),
+            input_glyph_fg: Color::Rgb(137, 220, 235),
+            input_placeholder_fg: Color::Rgb(108, 112, 134),
+            input_hint_fg: Color::Rgb(127, 132, 156),
+            modeline_bg: Color::Rgb(17, 17, 27),
+            modeline_fg: Color::Rgb(127, 132, 156),
         }
     }
 

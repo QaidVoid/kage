@@ -23,7 +23,10 @@ pub use events::populate_from_history;
 pub use events::{SharedBuffer, TuiHooks, shared_buffer};
 pub use hostlog::buffer_host_log;
 pub use input::{HISTORY_MAX, InputAction, InputState, Mode};
-pub use layout::{INPUT_MAX_LINES, INPUT_MIN_LINES, Regions, input_height_for, split};
+pub use layout::{
+    INPUT_CHROME_LINES, INPUT_CONTENT_MAX_LINES, INPUT_CONTENT_MIN_LINES, INPUT_MAX_LINES,
+    INPUT_MIN_LINES, Regions, STATUS_BOTTOM_LINES_DEFAULT, input_height_for, split,
+};
 pub use overlay::{OverlayPicker, PickerEvent};
 pub use picker::{PickItem, pick};
 pub use terminal::Tui;

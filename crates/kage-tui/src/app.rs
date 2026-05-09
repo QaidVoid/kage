@@ -413,7 +413,7 @@ impl App {
         let search_match_count = self.compute_search_match_count();
         let mut buffer = self.buffer.lock().expect("buffer mutex poisoned");
         let input_text_lines = u16::try_from(text_row_count(self.input.text())).unwrap_or(u16::MAX);
-        let input_height = input_height_for(input_text_lines + 1);
+        let input_height = input_height_for(input_text_lines);
         let cmdline = self.cmdline.as_ref();
         let model_snapshot = self
             .status_model
@@ -431,7 +431,7 @@ impl App {
         let input = &self.input;
         let picker = self.picker.as_mut();
         tui.terminal().draw(|frame| {
-            let regions = split(frame.area(), input_height);
+            let regions = split(frame.area(), input_height, 0);
             view::render(
                 frame,
                 regions,
@@ -1152,7 +1152,7 @@ impl App {
         let search_match_count = self.compute_search_match_count();
         let mut buffer = self.buffer.lock().expect("buffer mutex poisoned");
         let input_text_lines = u16::try_from(text_row_count(self.input.text())).unwrap_or(u16::MAX);
-        let input_height = input_height_for(input_text_lines + 1);
+        let input_height = input_height_for(input_text_lines);
         let picker = self.picker.as_mut();
         let cmdline = self.cmdline.as_ref();
         let model_snapshot = self
@@ -1171,7 +1171,7 @@ impl App {
         let input = &self.input;
         terminal
             .draw(|frame| {
-                let regions = split(frame.area(), input_height);
+                let regions = split(frame.area(), input_height, 0);
                 view::render(
                     frame,
                     regions,

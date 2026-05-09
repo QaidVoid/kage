@@ -13,8 +13,10 @@ mod doom;
 pub mod hooks;
 pub mod run;
 mod stream;
+pub mod system_prompt;
 
 pub use config::LoopConfig;
 pub use context::{AgentContext, TokenBudget};
 pub use hooks::{Hooks, NoopHooks};
 pub use run::run;
+pub use system_prompt::{DEFAULT_ROLE, EnvContext, compose as compose_system_prompt};

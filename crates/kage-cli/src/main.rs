@@ -8,6 +8,7 @@
 mod auth;
 mod history;
 mod plugins;
+mod runtime_env;
 mod session;
 mod state;
 mod tui;
@@ -170,8 +171,9 @@ fn main() -> ExitCode {
     };
 
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let system_prompt = runtime_env::build_system_prompt(&cli.system, &workdir, &model);
     let plugin_runtime = match plugins_dir() {
-        Ok(dir) => match setup_runtime(&dir, &workdir, &model, &cli.system) {
+        Ok(dir) => match setup_runtime(&dir, &workdir, &model, &system_prompt) {
             Ok(rt) => rt,
             Err(e) => {
                 eprintln!("kage: {e}");
@@ -190,14 +192,17 @@ fn main() -> ExitCode {
             tools.register(tool);
         }
     }
-    let mut cx = AgentContext::new(resolved.model.clone(), &cli.system);
+    let mut cx = AgentContext::new(resolved.model.clone(), &system_prompt).with_workdir(&workdir);
+    if let Some(window) = runtime_env::context_window_for(&model) {
+        cx = cx.with_context_window(window);
+    }
     let user_msg = Message::new(Role::User, vec![Content::Text { text: prompt }], None);
     cx.history.push(user_msg.clone());
 
     let writer = if cli.no_session {
         None
     } else {
-        match open_session(&model, &cli.system) {
+        match open_session(&model, &system_prompt) {
             Ok(w) => {
                 eprintln!("kage: recording session to {}", w.path().display());
                 Some(w)
@@ -418,7 +423,11 @@ fn run_resume(
             tools.register(tool);
         }
     }
-    let mut cx = AgentContext::new(resolved.model.clone(), &replay.header.system_prompt);
+    let mut cx = AgentContext::new(resolved.model.clone(), &replay.header.system_prompt)
+        .with_workdir(&workdir);
+    if let Some(window) = runtime_env::context_window_for(&model) {
+        cx = cx.with_context_window(window);
+    }
     cx.history = replay.history;
     let user_msg = Message::new(
         Role::User,

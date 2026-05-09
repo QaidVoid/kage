@@ -54,6 +54,8 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     // instead of stderr (which would corrupt the alt screen).
     let buffer = shared_buffer();
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let system_prompt = crate::runtime_env::build_system_prompt(system, &workdir, model);
+    let system = system_prompt.as_str();
     let plugin_runtime = match crate::plugins_dir() {
         Ok(dir) => match setup_runtime_with_sink(
             &dir,
@@ -89,9 +91,11 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         }
     }
     let cancel = CancelFlag::new();
-    let cx = Arc::new(Mutex::new(
-        AgentContext::new(bare_model, system).with_workdir(&workdir),
-    ));
+    let mut initial_cx = AgentContext::new(bare_model, system).with_workdir(&workdir);
+    if let Some(window) = crate::runtime_env::context_window_for(model) {
+        initial_cx = initial_cx.with_context_window(window);
+    }
+    let cx = Arc::new(Mutex::new(initial_cx));
     let (tx, rx) = mpsc::channel::<RunRequest>();
 
     // Plan a session up-front but defer creating the file until the

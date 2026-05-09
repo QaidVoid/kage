@@ -1,0 +1,54 @@
+//! Runtime-environment helpers for the CLI.
+//!
+//! Today this just composes the agent's system prompt with a small
+//! `<environment>` block describing the current cwd, OS, shell, and
+//! model. The block lives at the top of the system prompt so the
+//! model has concrete grounding for filesystem and shell suggestions
+//! and does not, for example, invent paths like `/home/user`.
+
+use std::path::Path;
+
+use kage_loop::{EnvContext, compose_system_prompt};
+
+/// Look up the context-window size (input tokens) the catalog
+/// reports for `qualified_model` (`provider:model`). Returns `None`
+/// when either side is missing or the catalog has no entry; callers
+/// fall back to the [`kage_loop::AgentContext`] default.
+#[must_use]
+pub fn context_window_for(qualified_model: &str) -> Option<u64> {
+    let (provider, model) = qualified_model.split_once(':')?;
+    kage_provider::catalog::model(provider, model)?.context
+}
+
+/// Build the full system prompt for an agent run: `role` (the user's
+/// `--system` text or a default) plus an `<environment>` block.
+///
+/// `model` is the qualified `provider:model` id; `workdir` is the
+/// agent's effective working directory (the host's cwd).
+#[must_use]
+pub fn build_system_prompt(role: &str, workdir: &Path, model: &str) -> String {
+    let shell_owned = std::env::var("SHELL").ok();
+    let date_owned = chrono::Utc::now().date_naive().to_string();
+    let env = EnvContext {
+        cwd: workdir,
+        os: std::env::consts::OS,
+        shell: shell_owned.as_deref(),
+        date: &date_owned,
+        model,
+    };
+    compose_system_prompt(role, &env)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_includes_role_and_env_block() {
+        let out = build_system_prompt("you are kage.", Path::new("/tmp/work"), "x:y");
+        assert!(out.starts_with("you are kage."));
+        assert!(out.contains("<environment>"));
+        assert!(out.contains("cwd: /tmp/work"));
+        assert!(out.contains("model: x:y"));
+    }
+}

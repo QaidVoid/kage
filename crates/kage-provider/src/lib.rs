@@ -6,6 +6,7 @@
 
 pub mod anthropic;
 pub mod catalog;
+pub mod compat;
 pub mod error;
 pub mod event;
 pub mod gemini;

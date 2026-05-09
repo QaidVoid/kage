@@ -27,6 +27,16 @@ const SUPPORTED_PROVIDERS: &[ProviderMap] = &[
     ProviderMap::same("anthropic"),
     ProviderMap::same("openai"),
     ProviderMap::same("zai"),
+    ProviderMap::same("zai-coding-plan"),
+    ProviderMap::same("deepseek"),
+    ProviderMap::same("groq"),
+    ProviderMap::same("mistral"),
+    ProviderMap::same("cerebras"),
+    ProviderMap::same("xai"),
+    ProviderMap::same("openrouter"),
+    ProviderMap::same("fireworks-ai"),
+    ProviderMap::same("moonshotai"),
+    ProviderMap::same("kimi-for-coding"),
     // models.dev calls Google's API "google" but kage's Provider impl
     // is registered under "gemini".
     ProviderMap {

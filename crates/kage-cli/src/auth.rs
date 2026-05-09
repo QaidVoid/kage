@@ -106,9 +106,25 @@ impl AuthStore {
     }
 }
 
-/// Provider ids the auth subcommand can target. `zai` and `zai-coding`
-/// are billed separately so each takes its own key.
-pub const KNOWN_PROVIDERS: &[&str] = &["anthropic", "openai", "gemini", "zai", "zai-coding"];
+/// Provider ids the auth subcommand can target. The list mirrors the
+/// catalog (and our hardcoded `Provider` impls). `zai` and
+/// `zai-coding-plan` are billed separately so each takes its own key.
+pub const KNOWN_PROVIDERS: &[&str] = &[
+    "anthropic",
+    "openai",
+    "gemini",
+    "zai",
+    "zai-coding-plan",
+    "deepseek",
+    "groq",
+    "mistral",
+    "cerebras",
+    "xai",
+    "openrouter",
+    "fireworks-ai",
+    "moonshotai",
+    "kimi-for-coding",
+];
 
 /// Env-var name that, when set, supersedes any saved key for `provider`.
 #[must_use]
@@ -118,7 +134,16 @@ pub fn env_var_for(provider: &str) -> &'static str {
         "openai" => "OPENAI_API_KEY",
         "gemini" => "GEMINI_API_KEY",
         "zai" => "ZAI_API_KEY",
-        "zai-coding" => "ZAI_CODING_API_KEY",
+        "zai-coding-plan" => "ZAI_CODING_API_KEY",
+        "deepseek" => "DEEPSEEK_API_KEY",
+        "groq" => "GROQ_API_KEY",
+        "mistral" => "MISTRAL_API_KEY",
+        "cerebras" => "CEREBRAS_API_KEY",
+        "xai" => "XAI_API_KEY",
+        "openrouter" => "OPENROUTER_API_KEY",
+        "fireworks-ai" => "FIREWORKS_API_KEY",
+        "moonshotai" => "MOONSHOT_API_KEY",
+        "kimi-for-coding" => "KIMI_API_KEY",
         _ => "",
     }
 }
@@ -231,7 +256,9 @@ fn select_provider(arg: Option<&str>) -> Result<String, String> {
                 // models.dev entry just render their id.
                 None => (*p).to_owned(),
             };
-            kage_tui::PickItem::simple(*p).with_label(label).with_badge(badge)
+            kage_tui::PickItem::simple(*p)
+                .with_label(label)
+                .with_badge(badge)
         })
         .collect();
     match kage_tui::pick("Select a provider", &items) {

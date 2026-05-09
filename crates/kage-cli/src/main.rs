@@ -20,7 +20,7 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use kage_core::{CancelFlag, Content, LoopEvent, Message, Role};
 use kage_loop::{AgentContext, Hooks, LoopConfig, NoopHooks, run};
-use kage_provider::{ProviderRegistry, anthropic, gemini, openai, zai};
+use kage_provider::{ProviderRegistry, anthropic, compat, gemini, openai, zai};
 use kage_session::{EntryId, FORMAT_VERSION, Header, SessionId, SessionSummary, SessionWriter};
 use kage_tools::builtin_registry;
 
@@ -688,8 +688,7 @@ fn build_session_path(dir: &std::path::Path, session: SessionId) -> PathBuf {
 }
 
 /// Build a registry holding every provider whose API key is reachable
-/// through either an env var (priority) or the saved auth store. ZAI's
-/// standard and coding plans use distinct keys and register separately.
+/// through either an env var (priority) or the saved auth store.
 fn build_provider_registry() -> ProviderRegistry {
     let store = auth::AuthStore::load().unwrap_or_else(|_| auth::AuthStore::empty());
     let mut registry = ProviderRegistry::new();
@@ -705,14 +704,43 @@ fn build_provider_registry() -> ProviderRegistry {
     if let Some(key) = lookup_key("zai", &store) {
         registry.register(Arc::new(zai::provider(key)));
     }
-    if let Some(key) = lookup_key("zai-coding", &store) {
+    if let Some(key) = lookup_key("zai-coding-plan", &store) {
         registry.register(Arc::new(zai::coding_plan(key)));
+    }
+    if let Some(key) = lookup_key("deepseek", &store) {
+        registry.register(Arc::new(compat::deepseek(key)));
+    }
+    if let Some(key) = lookup_key("groq", &store) {
+        registry.register(Arc::new(compat::groq(key)));
+    }
+    if let Some(key) = lookup_key("mistral", &store) {
+        registry.register(Arc::new(compat::mistral(key)));
+    }
+    if let Some(key) = lookup_key("cerebras", &store) {
+        registry.register(Arc::new(compat::cerebras(key)));
+    }
+    if let Some(key) = lookup_key("xai", &store) {
+        registry.register(Arc::new(compat::xai(key)));
+    }
+    if let Some(key) = lookup_key("openrouter", &store) {
+        registry.register(Arc::new(compat::openrouter(key)));
+    }
+    if let Some(key) = lookup_key("fireworks-ai", &store) {
+        registry.register(Arc::new(compat::fireworks_ai(key)));
+    }
+    if let Some(key) = lookup_key("moonshotai", &store) {
+        registry.register(Arc::new(compat::moonshotai(key)));
+    }
+    if let Some(key) = lookup_key("kimi-for-coding", &store) {
+        registry.register(Arc::new(compat::kimi_for_coding(key)));
     }
     registry
 }
 
 /// Look up `provider`'s API key, preferring the env var declared by
-/// [`auth::env_var_for`] and falling back to the auth store.
+/// [`auth::env_var_for`] and falling back to the auth store. For the
+/// rename `zai-coding` -> `zai-coding-plan` we also accept the old id
+/// in the store so existing saves keep working.
 fn lookup_key(provider: &str, store: &auth::AuthStore) -> Option<String> {
     let env = auth::env_var_for(provider);
     if !env.is_empty() {
@@ -722,7 +750,13 @@ fn lookup_key(provider: &str, store: &auth::AuthStore) -> Option<String> {
             }
         }
     }
-    store.get(provider).map(str::to_owned)
+    if let Some(k) = store.get(provider) {
+        return Some(k.to_owned());
+    }
+    if provider == "zai-coding-plan" {
+        return store.get("zai-coding").map(str::to_owned);
+    }
+    None
 }
 
 /// Pick a sensible default model: prefer the last model the user

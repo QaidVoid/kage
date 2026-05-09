@@ -10,7 +10,7 @@
 //! [provider]
 //! default_model = "zai:glm-4.6"          # standard plan
 //! # or
-//! default_model = "zai-coding:glm-4.6"   # coding plan
+//! default_model = "zai-coding-plan:glm-4.6"   # coding plan
 //! ```
 
 use crate::ProviderMetadata;
@@ -39,14 +39,14 @@ pub fn provider(api_key: impl Into<String>) -> OpenAiProvider {
 
 /// Construct a ZAI coding-plan provider.
 ///
-/// Registers under the `zai-coding` id; resolve as `zai-coding:<model>`.
+/// Registers under the `zai-coding-plan` id; resolve as `zai-coding-plan:<model>`.
 #[must_use]
 pub fn coding_plan(api_key: impl Into<String>) -> OpenAiProvider {
     OpenAiProvider::compatible(
         api_key,
         CODING_BASE_URL,
         ProviderMetadata {
-            id: "zai-coding".into(),
+            id: "zai-coding-plan".into(),
             display_name: "ZAI Coding Plan".into(),
             supports_caching: false,
             supports_thinking: false,
@@ -71,7 +71,7 @@ mod tests {
     #[test]
     fn coding_plan_provider_id_is_zai_coding() {
         let p = coding_plan("test-key");
-        assert_eq!(p.metadata().id, "zai-coding");
+        assert_eq!(p.metadata().id, "zai-coding-plan");
         assert_eq!(p.metadata().display_name, "ZAI Coding Plan");
     }
 

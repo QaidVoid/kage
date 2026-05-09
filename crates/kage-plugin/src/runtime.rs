@@ -25,12 +25,19 @@ use mlua::Lua;
 
 use crate::api::{self, SharedHostLog, default_host_log};
 use crate::error::PluginError;
+use crate::events;
 
 /// A Lua VM with the dangerous standard-library bindings stripped and
 /// the `kage` API table installed.
-#[derive(Debug)]
 pub struct PluginRuntime {
     lua: Lua,
+    sink: SharedHostLog,
+}
+
+impl std::fmt::Debug for PluginRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PluginRuntime").finish_non_exhaustive()
+    }
 }
 
 impl PluginRuntime {
@@ -61,6 +68,21 @@ impl PluginRuntime {
     /// chunk's return value as a Lua [`mlua::Value`].
     pub fn eval(&self, source: &str) -> Result<mlua::Value, PluginError> {
         Ok(self.lua.load(source).eval::<mlua::Value>()?)
+    }
+
+    /// Fire every handler subscribed to `event_name` with `payload`.
+    pub fn dispatch_event(
+        &self,
+        event_name: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), PluginError> {
+        events::dispatch(&self.lua, event_name, payload, &self.sink)
+    }
+
+    /// Number of handlers subscribed to `event_name`.
+    #[must_use]
+    pub fn handler_count(&self, event_name: &str) -> usize {
+        events::handler_count(&self.lua, event_name)
     }
 }
 
@@ -95,12 +117,17 @@ impl PluginRuntimeBuilder {
     }
 
     /// Finalize the runtime: build the Lua state, apply sandbox removals,
-    /// and install the `kage` API table.
+    /// install the `kage` API table, and wire `kage.on` for event
+    /// subscriptions.
     pub fn build(self) -> Result<PluginRuntime, PluginError> {
         let lua = Lua::new();
         apply_sandbox(&lua)?;
-        api::install(&lua, self.sink, self.config)?;
-        Ok(PluginRuntime { lua })
+        api::install(&lua, self.sink.clone(), self.config)?;
+        events::install_subscriptions(&lua)?;
+        Ok(PluginRuntime {
+            lua,
+            sink: self.sink,
+        })
     }
 }
 

@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod error;
+pub mod events;
 pub mod runtime;
 
 pub use api::{HostLog, LogLevel, SharedHostLog, StderrHostLog, default_host_log};

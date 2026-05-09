@@ -218,6 +218,13 @@ pub struct InputState {
     /// etc.), so `p` pastes on a new line below the cursor instead of
     /// inserting inline.
     register_linewise: bool,
+    /// Anchor byte offset of an active input-pane char-visual
+    /// selection. `None` outside Visual mode and during buffer-cell
+    /// visual; `Some(n)` while the user is dragging a vim-style range
+    /// across the input text. Stage C.5 uses this to disambiguate
+    /// "v in input pane" (inline selection) from "v in buffer pane"
+    /// (today's cell-overlay selection).
+    visual_anchor: Option<usize>,
     /// Undo stack: snapshots taken before each mutating op. Vim
     /// groups one Insert session as a single undo unit, so the
     /// snapshot is taken once at insert-entry time, not per
@@ -739,7 +746,14 @@ impl InputState {
                 self.cursor = self.text.len();
                 Vec::new()
             }
-            KeyCode::Char('v') => vec![InputAction::EnterVisual],
+            KeyCode::Char('v') => {
+                // Input-pane char-visual: anchor at current cursor
+                // and switch to Visual mode. The host detects this
+                // via `input_visual_range()` and renders an inline
+                // highlight; buffer-cell selection is suppressed.
+                self.visual_anchor = Some(self.cursor);
+                self.enter_mode(Mode::Visual)
+            }
             KeyCode::PageDown => vec![InputAction::Scroll(10)],
             KeyCode::PageUp => vec![InputAction::Scroll(-10)],
             _ => Vec::new(),
@@ -1171,6 +1185,9 @@ impl InputState {
     }
 
     fn handle_visual(&mut self, key: KeyEvent) -> Vec<InputAction> {
+        if self.visual_anchor.is_some() {
+            return self.handle_visual_input(key);
+        }
         match key.code {
             KeyCode::Esc => {
                 let mut actions = vec![InputAction::ClearSelection];
@@ -1190,6 +1207,110 @@ impl InputState {
             KeyCode::Char('$') | KeyCode::End => vec![InputAction::VisualLineEnd],
             _ => Vec::new(),
         }
+    }
+
+    /// Handle Visual-mode keys when an input-pane char-visual
+    /// selection is active. Motions extend the cursor (anchor stays
+    /// put); operators (`d`/`c`/`y`) act on the
+    /// `[min(anchor, cursor), max + 1)` range and exit Visual.
+    fn handle_visual_input(&mut self, key: KeyEvent) -> Vec<InputAction> {
+        match key.code {
+            KeyCode::Esc => {
+                self.visual_anchor = None;
+                let mut actions = vec![InputAction::ClearSelection];
+                actions.extend(self.enter_mode(Mode::Normal));
+                return actions;
+            }
+            KeyCode::Char('h') | KeyCode::Left => {
+                self.cursor = self.cursor_after_char_move(-1);
+                return Vec::new();
+            }
+            KeyCode::Char('l') | KeyCode::Right => {
+                self.cursor = self.cursor_after_char_move(1);
+                return Vec::new();
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                self.move_cursor_down();
+                return Vec::new();
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                self.move_cursor_up();
+                return Vec::new();
+            }
+            KeyCode::Char('0') | KeyCode::Home => {
+                self.cursor = current_line_start(&self.text, self.cursor);
+                return Vec::new();
+            }
+            KeyCode::Char('$') | KeyCode::End => {
+                self.cursor = current_line_end(&self.text, self.cursor);
+                return Vec::new();
+            }
+            KeyCode::Char('^') => {
+                let s = current_line_start(&self.text, self.cursor);
+                self.cursor = first_non_whitespace_at(&self.text, s);
+                return Vec::new();
+            }
+            KeyCode::Char('w') => {
+                self.cursor = vim_word_forward(&self.text, self.cursor);
+                return Vec::new();
+            }
+            KeyCode::Char('b') => {
+                self.cursor = backward_word_start(&self.text, self.cursor);
+                return Vec::new();
+            }
+            KeyCode::Char('e') => {
+                self.cursor = vim_word_end(&self.text, self.cursor);
+                return Vec::new();
+            }
+            KeyCode::Char(op_key) if matches!(op_key, 'd' | 'c' | 'y' | 'x' | 'X') => {
+                let op = match op_key {
+                    'c' => Operator::Change,
+                    'y' => Operator::Yank,
+                    _ => Operator::Delete,
+                };
+                let range = self.input_visual_range_inclusive();
+                self.visual_anchor = None;
+                let mut actions = self.apply_op_charwise(op, range);
+                if !matches!(op, Operator::Change) {
+                    actions.extend(self.enter_mode(Mode::Normal));
+                }
+                return actions;
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    /// Byte range covered by an active input-pane char-visual
+    /// selection, expressed inclusively at the right edge so an
+    /// operator deletes the char under the cursor too. Returns
+    /// `(0, 0)` when no selection is active (callers should check
+    /// [`Self::visual_anchor`] first).
+    fn input_visual_range_inclusive(&self) -> (usize, usize) {
+        let Some(anchor) = self.visual_anchor else {
+            return (0, 0);
+        };
+        let (start, end) = if anchor <= self.cursor {
+            (anchor, self.cursor)
+        } else {
+            (self.cursor, anchor)
+        };
+        let end_inclusive = if let Some((_, w)) = char_at(&self.text, end) {
+            end + w
+        } else {
+            end
+        };
+        (start, end_inclusive)
+    }
+
+    /// Public accessor: byte range of the active input-pane visual
+    /// selection, inclusive at the right edge. Returns `None` when
+    /// the user is not in input-pane Visual mode (either Normal /
+    /// Insert, or Buffer-pane visual).
+    #[must_use]
+    pub fn input_visual_range(&self) -> Option<(usize, usize)> {
+        self.visual_anchor?;
+        Some(self.input_visual_range_inclusive())
     }
 
     fn enter_mode(&mut self, mode: Mode) -> Vec<InputAction> {
@@ -2280,6 +2401,55 @@ mod tests {
         assert_eq!(state.text(), "second");
         state.handle_key(ctrl('r')); // redo - nothing to redo
         assert_eq!(state.text(), "second");
+    }
+
+    #[test]
+    fn v_in_input_pane_starts_input_visual() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("hello");
+        state.handle_key(key(KeyCode::Esc));
+        state.handle_key(key(KeyCode::Char('0')));
+        state.handle_key(key(KeyCode::Char('v')));
+        assert_eq!(state.mode(), Mode::Visual);
+        assert!(state.input_visual_range().is_some());
+        // Anchor and cursor both at 0 -> range covers char 'h'.
+        assert_eq!(state.input_visual_range(), Some((0, 1)));
+    }
+
+    #[test]
+    fn input_visual_d_deletes_selected_range() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("hello world");
+        state.handle_key(key(KeyCode::Esc));
+        state.handle_key(key(KeyCode::Char('0')));
+        state.handle_key(key(KeyCode::Char('v')));
+        // Extend selection by 4 chars (covering "hello" inclusive).
+        for _ in 0..4 {
+            state.handle_key(key(KeyCode::Char('l')));
+        }
+        state.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(state.text(), " world");
+        assert_eq!(state.mode(), Mode::Normal);
+        assert!(state.input_visual_range().is_none());
+    }
+
+    #[test]
+    fn input_visual_y_yanks_selection() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        state.paste("foo bar");
+        state.handle_key(key(KeyCode::Esc));
+        state.handle_key(key(KeyCode::Char('0')));
+        state.handle_key(key(KeyCode::Char('v')));
+        for _ in 0..2 {
+            state.handle_key(key(KeyCode::Char('l')));
+        }
+        state.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(state.text(), "foo bar"); // unchanged
+        assert_eq!(state.register, "foo");
+        assert_eq!(state.mode(), Mode::Normal);
     }
 
     #[test]

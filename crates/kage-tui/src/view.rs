@@ -870,22 +870,86 @@ fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {
             frame.render_widget(placeholder, body_area);
         }
     } else if body_width > 0 {
-        let body = Paragraph::new(input.text())
+        let visual_range = if mode == Mode::Visual {
+            input.input_visual_range()
+        } else {
+            None
+        };
+        let lines = build_input_body_lines(input.text(), visual_range, &theme);
+        let body = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .scroll((scroll_off, 0));
         frame.render_widget(body, body_area);
     }
 
-    // Cursor visibility: present in the input card only when the
-    // input pane has window focus and the user is in a mode where
-    // editing the prompt makes sense. Visual mode (today) drives the
-    // buffer-cell selection overlay; the input cursor stays hidden
-    // there until Stage C introduces input-pane visual.
-    if input.focused_pane() == Pane::Input && matches!(mode, Mode::Normal | Mode::Insert) {
-        if let Some(pos) = input_cursor_position(input, body_area, scroll_off) {
-            frame.set_cursor_position(pos);
-        }
+    // Cursor visibility: present in the input card whenever the
+    // input pane has window focus AND the user is in a mode where
+    // we want a hardware cursor on the input. That includes Normal
+    // (vim cursor), Insert (editing), and an active input-pane
+    // visual selection. Buffer-cell visual leaves the input cursor
+    // hidden because the user's attention is on the buffer overlay.
+    let input_visual_active = mode == Mode::Visual && input.input_visual_range().is_some();
+    let show_cursor = input.focused_pane() == Pane::Input
+        && (matches!(mode, Mode::Normal | Mode::Insert) || input_visual_active);
+    if show_cursor && let Some(pos) = input_cursor_position(input, body_area, scroll_off) {
+        frame.set_cursor_position(pos);
     }
+}
+
+/// Build the [`Line`]s for the input body, optionally splitting the
+/// text into pre-selection / selected / post-selection spans so the
+/// renderer can paint a vim-style highlight on the active char-visual
+/// range. `visual_range` is `(start, end_exclusive)` in byte offsets
+/// over the full input text.
+fn build_input_body_lines(
+    text: &str,
+    visual_range: Option<(usize, usize)>,
+    theme: &crate::theme::Theme,
+) -> Vec<Line<'static>> {
+    let highlight = Style::default().bg(theme.selection_color);
+    let Some((vs, ve)) = visual_range else {
+        return text
+            .split('\n')
+            .map(|line| Line::from(Span::raw(line.to_owned())))
+            .collect();
+    };
+    let mut out = Vec::new();
+    let mut byte_offset = 0usize;
+    for line in text.split('\n') {
+        let line_start = byte_offset;
+        let line_end = line_start + line.len();
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let sel_start_in_line = vs.saturating_sub(line_start).min(line.len());
+        let sel_end_in_line = ve.saturating_sub(line_start).min(line.len());
+        let sel_start_in_line = if vs >= line_end {
+            line.len()
+        } else {
+            sel_start_in_line
+        };
+        let sel_end_in_line = if ve >= line_end {
+            line.len()
+        } else {
+            sel_end_in_line
+        };
+        if sel_start_in_line > 0 {
+            spans.push(Span::raw(line[..sel_start_in_line].to_owned()));
+        }
+        if sel_end_in_line > sel_start_in_line {
+            spans.push(Span::styled(
+                line[sel_start_in_line..sel_end_in_line].to_owned(),
+                highlight,
+            ));
+        }
+        if sel_end_in_line < line.len() {
+            spans.push(Span::raw(line[sel_end_in_line..].to_owned()));
+        }
+        if spans.is_empty() {
+            spans.push(Span::raw(String::new()));
+        }
+        out.push(Line::from(spans));
+        byte_offset = line_end + 1;
+    }
+    out
 }
 
 /// Paint the bottom modeline. Reserved for plugin status widgets

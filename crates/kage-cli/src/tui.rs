@@ -28,8 +28,9 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     let registry = crate::build_provider_registry();
     if registry.ids().count() == 0 {
         eprintln!(
-            "kage: no provider API keys found in environment. Set one of \
-             ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, ZAI_API_KEY."
+            "kage: no provider credentials found. Run `kage auth login` to save \
+             one, or export an env var (ANTHROPIC_API_KEY, OPENAI_API_KEY, \
+             GEMINI_API_KEY, ZAI_API_KEY, ZAI_CODING_API_KEY)."
         );
         return ExitCode::from(1);
     }

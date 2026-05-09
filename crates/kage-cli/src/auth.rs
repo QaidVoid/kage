@@ -106,8 +106,8 @@ impl AuthStore {
     }
 }
 
-/// Provider ids the auth subcommand can target. Kept tiny on purpose;
-/// users can always edit `auth.json` by hand for anything exotic.
+/// Provider ids the auth subcommand can target. `zai` and `zai-coding`
+/// are billed separately so each takes its own key.
 pub const KNOWN_PROVIDERS: &[&str] = &["anthropic", "openai", "gemini", "zai", "zai-coding"];
 
 /// Env-var name that, when set, supersedes any saved key for `provider`.
@@ -117,8 +117,8 @@ pub fn env_var_for(provider: &str) -> &'static str {
         "anthropic" => "ANTHROPIC_API_KEY",
         "openai" => "OPENAI_API_KEY",
         "gemini" => "GEMINI_API_KEY",
-        // ZAI's coding plan reuses the standard ZAI key.
-        "zai" | "zai-coding" => "ZAI_API_KEY",
+        "zai" => "ZAI_API_KEY",
+        "zai-coding" => "ZAI_CODING_API_KEY",
         _ => "",
     }
 }

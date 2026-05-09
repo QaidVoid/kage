@@ -152,8 +152,9 @@ fn main() -> ExitCode {
     let registry = build_provider_registry();
     if registry.ids().count() == 0 {
         eprintln!(
-            "kage: no provider API keys found in environment. Set one of \
-             ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, ZAI_API_KEY."
+            "kage: no provider credentials found. Run `kage auth login` to save \
+             one, or export an env var (ANTHROPIC_API_KEY, OPENAI_API_KEY, \
+             GEMINI_API_KEY, ZAI_API_KEY, ZAI_CODING_API_KEY)."
         );
         return ExitCode::from(1);
     }
@@ -367,8 +368,9 @@ fn run_resume(
     let registry = build_provider_registry();
     if registry.ids().count() == 0 {
         eprintln!(
-            "kage: no provider API keys found in environment. Set one of \
-             ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, ZAI_API_KEY."
+            "kage: no provider credentials found. Run `kage auth login` to save \
+             one, or export an env var (ANTHROPIC_API_KEY, OPENAI_API_KEY, \
+             GEMINI_API_KEY, ZAI_API_KEY, ZAI_CODING_API_KEY)."
         );
         return ExitCode::from(1);
     }
@@ -686,7 +688,8 @@ fn build_session_path(dir: &std::path::Path, session: SessionId) -> PathBuf {
 }
 
 /// Build a registry holding every provider whose API key is reachable
-/// through either an env var (priority) or the saved auth store.
+/// through either an env var (priority) or the saved auth store. ZAI's
+/// standard and coding plans use distinct keys and register separately.
 fn build_provider_registry() -> ProviderRegistry {
     let store = auth::AuthStore::load().unwrap_or_else(|_| auth::AuthStore::empty());
     let mut registry = ProviderRegistry::new();
@@ -700,7 +703,9 @@ fn build_provider_registry() -> ProviderRegistry {
         registry.register(Arc::new(gemini::GeminiProvider::new(key)));
     }
     if let Some(key) = lookup_key("zai", &store) {
-        registry.register(Arc::new(zai::provider(key.clone())));
+        registry.register(Arc::new(zai::provider(key)));
+    }
+    if let Some(key) = lookup_key("zai-coding", &store) {
         registry.register(Arc::new(zai::coding_plan(key)));
     }
     registry

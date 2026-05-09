@@ -90,26 +90,19 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     ));
     let (tx, rx) = mpsc::channel::<RunRequest>();
 
-    // Open a session file so this TUI run is recorded the same way
-    // print mode is. Failures are non-fatal; we just won't write.
-    let session_path = match crate::open_session(model, system) {
-        Ok(writer) => {
-            let path = writer.path().to_path_buf();
-            if let Ok(mut buf) = buffer.lock() {
-                buf.push_custom(
-                    "kage:notify",
-                    format!("recording session to {}", path.display()),
-                    true,
-                );
-            }
-            drop(writer);
-            Some(Arc::new(Mutex::new(path)))
-        }
+    // Plan a session up-front but defer creating the file until the
+    // first prompt actually lands. Otherwise quitting or resuming
+    // immediately would leave an empty header-only stub on disk.
+    let (session_path, session_header) = match crate::plan_session(model, system) {
+        Ok((path, header)) => (
+            Some(Arc::new(Mutex::new(path))),
+            Some(Arc::new(Mutex::new(Some(header)))),
+        ),
         Err(e) => {
             if let Ok(mut buf) = buffer.lock() {
                 buf.push_custom("kage:error", format!("session: {e}"), false);
             }
-            None
+            (None, None)
         }
     };
 
@@ -131,6 +124,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         plugin_runtime,
         rx,
         session_path: session_path.clone(),
+        session_header: session_header.clone(),
     });
 
     let mut tui = match Tui::enter() {
@@ -172,6 +166,10 @@ struct WorkerConfig {
     /// Path to the session file the worker appends to. Shared with
     /// the resume handler so `Ctrl+R` can swap the file in place.
     session_path: Option<Arc<Mutex<PathBuf>>>,
+    /// Header to write the first time the planned session file is
+    /// created. After creation, this is taken (`Some(_) -> None`) and
+    /// subsequent turns reopen the existing file in append mode.
+    session_header: Option<Arc<Mutex<Option<kage_session::Header>>>>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -187,6 +185,7 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
             plugin_runtime,
             rx,
             session_path,
+            session_header,
         } = cfg;
         let loop_cfg = LoopConfig::default();
 
@@ -225,7 +224,11 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                     let parent = cx_guard.history.last().map(|m| m.id);
                     let user_msg = Message::new(Role::User, vec![Content::Text { text }], parent);
                     cx_guard.history.push(user_msg.clone());
-                    let writer_for_turn = open_writer_for_turn(session_path.as_ref(), &buffer);
+                    let writer_for_turn = open_writer_for_turn(
+                        session_path.as_ref(),
+                        session_header.as_ref(),
+                        &buffer,
+                    );
                     let ok = run_with_hooks(
                         provider.as_ref(),
                         &tools,
@@ -292,11 +295,17 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
     })
 }
 
-/// Reopen the worker's session file in append mode for the duration
-/// of one turn. `None` either means recording was disabled at startup
-/// or the open failed (already reported into the buffer).
+/// Open or create the session file for the duration of one turn.
+///
+/// The TUI plans a session id+path at startup but defers writing the
+/// header file until the first prompt actually lands. If the path
+/// already exists (resumed session, or this is a follow-up turn) we
+/// open it in append mode. If not, we consume the planned header,
+/// create the file with it, and let subsequent turns hit the open
+/// branch.
 fn open_writer_for_turn(
     session_path: Option<&Arc<Mutex<PathBuf>>>,
+    session_header: Option<&Arc<Mutex<Option<kage_session::Header>>>>,
     buffer: &SharedBuffer,
 ) -> Option<SessionWriter> {
     let path_arc = session_path?;
@@ -304,6 +313,23 @@ fn open_writer_for_turn(
         .lock()
         .expect("session path mutex poisoned")
         .clone();
+    if !path.exists() {
+        let header =
+            session_header.and_then(|h| h.lock().expect("session header mutex poisoned").take())?;
+        return match SessionWriter::create(path.clone(), header) {
+            Ok(w) => Some(w),
+            Err(e) => {
+                if let Ok(mut buf) = buffer.lock() {
+                    buf.push_custom(
+                        "kage:error",
+                        format!("session: create {}: {e}", path.display()),
+                        false,
+                    );
+                }
+                None
+            }
+        };
+    }
     match SessionWriter::open(&path) {
         Ok(w) => Some(w),
         Err(e) => {

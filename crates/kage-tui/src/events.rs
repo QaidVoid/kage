@@ -162,7 +162,16 @@ pub fn populate_from_history(buf: &mut Buffer, messages: &[Message]) {
                         is_error,
                     } = block
                     {
-                        buf.push_tool_result(call_id.to_string(), output.clone(), *is_error);
+                        // Replay: timing is not persisted in the
+                        // session format, so pass `None` rather than
+                        // computing a misleading sub-millisecond
+                        // duration from the just-replayed call.
+                        buf.push_tool_result_with_duration(
+                            call_id.to_string(),
+                            output.clone(),
+                            *is_error,
+                            None,
+                        );
                     }
                 }
             }

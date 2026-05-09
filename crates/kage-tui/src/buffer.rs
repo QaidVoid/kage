@@ -292,24 +292,46 @@ impl Buffer {
         output: impl Into<String>,
         is_error: bool,
     ) {
-        let call_id = call_id.into();
-        let mut name = String::new();
+        let call_id_owned = call_id.into();
         let mut duration_ms = None;
         for block in self.blocks.iter().rev() {
             if let Block::ToolCall {
                 call_id: cid,
-                name: n,
                 started_at,
                 ..
             } = block
-                && cid == &call_id
+                && cid == &call_id_owned
             {
-                name.clone_from(n);
                 duration_ms =
                     Some(u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX));
                 break;
             }
         }
+        self.push_tool_result_with_duration(call_id_owned, output, is_error, duration_ms);
+    }
+
+    /// Add a tool-result block with an explicit duration (or `None` if
+    /// timing was not recorded, e.g. during session replay where the
+    /// original timing is not preserved on disk).
+    pub fn push_tool_result_with_duration(
+        &mut self,
+        call_id: impl Into<String>,
+        output: impl Into<String>,
+        is_error: bool,
+        duration_ms: Option<u64>,
+    ) {
+        let call_id = call_id.into();
+        let name = self
+            .blocks
+            .iter()
+            .rev()
+            .find_map(|b| match b {
+                Block::ToolCall {
+                    call_id: cid, name, ..
+                } if cid == &call_id => Some(name.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
         self.blocks.push(Block::ToolResult {
             call_id,
             name,

@@ -670,6 +670,16 @@ fn truncate_one_line(text: &str, max: usize) -> String {
 
 /// Create a fresh session file under [`sessions_dir`].
 pub(crate) fn open_session(model: &str, system_prompt: &str) -> Result<SessionWriter, String> {
+    let (path, header) = plan_session(model, system_prompt)?;
+    SessionWriter::create(path, header).map_err(|e| e.to_string())
+}
+
+/// Plan a fresh session: build the path and header without touching
+/// the filesystem. The TUI uses this to defer file creation until the
+/// first real prompt actually lands, so launching the TUI and
+/// quitting (or resuming a different session) doesn't litter the
+/// sessions directory with empty header-only stubs.
+pub(crate) fn plan_session(model: &str, system_prompt: &str) -> Result<(PathBuf, Header), String> {
     let dir = sessions_dir()?;
     let session = SessionId::new();
     let path = build_session_path(&dir, session);
@@ -685,7 +695,7 @@ pub(crate) fn open_session(model: &str, system_prompt: &str) -> Result<SessionWr
         parent_session: None,
         parent_entry: None,
     };
-    SessionWriter::create(path, header).map_err(|e| e.to_string())
+    Ok((path, header))
 }
 
 fn build_session_path(dir: &std::path::Path, session: SessionId) -> PathBuf {

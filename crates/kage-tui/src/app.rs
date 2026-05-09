@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
 
+use crate::cmdline::{CommandLine, CommandLineEvent};
 use crate::error::TuiError;
 use crate::events::SharedBuffer;
 use crate::input::{InputAction, InputState, Mode};
@@ -109,6 +110,9 @@ pub struct App {
     /// Active modal overlay, if any. Drives both render and input
     /// routing while present.
     picker: Option<OverlayPicker>,
+    /// Open `:` command line, if any. While present it owns key input
+    /// and replaces the status bar's mode pill.
+    cmdline: Option<CommandLine>,
 }
 
 impl App {
@@ -122,6 +126,7 @@ impl App {
             requests,
             model_choices: Vec::new(),
             picker: None,
+            cmdline: None,
         }
     }
 
@@ -179,9 +184,10 @@ impl App {
         let buffer = self.buffer.lock().expect("buffer mutex poisoned");
         let input_text_lines = u16::try_from(text_row_count(self.input.text())).unwrap_or(u16::MAX);
         let input_height = input_height_for(input_text_lines + 1);
+        let cmdline = self.cmdline.as_ref();
         tui.terminal().draw(|frame| {
             let regions = split(frame.area(), input_height);
-            view::render(frame, regions, &buffer, &self.input);
+            view::render(frame, regions, &buffer, &self.input, cmdline);
             if let Some(picker) = self.picker.as_mut() {
                 picker.render(frame, frame.area());
             }
@@ -201,6 +207,11 @@ impl App {
             return self.dispatch_picker_key(key);
         }
 
+        // The `:` command line is the next-most-modal layer.
+        if self.cmdline.is_some() {
+            return self.dispatch_cmdline_key(key);
+        }
+
         let actions = self.input.handle_key(key);
         for action in actions {
             if let Some(exit) = self.apply(action) {
@@ -208,6 +219,84 @@ impl App {
             }
         }
         None
+    }
+
+    fn dispatch_cmdline_key(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+    ) -> Option<AppExit> {
+        let cmdline = self.cmdline.as_mut()?;
+        match cmdline.handle_key(key) {
+            CommandLineEvent::Pending => None,
+            CommandLineEvent::Cancelled => {
+                self.cmdline = None;
+                None
+            }
+            CommandLineEvent::Submit(text) => {
+                self.cmdline = None;
+                self.run_command(&text)
+            }
+        }
+    }
+
+    /// Dispatch a `:` command. Recognised commands are documented in
+    /// the `:help` output below; unknown commands surface a `kage:error`
+    /// block in the buffer rather than failing silently.
+    fn run_command(&mut self, line: &str) -> Option<AppExit> {
+        let mut parts = line.splitn(2, char::is_whitespace);
+        let head = parts.next().unwrap_or("");
+        let rest = parts.next().unwrap_or("").trim();
+        match head {
+            "q" | "quit" => Some(AppExit::Quit),
+            "cancel" => {
+                let _ = self.send_request(RunRequest::Cancel);
+                None
+            }
+            "model" => {
+                if rest.is_empty() {
+                    self.push_error("model: usage `:model <provider:id>`");
+                } else {
+                    let _ = self.send_request(RunRequest::SwitchModel(rest.to_owned()));
+                }
+                None
+            }
+            "fold" if rest == "all" => {
+                self.set_all_folds(true);
+                None
+            }
+            "unfold" if rest == "all" => {
+                self.set_all_folds(false);
+                None
+            }
+            "help" => {
+                self.push_help();
+                None
+            }
+            "" => None,
+            other => {
+                self.push_error(format!("unknown command: {other}"));
+                None
+            }
+        }
+    }
+
+    fn push_error(&mut self, msg: impl Into<String>) {
+        if let Ok(mut buf) = self.buffer.lock() {
+            buf.push_custom("kage:error", msg, false);
+        }
+    }
+
+    fn push_help(&mut self) {
+        let body = "available commands:\n  \
+                    :q, :quit       leave the TUI\n  \
+                    :cancel         cancel the in-flight turn\n  \
+                    :model <id>     switch to provider:model (e.g. anthropic:claude-sonnet-4-5)\n  \
+                    :fold all       fold every foldable block\n  \
+                    :unfold all     unfold every foldable block\n  \
+                    :help           show this help";
+        if let Ok(mut buf) = self.buffer.lock() {
+            buf.push_custom("kage:help", body, false);
+        }
     }
 
     fn dispatch_picker_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> Option<AppExit> {
@@ -253,10 +342,10 @@ impl App {
                     ));
                 }
             }
-            InputAction::EnterMode(_)
-            | InputAction::BeginCommand
-            | InputAction::BeginSearch
-            | InputAction::Yank => {}
+            InputAction::BeginCommand => {
+                self.cmdline = Some(CommandLine::new());
+            }
+            InputAction::EnterMode(_) | InputAction::BeginSearch | InputAction::Yank => {}
         }
         None
     }
@@ -330,10 +419,11 @@ impl App {
         let input_text_lines = u16::try_from(text_row_count(self.input.text())).unwrap_or(u16::MAX);
         let input_height = input_height_for(input_text_lines + 1);
         let picker = self.picker.as_mut();
+        let cmdline = self.cmdline.as_ref();
         terminal
             .draw(|frame| {
                 let regions = split(frame.area(), input_height);
-                view::render(frame, regions, &buffer, &self.input);
+                view::render(frame, regions, &buffer, &self.input, cmdline);
                 if let Some(picker) = picker {
                     picker.render(frame, frame.area());
                 }

@@ -16,26 +16,66 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block as RtBlock, Borders, Paragraph, Wrap};
 
 use crate::buffer::{Block, Buffer};
+use crate::cmdline::CommandLine;
 use crate::input::{InputState, Mode};
 use crate::layout::Regions;
 
 /// Paint the entire TUI for one frame.
-pub fn render(frame: &mut Frame, regions: Regions, buffer: &Buffer, input: &InputState) {
-    render_status(frame, regions, input);
+pub fn render(
+    frame: &mut Frame,
+    regions: Regions,
+    buffer: &Buffer,
+    input: &InputState,
+    cmdline: Option<&CommandLine>,
+) {
+    render_status(frame, regions, input, cmdline);
     render_buffer(frame, regions, buffer);
     render_input(frame, regions, input);
+    if let Some(cl) = cmdline {
+        place_cmdline_cursor(frame, regions, cl);
+    }
 }
 
-fn render_status(frame: &mut Frame, regions: Regions, input: &InputState) {
-    let mode = mode_label(input.mode());
-    let line = Line::from(vec![
-        Span::styled(format!(" {mode} "), mode_style(input.mode())),
-        Span::raw(" kage"),
-    ]);
+fn render_status(
+    frame: &mut Frame,
+    regions: Regions,
+    input: &InputState,
+    cmdline: Option<&CommandLine>,
+) {
+    let line = if let Some(cl) = cmdline {
+        Line::from(vec![
+            Span::styled(":", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(cl.text().to_owned()),
+        ])
+    } else {
+        let mode = mode_label(input.mode());
+        Line::from(vec![
+            Span::styled(format!(" {mode} "), mode_style(input.mode())),
+            Span::raw(" kage"),
+        ])
+    };
     let paragraph = Paragraph::new(line)
         .alignment(Alignment::Left)
         .style(Style::default().bg(Color::DarkGray));
     frame.render_widget(paragraph, regions.status);
+}
+
+/// Position the terminal cursor on the status row at the cmdline's
+/// editing position when the `:` command line is open. Without this
+/// the user has no visual cue where typing will land.
+fn place_cmdline_cursor(frame: &mut Frame, regions: Regions, cmdline: &CommandLine) {
+    let row = regions.status;
+    if row.width == 0 {
+        return;
+    }
+    let prefix_width = 1u16;
+    let col = u16::try_from(cmdline.text()[..cmdline.cursor()].chars().count()).unwrap_or(u16::MAX);
+    let cx = row
+        .x
+        .saturating_add(prefix_width)
+        .saturating_add(col)
+        .min(row.x + row.width - 1);
+    frame.set_cursor_position((cx, row.y));
 }
 
 fn render_buffer(frame: &mut Frame, regions: Regions, buffer: &Buffer) {
@@ -454,7 +494,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let regions = crate::layout::split(frame.area(), 1);
-                render(frame, regions, buffer, input);
+                render(frame, regions, buffer, input, None);
             })
             .unwrap();
         let buf = terminal.backend().buffer();

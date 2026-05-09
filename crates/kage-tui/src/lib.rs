@@ -6,6 +6,7 @@ pub mod events;
 pub mod input;
 pub mod layout;
 pub mod terminal;
+pub mod view;
 
 pub use buffer::{Block, Buffer};
 pub use error::TuiError;

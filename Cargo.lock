@@ -825,11 +825,16 @@ version = "0.1.0"
 name = "kage-cli"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "clap",
+ "dirs",
  "kage-core",
  "kage-loop",
  "kage-provider",
+ "kage-session",
  "kage-tools",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

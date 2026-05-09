@@ -132,6 +132,8 @@ pub enum LoopEvent {
         kept: usize,
         /// Number of older turns replaced by a summary.
         summarized: usize,
+        /// Text of the synthetic message that replaced the summarized turns.
+        summary: String,
     },
     /// Terminal error.
     Error {

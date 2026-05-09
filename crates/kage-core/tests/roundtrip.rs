@@ -99,6 +99,7 @@ fn all_loop_events_roundtrip() {
         LoopEvent::Compaction {
             kept: 5,
             summarized: 30,
+            summary: "[summary of 30 earlier turns]\nfoo".into(),
         },
         LoopEvent::Error {
             kind: LoopError::Cancelled,

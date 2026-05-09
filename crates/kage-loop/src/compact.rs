@@ -41,11 +41,12 @@ pub(crate) fn maybe_compact<F: FnMut(LoopEvent)>(
     let split = cx.history.len() - KEEP_RECENT;
     let to_summarize: Vec<Message> = cx.history.drain(..split).collect();
     let summary_text = summarize(provider, &cx.model, &to_summarize, cancel)?;
+    let summary_body = format!("[summary of {split} earlier turns]\n{summary_text}");
 
     let summary_msg = Message {
         role: Role::Assistant,
         content: vec![Content::Text {
-            text: format!("[summary of {split} earlier turns]\n{summary_text}"),
+            text: summary_body.clone(),
         }],
         id: MessageId::new(),
         parent: None,
@@ -60,6 +61,7 @@ pub(crate) fn maybe_compact<F: FnMut(LoopEvent)>(
         LoopEvent::Compaction {
             kept: KEEP_RECENT,
             summarized: split,
+            summary: summary_body,
         },
     );
     Ok(true)
@@ -226,12 +228,10 @@ mod tests {
             }
             other => panic!("expected Text, got {other:?}"),
         }
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, LoopEvent::Compaction { kept, summarized }
-                if *kept == KEEP_RECENT && *summarized == 10 - KEEP_RECENT))
-        );
+        assert!(events.iter().any(
+            |e| matches!(e, LoopEvent::Compaction { kept, summarized, .. }
+                if *kept == KEEP_RECENT && *summarized == 10 - KEEP_RECENT)
+        ));
         assert_eq!(cx.budget, TokenBudget::default());
     }
 

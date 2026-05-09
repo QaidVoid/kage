@@ -112,6 +112,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     };
     let mut app = App::new(buffer, tx);
     app.set_model_choices(model_choices);
+    app.set_history(crate::history::load());
     let result = app.run(&mut tui);
     drop(tui);
     drop(app);
@@ -156,6 +157,11 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
             match req {
                 RunRequest::Submit(text) => {
                     cancel.reset();
+                    if let Err(err) = crate::history::append(&text)
+                        && let Ok(mut buf) = buffer.lock()
+                    {
+                        buf.push_custom("kage:error", format!("history: {err}"), false);
+                    }
                     // Re-resolve the model on every turn so a switch
                     // request between turns takes effect immediately.
                     let qualified = active_qualified

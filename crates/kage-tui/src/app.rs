@@ -81,6 +81,13 @@ impl App {
         self.model_choices = choices;
     }
 
+    /// Seed the prompt history with persisted entries (oldest first).
+    /// Truncated to [`crate::input::HISTORY_MAX`] keeping the most
+    /// recent.
+    pub fn set_history(&mut self, entries: Vec<String>) {
+        self.input.set_history(entries);
+    }
+
     /// Drive the event loop until the user quits. Returns the exit
     /// reason. The caller is expected to drop the [`Tui`] (which
     /// restores the terminal) before printing anything to stdout.

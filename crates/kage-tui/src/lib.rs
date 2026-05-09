@@ -17,7 +17,7 @@ pub use buffer::{Block, Buffer};
 pub use error::TuiError;
 pub use events::{SharedBuffer, TuiHooks, shared_buffer};
 pub use hostlog::buffer_host_log;
-pub use input::{InputAction, InputState, Mode};
+pub use input::{HISTORY_MAX, InputAction, InputState, Mode};
 pub use layout::{INPUT_MAX_LINES, INPUT_MIN_LINES, Regions, input_height_for, split};
 pub use overlay::{OverlayPicker, PickerEvent};
 pub use picker::{PickItem, pick};

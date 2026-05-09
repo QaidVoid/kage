@@ -6,6 +6,7 @@
 //! `$XDG_DATA_HOME/kage/sessions/` (default `~/.local/share/kage/sessions/`).
 
 mod auth;
+mod history;
 mod plugins;
 mod session;
 mod state;

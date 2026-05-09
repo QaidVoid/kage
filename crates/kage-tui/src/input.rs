@@ -54,14 +54,21 @@ pub enum InputAction {
     OpenModelPicker,
 }
 
-/// Tracks the editing mode, the prompt text, and any pending leader key
-/// (e.g. `g` waiting for the second `g` of `gg`).
+/// Cap on retained history entries. The host's persistence layer is
+/// expected to truncate to the same bound when it serializes.
+pub const HISTORY_MAX: usize = 1000;
+
+/// Tracks the editing mode, the prompt text, the prompt history, and
+/// any pending leader key (e.g. `g` waiting for the second `g` of `gg`).
 #[derive(Debug, Default)]
 pub struct InputState {
     mode: Mode,
     text: String,
     cursor: usize,
     pending: Option<char>,
+    history: Vec<String>,
+    history_cursor: Option<usize>,
+    history_stash: Option<String>,
 }
 
 impl InputState {
@@ -94,6 +101,79 @@ impl InputState {
     #[must_use]
     pub fn has_pending(&self) -> bool {
         self.pending.is_some()
+    }
+
+    /// Read-only slice of history entries, oldest first.
+    #[must_use]
+    pub fn history(&self) -> &[String] {
+        &self.history
+    }
+
+    /// Replace the in-memory history (e.g. when seeding from the
+    /// persisted file at startup). Truncated to [`HISTORY_MAX`]
+    /// entries, keeping the most recent.
+    pub fn set_history(&mut self, entries: Vec<String>) {
+        self.history = entries;
+        if self.history.len() > HISTORY_MAX {
+            let drop = self.history.len() - HISTORY_MAX;
+            self.history.drain(..drop);
+        }
+        self.history_cursor = None;
+        self.history_stash = None;
+    }
+
+    /// Append `entry` to the history, deduping against the most recent
+    /// entry and skipping empty strings. Truncates to [`HISTORY_MAX`]
+    /// from the front when full.
+    pub fn push_history(&mut self, entry: &str) {
+        if entry.is_empty() {
+            return;
+        }
+        if self.history.last().is_some_and(|last| last == entry) {
+            return;
+        }
+        self.history.push(entry.to_owned());
+        if self.history.len() > HISTORY_MAX {
+            self.history.remove(0);
+        }
+    }
+
+    fn history_prev(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let next = match self.history_cursor {
+            None => {
+                self.history_stash = Some(self.text.clone());
+                self.history.len() - 1
+            }
+            Some(0) => 0,
+            Some(idx) => idx - 1,
+        };
+        self.history_cursor = Some(next);
+        self.text.clone_from(&self.history[next]);
+        self.cursor = self.text.len();
+    }
+
+    fn history_next(&mut self) {
+        let Some(idx) = self.history_cursor else {
+            return;
+        };
+        if idx + 1 < self.history.len() {
+            let next = idx + 1;
+            self.history_cursor = Some(next);
+            self.text.clone_from(&self.history[next]);
+            self.cursor = self.text.len();
+        } else {
+            self.history_cursor = None;
+            self.text = self.history_stash.take().unwrap_or_default();
+            self.cursor = self.text.len();
+        }
+    }
+
+    fn reset_history_navigation(&mut self) {
+        self.history_cursor = None;
+        self.history_stash = None;
     }
 
     /// Drive the state machine forward by one key.
@@ -150,7 +230,10 @@ impl InputState {
 
     fn handle_insert(&mut self, key: KeyEvent) -> Vec<InputAction> {
         match key.code {
-            KeyCode::Esc => self.enter_mode(Mode::Normal),
+            KeyCode::Esc => {
+                self.reset_history_navigation();
+                self.enter_mode(Mode::Normal)
+            }
             KeyCode::Enter => {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     self.insert_char('\n');
@@ -160,12 +243,23 @@ impl InputState {
                 } else {
                     let text = std::mem::take(&mut self.text);
                     self.cursor = 0;
+                    self.push_history(&text);
+                    self.reset_history_navigation();
                     let mut actions = vec![InputAction::Submit(text)];
                     actions.extend(self.enter_mode(Mode::Normal));
                     actions
                 }
             }
+            KeyCode::Up => {
+                self.history_prev();
+                Vec::new()
+            }
+            KeyCode::Down => {
+                self.history_next();
+                Vec::new()
+            }
             KeyCode::Backspace => {
+                self.reset_history_navigation();
                 self.backspace();
                 Vec::new()
             }
@@ -186,6 +280,7 @@ impl InputState {
                 Vec::new()
             }
             KeyCode::Char(c) => {
+                self.reset_history_navigation();
                 self.insert_char(c);
                 Vec::new()
             }
@@ -445,6 +540,74 @@ mod tests {
         state.paste("multi\nline\npaste");
         state.handle_key(key(KeyCode::Char('z')));
         assert_eq!(state.text(), "amulti\nline\npastez");
+    }
+
+    #[test]
+    fn submit_pushes_text_into_history_skipping_dupes() {
+        let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Char('i')));
+        for c in "foo".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        state.handle_key(key(KeyCode::Enter));
+        // Re-enter, type the same prompt again.
+        state.handle_key(key(KeyCode::Char('i')));
+        for c in "foo".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        state.handle_key(key(KeyCode::Enter));
+        assert_eq!(state.history(), &["foo".to_owned()]);
+    }
+
+    #[test]
+    fn up_in_insert_walks_back_through_history() {
+        let mut state = InputState::new();
+        state.set_history(vec!["alpha".into(), "beta".into(), "gamma".into()]);
+        state.handle_key(key(KeyCode::Char('i')));
+        state.handle_key(key(KeyCode::Up));
+        assert_eq!(state.text(), "gamma");
+        state.handle_key(key(KeyCode::Up));
+        assert_eq!(state.text(), "beta");
+        state.handle_key(key(KeyCode::Up));
+        assert_eq!(state.text(), "alpha");
+        state.handle_key(key(KeyCode::Up));
+        assert_eq!(state.text(), "alpha", "stops at oldest");
+    }
+
+    #[test]
+    fn down_in_insert_returns_to_stashed_draft() {
+        let mut state = InputState::new();
+        state.set_history(vec!["one".into(), "two".into()]);
+        state.handle_key(key(KeyCode::Char('i')));
+        for c in "draft".chars() {
+            state.handle_key(key(KeyCode::Char(c)));
+        }
+        state.handle_key(key(KeyCode::Up));
+        assert_eq!(state.text(), "two");
+        state.handle_key(key(KeyCode::Down));
+        assert_eq!(state.text(), "draft");
+    }
+
+    #[test]
+    fn typing_after_history_walk_resets_navigation() {
+        let mut state = InputState::new();
+        state.set_history(vec!["a".into(), "b".into()]);
+        state.handle_key(key(KeyCode::Char('i')));
+        state.handle_key(key(KeyCode::Up));
+        assert_eq!(state.text(), "b");
+        state.handle_key(key(KeyCode::Char('z')));
+        assert_eq!(state.text(), "bz");
+        state.handle_key(key(KeyCode::Down));
+        assert_eq!(state.text(), "bz", "down with no cursor is a no-op");
+    }
+
+    #[test]
+    fn set_history_truncates_to_cap() {
+        let mut state = InputState::new();
+        let entries: Vec<String> = (0..(HISTORY_MAX + 5)).map(|i| format!("e{i}")).collect();
+        state.set_history(entries);
+        assert_eq!(state.history().len(), HISTORY_MAX);
+        assert_eq!(state.history().first().unwrap(), "e5");
     }
 
     #[test]

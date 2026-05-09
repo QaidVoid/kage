@@ -865,6 +865,7 @@ dependencies = [
  "dirs",
  "kage-core",
  "kage-loop",
+ "kage-plugin",
  "kage-provider",
  "kage-session",
  "kage-tools",

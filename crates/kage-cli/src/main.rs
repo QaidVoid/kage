@@ -5,6 +5,7 @@
 //! a table of recorded sessions stored under
 //! `$XDG_DATA_HOME/kage/sessions/` (default `~/.local/share/kage/sessions/`).
 
+mod plugins;
 mod session;
 
 use std::io::{self, Write};
@@ -15,11 +16,12 @@ use std::sync::Arc;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use kage_core::{CancelFlag, Content, LoopEvent, Message, Role};
-use kage_loop::{AgentContext, LoopConfig, NoopHooks, run};
+use kage_loop::{AgentContext, Hooks, LoopConfig, NoopHooks, run};
 use kage_provider::{ProviderRegistry, anthropic, gemini, openai, zai};
 use kage_session::{EntryId, FORMAT_VERSION, Header, SessionId, SessionSummary, SessionWriter};
 use kage_tools::builtin_registry;
 
+use crate::plugins::{PluginEventHooks, setup_runtime};
 use crate::session::SessionRecordingHooks;
 
 /// kage: a minimal, extensible coding agent.
@@ -129,7 +131,27 @@ fn main() -> ExitCode {
         }
     };
 
-    let tools = builtin_registry();
+    let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let plugin_runtime = match plugins_dir() {
+        Ok(dir) => match setup_runtime(&dir, &workdir, &model, &cli.system) {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("kage: {e}");
+                None
+            }
+        },
+        Err(e) => {
+            eprintln!("kage: {e}");
+            None
+        }
+    };
+
+    let mut tools = builtin_registry();
+    if let Some(rt) = plugin_runtime.as_ref() {
+        for tool in rt.registered_tools() {
+            tools.register(tool);
+        }
+    }
     let mut cx = AgentContext::new(resolved.model.clone(), &cli.system);
     let user_msg = Message::new(Role::User, vec![Content::Text { text: prompt }], None);
     cx.history.push(user_msg.clone());
@@ -155,41 +177,117 @@ fn main() -> ExitCode {
         &mut cx,
         &user_msg,
         writer,
+        plugin_runtime,
     )
 }
 
 /// Drive one print-mode run. Streams loop events to stdout and, when a
-/// writer is supplied, records the conversation. Returns the appropriate
-/// process exit code.
+/// writer is supplied, records the conversation. When a plugin runtime is
+/// supplied, plugin event handlers fire at turn boundaries. Returns the
+/// appropriate process exit code.
 fn execute_print_run(
     provider: &dyn kage_provider::Provider,
     tools: &kage_tools::ToolRegistry,
     cx: &mut AgentContext,
     user_msg: &Message,
     writer: Option<SessionWriter>,
+    plugin_runtime: Option<std::sync::Arc<kage_plugin::PluginRuntime>>,
 ) -> ExitCode {
     let cfg = LoopConfig::default();
     let cancel = CancelFlag::new();
     let mut stdout = io::stdout().lock();
-    let result = match writer {
-        None => {
-            let mut hooks = NoopHooks;
-            run(provider, tools, cx, &cfg, &mut hooks, &cancel, |event| {
-                print_event(&mut stdout, &event);
-            })
-        }
-        Some(w) => {
-            let mut hooks = SessionRecordingHooks::new(NoopHooks, w);
-            hooks.record_user_message(user_msg);
-            run(provider, tools, cx, &cfg, &mut hooks, &cancel, |event| {
-                print_event(&mut stdout, &event);
-            })
-        }
-    };
+    let result = run_with_hooks(
+        provider,
+        tools,
+        cx,
+        &cfg,
+        &cancel,
+        user_msg,
+        writer,
+        plugin_runtime,
+        |event| print_event(&mut stdout, &event),
+    );
     let _ = writeln!(stdout);
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::from(1),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_with_hooks<F>(
+    provider: &dyn kage_provider::Provider,
+    tools: &kage_tools::ToolRegistry,
+    cx: &mut AgentContext,
+    cfg: &LoopConfig,
+    cancel: &CancelFlag,
+    user_msg: &Message,
+    writer: Option<SessionWriter>,
+    plugin_runtime: Option<std::sync::Arc<kage_plugin::PluginRuntime>>,
+    mut emit: F,
+) -> Result<(), kage_core::LoopError>
+where
+    F: FnMut(LoopEvent),
+{
+    let mut session_layer: Box<dyn Hooks> = match writer {
+        None => Box::new(NoopHooks),
+        Some(w) => {
+            let mut hooks = SessionRecordingHooks::new(NoopHooks, w);
+            hooks.record_user_message(user_msg);
+            Box::new(hooks)
+        }
+    };
+
+    if let Some(runtime) = plugin_runtime {
+        let mut hooks = PluginEventHooks::new(BoxedHooks(session_layer), runtime.clone());
+        hooks.dispatch_agent_start();
+        let res = run(provider, tools, cx, cfg, &mut hooks, cancel, &mut emit);
+        hooks.dispatch_agent_end(res.is_ok());
+        res
+    } else {
+        run(
+            provider,
+            tools,
+            cx,
+            cfg,
+            session_layer.as_mut(),
+            cancel,
+            &mut emit,
+        )
+    }
+}
+
+/// Adapter so a `Box<dyn Hooks>` satisfies the static-dispatch `Hooks`
+/// bound on [`PluginEventHooks`].
+struct BoxedHooks(Box<dyn Hooks>);
+
+impl Hooks for BoxedHooks {
+    fn before_tool_call(
+        &mut self,
+        name: &str,
+        input: &serde_json::Value,
+    ) -> Option<kage_core::ToolOutput> {
+        self.0.before_tool_call(name, input)
+    }
+
+    fn after_tool_call(
+        &mut self,
+        name: &str,
+        output: kage_core::ToolOutput,
+    ) -> kage_core::ToolOutput {
+        self.0.after_tool_call(name, output)
+    }
+
+    fn on_event(&mut self, event: &LoopEvent) {
+        self.0.on_event(event);
+    }
+
+    fn get_steering(&mut self) -> Option<String> {
+        self.0.get_steering()
+    }
+
+    fn get_followup(&mut self) -> Option<String> {
+        self.0.get_followup()
     }
 }
 
@@ -256,7 +354,27 @@ fn run_resume(
         }
     };
 
-    let tools = builtin_registry();
+    let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let plugin_runtime = match plugins_dir() {
+        Ok(dir) => match setup_runtime(&dir, &workdir, &model, &replay.header.system_prompt) {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("kage: {e}");
+                None
+            }
+        },
+        Err(e) => {
+            eprintln!("kage: {e}");
+            None
+        }
+    };
+
+    let mut tools = builtin_registry();
+    if let Some(rt) = plugin_runtime.as_ref() {
+        for tool in rt.registered_tools() {
+            tools.register(tool);
+        }
+    }
     let mut cx = AgentContext::new(resolved.model.clone(), &replay.header.system_prompt);
     cx.history = replay.history;
     let user_msg = Message::new(
@@ -274,6 +392,7 @@ fn run_resume(
         &mut cx,
         &user_msg,
         Some(writer),
+        plugin_runtime,
     )
 }
 
@@ -421,7 +540,6 @@ fn sessions_dir() -> Result<PathBuf, String> {
 
 /// Resolve the XDG-style plugin directory:
 /// `$XDG_CONFIG_HOME/kage/plugins` (default `~/.config/kage/plugins`).
-#[allow(dead_code)] // Wired into the loop in T6.12.
 fn plugins_dir() -> Result<PathBuf, String> {
     Ok(xdg_dir("XDG_CONFIG_HOME", ".config")?
         .join("kage")

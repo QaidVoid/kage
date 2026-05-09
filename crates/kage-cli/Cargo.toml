@@ -18,6 +18,7 @@ clap.workspace = true
 dirs.workspace = true
 kage-core.workspace = true
 kage-loop.workspace = true
+kage-plugin.workspace = true
 kage-provider.workspace = true
 kage-session.workspace = true
 kage-tools.workspace = true

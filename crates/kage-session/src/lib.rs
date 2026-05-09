@@ -10,6 +10,7 @@ pub mod entry;
 pub mod error;
 pub mod fork;
 pub mod list;
+pub mod migrate;
 pub mod reader;
 pub mod resume;
 pub mod search;

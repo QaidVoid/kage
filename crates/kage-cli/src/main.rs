@@ -120,7 +120,7 @@ fn main() -> ExitCode {
     let writer = if cli.no_session {
         None
     } else {
-        match open_session(&resolved.model, &cli.system) {
+        match open_session(&model, &cli.system) {
             Ok(w) => {
                 eprintln!("kage: recording session to {}", w.path().display());
                 Some(w)

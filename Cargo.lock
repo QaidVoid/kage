@@ -1330,7 +1330,10 @@ dependencies = [
 name = "kage-tui"
 version = "0.1.0"
 dependencies = [
+ "kage-core",
+ "kage-loop",
  "ratatui",
+ "serde_json",
  "thiserror 2.0.18",
 ]
 

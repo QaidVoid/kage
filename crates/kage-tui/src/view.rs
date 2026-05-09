@@ -100,17 +100,21 @@ fn render_buffer(frame: &mut Frame, regions: Regions, buffer: &mut Buffer) {
             result_by_call.entry(call_id).or_insert(i);
         }
     }
+    let focus = buffer.effective_focus();
     let mut consumed_results: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for (idx, cur) in blocks.iter().enumerate() {
         match cur {
             Block::ToolCall { call_id, .. } => {
                 if let Some(&result_idx) = result_by_call.get(call_id.as_str()) {
                     consumed_results.insert(result_idx);
-                    for line in tool_pair_to_lines(cur, &blocks[result_idx], regions.buffer.width) {
+                    let focused = focus == Some(idx) || focus == Some(result_idx);
+                    for line in
+                        tool_pair_to_lines(cur, &blocks[result_idx], regions.buffer.width, focused)
+                    {
                         lines.push(line);
                     }
                 } else {
-                    for line in block_to_lines(cur, regions.buffer.width) {
+                    for line in block_to_lines(cur, regions.buffer.width, focus == Some(idx)) {
                         lines.push(line);
                     }
                 }
@@ -119,7 +123,7 @@ fn render_buffer(frame: &mut Frame, regions: Regions, buffer: &mut Buffer) {
                 continue;
             }
             _ => {
-                for line in block_to_lines(cur, regions.buffer.width) {
+                for line in block_to_lines(cur, regions.buffer.width, focus == Some(idx)) {
                     lines.push(line);
                 }
             }
@@ -222,7 +226,7 @@ fn input_cursor_position(
 /// the header plus the body. Assistant text has no header; it is the
 /// content directly. Thinking text is rendered dimmed.
 #[must_use]
-pub fn block_to_lines(block: &Block, width: u16) -> Vec<Line<'static>> {
+pub fn block_to_lines(block: &Block, width: u16, focused: bool) -> Vec<Line<'static>> {
     match block {
         Block::User { text } => user_block_lines(text, width),
         Block::Assistant { text, .. } => plain_lines(text, assistant_style()),
@@ -276,7 +280,7 @@ pub fn block_to_lines(block: &Block, width: u16) -> Vec<Line<'static>> {
                     content.push(body_line);
                 }
             }
-            wrap_in_bubble(content, Color::Yellow, TOOL_PENDING_BG, width)
+            wrap_in_bubble_focused(content, Color::Yellow, TOOL_PENDING_BG, width, focused)
         }
         Block::ToolResult {
             name,
@@ -371,6 +375,16 @@ fn wrap_in_bubble(
     bg: Color,
     width: u16,
 ) -> Vec<Line<'static>> {
+    wrap_in_bubble_focused(content, rule_color, bg, width, false)
+}
+
+fn wrap_in_bubble_focused(
+    content: Vec<Line<'static>>,
+    rule_color: Color,
+    bg: Color,
+    width: u16,
+    focused: bool,
+) -> Vec<Line<'static>> {
     const RULE_WIDTH: usize = 1;
     const LEFT_PAD: usize = 1;
     const RIGHT_PAD: usize = 1;
@@ -379,14 +393,18 @@ fn wrap_in_bubble(
         .saturating_sub(RULE_WIDTH)
         .max(LEFT_PAD + RIGHT_PAD + 1);
     let max_content = interior.saturating_sub(LEFT_PAD + RIGHT_PAD);
+    // Focused blocks use a thicker half-block rule glyph with a
+    // brighter (white) accent so the user sees which block the next
+    // `zo` toggles.
     let rule_style = Style::default()
-        .fg(rule_color)
+        .fg(if focused { Color::White } else { rule_color })
         .bg(bg)
         .add_modifier(Modifier::BOLD);
+    let rule_glyph = if focused { "\u{258c}" } else { "\u{258e}" };
     let bg_only = Style::default().bg(bg);
     let pad_row = || -> Line<'static> {
         Line::from(vec![
-            Span::styled("\u{258e}".to_owned(), rule_style),
+            Span::styled(rule_glyph.to_owned(), rule_style),
             Span::styled(" ".repeat(interior), bg_only),
         ])
     };
@@ -397,7 +415,7 @@ fn wrap_in_bubble(
         for visual_spans in split_line_into_rows(line, max_content) {
             let used_chars: usize = visual_spans.iter().map(|s| s.content.chars().count()).sum();
             let mut spans: Vec<Span<'static>> = Vec::with_capacity(visual_spans.len() + 3);
-            spans.push(Span::styled("\u{258e}".to_owned(), rule_style));
+            spans.push(Span::styled(rule_glyph.to_owned(), rule_style));
             spans.push(Span::styled(" ".repeat(LEFT_PAD), bg_only));
             for s in visual_spans {
                 spans.push(Span::styled(s.content, s.style.bg(bg)));
@@ -467,7 +485,12 @@ fn plain_lines(text: &str, style: Style) -> Vec<Line<'static>> {
 ///                                     <- blank
 ///   Took 23ms · 1.2 KB                <- dim footer
 /// ```
-fn tool_pair_to_lines(call: &Block, result: &Block, width: u16) -> Vec<Line<'static>> {
+fn tool_pair_to_lines(
+    call: &Block,
+    result: &Block,
+    width: u16,
+    focused: bool,
+) -> Vec<Line<'static>> {
     let (name, input_summary, input_pretty, folded) = match call {
         Block::ToolCall {
             name,
@@ -561,7 +584,7 @@ fn tool_pair_to_lines(call: &Block, result: &Block, width: u16) -> Vec<Line<'sta
     } else {
         TOOL_BUBBLE_BG
     };
-    wrap_in_bubble(content, Color::Yellow, bg, width)
+    wrap_in_bubble_focused(content, Color::Yellow, bg, width, focused)
 }
 
 /// Lines and bytes shown in a folded tool block's preview. Trades

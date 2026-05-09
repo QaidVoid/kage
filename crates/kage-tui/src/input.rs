@@ -62,6 +62,10 @@ pub enum InputAction {
     /// Open the slash command palette overlay (leading `/` typed in
     /// Insert mode against an empty prompt).
     OpenCommandPalette,
+    /// Jump focus to the next block matching the active search.
+    SearchNext,
+    /// Jump focus to the previous block matching the active search.
+    SearchPrev,
 }
 
 /// Cap on retained history entries. The host's persistence layer is
@@ -227,6 +231,8 @@ impl InputState {
             KeyCode::Char('r') if ctrl => vec![InputAction::OpenSessionPicker],
             KeyCode::Char('[') => vec![InputAction::FocusPrev],
             KeyCode::Char(']') => vec![InputAction::FocusNext],
+            KeyCode::Char('n') => vec![InputAction::SearchNext],
+            KeyCode::Char('N') => vec![InputAction::SearchPrev],
             _ => Vec::new(),
         }
     }

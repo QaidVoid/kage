@@ -176,6 +176,13 @@ pub struct App {
     /// Open `:` command line, if any. While present it owns key input
     /// and replaces the status bar's mode pill.
     cmdline: Option<CommandLine>,
+    /// Open `/` search line, if any. Reuses the [`CommandLine`]
+    /// widget; painted with a `/` prefix instead of `:`.
+    search_line: Option<CommandLine>,
+    /// The most recently submitted search pattern. While set, blocks
+    /// containing the pattern render with a Match emphasis and `n` /
+    /// `N` walk between them.
+    search_pattern: Option<String>,
     /// Status bar context the host populates: live model id and a
     /// short session-id pill. Held as `Arc<Mutex<...>>` so the worker
     /// thread can update them out from under the renderer (model
@@ -204,6 +211,8 @@ impl App {
             status_model: None,
             status_session_id: None,
             plugin_commands: Vec::new(),
+            search_line: None,
+            search_pattern: None,
         }
     }
 
@@ -296,6 +305,8 @@ impl App {
         let status = view::StatusCtx {
             model: model_snapshot.as_deref(),
             session_id: self.status_session_id.as_deref(),
+            search_pattern: self.search_pattern.as_deref(),
+            search_line: self.search_line.as_ref(),
         };
         tui.terminal().draw(|frame| {
             let regions = split(frame.area(), input_height);
@@ -324,6 +335,11 @@ impl App {
             return self.dispatch_cmdline_key(key);
         }
 
+        // The `/` search line is also modal while open.
+        if self.search_line.is_some() {
+            return self.dispatch_search_key(key);
+        }
+
         let actions = self.input.handle_key(key);
         for action in actions {
             if let Some(exit) = self.apply(action) {
@@ -331,6 +347,42 @@ impl App {
             }
         }
         None
+    }
+
+    fn dispatch_search_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> Option<AppExit> {
+        let line = self.search_line.as_mut()?;
+        match line.handle_key(key) {
+            CommandLineEvent::Pending => None,
+            CommandLineEvent::Cancelled => {
+                self.search_line = None;
+                None
+            }
+            CommandLineEvent::Submit(text) => {
+                self.search_line = None;
+                self.search_pattern = Some(text);
+                self.jump_to_search_match(true);
+                None
+            }
+        }
+    }
+
+    /// Jump focus to the next or previous block whose content matches
+    /// the active search pattern. No-op when no pattern is set.
+    fn jump_to_search_match(&mut self, forward: bool) {
+        let Some(pattern) = self.search_pattern.clone() else {
+            return;
+        };
+        if let Ok(mut buf) = self.buffer.lock() {
+            let from = buf.effective_focus().unwrap_or(0);
+            let next = if forward {
+                buf.next_match(from, &pattern)
+            } else {
+                buf.prev_match(from, &pattern)
+            };
+            if let Some(n) = next {
+                buf.set_focus(Some(n));
+            }
+        }
     }
 
     fn dispatch_cmdline_key(
@@ -557,7 +609,11 @@ impl App {
             InputAction::Yank => {
                 self.yank_visual_selection();
             }
-            InputAction::BeginSearch => {}
+            InputAction::BeginSearch => {
+                self.search_line = Some(CommandLine::new());
+            }
+            InputAction::SearchNext => self.jump_to_search_match(true),
+            InputAction::SearchPrev => self.jump_to_search_match(false),
         }
         None
     }
@@ -633,6 +689,8 @@ impl App {
         let status = view::StatusCtx {
             model: model_snapshot.as_deref(),
             session_id: self.status_session_id.as_deref(),
+            search_pattern: self.search_pattern.as_deref(),
+            search_line: self.search_line.as_ref(),
         };
         terminal
             .draw(|frame| {

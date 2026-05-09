@@ -285,6 +285,51 @@ impl Buffer {
         Some((anchor.min(head), anchor.max(head)))
     }
 
+    /// True if block `idx` contains the case-insensitive `needle` in
+    /// its searchable text content. Empty needles never match.
+    #[must_use]
+    pub fn block_contains(&self, idx: usize, needle: &str) -> bool {
+        let needle = needle.trim();
+        if needle.is_empty() {
+            return false;
+        }
+        let needle_lower = needle.to_lowercase();
+        let Some(block) = self.blocks.get(idx) else {
+            return false;
+        };
+        let haystack = match block {
+            Block::User { text } | Block::Assistant { text, .. } | Block::Thinking { text, .. } => {
+                text.to_lowercase()
+            }
+            Block::ToolCall {
+                name,
+                input_summary,
+                input_pretty,
+                ..
+            } => format!("{name} {input_summary} {input_pretty}").to_lowercase(),
+            Block::ToolResult { name, output, .. } => format!("{name} {output}").to_lowercase(),
+            Block::Custom { kind, text, .. } => format!("{kind} {text}").to_lowercase(),
+        };
+        haystack.contains(&needle_lower)
+    }
+
+    /// Index of the next block after `from` (exclusive) whose content
+    /// contains `needle`. Skips merged tool-result halves.
+    #[must_use]
+    pub fn next_match(&self, from: usize, needle: &str) -> Option<usize> {
+        (from + 1..self.blocks.len())
+            .find(|i| self.is_selectable(*i) && self.block_contains(*i, needle))
+    }
+
+    /// Index of the previous block before `from` (exclusive) whose
+    /// content contains `needle`.
+    #[must_use]
+    pub fn prev_match(&self, from: usize, needle: &str) -> Option<usize> {
+        (0..from)
+            .rev()
+            .find(|i| self.is_selectable(*i) && self.block_contains(*i, needle))
+    }
+
     /// Concatenate the plain-text content of blocks in the inclusive
     /// range `[start, end]` for clipboard yank. Skips renderer-only
     /// decoration (rule glyphs, padding, status pills). Tool calls

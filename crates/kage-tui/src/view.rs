@@ -28,22 +28,28 @@ pub struct StatusCtx<'a> {
     pub model: Option<&'a str>,
     /// Short session id pill, if recording is active.
     pub session_id: Option<&'a str>,
+    /// Currently submitted search pattern, if any. Blocks whose
+    /// content contains this pattern get a `Match` emphasis.
+    pub search_pattern: Option<&'a str>,
+    /// Open `/` search line, if the user is mid-typing one.
+    pub search_line: Option<&'a CommandLine>,
 }
 
 /// What kind of attention a block should draw on this frame: the
 /// navigation head (white rule), part of a visual selection (magenta
-/// rule), or neither. `Ord` is implemented so merged tool pairs can
-/// pick `max` across both halves; Focused outranks Selected outranks
-/// None.
+/// rule), a search match (yellow rule), or neither. `Ord` is
+/// implemented so merged tool pairs can pick `max` across both halves;
+/// Focused beats Selected beats Match beats None.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Emphasis {
     /// No special highlight.
     None,
+    /// Block contains a hit for the active search pattern.
+    Match,
     /// Block is inside the visual selection range, but isn't the
     /// navigation head.
     Selected,
-    /// Block is the navigation head (and possibly also in a visual
-    /// selection - it always is, since the head is in range).
+    /// Block is the navigation head.
     Focused,
 }
 
@@ -51,7 +57,7 @@ impl Emphasis {
     fn rule_glyph(self) -> &'static str {
         match self {
             Self::None => "\u{258e}",
-            Self::Focused | Self::Selected => "\u{258c}",
+            Self::Match | Self::Focused | Self::Selected => "\u{258c}",
         }
     }
 
@@ -60,6 +66,7 @@ impl Emphasis {
             Self::None => base,
             Self::Focused => Color::White,
             Self::Selected => Color::Magenta,
+            Self::Match => Color::Yellow,
         }
     }
 }
@@ -81,10 +88,12 @@ pub fn render(
     status: &StatusCtx<'_>,
 ) {
     render_status(frame, regions, input, cmdline, status);
-    render_buffer(frame, regions, buffer);
+    render_buffer(frame, regions, buffer, status.search_pattern);
     render_input(frame, regions, input);
     if let Some(cl) = cmdline {
         place_cmdline_cursor(frame, regions, cl);
+    } else if let Some(sl) = status.search_line {
+        place_search_cursor(frame, regions, sl);
     }
 }
 
@@ -99,6 +108,22 @@ fn render_status(
         let line = Line::from(vec![
             Span::styled(":", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(cl.text().to_owned()),
+        ]);
+        let paragraph = Paragraph::new(line)
+            .alignment(Alignment::Left)
+            .style(Style::default().bg(Color::DarkGray));
+        frame.render_widget(paragraph, regions.status);
+        return;
+    }
+    if let Some(sl) = status.search_line {
+        let line = Line::from(vec![
+            Span::styled(
+                "/",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(sl.text().to_owned()),
         ]);
         let paragraph = Paragraph::new(line)
             .alignment(Alignment::Left)
@@ -144,6 +169,11 @@ fn render_status(
     frame.render_widget(paragraph, regions.status);
 }
 
+/// Same as [`place_cmdline_cursor`] but for the `/` search line.
+fn place_search_cursor(frame: &mut Frame, regions: Regions, line: &CommandLine) {
+    place_cmdline_cursor(frame, regions, line);
+}
+
 /// Position the terminal cursor on the status row at the cmdline's
 /// editing position when the `:` command line is open. Without this
 /// the user has no visual cue where typing will land.
@@ -163,7 +193,12 @@ fn place_cmdline_cursor(frame: &mut Frame, regions: Regions, cmdline: &CommandLi
 }
 
 #[allow(clippy::too_many_lines)]
-fn render_buffer(frame: &mut Frame, regions: Regions, buffer: &mut Buffer) {
+fn render_buffer(
+    frame: &mut Frame,
+    regions: Regions,
+    buffer: &mut Buffer,
+    search_pattern: Option<&str>,
+) {
     let mut lines: Vec<Line<'_>> = Vec::new();
     let blocks = buffer.blocks();
     // Index every ToolResult by its call_id so we can pair with a
@@ -187,6 +222,8 @@ fn render_buffer(frame: &mut Frame, regions: Regions, buffer: &mut Buffer) {
             Emphasis::Focused
         } else if in_selection(idx) {
             Emphasis::Selected
+        } else if search_pattern.is_some_and(|p| buffer.block_contains(idx, p)) {
+            Emphasis::Match
         } else {
             Emphasis::None
         }

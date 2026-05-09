@@ -655,6 +655,154 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default)]
+    struct CountingTool {
+        calls: std::sync::Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl kage_tools::Tool for CountingTool {
+        fn name(&self) -> &'static str {
+            "counting"
+        }
+        fn description(&self) -> &'static str {
+            "records every input it receives"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn risk(&self) -> kage_core::Risk {
+            kage_core::Risk::Read
+        }
+        fn execute(
+            &self,
+            input: serde_json::Value,
+            _cx: &kage_tools::ToolContext<'_>,
+        ) -> Result<kage_core::ToolOutput, kage_tools::ToolError> {
+            self.calls.lock().expect("not poisoned").push(input.clone());
+            Ok(kage_core::ToolOutput {
+                is_error: false,
+                text: format!("ran #{}", self.calls.lock().expect("not poisoned").len()),
+                structured: None,
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct OrderRecording {
+        order: Vec<String>,
+    }
+    impl Hooks for OrderRecording {
+        fn before_tool_call(
+            &mut self,
+            name: &str,
+            _input: &serde_json::Value,
+        ) -> Option<kage_core::ToolOutput> {
+            self.order.push(format!("before:{name}"));
+            None
+        }
+        fn after_tool_call(
+            &mut self,
+            name: &str,
+            output: kage_core::ToolOutput,
+        ) -> kage_core::ToolOutput {
+            self.order.push(format!("after:{name}"));
+            output
+        }
+        fn on_event(&mut self, event: &LoopEvent) {
+            let tag = serde_json::to_value(event).unwrap()["type"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            self.order.push(format!("event:{tag}"));
+        }
+    }
+
+    #[test]
+    fn end_to_end_event_ordering_and_hook_callbacks() {
+        let call_id = kage_core::ToolCallId::new("call_e2e");
+        let mock = MockProvider::sequence(vec![
+            vec![
+                Ok(ProviderEvent::MessageStart),
+                Ok(ProviderEvent::TextDelta {
+                    delta: "calling tool".into(),
+                }),
+                Ok(ProviderEvent::ToolCallStart {
+                    id: call_id.clone(),
+                    name: "counting".into(),
+                }),
+                Ok(ProviderEvent::ToolCallEnd {
+                    id: call_id.clone(),
+                    input: serde_json::json!({"k": "v"}),
+                }),
+                Ok(ProviderEvent::MessageEnd {
+                    stop_reason: StopReason::ToolUse,
+                    usage: TokenUsage::default(),
+                }),
+            ],
+            vec![
+                Ok(ProviderEvent::TextDelta {
+                    delta: "done".into(),
+                }),
+                Ok(ProviderEvent::MessageEnd {
+                    stop_reason: StopReason::EndTurn,
+                    usage: TokenUsage::default(),
+                }),
+            ],
+        ]);
+
+        let counting = std::sync::Arc::new(CountingTool::default());
+        let registry = ToolRegistry::new().with(counting.clone());
+
+        let mut cx = AgentContext::new("mock:m", "be helpful").with_workdir("/tmp");
+        cx.history.push(user_msg("kick off"));
+        let cfg = LoopConfig::default();
+        let mut hooks = OrderRecording::default();
+        let cancel = CancelFlag::new();
+
+        let res = run(&mock, &registry, &mut cx, &cfg, &mut hooks, &cancel, |_| {});
+        assert!(res.is_ok());
+
+        // Tool ran exactly once with the expected input.
+        let recorded = counting.calls.lock().unwrap().clone();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0]["k"], "v");
+
+        // History: user, assistant(text+tool_call), tool_result, assistant(text).
+        assert_eq!(cx.history.len(), 4);
+        assert_eq!(cx.history[0].role, Role::User);
+        assert_eq!(cx.history[1].role, Role::Assistant);
+        assert_eq!(cx.history[2].role, Role::ToolResult);
+        assert_eq!(cx.history[3].role, Role::Assistant);
+
+        // Hook ordering across the whole run.
+        let order: Vec<&str> = hooks.order.iter().map(String::as_str).collect();
+        let before_pos = order
+            .iter()
+            .position(|s| *s == "before:counting")
+            .expect("before fired");
+        let after_pos = order
+            .iter()
+            .position(|s| *s == "after:counting")
+            .expect("after fired");
+        assert!(before_pos < after_pos, "before must precede after");
+
+        // Event order: MessageStart, TextDelta, ToolCallStart, MessageEnd
+        // (turn 1), ToolCallEnd, MessageStart (turn 2), TextDelta, MessageEnd.
+        let event_seq: Vec<&str> = order
+            .iter()
+            .filter_map(|s| s.strip_prefix("event:"))
+            .collect();
+        assert!(event_seq.starts_with(&["message_start", "text_delta", "tool_call_start"]));
+        assert!(event_seq.contains(&"tool_call_end"));
+        assert!(event_seq.last() == Some(&"message_end"));
+        // The before/after hook must bracket the tool_call_end event.
+        let tcend = order
+            .iter()
+            .position(|s| *s == "event:tool_call_end")
+            .unwrap();
+        assert!(before_pos < tcend && tcend == after_pos + 1);
+    }
+
     #[test]
     fn end_to_end_tool_call_loop() {
         // Turn 1: model emits a tool call. Turn 2: model emits final text.

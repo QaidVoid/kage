@@ -22,7 +22,7 @@ use kage_core::{CancelFlag, LoopError, LoopEvent};
 use kage_provider::{Provider, StreamRequest};
 use kage_tools::ToolRegistry;
 
-use crate::dispatch::dispatch_tool_calls;
+use crate::dispatch::{dispatch_tool_calls, dispatch_tool_calls_parallel};
 use crate::stream::collect_turn;
 use crate::{AgentContext, Hooks, LoopConfig};
 
@@ -117,7 +117,12 @@ where
             }
 
             let workdir = cx.workdir.clone();
-            let results = match dispatch_tool_calls(
+            let dispatch = if config.parallel_tools {
+                dispatch_tool_calls_parallel
+            } else {
+                dispatch_tool_calls
+            };
+            let results = match dispatch(
                 pending,
                 tools,
                 &workdir,

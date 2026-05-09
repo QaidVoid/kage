@@ -41,6 +41,7 @@ ignore = "0.4.25"
 mlua = { version = "0.11.6", features = ["lua54", "vendored", "send"] }
 notify = "8.2.0"
 ratatui = "0.30.0"
+rpassword = "7.5.2"
 schemars = "1.2.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"

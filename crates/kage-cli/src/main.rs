@@ -5,6 +5,7 @@
 //! a table of recorded sessions stored under
 //! `$XDG_DATA_HOME/kage/sessions/` (default `~/.local/share/kage/sessions/`).
 
+mod auth;
 mod plugins;
 mod session;
 mod tui;
@@ -91,6 +92,28 @@ enum Command {
         /// Regex query, ripgrep-style.
         query: String,
     },
+    /// Manage saved provider API credentials.
+    Auth {
+        /// Auth subcommand.
+        #[command(subcommand)]
+        action: AuthAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AuthAction {
+    /// Save an API key for a provider, prompting for it without echo.
+    Login {
+        /// Provider id. Omit to pick from a list.
+        provider: Option<String>,
+    },
+    /// Remove a saved API key.
+    Logout {
+        /// Provider id.
+        provider: String,
+    },
+    /// Show which providers have saved credentials available.
+    List,
 }
 
 fn main() -> ExitCode {
@@ -106,6 +129,13 @@ fn main() -> ExitCode {
         }) => return run_resume(id.as_deref(), last, print.as_deref(), model.as_deref()),
         Some(Command::Fork { id, at }) => return run_fork(&id, &at),
         Some(Command::Search { query }) => return run_search(&query),
+        Some(Command::Auth { action }) => {
+            return match action {
+                AuthAction::Login { provider } => auth::run_login(provider.as_deref()),
+                AuthAction::Logout { provider } => auth::run_logout(&provider),
+                AuthAction::List => auth::run_list(),
+            };
+        }
         None => {}
     }
 
@@ -535,12 +565,15 @@ fn resolve_resume_target(
         .ok_or_else(|| format!("no session matches prefix '{prefix}'"))
 }
 
+/// Resolve `$XDG_DATA_HOME/kage` (default `~/.local/share/kage`).
+pub(crate) fn data_root() -> Result<PathBuf, String> {
+    Ok(xdg_dir("XDG_DATA_HOME", ".local/share")?.join("kage"))
+}
+
 /// Resolve the XDG-style directory holding session files:
 /// `$XDG_DATA_HOME/kage/sessions` (default `~/.local/share/kage/sessions`).
 fn sessions_dir() -> Result<PathBuf, String> {
-    Ok(xdg_dir("XDG_DATA_HOME", ".local/share")?
-        .join("kage")
-        .join("sessions"))
+    Ok(data_root()?.join("sessions"))
 }
 
 /// Resolve the XDG-style plugin directory:
@@ -642,23 +675,39 @@ fn build_session_path(dir: &std::path::Path, session: SessionId) -> PathBuf {
     dir.join(format!("{session}.jsonl"))
 }
 
-/// Build a registry holding every provider whose API key env var is set.
+/// Build a registry holding every provider whose API key is reachable
+/// through either an env var (priority) or the saved auth store.
 fn build_provider_registry() -> ProviderRegistry {
+    let store = auth::AuthStore::load().unwrap_or_else(|_| auth::AuthStore::empty());
     let mut registry = ProviderRegistry::new();
-    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
+    if let Some(key) = lookup_key("anthropic", &store) {
         registry.register(Arc::new(anthropic::AnthropicProvider::new(key)));
     }
-    if let Ok(key) = std::env::var("OPENAI_API_KEY") {
+    if let Some(key) = lookup_key("openai", &store) {
         registry.register(Arc::new(openai::OpenAiProvider::new(key)));
     }
-    if let Ok(key) = std::env::var("GEMINI_API_KEY") {
+    if let Some(key) = lookup_key("gemini", &store) {
         registry.register(Arc::new(gemini::GeminiProvider::new(key)));
     }
-    if let Ok(key) = std::env::var("ZAI_API_KEY") {
+    if let Some(key) = lookup_key("zai", &store) {
         registry.register(Arc::new(zai::provider(key.clone())));
         registry.register(Arc::new(zai::coding_plan(key)));
     }
     registry
+}
+
+/// Look up `provider`'s API key, preferring the env var declared by
+/// [`auth::env_var_for`] and falling back to the auth store.
+fn lookup_key(provider: &str, store: &auth::AuthStore) -> Option<String> {
+    let env = auth::env_var_for(provider);
+    if !env.is_empty() {
+        if let Ok(v) = std::env::var(env) {
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    store.get(provider).map(str::to_owned)
 }
 
 /// Pick a sensible default model based on what providers are registered.

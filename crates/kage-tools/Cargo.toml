@@ -9,19 +9,19 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-globset = "0.4.18"
-grep = "0.4.1"
-html2text = "0.17.1"
-ignore = "0.4.25"
+globset.workspace = true
+grep.workspace = true
+html2text.workspace = true
+ignore.workspace = true
 kage-core.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-similar = "3.1.0"
+similar.workspace = true
 thiserror.workspace = true
 ulid.workspace = true
 ureq.workspace = true
-url = "2.5.8"
+url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

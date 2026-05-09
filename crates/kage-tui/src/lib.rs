@@ -7,6 +7,7 @@ pub mod events;
 pub mod hostlog;
 pub mod input;
 pub mod layout;
+pub mod picker;
 pub mod terminal;
 pub mod view;
 
@@ -17,4 +18,5 @@ pub use events::{SharedBuffer, TuiHooks, shared_buffer};
 pub use hostlog::buffer_host_log;
 pub use input::{InputAction, InputState, Mode};
 pub use layout::{INPUT_MAX_LINES, INPUT_MIN_LINES, Regions, input_height_for, split};
+pub use picker::{PickItem, pick};
 pub use terminal::Tui;

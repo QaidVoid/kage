@@ -387,6 +387,16 @@ impl App {
                     self.picker_kind = Some(PickerKind::Model);
                 }
             }
+            InputAction::FocusPrev => {
+                if let Ok(mut buf) = self.buffer.lock() {
+                    buf.focus_prev();
+                }
+            }
+            InputAction::FocusNext => {
+                if let Ok(mut buf) = self.buffer.lock() {
+                    buf.focus_next();
+                }
+            }
             InputAction::OpenSessionPicker => {
                 if let Some(lister) = self.session_lister.as_ref() {
                     let items = lister();
@@ -430,13 +440,7 @@ impl App {
 
     fn toggle_last_fold(&mut self) {
         if let Ok(mut buf) = self.buffer.lock() {
-            let last_foldable = buf
-                .blocks()
-                .iter()
-                .enumerate()
-                .rfind(|(_, b)| b.is_foldable())
-                .map(|(i, _)| i);
-            if let Some(idx) = last_foldable {
+            if let Some(idx) = buf.effective_focus() {
                 buf.toggle_fold(idx);
             }
         }

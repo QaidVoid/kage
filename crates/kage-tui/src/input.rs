@@ -55,6 +55,10 @@ pub enum InputAction {
     /// Open the in-TUI session picker overlay so the user can resume
     /// an earlier conversation in place.
     OpenSessionPicker,
+    /// Move focus to the previous (older) foldable block.
+    FocusPrev,
+    /// Move focus to the next (newer) foldable block.
+    FocusNext,
 }
 
 /// Cap on retained history entries. The host's persistence layer is
@@ -218,6 +222,8 @@ impl InputState {
             KeyCode::Char('c') if ctrl => vec![InputAction::Cancel],
             KeyCode::Char('p') if ctrl => vec![InputAction::OpenModelPicker],
             KeyCode::Char('r') if ctrl => vec![InputAction::OpenSessionPicker],
+            KeyCode::Char('[') => vec![InputAction::FocusPrev],
+            KeyCode::Char(']') => vec![InputAction::FocusNext],
             _ => Vec::new(),
         }
     }

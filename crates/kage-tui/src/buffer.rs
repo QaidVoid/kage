@@ -246,6 +246,15 @@ pub struct Buffer {
     /// into a block-relative char column.
     last_area_x: u16,
     last_area_width: u16,
+    /// First virtual row (0-indexed across the whole rendered buffer)
+    /// that was visible in the last painted frame. Mouse handlers
+    /// add `screen_row - area_y` to this to get a stable virtual-row
+    /// coordinate that survives subsequent scrolls; the renderer uses
+    /// it the other way to translate a virtual row back to a screen
+    /// row when painting selection overlay.
+    last_virtual_top: usize,
+    last_area_y: u16,
+    last_area_height: u16,
 }
 
 impl Buffer {
@@ -405,12 +414,25 @@ impl Buffer {
         self.last_block_screen_rows = rows;
     }
 
-    /// Renderer hook: stash the buffer area's left edge and width
-    /// so mouse handlers can map a click column into a block-relative
-    /// char column.
-    pub fn set_last_area_geometry(&mut self, x: u16, width: u16) {
+    /// Renderer hook: stash the buffer area's bounding box and the
+    /// virtual-row index of its first visible row. Mouse handlers
+    /// add `screen_row - area_y` to `last_virtual_top` to recover a
+    /// stable virtual-row coordinate that survives subsequent
+    /// scrolls; the renderer reverses that to project a virtual row
+    /// back to a screen row when painting selection overlay.
+    pub fn set_last_area_geometry(
+        &mut self,
+        x: u16,
+        y: u16,
+        width: u16,
+        height: u16,
+        virtual_top: usize,
+    ) {
         self.last_area_x = x;
+        self.last_area_y = y;
         self.last_area_width = width;
+        self.last_area_height = height;
+        self.last_virtual_top = virtual_top;
     }
 
     /// Width of the last-painted buffer area, in cells.
@@ -423,6 +445,25 @@ impl Buffer {
     #[must_use]
     pub fn last_area_x(&self) -> u16 {
         self.last_area_x
+    }
+
+    /// Y-origin of the last-painted buffer area.
+    #[must_use]
+    pub fn last_area_y(&self) -> u16 {
+        self.last_area_y
+    }
+
+    /// Height of the last-painted buffer area, in cells.
+    #[must_use]
+    pub fn last_area_height(&self) -> u16 {
+        self.last_area_height
+    }
+
+    /// Virtual-row index of the first visible row in the last
+    /// painted frame.
+    #[must_use]
+    pub fn last_virtual_top(&self) -> usize {
+        self.last_virtual_top
     }
 
     /// Find the block painted under absolute terminal row `y` from

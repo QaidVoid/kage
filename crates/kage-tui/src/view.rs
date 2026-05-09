@@ -87,8 +87,8 @@ pub fn render(
     input: &InputState,
     cmdline: Option<&CommandLine>,
     status: &StatusCtx<'_>,
-    screen_selection: Option<((u16, u16), (u16, u16))>,
-    screen_text_grid: &mut Vec<Vec<char>>,
+    screen_selection: Option<((usize, u16), (usize, u16))>,
+    captured_rows: &mut std::collections::BTreeMap<usize, Vec<char>>,
 ) {
     render_status(frame, regions, input, cmdline, status);
     render_buffer(frame, regions, buffer, status.search_pattern);
@@ -98,10 +98,7 @@ pub fn render(
     } else if let Some(sl) = status.search_line {
         place_search_cursor(frame, regions, sl);
     }
-    capture_screen_text(frame, screen_text_grid);
-    if let Some(sel) = screen_selection {
-        apply_screen_selection_overlay(frame, sel);
-    }
+    capture_and_overlay(frame, regions, buffer, screen_selection, captured_rows);
 }
 
 fn render_status(
@@ -532,7 +529,7 @@ fn render_buffer(
         })
         .collect();
     buffer.set_last_block_screen_rows(screen_rows);
-    buffer.set_last_area_geometry(area.x, area.width);
+    buffer.set_last_area_geometry(area.x, area.y, area.width, area.height, visible_top);
 
     let paragraph = Paragraph::new(emitted_lines).wrap(Wrap { trim: false });
     frame.render_widget(paragraph.scroll((paragraph_scroll, 0)), regions.buffer);
@@ -570,60 +567,74 @@ fn emphasis_for(
     e
 }
 
-/// Extract the painted char grid into `out`, indexed `[row][col]`,
-/// covering the entire frame area. Multi-`char` symbols (combining
-/// marks, wide glyphs) collapse to their first `char`; the host uses
-/// this for clipboard yank where exact display width doesn't matter.
-fn capture_screen_text(frame: &mut Frame, out: &mut Vec<Vec<char>>) {
-    let area = frame.area();
-    let buf = frame.buffer_mut();
-    out.clear();
-    out.reserve(usize::from(area.height));
-    for row in area.y..area.y.saturating_add(area.height) {
-        let mut line = Vec::with_capacity(usize::from(area.width));
-        for col in area.x..area.x.saturating_add(area.width) {
-            let ch = buf[(col, row)].symbol().chars().next().unwrap_or(' ');
-            line.push(ch);
-        }
-        out.push(line);
-    }
+/// True for chars the renderer paints purely for decoration:
+/// bubble rule glyphs (`U+258E` / `U+258C`).
+fn is_decoration_char(c: char) -> bool {
+    matches!(c, '\u{258e}' | '\u{258c}')
 }
 
-/// Paint a selection bg over every cell inside the rectangle bounded
-/// by `(anchor, cursor)`. Operates directly on the frame's cell buffer
-/// so it sits on top of whatever the renderer drew - including tool
-/// blocks and chrome - without needing the per-block coordinate math
-/// that broke earlier attempts.
-fn apply_screen_selection_overlay(frame: &mut Frame, selection: ((u16, u16), (u16, u16))) {
-    let (anchor, cursor) = selection;
-    let (start, end) = if anchor <= cursor {
-        (anchor, cursor)
-    } else {
-        (cursor, anchor)
-    };
-    let area = frame.area();
+/// Walk the buffer area's cell rows once: for each visible row,
+/// store its char content into `captured_rows` keyed by virtual row,
+/// and apply the selection bg overlay for rows in the selection
+/// range. Skips decoration glyphs (rule chars) so the highlight
+/// doesn't bleed onto block borders, and stays in virtual-row space
+/// so selection survives subsequent scrolls.
+fn capture_and_overlay(
+    frame: &mut Frame,
+    regions: Regions,
+    buffer: &Buffer,
+    selection: Option<((usize, u16), (usize, u16))>,
+    captured_rows: &mut std::collections::BTreeMap<usize, Vec<char>>,
+) {
+    let area = regions.buffer;
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let virtual_top = buffer.last_virtual_top();
     let theme = crate::theme::current();
-    let bg = theme.selection_color;
-    let fg = Color::Black;
+    let highlight_bg = theme.selection_color;
+    let on_select_fg = Color::Black;
     let buf = frame.buffer_mut();
-    let last_row = area.y.saturating_add(area.height).saturating_sub(1);
     let last_col = area.x.saturating_add(area.width).saturating_sub(1);
-    for row in start.0..=end.0 {
-        if row > last_row {
-            break;
+    let (start, end) = match selection {
+        Some((a, c)) if a <= c => (Some(a), Some(c)),
+        Some((a, c)) => (Some(c), Some(a)),
+        None => (None, None),
+    };
+    for screen_row in area.y..area.y.saturating_add(area.height) {
+        let vrow = virtual_top.saturating_add(usize::from(screen_row - area.y));
+        let mut row_chars: Vec<char> = Vec::with_capacity(usize::from(area.width));
+        for col in area.x..area.x.saturating_add(area.width) {
+            let ch = buf[(col, screen_row)]
+                .symbol()
+                .chars()
+                .next()
+                .unwrap_or(' ');
+            row_chars.push(ch);
         }
-        let from_col = if row == start.0 { start.1 } else { area.x };
-        let to_col = if row == end.0 { end.1 } else { last_col };
-        let lo = from_col.max(area.x);
-        let hi = to_col.min(last_col);
-        if hi < lo {
-            continue;
+        if let (Some(s), Some(e)) = (start, end)
+            && vrow >= s.0
+            && vrow <= e.0
+        {
+            let from_col = if vrow == s.0 { s.1 } else { area.x };
+            let to_col = if vrow == e.0 { e.1 } else { last_col };
+            let lo = from_col.max(area.x);
+            let hi = to_col.min(last_col);
+            if hi >= lo {
+                for col in lo..=hi {
+                    let local_idx = usize::from(col - area.x);
+                    if let Some(ch) = row_chars.get(local_idx)
+                        && is_decoration_char(*ch)
+                    {
+                        continue;
+                    }
+                    let cell = &mut buf[(col, screen_row)];
+                    cell.set_bg(highlight_bg);
+                    cell.set_fg(on_select_fg);
+                }
+            }
         }
-        for col in lo..=hi {
-            let cell = &mut buf[(col, row)];
-            cell.set_bg(bg);
-            cell.set_fg(fg);
-        }
+        captured_rows.insert(vrow, row_chars);
     }
 }
 
@@ -1532,7 +1543,8 @@ mod tests {
     fn snapshot_lines(buffer: &mut Buffer, input: &InputState, area: Rect) -> Vec<String> {
         let backend = TestBackend::new(area.width, area.height);
         let mut terminal = Terminal::new(backend).unwrap();
-        let mut grid = Vec::new();
+        let mut captured: std::collections::BTreeMap<usize, Vec<char>> =
+            std::collections::BTreeMap::new();
         terminal
             .draw(|frame| {
                 let regions = crate::layout::split(frame.area(), 1);
@@ -1544,7 +1556,7 @@ mod tests {
                     None,
                     &StatusCtx::default(),
                     None,
-                    &mut grid,
+                    &mut captured,
                 );
             })
             .unwrap();

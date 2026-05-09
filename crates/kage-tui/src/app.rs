@@ -206,19 +206,22 @@ pub struct App {
     /// while a dragged release leaves the screen selection in place
     /// for the user to yank with `y`.
     mouse_drag_anchor: Option<(u16, usize, bool)>,
-    /// Active screen-cell selection: `(anchor, cursor)` in absolute
-    /// terminal `(row, col)` coordinates. Painted as a bg overlay
-    /// over whatever the renderer drew, so it covers tool blocks and
-    /// chrome equally without changing layout. `y` in normal mode
-    /// extracts the underlying text from
-    /// [`Self::last_screen_text`] and OSC52-copies it.
-    screen_selection: Option<((u16, u16), (u16, u16))>,
-    /// 2D char grid extracted from the most recent painted frame,
-    /// indexed `[row][col]`. Used by [`Self::yank_screen_selection`]
-    /// to recover the text the user actually saw when they made
-    /// their drag selection. Cleared between frames so the indexes
-    /// always line up with the latest paint.
-    last_screen_text: Vec<Vec<char>>,
+    /// Active screen selection in `(virtual_row, col)` coordinates,
+    /// where `virtual_row` is the index of the row across the whole
+    /// rendered buffer (independent of scroll position). Painted as
+    /// a bg overlay over whatever the renderer drew so it covers
+    /// tool blocks and chrome equally without changing layout.
+    /// Tracking in virtual-row space lets the selection survive a
+    /// scroll: rows that go off-screen stay selected, and their
+    /// previously-captured text remains available for yank.
+    screen_selection: Option<((usize, u16), (usize, u16))>,
+    /// Text accumulated for every virtual row the user has dragged
+    /// through during the current selection. Indexed by virtual row;
+    /// each entry is the row's char content as captured at the
+    /// moment it was visible. Cleared on `MouseDown` (new selection)
+    /// or after a yank. Lets `y` recover the full selected text
+    /// even when part of the selection has scrolled off-screen.
+    captured_rows: std::collections::BTreeMap<usize, Vec<char>>,
 }
 
 impl App {
@@ -243,7 +246,7 @@ impl App {
             mouse_drag_anchor: None,
             pending_mouse_capture: None,
             screen_selection: None,
-            last_screen_text: Vec::new(),
+            captured_rows: std::collections::BTreeMap::new(),
         }
     }
 
@@ -423,7 +426,7 @@ impl App {
             search_match_count,
         };
         let screen_selection = self.screen_selection;
-        let mut screen_text_grid = std::mem::take(&mut self.last_screen_text);
+        let mut captured_rows = std::mem::take(&mut self.captured_rows);
         let input = &self.input;
         let picker = self.picker.as_mut();
         tui.terminal().draw(|frame| {
@@ -436,13 +439,13 @@ impl App {
                 cmdline,
                 &status,
                 screen_selection,
-                &mut screen_text_grid,
+                &mut captured_rows,
             );
             if let Some(picker) = picker {
                 picker.render(frame, frame.area());
             }
         })?;
-        self.last_screen_text = screen_text_grid;
+        self.captured_rows = captured_rows;
         Ok(())
     }
 
@@ -607,48 +610,56 @@ impl App {
         }
     }
 
-    /// Copy the active screen-cell selection to the system clipboard
-    /// via OSC52. Walks the cell text grid extracted by the renderer
-    /// (so the copy matches what's painted, including across tool
-    /// blocks), strips trailing whitespace per row, joins with `\n`,
-    /// and clears the selection.
+    /// Copy the active screen selection to the system clipboard via
+    /// OSC52. Walks every captured row in the selection range,
+    /// strips renderer-only decoration glyphs (rule chars), trims
+    /// trailing whitespace per row, joins with `\n`, and clears the
+    /// selection.
     fn yank_screen_selection(&mut self) {
         let text = self.extract_selection_text();
         if text.is_empty() {
-            self.screen_selection = None;
+            self.clear_selection();
             return;
         }
         let encoded = base64::engine::general_purpose::STANDARD.encode(&text);
         let mut stdout = std::io::stdout();
         let _ = write!(stdout, "\x1b]52;c;{encoded}\x07");
         let _ = stdout.flush();
-        self.screen_selection = None;
+        self.clear_selection();
         self.notify(format!(
             "yanked {} chars to clipboard",
             text.chars().count()
         ));
     }
 
+    fn clear_selection(&mut self) {
+        self.screen_selection = None;
+        self.captured_rows.clear();
+    }
+
     fn extract_selection_text(&self) -> String {
-        let Some(((a_row, a_col), (c_row, c_col))) = self.screen_selection else {
+        let Some((anchor, cursor)) = self.screen_selection else {
             return String::new();
         };
-        let (start, end) = if (a_row, a_col) <= (c_row, c_col) {
-            ((a_row, a_col), (c_row, c_col))
+        let (start, end) = if anchor <= cursor {
+            (anchor, cursor)
         } else {
-            ((c_row, c_col), (a_row, a_col))
+            (cursor, anchor)
         };
         let mut out = String::new();
-        for row in start.0..=end.0 {
-            let Some(grid_row) = self.last_screen_text.get(usize::from(row)) else {
+        for vrow in start.0..=end.0 {
+            let Some(grid_row) = self.captured_rows.get(&vrow) else {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
                 continue;
             };
-            let from_col = if row == start.0 {
+            let from_col = if vrow == start.0 {
                 usize::from(start.1)
             } else {
                 0
             };
-            let to_col = if row == end.0 {
+            let to_col = if vrow == end.0 {
                 usize::from(end.1).saturating_add(1)
             } else {
                 grid_row.len()
@@ -660,7 +671,10 @@ impl App {
                 }
                 continue;
             }
-            let slice: String = grid_row[from_col..to_col].iter().collect::<String>();
+            let slice: String = grid_row[from_col..to_col]
+                .iter()
+                .filter(|&&c| !is_decoration_char(c))
+                .collect();
             if !out.is_empty() {
                 out.push('\n');
             }
@@ -853,9 +867,7 @@ impl App {
             }
             InputAction::EnterMode(_) => {}
             InputAction::Yank => self.yank_screen_selection(),
-            InputAction::ClearSelection => {
-                self.screen_selection = None;
-            }
+            InputAction::ClearSelection => self.clear_selection(),
             InputAction::BeginSearch => {
                 self.search_line = Some(CommandLine::new());
             }
@@ -872,33 +884,56 @@ impl App {
         }
     }
 
-    /// Mouse left-button press: anchor a screen-cell selection at the
-    /// click position. Any prior selection is replaced. Focus is
-    /// snapped to whichever block sits under the click so subsequent
-    /// keyboard gestures (fold toggle, scroll) act on it.
+    /// Mouse left-button press: anchor a virtual-row selection at
+    /// the click position. Any prior selection (and its captured
+    /// text) is dropped. Focus snaps to whichever block sits under
+    /// the click so subsequent keyboard gestures act on it.
     fn mouse_down(&mut self, row: u16, col: u16) {
-        self.screen_selection = Some(((row, col), (row, col)));
-        if let Ok(mut buf) = self.buffer.lock()
-            && let Some(idx) = buf.block_at_screen_row(row)
-        {
-            buf.set_focus(Some(idx));
-            self.mouse_drag_anchor = Some((row, idx, false));
-        } else {
-            self.mouse_drag_anchor = None;
+        self.captured_rows.clear();
+        if let Ok(mut buf) = self.buffer.lock() {
+            let area_y = buf.last_area_y();
+            let area_height = buf.last_area_height();
+            if row < area_y || row >= area_y.saturating_add(area_height) {
+                self.screen_selection = None;
+                self.mouse_drag_anchor = None;
+                return;
+            }
+            let vrow = buf
+                .last_virtual_top()
+                .saturating_add(usize::from(row - area_y));
+            self.screen_selection = Some(((vrow, col), (vrow, col)));
+            if let Some(idx) = buf.block_at_screen_row(row) {
+                buf.set_focus(Some(idx));
+                self.mouse_drag_anchor = Some((row, idx, false));
+            } else {
+                self.mouse_drag_anchor = None;
+            }
         }
     }
 
-    /// Mouse drag while left-button is held: extend the screen-cell
-    /// selection's cursor end to `(row, col)`. The selection is in
-    /// raw terminal-cell coordinates so it covers anything the user
-    /// can see, including across multiple blocks.
+    /// Mouse drag while left-button is held: extend the selection
+    /// cursor to the virtual-row under `(row, col)`. Drag rows
+    /// outside the buffer area clamp to the closest visible row so
+    /// sweeping past the input area still extends correctly.
     fn mouse_drag(&mut self, row: u16, col: u16) {
-        let Some(((anchor_row, anchor_col), _)) = self.screen_selection else {
+        let Some((anchor, _)) = self.screen_selection else {
             return;
         };
-        self.screen_selection = Some(((anchor_row, anchor_col), (row, col)));
-        if let Some((_, _, ref mut dragged)) = self.mouse_drag_anchor {
-            *dragged = true;
+        if let Ok(buf) = self.buffer.lock() {
+            let area_y = buf.last_area_y();
+            let area_height = buf.last_area_height();
+            if area_height == 0 {
+                return;
+            }
+            let last_visible_row = area_y.saturating_add(area_height).saturating_sub(1);
+            let clamped_row = row.clamp(area_y, last_visible_row);
+            let vrow = buf
+                .last_virtual_top()
+                .saturating_add(usize::from(clamped_row - area_y));
+            self.screen_selection = Some((anchor, (vrow, col)));
+            if let Some((_, _, ref mut dragged)) = self.mouse_drag_anchor {
+                *dragged = true;
+            }
         }
     }
 
@@ -915,7 +950,7 @@ impl App {
         }
         // Plain click: clear the zero-width selection we anchored on
         // press, then maybe toggle a fold on the header row.
-        self.screen_selection = None;
+        self.clear_selection();
         if let Ok(mut buf) = self.buffer.lock()
             && buf.screen_top_of(anchor_idx) == Some(row)
         {
@@ -993,7 +1028,7 @@ impl App {
             search_match_count,
         };
         let screen_selection = self.screen_selection;
-        let mut screen_text_grid = std::mem::take(&mut self.last_screen_text);
+        let mut captured_rows = std::mem::take(&mut self.captured_rows);
         let input = &self.input;
         terminal
             .draw(|frame| {
@@ -1006,16 +1041,25 @@ impl App {
                     cmdline,
                     &status,
                     screen_selection,
-                    &mut screen_text_grid,
+                    &mut captured_rows,
                 );
                 if let Some(picker) = picker {
                     picker.render(frame, frame.area());
                 }
             })
             .map_err(|err| TuiError::Io(std::io::Error::other(err.to_string())))?;
-        self.last_screen_text = screen_text_grid;
+        self.captured_rows = captured_rows;
         Ok(())
     }
+}
+
+/// True for chars the renderer paints purely for decoration: bubble
+/// rule glyphs, fence-line markers, etc. Selection overlay skips
+/// these so the highlight doesn't bleed onto borders, and yank
+/// filters them out so the clipboard text is just the user-visible
+/// content.
+fn is_decoration_char(c: char) -> bool {
+    matches!(c, '\u{258e}' | '\u{258c}')
 }
 
 /// Translate an absolute terminal `(row, col)` mouse position to a

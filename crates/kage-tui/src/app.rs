@@ -123,29 +123,12 @@ enum PickerKind {
 /// since the TUI started.
 pub type SessionLister = Box<dyn Fn() -> Vec<PickItem> + Send + 'static>;
 
-/// Built-in commands offered by the slash palette and the `:` line.
-/// `(name, description)`. Plugin commands will join this set later.
-const BUILTIN_COMMANDS: &[(&str, &str)] = &[
-    ("help", "show available commands"),
-    ("q", "quit"),
-    ("quit", "quit"),
-    ("cancel", "cancel the in-flight turn"),
-    ("model", "switch to provider:model (takes one arg)"),
-    ("fold all", "fold every foldable block"),
-    ("unfold all", "unfold every foldable block"),
-    ("theme", "switch palette (use `:theme list` to enumerate)"),
-    (
-        "mouse",
-        "toggle mouse capture (`mouse off` lets the terminal handle text selection)",
-    ),
-];
-
 fn builtin_command_picker_items() -> Vec<PickItem> {
-    BUILTIN_COMMANDS
+    crate::command::BUILTIN_COMMANDS
         .iter()
-        .map(|(name, desc)| {
-            let label = format!("{name:<14}  {desc}");
-            PickItem::simple((*name).to_owned()).with_label(label)
+        .map(|spec| {
+            let label = format!("{:<14}  {}", spec.name, spec.description);
+            PickItem::simple(spec.name.to_owned()).with_label(label)
         })
         .collect()
 }
@@ -283,10 +266,10 @@ impl App {
 
     /// Register the plugin commands the host wants exposed in the
     /// palette and on the `:` line. Pairs are `(name, description)`.
-    /// Names that collide with built-ins are dropped; the host should
-    /// log a warning at registration time.
+    /// Names that collide with built-in specs are dropped; the host
+    /// should log a warning at registration time.
     pub fn set_plugin_commands(&mut self, mut commands: Vec<(String, String)>) {
-        commands.retain(|(n, _)| !BUILTIN_COMMANDS.iter().any(|(b, _)| *b == n));
+        commands.retain(|(n, _)| crate::command::find_builtin_command(n).is_none());
         self.plugin_commands = commands;
     }
 
@@ -643,15 +626,44 @@ impl App {
         }
     }
 
-    /// Dispatch a `:` command. Recognised commands are documented in
-    /// the `:help` output below; unknown commands surface a `kage:error`
-    /// block in the buffer rather than failing silently.
+    /// Dispatch a `:` command. Looks up the command name in the
+    /// built-in registry; on a match, extracts the trailing arg
+    /// string and delegates to the appropriate handler. Unknown
+    /// commands surface a `kage:error` block in the buffer rather
+    /// than failing silently. Plugin command names are checked
+    /// after builtins.
     fn run_command(&mut self, line: &str) -> Option<AppExit> {
         let mut parts = line.splitn(2, char::is_whitespace);
         let head = parts.next().unwrap_or("");
         let rest = parts.next().unwrap_or("").trim();
-        match head {
-            "q" | "quit" => Some(AppExit::Quit),
+
+        if let Some(spec) = crate::command::find_builtin_command(head) {
+            return self.dispatch_builtin(spec.name, rest);
+        }
+
+        if head.is_empty() {
+            return None;
+        }
+
+        if self.plugin_commands.iter().any(|(n, _)| n == head) {
+            let _ = self.send_request(RunRequest::InvokePluginCommand {
+                name: head.to_owned(),
+                args: rest.to_owned(),
+            });
+            return None;
+        }
+
+        self.push_error(format!("unknown command: {head}"));
+        None
+    }
+
+    /// Execute a built-in command by canonical name with the
+    /// remaining unparsed argument string. The match is on the
+    /// primary name; aliases were already resolved by
+    /// [`Self::run_command`].
+    fn dispatch_builtin(&mut self, name: &str, rest: &str) -> Option<AppExit> {
+        match name {
+            "quit" => Some(AppExit::Quit),
             "cancel" => {
                 let _ = self.send_request(RunRequest::Cancel);
                 None
@@ -664,12 +676,20 @@ impl App {
                 }
                 None
             }
-            "fold" if rest == "all" => {
-                self.set_all_folds(true);
+            "fold" => {
+                if rest == "all" {
+                    self.set_all_folds(true);
+                } else {
+                    self.push_error("fold: usage `:fold all`");
+                }
                 None
             }
-            "unfold" if rest == "all" => {
-                self.set_all_folds(false);
+            "unfold" => {
+                if rest == "all" {
+                    self.set_all_folds(false);
+                } else {
+                    self.push_error("unfold: usage `:unfold all`");
+                }
                 None
             }
             "theme" => {
@@ -684,18 +704,7 @@ impl App {
                 self.push_help();
                 None
             }
-            "" => None,
-            other => {
-                if self.plugin_commands.iter().any(|(n, _)| n == other) {
-                    let _ = self.send_request(RunRequest::InvokePluginCommand {
-                        name: other.to_owned(),
-                        args: rest.to_owned(),
-                    });
-                } else {
-                    self.push_error(format!("unknown command: {other}"));
-                }
-                None
-            }
+            _ => None,
         }
     }
 
@@ -909,16 +918,67 @@ impl App {
     }
 
     fn push_help(&mut self) {
-        let body = "available commands:\n  \
-                    :q, :quit       leave the TUI\n  \
-                    :cancel         cancel the in-flight turn\n  \
-                    :model <id>     switch to provider:model (e.g. anthropic:claude-sonnet-4-5)\n  \
-                    :fold all       fold every foldable block\n  \
-                    :unfold all     unfold every foldable block\n  \
-                    :theme <name>   switch palette (use `:theme list` to enumerate)\n  \
-                    :mouse off      release mouse capture so the terminal can select/copy text\n  \
-                    :mouse on       re-enable kage's mouse handling (click-to-fold, drag-select)\n  \
-                    :help           show this help";
+        let mut lines = vec!["available commands:".to_owned()];
+        for spec in crate::command::BUILTIN_COMMANDS {
+            let aliases = if spec.aliases.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", spec.aliases.join(", "))
+            };
+            let arg_hint = if let Some(arg) = spec.args.first() {
+                match arg {
+                    crate::command::ArgSpec::Choice {
+                        values, optional, ..
+                    } => {
+                        let vals = values.join("|");
+                        if *optional {
+                            format!(" [{vals}]")
+                        } else {
+                            format!(" <{vals}>")
+                        }
+                    }
+                    crate::command::ArgSpec::DynamicChoice { optional, .. } => {
+                        if *optional {
+                            " [<value>]".to_owned()
+                        } else {
+                            " <value>".to_owned()
+                        }
+                    }
+                    crate::command::ArgSpec::Rest { optional, hint, .. } => {
+                        if *optional {
+                            format!(" [{hint}]")
+                        } else {
+                            format!(" <{hint}>")
+                        }
+                    }
+                    crate::command::ArgSpec::Path { optional, .. } => {
+                        if *optional {
+                            " [<path>]".to_owned()
+                        } else {
+                            " <path>".to_owned()
+                        }
+                    }
+                    crate::command::ArgSpec::SessionId { optional, .. } => {
+                        if *optional {
+                            " [<session>]".to_owned()
+                        } else {
+                            " <session>".to_owned()
+                        }
+                    }
+                    crate::command::ArgSpec::Flag { .. } => " <on|off>".to_owned(),
+                }
+            } else {
+                String::new()
+            };
+            lines.push(format!(
+                "  :{name}{aliases}{arg_hint}   {desc}",
+                name = spec.name,
+                aliases = aliases,
+                arg_hint = arg_hint,
+                desc = spec.description,
+            ));
+        }
+        let body = lines.join("\n");
         if let Ok(mut buf) = self.buffer.lock() {
             buf.push_custom("kage:help", body, false);
         }

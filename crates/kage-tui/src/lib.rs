@@ -20,7 +20,9 @@ pub mod view;
 pub use app::{App, AppExit, RunRequest, SessionLister};
 pub use buffer::{Block, Buffer};
 pub use cmdline::{CommandLine, CommandLineEvent};
-pub use command::{ArgSource, ArgSpec, ArgValue, CommandCategory, CommandSpec, ParsedArgs};
+pub use command::{
+    ArgSource, ArgSpec, ArgValue, CommandCategory, CommandSpec, ParsedArgs, find_builtin_command,
+};
 pub use error::TuiError;
 pub use events::populate_from_history;
 pub use events::{SharedBuffer, TuiHooks, shared_buffer};

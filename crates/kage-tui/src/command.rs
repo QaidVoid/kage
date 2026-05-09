@@ -174,6 +174,97 @@ impl CommandSpec {
     }
 }
 
+/// Built-in commands offered by the slash palette and the `:` line.
+/// Plugin commands join this set at runtime via
+/// [`crate::App::set_plugin_commands`].
+pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "quit",
+        aliases: &["q"],
+        description: "leave the TUI",
+        category: CommandCategory::Both,
+        args: &[],
+    },
+    CommandSpec {
+        name: "cancel",
+        aliases: &[],
+        description: "cancel the in-flight turn",
+        category: CommandCategory::Both,
+        args: &[],
+    },
+    CommandSpec {
+        name: "model",
+        aliases: &[],
+        description: "switch to provider:model",
+        category: CommandCategory::Both,
+        args: &[ArgSpec::DynamicChoice {
+            name: "id",
+            source: ArgSource::Models,
+            optional: false,
+        }],
+    },
+    CommandSpec {
+        name: "fold",
+        aliases: &[],
+        description: "fold every foldable block",
+        category: CommandCategory::Both,
+        args: &[ArgSpec::Choice {
+            name: "scope",
+            values: &["all"],
+            optional: false,
+        }],
+    },
+    CommandSpec {
+        name: "unfold",
+        aliases: &[],
+        description: "unfold every foldable block",
+        category: CommandCategory::Both,
+        args: &[ArgSpec::Choice {
+            name: "scope",
+            values: &["all"],
+            optional: false,
+        }],
+    },
+    CommandSpec {
+        name: "theme",
+        aliases: &[],
+        description: "switch palette (use `:theme list` to enumerate)",
+        category: CommandCategory::Both,
+        args: &[ArgSpec::DynamicChoice {
+            name: "name",
+            source: ArgSource::Themes,
+            optional: true,
+        }],
+    },
+    CommandSpec {
+        name: "mouse",
+        aliases: &[],
+        description: "toggle mouse capture (off lets the terminal handle text selection)",
+        category: CommandCategory::Both,
+        args: &[ArgSpec::Choice {
+            name: "state",
+            values: &["on", "off", "toggle"],
+            optional: true,
+        }],
+    },
+    CommandSpec {
+        name: "help",
+        aliases: &[],
+        description: "show available commands",
+        category: CommandCategory::Both,
+        args: &[],
+    },
+];
+
+/// Find a built-in command by primary name or alias. Returns `None`
+/// for unknown command names.
+#[must_use]
+pub fn find_builtin_command(name: &str) -> Option<&'static CommandSpec> {
+    BUILTIN_COMMANDS
+        .iter()
+        .find(|spec| spec.names().any(|n| n == name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,5 +336,38 @@ mod tests {
         args.insert("state", ArgValue::Choice("on".into()));
         assert_eq!(args.get("state"), Some(&ArgValue::Choice("on".into())));
         assert_eq!(args.get("missing"), None);
+    }
+
+    #[test]
+    fn builtin_registry_finds_quit_by_primary_name() {
+        let spec = find_builtin_command("quit").expect("quit should exist");
+        assert_eq!(spec.name, "quit");
+        assert!(spec.aliases.contains(&"q"));
+    }
+
+    #[test]
+    fn builtin_registry_finds_quit_by_alias() {
+        let spec = find_builtin_command("q").expect("q alias should resolve");
+        assert_eq!(spec.name, "quit");
+    }
+
+    #[test]
+    fn builtin_registry_finds_model() {
+        let spec = find_builtin_command("model").expect("model should exist");
+        assert_eq!(spec.args.len(), 1);
+        assert!(matches!(
+            &spec.args[0],
+            ArgSpec::DynamicChoice { name: "id", .. }
+        ));
+    }
+
+    #[test]
+    fn builtin_registry_returns_none_for_unknown() {
+        assert!(find_builtin_command("bogus").is_none());
+    }
+
+    #[test]
+    fn builtin_registry_has_expected_command_count() {
+        assert_eq!(BUILTIN_COMMANDS.len(), 8);
     }
 }

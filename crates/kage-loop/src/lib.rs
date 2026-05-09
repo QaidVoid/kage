@@ -7,6 +7,7 @@
 
 pub mod config;
 pub mod context;
+mod dispatch;
 pub mod hooks;
 pub mod run;
 mod stream;

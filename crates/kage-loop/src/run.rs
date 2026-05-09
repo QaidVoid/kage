@@ -19,9 +19,10 @@
 //! tool dispatch in T4.4.
 
 use kage_core::{CancelFlag, LoopError, LoopEvent};
-use kage_provider::{Provider, StopReason, StreamRequest};
+use kage_provider::{Provider, StreamRequest};
 use kage_tools::ToolRegistry;
 
+use crate::dispatch::dispatch_tool_calls;
 use crate::stream::collect_turn;
 use crate::{AgentContext, Hooks, LoopConfig};
 
@@ -56,7 +57,6 @@ pub fn run<F>(
 where
     F: FnMut(LoopEvent),
 {
-    let _ = tools;
     let mut iterations: u32 = 0;
 
     loop {
@@ -72,10 +72,6 @@ where
             ));
         }
 
-        // T4.4 turns the `panic!` below into a `continue`, at which point the
-        // inner loop genuinely loops. Until then, clippy correctly observes
-        // it never re-iterates; allow the lint as a known-temporary.
-        #[allow(clippy::never_loop)]
         loop {
             iterations = iterations.saturating_add(1);
             if iterations > config.max_iterations {
@@ -90,7 +86,7 @@ where
                 return finish_cancelled(hooks, &mut emit);
             }
 
-            let req = build_request(cx);
+            let req = build_request(cx, tools);
             let stream = match provider.stream(req, cancel) {
                 Ok(s) => s,
                 Err(e) => {
@@ -112,15 +108,31 @@ where
             };
 
             cx.budget.add(turn.usage);
-            let had_tool_calls = !turn.tool_calls.is_empty();
+            let assistant_id = turn.message.id;
+            let pending = turn.tool_calls;
             cx.history.push(turn.message);
 
-            // T4.4 replaces the panic with real dispatch + `continue`.
-            assert!(
-                !(had_tool_calls || turn.stop_reason == StopReason::ToolUse),
-                "T4.3 shell does not yet dispatch tool calls; T4.4 fills this in",
-            );
-            break;
+            if pending.is_empty() {
+                break;
+            }
+
+            let workdir = cx.workdir.clone();
+            let results = match dispatch_tool_calls(
+                pending,
+                tools,
+                &workdir,
+                cancel,
+                assistant_id,
+                hooks,
+                &mut emit,
+            ) {
+                Ok(r) => r,
+                Err(kind) => {
+                    emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
+                    return Err(kind);
+                }
+            };
+            cx.history.extend(results);
         }
 
         let Some(text) = hooks.get_followup() else {
@@ -142,14 +154,12 @@ pub(crate) fn emit_one<F: FnMut(LoopEvent)>(hooks: &mut dyn Hooks, emit: &mut F,
 }
 
 /// Construct the next [`StreamRequest`] from the current agent context.
-///
-/// Tools list is omitted in the T4.3 shell; T4.4 plugs in
-/// `tools.list_for_provider()`.
-fn build_request(cx: &AgentContext) -> StreamRequest {
+fn build_request(cx: &AgentContext, tools: &ToolRegistry) -> StreamRequest {
     let mut req = StreamRequest::new(&cx.model, cx.history.clone());
     if !cx.system_prompt.is_empty() {
         req.system = Some(cx.system_prompt.clone());
     }
+    req.tools = tools.list_for_provider();
     req
 }
 
@@ -333,25 +343,111 @@ mod tests {
         assert!(matches!(res, Err(LoopError::Other { .. })));
     }
 
+    #[derive(Debug)]
+    struct StaticTool;
+
+    impl kage_tools::Tool for StaticTool {
+        fn name(&self) -> &'static str {
+            "static"
+        }
+        fn description(&self) -> &'static str {
+            "returns a fixed string"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn risk(&self) -> kage_core::Risk {
+            kage_core::Risk::Read
+        }
+        fn execute(
+            &self,
+            _input: serde_json::Value,
+            _cx: &kage_tools::ToolContext<'_>,
+        ) -> Result<kage_core::ToolOutput, kage_tools::ToolError> {
+            Ok(kage_core::ToolOutput {
+                is_error: false,
+                text: "static-result".into(),
+                structured: None,
+            })
+        }
+    }
+
     #[test]
-    #[should_panic(expected = "T4.3 shell does not yet dispatch tool calls")]
-    fn shell_panics_on_tool_call_per_t43_contract() {
-        let mock = MockProvider::replaying(vec![
-            Ok(ProviderEvent::ToolCallStart {
-                id: kage_core::ToolCallId::new("call_1"),
-                name: "read".into(),
-            }),
-            Ok(ProviderEvent::MessageEnd {
-                stop_reason: StopReason::ToolUse,
-                usage: TokenUsage::default(),
-            }),
+    fn end_to_end_tool_call_loop() {
+        // Turn 1: model emits a tool call. Turn 2: model emits final text.
+        let call_id = kage_core::ToolCallId::new("call_1");
+        let mock = MockProvider::sequence(vec![
+            vec![
+                Ok(ProviderEvent::MessageStart),
+                Ok(ProviderEvent::ToolCallStart {
+                    id: call_id.clone(),
+                    name: "static".into(),
+                }),
+                Ok(ProviderEvent::ToolCallEnd {
+                    id: call_id.clone(),
+                    input: serde_json::json!({}),
+                }),
+                Ok(ProviderEvent::MessageEnd {
+                    stop_reason: StopReason::ToolUse,
+                    usage: TokenUsage {
+                        input: 5,
+                        output: 5,
+                        cache_read: 0,
+                        cache_write: 0,
+                    },
+                }),
+            ],
+            vec![
+                Ok(ProviderEvent::TextDelta {
+                    delta: "all done".into(),
+                }),
+                Ok(ProviderEvent::MessageEnd {
+                    stop_reason: StopReason::EndTurn,
+                    usage: TokenUsage {
+                        input: 10,
+                        output: 5,
+                        cache_read: 0,
+                        cache_write: 0,
+                    },
+                }),
+            ],
         ]);
-        let mut cx = AgentContext::new("mock:m", "");
-        cx.history.push(user_msg("hi"));
+
+        let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
+        cx.history.push(user_msg("do the thing"));
         let cfg = LoopConfig::default();
         let mut hooks = NoopHooks;
         let cancel = CancelFlag::new();
-        let registry = ToolRegistry::new();
-        let _ = run(&mock, &registry, &mut cx, &cfg, &mut hooks, &cancel, |_| {});
+        let registry = ToolRegistry::new().with(std::sync::Arc::new(StaticTool));
+
+        let mut events = Vec::new();
+        let res = run(&mock, &registry, &mut cx, &cfg, &mut hooks, &cancel, |ev| {
+            events.push(ev);
+        });
+        assert!(res.is_ok(), "loop failed: {res:?}");
+        assert_eq!(mock.call_count(), 2);
+        assert_eq!(cx.budget.total(), 25);
+        // History: user, assistant(tool_call), tool_result, assistant(final).
+        assert_eq!(cx.history.len(), 4);
+        assert_eq!(cx.history[1].role, Role::Assistant);
+        assert_eq!(cx.history[2].role, Role::ToolResult);
+        assert_eq!(cx.history[3].role, Role::Assistant);
+        match &cx.history[2].content[0] {
+            Content::ToolResultBlock {
+                output, is_error, ..
+            } => {
+                assert_eq!(output, "static-result");
+                assert!(!is_error);
+            }
+            other => panic!("expected ToolResultBlock, got {other:?}"),
+        }
+        // Provider request 2 should include the tool result in messages.
+        let req2 = mock.requests().into_iter().nth(1).unwrap();
+        assert_eq!(req2.messages.len(), 3);
+        assert_eq!(req2.messages[2].role, Role::ToolResult);
+        // Provider request should advertise registered tool.
+        let req1 = mock.requests().into_iter().next().unwrap();
+        assert_eq!(req1.tools.len(), 1);
+        assert_eq!(req1.tools[0].name, "static");
     }
 }

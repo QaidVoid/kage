@@ -7,7 +7,7 @@
 //! the message-assembly state machine.
 
 use kage_core::{Content, LoopError, LoopEvent, Message, MessageId, Role, TokenUsage, ToolCallId};
-use kage_provider::{EventStream, ProviderEvent, StopReason};
+use kage_provider::{EventStream, ProviderEvent};
 
 use crate::Hooks;
 use crate::run::emit_one;
@@ -18,8 +18,6 @@ pub(crate) struct TurnResult {
     pub(crate) message: Message,
     /// Tool calls the model emitted, in order. Awaiting dispatch.
     pub(crate) tool_calls: Vec<PendingToolCall>,
-    /// Why the provider ended the stream.
-    pub(crate) stop_reason: StopReason,
     /// Token usage reported for the turn.
     pub(crate) usage: TokenUsage,
 }
@@ -125,10 +123,10 @@ fn handle_event<F: FnMut(LoopEvent)>(
                 input,
             });
         }
-        ProviderEvent::MessageEnd { stop_reason, usage } => {
+        ProviderEvent::MessageEnd { usage, .. } => {
             ensure_started(hooks, emit);
             emit_one(hooks, emit, LoopEvent::MessageEnd { id, usage });
-            return Ok(Some(assembler.finish(stop_reason, usage)));
+            return Ok(Some(assembler.finish(usage)));
         }
     }
     Ok(None)
@@ -199,7 +197,7 @@ impl Assembler {
         Ok((id, name, input))
     }
 
-    fn finish(&mut self, stop_reason: StopReason, usage: TokenUsage) -> TurnResult {
+    fn finish(&mut self, usage: TokenUsage) -> TurnResult {
         TurnResult {
             message: Message {
                 role: Role::Assistant,
@@ -209,7 +207,6 @@ impl Assembler {
                 ts: chrono::Utc::now(),
             },
             tool_calls: std::mem::take(&mut self.tool_calls),
-            stop_reason,
             usage,
         }
     }
@@ -285,7 +282,6 @@ mod tests {
             Content::Text { text } if text == "hello world"
         ));
         assert!(result.tool_calls.is_empty());
-        assert_eq!(result.stop_reason, StopReason::EndTurn);
         assert_eq!(result.usage.input, 5);
     }
 
@@ -367,7 +363,6 @@ mod tests {
             &result.message.content[0],
             Content::ToolCall { name, .. } if name == "read"
         ));
-        assert_eq!(result.stop_reason, StopReason::ToolUse);
     }
 
     #[test]

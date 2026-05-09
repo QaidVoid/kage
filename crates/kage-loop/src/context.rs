@@ -1,5 +1,7 @@
 //! Conversation state carried through one [`run`](crate::run) invocation.
 
+use std::path::PathBuf;
+
 use kage_core::{Message, TokenUsage};
 use serde::{Deserialize, Serialize};
 
@@ -51,20 +53,31 @@ pub struct AgentContext {
     pub model: String,
     /// System prompt prepended to every model call.
     pub system_prompt: String,
+    /// Working directory all filesystem-touching tools must scope under.
+    pub workdir: PathBuf,
     /// Running token totals.
     pub budget: TokenBudget,
 }
 
 impl AgentContext {
-    /// Construct a fresh context with empty history and zero budget.
+    /// Construct a fresh context with empty history, zero budget, and the
+    /// process current working directory as `workdir`.
     #[must_use]
     pub fn new(model: impl Into<String>, system_prompt: impl Into<String>) -> Self {
         Self {
             history: Vec::new(),
             model: model.into(),
             system_prompt: system_prompt.into(),
+            workdir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             budget: TokenBudget::default(),
         }
+    }
+
+    /// Override the working directory.
+    #[must_use]
+    pub fn with_workdir(mut self, workdir: impl Into<PathBuf>) -> Self {
+        self.workdir = workdir.into();
+        self
     }
 }
 

@@ -8,11 +8,13 @@ pub mod api;
 pub mod commands;
 pub mod error;
 pub mod events;
+pub mod providers;
 pub mod runtime;
 pub mod tools;
 
 pub use api::{HostLog, LogLevel, SharedHostLog, StderrHostLog, default_host_log};
 pub use commands::{CommandOutput, LuaCommand};
 pub use error::PluginError;
+pub use providers::LuaProvider;
 pub use runtime::{PluginRuntime, PluginRuntimeBuilder, SANDBOX_REMOVALS, SharedLua};
 pub use tools::LuaTool;

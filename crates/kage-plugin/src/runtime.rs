@@ -29,6 +29,7 @@ use crate::api::{self, SharedHostLog, default_host_log};
 use crate::commands::{self, LuaCommand, RegisteredCommands, registered_commands};
 use crate::error::PluginError;
 use crate::events;
+use crate::providers::{self, LuaProvider, RegisteredProviders, registered_providers};
 use crate::tools::{self, RegisteredTools, registered_tools};
 
 /// Shared, mutex-guarded handle to the Lua state. Plugin-defined tools
@@ -43,6 +44,7 @@ pub struct PluginRuntime {
     sink: SharedHostLog,
     tools: RegisteredTools,
     commands: RegisteredCommands,
+    providers: RegisteredProviders,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -131,6 +133,15 @@ impl PluginRuntime {
             .expect("plugin commands mutex poisoned")
             .clone()
     }
+
+    /// Snapshot the providers registered by plugins so far.
+    #[must_use]
+    pub fn registered_providers(&self) -> Vec<Arc<LuaProvider>> {
+        self.providers
+            .lock()
+            .expect("plugin providers mutex poisoned")
+            .clone()
+    }
 }
 
 /// Builder for [`PluginRuntime`]. Lets the host inject a custom host-log
@@ -165,7 +176,8 @@ impl PluginRuntimeBuilder {
 
     /// Finalize the runtime: build the Lua state, apply sandbox removals,
     /// install the `kage` API table, and wire `kage.on`,
-    /// `kage.register_tool`, and `kage.register_command`.
+    /// `kage.register_tool`, `kage.register_command`, and
+    /// `kage.register_provider`.
     pub fn build(self) -> Result<PluginRuntime, PluginError> {
         let lua = Lua::new();
         apply_sandbox(&lua)?;
@@ -174,6 +186,7 @@ impl PluginRuntimeBuilder {
         let shared_lua: SharedLua = Arc::new(Mutex::new(lua));
         let tool_registry = registered_tools();
         let command_registry = registered_commands();
+        let provider_registry = registered_providers();
         {
             let lua_guard = shared_lua.lock().expect("plugin lua mutex poisoned");
             tools::install_register_tool(
@@ -188,12 +201,19 @@ impl PluginRuntimeBuilder {
                 self.sink.clone(),
                 Arc::clone(&command_registry),
             )?;
+            providers::install_register_provider(
+                &lua_guard,
+                Arc::clone(&shared_lua),
+                self.sink.clone(),
+                Arc::clone(&provider_registry),
+            )?;
         }
         Ok(PluginRuntime {
             lua: shared_lua,
             sink: self.sink,
             tools: tool_registry,
             commands: command_registry,
+            providers: provider_registry,
         })
     }
 }

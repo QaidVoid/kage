@@ -877,6 +877,7 @@ name = "kage-plugin"
 version = "0.1.0"
 dependencies = [
  "kage-core",
+ "kage-provider",
  "kage-tools",
  "mlua",
  "serde",

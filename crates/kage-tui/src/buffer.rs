@@ -210,6 +210,15 @@ pub struct Buffer {
     /// cleared on `Esc` or `y`. Selection range is `[min, max]` of
     /// `(visual_anchor, effective_focus)`.
     visual_anchor: Option<usize>,
+    /// Per-block rendered-height cache, indexed parallel to
+    /// [`Self::blocks`]. Each entry stores `(width, height_in_rows)`
+    /// captured by the renderer's last successful layout pass for
+    /// that block. The renderer reuses cached entries whose `width`
+    /// matches the current viewport width and otherwise rebuilds.
+    /// Mutators push or invalidate entries in lockstep with `blocks`
+    /// to avoid stale data; this is what lets virtualized rendering
+    /// skip building [`ratatui::text::Line`]s for off-screen blocks.
+    block_heights: Vec<Option<(u16, u16)>>,
 }
 
 impl Buffer {
@@ -282,6 +291,58 @@ impl Buffer {
     /// frame so the next frame can compare and react.
     pub fn set_last_drawn_focus(&mut self, value: Option<usize>) {
         self.last_drawn_focus = value;
+    }
+
+    /// Cached rendered height (in wrapped rows) for the block at
+    /// `idx`, but only if the cache entry was captured at the given
+    /// `width`. Width-mismatched entries return `None` so the caller
+    /// recomputes and stores a fresh value. Out-of-range indices and
+    /// uncached blocks also return `None`.
+    #[must_use]
+    pub fn cached_height(&self, idx: usize, width: u16) -> Option<u16> {
+        self.block_heights
+            .get(idx)
+            .copied()
+            .flatten()
+            .and_then(|(w, h)| (w == width).then_some(h))
+    }
+
+    /// Renderer hook: store the wrapped-row height it just measured
+    /// for the block at `idx` at the given `width`. Subsequent frames
+    /// reuse this without rebuilding the block's [`Line`]s.
+    pub fn set_cached_height(&mut self, idx: usize, width: u16, height: u16) {
+        if let Some(slot) = self.block_heights.get_mut(idx) {
+            *slot = Some((width, height));
+        }
+    }
+
+    /// Drop every cached height. Called by the renderer when it sees
+    /// a width change, since wrap counts depend on width.
+    pub fn invalidate_all_heights(&mut self) {
+        for slot in &mut self.block_heights {
+            *slot = None;
+        }
+    }
+
+    fn invalidate_height(&mut self, idx: usize) {
+        if let Some(slot) = self.block_heights.get_mut(idx) {
+            *slot = None;
+        }
+    }
+
+    fn invalidate_pair_height(&mut self, call_id: &str) {
+        for (i, b) in self.blocks.iter().enumerate() {
+            match b {
+                Block::ToolCall { call_id: cid, .. } | Block::ToolResult { call_id: cid, .. }
+                    if cid == call_id =>
+                {
+                    if let Some(slot) = self.block_heights.get_mut(i) {
+                        *slot = None;
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Set the visual-selection anchor. `None` clears (exits visual).
@@ -550,6 +611,7 @@ impl Buffer {
     /// Push a fully-formed user prompt.
     pub fn push_user(&mut self, text: impl Into<String>) {
         self.blocks.push(Block::User { text: text.into() });
+        self.block_heights.push(None);
     }
 
     /// Begin a streaming assistant block. Subsequent deltas append to it
@@ -559,6 +621,7 @@ impl Buffer {
             text: String::new(),
             live: true,
         });
+        self.block_heights.push(None);
     }
 
     /// Append text to the most recent assistant block. If no live
@@ -570,6 +633,9 @@ impl Buffer {
         if let Some(Block::Assistant { text, .. }) = self.blocks.last_mut() {
             text.push_str(delta);
         }
+        if let Some(slot) = self.block_heights.last_mut() {
+            *slot = None;
+        }
     }
 
     /// Begin a streaming thinking block.
@@ -579,6 +645,7 @@ impl Buffer {
             folded: false,
             live: true,
         });
+        self.block_heights.push(None);
     }
 
     /// Append text to the most recent thinking block.
@@ -588,6 +655,9 @@ impl Buffer {
         }
         if let Some(Block::Thinking { text, .. }) = self.blocks.last_mut() {
             text.push_str(delta);
+        }
+        if let Some(slot) = self.block_heights.last_mut() {
+            *slot = None;
         }
     }
 
@@ -607,6 +677,7 @@ impl Buffer {
             folded: true,
             started_at: Instant::now(),
         });
+        self.block_heights.push(None);
     }
 
     /// Add a tool-result block. Looks up the matching tool call (by id)
@@ -660,13 +731,18 @@ impl Buffer {
             })
             .unwrap_or_default();
         self.blocks.push(Block::ToolResult {
-            call_id,
+            call_id: call_id.clone(),
             name,
             output: output.into(),
             is_error,
             folded: true,
             duration_ms,
         });
+        self.block_heights.push(None);
+        // The matching ToolCall now renders as a merged composite, so
+        // its previously-cached unmerged height is wrong; invalidate
+        // both halves so the next layout pass remeasures.
+        self.invalidate_pair_height(&call_id);
     }
 
     /// Add a plugin-defined custom block.
@@ -676,6 +752,7 @@ impl Buffer {
             text: text.into(),
             folded,
         });
+        self.block_heights.push(None);
     }
 
     /// Mark the most recent live (assistant or thinking) block as
@@ -683,6 +760,12 @@ impl Buffer {
     pub fn finish_streaming(&mut self) {
         if let Some(last) = self.blocks.last_mut() {
             last.finish();
+        }
+        // The `live` flag doesn't currently change rendered height,
+        // but invalidate anyway so a future renderer change that
+        // styles "stream done" differently picks up cleanly.
+        if let Some(slot) = self.block_heights.last_mut() {
+            *slot = None;
         }
     }
 
@@ -703,6 +786,7 @@ impl Buffer {
             return false;
         }
         block.toggle_fold();
+        self.invalidate_height(index);
         let pair_id = match &self.blocks[index] {
             Block::ToolCall { call_id, .. } | Block::ToolResult { call_id, .. } => {
                 Some(call_id.clone())
@@ -728,18 +812,24 @@ impl Buffer {
                     _ => {}
                 }
             }
+            self.invalidate_pair_height(&pid);
         }
         true
     }
 
     /// Set the fold state on every foldable block.
     pub fn set_all_folded(&mut self, folded: bool) {
-        for block in &mut self.blocks {
+        for (i, block) in self.blocks.iter_mut().enumerate() {
             match block {
                 Block::Thinking { folded: f, .. }
                 | Block::ToolCall { folded: f, .. }
                 | Block::ToolResult { folded: f, .. }
-                | Block::Custom { folded: f, .. } => *f = folded,
+                | Block::Custom { folded: f, .. } => {
+                    *f = folded;
+                    if let Some(slot) = self.block_heights.get_mut(i) {
+                        *slot = None;
+                    }
+                }
                 _ => {}
             }
         }
@@ -749,12 +839,14 @@ impl Buffer {
     /// `kage resume` and tests.
     pub fn clear(&mut self) {
         self.blocks.clear();
+        self.block_heights.clear();
         self.scroll = 0;
     }
 
     /// Take ownership of the blocks, leaving the buffer empty.
     pub fn take(&mut self) -> Vec<Block> {
         self.scroll = 0;
+        self.block_heights.clear();
         mem::take(&mut self.blocks)
     }
 
@@ -773,6 +865,72 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_height_misses_when_width_differs() {
+        let mut buf = Buffer::new();
+        buf.push_user("hello");
+        buf.set_cached_height(0, 80, 3);
+        assert_eq!(buf.cached_height(0, 80), Some(3));
+        assert_eq!(buf.cached_height(0, 100), None);
+    }
+
+    #[test]
+    fn append_invalidates_only_the_growing_block() {
+        let mut buf = Buffer::new();
+        buf.push_user("first");
+        buf.begin_assistant();
+        buf.set_cached_height(0, 80, 1);
+        buf.set_cached_height(1, 80, 2);
+        buf.append_assistant_delta("more");
+        assert_eq!(
+            buf.cached_height(0, 80),
+            Some(1),
+            "user block height must survive an unrelated assistant delta"
+        );
+        assert_eq!(
+            buf.cached_height(1, 80),
+            None,
+            "the assistant block that just grew must invalidate its cached height"
+        );
+    }
+
+    #[test]
+    fn push_tool_result_invalidates_paired_call_height() {
+        let mut buf = Buffer::new();
+        buf.push_tool_call("c1", "read", "summary", "{}");
+        buf.set_cached_height(0, 80, 4);
+        assert_eq!(buf.cached_height(0, 80), Some(4));
+        buf.push_tool_result("c1", "ok", false);
+        assert_eq!(
+            buf.cached_height(0, 80),
+            None,
+            "the call's pre-merge height is wrong once a result arrives"
+        );
+    }
+
+    #[test]
+    fn toggle_fold_invalidates_both_halves_of_pair() {
+        let mut buf = Buffer::new();
+        buf.push_tool_call("c1", "read", "summary", "{}");
+        buf.push_tool_result("c1", "body", false);
+        // After push_tool_result, the call's height was already
+        // invalidated; reseat a value to verify toggle invalidates.
+        buf.set_cached_height(0, 80, 5);
+        buf.set_cached_height(1, 80, 7);
+        buf.toggle_fold(0);
+        assert_eq!(buf.cached_height(0, 80), None);
+        assert_eq!(buf.cached_height(1, 80), None);
+    }
+
+    #[test]
+    fn clear_drops_height_cache() {
+        let mut buf = Buffer::new();
+        buf.push_user("hi");
+        buf.set_cached_height(0, 80, 1);
+        buf.clear();
+        assert_eq!(buf.cached_height(0, 80), None);
+    }
 
     #[test]
     fn user_block_line_count_matches_text() {

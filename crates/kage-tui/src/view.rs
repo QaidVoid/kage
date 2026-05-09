@@ -300,137 +300,102 @@ fn render_buffer(
     buffer: &mut Buffer,
     search_pattern: Option<&str>,
 ) {
-    let mut lines: Vec<Line<'_>> = Vec::new();
-    let blocks = buffer.blocks();
-    // Index every ToolResult by its call_id so we can pair with a
-    // possibly-non-adjacent ToolCall. Parallel tool batches arrive as
-    // call/call/call/.../result/result/result; without this lookup the
-    // merge would only catch trailing adjacent pairs and parallel calls
-    // would render as bare flat lines.
-    let mut result_by_call: std::collections::HashMap<&str, usize> =
-        std::collections::HashMap::new();
-    for (i, b) in blocks.iter().enumerate() {
+    let width = regions.buffer.width;
+    let visible = usize::from(regions.buffer.height);
+    if width == 0 || visible == 0 {
+        return;
+    }
+
+    // Owned-key snapshots of the call/result topology. Owning the
+    // call_id strings here means we don't keep an immutable borrow of
+    // `buffer.blocks()` alive across the height-cache writes below.
+    let n = buffer.blocks().len();
+    let mut result_by_call: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::with_capacity(n);
+    for (i, b) in buffer.blocks().iter().enumerate() {
         if let Block::ToolResult { call_id, .. } = b {
-            result_by_call.entry(call_id).or_insert(i);
+            result_by_call.entry(call_id.clone()).or_insert(i);
         }
     }
+    let mut consumed_results: std::collections::HashSet<usize> =
+        std::collections::HashSet::with_capacity(n);
+    let mut call_idx_for_result: std::collections::HashMap<usize, usize> =
+        std::collections::HashMap::with_capacity(n);
+    for (i, b) in buffer.blocks().iter().enumerate() {
+        if let Block::ToolCall { call_id, .. } = b
+            && let Some(&rid) = result_by_call.get(call_id)
+        {
+            consumed_results.insert(rid);
+            call_idx_for_result.insert(rid, i);
+        }
+    }
+
     let focus = buffer.effective_focus();
     let visual_range = buffer.visual_range();
-    let in_selection =
-        |idx: usize| -> bool { visual_range.is_some_and(|(lo, hi)| idx >= lo && idx <= hi) };
-    let emphasis = |idx: usize| -> Emphasis {
-        if focus == Some(idx) {
-            Emphasis::Focused
-        } else if in_selection(idx) {
-            Emphasis::Selected
-        } else if search_pattern.is_some_and(|p| buffer.block_contains(idx, p)) {
-            Emphasis::Match
-        } else {
-            Emphasis::None
-        }
-    };
-    let mut consumed_results: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    // (block_idx, line_start, line_end_exclusive) so we can recenter
-    // scroll on the focused block when focus changes. For merged
-    // tool-call+result pairs, both indices point at the same line
-    // range so focus on either half resolves cleanly.
-    let mut block_ranges: Vec<(usize, usize, usize)> = Vec::new();
-    for (idx, cur) in blocks.iter().enumerate() {
-        let line_start = lines.len();
-        let mut paired_result_idx: Option<usize> = None;
-        match cur {
-            Block::ToolCall { call_id, .. } => {
-                if let Some(&result_idx) = result_by_call.get(call_id.as_str()) {
-                    consumed_results.insert(result_idx);
-                    paired_result_idx = Some(result_idx);
-                    // The merged composite picks the strongest signal
-                    // across the pair: Focused beats Selected beats
-                    // None.
-                    let pair_emphasis = emphasis(idx).max(emphasis(result_idx));
-                    for line in tool_pair_to_lines(
-                        cur,
-                        &blocks[result_idx],
-                        regions.buffer.width,
-                        pair_emphasis,
-                    ) {
-                        lines.push(line);
-                    }
-                } else {
-                    for line in block_to_lines(cur, regions.buffer.width, emphasis(idx)) {
-                        lines.push(line);
-                    }
-                }
-            }
-            Block::ToolResult { .. } if consumed_results.contains(&idx) => {
-                continue;
-            }
-            _ => {
-                for line in block_to_lines(cur, regions.buffer.width, emphasis(idx)) {
-                    lines.push(line);
-                }
-            }
-        }
-        lines.push(Line::raw(""));
-        let line_end = lines.len();
-        block_ranges.push((idx, line_start, line_end));
-        if let Some(rid) = paired_result_idx {
-            block_ranges.push((rid, line_start, line_end));
-        }
-    }
-    // Build the paragraph and ask it how many rendered rows it
-    // actually occupies given the current width. `line_count` walks
-    // the same WordWrapper logic the renderer uses, so wrapped long
-    // lines are counted at their true visual height. Without this we
-    // used `lines.len()` which underestimates whenever any line is
-    // longer than the buffer area, making the earliest content
-    // unreachable.
-    if let Some(pattern) = search_pattern {
-        highlight_matches_in_lines(&mut lines, pattern);
-    }
-    let visible = usize::from(regions.buffer.height);
-    // Build a paragraph snapshot we can reuse: counting wrapped rows
-    // and rendering both walk the same span list.
-    let paragraph_full = Paragraph::new(lines.clone()).wrap(Wrap { trim: false });
-    let total_rendered = paragraph_full.line_count(regions.buffer.width);
-    let max_scroll_back = total_rendered.saturating_sub(visible);
 
-    // Auto-scroll to bring a newly focused block into view. Only
-    // fires when focus changed since the last paint; otherwise the
-    // user keeps full scroll control.
+    // Pass 1: gather per-block heights. Cached entries return
+    // immediately; misses build the block's lines once, measure with
+    // `line_count`, and store the result. The cache survives across
+    // frames so steady-state cost is O(blocks) for the lookup plus
+    // O(visible) for actual line construction in pass 2.
+    let mut heights: Vec<usize> = Vec::with_capacity(n);
+    let mut total_rows = 0usize;
+    for idx in 0..n {
+        if consumed_results.contains(&idx) {
+            heights.push(0);
+            continue;
+        }
+        let h = if let Some(cached) = buffer.cached_height(idx, width) {
+            usize::from(cached)
+        } else {
+            let block_lines =
+                build_block_lines(buffer, idx, width, &result_by_call, Emphasis::None);
+            let measured = Paragraph::new(block_lines)
+                .wrap(Wrap { trim: false })
+                .line_count(width);
+            let stored = u16::try_from(measured).unwrap_or(u16::MAX);
+            buffer.set_cached_height(idx, width, stored);
+            measured
+        };
+        heights.push(h);
+        // +1 for the blank separator row that always follows a
+        // non-consumed block.
+        total_rows = total_rows.saturating_add(h).saturating_add(1);
+    }
+    // Drop the trailing separator that has no successor block.
+    total_rows = total_rows.saturating_sub(1);
+
+    let max_scroll_back = total_rows.saturating_sub(visible);
+
     if focus != buffer.last_drawn_focus()
         && let Some(focus_idx) = focus
-        && let Some(&(_, line_start, line_end)) =
-            block_ranges.iter().find(|(i, _, _)| *i == focus_idx)
     {
-        // Translate the focused block's line range to rendered rows
-        // by counting wrap-aware lines for everything above it.
-        let head_paragraph =
-            Paragraph::new(lines[..line_start].to_vec()).wrap(Wrap { trim: false });
-        let block_paragraph =
-            Paragraph::new(lines[line_start..line_end].to_vec()).wrap(Wrap { trim: false });
-        let rendered_start = head_paragraph.line_count(regions.buffer.width);
-        let rendered_height = block_paragraph.line_count(regions.buffer.width);
-        let rendered_end = rendered_start + rendered_height;
-        // Rows-from-bottom scroll values that bracket the in-view
-        // range. `scroll_to_top` lands the block's top row at the top
-        // of the viewport; `scroll_to_bottom` lands its bottom row at
-        // the bottom. The block is in view iff scroll_back falls
-        // anywhere between these (inclusive).
-        let scroll_to_top = total_rendered.saturating_sub(rendered_start + visible);
-        let scroll_to_bottom = total_rendered.saturating_sub(rendered_end);
-        let current = buffer.scroll().min(max_scroll_back);
-        let in_view = current >= scroll_to_top && current <= scroll_to_bottom;
-        if !in_view {
-            let target = if rendered_height > visible || current < scroll_to_top {
-                // Block is below the viewport (or doesn't fit at all)
-                // - park its top at the viewport top.
-                scroll_to_top
-            } else {
-                // Block is above the viewport - park its bottom at the
-                // viewport bottom.
-                scroll_to_bottom
-            };
-            buffer.set_scroll(target.min(max_scroll_back));
+        let display_idx = if consumed_results.contains(&focus_idx) {
+            call_idx_for_result.get(&focus_idx).copied()
+        } else {
+            Some(focus_idx)
+        };
+        if let Some(di) = display_idx {
+            let mut rendered_start = 0usize;
+            for (i, h) in heights.iter().enumerate().take(di) {
+                if !consumed_results.contains(&i) {
+                    rendered_start = rendered_start.saturating_add(*h).saturating_add(1);
+                }
+            }
+            let rendered_height = heights[di];
+            let rendered_end = rendered_start.saturating_add(rendered_height);
+            let scroll_to_top = total_rows.saturating_sub(rendered_start + visible);
+            let scroll_to_bottom = total_rows.saturating_sub(rendered_end);
+            let current = buffer.scroll().min(max_scroll_back);
+            let in_view = current >= scroll_to_top && current <= scroll_to_bottom;
+            if !in_view {
+                let target = if rendered_height > visible || current < scroll_to_top {
+                    scroll_to_top
+                } else {
+                    scroll_to_bottom
+                };
+                buffer.set_scroll(target.min(max_scroll_back));
+            }
         }
     }
 
@@ -438,10 +403,110 @@ fn render_buffer(
     if scroll_back != buffer.scroll() {
         buffer.set_scroll(scroll_back);
     }
-    let top_offset = max_scroll_back - scroll_back;
-    let scroll = u16::try_from(top_offset).unwrap_or(u16::MAX);
-    frame.render_widget(paragraph_full.scroll((scroll, 0)), regions.buffer);
+    let visible_top = total_rows.saturating_sub(visible.saturating_add(scroll_back));
+    let visible_bot = visible_top.saturating_add(visible);
+
+    let mut emitted_lines: Vec<Line<'static>> = Vec::new();
+    let mut acc = 0usize;
+    let mut intra_scroll = 0usize;
+    let mut emitted_any = false;
+    for (idx, h) in heights.iter().copied().enumerate() {
+        if consumed_results.contains(&idx) {
+            continue;
+        }
+        let block_top = acc;
+        let block_bot = acc.saturating_add(h);
+        let block_advance = h.saturating_add(1);
+
+        if block_bot <= visible_top {
+            acc = acc.saturating_add(block_advance);
+            continue;
+        }
+        if block_top >= visible_bot {
+            break;
+        }
+        if !emitted_any {
+            intra_scroll = visible_top.saturating_sub(block_top);
+            emitted_any = true;
+        }
+        let emp = emphasis_for(
+            buffer,
+            idx,
+            focus,
+            visual_range,
+            search_pattern,
+            &consumed_results,
+            &call_idx_for_result,
+        );
+        let block_lines = build_block_lines(buffer, idx, width, &result_by_call, emp);
+        emitted_lines.extend(block_lines);
+        emitted_lines.push(Line::raw(""));
+        acc = acc.saturating_add(block_advance);
+    }
+
+    if let Some(pattern) = search_pattern {
+        highlight_matches_in_lines(&mut emitted_lines, pattern);
+    }
+
+    let scroll_u16 = u16::try_from(intra_scroll).unwrap_or(u16::MAX);
+    let paragraph = Paragraph::new(emitted_lines).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph.scroll((scroll_u16, 0)), regions.buffer);
     buffer.set_last_drawn_focus(focus);
+}
+
+/// Compute the emphasis for the displayed block at `idx`. Merged
+/// tool pairs pick `max` across both halves so a focused result
+/// lights up the call's bubble too.
+fn emphasis_for(
+    buffer: &Buffer,
+    idx: usize,
+    focus: Option<usize>,
+    visual_range: Option<(usize, usize)>,
+    search_pattern: Option<&str>,
+    consumed_results: &std::collections::HashSet<usize>,
+    call_idx_for_result: &std::collections::HashMap<usize, usize>,
+) -> Emphasis {
+    let single = |i: usize| -> Emphasis {
+        if focus == Some(i) {
+            Emphasis::Focused
+        } else if visual_range.is_some_and(|(lo, hi)| i >= lo && i <= hi) {
+            Emphasis::Selected
+        } else if search_pattern.is_some_and(|p| buffer.block_contains(i, p)) {
+            Emphasis::Match
+        } else {
+            Emphasis::None
+        }
+    };
+    let mut e = single(idx);
+    // Walk the result side of any merged pair this idx represents,
+    // picking up emphasis from the consumed half.
+    for (rid, cid) in call_idx_for_result {
+        if *cid == idx && consumed_results.contains(rid) {
+            e = e.max(single(*rid));
+        }
+    }
+    e
+}
+
+/// Build the rendered lines for the block at `idx`, automatically
+/// merging a `ToolCall` with its paired `ToolResult` when one exists.
+/// Callers pass the `result_by_call` map (so lookups stay cheap inside
+/// the render loop) and the emphasis state for this idx.
+fn build_block_lines(
+    buffer: &Buffer,
+    idx: usize,
+    width: u16,
+    result_by_call: &std::collections::HashMap<String, usize>,
+    emphasis: Emphasis,
+) -> Vec<Line<'static>> {
+    let blocks = buffer.blocks();
+    let cur = &blocks[idx];
+    if let Block::ToolCall { call_id, .. } = cur
+        && let Some(&result_idx) = result_by_call.get(call_id)
+    {
+        return tool_pair_to_lines(cur, &blocks[result_idx], width, emphasis);
+    }
+    block_to_lines(cur, width, emphasis)
 }
 
 fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {

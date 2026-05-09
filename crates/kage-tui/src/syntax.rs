@@ -31,6 +31,14 @@ static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
 /// worth of assistant blocks plus their tool reads", not unbounded.
 const CACHE_CAP: usize = 64;
 
+/// Skip syntect entirely for inputs above this many bytes. Even with
+/// the result cache, the first render of a huge file would block the
+/// UI for a noticeable beat; over this threshold we just emit plain
+/// styled lines (still readable, just not highlighted). Sized to keep
+/// worst-case syntect work under a few milliseconds on a typical
+/// development machine.
+const HIGHLIGHT_BYTE_LIMIT: usize = 64 * 1024;
+
 thread_local! {
     /// Per-thread cache of highlight results keyed by a 64-bit hash
     /// of `(text, marker)` where `marker` distinguishes fenced-text
@@ -112,6 +120,9 @@ fn theme() -> &'static Theme {
 /// frame. Cache caps at [`CACHE_CAP`] entries with FIFO eviction.
 #[must_use]
 pub fn highlight_extension(code: &str, extension: &str, fallback: Style) -> Vec<Line<'static>> {
+    if code.len() > HIGHLIGHT_BYTE_LIMIT {
+        return plain_lines(code, fallback);
+    }
     let key = cache_key(code, extension);
     cached_or(key, || {
         let ss = syntax_set();
@@ -132,6 +143,9 @@ pub fn highlight_extension(code: &str, extension: &str, fallback: Style) -> Vec<
 /// syntect on every fenced block.
 #[must_use]
 pub fn highlight_fenced(text: &str, fallback: Style) -> Vec<Line<'static>> {
+    if text.len() > HIGHLIGHT_BYTE_LIMIT {
+        return plain_lines(text, fallback);
+    }
     let key = cache_key(text, "fenced");
     cached_or(key, || highlight_fenced_uncached(text, fallback))
 }

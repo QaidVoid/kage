@@ -33,6 +33,10 @@ pub struct StatusCtx<'a> {
     pub search_pattern: Option<&'a str>,
     /// Open `/` search line, if the user is mid-typing one.
     pub search_line: Option<&'a CommandLine>,
+    /// `(current_1_indexed, total)` for the active search. `current`
+    /// is `0` when the focus isn't on any match. Painted as
+    /// `match X/Y` on the right side of the status bar.
+    pub search_match_count: Option<(usize, usize)>,
 }
 
 /// What kind of attention a block should draw on this frame: the
@@ -149,6 +153,22 @@ fn render_status(
         left_spans.push(Span::styled(model.to_owned(), dim));
     }
     let mut right_spans: Vec<Span<'static>> = Vec::new();
+    if let Some((current, total)) = status.search_match_count {
+        let label = if total == 0 {
+            "no match".to_owned()
+        } else if current == 0 {
+            format!("match -/{total}")
+        } else {
+            format!("match {current}/{total}")
+        };
+        right_spans.push(Span::styled(
+            format!("{label}  "),
+            Style::default()
+                .fg(Color::Yellow)
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     if let Some(sid) = status.session_id
         && !sid.is_empty()
     {
@@ -172,6 +192,87 @@ fn render_status(
 /// Same as [`place_cmdline_cursor`] but for the `/` search line.
 fn place_search_cursor(frame: &mut Frame, regions: Regions, line: &CommandLine) {
     place_cmdline_cursor(frame, regions, line);
+}
+
+/// Walk every `Line` in `lines` and split spans whose text contains
+/// `pattern` (ASCII case-insensitive) into pre-match / match /
+/// post-match chunks, applying a high-contrast yellow highlight to
+/// the matches. Allocates nothing per call beyond the rebuilt span
+/// vector; matters because this runs per frame across every block.
+fn highlight_matches_in_lines(lines: &mut [Line<'static>], pattern: &str) {
+    let needle = pattern.trim();
+    if needle.is_empty() {
+        return;
+    }
+    for line in lines {
+        let original = std::mem::take(&mut line.spans);
+        let mut rebuilt: Vec<Span<'static>> = Vec::with_capacity(original.len());
+        for span in original {
+            for piece in split_span_for_match(span, needle) {
+                rebuilt.push(piece);
+            }
+        }
+        line.spans = rebuilt;
+    }
+}
+
+/// Find the byte position of `needle` inside `haystack` ignoring
+/// ASCII case, starting at `from`. No allocation. Returns absolute
+/// byte position into `haystack`.
+fn ascii_ifind(haystack: &str, needle: &str, from: usize) -> Option<usize> {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() || from >= h.len() || h.len() - from < n.len() {
+        return None;
+    }
+    let limit = h.len() - n.len();
+    'outer: for i in from..=limit {
+        for j in 0..n.len() {
+            if !h[i + j].eq_ignore_ascii_case(&n[j]) {
+                continue 'outer;
+            }
+        }
+        return Some(i);
+    }
+    None
+}
+
+fn split_span_for_match(span: Span<'static>, needle: &str) -> Vec<Span<'static>> {
+    if ascii_ifind(&span.content, needle, 0).is_none() {
+        return vec![span];
+    }
+    let hit = span.style.patch(
+        Style::default()
+            .bg(Color::Yellow)
+            .fg(Color::Black)
+            .add_modifier(Modifier::BOLD)
+            .add_modifier(Modifier::REVERSED),
+    );
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut cursor = 0;
+    while let Some(abs) = ascii_ifind(&span.content, needle, cursor) {
+        if abs > cursor {
+            out.push(Span::styled(
+                span.content[cursor..abs].to_owned(),
+                span.style,
+            ));
+        }
+        let end = abs + needle.len();
+        out.push(Span::styled(span.content[abs..end].to_owned(), hit));
+        if end <= cursor {
+            // Defensive: needle was zero-width or boundary fudged;
+            // bail to avoid an infinite loop.
+            break;
+        }
+        cursor = end;
+    }
+    if cursor < span.content.len() {
+        out.push(Span::styled(span.content[cursor..].to_owned(), span.style));
+    }
+    if out.is_empty() {
+        return vec![span];
+    }
+    out
 }
 
 /// Position the terminal cursor on the status row at the cmdline's
@@ -283,6 +384,9 @@ fn render_buffer(
     // used `lines.len()` which underestimates whenever any line is
     // longer than the buffer area, making the earliest content
     // unreachable.
+    if let Some(pattern) = search_pattern {
+        highlight_matches_in_lines(&mut lines, pattern);
+    }
     let visible = usize::from(regions.buffer.height);
     // Build a paragraph snapshot we can reuse: counting wrapped rows
     // and rendering both walk the same span list.

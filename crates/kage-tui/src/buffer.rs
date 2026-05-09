@@ -159,6 +159,27 @@ impl Block {
     }
 }
 
+/// True if `haystack` contains `needle` ignoring ASCII case (a/A,
+/// b/B, ...). Non-ASCII bytes are compared exactly. Allocates
+/// nothing. Returns `false` for empty needles.
+fn ascii_icontains(haystack: &str, needle: &str) -> bool {
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() || n.len() > h.len() {
+        return false;
+    }
+    let limit = h.len() - n.len();
+    'outer: for i in 0..=limit {
+        for j in 0..n.len() {
+            if !h[i + j].eq_ignore_ascii_case(&n[j]) {
+                continue 'outer;
+            }
+        }
+        return true;
+    }
+    false
+}
+
 fn count_lines(text: &str) -> usize {
     if text.is_empty() {
         return 0;
@@ -285,32 +306,52 @@ impl Buffer {
         Some((anchor.min(head), anchor.max(head)))
     }
 
-    /// True if block `idx` contains the case-insensitive `needle` in
-    /// its searchable text content. Empty needles never match.
+    /// True if block `idx` contains `needle` (ASCII case-insensitive,
+    /// fallback to case-sensitive for non-ASCII). Empty needles never
+    /// match.
+    ///
+    /// Uses byte-level matching with no allocation so the renderer
+    /// can call this for every block on every frame without
+    /// `to_lowercase()` blowing up on multi-MB tool outputs.
     #[must_use]
     pub fn block_contains(&self, idx: usize, needle: &str) -> bool {
         let needle = needle.trim();
         if needle.is_empty() {
             return false;
         }
-        let needle_lower = needle.to_lowercase();
         let Some(block) = self.blocks.get(idx) else {
             return false;
         };
-        let haystack = match block {
+        match block {
             Block::User { text } | Block::Assistant { text, .. } | Block::Thinking { text, .. } => {
-                text.to_lowercase()
+                ascii_icontains(text, needle)
             }
             Block::ToolCall {
                 name,
                 input_summary,
                 input_pretty,
                 ..
-            } => format!("{name} {input_summary} {input_pretty}").to_lowercase(),
-            Block::ToolResult { name, output, .. } => format!("{name} {output}").to_lowercase(),
-            Block::Custom { kind, text, .. } => format!("{kind} {text}").to_lowercase(),
-        };
-        haystack.contains(&needle_lower)
+            } => {
+                ascii_icontains(name, needle)
+                    || ascii_icontains(input_summary, needle)
+                    || ascii_icontains(input_pretty, needle)
+            }
+            Block::ToolResult { name, output, .. } => {
+                ascii_icontains(name, needle) || ascii_icontains(output, needle)
+            }
+            Block::Custom { kind, text, .. } => {
+                ascii_icontains(kind, needle) || ascii_icontains(text, needle)
+            }
+        }
+    }
+
+    /// All block indices whose content contains `needle`, in buffer
+    /// order. Skips merged tool-result halves.
+    #[must_use]
+    pub fn match_indices(&self, needle: &str) -> Vec<usize> {
+        (0..self.blocks.len())
+            .filter(|i| self.is_selectable(*i) && self.block_contains(*i, needle))
+            .collect()
     }
 
     /// Index of the next block after `from` (exclusive) whose content

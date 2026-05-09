@@ -294,6 +294,10 @@ impl App {
     }
 
     fn draw(&mut self, tui: &mut Tui) -> Result<(), TuiError> {
+        // compute_search_match_count locks self.buffer internally; do
+        // it BEFORE we hold the lock or we'll deadlock the moment a
+        // search is active.
+        let search_match_count = self.compute_search_match_count();
         let mut buffer = self.buffer.lock().expect("buffer mutex poisoned");
         let input_text_lines = u16::try_from(text_row_count(self.input.text())).unwrap_or(u16::MAX);
         let input_height = input_height_for(input_text_lines + 1);
@@ -307,6 +311,7 @@ impl App {
             session_id: self.status_session_id.as_deref(),
             search_pattern: self.search_pattern.as_deref(),
             search_line: self.search_line.as_ref(),
+            search_match_count,
         };
         tui.terminal().draw(|frame| {
             let regions = split(frame.area(), input_height);
@@ -364,6 +369,20 @@ impl App {
                 None
             }
         }
+    }
+
+    /// Build `(current_1_indexed, total)` for the right-edge match
+    /// counter, or `None` when no search is active.
+    fn compute_search_match_count(&self) -> Option<(usize, usize)> {
+        let pattern = self.search_pattern.as_deref()?;
+        let buf = self.buffer.lock().ok()?;
+        let matches = buf.match_indices(pattern);
+        let focus = buf.effective_focus().unwrap_or(usize::MAX);
+        let current = matches
+            .iter()
+            .position(|i| *i == focus)
+            .map_or(0, |p| p + 1);
+        Some((current, matches.len()))
     }
 
     /// Jump focus to the next or previous block whose content matches
@@ -677,6 +696,7 @@ impl App {
         B: ratatui::backend::Backend,
         B::Error: std::error::Error + Send + Sync + 'static,
     {
+        let search_match_count = self.compute_search_match_count();
         let mut buffer = self.buffer.lock().expect("buffer mutex poisoned");
         let input_text_lines = u16::try_from(text_row_count(self.input.text())).unwrap_or(u16::MAX);
         let input_height = input_height_for(input_text_lines + 1);
@@ -691,6 +711,7 @@ impl App {
             session_id: self.status_session_id.as_deref(),
             search_pattern: self.search_pattern.as_deref(),
             search_line: self.search_line.as_ref(),
+            search_match_count,
         };
         terminal
             .draw(|frame| {

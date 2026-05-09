@@ -23,6 +23,11 @@ pub enum Mode {
     Normal,
     /// Free-text insert mode for the prompt input.
     Insert,
+    /// Keyboard-driven cell selection. The host paints a screen
+    /// overlay anchored at the position the user pressed `v`; this
+    /// mode's keys (`h`/`j`/`k`/`l`, arrows, `y`, `Esc`) move the
+    /// cursor end of that selection or finalise it.
+    Visual,
 }
 
 /// Side effect produced by a key press.
@@ -74,6 +79,25 @@ pub enum InputAction {
     SearchNext,
     /// Jump focus to the previous block matching the active search.
     SearchPrev,
+    /// Enter keyboard visual select. The host anchors a selection at
+    /// a sensible position (the focused block's first visible row)
+    /// and switches mode to [`Mode::Visual`].
+    EnterVisual,
+    /// Move the visual cursor by one column to the left.
+    VisualLeft,
+    /// Move the visual cursor by one column to the right.
+    VisualRight,
+    /// Move the visual cursor up by one row.
+    VisualUp,
+    /// Move the visual cursor down by one row.
+    VisualDown,
+    /// Snap the visual cursor to the start of the current row.
+    VisualLineStart,
+    /// Snap the visual cursor to the end of the current row.
+    VisualLineEnd,
+    /// Yank the entire content of the focused block (vim-style
+    /// `Y`). Selection state is left alone.
+    YankFocusedBlock,
 }
 
 /// Cap on retained history entries. The host's persistence layer is
@@ -203,6 +227,7 @@ impl InputState {
         match self.mode {
             Mode::Normal => self.handle_normal(key),
             Mode::Insert => self.handle_insert(key),
+            Mode::Visual => self.handle_visual(key),
         }
     }
 
@@ -213,7 +238,13 @@ impl InputState {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('i' | 'a') => self.enter_mode(Mode::Insert),
+            KeyCode::Char('v') => vec![InputAction::EnterVisual],
+            // Lowercase `y` yanks an existing selection (mouse or
+            // visual mode left it behind). Capital `Y` yanks the
+            // focused block whole, vim's "yank line" gesture
+            // adapted for our block-stream layout.
             KeyCode::Char('y') => vec![InputAction::Yank],
+            KeyCode::Char('Y') => vec![InputAction::YankFocusedBlock],
             KeyCode::Esc => vec![InputAction::ClearSelection],
             KeyCode::Char('j') | KeyCode::Down => vec![InputAction::Scroll(1)],
             KeyCode::Char('k') | KeyCode::Up => vec![InputAction::Scroll(-1)],
@@ -330,6 +361,28 @@ impl InputState {
                 self.insert_char(c);
                 Vec::new()
             }
+            _ => Vec::new(),
+        }
+    }
+
+    fn handle_visual(&mut self, key: KeyEvent) -> Vec<InputAction> {
+        match key.code {
+            KeyCode::Esc => {
+                let mut actions = vec![InputAction::ClearSelection];
+                actions.extend(self.enter_mode(Mode::Normal));
+                actions
+            }
+            KeyCode::Char('y') => {
+                let mut actions = vec![InputAction::Yank];
+                actions.extend(self.enter_mode(Mode::Normal));
+                actions
+            }
+            KeyCode::Char('h') | KeyCode::Left => vec![InputAction::VisualLeft],
+            KeyCode::Char('l') | KeyCode::Right => vec![InputAction::VisualRight],
+            KeyCode::Char('j') | KeyCode::Down => vec![InputAction::VisualDown],
+            KeyCode::Char('k') | KeyCode::Up => vec![InputAction::VisualUp],
+            KeyCode::Char('0') | KeyCode::Home => vec![InputAction::VisualLineStart],
+            KeyCode::Char('$') | KeyCode::End => vec![InputAction::VisualLineEnd],
             _ => Vec::new(),
         }
     }

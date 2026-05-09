@@ -638,6 +638,135 @@ impl App {
         self.captured_rows.clear();
     }
 
+    /// Anchor a keyboard selection at the focused block's first
+    /// visible row (or the viewport top if nothing's focused) and
+    /// switch the mode to [`Mode::Visual`]. Subsequent
+    /// [`InputAction::Visual*`] events move the cursor end.
+    fn enter_visual_mode(&mut self) {
+        let anchor = if let Ok(buf) = self.buffer.lock() {
+            let area_x = buf.last_area_x();
+            let area_y = buf.last_area_y();
+            let virtual_top = buf.last_virtual_top();
+            let row = buf
+                .effective_focus()
+                .and_then(|idx| buf.screen_top_of(idx))
+                .unwrap_or(area_y);
+            let vrow = virtual_top.saturating_add(usize::from(row.saturating_sub(area_y)));
+            (vrow, area_x)
+        } else {
+            (0, 0)
+        };
+        self.captured_rows.clear();
+        self.screen_selection = Some((anchor, anchor));
+        self.input.switch_mode(Mode::Visual);
+    }
+
+    fn move_visual_cursor(&mut self, dvrow: i32, dcol: i32) {
+        let Some((anchor, cursor)) = self.screen_selection else {
+            return;
+        };
+        let (mut vrow, mut col) = cursor;
+        if dvrow != 0 {
+            let next = i64::try_from(vrow).unwrap_or(i64::MAX) + i64::from(dvrow);
+            vrow = usize::try_from(next.max(0)).unwrap_or(0);
+        }
+        if dcol != 0 {
+            let next = i32::from(col).saturating_add(dcol).max(0);
+            col = u16::try_from(next).unwrap_or(u16::MAX);
+        }
+        self.screen_selection = Some((anchor, (vrow, col)));
+        self.scroll_visual_cursor_into_view(vrow);
+    }
+
+    fn snap_visual_cursor_x(&mut self, target_col: i32) {
+        let Some((anchor, cursor)) = self.screen_selection else {
+            return;
+        };
+        let (vrow, _) = cursor;
+        let col = if target_col <= 0 {
+            0
+        } else if let Ok(buf) = self.buffer.lock() {
+            buf.last_area_width().saturating_sub(1)
+        } else {
+            0
+        };
+        self.screen_selection = Some((anchor, (vrow, col)));
+    }
+
+    /// Keep the visual cursor on screen by adjusting buffer scroll.
+    /// Cursor above the viewport top scrolls up; below the bottom
+    /// scrolls down. Otherwise no-op.
+    fn scroll_visual_cursor_into_view(&mut self, cursor_vrow: usize) {
+        if let Ok(mut buf) = self.buffer.lock() {
+            let area_height = usize::from(buf.last_area_height());
+            if area_height == 0 {
+                return;
+            }
+            let visible_top = buf.last_virtual_top();
+            let visible_bot = visible_top.saturating_add(area_height);
+            let current_scroll = buf.scroll();
+            if cursor_vrow < visible_top {
+                let delta = visible_top - cursor_vrow;
+                buf.set_scroll(current_scroll.saturating_add(delta));
+            } else if cursor_vrow >= visible_bot {
+                let delta = cursor_vrow + 1 - visible_bot;
+                buf.set_scroll(current_scroll.saturating_sub(delta));
+            }
+        }
+    }
+
+    /// Yank the entire content of the currently focused block by
+    /// projecting its screen rows onto captured cells. Limitation:
+    /// only rows that have been visible (and thus captured) since
+    /// the last selection clear contribute text - tall blocks the
+    /// user hasn't scrolled fully through return only the visible
+    /// portion. Auto-scroll on entering visual covers the keyboard
+    /// path; for `Y` we just use whatever cells we have right now.
+    fn yank_focused_block(&mut self) {
+        // Force a fresh capture by walking the focused block's
+        // screen rows (currently visible) and pulling text from
+        // captured_rows.
+        let Ok(buf) = self.buffer.lock() else {
+            return;
+        };
+        let Some(idx) = buf.effective_focus() else {
+            return;
+        };
+        let virtual_top = buf.last_virtual_top();
+        let area_y = buf.last_area_y();
+        let Some((top, bot)) = buf.screen_rows_of(idx) else {
+            return;
+        };
+        drop(buf);
+        let mut text = String::new();
+        for screen_row in top..bot {
+            let vrow = virtual_top.saturating_add(usize::from(screen_row.saturating_sub(area_y)));
+            let Some(cells) = self.captured_rows.get(&vrow) else {
+                continue;
+            };
+            let line: String = cells
+                .iter()
+                .filter(|cell| !cell.decoration)
+                .map(|cell| cell.ch)
+                .collect();
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(line.trim_end());
+        }
+        if text.is_empty() {
+            return;
+        }
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&text);
+        let mut stdout = std::io::stdout();
+        let _ = write!(stdout, "\x1b]52;c;{encoded}\x07");
+        let _ = stdout.flush();
+        self.notify(format!(
+            "yanked {} chars to clipboard",
+            text.chars().count()
+        ));
+    }
+
     fn extract_selection_text(&self) -> String {
         let Some((anchor, cursor)) = self.screen_selection else {
             return String::new();
@@ -870,6 +999,14 @@ impl App {
             InputAction::EnterMode(_) => {}
             InputAction::Yank => self.yank_screen_selection(),
             InputAction::ClearSelection => self.clear_selection(),
+            InputAction::EnterVisual => self.enter_visual_mode(),
+            InputAction::VisualLeft => self.move_visual_cursor(0, -1),
+            InputAction::VisualRight => self.move_visual_cursor(0, 1),
+            InputAction::VisualUp => self.move_visual_cursor(-1, 0),
+            InputAction::VisualDown => self.move_visual_cursor(1, 0),
+            InputAction::VisualLineStart => self.snap_visual_cursor_x(0),
+            InputAction::VisualLineEnd => self.snap_visual_cursor_x(i32::MAX),
+            InputAction::YankFocusedBlock => self.yank_focused_block(),
             InputAction::BeginSearch => {
                 self.search_line = Some(CommandLine::new());
             }
@@ -1063,6 +1200,7 @@ pub fn mode_label(mode: Mode) -> &'static str {
     match mode {
         Mode::Normal => "normal",
         Mode::Insert => "insert",
+        Mode::Visual => "visual",
     }
 }
 

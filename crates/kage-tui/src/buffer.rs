@@ -487,6 +487,16 @@ impl Buffer {
             .find_map(|(i, top, _)| (*i == idx).then_some(*top))
     }
 
+    /// `(top, bottom)` screen-row range of the block at `idx` from
+    /// the most recent frame, with `bottom` exclusive. `None` when
+    /// the block is currently off-screen.
+    #[must_use]
+    pub fn screen_rows_of(&self, idx: usize) -> Option<(u16, u16)> {
+        self.last_block_screen_rows
+            .iter()
+            .find_map(|(i, top, bot)| (*i == idx).then_some((*top, *bot)))
+    }
+
     /// Current mutation counter. Render loops compare consecutive
     /// reads to decide if anything has changed and a repaint is
     /// warranted.

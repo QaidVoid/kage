@@ -1539,6 +1539,7 @@ fn mode_label(mode: Mode) -> &'static str {
     match mode {
         Mode::Normal => "NOR",
         Mode::Insert => "INS",
+        Mode::Visual => "VIS",
     }
 }
 
@@ -1546,6 +1547,7 @@ fn mode_style(mode: Mode) -> Style {
     let bg = match mode {
         Mode::Normal => Color::Blue,
         Mode::Insert => Color::Green,
+        Mode::Visual => Color::Magenta,
     };
     Style::default()
         .fg(Color::White)

@@ -788,7 +788,7 @@ fn build_block_lines(
 /// space. Painted on the first content row only; subsequent rows
 /// (multi-line draft, soft-wrapped continuation) align under the
 /// glyph slot but stay blank.
-const INPUT_GLYPH_WIDTH: u16 = 2;
+pub(crate) const INPUT_GLYPH_WIDTH: u16 = 2;
 
 /// Single-character prompt glyph painted at the start of the input
 /// content. Plain ASCII so it renders the same in every terminal and
@@ -1072,20 +1072,60 @@ fn placeholder_for(mode: Mode) -> Option<&'static str> {
 /// more rows than the input area can fit ([`INPUT_CONTENT_MAX_LINES`]
 /// from `layout.rs`), scrolling is the only way to keep typing
 /// visible.
+/// Total visual rows the input text occupies inside `body_width`,
+/// counting wrapped continuation rows. Empty logical lines still
+/// count for one row each (so a trailing newline grows the input).
+#[must_use]
+pub fn input_visual_row_count(text: &str, body_width: u16) -> u16 {
+    let bw = usize::from(body_width.max(1));
+    let mut total: usize = 0;
+    for line in text.split('\n') {
+        let chars = line.chars().count();
+        total += if chars == 0 { 1 } else { chars.div_ceil(bw) };
+    }
+    u16::try_from(total).unwrap_or(u16::MAX)
+}
+
+/// Visual `(row, col)` of the cursor in the wrapped layout. Walks
+/// every prior logical line, accumulating wrapped row counts, then
+/// adds the wrap-rows / column for the current logical line up to
+/// the cursor.
+fn input_visual_cursor(text: &str, cursor: usize, body_width: u16) -> (u16, u16) {
+    let bw = usize::from(body_width.max(1));
+    let prefix = text.get(..cursor).unwrap_or("");
+    let mut row: usize = 0;
+    let mut last_break = 0;
+    for (i, _) in prefix.match_indices('\n') {
+        let chars = prefix[last_break..i].chars().count();
+        row += if chars == 0 { 1 } else { chars.div_ceil(bw) };
+        last_break = i + 1;
+    }
+    let chars_in_current = prefix[last_break..].chars().count();
+    row += chars_in_current / bw;
+    let col = chars_in_current % bw;
+    (
+        u16::try_from(row).unwrap_or(u16::MAX),
+        u16::try_from(col).unwrap_or(u16::MAX),
+    )
+}
+
+/// How many rows to scroll the input Paragraph so the cursor's
+/// visual row stays inside `body_area`. Wrap-aware: a long single
+/// logical line that wraps to many visual rows scrolls correctly.
 fn input_scroll_offset(input: &InputState, body_area: ratatui::layout::Rect) -> u16 {
-    if body_area.height == 0 {
+    if body_area.height == 0 || body_area.width == 0 {
         return 0;
     }
-    let content_height = usize::from(body_area.height);
-    let prefix = input.text().get(..input.cursor()).unwrap_or("");
-    let cursor_row = prefix.matches('\n').count();
-    let max_visible_row = content_height.saturating_sub(1);
-    let off = cursor_row.saturating_sub(max_visible_row);
-    u16::try_from(off).unwrap_or(u16::MAX)
+    let (cursor_row, _) = input_visual_cursor(input.text(), input.cursor(), body_area.width);
+    let max_visible_row = body_area.height.saturating_sub(1);
+    cursor_row.saturating_sub(max_visible_row)
 }
 
 /// Compute the screen position of the prompt cursor inside the input
-/// body area. Returns `None` if `body_area` is empty.
+/// body area. Returns `None` if `body_area` is empty. Wrap-aware:
+/// the visual `(row, col)` mirrors what `Paragraph::wrap` paints,
+/// so a long line that wraps places the cursor on the right wrapped
+/// row instead of clamping to the right edge of row 0.
 fn input_cursor_position(
     input: &InputState,
     body_area: ratatui::layout::Rect,
@@ -1096,13 +1136,9 @@ fn input_cursor_position(
     }
     let max_x = body_area.x + body_area.width - 1;
     let max_y = body_area.y + body_area.height - 1;
-    let prefix = input.text().get(..input.cursor()).unwrap_or("");
-    let row_offset = u16::try_from(prefix.matches('\n').count())
-        .unwrap_or(u16::MAX)
-        .saturating_sub(scroll_off);
-    let last_line = prefix.rsplit('\n').next().unwrap_or("");
-    let col_offset = u16::try_from(last_line.chars().count()).unwrap_or(u16::MAX);
-    let cx = body_area.x.saturating_add(col_offset).min(max_x);
+    let (row, col) = input_visual_cursor(input.text(), input.cursor(), body_area.width);
+    let row_offset = row.saturating_sub(scroll_off);
+    let cx = body_area.x.saturating_add(col).min(max_x);
     let cy = body_area.y.saturating_add(row_offset).min(max_y);
     Some((cx, cy))
 }

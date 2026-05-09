@@ -28,14 +28,6 @@ use crate::view;
 /// Lines scrolled per mouse wheel notch.
 const MOUSE_SCROLL_LINES: i32 = 3;
 
-/// Number of rows the input text occupies, counting a trailing newline
-/// as a fresh empty row. `String::lines()` would drop that row, which
-/// would leave the input area undersized after `Shift+Enter` until the
-/// user types a visible character.
-fn text_row_count(text: &str) -> usize {
-    text.split('\n').count()
-}
-
 /// When `KAGE_DEBUG_KEYS` is set to a non-empty value, every press is
 /// appended to the file at that path (or `$XDG_STATE_HOME/kage/keys.log`
 /// when the value is `1`). Lets us diagnose terminal-specific quirks
@@ -478,8 +470,6 @@ impl App {
         // search is active.
         let search_match_count = self.compute_search_match_count();
         let mut buffer = self.buffer.lock().expect("buffer mutex poisoned");
-        let input_text_lines = u16::try_from(text_row_count(self.input.text())).unwrap_or(u16::MAX);
-        let input_height = input_height_for(input_text_lines);
         let cmdline = self.cmdline.as_ref();
         let model_snapshot = self
             .status_model
@@ -503,6 +493,16 @@ impl App {
         let picker = self.picker.as_mut();
         let input = &self.input;
         tui.terminal().draw(|frame| {
+            // Compute the input region size from the *visual* row
+            // count after wrap, not the logical `\n` count, so a
+            // long single line that overflows the body width grows
+            // the input card instead of being silently clipped.
+            let body_width = frame
+                .area()
+                .width
+                .saturating_sub(2 + view::INPUT_GLYPH_WIDTH);
+            let input_visual_lines = view::input_visual_row_count(input.text(), body_width);
+            let input_height = input_height_for(input_visual_lines);
             let regions = split(frame.area(), input_height, bottom);
             view::render(
                 frame,
@@ -1240,8 +1240,6 @@ impl App {
     {
         let search_match_count = self.compute_search_match_count();
         let mut buffer = self.buffer.lock().expect("buffer mutex poisoned");
-        let input_text_lines = u16::try_from(text_row_count(self.input.text())).unwrap_or(u16::MAX);
-        let input_height = input_height_for(input_text_lines);
         let session_usage = self.session_usage_snapshot();
         let bottom = if self.modeline_visible() {
             crate::layout::STATUS_BOTTOM_LINES_DEFAULT
@@ -1266,6 +1264,12 @@ impl App {
         let input = &self.input;
         terminal
             .draw(|frame| {
+                let body_width = frame
+                    .area()
+                    .width
+                    .saturating_sub(2 + view::INPUT_GLYPH_WIDTH);
+                let input_visual_lines = view::input_visual_row_count(input.text(), body_width);
+                let input_height = input_height_for(input_visual_lines);
                 let regions = split(frame.area(), input_height, bottom);
                 view::render(
                     frame,

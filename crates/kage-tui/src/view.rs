@@ -520,9 +520,10 @@ fn input_cursor_position(
 pub fn block_to_lines(block: &Block, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
     match block {
         Block::User { text } => user_block_lines(text, width, emphasis),
-        Block::Assistant { text, .. } => {
-            mark_emphasis(plain_lines(text, assistant_style()), emphasis)
-        }
+        Block::Assistant { text, .. } => mark_emphasis(
+            crate::syntax::highlight_fenced(text, assistant_style()),
+            emphasis,
+        ),
         Block::Thinking { text, folded, .. } => {
             let mut out = Vec::new();
             out.push(header_line(
@@ -874,7 +875,11 @@ fn tool_pair_to_lines(
     );
     if !body.is_empty() {
         content.push(Line::raw(""));
-        for line in body {
+        // For `read`/`view` results, syntect-highlight the body if we
+        // can infer a syntax from the path's extension. Other tools
+        // (find, grep, bash) keep the plain truncated body.
+        let highlighted = highlight_read_body_if_applicable(name, input_summary, &body, body_style);
+        for line in highlighted {
             content.push(line);
         }
     }
@@ -948,6 +953,47 @@ fn body_trim_for(tool: &str) -> BodyTrim {
         "read" | "view" => BodyTrim::Head,
         _ => BodyTrim::Tail,
     }
+}
+
+/// For `read`/`view` tool blocks, run the (already-truncated) body
+/// through syntect using the syntax inferred from the file path's
+/// extension. Other tools pass through unchanged.
+///
+/// Operates on already-rendered lines so it preserves the tail/head
+/// truncation marker added by `truncated_body`. The marker line is
+/// the only one whose first span style is the dim `DarkGray`; we
+/// detect that and skip highlighting it.
+fn highlight_read_body_if_applicable(
+    tool_name: &str,
+    input_summary: &str,
+    body: &[Line<'static>],
+    fallback: Style,
+) -> Vec<Line<'static>> {
+    if !matches!(tool_name, "read" | "view") {
+        return body.to_vec();
+    }
+    let path = input_summary.split_whitespace().next().unwrap_or("");
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+    if ext.is_empty() {
+        return body.to_vec();
+    }
+    let mut out: Vec<Line<'static>> = Vec::with_capacity(body.len());
+    for line in body {
+        let original_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        // Skip the truncation marker line (it starts with "...").
+        if original_text.trim_start().starts_with("...") {
+            out.push(line.clone());
+            continue;
+        }
+        let highlighted = crate::syntax::highlight_extension(&original_text, ext, fallback);
+        for hl in highlighted {
+            out.push(hl);
+        }
+    }
+    out
 }
 
 fn truncated_body(

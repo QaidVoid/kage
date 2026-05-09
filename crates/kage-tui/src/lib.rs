@@ -10,6 +10,7 @@ pub mod input;
 pub mod layout;
 pub mod overlay;
 pub mod picker;
+pub mod syntax;
 pub mod terminal;
 pub mod view;
 

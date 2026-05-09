@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod buffer;
+pub mod cmdline;
 pub mod error;
 pub mod events;
 pub mod hostlog;
@@ -14,6 +15,7 @@ pub mod view;
 
 pub use app::{App, AppExit, RunRequest};
 pub use buffer::{Block, Buffer};
+pub use cmdline::{CommandLine, CommandLineEvent};
 pub use error::TuiError;
 pub use events::{SharedBuffer, TuiHooks, shared_buffer};
 pub use hostlog::buffer_host_log;

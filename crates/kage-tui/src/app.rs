@@ -9,6 +9,7 @@
 
 use std::io::Write;
 use std::sync::mpsc::{Sender, TrySendError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
@@ -163,6 +164,12 @@ pub struct App {
     /// Open `:` command line, if any. While present it owns key input
     /// and replaces the status bar's mode pill.
     cmdline: Option<CommandLine>,
+    /// Status bar context the host populates: live model id and a
+    /// short session-id pill. Held as `Arc<Mutex<...>>` so the worker
+    /// thread can update them out from under the renderer (model
+    /// switches mid-session).
+    status_model: Option<Arc<Mutex<String>>>,
+    status_session_id: Option<String>,
 }
 
 impl App {
@@ -179,7 +186,21 @@ impl App {
             picker_kind: None,
             session_lister: None,
             cmdline: None,
+            status_model: None,
+            status_session_id: None,
         }
+    }
+
+    /// Hand the App a shared handle on the active `provider:model`
+    /// string so the status bar reflects model switches in real time.
+    pub fn set_status_model(&mut self, model: Arc<Mutex<String>>) {
+        self.status_model = Some(model);
+    }
+
+    /// Set the short session-id pill shown on the right of the status
+    /// bar.
+    pub fn set_status_session_id(&mut self, short_id: String) {
+        self.status_session_id = Some(short_id);
     }
 
     /// Replace the model list shown when the user opens the in-TUI
@@ -243,9 +264,17 @@ impl App {
         let input_text_lines = u16::try_from(text_row_count(self.input.text())).unwrap_or(u16::MAX);
         let input_height = input_height_for(input_text_lines + 1);
         let cmdline = self.cmdline.as_ref();
+        let model_snapshot = self
+            .status_model
+            .as_ref()
+            .and_then(|m| m.lock().ok().map(|g| g.clone()));
+        let status = view::StatusCtx {
+            model: model_snapshot.as_deref(),
+            session_id: self.status_session_id.as_deref(),
+        };
         tui.terminal().draw(|frame| {
             let regions = split(frame.area(), input_height);
-            view::render(frame, regions, &mut buffer, &self.input, cmdline);
+            view::render(frame, regions, &mut buffer, &self.input, cmdline, &status);
             if let Some(picker) = self.picker.as_mut() {
                 picker.render(frame, frame.area());
             }
@@ -515,10 +544,18 @@ impl App {
         let input_height = input_height_for(input_text_lines + 1);
         let picker = self.picker.as_mut();
         let cmdline = self.cmdline.as_ref();
+        let model_snapshot = self
+            .status_model
+            .as_ref()
+            .and_then(|m| m.lock().ok().map(|g| g.clone()));
+        let status = view::StatusCtx {
+            model: model_snapshot.as_deref(),
+            session_id: self.status_session_id.as_deref(),
+        };
         terminal
             .draw(|frame| {
                 let regions = split(frame.area(), input_height);
-                view::render(frame, regions, &mut buffer, &self.input, cmdline);
+                view::render(frame, regions, &mut buffer, &self.input, cmdline, &status);
                 if let Some(picker) = picker {
                     picker.render(frame, frame.area());
                 }

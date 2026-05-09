@@ -25,3 +25,4 @@ pub use layout::{INPUT_MAX_LINES, INPUT_MIN_LINES, Regions, input_height_for, sp
 pub use overlay::{OverlayPicker, PickerEvent};
 pub use picker::{PickItem, pick};
 pub use terminal::Tui;
+pub use view::StatusCtx;

@@ -20,6 +20,16 @@ use crate::cmdline::CommandLine;
 use crate::input::{InputState, Mode};
 use crate::layout::Regions;
 
+/// Read-only snapshot of the live state the status bar needs to
+/// paint. Built fresh each frame from whatever the host has wired in.
+#[derive(Default)]
+pub struct StatusCtx<'a> {
+    /// Active `provider:model` id, if known.
+    pub model: Option<&'a str>,
+    /// Short session id pill, if recording is active.
+    pub session_id: Option<&'a str>,
+}
+
 /// Paint the entire TUI for one frame.
 ///
 /// Takes `buffer` mutably so the renderer can write back the clamped
@@ -34,8 +44,9 @@ pub fn render(
     buffer: &mut Buffer,
     input: &InputState,
     cmdline: Option<&CommandLine>,
+    status: &StatusCtx<'_>,
 ) {
-    render_status(frame, regions, input, cmdline);
+    render_status(frame, regions, input, cmdline, status);
     render_buffer(frame, regions, buffer);
     render_input(frame, regions, input);
     if let Some(cl) = cmdline {
@@ -48,22 +59,54 @@ fn render_status(
     regions: Regions,
     input: &InputState,
     cmdline: Option<&CommandLine>,
+    status: &StatusCtx<'_>,
 ) {
-    let line = if let Some(cl) = cmdline {
-        Line::from(vec![
+    if let Some(cl) = cmdline {
+        let line = Line::from(vec![
             Span::styled(":", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(cl.text().to_owned()),
-        ])
-    } else {
-        let mode = mode_label(input.mode());
-        Line::from(vec![
-            Span::styled(format!(" {mode} "), mode_style(input.mode())),
-            Span::raw(" kage"),
-        ])
-    };
-    let paragraph = Paragraph::new(line)
+        ]);
+        let paragraph = Paragraph::new(line)
+            .alignment(Alignment::Left)
+            .style(Style::default().bg(Color::DarkGray));
+        frame.render_widget(paragraph, regions.status);
+        return;
+    }
+
+    let bg_style = Style::default().bg(Color::DarkGray);
+    let mode = mode_label(input.mode());
+    let dim = Style::default()
+        .fg(Color::Gray)
+        .bg(Color::DarkGray)
+        .add_modifier(Modifier::DIM);
+    let mut left_spans = vec![
+        Span::styled(format!(" {mode} "), mode_style(input.mode())),
+        Span::styled(" kage".to_owned(), bg_style),
+    ];
+    if let Some(model) = status.model
+        && !model.is_empty()
+    {
+        left_spans.push(Span::styled("  ".to_owned(), bg_style));
+        left_spans.push(Span::styled(model.to_owned(), dim));
+    }
+    let mut right_spans: Vec<Span<'static>> = Vec::new();
+    if let Some(sid) = status.session_id
+        && !sid.is_empty()
+    {
+        right_spans.push(Span::styled(format!("session {sid} "), dim));
+    }
+    let total = usize::from(regions.status.width);
+    let left_width: usize = left_spans.iter().map(|s| s.content.chars().count()).sum();
+    let right_width: usize = right_spans.iter().map(|s| s.content.chars().count()).sum();
+    let pad = total.saturating_sub(left_width + right_width);
+    let mut spans = left_spans;
+    if pad > 0 {
+        spans.push(Span::styled(" ".repeat(pad), bg_style));
+    }
+    spans.extend(right_spans);
+    let paragraph = Paragraph::new(Line::from(spans))
         .alignment(Alignment::Left)
-        .style(Style::default().bg(Color::DarkGray));
+        .style(bg_style);
     frame.render_widget(paragraph, regions.status);
 }
 
@@ -896,7 +939,7 @@ mod tests {
         terminal
             .draw(|frame| {
                 let regions = crate::layout::split(frame.area(), 1);
-                render(frame, regions, buffer, input, None);
+                render(frame, regions, buffer, input, None, &StatusCtx::default());
             })
             .unwrap();
         let buf = terminal.backend().buffer();

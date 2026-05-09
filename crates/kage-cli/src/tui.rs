@@ -137,6 +137,13 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     let mut app = App::new(buffer, tx);
     app.set_model_choices(model_choices);
     app.set_history(crate::history::load());
+    app.set_status_model(Arc::clone(&active_qualified));
+    if let Some(p) = session_path.as_ref() {
+        let path = p.lock().expect("session path mutex poisoned").clone();
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            app.set_status_session_id(stem.chars().take(8).collect());
+        }
+    }
     if let Ok(dir) = crate::sessions_dir() {
         app.set_session_lister(Box::new(move || list_session_choices(&dir)));
     }

@@ -88,7 +88,7 @@ fn apply_event(buf: &mut Buffer, event: &LoopEvent) {
             name,
             input_partial,
         } => {
-            let summary = summarize_input(input_partial);
+            let summary = summarize_input(name, input_partial);
             let pretty = serde_json::to_string_pretty(input_partial)
                 .unwrap_or_else(|_| input_partial.to_string());
             buf.push_tool_call(id.to_string(), name, summary, pretty);
@@ -114,16 +114,59 @@ fn apply_event(buf: &mut Buffer, event: &LoopEvent) {
     }
 }
 
-fn summarize_input(input: &serde_json::Value) -> String {
+/// One-line summary of a tool's input shown in the folded header.
+///
+/// Built-in tools each get a tailored projection of their JSON input
+/// (the path for `read`/`write`/`edit`, the pattern for `find`/`grep`,
+/// the command for `bash`, the URL for `web_fetch`, etc.) so the header
+/// reads like `read README.md` instead of `read({"path":"README.md"})`.
+/// Unknown tools fall back to the previous compact-JSON representation.
+fn summarize_input(name: &str, input: &serde_json::Value) -> String {
     if matches!(input, serde_json::Value::Null) {
         return String::new();
     }
-    let mut s = input.to_string();
-    if s.len() > 60 {
-        s.truncate(57);
-        s.push_str("...");
+    let summary = match name {
+        "read" | "view" | "write" | "ls" => string_field(input, "path"),
+        "edit" => edit_summary(input),
+        "find" | "glob" => string_field(input, "pattern"),
+        "grep" => grep_summary(input),
+        "bash" | "shell" => string_field(input, "cmd").or_else(|| string_field(input, "command")),
+        "web_fetch" | "fetch" => string_field(input, "url"),
+        _ => None,
+    };
+    let raw = summary.unwrap_or_else(|| input.to_string());
+    truncate(&raw, 60)
+}
+
+fn string_field(input: &serde_json::Value, key: &str) -> Option<String> {
+    input.get(key)?.as_str().map(str::to_owned)
+}
+
+fn edit_summary(input: &serde_json::Value) -> Option<String> {
+    let path = string_field(input, "path")?;
+    if let (Some(start), Some(end)) = (
+        input.get("start_line").and_then(serde_json::Value::as_i64),
+        input.get("end_line").and_then(serde_json::Value::as_i64),
+    ) {
+        return Some(format!("{path}:{start}-{end}"));
     }
-    s
+    Some(path)
+}
+
+fn grep_summary(input: &serde_json::Value) -> Option<String> {
+    let pattern = string_field(input, "pattern")?;
+    match string_field(input, "path") {
+        Some(path) if path != "." => Some(format!("{pattern} in {path}")),
+        _ => Some(pattern),
+    }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_owned();
+    }
+    let cut: String = s.chars().take(max.saturating_sub(3)).collect();
+    format!("{cut}...")
 }
 
 #[cfg(test)]
@@ -142,6 +185,66 @@ mod tests {
 
     fn id() -> MessageId {
         MessageId::new()
+    }
+
+    #[test]
+    fn summarize_read_returns_just_the_path() {
+        assert_eq!(
+            summarize_input("read", &json!({"path": "README.md"})),
+            "README.md"
+        );
+    }
+
+    #[test]
+    fn summarize_edit_includes_line_range_when_present() {
+        assert_eq!(
+            summarize_input(
+                "edit",
+                &json!({"path": "src/lib.rs", "start_line": 10, "end_line": 20})
+            ),
+            "src/lib.rs:10-20"
+        );
+        assert_eq!(
+            summarize_input("edit", &json!({"path": "src/lib.rs"})),
+            "src/lib.rs"
+        );
+    }
+
+    #[test]
+    fn summarize_grep_combines_pattern_and_path() {
+        assert_eq!(
+            summarize_input("grep", &json!({"pattern": "foo", "path": "src"})),
+            "foo in src"
+        );
+        assert_eq!(
+            summarize_input("grep", &json!({"pattern": "foo", "path": "."})),
+            "foo"
+        );
+    }
+
+    #[test]
+    fn summarize_bash_uses_command_field() {
+        assert_eq!(summarize_input("bash", &json!({"cmd": "ls -la"})), "ls -la");
+        assert_eq!(
+            summarize_input("bash", &json!({"command": "ls -la"})),
+            "ls -la"
+        );
+    }
+
+    #[test]
+    fn summarize_unknown_tool_falls_back_to_compact_json() {
+        assert_eq!(
+            summarize_input("custom_tool", &json!({"foo": "bar"})),
+            "{\"foo\":\"bar\"}"
+        );
+    }
+
+    #[test]
+    fn summarize_truncates_long_summaries() {
+        let path = "a".repeat(80);
+        let out = summarize_input("read", &json!({"path": path}));
+        assert!(out.ends_with("..."));
+        assert!(out.chars().count() <= 60);
     }
 
     #[test]

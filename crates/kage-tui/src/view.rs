@@ -158,15 +158,10 @@ pub fn block_to_lines(block: &Block) -> Vec<Line<'static>> {
             ..
         } => {
             let mut out = Vec::new();
-            let header_text = if input_summary.is_empty() {
-                format!("{name}()")
-            } else {
-                format!("{name}({input_summary})")
-            };
-            out.push(header_line(
+            out.push(tool_header_line(
                 fold_indicator(*folded),
-                "tool",
-                Some(header_text),
+                name,
+                input_summary,
                 tool_call_style(),
             ));
             if !*folded {
@@ -248,6 +243,21 @@ fn plain_lines(text: &str, style: Style) -> Vec<Line<'static>> {
     text.split('\n')
         .map(|line| Line::from(Span::styled(line.to_owned(), style)))
         .collect()
+}
+
+/// Header for a tool-call block: `{indicator} {name} {summary}` with no
+/// bracketed tag. The summary is bold so the tool name and the salient
+/// argument both pop, but the surrounding line stays compact.
+fn tool_header_line(indicator: char, name: &str, summary: &str, style: Style) -> Line<'static> {
+    let mut spans = vec![
+        Span::styled(format!("{indicator} "), style.add_modifier(Modifier::BOLD)),
+        Span::styled(name.to_owned(), style.add_modifier(Modifier::BOLD)),
+    ];
+    if !summary.is_empty() {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(summary.to_owned(), style));
+    }
+    Line::from(spans)
 }
 
 fn header_line(indicator: char, tag: &str, detail: Option<String>, style: Style) -> Line<'static> {
@@ -401,17 +411,18 @@ mod tests {
     }
 
     #[test]
-    fn folded_tool_call_renders_one_header_line() {
+    fn folded_tool_call_renders_name_then_summary_without_brackets() {
         let mut buffer = Buffer::new();
         buffer.push_tool_call("c1", "bash", "ls -la", "{\n  \"cmd\": \"ls -la\"\n}");
-        // Tool calls start folded.
         let input = InputState::new();
         let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 60, 6));
-        let header_line = lines
+        let header = lines
             .iter()
-            .find(|l| l.contains("[tool]"))
+            .find(|l| l.contains("bash"))
             .expect("tool header present");
-        assert!(header_line.contains("bash(ls -la)"));
+        assert!(header.contains("bash ls -la"));
+        assert!(!header.contains("[tool]"));
+        assert!(!header.contains('('));
         assert!(!lines.iter().any(|l| l.contains("\"cmd\"")));
     }
 
@@ -422,7 +433,7 @@ mod tests {
         assert!(buffer.toggle_fold(0));
         let input = InputState::new();
         let lines = snapshot_lines(&buffer, &input, Rect::new(0, 0, 60, 12));
-        assert!(lines.iter().any(|l| l.contains("[tool]")));
+        assert!(lines.iter().any(|l| l.contains("bash")));
         assert!(lines.iter().any(|l| l.contains("\"cmd\"")));
     }
 

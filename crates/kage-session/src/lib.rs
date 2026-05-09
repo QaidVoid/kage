@@ -10,6 +10,7 @@ pub mod entry;
 pub mod error;
 pub mod list;
 pub mod reader;
+pub mod resume;
 pub mod writer;
 
 pub use entry::{
@@ -19,4 +20,5 @@ pub use entry::{
 pub use error::SessionError;
 pub use list::{SessionSummary, list};
 pub use reader::SessionReader;
+pub use resume::{ReplayResult, find_by_prefix, find_last, replay};
 pub use writer::SessionWriter;

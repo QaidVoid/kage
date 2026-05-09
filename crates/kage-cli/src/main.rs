@@ -57,13 +57,36 @@ struct Cli {
 enum Command {
     /// List recorded sessions in `~/.kage/sessions/`.
     List,
+    /// Resume a recorded session, appending new entries to the same file.
+    Resume {
+        /// Session id or unique prefix. Mutually exclusive with --last.
+        id: Option<String>,
+        /// Resume the most recently created session.
+        #[arg(long = "last", conflicts_with = "id")]
+        last: bool,
+        /// New user prompt to append. Required: print mode is the only
+        /// runtime in this build.
+        #[arg(short = 'p', long = "print")]
+        print: Option<String>,
+        /// Override the recorded model. Defaults to the model the session
+        /// was last using.
+        #[arg(short = 'm', long = "model")]
+        model: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
 
-    if let Some(Command::List) = cli.command {
-        return run_list();
+    match cli.command {
+        Some(Command::List) => return run_list(),
+        Some(Command::Resume {
+            id,
+            last,
+            print,
+            model,
+        }) => return run_resume(id.as_deref(), last, print.as_deref(), model.as_deref()),
+        None => {}
     }
 
     let Some(prompt) = cli.print else {
@@ -94,52 +117,164 @@ fn main() -> ExitCode {
     let user_msg = Message::new(Role::User, vec![Content::Text { text: prompt }], None);
     cx.history.push(user_msg.clone());
 
-    let cfg = LoopConfig::default();
-    let cancel = CancelFlag::new();
-
-    let mut stdout = io::stdout().lock();
-    let result = if cli.no_session {
-        let mut hooks = NoopHooks;
-        run(
-            resolved.provider.as_ref(),
-            &tools,
-            &mut cx,
-            &cfg,
-            &mut hooks,
-            &cancel,
-            |event| print_event(&mut stdout, &event),
-        )
+    let writer = if cli.no_session {
+        None
     } else {
-        let writer = match open_session(&resolved.model, &cli.system) {
+        match open_session(&resolved.model, &cli.system) {
             Ok(w) => {
                 eprintln!("kage: recording session to {}", w.path().display());
-                w
+                Some(w)
             }
             Err(e) => {
                 eprintln!("kage: failed to open session file: {e}");
                 return ExitCode::from(1);
             }
-        };
-        let mut hooks = SessionRecordingHooks::new(NoopHooks, writer);
-        hooks.record_user_message(&user_msg);
-        run(
-            resolved.provider.as_ref(),
-            &tools,
-            &mut cx,
-            &cfg,
-            &mut hooks,
-            &cancel,
-            |event| print_event(&mut stdout, &event),
-        )
+        }
+    };
+
+    execute_print_run(
+        resolved.provider.as_ref(),
+        &tools,
+        &mut cx,
+        &user_msg,
+        writer,
+    )
+}
+
+/// Drive one print-mode run. Streams loop events to stdout and, when a
+/// writer is supplied, records the conversation. Returns the appropriate
+/// process exit code.
+fn execute_print_run(
+    provider: &dyn kage_provider::Provider,
+    tools: &kage_tools::ToolRegistry,
+    cx: &mut AgentContext,
+    user_msg: &Message,
+    writer: Option<SessionWriter>,
+) -> ExitCode {
+    let cfg = LoopConfig::default();
+    let cancel = CancelFlag::new();
+    let mut stdout = io::stdout().lock();
+    let result = match writer {
+        None => {
+            let mut hooks = NoopHooks;
+            run(provider, tools, cx, &cfg, &mut hooks, &cancel, |event| {
+                print_event(&mut stdout, &event);
+            })
+        }
+        Some(w) => {
+            let mut hooks = SessionRecordingHooks::new(NoopHooks, w);
+            hooks.record_user_message(user_msg);
+            run(provider, tools, cx, &cfg, &mut hooks, &cancel, |event| {
+                print_event(&mut stdout, &event);
+            })
+        }
     };
     let _ = writeln!(stdout);
-
-    // The loop emits errors as terminal `LoopEvent::Error`s, which `print_event`
-    // already renders. Don't double-print on the `Err` return; just exit non-zero.
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::from(1),
     }
+}
+
+/// Implement `kage resume`: replay an existing session and append a new
+/// user prompt before re-running the loop.
+fn run_resume(
+    id: Option<&str>,
+    last: bool,
+    print: Option<&str>,
+    model_override: Option<&str>,
+) -> ExitCode {
+    let Some(prompt) = print else {
+        eprintln!("kage: resume requires -p/--print in this build");
+        return ExitCode::from(2);
+    };
+    let dir = match sessions_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("kage: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let path = match resolve_resume_target(&dir, id, last) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("kage: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let replay = match kage_session::replay(&path) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("kage: failed to replay session {}: {e}", path.display());
+            return ExitCode::from(1);
+        }
+    };
+
+    let registry = build_provider_registry();
+    if registry.ids().count() == 0 {
+        eprintln!(
+            "kage: no provider API keys found in environment. Set one of \
+             ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, ZAI_API_KEY."
+        );
+        return ExitCode::from(1);
+    }
+    let model = model_override.unwrap_or(&replay.model).to_owned();
+    let resolved = match registry.resolve(&model) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("kage: cannot resolve model {model}: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let writer = match SessionWriter::open(&path) {
+        Ok(w) => {
+            eprintln!("kage: appending to session {}", w.path().display());
+            w
+        }
+        Err(e) => {
+            eprintln!("kage: failed to reopen session file: {e}");
+            return ExitCode::from(1);
+        }
+    };
+
+    let tools = builtin_registry();
+    let mut cx = AgentContext::new(resolved.model.clone(), &replay.header.system_prompt);
+    cx.history = replay.history;
+    let user_msg = Message::new(
+        Role::User,
+        vec![Content::Text {
+            text: prompt.to_owned(),
+        }],
+        cx.history.last().map(|m| m.id),
+    );
+    cx.history.push(user_msg.clone());
+
+    execute_print_run(
+        resolved.provider.as_ref(),
+        &tools,
+        &mut cx,
+        &user_msg,
+        Some(writer),
+    )
+}
+
+/// Resolve which session file to resume based on cli flags.
+fn resolve_resume_target(
+    dir: &std::path::Path,
+    id: Option<&str>,
+    last: bool,
+) -> Result<PathBuf, String> {
+    if last {
+        return kage_session::find_last(dir)
+            .map_err(|e| format!("failed to scan sessions: {e}"))?
+            .ok_or_else(|| format!("no sessions in {}", dir.display()));
+    }
+    let prefix = id.ok_or_else(|| "resume requires either --last or a session id".to_owned())?;
+    kage_session::find_by_prefix(dir, prefix)
+        .map_err(|e| format!("failed to resolve session id: {e}"))?
+        .ok_or_else(|| format!("no session matches prefix '{prefix}'"))
 }
 
 /// Resolve the directory holding session files: `~/.kage/sessions/`.

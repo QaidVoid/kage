@@ -17,7 +17,7 @@ use ratatui::widgets::{Block as RtBlock, Borders, Paragraph, Wrap};
 
 use crate::buffer::{Block, Buffer};
 use crate::cmdline::CommandLine;
-use crate::input::{InputState, Mode};
+use crate::input::{InputState, Mode, Pane};
 use crate::layout::Regions;
 
 /// Read-only snapshot of the live state the status bar needs to
@@ -804,15 +804,29 @@ fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {
     }
     let theme = crate::theme::current();
     let mode = input.mode();
-    let border_color = mode_border_color(&theme, mode);
-    let pill_style = mode_pill_style(&theme, mode);
+    let pane_focused = input.focused_pane() == Pane::Input;
+    let border_color = if pane_focused {
+        mode_border_color(&theme, mode)
+    } else {
+        // Buffer pane has focus: dim the input chrome so the eye
+        // tracks the buffer block focus instead.
+        theme.status_dim_fg
+    };
+    let mut pill_style = mode_pill_style(&theme, mode);
+    if !pane_focused {
+        pill_style = pill_style.add_modifier(Modifier::DIM);
+    }
 
     let mut top_line: Vec<Span<'static>> =
         vec![Span::styled(format!(" {} ", mode_label(mode)), pill_style)];
     let hint = mode_hint_text(mode);
     if !hint.is_empty() {
         top_line.push(Span::raw(" "));
-        top_line.push(Span::styled(hint, Style::default().fg(theme.input_hint_fg)));
+        let mut hint_style = Style::default().fg(theme.input_hint_fg);
+        if !pane_focused {
+            hint_style = hint_style.add_modifier(Modifier::DIM);
+        }
+        top_line.push(Span::styled(hint, hint_style));
     }
 
     let block = RtBlock::default()
@@ -862,7 +876,12 @@ fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {
         frame.render_widget(body, body_area);
     }
 
-    if mode == Mode::Insert {
+    // Cursor visibility: present in the input card only when the
+    // input pane has window focus and the user is in a mode where
+    // editing the prompt makes sense. Visual mode (today) drives the
+    // buffer-cell selection overlay; the input cursor stays hidden
+    // there until Stage C introduces input-pane visual.
+    if input.focused_pane() == Pane::Input && matches!(mode, Mode::Normal | Mode::Insert) {
         if let Some(pos) = input_cursor_position(input, body_area, scroll_off) {
             frame.set_cursor_position(pos);
         }

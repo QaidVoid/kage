@@ -18,7 +18,7 @@ use ratatui::crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
 use crate::cmdline::{CommandLine, CommandLineEvent};
 use crate::error::TuiError;
 use crate::events::SharedBuffer;
-use crate::input::{InputAction, InputState, Mode};
+use crate::input::{InputAction, InputState, Mode, Pane};
 use crate::layout::{input_height_for, split};
 use crate::overlay::{OverlayPicker, PickerEvent};
 use crate::picker::PickItem;
@@ -223,6 +223,12 @@ pub struct App {
     /// `y` recover the full selected text even when part of the
     /// selection has scrolled off-screen.
     captured_rows: std::collections::BTreeMap<usize, Vec<view::CapturedCell>>,
+    /// Last DECSCUSR cursor shape we emitted to the terminal, keyed
+    /// by `(mode, pane_focused_on_input)`. Stored so [`Self::draw`]
+    /// can skip the escape on frames where the cursor shape would be
+    /// identical, avoiding a flicker on terminals that briefly hide
+    /// the cursor when the style is reapplied.
+    last_cursor_style: Option<(Mode, bool)>,
 }
 
 impl App {
@@ -248,6 +254,7 @@ impl App {
             pending_mouse_capture: None,
             screen_selection: None,
             captured_rows: std::collections::BTreeMap::new(),
+            last_cursor_style: None,
         }
     }
 
@@ -406,7 +413,35 @@ impl App {
         !pending.is_empty()
     }
 
+    /// Emit a DECSCUSR cursor-shape escape if the desired shape for
+    /// the current mode + pane focus differs from the last shape we
+    /// emitted. Reapplying the same shape every frame causes some
+    /// terminals (kitty, mlterm) to flicker the cursor briefly.
+    fn sync_cursor_style(&mut self) {
+        use ratatui::crossterm::cursor::SetCursorStyle;
+        let pane_focused = self.input.focused_pane() == Pane::Input;
+        let key = (self.input.mode(), pane_focused);
+        if self.last_cursor_style == Some(key) {
+            return;
+        }
+        // Buffer pane focused: cursor is hidden in the input card;
+        // fall back to the user's shell-default shape so anywhere
+        // ratatui happens to paint a cursor matches ambient style.
+        // Visual + Input pane keeps the input cursor hidden during
+        // buffer-cell visual selection, but we leave the shape as
+        // Block so the next mode change starts from a sensible
+        // default.
+        let style = match key {
+            (Mode::Insert, true) => SetCursorStyle::SteadyBar,
+            (Mode::Normal | Mode::Visual, true) => SetCursorStyle::SteadyBlock,
+            (_, false) => SetCursorStyle::DefaultUserShape,
+        };
+        let _ = ratatui::crossterm::execute!(std::io::stdout(), style);
+        self.last_cursor_style = Some(key);
+    }
+
     fn draw(&mut self, tui: &mut Tui) -> Result<(), TuiError> {
+        self.sync_cursor_style();
         // compute_search_match_count locks self.buffer internally; do
         // it BEFORE we hold the lock or we'll deadlock the moment a
         // search is active.
@@ -1012,6 +1047,12 @@ impl App {
             }
             InputAction::SearchNext => self.jump_to_search_match(true),
             InputAction::SearchPrev => self.jump_to_search_match(false),
+            InputAction::CyclePane => {
+                self.input.toggle_focused_pane();
+            }
+            InputAction::FocusPane(pane) => {
+                self.input.set_focused_pane(pane);
+            }
         }
         None
     }
@@ -1033,10 +1074,20 @@ impl App {
             let area_y = buf.last_area_y();
             let area_height = buf.last_area_height();
             if row < area_y || row >= area_y.saturating_add(area_height) {
+                // Click landed outside the buffer rectangle. Anything
+                // below the buffer is the input card or modeline; the
+                // top status row is above. Clicks below the buffer
+                // focus the input pane (vim-style window focus); top
+                // status clicks leave focus alone.
                 self.screen_selection = None;
                 self.mouse_drag_anchor = None;
+                if row >= area_y.saturating_add(area_height) {
+                    self.input.set_focused_pane(Pane::Input);
+                }
                 return;
             }
+            // Click inside the buffer area focuses the buffer pane.
+            self.input.set_focused_pane(Pane::Buffer);
             let vrow = buf
                 .last_virtual_top()
                 .saturating_add(usize::from(row - area_y));

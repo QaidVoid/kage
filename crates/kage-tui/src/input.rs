@@ -30,6 +30,38 @@ pub enum Mode {
     Visual,
 }
 
+/// Vim-style window focus: which "pane" Normal-mode keys (and the
+/// hardware cursor) belong to. `Pane::Input` is the bordered input
+/// card at the bottom of the screen; `Pane::Buffer` is the read-only
+/// conversation buffer above it. `Ctrl-w` toggles between them, and
+/// mouse clicks inside a region focus that pane.
+///
+/// The pane is purely a routing flag in Stage B (PR-2): keystrokes
+/// behave the same regardless. Stage C (vim ops on the input pane)
+/// uses it to decide whether `j`/`k` scrolls the buffer or moves the
+/// input cursor.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Pane {
+    /// The bordered input card. Default focus: text and cursor live
+    /// here so the user can type immediately on startup.
+    #[default]
+    Input,
+    /// The conversation buffer. Block focus and scroll act on this
+    /// pane's content.
+    Buffer,
+}
+
+impl Pane {
+    /// Return the other pane. Stage B's `Ctrl-w` toggles using this.
+    #[must_use]
+    pub fn opposite(self) -> Self {
+        match self {
+            Self::Input => Self::Buffer,
+            Self::Buffer => Self::Input,
+        }
+    }
+}
+
 /// Side effect produced by a key press.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InputAction {
@@ -98,6 +130,12 @@ pub enum InputAction {
     /// Yank the entire content of the focused block (vim-style
     /// `Y`). Selection state is left alone.
     YankFocusedBlock,
+    /// Toggle vim-style window focus between the input card and the
+    /// conversation buffer (`Ctrl-w` in Normal mode).
+    CyclePane,
+    /// Force focus to a specific pane (e.g. mouse click in a
+    /// particular region).
+    FocusPane(Pane),
 }
 
 /// Cap on retained history entries. The host's persistence layer is
@@ -115,6 +153,7 @@ pub struct InputState {
     history: Vec<String>,
     history_cursor: Option<usize>,
     history_stash: Option<String>,
+    focused_pane: Pane,
 }
 
 impl InputState {
@@ -147,6 +186,32 @@ impl InputState {
     #[must_use]
     pub fn has_pending(&self) -> bool {
         self.pending.is_some()
+    }
+
+    /// Currently focused vim-style pane. See [`Pane`] for semantics.
+    #[must_use]
+    pub fn focused_pane(&self) -> Pane {
+        self.focused_pane
+    }
+
+    /// Force focus to `pane`. Returns whether the focus actually
+    /// changed; callers can use that signal to redraw or emit a
+    /// cursor-style escape only when necessary.
+    pub fn set_focused_pane(&mut self, pane: Pane) -> bool {
+        if self.focused_pane == pane {
+            return false;
+        }
+        self.focused_pane = pane;
+        true
+    }
+
+    /// Toggle the focused pane. Same return convention as
+    /// [`Self::set_focused_pane`] (always `true`, since the toggle
+    /// changes state by definition; the bool stays for symmetry with
+    /// the setter so callers can use them interchangeably).
+    pub fn toggle_focused_pane(&mut self) -> bool {
+        self.focused_pane = self.focused_pane.opposite();
+        true
     }
 
     /// Read-only slice of history entries, oldest first.
@@ -263,6 +328,7 @@ impl InputState {
                 Vec::new()
             }
             KeyCode::Char('o') if ctrl => vec![InputAction::ToggleFold],
+            KeyCode::Char('w') if ctrl => vec![InputAction::CyclePane],
             KeyCode::Char(':') => vec![InputAction::BeginCommand],
             KeyCode::Char('/') => vec![InputAction::BeginSearch],
             KeyCode::Char('c') if ctrl => vec![InputAction::Cancel],
@@ -828,5 +894,35 @@ mod tests {
         assert_eq!(state.cursor(), 0);
         state.handle_key(key(KeyCode::End));
         assert_eq!(state.cursor(), 3);
+    }
+
+    #[test]
+    fn default_pane_focus_is_input() {
+        let state = InputState::new();
+        assert_eq!(state.focused_pane(), Pane::Input);
+    }
+
+    #[test]
+    fn ctrl_w_in_normal_emits_cycle_pane() {
+        let mut state = InputState::new();
+        let acts = state.handle_key(ctrl('w'));
+        assert_eq!(acts, vec![InputAction::CyclePane]);
+    }
+
+    #[test]
+    fn toggle_focused_pane_round_trips() {
+        let mut state = InputState::new();
+        assert!(state.toggle_focused_pane());
+        assert_eq!(state.focused_pane(), Pane::Buffer);
+        assert!(state.toggle_focused_pane());
+        assert_eq!(state.focused_pane(), Pane::Input);
+    }
+
+    #[test]
+    fn set_focused_pane_reports_changes() {
+        let mut state = InputState::new();
+        assert!(!state.set_focused_pane(Pane::Input)); // no change
+        assert!(state.set_focused_pane(Pane::Buffer));
+        assert!(!state.set_focused_pane(Pane::Buffer)); // no change
     }
 }

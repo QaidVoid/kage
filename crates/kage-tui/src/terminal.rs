@@ -14,6 +14,7 @@ use std::io::{self, Write};
 use std::sync::Once;
 
 use ratatui::DefaultTerminal;
+use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -111,6 +112,10 @@ impl Tui {
 
 impl Drop for Tui {
     fn drop(&mut self) {
+        // Reset the DECSCUSR cursor shape we may have pushed (block
+        // in Normal, bar in Insert) so the user's shell prompt
+        // doesn't inherit it.
+        let _ = execute!(io::stdout(), SetCursorStyle::DefaultUserShape);
         if self.mouse_capture_active {
             let _ = execute!(io::stdout(), DisableMouseCapture);
             self.mouse_capture_active = false;
@@ -134,6 +139,7 @@ fn install_panic_hook() {
     PANIC_HOOK.call_once(|| {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
+            let _ = execute!(io::stdout(), SetCursorStyle::DefaultUserShape);
             let _ = execute!(io::stdout(), DisableMouseCapture);
             let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
             let _ = execute!(io::stdout(), DisableBracketedPaste);

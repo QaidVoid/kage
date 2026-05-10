@@ -9,9 +9,13 @@
 //! optional indented body, and custom blocks are passed through with
 //! their `kind` shown in the header.
 
+pub mod assistant;
+pub mod thinking;
 pub mod user;
 pub mod widget;
 
+pub use assistant::AssistantBlockWidget;
+pub use thinking::ThinkingBlockWidget;
 pub use user::UserBlockWidget;
 pub use widget::{BlockWidget, EmptyBlockWidget, RenderCtx, SelectionState};
 

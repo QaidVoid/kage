@@ -123,6 +123,29 @@ mod tests {
     }
 
     #[test]
+    fn focused_render_paints_rule_on_every_wrapped_row() {
+        let long = "a".repeat(120);
+        let w = AssistantBlockWidget::new(&long, false);
+        let theme = Theme::default();
+        let mut focused = ctx(&theme);
+        focused.emphasis = Emphasis::Focused;
+        let area = Rect::new(0, 0, 20, w.measure(20));
+        assert!(area.height >= 6, "expected the long line to wrap");
+        let mut buf = Buffer::empty(area);
+        w.render(area, &mut buf, &focused);
+        // PB.6: every visual row of body content (everything before
+        // the trailing pad row) carries the focus rule glyph.
+        let body_rows = area.height.saturating_sub(1);
+        for y in area.top()..(area.top() + body_rows) {
+            assert_eq!(
+                buf[(area.left(), y)].symbol(),
+                Emphasis::Focused.rule_glyph(),
+                "expected focus rule at row {y} col 0"
+            );
+        }
+    }
+
+    #[test]
     fn live_and_settled_widgets_paint_the_same_visible_text() {
         let live = AssistantBlockWidget::new("plain text", true);
         let settled = AssistantBlockWidget::new("plain text", false);

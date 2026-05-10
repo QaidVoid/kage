@@ -116,6 +116,24 @@ mod tests {
     }
 
     #[test]
+    fn unfocused_render_keeps_gutter_blank_but_reserved() {
+        let w = ThinkingBlockWidget::new("body", false, false);
+        let theme = Theme::default();
+        let area = Rect::new(0, 0, 30, w.measure(30));
+        let mut buf = Buffer::empty(area);
+        w.render(area, &mut buf, &ctx(&theme));
+        // PB.5: even when not focused, column 0 holds a blank cell
+        // (no rule glyph) so toggling focus does not shift the body.
+        for y in area.top()..area.bottom() {
+            let cell = buf[(area.left(), y)].symbol();
+            assert!(
+                cell == " " || cell == "\u{258e}",
+                "row {y} col 0 should be blank space or thinking rule, got {cell:?}"
+            );
+        }
+    }
+
+    #[test]
     fn folded_render_omits_body() {
         let w = ThinkingBlockWidget::new("hidden reason", true, false);
         let theme = Theme::default();

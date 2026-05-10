@@ -1282,7 +1282,7 @@ pub fn block_to_lines(block: &Block, width: u16, emphasis: Emphasis) -> Vec<Line
             } else {
                 crate::syntax::highlight_fenced(text, assistant_style())
             };
-            mark_emphasis(lines, emphasis)
+            mark_emphasis(lines, width, emphasis)
         }
         Block::Thinking { text, folded, .. } => {
             let mut out = Vec::new();
@@ -1312,7 +1312,7 @@ pub fn block_to_lines(block: &Block, width: u16, emphasis: Emphasis) -> Vec<Line
                     out.push(Line::from(spans));
                 }
             }
-            mark_emphasis(out, emphasis)
+            mark_emphasis(out, width, emphasis)
         }
         Block::ToolCall {
             name,
@@ -1377,7 +1377,7 @@ pub fn block_to_lines(block: &Block, width: u16, emphasis: Emphasis) -> Vec<Line
                     out.push(prefix_line("  ", body_line));
                 }
             }
-            mark_emphasis(out, emphasis)
+            mark_emphasis(out, width, emphasis)
         }
         Block::Custom {
             kind, text, folded, ..
@@ -1394,7 +1394,7 @@ pub fn block_to_lines(block: &Block, width: u16, emphasis: Emphasis) -> Vec<Line
                     out.push(prefix_line("  ", body_line));
                 }
             }
-            mark_emphasis(out, emphasis)
+            mark_emphasis(out, width, emphasis)
         }
     }
 }
@@ -1422,16 +1422,17 @@ fn user_block_lines(text: &str, width: u16, emphasis: Emphasis) -> Vec<Line<'sta
 /// blank stand-in, one cell of padding before the body.
 pub(super) const FOCUS_RULE_WIDTH: usize = 2;
 
-/// Prepend a left-edge focus rule to every line of an already-built
-/// non-bubble block's render.
+/// Prepend a left-edge focus rule to every visual row of an
+/// already-built non-bubble block's render.
 ///
-/// PB.5: the rule column is reserved unconditionally so toggling
-/// focus does not shift the body horizontally. When `emphasis` is
-/// `None` the gutter is painted as blank cells in the same width;
-/// when focused or matching a search hit the rule glyph is painted
-/// in the corresponding theme color. All chrome cells carry the
-/// `DECORATION_MARKER` so selection / yank skips them.
-fn mark_emphasis(lines: Vec<Line<'static>>, emphasis: Emphasis) -> Vec<Line<'static>> {
+/// PB.5 reserves the column unconditionally so toggling focus does
+/// not shift the body horizontally; PB.6 additionally pre-wraps
+/// each logical line to `width - FOCUS_RULE_WIDTH` chars so the
+/// rule prefix lands on **every** visual row, including wrapped
+/// continuations. Without the pre-wrap, ratatui's `Paragraph::wrap`
+/// would only see one logical line with the prefix and fold the
+/// rest of the text below the rule.
+fn mark_emphasis(lines: Vec<Line<'static>>, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
     let prefix: Span<'static> = if emphasis == Emphasis::None {
         Span::styled(
             " ".repeat(FOCUS_RULE_WIDTH),
@@ -1444,15 +1445,17 @@ fn mark_emphasis(lines: Vec<Line<'static>>, emphasis: Emphasis) -> Vec<Line<'sta
             .add_modifier(DECORATION_MARKER);
         Span::styled(format!("{} ", emphasis.rule_glyph()), style)
     };
-    lines
-        .into_iter()
-        .map(|line| {
-            let mut spans = Vec::with_capacity(line.spans.len() + 1);
+    let body_width = usize::from(width).saturating_sub(FOCUS_RULE_WIDTH).max(1);
+    let mut out: Vec<Line<'static>> = Vec::with_capacity(lines.len());
+    for line in lines {
+        for row_spans in split_line_into_rows(line, body_width) {
+            let mut spans = Vec::with_capacity(row_spans.len() + 1);
             spans.push(prefix.clone());
-            spans.extend(line.spans);
-            Line::from(spans)
-        })
-        .collect()
+            spans.extend(row_spans);
+            out.push(Line::from(spans));
+        }
+    }
+    out
 }
 
 /// Wrap a vector of content lines in a full-width "bubble": each row

@@ -13,6 +13,7 @@ use std::time::Instant;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget};
 
 use super::widget::{BlockWidget, RenderCtx};
@@ -123,13 +124,16 @@ impl BlockWidget for ToolPairBlockWidget {
         if area.width == 0 || area.height == 0 {
             return;
         }
-        let lines = tool_pair_to_lines(
+        Paragraph::new(self.lines(area.width, ctx)).render(area, buf);
+    }
+
+    fn lines(&self, width: u16, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
+        tool_pair_to_lines(
             &self.synthetic_call(),
             &self.synthetic_result(),
-            area.width,
+            width,
             ctx.emphasis,
-        );
-        Paragraph::new(lines).render(area, buf);
+        )
     }
 }
 

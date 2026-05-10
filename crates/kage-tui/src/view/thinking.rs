@@ -8,6 +8,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget};
 
 use super::widget::{BlockWidget, RenderCtx};
@@ -57,8 +58,11 @@ impl BlockWidget for ThinkingBlockWidget {
         if area.width == 0 || area.height == 0 {
             return;
         }
-        let lines = block_to_lines(&self.synthetic_block(), area.width, ctx.emphasis);
-        Paragraph::new(lines).render(area, buf);
+        Paragraph::new(self.lines(area.width, ctx)).render(area, buf);
+    }
+
+    fn lines(&self, width: u16, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
+        block_to_lines(&self.synthetic_block(), width, ctx.emphasis)
     }
 }
 

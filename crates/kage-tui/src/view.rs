@@ -379,6 +379,7 @@ fn render_buffer(
         }
     }
 
+    let registry = registry::BlockRenderer::with_builtins();
     let focus = buffer.effective_focus();
 
     // Pass 1: gather per-block heights. Cached entries return
@@ -406,8 +407,14 @@ fn render_buffer(
         } else if buffer.is_live(idx) {
             approximate_block_height(buffer, idx, width)
         } else {
-            let block_lines =
-                build_block_lines(buffer, idx, width, &result_by_call, Emphasis::None);
+            let block_lines = build_block_lines(
+                buffer,
+                idx,
+                width,
+                &result_by_call,
+                Emphasis::None,
+                &registry,
+            );
             let measured = Paragraph::new(block_lines.clone())
                 .wrap(Wrap { trim: false })
                 .line_count(width);
@@ -521,7 +528,7 @@ fn render_buffer(
         {
             cached.as_ref().clone()
         } else {
-            let built = build_block_lines(buffer, idx, width, &result_by_call, emp);
+            let built = build_block_lines(buffer, idx, width, &result_by_call, emp, &registry);
             if emp == Emphasis::None {
                 let measured = Paragraph::new(built.clone())
                     .wrap(Wrap { trim: false })
@@ -801,21 +808,41 @@ fn approximate_block_height(buffer: &Buffer, idx: usize, width: u16) -> usize {
 /// merging a `ToolCall` with its paired `ToolResult` when one exists.
 /// Callers pass the `result_by_call` map (so lookups stay cheap inside
 /// the render loop) and the emphasis state for this idx.
+///
+/// PB.9 routes this through the [`registry::BlockRenderer`] so block
+/// rendering goes through the same widget dispatch plugins will hook
+/// into via `set_builtin` / `set_custom`. Built-in widgets currently
+/// delegate to the same `block_to_lines` / `tool_pair_to_lines`
+/// helpers; future commits lift the per-kind logic into the widgets
+/// directly and retire those helpers.
 fn build_block_lines(
     buffer: &Buffer,
     idx: usize,
     width: u16,
     result_by_call: &std::collections::HashMap<String, usize>,
     emphasis: Emphasis,
+    registry: &registry::BlockRenderer,
 ) -> Vec<Line<'static>> {
     let blocks = buffer.blocks();
     let cur = &blocks[idx];
+    let theme = crate::theme::current();
+    let ctx = widget::RenderCtx {
+        theme: &theme,
+        focused: emphasis == Emphasis::Focused,
+        emphasis,
+        selection: None,
+        search_pattern: None,
+    };
     if let Block::ToolCall { call_id, .. } = cur
         && let Some(&result_idx) = result_by_call.get(call_id)
+        && let Some(w) = registry.pair_widget_for(cur, &blocks[result_idx])
     {
-        return tool_pair_to_lines(cur, &blocks[result_idx], width, emphasis);
+        return w.lines(width, &ctx);
     }
-    block_to_lines(cur, width, emphasis)
+    if let Some(w) = registry.widget_for(cur) {
+        return w.lines(width, &ctx);
+    }
+    Vec::new()
 }
 
 /// Width in cells of the leading prompt glyph plus its trailing

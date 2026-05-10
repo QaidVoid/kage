@@ -10,6 +10,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget};
 
 use super::user_block_lines;
@@ -36,16 +37,19 @@ impl UserBlockWidget {
 
 impl BlockWidget for UserBlockWidget {
     fn measure(&self, width: u16) -> u16 {
-        let lines = user_block_lines(&self.text, width, super::Emphasis::None);
-        u16::try_from(lines.len()).unwrap_or(u16::MAX)
+        u16::try_from(user_block_lines(&self.text, width, super::Emphasis::None).len())
+            .unwrap_or(u16::MAX)
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, ctx: &RenderCtx<'_>) {
         if area.width == 0 || area.height == 0 {
             return;
         }
-        let lines = user_block_lines(&self.text, area.width, ctx.emphasis);
-        Paragraph::new(lines).render(area, buf);
+        Paragraph::new(self.lines(area.width, ctx)).render(area, buf);
+    }
+
+    fn lines(&self, width: u16, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
+        user_block_lines(&self.text, width, ctx.emphasis)
     }
 }
 

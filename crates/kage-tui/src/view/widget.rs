@@ -17,6 +17,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::text::Line;
 
 use super::Emphasis;
 use crate::theme::Theme;
@@ -74,6 +75,12 @@ pub struct SelectionState {
 /// block they paint; per-frame state lives in [`RenderCtx`]. The
 /// renderer calls [`Self::measure`] first to get an exact height for
 /// vertical layout, then [`Self::render`] with the resulting `Rect`.
+///
+/// While the existing `render_buffer` still composes blocks into one
+/// big `Paragraph`, [`Self::lines`] returns the same `Line`s the
+/// widget would paint so the lines path can dispatch via the
+/// registry. PB.9 retires the `Paragraph` composition; until then
+/// `lines()` and `render()` are kept in sync.
 pub trait BlockWidget: Send + Sync {
     /// Compute the exact number of terminal rows this block occupies
     /// when rendered at `width` columns. Replaces the
@@ -85,6 +92,16 @@ pub trait BlockWidget: Send + Sync {
     /// for the full content of `area`, including any chrome (focus
     /// rule column, padding) it owns.
     fn render(&self, area: Rect, buf: &mut Buffer, ctx: &RenderCtx<'_>);
+
+    /// Produce the styled lines this widget would paint at `width`.
+    /// The default returns an empty vector for [`EmptyBlockWidget`];
+    /// every real widget overrides this so `render_buffer` can route
+    /// through the registry while the lines-based composition path
+    /// still exists.
+    fn lines(&self, width: u16, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
+        let _ = (width, ctx);
+        Vec::new()
+    }
 }
 
 /// Uniform layout convention for every block widget.

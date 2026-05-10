@@ -362,7 +362,12 @@ impl App {
             // even with no streaming deltas (e.g. waiting on a slow
             // first token from the provider).
             let tick = if self.is_working() || self.has_running_tool_call() {
-                Duration::from_millis(100)
+                // 50ms keeps the spinner smooth and shaves the worst-
+                // case redraw lag after `working` flips false (e.g.
+                // after a cancel takes effect) so the user perceives
+                // the spinner stopping as effectively instant rather
+                // than tail-end-of-the-100ms-window.
+                Duration::from_millis(50)
             } else {
                 Duration::from_secs(1)
             };

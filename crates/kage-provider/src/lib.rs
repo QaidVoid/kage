@@ -20,7 +20,7 @@ pub mod tokens;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
-pub use cancelable::make_cancelable;
+pub use cancelable::{cancellable_call, make_cancelable};
 pub use catalog::{ModelInfo, PROVIDERS, ProviderInfo};
 pub use error::ProviderError;
 pub use event::{ProviderEvent, StopReason};

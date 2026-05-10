@@ -71,12 +71,14 @@ impl Provider for GeminiProvider {
             "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
             self.base_url, req.model, self.api_key,
         );
-        let response = self
-            .agent
-            .post(&url)
-            .header("content-type", "application/json")
-            .send_json(&body)
-            .map_err(map_ureq_error)?;
+        let agent = self.agent.clone();
+        let response = crate::cancelable::cancellable_call(cancel, move || {
+            agent
+                .post(&url)
+                .header("content-type", "application/json")
+                .send_json(&body)
+                .map_err(map_ureq_error)
+        })?;
 
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {

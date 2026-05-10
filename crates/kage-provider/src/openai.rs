@@ -96,13 +96,16 @@ impl Provider for OpenAiProvider {
         }
         let body = build_request_body(&req, true);
         let url = format!("{}/chat/completions", self.base_url);
-        let response = self
-            .agent
-            .post(&url)
-            .header("authorization", &format!("Bearer {}", self.api_key))
-            .header("content-type", "application/json")
-            .send_json(&body)
-            .map_err(map_ureq_error)?;
+        let agent = self.agent.clone();
+        let api_key = self.api_key.clone();
+        let response = crate::cancelable::cancellable_call(cancel, move || {
+            agent
+                .post(&url)
+                .header("authorization", &format!("Bearer {api_key}"))
+                .header("content-type", "application/json")
+                .send_json(&body)
+                .map_err(map_ureq_error)
+        })?;
 
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {

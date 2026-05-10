@@ -29,14 +29,55 @@ use crate::{EventStream, ProviderError, ProviderEvent};
 
 /// Time the foreground iterator waits between cancel-flag checks.
 ///
-/// Trades responsiveness vs CPU. 100ms is fast enough that a user
-/// hitting `Esc` perceives the cancel as instant, slow enough that the
-/// idle iterator is not visible in `top`.
-const POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Trades responsiveness vs CPU. 25ms is below the human "instant"
+/// perception threshold: a user hitting `Esc` sees the cancel land
+/// effectively immediately. The idle iterator wakes 40 times a
+/// second checking a single atomic load, which is invisible in `top`.
+const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Bounded backlog between worker thread and consumer. Bounded so a
 /// fast-streaming provider cannot run away if the consumer is slow.
 const CHANNEL_BUFFER: usize = 32;
+
+/// Run a blocking, uncancellable closure on a worker thread and poll
+/// `cancel` from the foreground so the caller can return
+/// `ProviderError::Cancelled` long before `f` finishes.
+///
+/// Used by each provider's `stream` impl to wrap the synchronous
+/// `ureq` request-and-headers call: that part of the round-trip
+/// happens before we ever get a Reader to wrap, so without this the
+/// cancel flag would not be observed until the HTTP server replies
+/// (potentially many seconds for slow providers).
+///
+/// On cancel the spawned thread is detached - it continues until `f`
+/// returns naturally and the result is discarded. The connection it
+/// holds is reclaimed at OS-level HTTP keepalive timeout.
+///
+/// # Errors
+///
+/// - Whatever `f` returns when it completes first.
+/// - [`ProviderError::Cancelled`] when the flag is observed first or
+///   the worker thread panics.
+pub fn cancellable_call<F, T>(cancel: &CancelFlag, f: F) -> Result<T, ProviderError>
+where
+    F: FnOnce() -> Result<T, ProviderError> + Send + 'static,
+    T: Send + 'static,
+{
+    let (tx, rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    loop {
+        if cancel.is_cancelled() {
+            return Err(ProviderError::Cancelled);
+        }
+        match rx.recv_timeout(POLL_INTERVAL) {
+            Ok(r) => return r,
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => return Err(ProviderError::Cancelled),
+        }
+    }
+}
 
 /// Wrap `inner` so that `cancel` is observed within [`POLL_INTERVAL`]
 /// regardless of how long the underlying read blocks.

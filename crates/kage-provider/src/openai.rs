@@ -431,7 +431,16 @@ impl OpenAiStream {
             let input = if builder.args.is_empty() {
                 Value::Object(serde_json::Map::new())
             } else {
-                serde_json::from_str(&builder.args).unwrap_or(Value::Null)
+                match serde_json::from_str::<Value>(&builder.args) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.pending.push_back(Err(ProviderError::Decode(format!(
+                            "tool call {} arguments did not parse as JSON: {} (raw: {})",
+                            builder.id.0, e, builder.args
+                        ))));
+                        continue;
+                    }
+                }
             };
             self.pending.push_back(Ok(ProviderEvent::ToolCallEnd {
                 id: builder.id,
@@ -674,6 +683,30 @@ mod tests {
         if let Some(ProviderEvent::MessageEnd { stop_reason, .. }) = events.last() {
             assert_eq!(*stop_reason, StopReason::ToolUse);
         }
+    }
+
+    #[test]
+    fn stream_emits_decode_error_when_tool_args_are_malformed_json() {
+        let bytes: &[u8] = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"write\",\"arguments\":\"{not json\"}}]}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n";
+        let s = stream_from_bytes(bytes);
+        let events: Vec<_> = s.collect();
+        let decode_err = events
+            .iter()
+            .find(|r| matches!(r, Err(ProviderError::Decode(_))))
+            .expect("expected a Decode error event for malformed tool args");
+        if let Err(ProviderError::Decode(msg)) = decode_err {
+            assert!(msg.contains("call_1"), "error should name the tool call id");
+            assert!(
+                msg.contains("{not json"),
+                "error should include the raw args"
+            );
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|r| matches!(r, Ok(ProviderEvent::ToolCallEnd { .. }))),
+            "no ToolCallEnd should fire when args fail to parse"
+        );
     }
 
     #[test]

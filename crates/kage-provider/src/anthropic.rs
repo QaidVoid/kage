@@ -338,7 +338,10 @@ fn anthropic_block_to_content(block: &Value) -> Option<Content> {
         "tool_use" => {
             let id = block.get("id")?.as_str()?.to_owned();
             let name = block.get("name")?.as_str()?.to_owned();
-            let input = block.get("input").cloned().unwrap_or(Value::Null);
+            let input = block
+                .get("input")
+                .cloned()
+                .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
             Some(Content::ToolCall {
                 id: ToolCallId::new(id),
                 name,
@@ -593,7 +596,16 @@ impl AnthropicStream {
             let input = if partial_input.is_empty() {
                 Value::Object(serde_json::Map::new())
             } else {
-                serde_json::from_str(&partial_input).unwrap_or(Value::Null)
+                match serde_json::from_str::<Value>(&partial_input) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        self.pending.push_back(Err(ProviderError::Decode(format!(
+                            "tool call {} input did not parse as JSON: {} (raw: {})",
+                            id.0, e, partial_input
+                        ))));
+                        return;
+                    }
+                }
             };
             self.pending
                 .push_back(Ok(ProviderEvent::ToolCallEnd { id, input }));
@@ -1040,6 +1052,30 @@ mod tests {
         } else {
             panic!("expected MessageEnd");
         }
+    }
+
+    #[test]
+    fn stream_emits_decode_error_when_tool_input_partial_json_is_malformed() {
+        let bytes: &[u8] = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"write\",\"input\":{}}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{not json\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":2}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+        let s = stream_from_bytes(bytes);
+        let events: Vec<_> = s.collect();
+        let decode_err = events
+            .iter()
+            .find(|r| matches!(r, Err(ProviderError::Decode(_))))
+            .expect("expected a Decode error event for malformed tool input");
+        if let Err(ProviderError::Decode(msg)) = decode_err {
+            assert!(msg.contains("call_1"), "error should name the tool call id");
+            assert!(
+                msg.contains("{not json"),
+                "error should include the raw partial input"
+            );
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|r| matches!(r, Ok(ProviderEvent::ToolCallEnd { .. }))),
+            "no ToolCallEnd should fire when input fails to parse"
+        );
     }
 
     #[test]

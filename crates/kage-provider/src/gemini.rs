@@ -294,7 +294,10 @@ impl GeminiStream {
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .to_owned();
-            let args = call.get("args").cloned().unwrap_or(Value::Null);
+            let args = call
+                .get("args")
+                .cloned()
+                .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
             let id = self
                 .tool_call_ids
                 .entry(name.clone())

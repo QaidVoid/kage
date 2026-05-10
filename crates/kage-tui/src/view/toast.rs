@@ -164,10 +164,10 @@ fn accent_for(theme: &Theme, kind: ToastKind) -> ratatui::style::Color {
 
 fn icon_for(kind: ToastKind) -> &'static str {
     match kind {
-        ToastKind::Info => "\u{2022}",     // bullet
-        ToastKind::Success => "\u{2713}",  // check
-        ToastKind::Warning => "\u{26a0}",  // warning sign
-        ToastKind::Error => "\u{2717}",    // ballot x
+        ToastKind::Info => "\u{2022}",    // bullet
+        ToastKind::Success => "\u{2713}", // check
+        ToastKind::Warning => "\u{26a0}", // warning sign
+        ToastKind::Error => "\u{2717}",   // ballot x
     }
 }
 

@@ -5,6 +5,7 @@
 //! is no tokio, no async-trait, and no `Pin<Box<dyn Stream>>`.
 
 pub mod anthropic;
+pub mod cancelable;
 pub mod catalog;
 pub mod compat;
 pub mod error;
@@ -19,6 +20,7 @@ pub mod tokens;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
+pub use cancelable::make_cancelable;
 pub use catalog::{ModelInfo, PROVIDERS, ProviderInfo};
 pub use error::ProviderError;
 pub use event::{ProviderEvent, StopReason};

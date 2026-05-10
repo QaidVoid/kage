@@ -393,7 +393,8 @@ impl Provider for AnthropicProvider {
         }
 
         let reader: Box<dyn Read + Send> = Box::new(response.into_body().into_reader());
-        Ok(Box::new(AnthropicStream::new(reader, cancel.clone())))
+        let inner: EventStream = Box::new(AnthropicStream::new(reader, cancel.clone()));
+        Ok(crate::cancelable::make_cancelable(inner, cancel.clone()))
     }
 }
 

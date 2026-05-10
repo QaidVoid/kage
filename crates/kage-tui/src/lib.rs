@@ -42,6 +42,7 @@ pub use terminal::Tui;
 pub use theme::{Theme, current as current_theme, set_current as set_current_theme};
 pub use usage::{SessionUsage, SharedSessionUsage, shared_session_usage};
 pub use view::{
-    AssistantBlockWidget, BlockWidget, EmptyBlockWidget, RenderCtx, SelectionState, StatusCtx,
-    ThinkingBlockWidget, ToolPairBlockWidget, UserBlockWidget,
+    AssistantBlockWidget, BlockFactory, BlockRenderer, BlockWidget, BuiltinKind, EmptyBlockWidget,
+    RenderCtx, SelectionState, StatusCtx, ThinkingBlockWidget, ToolPairBlockWidget,
+    UserBlockWidget,
 };

@@ -10,12 +10,14 @@
 //! their `kind` shown in the header.
 
 pub mod assistant;
+pub mod registry;
 pub mod thinking;
 pub mod tool_pair;
 pub mod user;
 pub mod widget;
 
 pub use assistant::AssistantBlockWidget;
+pub use registry::{BlockFactory, BlockRenderer, BuiltinKind};
 pub use thinking::ThinkingBlockWidget;
 pub use tool_pair::ToolPairBlockWidget;
 pub use user::UserBlockWidget;

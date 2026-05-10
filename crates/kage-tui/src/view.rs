@@ -11,11 +11,13 @@
 
 pub mod assistant;
 pub mod thinking;
+pub mod tool_pair;
 pub mod user;
 pub mod widget;
 
 pub use assistant::AssistantBlockWidget;
 pub use thinking::ThinkingBlockWidget;
+pub use tool_pair::ToolPairBlockWidget;
 pub use user::UserBlockWidget;
 pub use widget::{BlockWidget, EmptyBlockWidget, RenderCtx, SelectionState};
 
@@ -1560,7 +1562,7 @@ fn plain_lines(text: &str, style: Style) -> Vec<Line<'static>> {
 ///                                     <- blank
 ///   Took 23ms · 1.2 KB                <- dim footer
 /// ```
-fn tool_pair_to_lines(
+pub(super) fn tool_pair_to_lines(
     call: &Block,
     result: &Block,
     width: u16,

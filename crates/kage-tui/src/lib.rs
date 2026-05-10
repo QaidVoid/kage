@@ -43,5 +43,5 @@ pub use theme::{Theme, current as current_theme, set_current as set_current_them
 pub use usage::{SessionUsage, SharedSessionUsage, shared_session_usage};
 pub use view::{
     AssistantBlockWidget, BlockWidget, EmptyBlockWidget, RenderCtx, SelectionState, StatusCtx,
-    ThinkingBlockWidget, UserBlockWidget,
+    ThinkingBlockWidget, ToolPairBlockWidget, UserBlockWidget,
 };

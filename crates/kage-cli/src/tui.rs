@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use kage_core::{CancelFlag, Content, Message, Role};
-use kage_loop::{AgentContext, LoopConfig, NoopHooks, run};
+use kage_loop::{AgentContext, LoopConfig, NoopHooks, force_compact, run};
 use kage_plugin::PluginRuntime;
 use kage_provider::ProviderRegistry;
 use kage_session::{SessionSummary, SessionWriter};
@@ -353,6 +353,65 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                     }
                 }
                 RunRequest::Cancel => cancel.cancel(),
+                RunRequest::CompactNow => {
+                    cancel.reset();
+                    let qualified = active_qualified
+                        .lock()
+                        .expect("active model mutex poisoned")
+                        .clone();
+                    let resolved = match registry.resolve(&qualified) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            if let Ok(mut buf) = buffer.lock() {
+                                buf.push_custom(
+                                    "kage:error",
+                                    format!("compact: model {qualified} unavailable: {e}"),
+                                    false,
+                                );
+                            }
+                            continue;
+                        }
+                    };
+                    let provider = Arc::clone(resolved.provider);
+                    let mut cx_guard = cx.lock().expect("agent context mutex poisoned");
+                    let writer_for_turn = open_writer_for_turn(
+                        session_path.as_ref(),
+                        session_header.as_ref(),
+                        &buffer,
+                    );
+                    if let Ok(mut snap) = session_usage.lock() {
+                        snap.working = true;
+                    }
+                    let ran = run_compact_with_hooks(
+                        provider.as_ref(),
+                        &mut cx_guard,
+                        &cancel,
+                        &buffer,
+                        plugin_runtime.as_ref(),
+                        writer_for_turn,
+                    );
+                    if let Ok(mut snap) = session_usage.lock() {
+                        snap.working = false;
+                    }
+                    match ran {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            push_toast(
+                                &toasts,
+                                Toast::info("compact: not enough history yet".to_owned()),
+                            );
+                        }
+                        Err(e) => {
+                            if let Ok(mut buf) = buffer.lock() {
+                                buf.push_custom(
+                                    "kage:error",
+                                    format!("compact failed: {e}"),
+                                    false,
+                                );
+                            }
+                        }
+                    }
+                }
                 RunRequest::SwitchModel(new_model) => {
                     // Validate before switching so a typo doesn't break
                     // the next turn silently.
@@ -490,6 +549,41 @@ fn run_with_hooks(
             let mut wrapped =
                 UsageHooks::new(tui_hooks, session_usage, qualified_model, context_window);
             run(provider, tools, cx, loop_cfg, &mut wrapped, cancel, |_| {}).is_ok()
+        }
+    }
+}
+
+/// Run an unconditional compaction pass through the same hook stack
+/// `run_with_hooks` uses, so the resulting `LoopEvent::Compaction`
+/// is mirrored to the buffer and recorded to the session file. The
+/// usage hook is intentionally skipped: compaction does not change
+/// the active model or window, just the saved budget.
+fn run_compact_with_hooks(
+    provider: &dyn kage_provider::Provider,
+    cx: &mut AgentContext,
+    cancel: &CancelFlag,
+    buffer: &SharedBuffer,
+    plugin_runtime: Option<&Arc<PluginRuntime>>,
+    writer: Option<SessionWriter>,
+) -> Result<bool, kage_core::LoopError> {
+    let tui_hooks = TuiHooks::new(NoopHooks, buffer.clone());
+    match (writer, plugin_runtime) {
+        (Some(w), Some(rt)) => {
+            let recorded = SessionRecordingHooks::new(tui_hooks, w);
+            let mut plugin_hooks = PluginEventHooks::new(recorded, Arc::clone(rt));
+            force_compact(cx, provider, cancel, &mut plugin_hooks, &mut |_| {})
+        }
+        (Some(w), None) => {
+            let mut recorded = SessionRecordingHooks::new(tui_hooks, w);
+            force_compact(cx, provider, cancel, &mut recorded, &mut |_| {})
+        }
+        (None, Some(rt)) => {
+            let mut plugin_hooks = PluginEventHooks::new(tui_hooks, Arc::clone(rt));
+            force_compact(cx, provider, cancel, &mut plugin_hooks, &mut |_| {})
+        }
+        (None, None) => {
+            let mut hooks = tui_hooks;
+            force_compact(cx, provider, cancel, &mut hooks, &mut |_| {})
         }
     }
 }

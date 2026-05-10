@@ -100,6 +100,11 @@ pub enum RunRequest {
         /// string when the command takes no arguments.
         args: String,
     },
+    /// Force a compaction pass right now, regardless of token budget.
+    /// The worker runs `maybe_compact` with the threshold lowered so it
+    /// fires unconditionally, then emits the resulting `Compaction`
+    /// event through the buffer/session hooks like an automatic pass.
+    CompactNow,
 }
 
 /// Outcome of [`App::run`].
@@ -796,6 +801,16 @@ impl App {
             }
             "help" => {
                 self.push_help();
+                None
+            }
+            "compact" => {
+                let _ = self.send_request(RunRequest::CompactNow);
+                None
+            }
+            "clear" => {
+                if let Ok(mut buf) = self.buffer.lock() {
+                    buf.clear();
+                }
                 None
             }
             _ => None,

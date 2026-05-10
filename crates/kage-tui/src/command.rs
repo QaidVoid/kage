@@ -254,6 +254,20 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         category: CommandCategory::Both,
         args: &[],
     },
+    CommandSpec {
+        name: "compact",
+        aliases: &[],
+        description: "summarize older history into a single message",
+        category: CommandCategory::Both,
+        args: &[],
+    },
+    CommandSpec {
+        name: "clear",
+        aliases: &[],
+        description: "clear the rendered conversation buffer",
+        category: CommandCategory::Both,
+        args: &[],
+    },
 ];
 
 /// Find a built-in command by primary name or alias. Returns `None`
@@ -368,6 +382,13 @@ mod tests {
 
     #[test]
     fn builtin_registry_has_expected_command_count() {
-        assert_eq!(BUILTIN_COMMANDS.len(), 8);
+        assert_eq!(BUILTIN_COMMANDS.len(), 10);
+    }
+
+    #[test]
+    fn builtin_registry_includes_compact() {
+        let spec = find_builtin_command("compact").expect("compact should exist");
+        assert_eq!(spec.name, "compact");
+        assert_eq!(spec.args.len(), 0);
     }
 }

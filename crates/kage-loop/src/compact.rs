@@ -46,6 +46,30 @@ pub(crate) fn maybe_compact<F: FnMut(LoopEvent)>(
     if !should_compact(cx, config) {
         return Ok(false);
     }
+    run_compaction(cx, provider, cancel, hooks, emit)
+}
+
+/// Force a compaction pass right now, ignoring the token-budget
+/// threshold. Used by the `:compact` and `/compact` commands so the
+/// user can shrink history on demand. Returns `false` when there is
+/// not enough history to compact (history at or below `KEEP_RECENT`).
+pub fn force_compact<F: FnMut(LoopEvent)>(
+    cx: &mut AgentContext,
+    provider: &dyn Provider,
+    cancel: &CancelFlag,
+    hooks: &mut dyn Hooks,
+    emit: &mut F,
+) -> Result<bool, LoopError> {
+    run_compaction(cx, provider, cancel, hooks, emit)
+}
+
+fn run_compaction<F: FnMut(LoopEvent)>(
+    cx: &mut AgentContext,
+    provider: &dyn Provider,
+    cancel: &CancelFlag,
+    hooks: &mut dyn Hooks,
+    emit: &mut F,
+) -> Result<bool, LoopError> {
     if cx.history.len() <= KEEP_RECENT {
         return Ok(false);
     }

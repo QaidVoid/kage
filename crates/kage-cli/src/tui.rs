@@ -97,6 +97,9 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     if let Some(window) = crate::runtime_env::context_window_for(model) {
         initial_cx = initial_cx.with_context_window(window);
     }
+    if let Some(out) = crate::runtime_env::max_output_tokens_for(model) {
+        initial_cx = initial_cx.with_max_output_tokens(out);
+    }
     let cx = Arc::new(Mutex::new(initial_cx));
     let (tx, rx) = mpsc::channel::<RunRequest>();
 
@@ -264,6 +267,11 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                     let bare_model = resolved.model.clone();
                     let mut cx_guard = cx.lock().expect("agent context mutex poisoned");
                     cx_guard.model = bare_model;
+                    if let Some(window) = crate::runtime_env::context_window_for(&qualified) {
+                        cx_guard.context_window = window;
+                    }
+                    cx_guard.max_output_tokens =
+                        crate::runtime_env::max_output_tokens_for(&qualified);
                     let parent = cx_guard.history.last().map(|m| m.id);
                     let user_msg = Message::new(Role::User, vec![Content::Text { text }], parent);
                     cx_guard.history.push(user_msg.clone());
@@ -694,6 +702,10 @@ fn handle_resume(
         let mut cx_guard = cx.lock().expect("agent context mutex poisoned");
         cx_guard.history.clone_from(&replay.history);
         cx_guard.model = bare_model;
+        if let Some(window) = crate::runtime_env::context_window_for(&qualified_model) {
+            cx_guard.context_window = window;
+        }
+        cx_guard.max_output_tokens = crate::runtime_env::max_output_tokens_for(&qualified_model);
         cx_guard.budget.used_input = replay.usage_total.input;
         cx_guard.budget.used_output = replay.usage_total.output;
         cx_guard.budget.used_cache_read = replay.usage_total.cache_read;

@@ -197,6 +197,9 @@ fn main() -> ExitCode {
     if let Some(window) = runtime_env::context_window_for(&model) {
         cx = cx.with_context_window(window);
     }
+    if let Some(out) = runtime_env::max_output_tokens_for(&model) {
+        cx = cx.with_max_output_tokens(out);
+    }
     let user_msg = Message::new(Role::User, vec![Content::Text { text: prompt }], None);
     cx.history.push(user_msg.clone());
 
@@ -429,6 +432,9 @@ fn run_resume(
         .with_workdir(&workdir);
     if let Some(window) = runtime_env::context_window_for(&model) {
         cx = cx.with_context_window(window);
+    }
+    if let Some(out) = runtime_env::max_output_tokens_for(&model) {
+        cx = cx.with_max_output_tokens(out);
     }
     cx.history = replay.history;
     cx.budget.used_input = replay.usage_total.input;

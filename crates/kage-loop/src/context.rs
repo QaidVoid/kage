@@ -77,6 +77,12 @@ pub struct AgentContext {
     /// together with [`crate::LoopConfig::compaction_threshold`] to decide
     /// when to summarize older turns. Default is 200,000.
     pub context_window: u64,
+    /// Maximum output tokens per turn for the active model. When set,
+    /// the loop forwards this on every [`kage_provider::StreamRequest`]
+    /// so the provider does not silently truncate large responses
+    /// (typically tool calls with bulky JSON arguments) at its own
+    /// conservative default. `None` defers to the provider default.
+    pub max_output_tokens: Option<u32>,
     /// Running token totals.
     pub budget: TokenBudget,
 }
@@ -92,6 +98,7 @@ impl AgentContext {
             system_prompt: system_prompt.into(),
             workdir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             context_window: 200_000,
+            max_output_tokens: None,
             budget: TokenBudget::default(),
         }
     }
@@ -107,6 +114,13 @@ impl AgentContext {
     #[must_use]
     pub fn with_context_window(mut self, window: u64) -> Self {
         self.context_window = window;
+        self
+    }
+
+    /// Override the per-turn output token cap forwarded to the provider.
+    #[must_use]
+    pub fn with_max_output_tokens(mut self, tokens: u32) -> Self {
+        self.max_output_tokens = Some(tokens);
         self
     }
 }

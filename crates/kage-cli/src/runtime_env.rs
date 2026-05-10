@@ -20,6 +20,19 @@ pub fn context_window_for(qualified_model: &str) -> Option<u64> {
     kage_provider::catalog::model(provider, model)?.context
 }
 
+/// Look up the per-turn max output tokens the catalog reports for
+/// `qualified_model`. Returned as `u32` because the wire protocols
+/// all use 32-bit ints for this field. Saturates at `u32::MAX`. The
+/// loop forwards this on every [`kage_provider::StreamRequest`] so
+/// the provider's conservative 4K-ish default never silently truncates
+/// large tool-call argument JSON.
+#[must_use]
+pub fn max_output_tokens_for(qualified_model: &str) -> Option<u32> {
+    let (provider, model) = qualified_model.split_once(':')?;
+    let raw = kage_provider::catalog::model(provider, model)?.output?;
+    Some(u32::try_from(raw).unwrap_or(u32::MAX))
+}
+
 /// Build the full system prompt for an agent run: `role` (the user's
 /// `--system` text or a default) plus an `<environment>` block.
 ///

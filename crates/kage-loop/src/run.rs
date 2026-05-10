@@ -192,6 +192,7 @@ fn build_request(cx: &AgentContext, tools: &ToolRegistry) -> StreamRequest {
         req.system = Some(cx.system_prompt.clone());
     }
     req.tools = tools.list_for_provider();
+    req.max_output_tokens = cx.max_output_tokens;
     req
 }
 
@@ -226,6 +227,25 @@ mod tests {
             }],
             None,
         )
+    }
+
+    #[test]
+    fn build_request_forwards_max_output_tokens_from_context() {
+        let mut cx = AgentContext::new("m", "");
+        cx.history.push(user_msg("hi"));
+        cx = cx.with_max_output_tokens(32_000);
+        let tools = ToolRegistry::new();
+        let req = build_request(&cx, &tools);
+        assert_eq!(req.max_output_tokens, Some(32_000));
+    }
+
+    #[test]
+    fn build_request_leaves_max_output_tokens_unset_when_context_default() {
+        let mut cx = AgentContext::new("m", "");
+        cx.history.push(user_msg("hi"));
+        let tools = ToolRegistry::new();
+        let req = build_request(&cx, &tools);
+        assert!(req.max_output_tokens.is_none());
     }
 
     struct OneFollowup(bool);

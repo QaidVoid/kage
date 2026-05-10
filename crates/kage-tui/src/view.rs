@@ -9,8 +9,10 @@
 //! optional indented body, and custom blocks are passed through with
 //! their `kind` shown in the header.
 
+pub mod user;
 pub mod widget;
 
+pub use user::UserBlockWidget;
 pub use widget::{BlockWidget, EmptyBlockWidget, RenderCtx, SelectionState};
 
 use ratatui::Frame;
@@ -78,14 +80,14 @@ pub enum Emphasis {
 }
 
 impl Emphasis {
-    fn rule_glyph(self) -> &'static str {
+    pub(super) fn rule_glyph(self) -> &'static str {
         match self {
             Self::None => "\u{258e}",
             Self::Match | Self::Focused => "\u{258c}",
         }
     }
 
-    fn rule_color(self, base: Color) -> Color {
+    pub(super) fn rule_color(self, base: Color) -> Color {
         let t = crate::theme::current();
         match self {
             Self::None => base,

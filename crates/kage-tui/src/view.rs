@@ -1446,7 +1446,8 @@ fn mark_emphasis(lines: Vec<Line<'static>>, width: u16, emphasis: Emphasis) -> V
         Span::styled(format!("{} ", emphasis.rule_glyph()), style)
     };
     let body_width = usize::from(width).saturating_sub(FOCUS_RULE_WIDTH).max(1);
-    let mut out: Vec<Line<'static>> = Vec::with_capacity(lines.len());
+    let mut out: Vec<Line<'static>> =
+        Vec::with_capacity(lines.len() + widget::BlockPadding::BOTTOM);
     for line in lines {
         for row_spans in split_line_into_rows(line, body_width) {
             let mut spans = Vec::with_capacity(row_spans.len() + 1);
@@ -1454,6 +1455,12 @@ fn mark_emphasis(lines: Vec<Line<'static>>, width: u16, emphasis: Emphasis) -> V
             spans.extend(row_spans);
             out.push(Line::from(spans));
         }
+    }
+    // PB.7: trailing pad row(s) so non-bubble blocks have the same
+    // visual separation bubbles already get from their bottom pad.
+    // Carries the gutter so the rule reads as continuous.
+    for _ in 0..widget::BlockPadding::BOTTOM {
+        out.push(Line::from(vec![prefix.clone()]));
     }
     out
 }

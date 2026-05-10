@@ -87,6 +87,36 @@ pub trait BlockWidget: Send + Sync {
     fn render(&self, area: Rect, buf: &mut Buffer, ctx: &RenderCtx<'_>);
 }
 
+/// Uniform layout convention for every block widget.
+///
+/// PB.7 locks the spacing every block reserves around its content,
+/// so the buffer reads as a series of evenly-spaced blocks rather
+/// than the previous mix of "tinted bubbles padded inside" and
+/// "naked assistant text crammed against its neighbours".
+///
+/// The 1-row bottom padding gives non-bubble blocks the same vertical
+/// breathing room bubbles already had via their internal pad row,
+/// and the 2-col left padding aligns content with the bubble interior
+/// (1 col rule + 1 col internal pad).
+pub struct BlockPadding;
+
+impl BlockPadding {
+    /// Rows of blank space above the block's content. Currently `0`
+    /// for both bubbles and non-bubbles; bumped only if a future
+    /// design wants more headroom.
+    pub const TOP: usize = 0;
+    /// Rows of blank space below the block's content. `1` for
+    /// non-bubble blocks (added by `mark_emphasis`) and matched by
+    /// the bubble's existing trailing pad row.
+    pub const BOTTOM: usize = 1;
+    /// Left chrome cells reserved before content. `2` to match the
+    /// focus-rule (1 col) plus its trailing space (1 col).
+    pub const LEFT: usize = 2;
+    /// Right chrome cells reserved after content. `0` - blocks fill
+    /// to the right edge.
+    pub const RIGHT: usize = 0;
+}
+
 /// No-op widget used to lock the trait shape and as a safe default
 /// from registry lookups before every block kind is migrated. Renders
 /// nothing and reports zero rows.

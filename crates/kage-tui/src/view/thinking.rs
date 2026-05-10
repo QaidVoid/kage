@@ -78,9 +78,14 @@ mod tests {
     }
 
     #[test]
-    fn folded_widget_measures_one_row() {
+    fn folded_widget_measures_header_plus_bottom_pad() {
+        // PB.7: every non-bubble block gets a trailing pad row, so
+        // a folded thinking block (1 header line) measures 2 rows.
         let w = ThinkingBlockWidget::new("a\nb\nc", true, false);
-        assert_eq!(w.measure(40), 1);
+        assert_eq!(
+            usize::from(w.measure(40)),
+            1 + super::super::widget::BlockPadding::BOTTOM
+        );
     }
 
     #[test]

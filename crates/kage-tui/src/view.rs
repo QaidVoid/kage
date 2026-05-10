@@ -1416,23 +1416,39 @@ fn user_block_lines(text: &str, width: u16, emphasis: Emphasis) -> Vec<Line<'sta
     wrap_in_bubble_focused(content, theme.user_rule, theme.user_bg, width, emphasis)
 }
 
-/// Prepend a left-edge emphasis marker to every line of an
-/// already-built block's render. Used for non-bubbled blocks
-/// (Assistant text, Thinking, Custom, standalone `ToolResult`) so
-/// block-level navigation has the same visual feedback the bubble
-/// blocks already get from their tinted rule.
+/// Width in cells of the focus-rule chrome that PB.5 reserves on
+/// every non-bubble block (assistant text, thinking, custom,
+/// standalone tool result). One cell for the rule glyph or its
+/// blank stand-in, one cell of padding before the body.
+pub(super) const FOCUS_RULE_WIDTH: usize = 2;
+
+/// Prepend a left-edge focus rule to every line of an already-built
+/// non-bubble block's render.
+///
+/// PB.5: the rule column is reserved unconditionally so toggling
+/// focus does not shift the body horizontally. When `emphasis` is
+/// `None` the gutter is painted as blank cells in the same width;
+/// when focused or matching a search hit the rule glyph is painted
+/// in the corresponding theme color. All chrome cells carry the
+/// `DECORATION_MARKER` so selection / yank skips them.
 fn mark_emphasis(lines: Vec<Line<'static>>, emphasis: Emphasis) -> Vec<Line<'static>> {
-    if emphasis == Emphasis::None {
-        return lines;
-    }
-    let mark_style = Style::default()
-        .fg(emphasis.rule_color(Color::White))
-        .add_modifier(Modifier::BOLD)
-        .add_modifier(DECORATION_MARKER);
+    let prefix: Span<'static> = if emphasis == Emphasis::None {
+        Span::styled(
+            " ".repeat(FOCUS_RULE_WIDTH),
+            Style::default().add_modifier(DECORATION_MARKER),
+        )
+    } else {
+        let style = Style::default()
+            .fg(emphasis.rule_color(Color::White))
+            .add_modifier(Modifier::BOLD)
+            .add_modifier(DECORATION_MARKER);
+        Span::styled(format!("{} ", emphasis.rule_glyph()), style)
+    };
     lines
         .into_iter()
         .map(|line| {
-            let mut spans = vec![Span::styled("\u{258c} ".to_owned(), mark_style)];
+            let mut spans = Vec::with_capacity(line.spans.len() + 1);
+            spans.push(prefix.clone());
             spans.extend(line.spans);
             Line::from(spans)
         })

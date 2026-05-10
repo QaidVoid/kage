@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
+use kage_core::CancelFlag;
 use ratatui::crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
 
 use crate::cmdline::{CommandLine, CommandLineEvent};
@@ -210,6 +211,14 @@ pub struct App {
     /// `model :: in/out :: total/window (pct)`. Updated by the host
     /// worker thread after every turn.
     session_usage: Option<crate::usage::SharedSessionUsage>,
+    /// Optional handle on the host's cancellation flag. When set,
+    /// `Cancel` actions (Ctrl-C, `:cancel`) flip it synchronously on
+    /// the foreground event-loop thread instead of going through
+    /// the worker request channel - which is essential because the
+    /// worker is busy inside `run_with_hooks` while the in-flight
+    /// turn is what we want to cancel, so a queued `RunRequest::Cancel`
+    /// would not fire until *after* the turn finishes naturally.
+    cancel_flag: Option<CancelFlag>,
 }
 
 impl App {
@@ -237,6 +246,7 @@ impl App {
             captured_rows: std::collections::BTreeMap::new(),
             last_cursor_style: None,
             session_usage: None,
+            cancel_flag: None,
         }
     }
 
@@ -247,6 +257,28 @@ impl App {
     /// collapsed.
     pub fn set_session_usage(&mut self, usage: crate::usage::SharedSessionUsage) {
         self.session_usage = Some(usage);
+    }
+
+    /// Register the host's cancellation flag so [`InputAction::Cancel`]
+    /// and `:cancel` can flip it directly on the event-loop thread,
+    /// bypassing the worker request queue. Without this, cancellation
+    /// of an in-flight turn does not take effect until the turn ends
+    /// naturally because the worker thread is blocked inside the
+    /// agent loop and cannot drain its request channel.
+    pub fn set_cancel_flag(&mut self, flag: CancelFlag) {
+        self.cancel_flag = Some(flag);
+    }
+
+    /// Trip the registered cancel flag if any, then forward a
+    /// `RunRequest::Cancel` to the worker for any extra cleanup that
+    /// arm performs (currently it just calls `.cancel()` again, which
+    /// is idempotent - the channel send is a fallback for hosts that
+    /// have not registered a flag via [`Self::set_cancel_flag`]).
+    fn trip_cancel(&mut self) {
+        if let Some(flag) = &self.cancel_flag {
+            flag.cancel();
+        }
+        let _ = self.send_request(RunRequest::Cancel);
     }
 
     /// Whether the host has registered a session-usage handle. Used
@@ -665,7 +697,7 @@ impl App {
         match name {
             "quit" => Some(AppExit::Quit),
             "cancel" => {
-                let _ = self.send_request(RunRequest::Cancel);
+                self.trip_cancel();
                 None
             }
             "model" => {
@@ -1106,7 +1138,7 @@ impl App {
             InputAction::UnfoldAll => self.set_all_folds(false),
             InputAction::FoldAll => self.set_all_folds(true),
             InputAction::Cancel => {
-                let _ = self.send_request(RunRequest::Cancel);
+                self.trip_cancel();
             }
             InputAction::OpenModelPicker => {
                 if !self.model_choices.is_empty() {
@@ -1441,6 +1473,35 @@ mod tests {
         let mut app = App::new(buffer, tx);
         app.handle_key(ctrl('c'));
         assert_eq!(rx.try_recv(), Ok(RunRequest::Cancel));
+    }
+
+    #[test]
+    fn ctrl_c_flips_registered_cancel_flag_synchronously() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let flag = CancelFlag::new();
+        app.set_cancel_flag(flag.clone());
+        assert!(!flag.is_cancelled());
+        app.handle_key(ctrl('c'));
+        assert!(
+            flag.is_cancelled(),
+            "Ctrl-C should flip the cancel flag on the foreground thread"
+        );
+    }
+
+    #[test]
+    fn cancel_command_flips_registered_cancel_flag_synchronously() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let flag = CancelFlag::new();
+        app.set_cancel_flag(flag.clone());
+        assert!(app.run_command("cancel").is_none());
+        assert!(
+            flag.is_cancelled(),
+            ":cancel should flip the cancel flag on the foreground thread"
+        );
     }
 
     #[test]

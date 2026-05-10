@@ -157,6 +157,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     app.set_history(crate::history::load());
     app.set_status_model(Arc::clone(&active_qualified));
     app.set_plugin_commands(plugin_command_listing);
+    app.set_cancel_flag(cancel.clone());
     app.set_session_usage(session_usage);
     if let Some(p) = session_path.as_ref() {
         let path = p.lock().expect("session path mutex poisoned").clone();

@@ -16,6 +16,8 @@ use base64::Engine as _;
 use kage_core::CancelFlag;
 use ratatui::crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
 
+use crate::toast::{self, SharedToasts, Toast, ToastKind};
+
 use crate::cmdline::{CommandLine, CommandLineEvent};
 use crate::error::TuiError;
 use crate::events::SharedBuffer;
@@ -219,6 +221,13 @@ pub struct App {
     /// turn is what we want to cancel, so a queued `RunRequest::Cancel`
     /// would not fire until *after* the turn finishes naturally.
     cancel_flag: Option<CancelFlag>,
+    /// Shared queue of ephemeral toast notifications painted as a
+    /// top-right overlay over the conversation buffer. The handle is
+    /// cloned to whatever sinks need to push (the App's own
+    /// `notify`, the host log sink for plugin `kage.notify`, etc.).
+    /// When `None`, `notify(...)` is a silent no-op: toasts are
+    /// decorative and never load-bearing.
+    toasts: Option<SharedToasts>,
 }
 
 impl App {
@@ -247,6 +256,7 @@ impl App {
             last_cursor_style: None,
             session_usage: None,
             cancel_flag: None,
+            toasts: None,
         }
     }
 
@@ -267,6 +277,39 @@ impl App {
     /// agent loop and cannot drain its request channel.
     pub fn set_cancel_flag(&mut self, flag: CancelFlag) {
         self.cancel_flag = Some(flag);
+    }
+
+    /// Register the shared toast queue. While set, App-internal
+    /// `notify(...)` calls and external sinks holding a clone of
+    /// the same handle push into a top-right overlay. Without it
+    /// `notify(...)` silently drops the message - toasts are
+    /// decorative, never load-bearing.
+    pub fn set_toasts(&mut self, toasts: SharedToasts) {
+        self.toasts = Some(toasts);
+    }
+
+    /// Snapshot live (non-expired) toasts for one frame, dropping
+    /// expired entries in the process. Returns `None` when no toast
+    /// queue is registered or the lock is poisoned.
+    fn live_toasts(&self) -> Vec<Toast> {
+        let Some(handle) = &self.toasts else {
+            return Vec::new();
+        };
+        let now = Instant::now();
+        let _ = toast::prune_expired(handle, now);
+        handle
+            .lock()
+            .map(|q| q.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Earliest deadline at which a live toast will expire, used by
+    /// the event loop to wake up just in time to repaint without
+    /// waiting for an unrelated key event.
+    fn next_toast_deadline(&self) -> Option<Instant> {
+        let handle = self.toasts.as_ref()?;
+        let q = handle.lock().ok()?;
+        q.iter().map(|t| t.expires_at).min()
     }
 
     /// Trip the registered cancel flag if any, then forward a
@@ -371,7 +414,19 @@ impl App {
             } else {
                 Duration::from_secs(1)
             };
-            let deadline = Instant::now() + tick;
+            let mut deadline = Instant::now() + tick;
+            // Toasts auto-expire on a wall-clock schedule independent
+            // of key input; cap the poll deadline at the next toast
+            // expiration and force a redraw each tick so the overlay
+            // appears immediately when pushed from a worker thread
+            // and disappears when its deadline fires, regardless of
+            // whether the user pressed a key.
+            if let Some(toast_deadline) = self.next_toast_deadline() {
+                if toast_deadline < deadline {
+                    deadline = toast_deadline;
+                }
+                needs_redraw = true;
+            }
             while Instant::now() < deadline {
                 let remaining = deadline
                     .checked_duration_since(Instant::now())
@@ -526,6 +581,7 @@ impl App {
         let screen_selection = self.screen_selection;
         let mut captured_rows = std::mem::take(&mut self.captured_rows);
         let session_usage = self.session_usage_snapshot();
+        let live_toasts = self.live_toasts();
         let bottom = if self.modeline_visible() {
             crate::layout::STATUS_BOTTOM_LINES_DEFAULT
         } else {
@@ -555,6 +611,7 @@ impl App {
                 screen_selection,
                 &mut captured_rows,
                 session_usage.as_ref(),
+                &live_toasts,
             );
             if let Some(picker) = picker {
                 picker.render(frame, frame.area());
@@ -1067,9 +1124,13 @@ impl App {
     }
 
     fn notify(&mut self, msg: impl Into<String>) {
-        if let Ok(mut buf) = self.buffer.lock() {
-            buf.push_custom("kage:notify", msg, false);
-        }
+        let Some(toasts) = &self.toasts else {
+            return;
+        };
+        toast::push_toast(
+            toasts,
+            Toast::with_kind(msg, ToastKind::Info, toast::DEFAULT_TOAST_DURATION),
+        );
     }
 
     fn run_mouse_command(&mut self, rest: &str) {
@@ -1359,6 +1420,7 @@ impl App {
         let search_match_count = self.compute_search_match_count();
         let mut buffer = self.buffer.lock().expect("buffer mutex poisoned");
         let session_usage = self.session_usage_snapshot();
+        let live_toasts = self.live_toasts();
         let bottom = if self.modeline_visible() {
             crate::layout::STATUS_BOTTOM_LINES_DEFAULT
         } else {
@@ -1399,6 +1461,7 @@ impl App {
                     screen_selection,
                     &mut captured_rows,
                     session_usage.as_ref(),
+                    &live_toasts,
                 );
                 if let Some(picker) = picker {
                     picker.render(frame, frame.area());

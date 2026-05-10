@@ -12,6 +12,7 @@
 pub mod assistant;
 pub mod registry;
 pub mod thinking;
+pub mod toast;
 pub mod tool_pair;
 pub mod user;
 pub mod widget;
@@ -19,6 +20,7 @@ pub mod widget;
 pub use assistant::AssistantBlockWidget;
 pub use registry::{BlockFactory, BlockRenderer, BuiltinKind};
 pub use thinking::ThinkingBlockWidget;
+pub use toast::render_toasts;
 pub use tool_pair::ToolPairBlockWidget;
 pub use user::UserBlockWidget;
 pub use widget::{BlockWidget, EmptyBlockWidget, RenderCtx, SelectionState};
@@ -124,11 +126,16 @@ pub fn render(
     screen_selection: Option<((usize, u16), (usize, u16))>,
     captured_rows: &mut std::collections::BTreeMap<usize, Vec<CapturedCell>>,
     session_usage: Option<&SessionUsage>,
+    toasts: &[crate::toast::Toast],
 ) {
     render_status(frame, regions, input, cmdline, status);
     render_buffer(frame, regions, buffer, status.search_pattern);
     render_input(frame, regions, input);
     render_modeline(frame, regions, session_usage);
+    if !toasts.is_empty() {
+        let theme = crate::theme::current();
+        render_toasts(frame, regions.buffer, toasts, &theme);
+    }
     if let Some(cl) = cmdline {
         place_cmdline_cursor(frame, regions, cl);
     } else if let Some(sl) = status.search_line {
@@ -2052,6 +2059,7 @@ mod tests {
                     None,
                     &mut captured,
                     None,
+                    &[],
                 );
             })
             .unwrap();

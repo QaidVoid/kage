@@ -20,8 +20,9 @@ use kage_provider::ProviderRegistry;
 use kage_session::{SessionSummary, SessionWriter};
 use kage_tools::ToolRegistry;
 use kage_tui::{
-    App, PickItem, RunRequest, SharedBuffer, SharedSessionUsage, Tui, TuiHooks, buffer_host_log,
-    populate_from_history, shared_buffer, shared_session_usage,
+    App, PickItem, RunRequest, SharedBuffer, SharedSessionUsage, SharedToasts, Toast, Tui,
+    TuiHooks, buffer_host_log, populate_from_history, push_toast, shared_buffer,
+    shared_session_usage, shared_toasts,
 };
 
 use crate::plugins::{PluginEventHooks, setup_runtime_with_sink};
@@ -53,6 +54,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     // hand the runtime a sink that routes notify/log into the buffer
     // instead of stderr (which would corrupt the alt screen).
     let buffer = shared_buffer();
+    let toasts = shared_toasts();
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let system_prompt = crate::runtime_env::build_system_prompt(system, &workdir, model);
     let system = system_prompt.as_str();
@@ -62,7 +64,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
             &workdir,
             model,
             system,
-            buffer_host_log(buffer.clone()),
+            buffer_host_log(buffer.clone(), toasts.clone()),
         ) {
             Ok(rt) => rt,
             Err(e) => {
@@ -143,6 +145,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         session_path: session_path.clone(),
         session_header: session_header.clone(),
         session_usage: session_usage.clone(),
+        toasts: toasts.clone(),
     });
 
     let mut tui = match Tui::enter() {
@@ -158,6 +161,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     app.set_status_model(Arc::clone(&active_qualified));
     app.set_plugin_commands(plugin_command_listing);
     app.set_cancel_flag(cancel.clone());
+    app.set_toasts(toasts.clone());
     app.set_session_usage(session_usage);
     if let Some(p) = session_path.as_ref() {
         let path = p.lock().expect("session path mutex poisoned").clone();
@@ -202,6 +206,11 @@ struct WorkerConfig {
     /// worker updates it after every turn from `cx.budget` so the
     /// modeline reflects live token totals without polling.
     session_usage: SharedSessionUsage,
+    /// Shared toast queue. The worker pushes into it for model
+    /// switches, session resume confirmations, and other async
+    /// notifications that should appear as overlays rather than
+    /// inline conversation noise.
+    toasts: SharedToasts,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -219,6 +228,7 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
             session_path,
             session_header,
             session_usage,
+            toasts,
         } = cfg;
         let loop_cfg = LoopConfig::default();
 
@@ -297,6 +307,7 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         &buffer,
                         session_path.as_ref(),
                         &session_usage,
+                        &toasts,
                         &path,
                     );
                 }
@@ -351,13 +362,7 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                                 .lock()
                                 .expect("active model mutex poisoned")
                                 .clone_from(&new_model);
-                            if let Ok(mut buf) = buffer.lock() {
-                                buf.push_custom(
-                                    "kage:notify",
-                                    format!("switched to {new_model}"),
-                                    false,
-                                );
-                            }
+                            push_toast(&toasts, Toast::info(format!("switched to {new_model}")));
                             if let Err(err) = crate::state::record_last_model(&new_model)
                                 && let Ok(mut buf) = buffer.lock()
                             {
@@ -538,7 +543,7 @@ fn truncate(s: &str, max: usize) -> String {
 /// not authed in this run, model removed from the catalog), the
 /// resume keeps the currently active model rather than failing. The
 /// replay history still loads so the substitute model continues with
-/// full context; a `kage:notify` flags the substitution.
+/// full context; a toast flags the substitution.
 #[allow(clippy::too_many_arguments)]
 fn handle_resume(
     registry: &Arc<ProviderRegistry>,
@@ -547,6 +552,7 @@ fn handle_resume(
     buffer: &SharedBuffer,
     session_path: Option<&Arc<Mutex<PathBuf>>>,
     session_usage: &SharedSessionUsage,
+    toasts: &SharedToasts,
     path: &std::path::Path,
 ) {
     let replay = match kage_session::replay(path) {
@@ -619,19 +625,18 @@ fn handle_resume(
             .expect("session path mutex poisoned")
             .clone_from(&path.to_path_buf());
     }
+    let id = replay.header.session.to_string();
+    let short: String = id.chars().take(8).collect();
     if let Ok(mut buf) = buffer.lock() {
         buf.clear();
         populate_from_history(&mut buf, &replay.history, &replay.tool_durations);
-        let id = replay.header.session.to_string();
-        let short: String = id.chars().take(8).collect();
-        buf.push_custom(
-            "kage:notify",
-            format!("resumed session {short} on {qualified_model}"),
-            false,
-        );
-        if let Some(note) = fallback_note {
-            buf.push_custom("kage:notify", note, false);
-        }
+    }
+    push_toast(
+        toasts,
+        Toast::info(format!("resumed session {short} on {qualified_model}")),
+    );
+    if let Some(note) = fallback_note {
+        push_toast(toasts, Toast::info(note));
     }
 }
 

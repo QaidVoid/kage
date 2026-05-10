@@ -15,6 +15,7 @@ pub mod picker;
 pub mod syntax;
 pub mod terminal;
 pub mod theme;
+pub mod toast;
 pub mod usage;
 pub mod view;
 
@@ -40,6 +41,10 @@ pub use overlay::{OverlayPicker, PickerEvent};
 pub use picker::{PickItem, pick};
 pub use terminal::Tui;
 pub use theme::{Theme, current as current_theme, set_current as set_current_theme};
+pub use toast::{
+    DEFAULT_TOAST_DURATION, MAX_VISIBLE_TOASTS, SharedToasts, Toast, ToastKind, push_toast,
+    shared_toasts,
+};
 pub use usage::{SessionUsage, SharedSessionUsage, shared_session_usage};
 pub use view::{
     AssistantBlockWidget, BlockFactory, BlockRenderer, BlockWidget, BuiltinKind, EmptyBlockWidget,

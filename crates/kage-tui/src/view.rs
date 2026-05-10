@@ -10,18 +10,24 @@
 //! their `kind` shown in the header.
 
 pub mod assistant;
+pub mod custom;
 pub mod registry;
 pub mod thinking;
 pub mod toast;
+pub mod tool_call_alone;
 pub mod tool_pair;
+pub mod tool_result_alone;
 pub mod user;
 pub mod widget;
 
 pub use assistant::AssistantBlockWidget;
+pub use custom::CustomBlockWidget;
 pub use registry::{BlockFactory, BlockRenderer, BuiltinKind};
 pub use thinking::ThinkingBlockWidget;
 pub use toast::render_toasts;
+pub use tool_call_alone::ToolCallAloneBlockWidget;
 pub use tool_pair::ToolPairBlockWidget;
+pub use tool_result_alone::ToolResultAloneBlockWidget;
 pub use user::UserBlockWidget;
 pub use widget::{BlockWidget, EmptyBlockWidget, RenderCtx, SelectionState};
 

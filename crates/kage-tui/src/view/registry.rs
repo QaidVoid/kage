@@ -18,7 +18,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::widget::BlockWidget;
-use super::{AssistantBlockWidget, ThinkingBlockWidget, ToolPairBlockWidget, UserBlockWidget};
+use super::{
+    AssistantBlockWidget, CustomBlockWidget, ThinkingBlockWidget, ToolCallAloneBlockWidget,
+    ToolPairBlockWidget, ToolResultAloneBlockWidget, UserBlockWidget,
+};
 use crate::buffer::Block;
 
 /// Produces a per-render [`BlockWidget`] for a specific `Block`
@@ -48,6 +51,9 @@ pub struct BlockRenderer {
     assistant: Option<Arc<dyn BlockFactory>>,
     thinking: Option<Arc<dyn BlockFactory>>,
     tool_pair: Option<Arc<dyn BlockFactory>>,
+    tool_call_alone: Option<Arc<dyn BlockFactory>>,
+    tool_result_alone: Option<Arc<dyn BlockFactory>>,
+    custom_default: Option<Arc<dyn BlockFactory>>,
     custom: HashMap<String, Arc<dyn BlockFactory>>,
 }
 
@@ -61,6 +67,9 @@ impl BlockRenderer {
             assistant: Some(Arc::new(BuiltinAssistantFactory)),
             thinking: Some(Arc::new(BuiltinThinkingFactory)),
             tool_pair: Some(Arc::new(BuiltinToolPairFactory)),
+            tool_call_alone: Some(Arc::new(BuiltinToolCallAloneFactory)),
+            tool_result_alone: Some(Arc::new(BuiltinToolResultAloneFactory)),
+            custom_default: Some(Arc::new(BuiltinCustomFactory)),
             custom: HashMap::new(),
         }
     }
@@ -75,6 +84,9 @@ impl BlockRenderer {
             BuiltinKind::Assistant => self.assistant = Some(factory),
             BuiltinKind::Thinking => self.thinking = Some(factory),
             BuiltinKind::ToolPair => self.tool_pair = Some(factory),
+            BuiltinKind::ToolCallAlone => self.tool_call_alone = Some(factory),
+            BuiltinKind::ToolResultAlone => self.tool_result_alone = Some(factory),
+            BuiltinKind::Custom => self.custom_default = Some(factory),
         }
     }
 
@@ -84,22 +96,29 @@ impl BlockRenderer {
         self.custom.insert(name.into(), factory);
     }
 
-    /// Look up the widget for `block`. For paired tool blocks pass
-    /// the call side; the result side is intended to be skipped by
-    /// the caller via a `result_by_call` map (the same convention
-    /// the lines path uses today).
+    /// Look up the widget for a single (non-paired) `block`. Tool
+    /// calls and tool results that are part of a merged pair must go
+    /// through [`Self::pair_widget_for`] instead; this method
+    /// renders them in their unpaired (running... / orphan-result)
+    /// form.
     ///
-    /// Returns `None` when no factory matches the block's kind, e.g.
-    /// a `Block::Custom { kind: "x" }` for which no plugin has
-    /// registered a renderer.
+    /// Custom blocks resolve via the per-kind registry first, falling
+    /// back to the default custom factory. Returns `None` only when
+    /// no factory at all is registered for the block's kind, which
+    /// can happen for an empty registry created via
+    /// [`BlockRenderer::default`] rather than [`Self::with_builtins`].
     #[must_use]
     pub fn widget_for(&self, block: &Block) -> Option<Box<dyn BlockWidget>> {
         match block {
             Block::User { .. } => self.user.as_ref()?.make(block),
             Block::Assistant { .. } => self.assistant.as_ref()?.make(block),
             Block::Thinking { .. } => self.thinking.as_ref()?.make(block),
-            Block::ToolCall { .. } | Block::ToolResult { .. } => None,
-            Block::Custom { kind, .. } => self.custom.get(kind)?.make(block),
+            Block::ToolCall { .. } => self.tool_call_alone.as_ref()?.make(block),
+            Block::ToolResult { .. } => self.tool_result_alone.as_ref()?.make(block),
+            Block::Custom { kind, .. } => match self.custom.get(kind) {
+                Some(f) => f.make(block),
+                None => self.custom_default.as_ref()?.make(block),
+            },
         }
     }
 
@@ -125,6 +144,13 @@ pub enum BuiltinKind {
     Thinking,
     /// Paired [`Block::ToolCall`] + [`Block::ToolResult`].
     ToolPair,
+    /// Unpaired in-flight [`Block::ToolCall`] (running, no result yet).
+    ToolCallAlone,
+    /// Orphan [`Block::ToolResult`] without a matching call.
+    ToolResultAlone,
+    /// Default fallback for [`Block::Custom`] when no per-kind
+    /// override is registered.
+    Custom,
 }
 
 /// Extension trait implemented by `BlockFactory` for the special
@@ -217,6 +243,37 @@ impl ToolPairFactoryExt for BuiltinToolPairFactory {
     }
 }
 
+/// Built-in factory for an unpaired in-flight [`Block::ToolCall`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BuiltinToolCallAloneFactory;
+
+impl BlockFactory for BuiltinToolCallAloneFactory {
+    fn make(&self, block: &Block) -> Option<Box<dyn BlockWidget>> {
+        ToolCallAloneBlockWidget::from_block(block).map(|w| Box::new(w) as Box<dyn BlockWidget>)
+    }
+}
+
+/// Built-in factory for an orphan [`Block::ToolResult`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BuiltinToolResultAloneFactory;
+
+impl BlockFactory for BuiltinToolResultAloneFactory {
+    fn make(&self, block: &Block) -> Option<Box<dyn BlockWidget>> {
+        ToolResultAloneBlockWidget::from_block(block).map(|w| Box::new(w) as Box<dyn BlockWidget>)
+    }
+}
+
+/// Built-in fallback factory for [`Block::Custom`] when no per-kind
+/// override is registered. Renders the default header+body card.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BuiltinCustomFactory;
+
+impl BlockFactory for BuiltinCustomFactory {
+    fn make(&self, block: &Block) -> Option<Box<dyn BlockWidget>> {
+        CustomBlockWidget::from_block(block).map(|w| Box::new(w) as Box<dyn BlockWidget>)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
@@ -271,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn builtins_registry_returns_none_for_tool_call_alone() {
+    fn builtins_registry_dispatches_tool_call_alone() {
         let r = BlockRenderer::with_builtins();
         let block = Block::ToolCall {
             call_id: "c1".into(),
@@ -281,10 +338,21 @@ mod tests {
             folded: false,
             started_at: Instant::now(),
         };
-        assert!(
-            r.widget_for(&block).is_none(),
-            "tool-call-alone is handled at the pair-walker level"
-        );
+        assert!(r.widget_for(&block).is_some());
+    }
+
+    #[test]
+    fn builtins_registry_dispatches_tool_result_alone() {
+        let r = BlockRenderer::with_builtins();
+        let block = Block::ToolResult {
+            call_id: "missing".into(),
+            name: "read".into(),
+            output: "x".into(),
+            is_error: false,
+            folded: false,
+            duration_ms: Some(1),
+        };
+        assert!(r.widget_for(&block).is_some());
     }
 
     #[test]
@@ -310,13 +378,22 @@ mod tests {
     }
 
     #[test]
-    fn unknown_custom_kind_returns_none() {
+    fn unknown_custom_kind_falls_back_to_default_factory() {
         let r = BlockRenderer::with_builtins();
+        assert!(
+            r.widget_for(&custom_block("bogus")).is_some(),
+            "default custom factory should render any kind"
+        );
+    }
+
+    #[test]
+    fn empty_registry_with_no_default_returns_none_for_custom() {
+        let r = BlockRenderer::default();
         assert!(r.widget_for(&custom_block("bogus")).is_none());
     }
 
     #[test]
-    fn registered_custom_kind_dispatches_through_registry() {
+    fn registered_custom_kind_overrides_default_factory() {
         struct CustomFactory;
         impl BlockFactory for CustomFactory {
             fn make(&self, _: &Block) -> Option<Box<dyn BlockWidget>> {
@@ -326,8 +403,21 @@ mod tests {
 
         let mut r = BlockRenderer::with_builtins();
         r.set_custom("kage:notify", Arc::new(CustomFactory));
-        assert!(r.widget_for(&custom_block("kage:notify")).is_some());
-        assert!(r.widget_for(&custom_block("other")).is_none());
+        // Registered kind hits the override.
+        let registered = r
+            .widget_for(&custom_block("kage:notify"))
+            .expect("override matches");
+        assert_eq!(
+            registered.measure(40),
+            0,
+            "override returns EmptyBlockWidget"
+        );
+        // Unregistered kind falls back to the default custom
+        // factory (CustomBlockWidget), which has a non-zero measure.
+        let fallback = r
+            .widget_for(&custom_block("other"))
+            .expect("default factory matches");
+        assert!(fallback.measure(40) > 0);
     }
 
     #[test]

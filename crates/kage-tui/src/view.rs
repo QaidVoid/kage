@@ -4,10 +4,10 @@
 //! turns each one into a styled [`Line`], lays them out in a scrollable
 //! [`Paragraph`], and paints the status bar and input area on top.
 //!
-//! Block styling lives in [`block_to_lines`]: assistant text is plain,
-//! thinking is dimmed, tool calls render as a header line plus an
-//! optional indented body, and custom blocks are passed through with
-//! their `kind` shown in the header.
+//! Block styling lives in the per-kind widget modules (`view::user`,
+//! `view::assistant`, etc.); `render_buffer` dispatches via
+//! [`registry::BlockRenderer`] and concatenates each widget's
+//! [`widget::BlockWidget::lines`] into one Paragraph.
 
 pub mod assistant;
 pub mod custom;
@@ -810,11 +810,8 @@ fn approximate_block_height(buffer: &Buffer, idx: usize, width: u16) -> usize {
 /// the render loop) and the emphasis state for this idx.
 ///
 /// PB.9 routes this through the [`registry::BlockRenderer`] so block
-/// rendering goes through the same widget dispatch plugins will hook
-/// into via `set_builtin` / `set_custom`. Built-in widgets currently
-/// delegate to the same `block_to_lines` / `tool_pair_to_lines`
-/// helpers; future commits lift the per-kind logic into the widgets
-/// directly and retire those helpers.
+/// rendering goes through the same widget dispatch plugins hook into
+/// via `set_builtin` / `set_custom`.
 fn build_block_lines(
     buffer: &Buffer,
     idx: usize,
@@ -1298,153 +1295,10 @@ fn input_cursor_position(
     Some((cx, cy))
 }
 
-/// Convert one [`Block`] into its rendered [`Line`]s.
-///
-/// `width` is the rendering area's column count, used by blocks that
-/// pad to a full-width visual block (`User` bubble). Other blocks
-/// ignore it.
-///
-/// Folded blocks contribute one header line. Unfolded blocks contribute
-/// the header plus the body. Assistant text has no header; it is the
-/// content directly. Thinking text is rendered dimmed.
-#[must_use]
-#[allow(clippy::too_many_lines)]
-pub fn block_to_lines(block: &Block, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
-    match block {
-        Block::User { text } => user_block_lines(text, width, emphasis),
-        Block::Assistant { text, live } => {
-            // Skip syntect while the block is still streaming. Each
-            // delta changes the text, so the syntect cache would miss
-            // on every frame and we'd re-highlight the whole growing
-            // body 30 times a second. Once the stream finishes the
-            // text is stable, the cache hits, and we syntect-highlight
-            // for free.
-            let lines = if *live {
-                plain_lines(text, assistant_style())
-            } else {
-                crate::syntax::highlight_fenced(text, assistant_style())
-            };
-            mark_emphasis(lines, width, emphasis)
-        }
-        Block::Thinking { text, folded, .. } => {
-            let mut out = Vec::new();
-            out.push(header_line(
-                fold_indicator(*folded),
-                "thinking",
-                None,
-                thinking_style(),
-            ));
-            if !*folded {
-                // Each body line gets a left-rule glyph in the
-                // thinking fg color so the thinking section is
-                // visibly distinct from assistant text even on
-                // terminals that don't render italic. The glyph
-                // itself is decoration so cell-based selection
-                // skips it on yank.
-                let rule = Span::styled(
-                    "\u{258e} ",
-                    Style::default()
-                        .fg(crate::theme::current().thinking_fg)
-                        .add_modifier(DECORATION_MARKER),
-                );
-                for body_line in plain_lines(text, thinking_style()) {
-                    let mut spans = Vec::with_capacity(body_line.spans.len() + 1);
-                    spans.push(rule.clone());
-                    spans.extend(body_line.spans);
-                    out.push(Line::from(spans));
-                }
-            }
-            mark_emphasis(out, width, emphasis)
-        }
-        Block::ToolCall {
-            name,
-            input_summary,
-            input_pretty,
-            folded,
-            ..
-        } => {
-            // No matching result yet: render as a pending bubble so
-            // the user sees in-flight calls visually distinct from
-            // completed ones.
-            let dim = Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM);
-            let mut content: Vec<Line<'static>> = Vec::new();
-            let style = tool_call_style();
-            let mut header_spans = vec![
-                Span::styled(
-                    format!("{} ", fold_indicator(*folded)),
-                    style.add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(name.to_owned(), style.add_modifier(Modifier::BOLD)),
-            ];
-            if !input_summary.is_empty() {
-                header_spans.push(Span::raw(" "));
-                header_spans.push(Span::styled(input_summary.to_owned(), style));
-            }
-            header_spans.push(Span::raw("  "));
-            header_spans.push(Span::styled("running...".to_owned(), dim));
-            content.push(Line::from(header_spans));
-            if !*folded {
-                content.push(Line::raw(""));
-                for body_line in plain_lines(input_pretty, style) {
-                    content.push(body_line);
-                }
-            }
-            let theme = crate::theme::current();
-            wrap_in_bubble_focused(
-                content,
-                theme.tool_rule,
-                theme.tool_pending_bg,
-                width,
-                emphasis,
-            )
-        }
-        Block::ToolResult {
-            name,
-            output,
-            is_error,
-            folded,
-            ..
-        } => {
-            let mut out = Vec::new();
-            out.push(tool_result_header_line(*folded, name, output, *is_error));
-            if !*folded {
-                let body_style = if *is_error {
-                    tool_error_style()
-                } else {
-                    tool_result_style()
-                };
-                for body_line in truncated_body_lines(output, body_style) {
-                    out.push(prefix_line("  ", body_line));
-                }
-            }
-            mark_emphasis(out, width, emphasis)
-        }
-        Block::Custom {
-            kind, text, folded, ..
-        } => {
-            let mut out = Vec::new();
-            out.push(header_line(
-                fold_indicator(*folded),
-                kind,
-                None,
-                custom_style(),
-            ));
-            if !*folded {
-                for body_line in plain_lines(text, custom_style()) {
-                    out.push(prefix_line("  ", body_line));
-                }
-            }
-            mark_emphasis(out, width, emphasis)
-        }
-    }
-}
-
 /// Render a user prompt as a tinted full-width "chat bubble" with a
 /// thin themed left-edge rule and one row of padding above and below
 /// the text.
-fn user_block_lines(text: &str, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
+pub(super) fn user_block_lines(text: &str, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
     let theme = crate::theme::current();
     let mut content: Vec<Line<'static>> = Vec::new();
     for raw in text.split('\n') {
@@ -1474,7 +1328,11 @@ pub(super) const FOCUS_RULE_WIDTH: usize = 2;
 /// continuations. Without the pre-wrap, ratatui's `Paragraph::wrap`
 /// would only see one logical line with the prefix and fold the
 /// rest of the text below the rule.
-fn mark_emphasis(lines: Vec<Line<'static>>, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
+pub(super) fn mark_emphasis(
+    lines: Vec<Line<'static>>,
+    width: u16,
+    emphasis: Emphasis,
+) -> Vec<Line<'static>> {
     let prefix: Span<'static> = if emphasis == Emphasis::None {
         Span::styled(
             " ".repeat(FOCUS_RULE_WIDTH),
@@ -1519,7 +1377,7 @@ fn mark_emphasis(lines: Vec<Line<'static>>, width: u16, emphasis: Emphasis) -> V
 ///
 /// Spans inside `content` are reused as-is except their background is
 /// overridden with `bg` so the bubble reads as a uniform block.
-fn wrap_in_bubble_focused(
+pub(super) fn wrap_in_bubble_focused(
     content: Vec<Line<'static>>,
     rule_color: Color,
     bg: Color,
@@ -1609,7 +1467,7 @@ fn split_line_into_rows(line: Line<'static>, max: usize) -> Vec<Vec<Span<'static
     rows
 }
 
-fn plain_lines(text: &str, style: Style) -> Vec<Line<'static>> {
+pub(super) fn plain_lines(text: &str, style: Style) -> Vec<Line<'static>> {
     if text.is_empty() {
         return Vec::new();
     }
@@ -1894,7 +1752,7 @@ fn truncated_body(
 /// (or `ERROR` glyph) and a one-line preview of the output so the user
 /// sees the gist without expanding. Unfolded results keep just the
 /// name + size and rely on the body for detail.
-fn tool_result_header_line(
+pub(super) fn tool_result_header_line(
     folded: bool,
     name: &str,
     output: &str,
@@ -1966,7 +1824,7 @@ const MAX_BODY_BYTES: usize = 16 * 1024;
 /// `... (N more lines)` marker when content was elided. The full text
 /// stays in the buffer's `Block` so a future "expand fully" gesture
 /// can show the rest without rerunning the tool.
-fn truncated_body_lines(output: &str, style: Style) -> Vec<Line<'static>> {
+pub(super) fn truncated_body_lines(output: &str, style: Style) -> Vec<Line<'static>> {
     if output.is_empty() {
         return Vec::new();
     }
@@ -2006,7 +1864,12 @@ fn first_line_preview(text: &str, max: usize) -> Option<String> {
     Some(format!("{cut}..."))
 }
 
-fn header_line(indicator: char, tag: &str, detail: Option<String>, style: Style) -> Line<'static> {
+pub(super) fn header_line(
+    indicator: char,
+    tag: &str,
+    detail: Option<String>,
+    style: Style,
+) -> Line<'static> {
     let mut spans = vec![
         Span::styled(format!("{indicator} "), style.add_modifier(Modifier::BOLD)),
         Span::styled(format!("[{tag}]"), style.add_modifier(Modifier::BOLD)),
@@ -2018,14 +1881,14 @@ fn header_line(indicator: char, tag: &str, detail: Option<String>, style: Style)
     Line::from(spans)
 }
 
-fn prefix_line(prefix: &str, line: Line<'static>) -> Line<'static> {
+pub(super) fn prefix_line(prefix: &str, line: Line<'static>) -> Line<'static> {
     let mut spans = Vec::with_capacity(line.spans.len() + 1);
     spans.push(Span::raw(prefix.to_owned()));
     spans.extend(line.spans);
     Line::from(spans)
 }
 
-fn fold_indicator(folded: bool) -> char {
+pub(super) fn fold_indicator(folded: bool) -> char {
     if folded { '>' } else { 'v' }
 }
 
@@ -2037,31 +1900,31 @@ fn mode_label(mode: Mode) -> &'static str {
     }
 }
 
-fn assistant_style() -> Style {
+pub(super) fn assistant_style() -> Style {
     Style::default().fg(crate::theme::current().assistant_fg)
 }
 
-fn thinking_style() -> Style {
+pub(super) fn thinking_style() -> Style {
     Style::default()
         .fg(crate::theme::current().thinking_fg)
         .add_modifier(Modifier::DIM | Modifier::ITALIC)
 }
 
-fn tool_call_style() -> Style {
+pub(super) fn tool_call_style() -> Style {
     Style::default().fg(crate::theme::current().tool_rule)
 }
 
-fn tool_result_style() -> Style {
+pub(super) fn tool_result_style() -> Style {
     Style::default().fg(crate::theme::current().tool_result_fg)
 }
 
-fn tool_error_style() -> Style {
+pub(super) fn tool_error_style() -> Style {
     Style::default()
         .fg(crate::theme::current().tool_error_fg)
         .add_modifier(Modifier::BOLD)
 }
 
-fn custom_style() -> Style {
+pub(super) fn custom_style() -> Style {
     Style::default().fg(crate::theme::current().custom_fg)
 }
 

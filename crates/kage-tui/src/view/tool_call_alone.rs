@@ -1,26 +1,23 @@
 //! Widget for an unpaired in-flight tool call (rendered as the
-//! "running..." pending bubble before its [`Block::ToolResult`]
+//! "running..." pending bubble before its [`crate::buffer::Block::ToolResult`]
 //! arrives).
-//!
-//! Same shim approach as the other widgets: delegate to the existing
-//! `block_to_lines` matcher with a synthetic [`Block::ToolCall`].
-
-use std::time::Instant;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::text::Line;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
 use super::widget::{BlockWidget, RenderCtx};
-use super::{Emphasis, block_to_lines};
+use super::{Emphasis, fold_indicator, plain_lines, tool_call_style, wrap_in_bubble_focused};
 use crate::buffer::Block;
 
-/// Renders the [`Block::ToolCall`] standalone bubble (the agent has
-/// invoked a tool but we have not yet seen the matching result).
+/// Renders the [`crate::buffer::Block::ToolCall`] standalone bubble:
+/// the agent has invoked a tool but we have not yet seen the
+/// matching result, so the body shows the pretty-printed input and
+/// a `running...` marker.
 #[derive(Clone, Debug)]
 pub struct ToolCallAloneBlockWidget {
-    call_id: String,
     name: String,
     input_summary: String,
     input_pretty: String,
@@ -33,14 +30,12 @@ impl ToolCallAloneBlockWidget {
     pub fn from_block(block: &Block) -> Option<Self> {
         match block {
             Block::ToolCall {
-                call_id,
                 name,
                 input_summary,
                 input_pretty,
                 folded,
                 ..
             } => Some(Self {
-                call_id: call_id.clone(),
                 name: name.clone(),
                 input_summary: input_summary.clone(),
                 input_pretty: input_pretty.clone(),
@@ -50,22 +45,46 @@ impl ToolCallAloneBlockWidget {
         }
     }
 
-    fn synthetic(&self) -> Block {
-        Block::ToolCall {
-            call_id: self.call_id.clone(),
-            name: self.name.clone(),
-            input_summary: self.input_summary.clone(),
-            input_pretty: self.input_pretty.clone(),
-            folded: self.folded,
-            started_at: Instant::now(),
+    fn lines_for(&self, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
+        let dim = Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::DIM);
+        let style = tool_call_style();
+        let mut content: Vec<Line<'static>> = Vec::new();
+        let mut header_spans = vec![
+            Span::styled(
+                format!("{} ", fold_indicator(self.folded)),
+                style.add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(self.name.clone(), style.add_modifier(Modifier::BOLD)),
+        ];
+        if !self.input_summary.is_empty() {
+            header_spans.push(Span::raw(" "));
+            header_spans.push(Span::styled(self.input_summary.clone(), style));
         }
+        header_spans.push(Span::raw("  "));
+        header_spans.push(Span::styled("running...".to_owned(), dim));
+        content.push(Line::from(header_spans));
+        if !self.folded {
+            content.push(Line::raw(""));
+            for body_line in plain_lines(&self.input_pretty, style) {
+                content.push(body_line);
+            }
+        }
+        let theme = crate::theme::current();
+        wrap_in_bubble_focused(
+            content,
+            theme.tool_rule,
+            theme.tool_pending_bg,
+            width,
+            emphasis,
+        )
     }
 }
 
 impl BlockWidget for ToolCallAloneBlockWidget {
     fn measure(&self, width: u16) -> u16 {
-        let lines = block_to_lines(&self.synthetic(), width, Emphasis::None);
-        u16::try_from(lines.len()).unwrap_or(u16::MAX)
+        u16::try_from(self.lines_for(width, Emphasis::None).len()).unwrap_or(u16::MAX)
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, ctx: &RenderCtx<'_>) {
@@ -76,12 +95,14 @@ impl BlockWidget for ToolCallAloneBlockWidget {
     }
 
     fn lines(&self, width: u16, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
-        block_to_lines(&self.synthetic(), width, ctx.emphasis)
+        self.lines_for(width, ctx.emphasis)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::*;
     use crate::theme::Theme;
 

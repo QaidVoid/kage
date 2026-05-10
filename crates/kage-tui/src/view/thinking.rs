@@ -1,19 +1,23 @@
 //! `ThinkingBlockWidget`: per-block renderer for hidden
 //! chain-of-thought blocks.
 //!
-//! Same shim approach as PB.2 / PB.3 assistant: build a synthetic
-//! `Block::Thinking` and route through `block_to_lines` so behavior is
-//! pixel-identical with the existing renderer. PB.6 replaces the lines
-//! path with direct buffer painting.
+//! Renders a `thinking` header line plus, when not folded, one body
+//! row per logical thinking line each prefixed with the themed left
+//! rule glyph. The whole block flows through `mark_emphasis` so
+//! focused / search-matching thinking blocks pick up the standard
+//! left-edge accent.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::text::Line;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
 use super::widget::{BlockWidget, RenderCtx};
-use super::{Emphasis, block_to_lines};
-use crate::buffer::Block;
+use super::{
+    DECORATION_MARKER, Emphasis, fold_indicator, header_line, mark_emphasis, plain_lines,
+    thinking_style,
+};
 
 /// Renders a [`Block::Thinking`] with its `thinking` header line, the
 /// fold indicator, and (when unfolded) one body row per thinking line
@@ -28,8 +32,7 @@ pub struct ThinkingBlockWidget {
 impl ThinkingBlockWidget {
     /// Construct a widget for a thinking block.
     ///
-    /// `folded` collapses the body to just the header line; `live`
-    /// mirrors [`Block::Thinking::live`].
+    /// `folded` collapses the body to just the header line.
     #[must_use]
     pub fn new(text: impl Into<String>, folded: bool, live: bool) -> Self {
         Self {
@@ -39,19 +42,41 @@ impl ThinkingBlockWidget {
         }
     }
 
-    fn synthetic_block(&self) -> Block {
-        Block::Thinking {
-            text: self.text.clone(),
-            folded: self.folded,
-            live: self.live,
+    fn lines_for(&self, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
+        let mut out = Vec::new();
+        out.push(header_line(
+            fold_indicator(self.folded),
+            "thinking",
+            None,
+            thinking_style(),
+        ));
+        if !self.folded {
+            // Each body line gets a left-rule glyph in the thinking
+            // fg color so the thinking section reads distinct from
+            // assistant text even on terminals that swallow italic.
+            // The glyph is decoration so cell-based selection skips
+            // it on yank.
+            let rule = Span::styled(
+                "\u{258e} ",
+                Style::default()
+                    .fg(crate::theme::current().thinking_fg)
+                    .add_modifier(DECORATION_MARKER),
+            );
+            for body_line in plain_lines(&self.text, thinking_style()) {
+                let mut spans = Vec::with_capacity(body_line.spans.len() + 1);
+                spans.push(rule.clone());
+                spans.extend(body_line.spans);
+                out.push(Line::from(spans));
+            }
         }
+        let _ = (Modifier::empty(), self.live);
+        mark_emphasis(out, width, emphasis)
     }
 }
 
 impl BlockWidget for ThinkingBlockWidget {
     fn measure(&self, width: u16) -> u16 {
-        let lines = block_to_lines(&self.synthetic_block(), width, Emphasis::None);
-        u16::try_from(lines.len()).unwrap_or(u16::MAX)
+        u16::try_from(self.lines_for(width, Emphasis::None).len()).unwrap_or(u16::MAX)
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, ctx: &RenderCtx<'_>) {
@@ -62,7 +87,7 @@ impl BlockWidget for ThinkingBlockWidget {
     }
 
     fn lines(&self, width: u16, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
-        block_to_lines(&self.synthetic_block(), width, ctx.emphasis)
+        self.lines_for(width, ctx.emphasis)
     }
 }
 

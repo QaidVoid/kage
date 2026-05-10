@@ -1,13 +1,10 @@
 //! `ToolPairBlockWidget`: per-block renderer for a paired tool call
 //! and its result (the merged "tool block" the user sees in the buffer).
 //!
-//! The big lift of PB.4: roughly 600 lines of layout helpers
-//! (`tool_pair_to_lines`, `truncated_body`, `body_trim_for`,
-//! `highlight_read_body_if_applicable`, `input_recap_worth_showing`,
-//! `duration_footer`) live in `view.rs` for now. PB.4 wraps the
-//! existing matcher rather than lifting those helpers wholesale, so
-//! behavior stays identical and the helpers can move in PB.9 when the
-//! lines path is retired.
+//! Calls into `tool_pair_to_lines` and its private helper cluster
+//! (`truncated_body`, `body_trim_for`, `highlight_read_body_if_applicable`,
+//! `input_recap_worth_showing`, `duration_footer`) which live in
+//! `view.rs` because they are shared with the bubble layout path.
 
 use std::time::Instant;
 

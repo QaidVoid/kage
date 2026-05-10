@@ -7,12 +7,11 @@
 //! startup; plugins call [`BlockRenderer::set_custom`] to add a
 //! widget for a `Block::Custom { kind: ... }` variant they own.
 //!
-//! PB.10 deliberately stops short of wiring this into the render
-//! path. PB.9 will replace `block_to_lines` / `build_block_lines`
-//! with a widget walker that calls
-//! [`BlockRenderer::widget_for`]; until then the registry lives
-//! alongside the existing lines pipeline so the trait surface can
-//! be reviewed independently of the rewrite.
+//! PB.9 wires this into `render_buffer`: every block goes through
+//! [`BlockRenderer::widget_for`] (or [`BlockRenderer::pair_widget_for`]
+//! for merged tool blocks) before its lines are composed into the
+//! Paragraph. Plugin overrides via `set_builtin` / `set_custom`
+//! are picked up automatically.
 
 use std::collections::HashMap;
 use std::sync::Arc;

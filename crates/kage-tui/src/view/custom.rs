@@ -8,7 +8,9 @@ use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget};
 
 use super::widget::{BlockWidget, RenderCtx};
-use super::{Emphasis, block_to_lines};
+use super::{
+    Emphasis, custom_style, fold_indicator, header_line, mark_emphasis, plain_lines, prefix_line,
+};
 use crate::buffer::Block;
 
 /// Renders a [`Block::Custom`] using the default header+body layout.
@@ -36,19 +38,26 @@ impl CustomBlockWidget {
         }
     }
 
-    fn synthetic(&self) -> Block {
-        Block::Custom {
-            kind: self.kind.clone(),
-            text: self.text.clone(),
-            folded: self.folded,
+    fn lines_for(&self, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
+        let mut out = Vec::new();
+        out.push(header_line(
+            fold_indicator(self.folded),
+            &self.kind,
+            None,
+            custom_style(),
+        ));
+        if !self.folded {
+            for body_line in plain_lines(&self.text, custom_style()) {
+                out.push(prefix_line("  ", body_line));
+            }
         }
+        mark_emphasis(out, width, emphasis)
     }
 }
 
 impl BlockWidget for CustomBlockWidget {
     fn measure(&self, width: u16) -> u16 {
-        let lines = block_to_lines(&self.synthetic(), width, Emphasis::None);
-        u16::try_from(lines.len()).unwrap_or(u16::MAX)
+        u16::try_from(self.lines_for(width, Emphasis::None).len()).unwrap_or(u16::MAX)
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, ctx: &RenderCtx<'_>) {
@@ -59,7 +68,7 @@ impl BlockWidget for CustomBlockWidget {
     }
 
     fn lines(&self, width: u16, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
-        block_to_lines(&self.synthetic(), width, ctx.emphasis)
+        self.lines_for(width, ctx.emphasis)
     }
 }
 

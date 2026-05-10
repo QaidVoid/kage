@@ -1,11 +1,9 @@
 //! `AssistantBlockWidget`: per-block renderer for assistant text.
 //!
-//! PB.3: parallel implementation that delegates to the existing
-//! `block_to_lines` matcher via a synthetic `Block::Assistant`. Keeps
-//! behavior identical (live blocks skip syntect; finished blocks pass
-//! through the fenced-highlight cache; emphasis adds the left-edge
-//! marker via `mark_emphasis`). PB.6 will replace the lines path with
-//! direct buffer painting and exact `measure()`.
+//! Live blocks skip syntect (the cache would miss on every streamed
+//! delta and re-highlight a growing body 30 times a second). Finished
+//! blocks run through the fenced-highlight cache. Emphasis adds the
+//! left-edge marker via `mark_emphasis`.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -13,8 +11,7 @@ use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget};
 
 use super::widget::{BlockWidget, RenderCtx};
-use super::{Emphasis, block_to_lines};
-use crate::buffer::Block;
+use super::{Emphasis, assistant_style, mark_emphasis, plain_lines};
 
 /// Renders a [`Block::Assistant`] as plain text (while streaming) or
 /// fenced-syntax-highlighted text (once the turn finishes), with the
@@ -28,9 +25,10 @@ pub struct AssistantBlockWidget {
 impl AssistantBlockWidget {
     /// Construct a widget for an assistant text block.
     ///
-    /// `live` mirrors [`Block::Assistant::live`]: when `true` the
-    /// renderer skips syntect since each delta would invalidate the
-    /// cache; once the turn ends, set it to `false` so the cache hits.
+    /// `live` mirrors [`crate::buffer::Block::Assistant::live`]: when
+    /// `true` the renderer skips syntect since each delta would
+    /// invalidate the cache; once the turn ends, set it to `false`
+    /// so the cache hits.
     #[must_use]
     pub fn new(text: impl Into<String>, live: bool) -> Self {
         Self {
@@ -39,18 +37,19 @@ impl AssistantBlockWidget {
         }
     }
 
-    fn synthetic_block(&self) -> Block {
-        Block::Assistant {
-            text: self.text.clone(),
-            live: self.live,
-        }
+    fn lines_for(&self, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
+        let body = if self.live {
+            plain_lines(&self.text, assistant_style())
+        } else {
+            crate::syntax::highlight_fenced(&self.text, assistant_style())
+        };
+        mark_emphasis(body, width, emphasis)
     }
 }
 
 impl BlockWidget for AssistantBlockWidget {
     fn measure(&self, width: u16) -> u16 {
-        let lines = block_to_lines(&self.synthetic_block(), width, Emphasis::None);
-        u16::try_from(lines.len()).unwrap_or(u16::MAX)
+        u16::try_from(self.lines_for(width, Emphasis::None).len()).unwrap_or(u16::MAX)
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, ctx: &RenderCtx<'_>) {
@@ -61,7 +60,7 @@ impl BlockWidget for AssistantBlockWidget {
     }
 
     fn lines(&self, width: u16, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
-        block_to_lines(&self.synthetic_block(), width, ctx.emphasis)
+        self.lines_for(width, ctx.emphasis)
     }
 }
 

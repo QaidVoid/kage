@@ -1,7 +1,7 @@
 //! Widget for an unpaired tool result (rare; usually a result is
 //! consumed via [`super::ToolPairBlockWidget`] and skipped at the
-//! per-block layer). The lines path renders this on the assistant /
-//! mark-emphasis style with a header + body.
+//! per-block layer). Renders a header + truncated body in the
+//! mark-emphasis style.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -9,19 +9,21 @@ use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget};
 
 use super::widget::{BlockWidget, RenderCtx};
-use super::{Emphasis, block_to_lines};
+use super::{
+    Emphasis, mark_emphasis, prefix_line, tool_error_style, tool_result_header_line,
+    tool_result_style, truncated_body_lines,
+};
 use crate::buffer::Block;
 
-/// Renders an orphan [`Block::ToolResult`] (a tool result whose
-/// matching [`Block::ToolCall`] is missing).
+/// Renders an orphan [`crate::buffer::Block::ToolResult`] (a tool
+/// result whose matching [`crate::buffer::Block::ToolCall`] is
+/// missing).
 #[derive(Clone, Debug)]
 pub struct ToolResultAloneBlockWidget {
-    call_id: String,
     name: String,
     output: String,
     is_error: bool,
     folded: bool,
-    duration_ms: Option<u64>,
 }
 
 impl ToolResultAloneBlockWidget {
@@ -30,40 +32,46 @@ impl ToolResultAloneBlockWidget {
     pub fn from_block(block: &Block) -> Option<Self> {
         match block {
             Block::ToolResult {
-                call_id,
                 name,
                 output,
                 is_error,
                 folded,
-                duration_ms,
+                ..
             } => Some(Self {
-                call_id: call_id.clone(),
                 name: name.clone(),
                 output: output.clone(),
                 is_error: *is_error,
                 folded: *folded,
-                duration_ms: *duration_ms,
             }),
             _ => None,
         }
     }
 
-    fn synthetic(&self) -> Block {
-        Block::ToolResult {
-            call_id: self.call_id.clone(),
-            name: self.name.clone(),
-            output: self.output.clone(),
-            is_error: self.is_error,
-            folded: self.folded,
-            duration_ms: self.duration_ms,
+    fn lines_for(&self, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
+        let mut out = Vec::new();
+        out.push(tool_result_header_line(
+            self.folded,
+            &self.name,
+            &self.output,
+            self.is_error,
+        ));
+        if !self.folded {
+            let body_style = if self.is_error {
+                tool_error_style()
+            } else {
+                tool_result_style()
+            };
+            for body_line in truncated_body_lines(&self.output, body_style) {
+                out.push(prefix_line("  ", body_line));
+            }
         }
+        mark_emphasis(out, width, emphasis)
     }
 }
 
 impl BlockWidget for ToolResultAloneBlockWidget {
     fn measure(&self, width: u16) -> u16 {
-        let lines = block_to_lines(&self.synthetic(), width, Emphasis::None);
-        u16::try_from(lines.len()).unwrap_or(u16::MAX)
+        u16::try_from(self.lines_for(width, Emphasis::None).len()).unwrap_or(u16::MAX)
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, ctx: &RenderCtx<'_>) {
@@ -74,7 +82,7 @@ impl BlockWidget for ToolResultAloneBlockWidget {
     }
 
     fn lines(&self, width: u16, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
-        block_to_lines(&self.synthetic(), width, ctx.emphasis)
+        self.lines_for(width, ctx.emphasis)
     }
 }
 

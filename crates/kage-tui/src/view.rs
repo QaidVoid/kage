@@ -9,6 +9,10 @@
 //! optional indented body, and custom blocks are passed through with
 //! their `kind` shown in the header.
 
+pub mod widget;
+
+pub use widget::{BlockWidget, EmptyBlockWidget, RenderCtx, SelectionState};
+
 use ratatui::Frame;
 use ratatui::layout::Alignment;
 use ratatui::style::{Color, Modifier, Style};

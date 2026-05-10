@@ -41,4 +41,4 @@ pub use picker::{PickItem, pick};
 pub use terminal::Tui;
 pub use theme::{Theme, current as current_theme, set_current as set_current_theme};
 pub use usage::{SessionUsage, SharedSessionUsage, shared_session_usage};
-pub use view::StatusCtx;
+pub use view::{BlockWidget, EmptyBlockWidget, RenderCtx, SelectionState, StatusCtx};

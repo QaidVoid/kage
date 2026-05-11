@@ -43,6 +43,10 @@ pub struct CommandLine {
     completions: Completions,
     popup_open: bool,
     selected: Option<usize>,
+    /// Inline validation error displayed below the command line.
+    /// Set by the host after a failed submit; cleared on the next
+    /// keystroke that changes the text.
+    error: Option<String>,
 }
 
 impl CommandLine {
@@ -85,6 +89,25 @@ impl CommandLine {
     #[must_use]
     pub fn selected(&self) -> Option<usize> {
         self.selected
+    }
+
+    /// Current inline validation error, if any. Set by the host after
+    /// a failed submit attempt; cleared on the next editing keystroke.
+    #[must_use]
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// Set an inline validation error. The cmdline should remain open
+    /// (the host does not set `self.cmdline = None`) so the user can
+    /// fix the input.
+    pub fn set_error(&mut self, msg: impl Into<String>) {
+        self.error = Some(msg.into());
+    }
+
+    /// Clear any inline validation error.
+    pub fn clear_error(&mut self) {
+        self.error = None;
     }
 
     /// Close the completion popup without changing the text.
@@ -134,6 +157,7 @@ impl CommandLine {
                 }
             }
             KeyCode::Tab => {
+                self.error = None;
                 if self.completions.items.is_empty() {
                     self.refresh(registry, resolver);
                 }
@@ -141,6 +165,7 @@ impl CommandLine {
                 CommandLineEvent::Pending
             }
             KeyCode::BackTab => {
+                self.error = None;
                 if self.completions.items.is_empty() {
                     self.refresh(registry, resolver);
                 }
@@ -156,31 +181,37 @@ impl CommandLine {
                 CommandLineEvent::Pending
             }
             KeyCode::Backspace => {
+                self.error = None;
                 self.backspace();
                 self.refresh(registry, resolver);
                 CommandLineEvent::Pending
             }
             KeyCode::Left => {
+                self.error = None;
                 self.move_cursor(-1);
                 self.refresh(registry, resolver);
                 CommandLineEvent::Pending
             }
             KeyCode::Right => {
+                self.error = None;
                 self.move_cursor(1);
                 self.refresh(registry, resolver);
                 CommandLineEvent::Pending
             }
             KeyCode::Home => {
+                self.error = None;
                 self.cursor = 0;
                 self.refresh(registry, resolver);
                 CommandLineEvent::Pending
             }
             KeyCode::End => {
+                self.error = None;
                 self.cursor = self.text.len();
                 self.refresh(registry, resolver);
                 CommandLineEvent::Pending
             }
             KeyCode::Char(c) => {
+                self.error = None;
                 self.insert_char(c);
                 self.refresh(registry, resolver);
                 CommandLineEvent::Pending
@@ -304,6 +335,20 @@ impl CommandLine {
             completions,
             popup_open,
             selected,
+            error: None,
+        }
+    }
+
+    /// Build a `CommandLine` with a validation error set. Used by
+    /// view snapshot tests to exercise error rendering.
+    pub(crate) fn for_test_with_error(text: &str, error: &str) -> Self {
+        Self {
+            text: text.to_owned(),
+            cursor: text.len(),
+            completions: Completions::default(),
+            popup_open: false,
+            selected: None,
+            error: Some(error.to_owned()),
         }
     }
 }
@@ -638,5 +683,77 @@ mod tests {
         assert_eq!(longest_common_prefix(["only"]), "only");
         let empty: [&str; 0] = [];
         assert_eq!(longest_common_prefix(empty), "");
+    }
+
+    // --- Inline error tests (PN.9) ---
+
+    #[test]
+    fn set_error_stores_message_accessible_via_error() {
+        let mut cl = CommandLine::new();
+        assert!(cl.error().is_none());
+        cl.set_error("bad arg");
+        assert_eq!(cl.error(), Some("bad arg"));
+    }
+
+    #[test]
+    fn clear_error_removes_message() {
+        let mut cl = CommandLine::new();
+        cl.set_error("oops");
+        cl.clear_error();
+        assert!(cl.error().is_none());
+    }
+
+    #[test]
+    fn typing_clears_error() {
+        let mut cl = CommandLine::new();
+        cl.set_error("fix me");
+        assert_eq!(cl.error(), Some("fix me"));
+        send(&mut cl, key(KeyCode::Char('x')));
+        assert!(cl.error().is_none(), "typing should clear the error");
+    }
+
+    #[test]
+    fn backspace_clears_error() {
+        let mut cl = CommandLine::new();
+        for c in "abc".chars() {
+            send(&mut cl, key(KeyCode::Char(c)));
+        }
+        cl.set_error("fix me");
+        assert_eq!(cl.error(), Some("fix me"));
+        send(&mut cl, key(KeyCode::Backspace));
+        assert!(cl.error().is_none(), "backspace should clear the error");
+    }
+
+    #[test]
+    fn left_right_clear_error() {
+        let mut cl = CommandLine::new();
+        for c in "abc".chars() {
+            send(&mut cl, key(KeyCode::Char(c)));
+        }
+        cl.set_error("fix me");
+        send(&mut cl, key(KeyCode::Left));
+        assert!(cl.error().is_none(), "cursor left should clear the error");
+    }
+
+    #[test]
+    fn esc_does_not_clear_error_when_popup_closed() {
+        let mut cl = CommandLine::new();
+        cl.set_error("fix me");
+        // Esc cancels the cmdline when popup is closed; the error
+        // state doesn't matter because the cmdline is about to be
+        // destroyed. We just verify the event is Cancelled.
+        assert_eq!(
+            send(&mut cl, key(KeyCode::Esc)),
+            CommandLineEvent::Cancelled
+        );
+    }
+
+    #[test]
+    fn tab_clears_error() {
+        let mut cl = CommandLine::new();
+        cl.set_error("fix me");
+        let reg = registry();
+        send_with(&mut cl, key(KeyCode::Tab), &reg, &EmptyResolver);
+        assert!(cl.error().is_none(), "tab should clear the error");
     }
 }

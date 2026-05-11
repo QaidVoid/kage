@@ -143,6 +143,7 @@ pub fn render(
         render_toasts(frame, regions.buffer, toasts, &theme);
     }
     if let Some(cl) = cmdline {
+        render_cmdline_error(frame, regions, cl);
         render_cmdline_popup(frame, regions, cl);
         place_cmdline_cursor(frame, regions, cl);
     } else if let Some(sl) = status.search_line {
@@ -346,13 +347,60 @@ fn popup_styles() -> (Style, Style, Style) {
     (row, sel, dim)
 }
 
+/// Paint an inline validation error below the cmdline status row.
+/// Shown when the host set [`CommandLine::set_error`] after a failed
+/// submit attempt. The error is rendered in the tool-error foreground
+/// colour so it is visually distinct from the completion popup. The
+/// popup is suppressed while an error is visible so the user focuses
+/// on fixing the input.
+fn render_cmdline_error(frame: &mut Frame, regions: Regions, cmdline: &CommandLine) {
+    let Some(err) = cmdline.error() else {
+        return;
+    };
+    let theme = crate::theme::current();
+    let bg = theme.modeline_bg;
+    let fg = theme.tool_error_fg;
+    let style = Style::default().fg(fg).bg(bg);
+
+    let y = regions.status.y.saturating_add(1);
+    if y >= regions.buffer.y.saturating_add(regions.buffer.height) {
+        return;
+    }
+    let width = regions.status.width.max(regions.buffer.width);
+    let area = Rect {
+        x: regions.status.x,
+        y,
+        width,
+        height: 1,
+    };
+
+    let marker = "! ";
+    let marker_chars = marker.len();
+    let inner = usize::from(area.width).saturating_sub(marker_chars);
+    let text = truncate_to_width(err, inner);
+    let total_chars = marker_chars + text.chars().count();
+    let pad = usize::from(area.width).saturating_sub(total_chars);
+    let line = Line::from(vec![
+        Span::styled(marker.to_owned(), style.add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{text}{}", " ".repeat(pad)), style),
+    ]);
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
 /// Paint the completion popup over the conversation buffer when the
 /// cmdline has candidate completions. Each row shows the value plus an
 /// optional dimmed description; the [`CommandLine::selected`] row is
 /// highlighted. When there are more items than fit, a sliding window
 /// follows the selection and `... N more above` / `... N more below`
-/// indicator rows show how many candidates are off-screen.
+/// indicator rows show how many candidates are off-screen. Suppressed
+/// when an inline error is active.
 fn render_cmdline_popup(frame: &mut Frame, regions: Regions, cmdline: &CommandLine) {
+    // Suppress the popup when an error is shown so the user can
+    // focus on fixing the input.
+    if cmdline.error().is_some() {
+        return;
+    }
     let completions = cmdline.completions();
     if completions.items.is_empty() {
         return;
@@ -2712,6 +2760,70 @@ mod tests {
         assert!(
             !popup_row.contains("catalog"),
             "narrow viewport should drop the tail of the description, got {popup_row:?}",
+        );
+    }
+
+    // --- Inline error rendering tests (PN.9) ---
+
+    #[test]
+    fn error_line_shows_marker_and_message() {
+        let cl = CommandLine::for_test_with_error(
+            "mouse mayb",
+            "argument `state` must be one of on|off|toggle",
+        );
+        let lines = snapshot_with_cmdline(&cl, Rect::new(0, 0, 60, 12));
+        // Row 0 is the status row with ":mouse mayb".
+        // Row 1 should contain the error marker and message.
+        assert!(
+            lines[0].contains("mouse mayb"),
+            "status row should show typed text, got {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains('!'),
+            "error row should contain the error marker, got {:?}",
+            lines[1]
+        );
+        assert!(
+            lines[1].contains("must be one of"),
+            "error row should contain the error message, got {:?}",
+            lines[1]
+        );
+    }
+
+    #[test]
+    fn error_line_suppresses_popup() {
+        let completions = crate::cmdparse::Completions {
+            items: vec![
+                completion("model", Some("switch model")),
+                completion("mouse", Some("toggle mouse")),
+            ],
+            anchor: 0,
+        };
+        // Error is set even though completions are populated.
+        let mut cl = CommandLine::for_test("mo", completions, true, None);
+        cl.set_error("fix your input");
+        let lines = snapshot_with_cmdline(&cl, Rect::new(0, 0, 50, 12));
+        // The popup should be suppressed; only the error row appears.
+        assert!(
+            !lines.iter().any(|l| l.contains("switch model")),
+            "popup should be suppressed when error is active, got {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("fix your input")),
+            "error message should be visible, got {lines:#?}"
+        );
+    }
+
+    #[test]
+    fn error_line_truncates_in_narrow_viewport() {
+        let long_msg = "this is a very long error message that should definitely be truncated when the viewport is narrow";
+        let cl = CommandLine::for_test_with_error("x", long_msg);
+        let lines = snapshot_with_cmdline(&cl, Rect::new(0, 0, 30, 8));
+        let error_row = &lines[1];
+        assert!(
+            error_row.contains('\u{2026}'),
+            "long error should be truncated with ellipsis, got {error_row:?}"
         );
     }
 }

@@ -36,6 +36,18 @@ use crate::view;
 /// Lines scrolled per mouse wheel notch.
 const MOUSE_SCROLL_LINES: i32 = 3;
 
+/// Outcome of validating a command before execution.
+///
+/// [`CommandResult::Done`] means the command was dispatched (or the
+/// command name was empty). [`CommandResult::ValidationError`] means
+/// the argument schema rejected the input; the caller should keep the
+/// cmdline open and display the error inline.
+#[derive(Debug)]
+enum CommandResult {
+    Done(Option<AppExit>),
+    ValidationError(String),
+}
+
 /// When `KAGE_DEBUG_KEYS` is set to a non-empty value, every press is
 /// appended to the file at that path (or `$XDG_STATE_HOME/kage/keys.log`
 /// when the value is `1`). Lets us diagnose terminal-specific quirks
@@ -883,16 +895,31 @@ impl App {
             plugin_commands: &self.plugin_commands,
             sessions: self.session_lister.as_ref(),
         };
-        let cmdline = self.cmdline.as_mut()?;
-        match cmdline.handle_key(key, &registry, &resolver) {
+        let event = self
+            .cmdline
+            .as_mut()
+            .map(|cl| cl.handle_key(key, &registry, &resolver));
+        let event = event?;
+        match event {
             CommandLineEvent::Pending => None,
             CommandLineEvent::Cancelled => {
                 self.cmdline = None;
                 None
             }
             CommandLineEvent::Submit(text) => {
-                self.cmdline = None;
-                self.run_command(&text)
+                let result = self.run_command_validated(&text, &registry);
+                match result {
+                    CommandResult::Done(exit) => {
+                        self.cmdline = None;
+                        exit
+                    }
+                    CommandResult::ValidationError(msg) => {
+                        if let Some(cl) = self.cmdline.as_mut() {
+                            cl.set_error(msg);
+                        }
+                        None
+                    }
+                }
             }
         }
     }
@@ -907,37 +934,56 @@ impl App {
             plugin_commands: &self.plugin_commands,
             sessions: self.session_lister.as_ref(),
         };
-        let palette = self.slash_palette.as_mut()?;
-        match palette.handle_key(key, &registry, &resolver) {
+        let event = self
+            .slash_palette
+            .as_mut()
+            .map(|sp| sp.handle_key(key, &registry, &resolver));
+        let event = event?;
+        match event {
             CommandLineEvent::Pending => None,
             CommandLineEvent::Cancelled => {
                 self.slash_palette = None;
                 None
             }
             CommandLineEvent::Submit(text) => {
-                self.slash_palette = None;
-                self.run_command(&text)
+                let result = self.run_command_validated(&text, &registry);
+                match result {
+                    CommandResult::Done(exit) => {
+                        self.slash_palette = None;
+                        exit
+                    }
+                    CommandResult::ValidationError(msg) => {
+                        if let Some(sp) = self.slash_palette.as_mut() {
+                            sp.set_error(msg);
+                        }
+                        None
+                    }
+                }
             }
         }
     }
 
-    /// Dispatch a `:` command. Looks up the command name in the
-    /// built-in registry; on a match, extracts the trailing arg
-    /// string and delegates to the appropriate handler. Unknown
-    /// commands surface a `kage:error` block in the buffer rather
-    /// than failing silently. Plugin command names are checked
-    /// after builtins.
-    fn run_command(&mut self, line: &str) -> Option<AppExit> {
+    /// Validated command dispatch. Parses the argument string against
+    /// the matched spec's schema and returns a [`CommandResult`]
+    /// instead of pushing errors to the buffer. On
+    /// [`CommandResult::ValidationError`], the caller keeps the
+    /// cmdline open so the user can fix the input.
+    fn run_command_validated(&mut self, line: &str, registry: &[&CommandSpec]) -> CommandResult {
         let mut parts = line.splitn(2, char::is_whitespace);
         let head = parts.next().unwrap_or("");
         let rest = parts.next().unwrap_or("").trim();
 
-        if let Some(spec) = crate::command::find_builtin_command(head) {
-            return self.dispatch_builtin(spec.name, rest);
+        if head.is_empty() {
+            return CommandResult::Done(None);
         }
 
-        if head.is_empty() {
-            return None;
+        if let Some(spec) = crate::command::find_builtin_command(head) {
+            let (target_spec, target_rest) = Self::resolve_subcommand_tree(spec, rest);
+            if let Err(e) = crate::cmdparse::parse_input(target_spec, target_rest) {
+                return CommandResult::ValidationError(e.to_string());
+            }
+            let exit = self.dispatch_builtin(spec.name, rest);
+            return CommandResult::Done(exit);
         }
 
         if self.plugin_commands.iter().any(|(n, _)| n == head) {
@@ -945,11 +991,34 @@ impl App {
                 name: head.to_owned(),
                 args: rest.to_owned(),
             });
-            return None;
+            return CommandResult::Done(None);
         }
 
-        self.push_error(format!("unknown command: {head}"));
-        None
+        let mut msg = format!("unknown command: {head}");
+        if let Some(suggestion) = crate::cmdparse::suggest_command(registry, head) {
+            msg = format!("{msg} (did you mean :{suggestion}?)");
+        }
+        CommandResult::ValidationError(msg)
+    }
+
+    /// Walk the subcommand tree for commands like `theme set <name>`.
+    /// Returns the leaf spec and the remaining argument substring
+    /// after consuming subcommand names. If no subcommand matches,
+    /// returns the parent spec with the full `rest`.
+    fn resolve_subcommand_tree<'a, 'b>(
+        spec: &'a CommandSpec,
+        rest: &'b str,
+    ) -> (&'a CommandSpec, &'b str) {
+        if spec.subcommands.is_empty() {
+            return (spec, rest);
+        }
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let first = parts.next().unwrap_or("");
+        if let Some(sub) = spec.subcommand(first) {
+            let sub_rest = parts.next().unwrap_or("").trim();
+            return Self::resolve_subcommand_tree(sub, sub_rest);
+        }
+        (spec, rest)
     }
 
     /// Execute a built-in command by canonical name with the
@@ -1733,7 +1802,12 @@ mod tests {
         let mut app = App::new(buffer, tx);
         let flag = CancelFlag::new();
         app.set_cancel_flag(flag.clone());
-        assert!(app.run_command("cancel").is_none());
+        let registry: Vec<&CommandSpec> = BUILTIN_COMMANDS.iter().collect();
+        let result = app.run_command_validated("cancel", &registry);
+        assert!(
+            matches!(result, CommandResult::Done(None)),
+            "expected Done(None), got {result:?}"
+        );
         assert!(
             flag.is_cancelled(),
             ":cancel should flip the cancel flag on the foreground thread"
@@ -1869,5 +1943,148 @@ mod tests {
                 crate::buffer::Block::Thinking { folded: false, .. }
             ));
         }
+    }
+
+    // --- PN.9 validation error tests ---
+
+    fn builtin_registry() -> Vec<&'static CommandSpec> {
+        BUILTIN_COMMANDS.iter().collect()
+    }
+
+    #[test]
+    fn validated_unknown_command_returns_error_with_suggestion() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let registry = builtin_registry();
+        let result = app.run_command_validated("quut", &registry);
+        match result {
+            CommandResult::ValidationError(msg) => {
+                assert!(msg.contains("unknown command: quut"), "got {msg:?}");
+                assert!(
+                    msg.contains("did you mean"),
+                    "should suggest closest match, got {msg:?}"
+                );
+            }
+            other @ CommandResult::Done(_) => {
+                panic!("expected ValidationError, got {other:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn validated_invalid_choice_returns_error() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let registry = builtin_registry();
+        // "mouse mayb" is invalid: "mayb" is not in [on, off, toggle]
+        let result = app.run_command_validated("mouse mayb", &registry);
+        match result {
+            CommandResult::ValidationError(msg) => {
+                assert!(
+                    msg.contains("state"),
+                    "error should mention the arg name, got {msg:?}"
+                );
+            }
+            other @ CommandResult::Done(_) => {
+                panic!("expected ValidationError, got {other:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn validated_missing_required_arg_returns_error() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let registry = builtin_registry();
+        // "model" without a required <id> argument
+        let result = app.run_command_validated("model", &registry);
+        match result {
+            CommandResult::ValidationError(msg) => {
+                assert!(
+                    msg.contains("missing"),
+                    "error should mention missing arg, got {msg:?}"
+                );
+            }
+            other @ CommandResult::Done(_) => {
+                panic!("expected ValidationError, got {other:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn validated_valid_command_returns_done() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let registry = builtin_registry();
+        let result = app.run_command_validated("help", &registry);
+        assert!(
+            matches!(result, CommandResult::Done(_)),
+            "expected Done, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn validated_quit_returns_done_with_exit() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let registry = builtin_registry();
+        let result = app.run_command_validated("quit", &registry);
+        assert!(
+            matches!(result, CommandResult::Done(Some(AppExit::Quit))),
+            "expected Done(Some(Quit)), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn validated_subcommand_validates_against_leaf_spec() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let registry = builtin_registry();
+        // "theme set" without required <name> arg should error
+        let result = app.run_command_validated("theme set", &registry);
+        match result {
+            CommandResult::ValidationError(msg) => {
+                assert!(
+                    msg.contains("missing"),
+                    "error should mention missing arg, got {msg:?}"
+                );
+            }
+            other @ CommandResult::Done(_) => {
+                panic!("expected ValidationError, got {other:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn validated_empty_input_returns_done_none() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let registry = builtin_registry();
+        let result = app.run_command_validated("", &registry);
+        assert!(
+            matches!(result, CommandResult::Done(None)),
+            "expected Done(None), got {result:?}"
+        );
+    }
+
+    #[test]
+    fn validated_optional_arg_missing_is_ok() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let registry = builtin_registry();
+        // "mouse" without arg is valid (optional arg)
+        let result = app.run_command_validated("mouse", &registry);
+        assert!(
+            matches!(result, CommandResult::Done(_)),
+            "mouse with no arg should be valid, got {result:?}"
+        );
     }
 }

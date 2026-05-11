@@ -58,6 +58,11 @@ impl SlashPalette {
         &self.cmdline
     }
 
+    /// Set an inline validation error on the wrapped command line.
+    pub fn set_error(&mut self, msg: impl Into<String>) {
+        self.cmdline.set_error(msg);
+    }
+
     /// Drive the palette by one keystroke. Delegates to the wrapped
     /// [`CommandLine`].
     pub fn handle_key(
@@ -82,7 +87,10 @@ impl SlashPalette {
     /// the user were typing a message directly into the input box.
     /// Caller is expected to have drawn the rest of the frame first.
     pub fn render(&self, frame: &mut Frame, regions: Regions) {
-        self.render_popup_above_input(frame, regions);
+        self.render_error_above_input(frame, regions);
+        if self.cmdline.error().is_none() {
+            self.render_popup_above_input(frame, regions);
+        }
         self.render_slash_in_input_card(frame, regions);
     }
 
@@ -192,6 +200,34 @@ impl SlashPalette {
 
         frame.render_widget(Paragraph::new(lines).style(row_style), area);
     }
+
+    /// Render an inline validation error just above the input card,
+    /// in the same position the completion popup would occupy.
+    fn render_error_above_input(&self, frame: &mut Frame, regions: Regions) {
+        let Some(err) = self.cmdline.error() else {
+            return;
+        };
+        let Some(area) = error_area(regions) else {
+            return;
+        };
+        let theme = crate::theme::current();
+        let bg = theme.modeline_bg;
+        let fg = theme.tool_error_fg;
+        let style = Style::default().fg(fg).bg(bg);
+
+        let marker = "! ";
+        let marker_chars = marker.len();
+        let inner = usize::from(area.width).saturating_sub(marker_chars);
+        let text = truncate(err, inner);
+        let total_chars = marker_chars + text.chars().count();
+        let pad = usize::from(area.width).saturating_sub(total_chars);
+        let line = Line::from(vec![
+            Span::styled(marker.to_owned(), style.add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{text}{}", " ".repeat(pad)), style),
+        ]);
+        frame.render_widget(Clear, area);
+        frame.render_widget(Paragraph::new(line), area);
+    }
 }
 
 /// Compute the popup's painting rectangle anchored just above the
@@ -223,6 +259,26 @@ fn popup_area(regions: Regions, total: usize, selected: Option<usize>) -> Option
         y,
         width,
         height,
+    })
+}
+
+/// Compute the single-row error rectangle anchored just above the
+/// input card.
+fn error_area(regions: Regions) -> Option<Rect> {
+    let width = regions.input.width;
+    if width == 0 {
+        return None;
+    }
+    let space_above = regions.input.y.saturating_sub(regions.buffer.y);
+    if space_above == 0 {
+        return None;
+    }
+    let y = regions.input.y.saturating_sub(1);
+    Some(Rect {
+        x: regions.input.x,
+        y,
+        width,
+        height: 1,
     })
 }
 

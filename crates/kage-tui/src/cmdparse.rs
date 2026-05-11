@@ -507,6 +507,77 @@ pub fn complete(
     Completions { items, anchor }
 }
 
+/// Find the closest command name to `input` from the registry using a
+/// simple edit-distance heuristic. Returns the best-matching name
+/// (primary or alias) if the distance is below a reasonable
+/// threshold, or `None` when nothing looks close enough.
+///
+/// Used by the error UX (PN.9) to suggest "did you mean X?" when the
+/// user types an unknown command name.
+#[must_use]
+pub fn suggest_command(registry: &[&CommandSpec], input: &str) -> Option<&'static str> {
+    let input_lower = input.to_ascii_lowercase();
+    let mut best_name: Option<&'static str> = None;
+    let mut best_dist = usize::MAX;
+
+    for spec in registry {
+        for name in spec.names() {
+            let name_lower = name.to_ascii_lowercase();
+            let dist = edit_distance(&input_lower, &name_lower);
+            if dist < best_dist {
+                best_dist = dist;
+                best_name = Some(name);
+            }
+        }
+    }
+
+    // Only suggest when the distance is "close enough": at most
+    // half the length of the typed input (with a floor of 2 so
+    // single-char typos always suggest). Empty input never matches.
+    if input.is_empty() {
+        return None;
+    }
+    let threshold = (input.len() / 2).max(2);
+    if best_dist <= threshold {
+        best_name
+    } else {
+        None
+    }
+}
+
+/// Compute the Levenshtein edit distance between two strings.
+/// Optimised for short strings (command names): uses the
+/// classic O(n*m) DP without any early-exit tricks.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let n = a.len();
+    let m = b.len();
+    if n == 0 {
+        return m;
+    }
+    if m == 0 {
+        return n;
+    }
+    let mut prev = vec![0usize; m + 1];
+    let mut curr = vec![0usize; m + 1];
+    for (j, slot) in prev.iter_mut().enumerate() {
+        *slot = j;
+    }
+    for i in 1..=n {
+        curr[0] = i;
+        for j in 1..=m {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            curr[j] = prev[j]
+                .saturating_add(1)
+                .min(curr[j - 1].saturating_add(1))
+                .min(prev[j - 1].saturating_add(cost));
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[m]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1134,5 +1205,77 @@ mod tests {
             "got {:?}",
             set_item.description
         );
+    }
+
+    // --- edit_distance / suggest_command tests ---
+
+    #[test]
+    fn edit_distance_identical_is_zero() {
+        assert_eq!(edit_distance("quit", "quit"), 0);
+    }
+
+    #[test]
+    fn edit_distance_single_substitution() {
+        assert_eq!(edit_distance("quut", "quit"), 1);
+    }
+
+    #[test]
+    fn edit_distance_insertion() {
+        assert_eq!(edit_distance("qit", "quit"), 1);
+    }
+
+    #[test]
+    fn edit_distance_deletion() {
+        assert_eq!(edit_distance("quiit", "quit"), 1);
+    }
+
+    #[test]
+    fn edit_distance_completely_different() {
+        assert_eq!(edit_distance("abc", "xyz"), 3);
+    }
+
+    #[test]
+    fn edit_distance_empty_strings() {
+        assert_eq!(edit_distance("", ""), 0);
+        assert_eq!(edit_distance("abc", ""), 3);
+        assert_eq!(edit_distance("", "abc"), 3);
+    }
+
+    #[test]
+    fn suggest_command_finds_close_match() {
+        let suggestion = suggest_command(&registry(), "moose");
+        assert_eq!(suggestion, Some("mouse"));
+    }
+
+    #[test]
+    fn suggest_command_finds_by_alias() {
+        let suggestion = suggest_command(&registry(), "qiut");
+        // "qiut" is close to "quit" (edit distance 2) and also close
+        // to alias "q" (edit distance 3). Should pick "quit".
+        assert_eq!(suggestion, Some("quit"));
+    }
+
+    #[test]
+    fn suggest_command_returns_none_for_garbage() {
+        let suggestion = suggest_command(&registry(), "xyzzy");
+        assert!(suggestion.is_none());
+    }
+
+    #[test]
+    fn suggest_command_case_insensitive() {
+        let suggestion = suggest_command(&registry(), "MODEL");
+        assert_eq!(suggestion, Some("model"));
+    }
+
+    #[test]
+    fn suggest_command_returns_none_for_empty() {
+        let suggestion = suggest_command(&registry(), "");
+        assert!(suggestion.is_none());
+    }
+
+    #[test]
+    fn suggest_command_exact_match_returns_it() {
+        let suggestion = suggest_command(&registry(), "mouse");
+        assert_eq!(suggestion, Some("mouse"));
     }
 }

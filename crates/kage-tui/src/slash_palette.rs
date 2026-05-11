@@ -76,12 +76,54 @@ impl SlashPalette {
         self.cmdline.refresh_completions(registry, resolver);
     }
 
-    /// Paint the palette inline above the input card. The input row
-    /// shows `/ <text>` and the completion list stacks above it.
-    /// Caller is expected to have drawn the rest of the frame first;
-    /// [`Clear`] blanks the palette region before painting.
+    /// Paint the palette as two pieces: the completion popup floats
+    /// above the input card, and the input card's interior is
+    /// overpainted with `/ <text>` so the slash command reads as if
+    /// the user were typing a message directly into the input box.
+    /// Caller is expected to have drawn the rest of the frame first.
     pub fn render(&self, frame: &mut Frame, regions: Regions) {
-        let Some(area) = palette_area(
+        self.render_popup_above_input(frame, regions);
+        self.render_slash_in_input_card(frame, regions);
+    }
+
+    /// Place the terminal cursor inside the input card, after the
+    /// `/ ` prefix at the column the wrapped [`CommandLine`] thinks
+    /// it is editing.
+    pub fn place_cursor(&self, frame: &mut Frame, regions: Regions) {
+        let Some(inner) = input_inner(regions) else {
+            return;
+        };
+        let prefix: u16 = 2;
+        let chars: u16 =
+            u16::try_from(self.cmdline.text()[..self.cmdline.cursor()].chars().count())
+                .unwrap_or(u16::MAX);
+        let cx = inner
+            .x
+            .saturating_add(prefix)
+            .saturating_add(chars)
+            .min(inner.x + inner.width.saturating_sub(1));
+        frame.set_cursor_position((cx, inner.y));
+    }
+
+    fn render_slash_in_input_card(&self, frame: &mut Frame, regions: Regions) {
+        let Some(inner) = input_inner(regions) else {
+            return;
+        };
+        let theme = crate::theme::current();
+        let prefix_style = Style::default()
+            .fg(Color::Blue)
+            .add_modifier(Modifier::BOLD);
+        let text_style = Style::default().fg(theme.assistant_fg);
+        let line = Line::from(vec![
+            Span::styled("/ ", prefix_style),
+            Span::styled(self.cmdline.text().to_owned(), text_style),
+        ]);
+        frame.render_widget(Clear, inner);
+        frame.render_widget(Paragraph::new(line), inner);
+    }
+
+    fn render_popup_above_input(&self, frame: &mut Frame, regions: Regions) {
+        let Some(area) = popup_area(
             regions,
             self.cmdline.completions().items.len(),
             self.cmdline.selected(),
@@ -90,10 +132,6 @@ impl SlashPalette {
         };
         let theme = crate::theme::current();
         let bg = theme.modeline_bg;
-        let prefix_style = Style::default()
-            .fg(Color::Blue)
-            .add_modifier(Modifier::BOLD)
-            .bg(bg);
         let row_style = Style::default().fg(Color::White).bg(bg);
         let dim_style = Style::default().fg(theme.status_dim_fg).bg(bg);
         let sel_style = Style::default()
@@ -103,105 +141,66 @@ impl SlashPalette {
 
         frame.render_widget(Clear, area);
 
-        let list_rows = usize::from(area.height).saturating_sub(1);
-        let inner_width = usize::from(area.width);
-        let mut lines: Vec<Line<'static>> = Vec::with_capacity(usize::from(area.height));
-
         let completions = self.cmdline.completions();
         let total = completions.items.len();
-        if total > 0 && list_rows > 0 {
-            let max_visible = PALETTE_MAX_VISIBLE.min(total);
-            let (offset, window) = scroll_window(self.cmdline.selected(), total, max_visible);
-            let above = offset;
-            let below = total.saturating_sub(offset + window);
+        let inner_width = usize::from(area.width);
+        let max_visible = PALETTE_MAX_VISIBLE.min(total);
+        let (offset, window) = scroll_window(self.cmdline.selected(), total, max_visible);
+        let above = offset;
+        let below = total.saturating_sub(offset + window);
 
-            let max_value_chars = completions
-                .items
-                .iter()
-                .skip(offset)
-                .take(window)
-                .map(|c| c.value.chars().count())
-                .max()
-                .unwrap_or(0);
+        let max_value_chars = completions
+            .items
+            .iter()
+            .skip(offset)
+            .take(window)
+            .map(|c| c.value.chars().count())
+            .max()
+            .unwrap_or(0);
 
-            if above > 0 {
-                lines.push(Line::from(Span::styled(
-                    pad_to_width(&format!("  ... {above} more above"), inner_width),
-                    dim_style,
-                )));
-            }
-            for (i, item) in completions
-                .items
-                .iter()
-                .enumerate()
-                .skip(offset)
-                .take(window)
-            {
-                let selected = self.cmdline.selected() == Some(i);
-                let value_style = if selected { sel_style } else { row_style };
-                let desc_style = if selected { sel_style } else { dim_style };
-                lines.push(render_row(
-                    item,
-                    max_value_chars,
-                    inner_width,
-                    value_style,
-                    desc_style,
-                ));
-            }
-            if below > 0 {
-                lines.push(Line::from(Span::styled(
-                    pad_to_width(&format!("  ... {below} more below"), inner_width),
-                    dim_style,
-                )));
-            }
+        let mut lines: Vec<Line<'static>> = Vec::with_capacity(usize::from(area.height));
+        if above > 0 {
+            lines.push(Line::from(Span::styled(
+                pad_to_width(&format!("  ... {above} more above"), inner_width),
+                dim_style,
+            )));
         }
-
-        // Input row (always present, bottom).
-        let input_text = self.cmdline.text();
-        let mut input_spans = vec![
-            Span::styled("/ ", prefix_style),
-            Span::styled(input_text.to_owned(), row_style),
-        ];
-        let painted = "/ ".chars().count() + input_text.chars().count();
-        if painted < inner_width {
-            input_spans.push(Span::styled(" ".repeat(inner_width - painted), row_style));
+        for (i, item) in completions
+            .items
+            .iter()
+            .enumerate()
+            .skip(offset)
+            .take(window)
+        {
+            let selected = self.cmdline.selected() == Some(i);
+            let value_style = if selected { sel_style } else { row_style };
+            let desc_style = if selected { sel_style } else { dim_style };
+            lines.push(render_row(
+                item,
+                max_value_chars,
+                inner_width,
+                value_style,
+                desc_style,
+            ));
         }
-        lines.push(Line::from(input_spans));
+        if below > 0 {
+            lines.push(Line::from(Span::styled(
+                pad_to_width(&format!("  ... {below} more below"), inner_width),
+                dim_style,
+            )));
+        }
 
         frame.render_widget(Paragraph::new(lines).style(row_style), area);
     }
-
-    /// Place the terminal cursor in the palette's input row so the
-    /// user can see where typing will land. Mirrors the layout used
-    /// by [`Self::render`].
-    pub fn place_cursor(&self, frame: &mut Frame, regions: Regions) {
-        let Some(area) = palette_area(
-            regions,
-            self.cmdline.completions().items.len(),
-            self.cmdline.selected(),
-        ) else {
-            return;
-        };
-        let row_y = area.y + area.height.saturating_sub(1);
-        let prefix: u16 = 2;
-        let chars: u16 =
-            u16::try_from(self.cmdline.text()[..self.cmdline.cursor()].chars().count())
-                .unwrap_or(u16::MAX);
-        let cx = area
-            .x
-            .saturating_add(prefix)
-            .saturating_add(chars)
-            .min(area.x + area.width.saturating_sub(1));
-        frame.set_cursor_position((cx, row_y));
-    }
 }
 
-/// Compute the palette's painting rectangle anchored just above the
-/// input card. Returns `None` when there is no vertical room or the
-/// input region is degenerate. Height accommodates the input row plus
-/// up to [`PALETTE_MAX_VISIBLE`] completion rows and any `... N more`
-/// indicators, clamped to the buffer area above the input.
-fn palette_area(regions: Regions, total: usize, selected: Option<usize>) -> Option<Rect> {
+/// Compute the popup's painting rectangle anchored just above the
+/// input card. Returns `None` when there are no completions to show
+/// or no vertical room.
+fn popup_area(regions: Regions, total: usize, selected: Option<usize>) -> Option<Rect> {
+    if total == 0 {
+        return None;
+    }
     let width = regions.input.width;
     if width == 0 {
         return None;
@@ -210,21 +209,35 @@ fn palette_area(regions: Regions, total: usize, selected: Option<usize>) -> Opti
     let (offset, window) = scroll_window(selected, total, max_visible);
     let above = offset;
     let below = total.saturating_sub(offset + window);
-    let list_rows = window + usize::from(above > 0) + usize::from(below > 0);
-    let total_rows = list_rows + 1; // +1 for the input row
+    let rows = window + usize::from(above > 0) + usize::from(below > 0);
 
     let space_above = regions.input.y.saturating_sub(regions.buffer.y);
-    let total_rows = total_rows.min(usize::from(space_above)).max(1);
-    let height = u16::try_from(total_rows).unwrap_or(u16::MAX);
-    if height == 0 {
+    let rows = rows.min(usize::from(space_above));
+    if rows == 0 {
         return None;
     }
+    let height = u16::try_from(rows).unwrap_or(u16::MAX);
     let y = regions.input.y.saturating_sub(height);
     Some(Rect {
         x: regions.input.x,
         y,
         width,
         height,
+    })
+}
+
+/// Inner row of the input card where the slash text overpaints. Skips
+/// the surrounding 1-cell border. Returns `None` when the input region
+/// is too small to host a single line of content.
+fn input_inner(regions: Regions) -> Option<Rect> {
+    if regions.input.width < 3 || regions.input.height < 3 {
+        return None;
+    }
+    Some(Rect {
+        x: regions.input.x.saturating_add(1),
+        y: regions.input.y.saturating_add(1),
+        width: regions.input.width.saturating_sub(2),
+        height: 1,
     })
 }
 
@@ -376,16 +389,20 @@ mod tests {
     }
 
     #[test]
-    fn open_palette_shows_input_row_with_slash_prefix() {
+    fn slash_text_overpaints_input_card_body() {
         let mut palette = SlashPalette::new();
         let reg = registry();
         palette.refresh(&reg, &EmptyResolver);
         let lines = snapshot(&palette, 60, 16);
-        // The snapshot helper trims trailing spaces, so an empty text
-        // input row appears as just "/".
+        // Input card occupies the bottom 3 rows; the body row is at
+        // y = height - 2 (last row is the bottom border). With 16
+        // rows total and input_height=3, body row is y=14.
+        // The overpaint lands at input_inner.x = regions.input.x + 1,
+        // so the leading column is whitespace (the border position).
         assert!(
-            lines.iter().any(|l| l == "/" || l.starts_with("/ ")),
-            "expected a `/` input row, got {lines:#?}"
+            lines[14].trim_start().starts_with('/'),
+            "expected `/` near start of input body row 14, got {:?}",
+            lines[14]
         );
     }
 
@@ -425,31 +442,39 @@ mod tests {
     }
 
     #[test]
-    fn palette_anchored_above_input_card() {
+    fn popup_anchored_above_input_card() {
         let mut palette = SlashPalette::new();
         let reg = registry();
         palette.refresh(&reg, &EmptyResolver);
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
-        let regions_input_y = std::cell::Cell::new(0u16);
         terminal
             .draw(|frame| {
                 let regions = crate::layout::split(frame.area(), 3, 0);
-                regions_input_y.set(regions.input.y);
                 palette.render(frame, regions);
             })
             .unwrap();
-        let _ = regions_input_y.get();
-        // The `/` input row should sit immediately above regions.input,
-        // which split() positions at y = 20 - 3 = 17.
         let buf = terminal.backend().buffer();
-        let input_row = (0..buf.area.width)
-            .map(|x| buf[(x, 16)].symbol())
+        // Input card is at y=17..20 (height=3). The popup must paint
+        // strictly above y=17.
+        let row_below_input_start = (0..buf.area.width)
+            .map(|x| buf[(x, 17)].symbol())
             .collect::<String>();
         assert!(
-            input_row.trim_start().starts_with("/ "),
-            "row 16 should be the palette input, got {input_row:?}"
+            !row_below_input_start.contains("model"),
+            "popup should not paint into the input card border, got {row_below_input_start:?}"
         );
+        let mut found_in_popup_band = false;
+        for y in 13..17 {
+            let row = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>();
+            if row.contains("model") {
+                found_in_popup_band = true;
+                break;
+            }
+        }
+        assert!(found_in_popup_band, "expected popup to paint above input");
         let unused = Rect::new(0, 0, 0, 0);
         let _ = unused;
     }

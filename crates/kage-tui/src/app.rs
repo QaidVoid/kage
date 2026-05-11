@@ -20,7 +20,9 @@ use crate::toast::{self, SharedToasts, Toast, ToastKind};
 
 use crate::cmdline::{CommandLine, CommandLineEvent};
 use crate::cmdparse::{EmptyResolver, Resolver};
-use crate::command::{ArgSource, BUILTIN_COMMANDS, CommandCategory, CommandSpec};
+use crate::command::{
+    ArgSource, ArgSpec, BUILTIN_COMMANDS, CommandCategory, CommandSpec, OwnedArgSpec, PluginCommand,
+};
 use crate::error::TuiError;
 use crate::events::SharedBuffer;
 use crate::input::{InputAction, InputState, Mode, Pane};
@@ -140,6 +142,51 @@ fn cmdline_registry(plugin_specs: &[&'static CommandSpec]) -> Vec<&'static Comma
     let mut out: Vec<&'static CommandSpec> = BUILTIN_COMMANDS.iter().collect();
     out.extend(plugin_specs.iter().copied());
     out
+}
+
+/// Translate an [`OwnedArgSpec`] entry (declared at runtime by a
+/// plugin) into a static [`ArgSpec`] by leaking the owned name, hint,
+/// and choice strings. Callers feed the resulting value into a leaked
+/// slice; the lifetime is permanent for the process.
+fn leak_argspec(owned: &OwnedArgSpec) -> ArgSpec {
+    match owned {
+        OwnedArgSpec::Text {
+            name,
+            optional,
+            hint,
+        } => ArgSpec::Rest {
+            name: leak_str(name),
+            optional: *optional,
+            hint: leak_str(hint),
+        },
+        OwnedArgSpec::Choice {
+            name,
+            values,
+            optional,
+        } => {
+            let leaked_values: Vec<&'static str> = values.iter().map(|v| leak_str(v)).collect();
+            ArgSpec::Choice {
+                name: leak_str(name),
+                values: Box::leak(leaked_values.into_boxed_slice()),
+                optional: *optional,
+            }
+        }
+        OwnedArgSpec::Path { name, optional } => ArgSpec::Path {
+            name: leak_str(name),
+            optional: *optional,
+        },
+        OwnedArgSpec::Session { name, optional } => ArgSpec::SessionId {
+            name: leak_str(name),
+            optional: *optional,
+        },
+        OwnedArgSpec::Flag { name } => ArgSpec::Flag {
+            name: leak_str(name),
+        },
+    }
+}
+
+fn leak_str(s: &str) -> &'static str {
+    Box::leak(s.to_owned().into_boxed_str())
 }
 
 /// Recursive help renderer: pushes one line per command, then recurses
@@ -427,32 +474,38 @@ impl App {
     }
 
     /// Register the plugin commands the host wants exposed in the
-    /// palette and on the `:` line. Pairs are `(name, description)`.
-    /// Names that collide with built-in specs are dropped; the host
-    /// should log a warning at registration time.
+    /// palette and on the `:` line. Names that collide with built-in
+    /// specs are dropped; the host should log a warning at
+    /// registration time.
     ///
-    /// Builds one [`CommandSpec`] per plugin command (no args, since
-    /// PN.8 will add the arg schema) so plugin commands participate
-    /// in the same completion engine the builtins use. The leaked
-    /// `&'static` storage is bounded by the number of plugin commands
-    /// the user installs.
-    pub fn set_plugin_commands(&mut self, mut commands: Vec<(String, String)>) {
-        commands.retain(|(n, _)| crate::command::find_builtin_command(n).is_none());
+    /// Builds one [`CommandSpec`] per plugin command, leaking the
+    /// owned name, description, and per-arg schema into `&'static`
+    /// storage so plugin commands participate in the same completion
+    /// engine the builtins use. The leaked storage is bounded by the
+    /// number of plugin commands the user installs.
+    pub fn set_plugin_commands(&mut self, mut commands: Vec<PluginCommand>) {
+        commands.retain(|c| crate::command::find_builtin_command(&c.name).is_none());
         self.plugin_command_specs.clear();
-        for (name, desc) in &commands {
-            let name_static: &'static str = Box::leak(name.clone().into_boxed_str());
-            let desc_static: &'static str = Box::leak(format!("{desc}  [plugin]").into_boxed_str());
+        for cmd in &commands {
+            let name_static: &'static str = Box::leak(cmd.name.clone().into_boxed_str());
+            let desc_static: &'static str =
+                Box::leak(format!("{}  [plugin]", cmd.description).into_boxed_str());
+            let args_owned: Vec<ArgSpec> = cmd.args.iter().map(leak_argspec).collect();
+            let args_static: &'static [ArgSpec] = Box::leak(args_owned.into_boxed_slice());
             let spec: &'static CommandSpec = Box::leak(Box::new(CommandSpec {
                 name: name_static,
                 aliases: &[],
                 description: desc_static,
                 category: CommandCategory::Both,
-                args: &[],
+                args: args_static,
                 subcommands: &[],
             }));
             self.plugin_command_specs.push(spec);
         }
-        self.plugin_commands = commands;
+        self.plugin_commands = commands
+            .into_iter()
+            .map(|c| (c.name, c.description))
+            .collect();
     }
 
     /// Hand the App a shared handle on the active `provider:model`

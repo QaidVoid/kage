@@ -17,7 +17,7 @@ pub mod tools;
 pub mod watcher;
 
 pub use api::{HostLog, LogLevel, SharedHostLog, StderrHostLog, default_host_log};
-pub use commands::{CommandOutput, LuaCommand};
+pub use commands::{CommandOutput, LuaCommand, PluginArgSpec};
 pub use error::PluginError;
 pub use loader::{LoadReport, load_dir};
 pub use providers::LuaProvider;

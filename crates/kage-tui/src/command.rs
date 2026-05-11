@@ -94,6 +94,68 @@ pub enum ArgSpec {
     },
 }
 
+/// Owned counterpart to [`ArgSpec`] for runtime-supplied schemas
+/// (currently used for plugin slash commands). The host translates
+/// each variant into a leaked `&'static ArgSpec` at registration time
+/// so plugin commands participate in the same completion path as
+/// the static builtins.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OwnedArgSpec {
+    /// See [`ArgSpec::Rest`].
+    Text {
+        /// Parameter name.
+        name: String,
+        /// Whether the argument can be omitted.
+        optional: bool,
+        /// Placeholder for inline help.
+        hint: String,
+    },
+    /// See [`ArgSpec::Choice`].
+    Choice {
+        /// Parameter name.
+        name: String,
+        /// Accepted values.
+        values: Vec<String>,
+        /// Whether the argument can be omitted.
+        optional: bool,
+    },
+    /// See [`ArgSpec::Path`].
+    Path {
+        /// Parameter name.
+        name: String,
+        /// Whether the argument can be omitted.
+        optional: bool,
+    },
+    /// See [`ArgSpec::SessionId`].
+    Session {
+        /// Parameter name.
+        name: String,
+        /// Whether the argument can be omitted.
+        optional: bool,
+    },
+    /// See [`ArgSpec::Flag`].
+    Flag {
+        /// Parameter name.
+        name: String,
+    },
+}
+
+/// One plugin-registered slash command surfaced to the host. The host
+/// builds these from the plugin runtime's registered commands and
+/// hands them to [`crate::App::set_plugin_commands`], which leaks the
+/// owned fields into a `&'static CommandSpec` so they slot into the
+/// same registry the builtins use.
+#[derive(Clone, Debug)]
+pub struct PluginCommand {
+    /// Command name without any leading `/` or `:`.
+    pub name: String,
+    /// One-line description shown in the palette and help output.
+    pub description: String,
+    /// Argument schema declared by the plugin. Empty means the
+    /// command takes no arguments.
+    pub args: Vec<OwnedArgSpec>,
+}
+
 /// Format the argument schema as a compact hint string for inline
 /// help, e.g. `"<id>"` for a required dynamic choice, `"[name]"` for
 /// an optional one, `"<on|off|toggle>"` for a required fixed choice.

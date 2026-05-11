@@ -83,13 +83,17 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     };
 
     let mut tools = kage_tools::builtin_registry();
-    let mut plugin_command_listing: Vec<(String, String)> = Vec::new();
+    let mut plugin_command_listing: Vec<kage_tui::command::PluginCommand> = Vec::new();
     if let Some(rt) = plugin_runtime.as_ref() {
         for tool in rt.registered_tools() {
             tools.register(tool);
         }
         for cmd in rt.registered_commands() {
-            plugin_command_listing.push((cmd.name().to_owned(), cmd.description().to_owned()));
+            plugin_command_listing.push(kage_tui::command::PluginCommand {
+                name: cmd.name().to_owned(),
+                description: cmd.description().to_owned(),
+                args: cmd.args().iter().map(translate_plugin_arg).collect(),
+            });
         }
     }
     let cancel = CancelFlag::new();
@@ -634,6 +638,43 @@ fn truncate(s: &str, max: usize) -> String {
     }
     let cut: String = s.chars().take(max.saturating_sub(3)).collect();
     format!("{cut}...")
+}
+
+/// Bridge a plugin runtime arg-spec entry over to the TUI's owned
+/// arg-spec enum so [`kage_tui::App::set_plugin_commands`] can leak
+/// it into a `&'static ArgSpec` for the completion engine.
+fn translate_plugin_arg(arg: &kage_plugin::PluginArgSpec) -> kage_tui::command::OwnedArgSpec {
+    use kage_plugin::PluginArgSpec as P;
+    use kage_tui::command::OwnedArgSpec as O;
+    match arg {
+        P::Text {
+            name,
+            optional,
+            hint,
+        } => O::Text {
+            name: name.clone(),
+            optional: *optional,
+            hint: hint.clone(),
+        },
+        P::Choice {
+            name,
+            values,
+            optional,
+        } => O::Choice {
+            name: name.clone(),
+            values: values.clone(),
+            optional: *optional,
+        },
+        P::Path { name, optional } => O::Path {
+            name: name.clone(),
+            optional: *optional,
+        },
+        P::Session { name, optional } => O::Session {
+            name: name.clone(),
+            optional: *optional,
+        },
+        P::Flag { name } => O::Flag { name: name.clone() },
+    }
 }
 
 /// Replay `path` into the live TUI: clear the buffer, replace

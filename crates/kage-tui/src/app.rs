@@ -698,8 +698,8 @@ impl App {
                 picker.render(frame, frame.area());
             }
             if let Some(palette) = slash_palette {
-                palette.render(frame, frame.area());
-                palette.place_cursor(frame, frame.area());
+                palette.render(frame, regions);
+                palette.place_cursor(frame, regions);
             }
         })?;
         self.captured_rows = captured_rows;

@@ -12,6 +12,7 @@ pub mod input;
 pub mod layout;
 pub mod overlay;
 pub mod picker;
+pub mod slash_palette;
 pub mod syntax;
 pub mod terminal;
 pub mod theme;
@@ -39,6 +40,7 @@ pub use layout::{
 };
 pub use overlay::{OverlayPicker, PickerEvent};
 pub use picker::{PickItem, pick};
+pub use slash_palette::SlashPalette;
 pub use terminal::Tui;
 pub use theme::{Theme, current as current_theme, set_current as set_current_theme};
 pub use toast::{

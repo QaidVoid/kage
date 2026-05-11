@@ -93,6 +93,14 @@ impl CommandLine {
         self.selected = None;
     }
 
+    /// Recompute completions against `registry` and `resolver` using
+    /// the current text. Callers use this when they need to populate
+    /// the popup without driving through a keystroke, e.g. the slash
+    /// palette wants the full list visible on open.
+    pub fn refresh_completions(&mut self, registry: &[&CommandSpec], resolver: &dyn Resolver) {
+        self.refresh(registry, resolver);
+    }
+
     /// Drive the widget by one key press. `registry` and `resolver`
     /// are consulted on every edit to refresh completions and on Tab
     /// to apply them.

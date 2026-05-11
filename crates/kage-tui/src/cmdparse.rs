@@ -408,9 +408,15 @@ pub fn complete(
         for spec in registry {
             for name in spec.names() {
                 if name.starts_with(&prefix) {
+                    let hints = crate::command::arg_hints_text(spec.args);
+                    let description = if hints.is_empty() {
+                        spec.description.to_owned()
+                    } else {
+                        format!("{}  {hints}", spec.description)
+                    };
                     items.push(Completion {
                         value: name.to_owned(),
-                        description: Some(spec.description.to_owned()),
+                        description: Some(description),
                         replace_range: replace_range.clone(),
                     });
                 }

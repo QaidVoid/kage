@@ -20,13 +20,14 @@ use crate::toast::{self, SharedToasts, Toast, ToastKind};
 
 use crate::cmdline::{CommandLine, CommandLineEvent};
 use crate::cmdparse::{EmptyResolver, Resolver};
-use crate::command::{ArgSource, BUILTIN_COMMANDS, CommandSpec};
+use crate::command::{ArgSource, BUILTIN_COMMANDS, CommandCategory, CommandSpec};
 use crate::error::TuiError;
 use crate::events::SharedBuffer;
 use crate::input::{InputAction, InputState, Mode, Pane};
 use crate::layout::{input_height_for, split};
 use crate::overlay::{OverlayPicker, PickerEvent};
 use crate::picker::PickItem;
+use crate::slash_palette::SlashPalette;
 use crate::terminal::Tui;
 use crate::view;
 
@@ -118,13 +119,12 @@ pub enum AppExit {
 
 /// Which overlay picker is currently open. Determines how
 /// [`PickerEvent::Picked`] is dispatched: a model id triggers a switch,
-/// a session path triggers a resume, a command name runs the same
-/// handler the `:` command line uses.
+/// a session path triggers a resume. (Command picking moved off
+/// `OverlayPicker` onto [`SlashPalette`] in PN.6.)
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PickerKind {
     Model,
     Session,
-    Command,
 }
 
 /// Closure that returns the current set of resumable sessions on
@@ -133,11 +133,13 @@ enum PickerKind {
 /// since the TUI started.
 pub type SessionLister = Box<dyn Fn() -> Vec<PickItem> + Send + 'static>;
 
-/// Snapshot of the builtin command registry shaped for the
-/// [`crate::cmdparse::complete`] engine, which expects a slice of
-/// references rather than the static value slice.
-fn cmdline_registry() -> Vec<&'static CommandSpec> {
-    BUILTIN_COMMANDS.iter().collect()
+/// Unified command registry the completion engine consumes: builtin
+/// commands first, then any plugin-registered commands (built once at
+/// `set_plugin_commands` time and stored as `&'static` refs).
+fn cmdline_registry(plugin_specs: &[&'static CommandSpec]) -> Vec<&'static CommandSpec> {
+    let mut out: Vec<&'static CommandSpec> = BUILTIN_COMMANDS.iter().collect();
+    out.extend(plugin_specs.iter().copied());
+    out
 }
 
 /// [`Resolver`] backed by the live App state: model choices and
@@ -184,16 +186,6 @@ impl Resolver for AppResolver<'_> {
     }
 }
 
-fn builtin_command_picker_items() -> Vec<PickItem> {
-    crate::command::BUILTIN_COMMANDS
-        .iter()
-        .map(|spec| {
-            let label = format!("{:<14}  {}", spec.name, spec.description);
-            PickItem::simple(spec.name.to_owned()).with_label(label)
-        })
-        .collect()
-}
-
 /// Runtime state for the interactive TUI loop.
 pub struct App {
     buffer: SharedBuffer,
@@ -214,6 +206,10 @@ pub struct App {
     /// Open `:` command line, if any. While present it owns key input
     /// and replaces the status bar's mode pill.
     cmdline: Option<CommandLine>,
+    /// Open `/` slash palette overlay, if any. Wraps a [`CommandLine`]
+    /// and renders as a centered modal; shares the parser, completer,
+    /// and arg-editing flow with the `:` cmdline.
+    slash_palette: Option<SlashPalette>,
     /// Open `/` search line, if any. Reuses the [`CommandLine`]
     /// widget; painted with a `/` prefix instead of `:`.
     search_line: Option<CommandLine>,
@@ -230,6 +226,11 @@ pub struct App {
     /// Plugin-registered command names + descriptions for palette
     /// display. Builtin names take precedence on collision.
     plugin_commands: Vec<(String, String)>,
+    /// Synthetic `CommandSpec` entries built from `plugin_commands`
+    /// at registration time. Stored as `&'static` via `Box::leak` so
+    /// the completion engine can mix them with the static builtin
+    /// registry. Cleared and re-built on every `set_plugin_commands`.
+    plugin_command_specs: Vec<&'static CommandSpec>,
     /// Pending request to toggle terminal mouse capture, applied by
     /// `run` between iterations. `None` means leave the capture state
     /// as-is. The indirection exists because `run_command` can't
@@ -302,9 +303,11 @@ impl App {
             picker_kind: None,
             session_lister: None,
             cmdline: None,
+            slash_palette: None,
             status_model: None,
             status_session_id: None,
             plugin_commands: Vec::new(),
+            plugin_command_specs: Vec::new(),
             search_line: None,
             search_pattern: None,
             mouse_drag_anchor: None,
@@ -401,8 +404,27 @@ impl App {
     /// palette and on the `:` line. Pairs are `(name, description)`.
     /// Names that collide with built-in specs are dropped; the host
     /// should log a warning at registration time.
+    ///
+    /// Builds one [`CommandSpec`] per plugin command (no args, since
+    /// PN.8 will add the arg schema) so plugin commands participate
+    /// in the same completion engine the builtins use. The leaked
+    /// `&'static` storage is bounded by the number of plugin commands
+    /// the user installs.
     pub fn set_plugin_commands(&mut self, mut commands: Vec<(String, String)>) {
         commands.retain(|(n, _)| crate::command::find_builtin_command(n).is_none());
+        self.plugin_command_specs.clear();
+        for (name, desc) in &commands {
+            let name_static: &'static str = Box::leak(name.clone().into_boxed_str());
+            let desc_static: &'static str = Box::leak(format!("{desc}  [plugin]").into_boxed_str());
+            let spec: &'static CommandSpec = Box::leak(Box::new(CommandSpec {
+                name: name_static,
+                aliases: &[],
+                description: desc_static,
+                category: CommandCategory::Both,
+                args: &[],
+            }));
+            self.plugin_command_specs.push(spec);
+        }
         self.plugin_commands = commands;
     }
 
@@ -646,6 +668,7 @@ impl App {
             0
         };
         let picker = self.picker.as_mut();
+        let slash_palette = self.slash_palette.as_ref();
         let input = &self.input;
         tui.terminal().draw(|frame| {
             // Compute the input region size from the *visual* row
@@ -674,6 +697,10 @@ impl App {
             if let Some(picker) = picker {
                 picker.render(frame, frame.area());
             }
+            if let Some(palette) = slash_palette {
+                palette.render(frame, frame.area());
+                palette.place_cursor(frame, frame.area());
+            }
         })?;
         self.captured_rows = captured_rows;
         Ok(())
@@ -689,6 +716,12 @@ impl App {
         // When the picker overlay is open, it owns the keyboard.
         if self.picker.is_some() {
             return self.dispatch_picker_key(key);
+        }
+
+        // The slash palette is its own modal layer, taking precedence
+        // over the cmdline and search line.
+        if self.slash_palette.is_some() {
+            return self.dispatch_slash_palette_key(key);
         }
 
         // The `:` command line is the next-most-modal layer.
@@ -764,7 +797,7 @@ impl App {
         &mut self,
         key: ratatui::crossterm::event::KeyEvent,
     ) -> Option<AppExit> {
-        let registry = cmdline_registry();
+        let registry = cmdline_registry(&self.plugin_command_specs);
         let resolver = AppResolver {
             models: &self.model_choices,
             plugin_commands: &self.plugin_commands,
@@ -779,6 +812,30 @@ impl App {
             }
             CommandLineEvent::Submit(text) => {
                 self.cmdline = None;
+                self.run_command(&text)
+            }
+        }
+    }
+
+    fn dispatch_slash_palette_key(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+    ) -> Option<AppExit> {
+        let registry = cmdline_registry(&self.plugin_command_specs);
+        let resolver = AppResolver {
+            models: &self.model_choices,
+            plugin_commands: &self.plugin_commands,
+            sessions: self.session_lister.as_ref(),
+        };
+        let palette = self.slash_palette.as_mut()?;
+        match palette.handle_key(key, &registry, &resolver) {
+            CommandLineEvent::Pending => None,
+            CommandLineEvent::Cancelled => {
+                self.slash_palette = None;
+                None
+            }
+            CommandLineEvent::Submit(text) => {
+                self.slash_palette = None;
                 self.run_command(&text)
             }
         }
@@ -1250,9 +1307,6 @@ impl App {
                             std::path::PathBuf::from(value),
                         ));
                     }
-                    Some(PickerKind::Command) => {
-                        return self.run_command(&value);
-                    }
                     None => {}
                 }
             }
@@ -1290,15 +1344,15 @@ impl App {
                 }
             }
             InputAction::OpenCommandPalette => {
-                let mut items = builtin_command_picker_items();
-                for (name, desc) in &self.plugin_commands {
-                    let label = format!("{name:<14}  {desc}  [plugin]");
-                    items.push(PickItem::simple(name.clone()).with_label(label));
-                }
-                if !items.is_empty() {
-                    self.picker = Some(OverlayPicker::new("Run command", items));
-                    self.picker_kind = Some(PickerKind::Command);
-                }
+                let registry = cmdline_registry(&self.plugin_command_specs);
+                let resolver = AppResolver {
+                    models: &self.model_choices,
+                    plugin_commands: &self.plugin_commands,
+                    sessions: self.session_lister.as_ref(),
+                };
+                let mut palette = SlashPalette::new();
+                palette.refresh(&registry, &resolver);
+                self.slash_palette = Some(palette);
             }
             InputAction::FocusPrev => {
                 if let Ok(mut buf) = self.buffer.lock() {

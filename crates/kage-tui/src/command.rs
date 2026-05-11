@@ -94,6 +94,43 @@ pub enum ArgSpec {
     },
 }
 
+/// Format the argument schema as a compact hint string for inline
+/// help, e.g. `"<id>"` for a required dynamic choice, `"[name]"` for
+/// an optional one, `"<on|off|toggle>"` for a required fixed choice.
+/// Multi-arg commands join hints with spaces. Returns an empty string
+/// when `args` is empty so callers can render argless commands
+/// without trailing whitespace.
+#[must_use]
+pub fn arg_hints_text(args: &[ArgSpec]) -> String {
+    args.iter().map(arg_hint_one).collect::<Vec<_>>().join(" ")
+}
+
+fn arg_hint_one(arg: &ArgSpec) -> String {
+    match arg {
+        ArgSpec::Rest { name, optional, .. }
+        | ArgSpec::DynamicChoice { name, optional, .. }
+        | ArgSpec::Path { name, optional }
+        | ArgSpec::SessionId { name, optional } => {
+            if *optional {
+                format!("[{name}]")
+            } else {
+                format!("<{name}>")
+            }
+        }
+        ArgSpec::Choice {
+            values, optional, ..
+        } => {
+            let inside = values.join("|");
+            if *optional {
+                format!("[{inside}]")
+            } else {
+                format!("<{inside}>")
+            }
+        }
+        ArgSpec::Flag { name } => format!("[{name}]"),
+    }
+}
+
 impl ArgSpec {
     /// Parameter name for this argument position.
     #[must_use]

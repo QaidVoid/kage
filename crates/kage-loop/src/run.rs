@@ -52,7 +52,7 @@ pub fn run<F>(
     provider: &dyn Provider,
     tools: &ToolRegistry,
     cx: &mut AgentContext,
-    config: &LoopConfig,
+    config: LoopConfig,
     hooks: &mut dyn Hooks,
     cancel: &CancelFlag,
     mut emit: F,
@@ -60,7 +60,6 @@ pub fn run<F>(
 where
     F: FnMut(LoopEvent),
 {
-    let mut iterations: u32 = 0;
     let mut doom = DoomTracker::default();
 
     loop {
@@ -69,15 +68,6 @@ where
         }
 
         loop {
-            iterations = iterations.saturating_add(1);
-            if iterations > config.max_iterations {
-                let kind = LoopError::Other {
-                    message: format!("max_iterations ({}) exceeded", config.max_iterations),
-                };
-                emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
-                return Err(kind);
-            }
-
             if cancel.is_cancelled() {
                 return finish_cancelled(hooks, &mut emit);
             }
@@ -292,13 +282,6 @@ mod tests {
         }
     }
 
-    struct ForeverFollowup;
-    impl Hooks for ForeverFollowup {
-        fn get_followup(&mut self) -> Option<String> {
-            Some("again".into())
-        }
-    }
-
     #[test]
     fn shell_returns_after_provider_emits_text_only_turn() {
         let mock = MockProvider::replaying(vec![
@@ -317,7 +300,7 @@ mod tests {
         let registry = ToolRegistry::new();
 
         let mut events = Vec::new();
-        let res = run(&mock, &registry, &mut cx, &cfg, &mut hooks, &cancel, |ev| {
+        let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |ev| {
             events.push(ev);
         });
         assert!(res.is_ok());
@@ -344,7 +327,7 @@ mod tests {
         let cancel = CancelFlag::new();
         let registry = ToolRegistry::new();
 
-        let res = run(&mock, &registry, &mut cx, &cfg, &mut hooks, &cancel, |_| {});
+        let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {});
         assert!(res.is_ok());
         assert_eq!(mock.call_count(), 2, "follow-up should trigger second turn");
     }
@@ -363,7 +346,7 @@ mod tests {
         let cancel = CancelFlag::new();
         let registry = ToolRegistry::new();
 
-        let _ = run(&mock, &registry, &mut cx, &cfg, &mut hooks, &cancel, |_| {});
+        let _ = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {});
         let req = mock.last_request().unwrap();
         let last = req.messages.last().unwrap();
         assert_eq!(last.role, Role::User);
@@ -385,34 +368,13 @@ mod tests {
         let registry = ToolRegistry::new();
 
         let mut errors = Vec::new();
-        let res = run(&mock, &registry, &mut cx, &cfg, &mut hooks, &cancel, |ev| {
+        let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |ev| {
             if let LoopEvent::Error { kind } = ev {
                 errors.push(kind);
             }
         });
         assert!(matches!(res, Err(LoopError::Cancelled)));
         assert_eq!(errors, vec![LoopError::Cancelled]);
-    }
-
-    #[test]
-    fn shell_propagates_max_iterations() {
-        let mock = MockProvider::replaying(vec![Ok(ProviderEvent::MessageEnd {
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-        })]);
-
-        let mut cx = AgentContext::new("mock:m", "");
-        cx.history.push(user_msg("hi"));
-        let cfg = LoopConfig {
-            max_iterations: 3,
-            ..LoopConfig::default()
-        };
-        let mut hooks = ForeverFollowup;
-        let cancel = CancelFlag::new();
-        let registry = ToolRegistry::new();
-
-        let res = run(&mock, &registry, &mut cx, &cfg, &mut hooks, &cancel, |_| {});
-        assert!(matches!(res, Err(LoopError::Other { .. })));
     }
 
     #[derive(Debug)]
@@ -466,7 +428,7 @@ mod tests {
         let cancel = CancelFlag::new();
         let registry = ToolRegistry::new();
 
-        let res = run(&mock, &registry, &mut cx, &cfg, &mut hooks, &cancel, |_| {});
+        let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {});
         assert!(res.is_ok());
         assert_eq!(mock.call_count(), 2);
 
@@ -512,7 +474,7 @@ mod tests {
         let cancel = CancelFlag::new();
         let registry = ToolRegistry::new().with(std::sync::Arc::new(StaticTool));
 
-        let res = run(&mock, &registry, &mut cx, &cfg, &mut hooks, &cancel, |_| {});
+        let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {});
         assert!(res.is_ok(), "loop failed: {res:?}");
         assert_eq!(hooks.polls, 2, "steering polled once per inner-loop turn");
     }
@@ -576,7 +538,7 @@ mod tests {
             cancel: cancel.clone(),
         }));
 
-        let res = run(&mock, &registry, &mut cx, &cfg, &mut hooks, &cancel, |_| {});
+        let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {});
         assert!(matches!(res, Err(LoopError::Cancelled)));
         // First turn ran (provider called once); second never did.
         assert_eq!(mock.call_count(), 1);
@@ -658,7 +620,7 @@ mod tests {
         let cancel = CancelFlag::new();
         let registry = ToolRegistry::new().with(std::sync::Arc::new(AlwaysFailTool));
 
-        let res = run(&mock, &registry, &mut cx, &cfg, &mut hooks, &cancel, |_| {});
+        let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {});
         assert!(res.is_ok(), "loop failed: {res:?}");
 
         // The fourth provider request should have a steering user message in
@@ -779,7 +741,7 @@ mod tests {
         let mut hooks = OrderRecording::default();
         let cancel = CancelFlag::new();
 
-        let res = run(&mock, &registry, &mut cx, &cfg, &mut hooks, &cancel, |_| {});
+        let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {});
         assert!(res.is_ok());
 
         // Tool ran exactly once with the expected input.
@@ -872,7 +834,7 @@ mod tests {
         let registry = ToolRegistry::new().with(std::sync::Arc::new(StaticTool));
 
         let mut events = Vec::new();
-        let res = run(&mock, &registry, &mut cx, &cfg, &mut hooks, &cancel, |ev| {
+        let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |ev| {
             events.push(ev);
         });
         assert!(res.is_ok(), "loop failed: {res:?}");

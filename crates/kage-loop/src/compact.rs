@@ -37,7 +37,7 @@ const COMPACTION_SUMMARY_SUFFIX: &str = "\n</summary>";
 /// Returns whether compaction ran.
 pub(crate) fn maybe_compact<F: FnMut(LoopEvent)>(
     cx: &mut AgentContext,
-    config: &LoopConfig,
+    config: LoopConfig,
     provider: &dyn Provider,
     cancel: &CancelFlag,
     hooks: &mut dyn Hooks,
@@ -104,7 +104,7 @@ fn run_compaction<F: FnMut(LoopEvent)>(
     Ok(true)
 }
 
-fn should_compact(cx: &AgentContext, config: &LoopConfig) -> bool {
+fn should_compact(cx: &AgentContext, config: LoopConfig) -> bool {
     if config.compaction_threshold <= 0.0 || cx.context_window == 0 {
         return false;
     }
@@ -280,8 +280,7 @@ mod tests {
         let mut cx = loaded_context(1_000, 20);
         cx.context_window = 200_000;
 
-        let ran =
-            maybe_compact(&mut cx, &cfg, &provider, &cancel, &mut hooks, &mut |_| {}).unwrap();
+        let ran = maybe_compact(&mut cx, cfg, &provider, &cancel, &mut hooks, &mut |_| {}).unwrap();
         assert!(!ran);
         assert_eq!(cx.history.len(), 20);
     }
@@ -295,8 +294,7 @@ mod tests {
         let mut cx = loaded_context(u64::MAX / 2, 3);
         cx.context_window = 200_000;
 
-        let ran =
-            maybe_compact(&mut cx, &cfg, &provider, &cancel, &mut hooks, &mut |_| {}).unwrap();
+        let ran = maybe_compact(&mut cx, cfg, &provider, &cancel, &mut hooks, &mut |_| {}).unwrap();
         assert!(!ran);
         assert_eq!(cx.history.len(), 3);
     }
@@ -322,7 +320,7 @@ mod tests {
         cx.context_window = 200_000;
 
         let mut events = Vec::new();
-        let ran = maybe_compact(&mut cx, &cfg, &provider, &cancel, &mut hooks, &mut |ev| {
+        let ran = maybe_compact(&mut cx, cfg, &provider, &cancel, &mut hooks, &mut |ev| {
             events.push(ev);
         })
         .unwrap();
@@ -362,7 +360,7 @@ mod tests {
         let mut cx = loaded_context(150_000, 10);
         cx.context_window = 200_000;
 
-        let res = maybe_compact(&mut cx, &cfg, &provider, &cancel, &mut hooks, &mut |_| {});
+        let res = maybe_compact(&mut cx, cfg, &provider, &cancel, &mut hooks, &mut |_| {});
         assert!(matches!(res, Err(LoopError::Provider { .. })));
     }
 

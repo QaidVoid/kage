@@ -270,6 +270,27 @@ impl CommandLine {
     }
 }
 
+#[cfg(test)]
+impl CommandLine {
+    /// Build a `CommandLine` in a specific state. Used by `view`
+    /// snapshot tests to exercise popup rendering without driving
+    /// through a full keystroke sequence.
+    pub(crate) fn for_test(
+        text: &str,
+        completions: Completions,
+        popup_open: bool,
+        selected: Option<usize>,
+    ) -> Self {
+        Self {
+            text: text.to_owned(),
+            cursor: text.len(),
+            completions,
+            popup_open,
+            selected,
+        }
+    }
+}
+
 fn longest_common_prefix<'a, I: IntoIterator<Item = &'a str>>(values: I) -> String {
     let mut iter = values.into_iter();
     let Some(first) = iter.next() else {

@@ -32,10 +32,10 @@ pub use user::UserBlockWidget;
 pub use widget::{BlockWidget, EmptyBlockWidget, RenderCtx, SelectionState};
 
 use ratatui::Frame;
-use ratatui::layout::Alignment;
+use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block as RtBlock, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block as RtBlock, Borders, Clear, Paragraph, Wrap};
 
 use crate::buffer::{Block, Buffer};
 use crate::cmdline::CommandLine;
@@ -143,6 +143,7 @@ pub fn render(
         render_toasts(frame, regions.buffer, toasts, &theme);
     }
     if let Some(cl) = cmdline {
+        render_cmdline_popup(frame, regions, cl);
         place_cmdline_cursor(frame, regions, cl);
     } else if let Some(sl) = status.search_line {
         place_search_cursor(frame, regions, sl);
@@ -321,6 +322,181 @@ fn split_span_for_match(span: Span<'static>, needle: &str) -> Vec<Span<'static>>
     if out.is_empty() {
         return vec![span];
     }
+    out
+}
+
+/// Maximum number of completion rows painted in the popup. Anything
+/// beyond this is summarized as "+ N more" on the last row.
+const POPUP_MAX_VISIBLE: usize = 8;
+
+/// Reuses the slash palette's blue accent so the popup visually
+/// reads as the same surface; selected rows use white-on-blue.
+fn popup_styles() -> (Style, Style, Style) {
+    let theme = crate::theme::current();
+    let row = Style::default().fg(Color::White).bg(theme.status_bg);
+    let sel = Style::default()
+        .fg(Color::White)
+        .bg(Color::Blue)
+        .add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(Color::DarkGray).bg(theme.status_bg);
+    (row, sel, dim)
+}
+
+/// Paint the completion popup over the conversation buffer when the
+/// cmdline has candidate completions. Each row shows the value plus an
+/// optional dimmed description; the [`CommandLine::selected`] row is
+/// highlighted. Renders nothing when there are no completions or no
+/// room (height < 1).
+fn render_cmdline_popup(frame: &mut Frame, regions: Regions, cmdline: &CommandLine) {
+    let completions = cmdline.completions();
+    if completions.items.is_empty() {
+        return;
+    }
+    let total = completions.items.len();
+    let visible = total.min(POPUP_MAX_VISIBLE);
+    let overflow = total.saturating_sub(visible);
+    let rows = visible + usize::from(overflow > 0);
+
+    let buf_h = usize::from(regions.buffer.height);
+    let rows = rows.min(buf_h);
+    if rows == 0 {
+        return;
+    }
+    let height = u16::try_from(rows).unwrap_or(u16::MAX);
+
+    let width = popup_width(regions, completions);
+    if width == 0 {
+        return;
+    }
+    let anchor_x = regions.status.x.saturating_add(1);
+    let area = Rect {
+        x: anchor_x,
+        y: regions.status.y.saturating_add(1),
+        width,
+        height,
+    };
+    if area.y >= regions.buffer.y.saturating_add(regions.buffer.height) {
+        return;
+    }
+
+    let (row_style, sel_style, dim_style) = popup_styles();
+    let max_value_chars = completions
+        .items
+        .iter()
+        .take(visible)
+        .map(|c| c.value.chars().count())
+        .max()
+        .unwrap_or(0);
+    let inner_width = usize::from(area.width);
+    let lines: Vec<Line<'static>> = completions
+        .items
+        .iter()
+        .take(visible)
+        .enumerate()
+        .map(|(i, item)| {
+            let selected = cmdline.selected() == Some(i);
+            let value_style = if selected { sel_style } else { row_style };
+            let desc_style = if selected { sel_style } else { dim_style };
+            popup_row(
+                item.value.as_str(),
+                item.description.as_deref(),
+                max_value_chars,
+                inner_width,
+                value_style,
+                desc_style,
+            )
+        })
+        .chain(if overflow > 0 {
+            let overflow_line = Line::from(Span::styled(
+                pad_to_width(&format!("  + {overflow} more"), inner_width),
+                dim_style,
+            ));
+            Some(overflow_line)
+        } else {
+            None
+        })
+        .collect();
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(lines).style(row_style), area);
+}
+
+fn popup_width(regions: Regions, completions: &crate::cmdparse::Completions) -> u16 {
+    let max_value = completions
+        .items
+        .iter()
+        .map(|c| c.value.chars().count())
+        .max()
+        .unwrap_or(0);
+    let max_desc = completions
+        .items
+        .iter()
+        .filter_map(|c| c.description.as_deref().map(|d| d.chars().count()))
+        .max()
+        .unwrap_or(0);
+    let separator = if max_desc > 0 { 2 } else { 0 };
+    let leading = 2;
+    let desired = leading + max_value + separator + max_desc;
+    let viewport = usize::from(regions.buffer.width.max(regions.status.width));
+    let cap = viewport.saturating_sub(2).min(80);
+    let width = desired.min(cap).max(max_value + leading);
+    u16::try_from(width.min(viewport)).unwrap_or(u16::MAX)
+}
+
+fn popup_row(
+    value: &str,
+    description: Option<&str>,
+    value_col_chars: usize,
+    inner_width: usize,
+    value_style: Style,
+    desc_style: Style,
+) -> Line<'static> {
+    let leading = "  ";
+    let leading_chars = leading.chars().count();
+    let value_chars = value.chars().count();
+    let value_pad = value_col_chars.saturating_sub(value_chars);
+    let after_value = leading_chars + value_chars + value_pad;
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(4);
+    spans.push(Span::styled(leading.to_owned(), value_style));
+    spans.push(Span::styled(value.to_owned(), value_style));
+    if value_pad > 0 {
+        spans.push(Span::styled(" ".repeat(value_pad), value_style));
+    }
+    if let Some(desc) = description {
+        let remaining = inner_width.saturating_sub(after_value).saturating_sub(2);
+        if remaining > 0 {
+            let truncated = truncate_to_width(desc, remaining);
+            spans.push(Span::styled("  ".to_owned(), desc_style));
+            spans.push(Span::styled(truncated, desc_style));
+        }
+    }
+    let painted: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    if painted < inner_width {
+        spans.push(Span::styled(" ".repeat(inner_width - painted), value_style));
+    }
+    Line::from(spans)
+}
+
+fn truncate_to_width(s: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_chars {
+        return s.to_owned();
+    }
+    let mut out: String = chars[..max_chars.saturating_sub(1)].iter().collect();
+    out.push('\u{2026}');
+    out
+}
+
+fn pad_to_width(s: &str, width: usize) -> String {
+    let n = s.chars().count();
+    if n >= width {
+        return s.to_owned();
+    }
+    let mut out = s.to_owned();
+    out.push_str(&" ".repeat(width - n));
     out
 }
 
@@ -2293,5 +2469,159 @@ mod tests {
         );
         // Top status bar no longer carries the mode pill; just kage label.
         assert!(!lines[0].contains("INS"));
+    }
+
+    fn snapshot_with_cmdline(cmdline: &CommandLine, area: Rect) -> Vec<String> {
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut buffer = Buffer::new();
+        let input = InputState::new();
+        let mut captured: std::collections::BTreeMap<usize, Vec<CapturedCell>> =
+            std::collections::BTreeMap::new();
+        terminal
+            .draw(|frame| {
+                let regions = crate::layout::split(frame.area(), 1, 0);
+                render(
+                    frame,
+                    regions,
+                    &mut buffer,
+                    &input,
+                    Some(cmdline),
+                    &StatusCtx::default(),
+                    None,
+                    &mut captured,
+                    None,
+                    &[],
+                );
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut out = Vec::new();
+        for y in 0..buf.area.height {
+            let mut row = String::new();
+            for x in 0..buf.area.width {
+                row.push_str(buf[(x, y)].symbol());
+            }
+            out.push(row.trim_end().to_owned());
+        }
+        out
+    }
+
+    fn cell_bg_at(cmdline: &CommandLine, area: Rect, x: u16, y: u16) -> Color {
+        let backend = TestBackend::new(area.width, area.height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut buffer = Buffer::new();
+        let input = InputState::new();
+        let mut captured: std::collections::BTreeMap<usize, Vec<CapturedCell>> =
+            std::collections::BTreeMap::new();
+        terminal
+            .draw(|frame| {
+                let regions = crate::layout::split(frame.area(), 1, 0);
+                render(
+                    frame,
+                    regions,
+                    &mut buffer,
+                    &input,
+                    Some(cmdline),
+                    &StatusCtx::default(),
+                    None,
+                    &mut captured,
+                    None,
+                    &[],
+                );
+            })
+            .unwrap();
+        terminal.backend().buffer()[(x, y)].bg
+    }
+
+    fn completion(value: &str, description: Option<&str>) -> crate::cmdparse::Completion {
+        crate::cmdparse::Completion {
+            value: value.to_owned(),
+            description: description.map(str::to_owned),
+            replace_range: 0..0,
+        }
+    }
+
+    #[test]
+    fn popup_paints_nothing_with_zero_completions() {
+        let empty = crate::cmdparse::Completions::default();
+        let cl = CommandLine::for_test("", empty, true, None);
+        let lines = snapshot_with_cmdline(&cl, Rect::new(0, 0, 40, 12));
+        // Row 1 is the first row below the status; it should be blank
+        // (or at least not contain any completion text we did not give).
+        assert!(
+            lines[1].chars().all(|c| c == ' '),
+            "row 1 should be blank, got {:?}",
+            lines[1]
+        );
+    }
+
+    #[test]
+    fn popup_paints_single_item_text() {
+        let completions = crate::cmdparse::Completions {
+            items: vec![completion("model", Some("switch model"))],
+            anchor: 0,
+        };
+        let cl = CommandLine::for_test("m", completions, true, None);
+        let lines = snapshot_with_cmdline(&cl, Rect::new(0, 0, 40, 12));
+        let popup_row = lines
+            .iter()
+            .skip(1)
+            .find(|l| l.contains("model"))
+            .expect("popup row containing 'model'");
+        assert!(popup_row.contains("switch model"), "got {popup_row:?}");
+    }
+
+    #[test]
+    fn popup_paints_many_items_and_highlights_selected() {
+        let completions = crate::cmdparse::Completions {
+            items: vec![
+                completion("model", Some("switch model")),
+                completion("mouse", Some("toggle mouse")),
+            ],
+            anchor: 0,
+        };
+        let cl = CommandLine::for_test("mo", completions, true, Some(1));
+        let area = Rect::new(0, 0, 50, 12);
+        let lines = snapshot_with_cmdline(&cl, area);
+        assert!(lines.iter().any(|l| l.contains("model")), "{lines:#?}");
+        assert!(lines.iter().any(|l| l.contains("mouse")), "{lines:#?}");
+        // The selected row (index 1, painted at y=2) should have the
+        // blue selection bg; the unselected row (y=1) should not.
+        let sel_bg = cell_bg_at(&cl, area, 3, 2);
+        let unsel_bg = cell_bg_at(&cl, area, 3, 1);
+        assert_eq!(sel_bg, Color::Blue, "selected row bg should be blue");
+        assert_ne!(
+            unsel_bg,
+            Color::Blue,
+            "unselected row bg should not be blue"
+        );
+    }
+
+    #[test]
+    fn popup_truncates_description_in_narrow_viewport() {
+        let completions = crate::cmdparse::Completions {
+            items: vec![completion(
+                "model",
+                Some("switch to a provider:model identifier from the catalog"),
+            )],
+            anchor: 0,
+        };
+        let cl = CommandLine::for_test("m", completions, true, None);
+        // 28 cells total: leading "  " + "model" (5) + "  " + ~19 desc chars + ellipsis.
+        let lines = snapshot_with_cmdline(&cl, Rect::new(0, 0, 28, 8));
+        let popup_row = lines
+            .iter()
+            .skip(1)
+            .find(|l| l.contains("model"))
+            .expect("popup row");
+        assert!(
+            popup_row.contains('\u{2026}'),
+            "expected ellipsis in narrow row, got {popup_row:?}",
+        );
+        assert!(
+            !popup_row.contains("catalog"),
+            "narrow viewport should drop the tail of the description, got {popup_row:?}",
+        );
     }
 }

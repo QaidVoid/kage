@@ -7,7 +7,7 @@ use kage_core::{Risk, ToolOutput};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{Tool, ToolContext, ToolError, resolve_under, schema_for};
+use crate::{Tool, ToolContext, ToolError, resolve, schema_for};
 
 /// Files larger than this are truncated; the model is told via a footer.
 const MAX_BYTES: usize = 2_000_000;
@@ -53,7 +53,7 @@ impl Tool for ReadTool {
         cx: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
         let input: ReadInput = serde_json::from_value(input)?;
-        let path = resolve_under(cx.workdir(), Path::new(&input.path))?;
+        let path = resolve(cx.workdir(), Path::new(&input.path))?;
 
         let bytes = std::fs::read(&path)?;
         let total_bytes = bytes.len();
@@ -140,30 +140,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out.text, "b\nc\nd");
-    }
-
-    #[test]
-    fn rejects_path_outside_workdir() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = run(
-            &ReadTool,
-            dir.path(),
-            serde_json::json!({"path":"/etc/passwd"}),
-        )
-        .unwrap_err();
-        assert!(matches!(err, ToolError::Path { .. }));
-    }
-
-    #[test]
-    fn rejects_dot_dot_traversal() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = run(
-            &ReadTool,
-            dir.path(),
-            serde_json::json!({"path":"../../etc/passwd"}),
-        )
-        .unwrap_err();
-        assert!(matches!(err, ToolError::Path { .. }));
     }
 
     #[test]

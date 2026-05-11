@@ -12,7 +12,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::atomic::atomic_write;
-use crate::{Tool, ToolContext, ToolError, resolve_under, schema_for};
+use crate::{Tool, ToolContext, ToolError, resolve, schema_for};
 
 /// Input shape for the `write` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -55,7 +55,7 @@ impl Tool for WriteTool {
         cx: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
         let input: WriteInput = serde_json::from_value(input)?;
-        let target = resolve_under(cx.workdir(), Path::new(&input.path))?;
+        let target = resolve(cx.workdir(), Path::new(&input.path))?;
 
         if target.exists() && !input.overwrite {
             return Ok(ToolOutput {
@@ -150,18 +150,6 @@ mod tests {
         .unwrap();
         assert!(!out.is_error);
         assert_eq!(fs::read_to_string(dir.path().join("x.txt")).unwrap(), "new");
-    }
-
-    #[test]
-    fn rejects_path_outside_workdir() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = run(
-            &WriteTool,
-            dir.path(),
-            serde_json::json!({"path":"/tmp/outside.txt","content":"x"}),
-        )
-        .unwrap_err();
-        assert!(matches!(err, ToolError::Path { .. }));
     }
 
     #[test]

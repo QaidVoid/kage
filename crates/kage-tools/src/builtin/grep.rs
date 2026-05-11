@@ -13,7 +13,7 @@ use kage_core::{Risk, ToolOutput};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{Tool, ToolContext, ToolError, resolve_under, schema_for};
+use crate::{Tool, ToolContext, ToolError, resolve, schema_for};
 
 const DEFAULT_MAX_MATCHES: u64 = 1_000;
 
@@ -63,7 +63,7 @@ impl Tool for GrepTool {
     ) -> Result<ToolOutput, ToolError> {
         let input: GrepInput = serde_json::from_value(input)?;
         let root = match &input.path {
-            Some(p) => resolve_under(cx.workdir(), Path::new(p))?,
+            Some(p) => resolve(cx.workdir(), Path::new(p))?,
             None => cx.workdir().to_path_buf(),
         };
         let max = input.max_matches.unwrap_or(DEFAULT_MAX_MATCHES);
@@ -236,13 +236,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = run(dir.path(), serde_json::json!({"pattern":"["})).unwrap_err();
         assert!(matches!(err, ToolError::InvalidInput(_)));
-    }
-
-    #[test]
-    fn path_outside_workdir_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = run(dir.path(), serde_json::json!({"pattern":"x","path":"/etc"})).unwrap_err();
-        assert!(matches!(err, ToolError::Path { .. }));
     }
 
     #[test]

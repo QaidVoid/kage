@@ -12,7 +12,7 @@ use serde::Deserialize;
 use similar::TextDiff;
 
 use crate::atomic::atomic_write;
-use crate::{Tool, ToolContext, ToolError, resolve_under, schema_for};
+use crate::{Tool, ToolContext, ToolError, resolve, schema_for};
 
 /// Input shape for the `edit` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -57,7 +57,7 @@ impl Tool for EditTool {
         cx: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
         let input: EditInput = serde_json::from_value(input)?;
-        let path = resolve_under(cx.workdir(), Path::new(&input.path))?;
+        let path = resolve(cx.workdir(), Path::new(&input.path))?;
         let original = std::fs::read_to_string(&path)?;
 
         let count = original.matches(&input.old_str).count();
@@ -190,17 +190,6 @@ mod tests {
             "y\ny\ny\n"
         );
         assert_eq!(out.structured.unwrap()["replacements"], 3);
-    }
-
-    #[test]
-    fn rejects_path_outside_workdir() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = run(
-            dir.path(),
-            serde_json::json!({"path":"/etc/passwd","old_str":"a","new_str":"b"}),
-        )
-        .unwrap_err();
-        assert!(matches!(err, ToolError::Path { .. }));
     }
 
     #[test]

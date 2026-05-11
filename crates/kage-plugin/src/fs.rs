@@ -1,11 +1,15 @@
-//! `kage.fs.read` / `kage.fs.write` - filesystem helpers gated by the same
-//! `resolve_under` policy as built-in tools.
+//! `kage.fs.read` / `kage.fs.write` - filesystem helpers confined to the
+//! plugin's workdir.
 //!
 //! The host supplies a workdir at runtime construction. Every path passed
 //! by Lua is resolved through [`kage_tools::resolve_under`], which rejects
 //! anything that would escape the workdir (absolute paths, `..`, symlinks
 //! pointing outside). On any rejection the helper raises a Lua error so
 //! plugins fail loudly rather than silently writing to the wrong place.
+//!
+//! Built-in tools use the looser [`kage_tools::resolve`] (no escape check)
+//! because the model already has shell access via `bash`; plugins keep the
+//! tighter check because they are third-party code in a sandbox.
 
 use std::path::{Path, PathBuf};
 

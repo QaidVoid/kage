@@ -15,7 +15,7 @@ use kage_core::{Risk, ToolOutput};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{Tool, ToolContext, ToolError, resolve_under, schema_for};
+use crate::{Tool, ToolContext, ToolError, resolve, schema_for};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_STREAM_BYTES: usize = 100_000;
@@ -64,7 +64,7 @@ impl Tool for BashTool {
         let input: BashInput = serde_json::from_value(input)?;
         let timeout = Duration::from_millis(input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
         let cwd = match &input.cwd {
-            Some(c) => resolve_under(cx.workdir(), Path::new(c))?,
+            Some(c) => resolve(cx.workdir(), Path::new(c))?,
             None => cx.workdir().to_path_buf(),
         };
         run_command(&input.command, &cwd, timeout, cx)
@@ -237,16 +237,5 @@ mod tests {
         .unwrap();
         assert!(!out.is_error);
         assert!(out.text.contains('x'));
-    }
-
-    #[test]
-    fn cwd_outside_workdir_is_rejected() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = run(
-            dir.path(),
-            serde_json::json!({"command":"echo hi","cwd":"/etc"}),
-        )
-        .unwrap_err();
-        assert!(matches!(err, ToolError::Path { .. }));
     }
 }

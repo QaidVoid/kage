@@ -8,7 +8,7 @@ use kage_core::{Risk, ToolOutput};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{Tool, ToolContext, ToolError, resolve_under, schema_for};
+use crate::{Tool, ToolContext, ToolError, resolve, schema_for};
 
 /// Input shape for the `find` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -52,7 +52,7 @@ impl Tool for FindTool {
     ) -> Result<ToolOutput, ToolError> {
         let input: FindInput = serde_json::from_value(input)?;
         let root = match &input.path {
-            Some(p) => resolve_under(cx.workdir(), Path::new(p))?,
+            Some(p) => resolve(cx.workdir(), Path::new(p))?,
             None => cx.workdir().to_path_buf(),
         };
         let glob = Glob::new(&input.pattern)
@@ -163,13 +163,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = run(dir.path(), serde_json::json!({"pattern":"["})).unwrap_err();
         assert!(matches!(err, ToolError::InvalidInput(_)));
-    }
-
-    #[test]
-    fn rejects_path_outside_workdir() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = run(dir.path(), serde_json::json!({"pattern":"*","path":"/etc"})).unwrap_err();
-        assert!(matches!(err, ToolError::Path { .. }));
     }
 
     #[test]

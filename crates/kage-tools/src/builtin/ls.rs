@@ -7,7 +7,7 @@ use kage_core::{Risk, ToolOutput};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{Tool, ToolContext, ToolError, resolve_under, schema_for};
+use crate::{Tool, ToolContext, ToolError, resolve, schema_for};
 
 /// Input shape for the `ls` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -50,7 +50,7 @@ impl Tool for LsTool {
     ) -> Result<ToolOutput, ToolError> {
         let input: LsInput = serde_json::from_value(input)?;
         let target = match &input.path {
-            Some(p) => resolve_under(cx.workdir(), Path::new(p))?,
+            Some(p) => resolve(cx.workdir(), Path::new(p))?,
             None => cx.workdir().to_path_buf(),
         };
 
@@ -147,13 +147,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = run(dir.path(), serde_json::json!({})).unwrap();
         assert_eq!(out.text, "(empty)");
-    }
-
-    #[test]
-    fn rejects_path_outside_workdir() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = run(dir.path(), serde_json::json!({"path":"/etc"})).unwrap_err();
-        assert!(matches!(err, ToolError::Path { .. }));
     }
 
     #[test]

@@ -349,24 +349,29 @@ fn popup_styles() -> (Style, Style, Style) {
 /// Paint the completion popup over the conversation buffer when the
 /// cmdline has candidate completions. Each row shows the value plus an
 /// optional dimmed description; the [`CommandLine::selected`] row is
-/// highlighted. Renders nothing when there are no completions or no
-/// room (height < 1).
+/// highlighted. When there are more items than fit, a sliding window
+/// follows the selection and `... N more above` / `... N more below`
+/// indicator rows show how many candidates are off-screen.
 fn render_cmdline_popup(frame: &mut Frame, regions: Regions, cmdline: &CommandLine) {
     let completions = cmdline.completions();
     if completions.items.is_empty() {
         return;
     }
     let total = completions.items.len();
-    let visible = total.min(POPUP_MAX_VISIBLE);
-    let overflow = total.saturating_sub(visible);
-    let rows = visible + usize::from(overflow > 0);
+    let max_visible = POPUP_MAX_VISIBLE.min(total);
+    let (offset, window) = popup_scroll_window(cmdline.selected(), total, max_visible);
+    let above = offset;
+    let below = total.saturating_sub(offset + window);
+    let rows_above = usize::from(above > 0);
+    let rows_below = usize::from(below > 0);
+    let total_rows = window + rows_above + rows_below;
 
     let buf_h = usize::from(regions.buffer.height);
-    let rows = rows.min(buf_h);
-    if rows == 0 {
+    let total_rows = total_rows.min(buf_h);
+    if total_rows == 0 {
         return;
     }
-    let height = u16::try_from(rows).unwrap_or(u16::MAX);
+    let height = u16::try_from(total_rows).unwrap_or(u16::MAX);
 
     let width = popup_width(regions, completions);
     if width == 0 {
@@ -387,42 +392,75 @@ fn render_cmdline_popup(frame: &mut Frame, regions: Regions, cmdline: &CommandLi
     let max_value_chars = completions
         .items
         .iter()
-        .take(visible)
+        .skip(offset)
+        .take(window)
         .map(|c| c.value.chars().count())
         .max()
         .unwrap_or(0);
     let inner_width = usize::from(area.width);
-    let lines: Vec<Line<'static>> = completions
+
+    let mut lines: Vec<Line<'static>> = Vec::with_capacity(total_rows);
+
+    if rows_above > 0 {
+        lines.push(Line::from(Span::styled(
+            pad_to_width(&format!("  ... {above} more above"), inner_width),
+            dim_style,
+        )));
+    }
+
+    for (i, item) in completions
         .items
         .iter()
-        .take(visible)
         .enumerate()
-        .map(|(i, item)| {
-            let selected = cmdline.selected() == Some(i);
-            let value_style = if selected { sel_style } else { row_style };
-            let desc_style = if selected { sel_style } else { dim_style };
-            popup_row(
-                item.value.as_str(),
-                item.description.as_deref(),
-                max_value_chars,
-                inner_width,
-                value_style,
-                desc_style,
-            )
-        })
-        .chain(if overflow > 0 {
-            let overflow_line = Line::from(Span::styled(
-                pad_to_width(&format!("  + {overflow} more"), inner_width),
-                dim_style,
-            ));
-            Some(overflow_line)
-        } else {
-            None
-        })
-        .collect();
+        .skip(offset)
+        .take(window)
+    {
+        let selected = cmdline.selected() == Some(i);
+        let value_style = if selected { sel_style } else { row_style };
+        let desc_style = if selected { sel_style } else { dim_style };
+        lines.push(popup_row(
+            item.value.as_str(),
+            item.description.as_deref(),
+            max_value_chars,
+            inner_width,
+            value_style,
+            desc_style,
+        ));
+    }
+
+    if rows_below > 0 {
+        lines.push(Line::from(Span::styled(
+            pad_to_width(&format!("  ... {below} more below"), inner_width),
+            dim_style,
+        )));
+    }
 
     frame.render_widget(Clear, area);
     frame.render_widget(Paragraph::new(lines).style(row_style), area);
+}
+
+/// Compute the visible-items window for the completion popup so the
+/// selected row stays in view as the user cycles past the bottom or
+/// scrolls back above the top. Returns `(offset, window_len)` where
+/// `offset` is the index of the first item to render and `window_len`
+/// is how many to render (clamped to `max_visible`).
+fn popup_scroll_window(
+    selected: Option<usize>,
+    total: usize,
+    max_visible: usize,
+) -> (usize, usize) {
+    if total <= max_visible {
+        return (0, total);
+    }
+    let sel = selected.unwrap_or(0);
+    let offset = if sel < max_visible {
+        0
+    } else {
+        (sel + 1)
+            .saturating_sub(max_visible)
+            .min(total - max_visible)
+    };
+    (offset, max_visible)
 }
 
 fn popup_width(regions: Regions, completions: &crate::cmdparse::Completions) -> u16 {
@@ -440,7 +478,13 @@ fn popup_width(regions: Regions, completions: &crate::cmdparse::Completions) -> 
         .unwrap_or(0);
     let separator = if max_desc > 0 { 2 } else { 0 };
     let leading = 2;
-    let desired = leading + max_value + separator + max_desc;
+    let mut desired = leading + max_value + separator + max_desc;
+    // When the popup will scroll, reserve enough room to paint the
+    // "... N more above/below" indicator. ~22 cells fits up to four-
+    // digit counts without truncation.
+    if completions.items.len() > POPUP_MAX_VISIBLE {
+        desired = desired.max(22);
+    }
     let viewport = usize::from(regions.buffer.width.max(regions.status.width));
     let cap = viewport.saturating_sub(2).min(80);
     let width = desired.min(cap).max(max_value + leading);
@@ -2599,6 +2643,48 @@ mod tests {
             unsel_bg,
             Color::Blue,
             "unselected row bg should not be blue"
+        );
+    }
+
+    #[test]
+    fn popup_scrolls_to_keep_selected_in_view() {
+        let items: Vec<crate::cmdparse::Completion> = (0..12)
+            .map(|i| completion(&format!("cmd{i:02}"), None))
+            .collect();
+        let completions = crate::cmdparse::Completions { items, anchor: 0 };
+
+        // selected near top: window starts at 0, no "above" indicator,
+        // "below" indicator shows the off-screen tail.
+        let cl_top = CommandLine::for_test("c", completions.clone(), true, Some(2));
+        let lines = snapshot_with_cmdline(&cl_top, Rect::new(0, 0, 40, 20));
+        assert!(
+            lines.iter().any(|l| l.contains("cmd00")),
+            "cmd00 should be visible near the top, got {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("more below")),
+            "expected 'more below' indicator, got {lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("more above")),
+            "no 'more above' indicator near top, got {lines:#?}"
+        );
+
+        // selected past the bottom: window slides so selected is the last
+        // visible row, both indicators present.
+        let cl_bottom = CommandLine::for_test("c", completions.clone(), true, Some(10));
+        let lines = snapshot_with_cmdline(&cl_bottom, Rect::new(0, 0, 40, 20));
+        assert!(
+            lines.iter().any(|l| l.contains("cmd10")),
+            "selected cmd10 must be visible, got {lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("cmd00")),
+            "cmd00 should have scrolled out of view, got {lines:#?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("more above")),
+            "expected 'more above' indicator, got {lines:#?}"
         );
     }
 

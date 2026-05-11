@@ -19,6 +19,8 @@ use ratatui::crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
 use crate::toast::{self, SharedToasts, Toast, ToastKind};
 
 use crate::cmdline::{CommandLine, CommandLineEvent};
+use crate::cmdparse::{EmptyResolver, Resolver};
+use crate::command::{ArgSource, BUILTIN_COMMANDS, CommandSpec};
 use crate::error::TuiError;
 use crate::events::SharedBuffer;
 use crate::input::{InputAction, InputState, Mode, Pane};
@@ -130,6 +132,57 @@ enum PickerKind {
 /// `Ctrl+R`, so a fresh scan reflects any sessions written elsewhere
 /// since the TUI started.
 pub type SessionLister = Box<dyn Fn() -> Vec<PickItem> + Send + 'static>;
+
+/// Snapshot of the builtin command registry shaped for the
+/// [`crate::cmdparse::complete`] engine, which expects a slice of
+/// references rather than the static value slice.
+fn cmdline_registry() -> Vec<&'static CommandSpec> {
+    BUILTIN_COMMANDS.iter().collect()
+}
+
+/// [`Resolver`] backed by the live App state: model choices and
+/// plugin-registered commands the user has imported, plus the bundled
+/// theme list and any session lister the host provided. Paths return
+/// empty until PU.4 wires file-system completion.
+struct AppResolver<'a> {
+    models: &'a [PickItem],
+    plugin_commands: &'a [(String, String)],
+    sessions: Option<&'a SessionLister>,
+}
+
+impl Resolver for AppResolver<'_> {
+    fn dynamic_choice(&self, source: &ArgSource) -> Vec<String> {
+        match source {
+            ArgSource::Models => self.models.iter().map(|p| p.value.clone()).collect(),
+            ArgSource::Themes => crate::theme::Theme::bundled_names()
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
+            ArgSource::PluginCommands => self
+                .plugin_commands
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect(),
+            ArgSource::Sessions => self
+                .sessions
+                .map(|f| f())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|item| item.value)
+                .collect(),
+            ArgSource::Custom(f) => f(),
+        }
+    }
+
+    fn sessions(&self) -> Vec<String> {
+        self.sessions
+            .map(|f| f())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|item| item.value)
+            .collect()
+    }
+}
 
 fn builtin_command_picker_items() -> Vec<PickItem> {
     crate::command::BUILTIN_COMMANDS
@@ -659,7 +712,7 @@ impl App {
 
     fn dispatch_search_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> Option<AppExit> {
         let line = self.search_line.as_mut()?;
-        match line.handle_key(key) {
+        match line.handle_key(key, &[], &EmptyResolver) {
             CommandLineEvent::Pending => None,
             CommandLineEvent::Cancelled => {
                 self.search_line = None;
@@ -711,8 +764,14 @@ impl App {
         &mut self,
         key: ratatui::crossterm::event::KeyEvent,
     ) -> Option<AppExit> {
+        let registry = cmdline_registry();
+        let resolver = AppResolver {
+            models: &self.model_choices,
+            plugin_commands: &self.plugin_commands,
+            sessions: self.session_lister.as_ref(),
+        };
         let cmdline = self.cmdline.as_mut()?;
-        match cmdline.handle_key(key) {
+        match cmdline.handle_key(key, &registry, &resolver) {
             CommandLineEvent::Pending => None,
             CommandLineEvent::Cancelled => {
                 self.cmdline = None;

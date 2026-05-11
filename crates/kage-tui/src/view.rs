@@ -331,14 +331,18 @@ const POPUP_MAX_VISIBLE: usize = 8;
 
 /// Reuses the slash palette's blue accent so the popup visually
 /// reads as the same surface; selected rows use white-on-blue.
+/// Background is [`Theme::modeline_bg`] (dark navy) so the popup is
+/// distinct from the status row's [`Theme::status_bg`], rather than
+/// merging into a single dark-gray block.
 fn popup_styles() -> (Style, Style, Style) {
     let theme = crate::theme::current();
-    let row = Style::default().fg(Color::White).bg(theme.status_bg);
+    let bg = theme.modeline_bg;
+    let row = Style::default().fg(Color::White).bg(bg);
     let sel = Style::default()
         .fg(Color::White)
         .bg(Color::Blue)
         .add_modifier(Modifier::BOLD);
-    let dim = Style::default().fg(Color::DarkGray).bg(theme.status_bg);
+    let dim = Style::default().fg(theme.status_dim_fg).bg(bg);
     (row, sel, dim)
 }
 

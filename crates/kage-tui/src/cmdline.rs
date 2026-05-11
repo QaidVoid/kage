@@ -126,10 +126,16 @@ impl CommandLine {
                 }
             }
             KeyCode::Tab => {
+                if self.completions.items.is_empty() {
+                    self.refresh(registry, resolver);
+                }
                 self.tab(true);
                 CommandLineEvent::Pending
             }
             KeyCode::BackTab => {
+                if self.completions.items.is_empty() {
+                    self.refresh(registry, resolver);
+                }
                 self.tab(false);
                 CommandLineEvent::Pending
             }
@@ -175,10 +181,15 @@ impl CommandLine {
         }
     }
 
-    /// Apply the completion engine's current candidates: a single
-    /// match is inserted outright; multiple matches first extend the
-    /// prefix to the longest common prefix and open the popup, then
-    /// subsequent calls cycle through entries.
+    /// Apply the completion engine's current candidates. Matches
+    /// vim's `wildmode=longest:full,full`:
+    ///
+    /// - Single match: insert it and close the popup.
+    /// - Popup closed: insert the longest common prefix (if it extends
+    ///   what the user has typed) and open the popup with no row
+    ///   selected. The user sees the candidate list and can browse
+    ///   before committing to one.
+    /// - Popup already open: cycle selection forward or backward.
     pub fn tab(&mut self, forward: bool) {
         if self.completions.items.is_empty() {
             return;
@@ -198,12 +209,10 @@ impl CommandLine {
         let current_prefix = self.text.get(anchor..self.cursor).unwrap_or("");
         if lcp.len() > current_prefix.len() && lcp.starts_with(current_prefix) {
             self.replace_at_anchor(&lcp);
-            self.popup_open = true;
-            self.selected = None;
-        } else {
-            self.popup_open = true;
-            self.cycle(forward);
         }
+        self.popup_open = true;
+        self.selected = None;
+        let _ = forward;
     }
 
     fn cycle(&mut self, forward: bool) {
@@ -521,6 +530,9 @@ mod tests {
             send_with(&mut cl, key(KeyCode::Char(c)), &reg, &EmptyResolver);
         }
         send_with(&mut cl, key(KeyCode::Tab), &reg, &EmptyResolver);
+        assert!(cl.popup_open());
+        assert_eq!(cl.selected(), None);
+        send_with(&mut cl, key(KeyCode::Tab), &reg, &EmptyResolver);
         assert_eq!(cl.selected(), Some(0));
         send_with(&mut cl, key(KeyCode::Tab), &reg, &EmptyResolver);
         assert_eq!(cl.selected(), Some(1));
@@ -538,10 +550,25 @@ mod tests {
             send_with(&mut cl, key(KeyCode::Char(c)), &reg, &EmptyResolver);
         }
         send_with(&mut cl, key(KeyCode::Tab), &reg, &EmptyResolver);
+        assert_eq!(cl.selected(), None);
+        send_with(&mut cl, key(KeyCode::Down), &reg, &EmptyResolver);
         assert_eq!(cl.selected(), Some(0));
         send_with(&mut cl, key(KeyCode::Down), &reg, &EmptyResolver);
         assert_eq!(cl.selected(), Some(1));
         send_with(&mut cl, key(KeyCode::Up), &reg, &EmptyResolver);
+        assert_eq!(cl.selected(), Some(0));
+    }
+
+    #[test]
+    fn tab_on_empty_input_opens_popup_without_cycling() {
+        let mut cl = CommandLine::new();
+        let reg = registry();
+        send_with(&mut cl, key(KeyCode::Tab), &reg, &EmptyResolver);
+        assert_eq!(cl.text(), "");
+        assert!(cl.popup_open());
+        assert_eq!(cl.selected(), None);
+        // Down moves into the list after the popup is open.
+        send_with(&mut cl, key(KeyCode::Down), &reg, &EmptyResolver);
         assert_eq!(cl.selected(), Some(0));
     }
 

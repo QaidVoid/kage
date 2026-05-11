@@ -362,6 +362,7 @@ mod tests {
         description: "leave",
         category: CommandCategory::Both,
         args: &[],
+        subcommands: &[],
     };
 
     const MODEL: CommandSpec = CommandSpec {
@@ -374,6 +375,7 @@ mod tests {
             source: ArgSource::Models,
             optional: false,
         }],
+        subcommands: &[],
     };
 
     const MOUSE: CommandSpec = CommandSpec {
@@ -386,6 +388,7 @@ mod tests {
             values: &["on", "off", "toggle"],
             optional: false,
         }],
+        subcommands: &[],
     };
 
     const HELP: CommandSpec = CommandSpec {
@@ -394,6 +397,7 @@ mod tests {
         description: "list commands",
         category: CommandCategory::Both,
         args: &[],
+        subcommands: &[],
     };
 
     fn registry() -> Vec<&'static CommandSpec> {

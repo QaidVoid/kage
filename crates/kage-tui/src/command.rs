@@ -195,6 +195,13 @@ pub struct CommandSpec {
     pub category: CommandCategory,
     /// Ordered argument positions. Empty for argument-less commands.
     pub args: &'static [ArgSpec],
+    /// Nested commands that share the parent's namespace. The parser
+    /// tries to match the first post-head token against a subcommand
+    /// before consuming arguments; the completer suggests subcommand
+    /// names at that position alongside the parent's first arg.
+    /// Subcommands may themselves carry args and further subcommands,
+    /// so the tree can nest arbitrarily.
+    pub subcommands: &'static [CommandSpec],
 }
 
 impl CommandSpec {
@@ -209,6 +216,14 @@ impl CommandSpec {
     pub fn arg_by_name(&self, name: &str) -> Option<&ArgSpec> {
         self.args.iter().find(|a| a.name() == name)
     }
+
+    /// Look up a subcommand by primary name or alias.
+    #[must_use]
+    pub fn subcommand(&self, name: &str) -> Option<&CommandSpec> {
+        self.subcommands
+            .iter()
+            .find(|sub| sub.names().any(|n| n == name))
+    }
 }
 
 /// Built-in commands offered by the slash palette and the `:` line.
@@ -221,6 +236,7 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         description: "leave the TUI",
         category: CommandCategory::Both,
         args: &[],
+        subcommands: &[],
     },
     CommandSpec {
         name: "cancel",
@@ -228,6 +244,7 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         description: "cancel the in-flight turn",
         category: CommandCategory::Both,
         args: &[],
+        subcommands: &[],
     },
     CommandSpec {
         name: "model",
@@ -239,6 +256,7 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
             source: ArgSource::Models,
             optional: false,
         }],
+        subcommands: &[],
     },
     CommandSpec {
         name: "fold",
@@ -250,6 +268,7 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
             values: &["all"],
             optional: false,
         }],
+        subcommands: &[],
     },
     CommandSpec {
         name: "unfold",
@@ -261,17 +280,44 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
             values: &["all"],
             optional: false,
         }],
+        subcommands: &[],
     },
     CommandSpec {
         name: "theme",
         aliases: &[],
-        description: "switch palette (use `:theme list` to enumerate)",
+        description: "manage UI palette",
         category: CommandCategory::Both,
-        args: &[ArgSpec::DynamicChoice {
-            name: "name",
-            source: ArgSource::Themes,
-            optional: true,
-        }],
+        args: &[],
+        subcommands: &[
+            CommandSpec {
+                name: "list",
+                aliases: &[],
+                description: "list every bundled theme",
+                category: CommandCategory::Both,
+                args: &[],
+                subcommands: &[],
+            },
+            CommandSpec {
+                name: "set",
+                aliases: &[],
+                description: "switch to a bundled theme",
+                category: CommandCategory::Both,
+                args: &[ArgSpec::DynamicChoice {
+                    name: "name",
+                    source: ArgSource::Themes,
+                    optional: false,
+                }],
+                subcommands: &[],
+            },
+            CommandSpec {
+                name: "current",
+                aliases: &[],
+                description: "show the active theme name",
+                category: CommandCategory::Both,
+                args: &[],
+                subcommands: &[],
+            },
+        ],
     },
     CommandSpec {
         name: "mouse",
@@ -283,6 +329,7 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
             values: &["on", "off", "toggle"],
             optional: true,
         }],
+        subcommands: &[],
     },
     CommandSpec {
         name: "help",
@@ -290,6 +337,7 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         description: "show available commands",
         category: CommandCategory::Both,
         args: &[],
+        subcommands: &[],
     },
     CommandSpec {
         name: "compact",
@@ -297,6 +345,7 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         description: "summarize older history into a single message",
         category: CommandCategory::Both,
         args: &[],
+        subcommands: &[],
     },
     CommandSpec {
         name: "clear",
@@ -304,6 +353,7 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         description: "clear the rendered conversation buffer",
         category: CommandCategory::Both,
         args: &[],
+        subcommands: &[],
     },
 ];
 
@@ -330,6 +380,7 @@ mod tests {
             values: &["on", "off", "toggle"],
             optional: false,
         }],
+        subcommands: &[],
     };
 
     #[test]
@@ -346,6 +397,7 @@ mod tests {
             description: "exit the TUI",
             category: CommandCategory::Both,
             args: &[],
+            subcommands: &[],
         };
         let names: Vec<&str> = QUIT.names().collect();
         assert_eq!(names, vec!["quit", "q"]);

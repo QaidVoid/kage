@@ -330,6 +330,7 @@ mod tests {
             source: ArgSource::Models,
             optional: false,
         }],
+        subcommands: &[],
     };
 
     const MOUSE: CommandSpec = CommandSpec {
@@ -342,6 +343,7 @@ mod tests {
             values: &["on", "off", "toggle"],
             optional: true,
         }],
+        subcommands: &[],
     };
 
     const QUIT: CommandSpec = CommandSpec {
@@ -350,6 +352,7 @@ mod tests {
         description: "leave the TUI",
         category: CommandCategory::Both,
         args: &[],
+        subcommands: &[],
     };
 
     fn registry() -> Vec<&'static CommandSpec> {

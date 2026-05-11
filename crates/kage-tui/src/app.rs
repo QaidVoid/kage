@@ -142,6 +142,32 @@ fn cmdline_registry(plugin_specs: &[&'static CommandSpec]) -> Vec<&'static Comma
     out
 }
 
+/// Recursive help renderer: pushes one line per command, then recurses
+/// into each subcommand with an indented prefix so nested commands
+/// appear under their parent.
+fn help_render_spec(lines: &mut Vec<String>, spec: &CommandSpec, prefix: &str, depth: usize) {
+    let aliases = if spec.aliases.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", spec.aliases.join(", "))
+    };
+    let hints = crate::command::arg_hints_text(spec.args);
+    let arg_hint = if hints.is_empty() {
+        String::new()
+    } else {
+        format!(" {hints}")
+    };
+    let indent = "  ".repeat(depth + 1);
+    lines.push(format!(
+        "{indent}{prefix}{name}{aliases}{arg_hint}   {desc}",
+        name = spec.name,
+        desc = spec.description,
+    ));
+    for sub in spec.subcommands {
+        help_render_spec(lines, sub, &format!("{prefix}{} ", spec.name), depth + 1);
+    }
+}
+
 /// [`Resolver`] backed by the live App state: model choices and
 /// plugin-registered commands the user has imported, plus the bundled
 /// theme list and any session lister the host provided. Paths return
@@ -422,6 +448,7 @@ impl App {
                 description: desc_static,
                 category: CommandCategory::Both,
                 args: &[],
+                subcommands: &[],
             }));
             self.plugin_command_specs.push(spec);
         }
@@ -1145,63 +1172,7 @@ impl App {
     fn push_help(&mut self) {
         let mut lines = vec!["available commands:".to_owned()];
         for spec in crate::command::BUILTIN_COMMANDS {
-            let aliases = if spec.aliases.is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", spec.aliases.join(", "))
-            };
-            let arg_hint = if let Some(arg) = spec.args.first() {
-                match arg {
-                    crate::command::ArgSpec::Choice {
-                        values, optional, ..
-                    } => {
-                        let vals = values.join("|");
-                        if *optional {
-                            format!(" [{vals}]")
-                        } else {
-                            format!(" <{vals}>")
-                        }
-                    }
-                    crate::command::ArgSpec::DynamicChoice { optional, .. } => {
-                        if *optional {
-                            " [<value>]".to_owned()
-                        } else {
-                            " <value>".to_owned()
-                        }
-                    }
-                    crate::command::ArgSpec::Rest { optional, hint, .. } => {
-                        if *optional {
-                            format!(" [{hint}]")
-                        } else {
-                            format!(" <{hint}>")
-                        }
-                    }
-                    crate::command::ArgSpec::Path { optional, .. } => {
-                        if *optional {
-                            " [<path>]".to_owned()
-                        } else {
-                            " <path>".to_owned()
-                        }
-                    }
-                    crate::command::ArgSpec::SessionId { optional, .. } => {
-                        if *optional {
-                            " [<session>]".to_owned()
-                        } else {
-                            " <session>".to_owned()
-                        }
-                    }
-                    crate::command::ArgSpec::Flag { .. } => " <on|off>".to_owned(),
-                }
-            } else {
-                String::new()
-            };
-            lines.push(format!(
-                "  :{name}{aliases}{arg_hint}   {desc}",
-                name = spec.name,
-                aliases = aliases,
-                arg_hint = arg_hint,
-                desc = spec.description,
-            ));
+            help_render_spec(&mut lines, spec, ":", 0);
         }
         let body = lines.join("\n");
         if let Ok(mut buf) = self.buffer.lock() {
@@ -1210,8 +1181,11 @@ impl App {
     }
 
     fn run_theme_command(&mut self, rest: &str) {
-        match rest {
-            "" => {
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let sub = parts.next().unwrap_or("");
+        let sub_rest = parts.next().unwrap_or("").trim();
+        match sub {
+            "" | "current" => {
                 let cur = crate::theme::current().name;
                 self.notify(format!("theme: {cur} (try `:theme list`)"));
             }
@@ -1232,26 +1206,39 @@ impl App {
                     buf.push_custom("kage:theme", format!("themes:\n{names}"), false);
                 }
             }
-            name => {
-                let names = crate::theme::Theme::bundled_names();
-                if !names.contains(&name) {
-                    self.push_error(format!("unknown theme: {name} (try `:theme list`)"));
+            "set" => {
+                if sub_rest.is_empty() {
+                    self.push_error("theme set: usage `:theme set <name>`");
                     return;
                 }
-                let theme = crate::theme::Theme::by_name(name);
-                crate::theme::set_current(theme);
-                if let Ok(mut buf) = self.buffer.lock() {
-                    // Force a fresh layout pass: every block's
-                    // cached height was measured against the prior
-                    // theme's bubble background, which doesn't
-                    // change geometry but invalidating is cheap and
-                    // protects against future theme-driven height
-                    // tweaks (different rule glyph widths, etc.).
-                    buf.invalidate_all_heights();
-                }
-                self.notify(format!("theme: {name}"));
+                self.apply_theme_by_name(sub_rest);
+            }
+            other => {
+                self.push_error(format!(
+                    "theme: unknown subcommand `{other}` (try list, set, current)"
+                ));
             }
         }
+    }
+
+    fn apply_theme_by_name(&mut self, name: &str) {
+        let names = crate::theme::Theme::bundled_names();
+        if !names.contains(&name) {
+            self.push_error(format!("unknown theme: {name} (try `:theme list`)"));
+            return;
+        }
+        let theme = crate::theme::Theme::by_name(name);
+        crate::theme::set_current(theme);
+        if let Ok(mut buf) = self.buffer.lock() {
+            // Force a fresh layout pass: every block's cached height
+            // was measured against the prior theme's bubble
+            // background, which doesn't change geometry but
+            // invalidating is cheap and protects against future
+            // theme-driven height tweaks (different rule glyph
+            // widths, etc.).
+            buf.invalidate_all_heights();
+        }
+        self.notify(format!("theme: {name}"));
     }
 
     fn notify(&mut self, msg: impl Into<String>) {

@@ -368,6 +368,7 @@ impl Resolver for EmptyResolver {}
 /// the line) returns [`Completions::empty`]: completion is best-effort
 /// and we never return partial / misleading suggestions for
 /// malformed input.
+#[allow(clippy::too_many_lines)]
 pub fn complete(
     registry: &[&CommandSpec],
     raw: &str,
@@ -428,38 +429,80 @@ pub fn complete(
     let Some(head_tok) = tokens.first() else {
         return Completions::empty();
     };
-    let Some(spec) = registry
+    let Some(head_spec) = registry
         .iter()
         .find(|s| s.names().any(|n| n == head_tok.value))
     else {
         return Completions::empty();
     };
-    let arg_idx = arg_position - 1;
-    let Some(arg_spec) = spec.args.get(arg_idx) else {
-        return Completions::empty();
-    };
 
-    let candidates: Vec<String> = match arg_spec {
-        ArgSpec::Choice { values, .. } => values.iter().map(|v| (*v).to_owned()).collect(),
-        ArgSpec::DynamicChoice { source, .. } => resolver.dynamic_choice(source),
-        ArgSpec::Path { .. } => resolver.paths(&prefix),
-        ArgSpec::SessionId { .. } => resolver.sessions(),
-        ArgSpec::Flag { .. } => ["true", "false", "yes", "no", "on", "off"]
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect(),
-        ArgSpec::Rest { .. } => Vec::new(),
-    };
+    // Walk down the subcommand tree as far as the typed tokens match.
+    // `spec_arg_start` is the token index where `spec`'s own args begin;
+    // tokens before it are the chain of command + subcommand names that
+    // brought us here.
+    let mut spec: &CommandSpec = head_spec;
+    let mut spec_arg_start = 1usize;
+    while spec_arg_start < arg_position {
+        let Some(tok) = tokens.get(spec_arg_start) else {
+            break;
+        };
+        let Some(sub) = spec.subcommand(tok.value.as_str()) else {
+            break;
+        };
+        spec = sub;
+        spec_arg_start += 1;
+    }
+    let local_arg_idx = arg_position - spec_arg_start;
 
-    let items: Vec<Completion> = candidates
-        .into_iter()
-        .filter(|c| c.starts_with(&prefix))
-        .map(|c| Completion {
-            value: c,
-            description: None,
-            replace_range: replace_range.clone(),
-        })
-        .collect();
+    let mut items: Vec<Completion> = Vec::new();
+
+    // At the first position after the spec's name, suggest its
+    // subcommands. They mix with the parent's first arg (if any) so a
+    // command can offer both a default arg and named subcommands.
+    if local_arg_idx == 0 {
+        for sub in spec.subcommands {
+            for name in sub.names() {
+                if !name.starts_with(&prefix) {
+                    continue;
+                }
+                let hints = crate::command::arg_hints_text(sub.args);
+                let description = if hints.is_empty() {
+                    sub.description.to_owned()
+                } else {
+                    format!("{}  {hints}", sub.description)
+                };
+                items.push(Completion {
+                    value: name.to_owned(),
+                    description: Some(description),
+                    replace_range: replace_range.clone(),
+                });
+            }
+        }
+    }
+
+    if let Some(arg_spec) = spec.args.get(local_arg_idx) {
+        let candidates: Vec<String> = match arg_spec {
+            ArgSpec::Choice { values, .. } => values.iter().map(|v| (*v).to_owned()).collect(),
+            ArgSpec::DynamicChoice { source, .. } => resolver.dynamic_choice(source),
+            ArgSpec::Path { .. } => resolver.paths(&prefix),
+            ArgSpec::SessionId { .. } => resolver.sessions(),
+            ArgSpec::Flag { .. } => ["true", "false", "yes", "no", "on", "off"]
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
+            ArgSpec::Rest { .. } => Vec::new(),
+        };
+        for c in candidates {
+            if !c.starts_with(&prefix) {
+                continue;
+            }
+            items.push(Completion {
+                value: c,
+                description: None,
+                replace_range: replace_range.clone(),
+            });
+        }
+    }
 
     Completions { items, anchor }
 }
@@ -475,6 +518,7 @@ mod tests {
         description: "leave",
         category: CommandCategory::Both,
         args: &[],
+        subcommands: &[],
     };
 
     const ONE_CHOICE: CommandSpec = CommandSpec {
@@ -487,6 +531,7 @@ mod tests {
             values: &["on", "off", "toggle"],
             optional: false,
         }],
+        subcommands: &[],
     };
 
     const ONE_CHOICE_OPTIONAL: CommandSpec = CommandSpec {
@@ -499,6 +544,7 @@ mod tests {
             values: &["all"],
             optional: true,
         }],
+        subcommands: &[],
     };
 
     const ONE_REST: CommandSpec = CommandSpec {
@@ -511,6 +557,7 @@ mod tests {
             optional: true,
             hint: "free text",
         }],
+        subcommands: &[],
     };
 
     const ONE_REST_REQUIRED: CommandSpec = CommandSpec {
@@ -523,6 +570,7 @@ mod tests {
             optional: false,
             hint: "session title",
         }],
+        subcommands: &[],
     };
 
     const ONE_DYN: CommandSpec = CommandSpec {
@@ -535,6 +583,7 @@ mod tests {
             source: ArgSource::Models,
             optional: false,
         }],
+        subcommands: &[],
     };
 
     const ONE_PATH: CommandSpec = CommandSpec {
@@ -546,6 +595,7 @@ mod tests {
             name: "path",
             optional: false,
         }],
+        subcommands: &[],
     };
 
     const ONE_FLAG: CommandSpec = CommandSpec {
@@ -554,6 +604,7 @@ mod tests {
         description: "toggle verbose",
         category: CommandCategory::Both,
         args: &[ArgSpec::Flag { name: "on" }],
+        subcommands: &[],
     };
 
     const CHOICE_THEN_REST: CommandSpec = CommandSpec {
@@ -573,6 +624,7 @@ mod tests {
                 hint: "what to say",
             },
         ],
+        subcommands: &[],
     };
 
     fn registry() -> Vec<&'static CommandSpec> {
@@ -992,5 +1044,95 @@ mod tests {
         let c = complete(&registry(), "say lo", 6, &r);
         let names: Vec<String> = c.items.iter().map(|i| i.value.clone()).collect();
         assert_eq!(names, vec!["loud"]);
+    }
+
+    const SUB_LEAF_ARGS: CommandSpec = CommandSpec {
+        name: "rename",
+        aliases: &[],
+        description: "rename to N",
+        category: CommandCategory::Both,
+        args: &[ArgSpec::Rest {
+            name: "name",
+            optional: false,
+            hint: "new name",
+        }],
+        subcommands: &[],
+    };
+
+    const SUB_LEAF_NOARGS: CommandSpec = CommandSpec {
+        name: "list",
+        aliases: &[],
+        description: "list things",
+        category: CommandCategory::Both,
+        args: &[],
+        subcommands: &[],
+    };
+
+    const SUB_LEAF_DYN: CommandSpec = CommandSpec {
+        name: "set",
+        aliases: &[],
+        description: "switch to one",
+        category: CommandCategory::Both,
+        args: &[ArgSpec::DynamicChoice {
+            name: "id",
+            source: ArgSource::Themes,
+            optional: false,
+        }],
+        subcommands: &[],
+    };
+
+    const PARENT_WITH_SUBS: CommandSpec = CommandSpec {
+        name: "tree",
+        aliases: &[],
+        description: "session tree ops",
+        category: CommandCategory::Both,
+        args: &[],
+        subcommands: &[SUB_LEAF_NOARGS, SUB_LEAF_DYN, SUB_LEAF_ARGS],
+    };
+
+    fn subcommand_registry() -> Vec<&'static CommandSpec> {
+        vec![&PARENT_WITH_SUBS]
+    }
+
+    #[test]
+    fn complete_after_parent_lists_subcommands() {
+        let r = TestResolver;
+        let c = complete(&subcommand_registry(), "tree ", 5, &r);
+        let names: Vec<String> = c.items.iter().map(|i| i.value.clone()).collect();
+        assert_eq!(names, vec!["list", "set", "rename"]);
+    }
+
+    #[test]
+    fn complete_partial_subcommand_filters() {
+        let r = TestResolver;
+        let c = complete(&subcommand_registry(), "tree s", 6, &r);
+        let names: Vec<String> = c.items.iter().map(|i| i.value.clone()).collect();
+        assert_eq!(names, vec!["set"]);
+    }
+
+    #[test]
+    fn complete_descends_into_subcommand_args() {
+        let r = TestResolver;
+        let c = complete(&subcommand_registry(), "tree set ", 9, &r);
+        let names: Vec<String> = c.items.iter().map(|i| i.value.clone()).collect();
+        // Theme resolver returns dark/dawn/moonlight from TestResolver.
+        assert!(names.contains(&"dark".to_owned()));
+        assert!(names.contains(&"dawn".to_owned()));
+    }
+
+    #[test]
+    fn complete_subcommand_arg_hints_in_description() {
+        let r = TestResolver;
+        let c = complete(&subcommand_registry(), "tree ", 5, &r);
+        let set_item = c.items.iter().find(|i| i.value == "set").expect("set item");
+        assert!(
+            set_item
+                .description
+                .as_deref()
+                .unwrap_or("")
+                .contains("<id>"),
+            "got {:?}",
+            set_item.description
+        );
     }
 }

@@ -93,7 +93,7 @@ impl SlashPalette {
         let Some(inner) = input_inner(regions) else {
             return;
         };
-        let prefix: u16 = 2;
+        let prefix: u16 = 1;
         let chars: u16 =
             u16::try_from(self.cmdline.text()[..self.cmdline.cursor()].chars().count())
                 .unwrap_or(u16::MAX);
@@ -115,7 +115,7 @@ impl SlashPalette {
             .add_modifier(Modifier::BOLD);
         let text_style = Style::default().fg(theme.assistant_fg);
         let line = Line::from(vec![
-            Span::styled("/ ", prefix_style),
+            Span::styled("/", prefix_style),
             Span::styled(self.cmdline.text().to_owned(), text_style),
         ]);
         frame.render_widget(Clear, inner);

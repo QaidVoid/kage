@@ -200,8 +200,9 @@ fn render_status(
     if let Some(model) = status.model
         && !model.is_empty()
     {
+        let short = shorten_model_name(model);
         left_spans.push(Span::styled("  ".to_owned(), bg_style));
-        left_spans.push(Span::styled(model.to_owned(), dim));
+        left_spans.push(Span::styled(short, dim));
     }
     let mut right_spans: Vec<Span<'static>> = Vec::new();
     if let Some((current, total)) = status.search_match_count {
@@ -1873,7 +1874,12 @@ pub(super) fn tool_pair_to_lines(
     } else {
         theme.tool_bg
     };
-    wrap_in_bubble_focused(content, theme.tool_rule, bg, width, emphasis)
+    let rule = if is_error {
+        theme.tool_error_rule
+    } else {
+        theme.tool_rule
+    };
+    wrap_in_bubble_focused(content, rule, bg, width, emphasis)
 }
 
 /// Lines and bytes shown in a folded tool block's preview. Trades

@@ -59,6 +59,10 @@ pub struct Theme {
     pub tool_pending_bg: Color,
     /// Tool block left rule when none of the emphasis states apply.
     pub tool_rule: Color,
+    /// Tool block left rule for errored tool blocks.
+    pub tool_error_rule: Color,
+    /// Tool block left rule for in-flight tool blocks.
+    pub tool_pending_rule: Color,
     /// Foreground for assistant text.
     pub assistant_fg: Color,
     /// Foreground for thinking text (rendered dim).
@@ -125,14 +129,16 @@ impl Theme {
     pub fn default_dark() -> Self {
         Self {
             name: "default".into(),
-            user_bg: Color::Rgb(45, 53, 70),
+            user_bg: Color::Rgb(36, 42, 58),
             user_rule: Color::Cyan,
             tool_bg: Color::Rgb(30, 34, 44),
             tool_error_bg: Color::Rgb(58, 22, 28),
             tool_pending_bg: Color::Rgb(54, 42, 22),
             tool_rule: Color::Yellow,
+            tool_error_rule: Color::Red,
+            tool_pending_rule: Color::Rgb(204, 153, 0),
             assistant_fg: Color::White,
-            thinking_fg: Color::Gray,
+            thinking_fg: Color::Rgb(100, 108, 130),
             tool_result_fg: Color::Gray,
             tool_error_fg: Color::Red,
             custom_fg: Color::Magenta,
@@ -170,6 +176,8 @@ impl Theme {
             tool_error_bg: Color::Rgb(63, 22, 30),
             tool_pending_bg: Color::Rgb(58, 50, 28),
             tool_rule: Color::Rgb(224, 175, 104),
+            tool_error_rule: Color::Rgb(247, 118, 142),
+            tool_pending_rule: Color::Rgb(224, 175, 104),
             assistant_fg: Color::Rgb(192, 202, 245),
             thinking_fg: Color::Rgb(86, 95, 137),
             tool_result_fg: Color::Rgb(169, 177, 214),
@@ -208,6 +216,8 @@ impl Theme {
             tool_error_bg: Color::Rgb(69, 26, 36),
             tool_pending_bg: Color::Rgb(58, 47, 28),
             tool_rule: Color::Rgb(249, 226, 175),
+            tool_error_rule: Color::Rgb(243, 139, 168),
+            tool_pending_rule: Color::Rgb(249, 226, 175),
             assistant_fg: Color::Rgb(205, 214, 244),
             thinking_fg: Color::Rgb(108, 112, 134),
             tool_result_fg: Color::Rgb(166, 173, 200),

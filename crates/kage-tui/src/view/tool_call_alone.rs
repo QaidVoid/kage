@@ -74,7 +74,7 @@ impl ToolCallAloneBlockWidget {
         let theme = crate::theme::current();
         wrap_in_bubble_focused(
             content,
-            theme.tool_rule,
+            theme.tool_pending_rule,
             theme.tool_pending_bg,
             width,
             emphasis,

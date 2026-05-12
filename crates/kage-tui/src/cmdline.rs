@@ -183,8 +183,12 @@ impl CommandLine {
             KeyCode::Backspace => {
                 self.error = None;
                 self.backspace();
-                self.refresh(registry, resolver);
-                CommandLineEvent::Pending
+                if self.text.is_empty() {
+                    CommandLineEvent::Cancelled
+                } else {
+                    self.refresh(registry, resolver);
+                    CommandLineEvent::Pending
+                }
             }
             KeyCode::Left => {
                 self.error = None;

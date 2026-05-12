@@ -563,7 +563,7 @@ impl InputState {
     /// user lands in a typable card.
     fn handle_normal_buffer(&mut self, key: KeyEvent) -> Vec<InputAction> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if ctrl && matches!(key.code, KeyCode::Char('r')) {
+        if ctrl && matches!(key.code, KeyCode::Char('s')) {
             return vec![InputAction::OpenSessionPicker];
         }
         match key.code {
@@ -605,6 +605,9 @@ impl InputState {
         if ctrl && matches!(key.code, KeyCode::Char('r')) {
             self.redo();
             return Vec::new();
+        }
+        if ctrl && matches!(key.code, KeyCode::Char('s')) {
+            return vec![InputAction::OpenSessionPicker];
         }
 
         // Count prefix: digits 1-9 always, `0` only after a count has
@@ -1067,6 +1070,9 @@ impl InputState {
         // Ctrl+a/e/u/k operate on the current visual line.
         if ctrl && !alt {
             match key.code {
+                KeyCode::Char('s') => {
+                    return vec![InputAction::OpenSessionPicker];
+                }
                 KeyCode::Char('w') => {
                     self.reset_history_navigation();
                     let to = unix_word_rubout_start(&self.text, self.cursor);
@@ -1207,6 +1213,9 @@ impl InputState {
     }
 
     fn handle_visual(&mut self, key: KeyEvent) -> Vec<InputAction> {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('s')) {
+            return vec![InputAction::OpenSessionPicker];
+        }
         if self.visual_anchor.is_some() {
             return self.handle_visual_input(key);
         }
@@ -2438,11 +2447,27 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_r_in_buffer_pane_opens_session_picker() {
+    fn ctrl_s_in_buffer_pane_opens_session_picker() {
         let mut state = InputState::new();
         state.force_normal();
         state.set_focused_pane(Pane::Buffer);
-        let acts = state.handle_key(ctrl('r'));
+        let acts = state.handle_key(ctrl('s'));
+        assert_eq!(acts, vec![InputAction::OpenSessionPicker]);
+    }
+
+    #[test]
+    fn ctrl_s_in_insert_mode_opens_session_picker() {
+        let mut state = InputState::new();
+        // Default mode is Insert.
+        let acts = state.handle_key(ctrl('s'));
+        assert_eq!(acts, vec![InputAction::OpenSessionPicker]);
+    }
+
+    #[test]
+    fn ctrl_s_in_normal_input_opens_session_picker() {
+        let mut state = InputState::new();
+        state.force_normal();
+        let acts = state.handle_key(ctrl('s'));
         assert_eq!(acts, vec![InputAction::OpenSessionPicker]);
     }
 

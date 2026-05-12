@@ -1126,8 +1126,8 @@ pub(crate) const INPUT_GLYPH_WIDTH: u16 = 2;
 const INPUT_GLYPH: &str = ">";
 
 /// Default placeholder text shown when the input is empty.
-const INPUT_PLACEHOLDER_INSERT: &str = "ask kage anything...";
-const INPUT_PLACEHOLDER_NORMAL: &str = "press i to insert  ::  : ex command  ::  / search";
+const INPUT_PLACEHOLDER_INSERT: &str = "Send a message...";
+const INPUT_PLACEHOLDER_NORMAL: &str = "press i to type, or use j/k to scroll";
 
 fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {
     let area = regions.input;
@@ -2481,10 +2481,7 @@ mod tests {
         let region = Rect::new(0, 4, 40, 4);
         let body = body_area_for(region);
         let mut input = InputState::new();
-        input.handle_key(ratatui::crossterm::event::KeyEvent::new(
-            ratatui::crossterm::event::KeyCode::Char('i'),
-            ratatui::crossterm::event::KeyModifiers::NONE,
-        ));
+        // Default mode is Insert; no need to press 'i'.
         for c in "hello".chars() {
             input.handle_key(ratatui::crossterm::event::KeyEvent::new(
                 ratatui::crossterm::event::KeyCode::Char(c),
@@ -2502,10 +2499,7 @@ mod tests {
         let region = Rect::new(0, 0, 20, 5);
         let body = body_area_for(region);
         let mut input = InputState::new();
-        input.handle_key(ratatui::crossterm::event::KeyEvent::new(
-            ratatui::crossterm::event::KeyCode::Char('i'),
-            ratatui::crossterm::event::KeyModifiers::NONE,
-        ));
+        // Default mode is Insert; no need to press 'i'.
         // Paste pre-builds multi-line content cheaply.
         input.paste("ab\ncd");
         let pos = super::input_cursor_position(&input, body, 0).unwrap();
@@ -2520,10 +2514,7 @@ mod tests {
         let body = body_area_for(region);
         assert_eq!(body.height, 3);
         let mut input = InputState::new();
-        input.handle_key(ratatui::crossterm::event::KeyEvent::new(
-            ratatui::crossterm::event::KeyCode::Char('i'),
-            ratatui::crossterm::event::KeyModifiers::NONE,
-        ));
+        // Default mode is Insert; no need to press 'i'.
         // Five rows of content; cursor lands on row 4 (last line).
         input.paste("a\nb\nc\nd\ne");
         let off = super::input_scroll_offset(&input, body);
@@ -2539,10 +2530,7 @@ mod tests {
         let region = Rect::new(0, 0, 40, 6);
         let body = body_area_for(region);
         let mut input = InputState::new();
-        input.handle_key(ratatui::crossterm::event::KeyEvent::new(
-            ratatui::crossterm::event::KeyCode::Char('i'),
-            ratatui::crossterm::event::KeyModifiers::NONE,
-        ));
+        // Default mode is Insert; no need to press 'i'.
         input.paste("a\nb\nc");
         assert_eq!(super::input_scroll_offset(&input, body), 0);
     }
@@ -2554,10 +2542,8 @@ mod tests {
         // fits inside the card border.
         let mut buffer = Buffer::new();
         let mut input = InputState::new();
-        input.handle_key(ratatui::crossterm::event::KeyEvent::new(
-            ratatui::crossterm::event::KeyCode::Char('i'),
-            ratatui::crossterm::event::KeyModifiers::NONE,
-        ));
+        // Default mode is Insert; the pill should show INS without
+        // pressing 'i'.
         let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 8));
         assert!(
             lines.iter().any(|l| l.contains("INS")),

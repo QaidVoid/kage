@@ -189,9 +189,9 @@ impl Operator {
     }
 }
 
-/// Tracks the editing mode, the prompt text, the prompt history, and
+/// Tracking the editing mode, the prompt text, the prompt history, and
 /// any pending leader key (e.g. `g` waiting for the second `g` of `gg`).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct InputState {
     mode: Mode,
     text: String,
@@ -235,11 +235,41 @@ pub struct InputState {
     redo_stack: Vec<EditSnapshot>,
 }
 
+impl Default for InputState {
+    fn default() -> Self {
+        Self {
+            mode: Mode::Insert,
+            text: String::new(),
+            cursor: 0,
+            pending: None,
+            history: Vec::new(),
+            history_cursor: None,
+            history_stash: None,
+            focused_pane: Pane::default(),
+            pending_op: None,
+            pending_count: None,
+            awaiting_replace: false,
+            register: String::new(),
+            register_linewise: false,
+            visual_anchor: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+        }
+    }
+}
+
 impl InputState {
-    /// Construct a state in [`Mode::Normal`] with an empty prompt.
+    /// Construct a state in [`Mode::Insert`] with an empty prompt.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Force the mode to [`Mode::Normal`] without emitting any
+    /// [`InputAction`]. Used by tests that need to start in Normal.
+    #[cfg(test)]
+    pub(crate) fn force_normal(&mut self) {
+        self.mode = Mode::Normal;
     }
 
     /// Current editing mode.
@@ -1098,12 +1128,6 @@ impl InputState {
                 self.enter_mode(Mode::Normal)
             }
             KeyCode::Enter => {
-                // Many terminals (wezterm, ghostty in default config,
-                // some xterm variants) transmit `Shift+Enter` as
-                // `Esc<Enter>` which crossterm decodes as `Alt+Enter`.
-                // Accept either modifier so the user-visible Shift+Enter
-                // gesture inserts a newline regardless of which mapping
-                // the terminal uses.
                 if key
                     .modifiers
                     .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
@@ -1117,9 +1141,7 @@ impl InputState {
                     self.cursor = 0;
                     self.push_history(&text);
                     self.reset_history_navigation();
-                    let mut actions = vec![InputAction::Submit(text)];
-                    actions.extend(self.enter_mode(Mode::Normal));
-                    actions
+                    vec![InputAction::Submit(text)]
                 }
             }
             KeyCode::Up => {
@@ -1621,6 +1643,7 @@ mod tests {
     #[test]
     fn i_enters_insert_then_esc_returns_to_normal() {
         let mut state = InputState::new();
+        state.force_normal();
         let acts = state.handle_key(key(KeyCode::Char('i')));
         assert_eq!(acts, vec![InputAction::EnterMode(Mode::Insert)]);
         assert_eq!(state.mode(), Mode::Insert);
@@ -1629,9 +1652,14 @@ mod tests {
     }
 
     #[test]
+    fn default_mode_is_insert() {
+        let state = InputState::new();
+        assert_eq!(state.mode(), Mode::Insert);
+    }
+
+    #[test]
     fn typing_in_insert_appends_to_text() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         for c in "hello".chars() {
             state.handle_key(key(KeyCode::Char(c)));
         }
@@ -1640,28 +1668,20 @@ mod tests {
     }
 
     #[test]
-    fn enter_in_insert_submits_and_returns_to_normal() {
+    fn enter_in_insert_submits_and_stays_in_insert() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         for c in "hi".chars() {
             state.handle_key(key(KeyCode::Char(c)));
         }
         let acts = state.handle_key(key(KeyCode::Enter));
-        assert_eq!(
-            acts,
-            vec![
-                InputAction::Submit("hi".into()),
-                InputAction::EnterMode(Mode::Normal),
-            ],
-        );
+        assert_eq!(acts, vec![InputAction::Submit("hi".into())]);
         assert_eq!(state.text(), "");
-        assert_eq!(state.mode(), Mode::Normal);
+        assert_eq!(state.mode(), Mode::Insert);
     }
 
     #[test]
     fn enter_on_empty_buffer_in_insert_is_a_no_op() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         let acts = state.handle_key(key(KeyCode::Enter));
         assert!(acts.is_empty());
         assert_eq!(state.mode(), Mode::Insert);
@@ -1670,7 +1690,6 @@ mod tests {
     #[test]
     fn shift_enter_inserts_a_newline_in_insert() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.handle_key(key(KeyCode::Char('a')));
         state.handle_key(shift_enter());
         state.handle_key(key(KeyCode::Char('b')));
@@ -1680,7 +1699,6 @@ mod tests {
     #[test]
     fn alt_enter_also_inserts_a_newline_for_terminals_that_remap_shift_enter() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.handle_key(key(KeyCode::Char('a')));
         state.handle_key(alt_enter());
         state.handle_key(key(KeyCode::Char('b')));
@@ -1689,10 +1707,8 @@ mod tests {
 
     #[test]
     fn jk_scroll_in_normal_when_buffer_focused() {
-        // Stage C made j/k pane-aware: they only emit Scroll(...)
-        // when the buffer pane has window focus. With default Input
-        // focus they move the input cursor instead.
         let mut state = InputState::new();
+        state.force_normal();
         state.set_focused_pane(Pane::Buffer);
         assert_eq!(
             state.handle_key(key(KeyCode::Char('j'))),
@@ -1707,11 +1723,8 @@ mod tests {
     #[test]
     fn jk_move_input_cursor_when_input_focused() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("first\nsecond");
         state.handle_key(key(KeyCode::Esc));
-        // Cursor at end of "second" (byte 12). j is no-op (no line
-        // below); k goes up one row at the same column.
         assert!(state.handle_key(key(KeyCode::Char('j'))).is_empty());
         assert_eq!(state.cursor(), 12);
         let acts = state.handle_key(key(KeyCode::Char('k')));
@@ -1722,6 +1735,7 @@ mod tests {
     #[test]
     fn gg_scrolls_to_top_when_buffer_focused() {
         let mut state = InputState::new();
+        state.force_normal();
         state.set_focused_pane(Pane::Buffer);
         let first = state.handle_key(key(KeyCode::Char('g')));
         assert!(first.is_empty());
@@ -1734,7 +1748,6 @@ mod tests {
     #[test]
     fn gg_jumps_input_cursor_to_start_when_input_focused() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("hello");
         state.handle_key(key(KeyCode::Esc));
         assert_eq!(state.cursor(), 5);
@@ -1747,6 +1760,7 @@ mod tests {
     #[test]
     fn capital_g_scrolls_to_bottom_when_buffer_focused() {
         let mut state = InputState::new();
+        state.force_normal();
         state.set_focused_pane(Pane::Buffer);
         assert_eq!(
             state.handle_key(key(KeyCode::Char('G'))),
@@ -1757,12 +1771,8 @@ mod tests {
     #[test]
     fn capital_g_jumps_input_cursor_to_end_when_input_focused() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("hello world");
         state.handle_key(key(KeyCode::Esc));
-        // After Esc cursor moves to byte 11 (end of "world"); but
-        // vim's `G` jumps to text end regardless. Verify by moving
-        // back first.
         state.handle_key(key(KeyCode::Char('h')));
         assert!(state.cursor() < 11);
         state.handle_key(key(KeyCode::Char('G')));
@@ -1772,6 +1782,7 @@ mod tests {
     #[test]
     fn z_prefix_handles_fold_keys() {
         let mut state = InputState::new();
+        state.force_normal();
         for (suffix, expected) in [
             ('o', InputAction::ToggleFold),
             ('c', InputAction::ToggleFold),
@@ -1787,6 +1798,7 @@ mod tests {
     #[test]
     fn colon_and_slash_open_command_and_search() {
         let mut state = InputState::new();
+        state.force_normal();
         assert_eq!(
             state.handle_key(key(KeyCode::Char(':'))),
             vec![InputAction::BeginCommand]
@@ -1800,15 +1812,14 @@ mod tests {
     #[test]
     fn ctrl_c_in_normal_emits_cancel() {
         let mut state = InputState::new();
+        state.force_normal();
         assert_eq!(state.handle_key(ctrl('c')), vec![InputAction::Cancel]);
     }
 
     #[test]
     fn normal_y_emits_yank_when_buffer_focused() {
-        // Stage C.2 made `y` an operator-entry in the input pane;
-        // buffer-pane keeps the original "yank current selection"
-        // semantics.
         let mut state = InputState::new();
+        state.force_normal();
         state.set_focused_pane(Pane::Buffer);
         let acts = state.handle_key(key(KeyCode::Char('y')));
         assert_eq!(acts, vec![InputAction::Yank]);
@@ -1817,6 +1828,7 @@ mod tests {
     #[test]
     fn normal_y_in_input_pane_starts_yank_operator() {
         let mut state = InputState::new();
+        state.force_normal();
         let acts = state.handle_key(key(KeyCode::Char('y')));
         assert!(acts.is_empty());
         assert!(state.pending_op.is_some());
@@ -1825,6 +1837,7 @@ mod tests {
     #[test]
     fn normal_esc_emits_clear_selection() {
         let mut state = InputState::new();
+        state.force_normal();
         let acts = state.handle_key(key(KeyCode::Esc));
         assert_eq!(acts, vec![InputAction::ClearSelection]);
     }
@@ -1832,7 +1845,6 @@ mod tests {
     #[test]
     fn backspace_removes_previous_char() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         for c in "abc".chars() {
             state.handle_key(key(KeyCode::Char(c)));
         }
@@ -1844,7 +1856,6 @@ mod tests {
     #[test]
     fn left_right_move_cursor_in_insert() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         for c in "abc".chars() {
             state.handle_key(key(KeyCode::Char(c)));
         }
@@ -1858,7 +1869,6 @@ mod tests {
     #[test]
     fn paste_in_insert_inserts_verbatim_with_newlines() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.handle_key(key(KeyCode::Char('a')));
         state.paste("multi\nline\npaste");
         state.handle_key(key(KeyCode::Char('z')));
@@ -1868,13 +1878,10 @@ mod tests {
     #[test]
     fn submit_pushes_text_into_history_skipping_dupes() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         for c in "foo".chars() {
             state.handle_key(key(KeyCode::Char(c)));
         }
         state.handle_key(key(KeyCode::Enter));
-        // Re-enter, type the same prompt again.
-        state.handle_key(key(KeyCode::Char('i')));
         for c in "foo".chars() {
             state.handle_key(key(KeyCode::Char(c)));
         }
@@ -1886,7 +1893,6 @@ mod tests {
     fn up_in_insert_walks_back_through_history() {
         let mut state = InputState::new();
         state.set_history(vec!["alpha".into(), "beta".into(), "gamma".into()]);
-        state.handle_key(key(KeyCode::Char('i')));
         state.handle_key(key(KeyCode::Up));
         assert_eq!(state.text(), "gamma");
         state.handle_key(key(KeyCode::Up));
@@ -1901,7 +1907,6 @@ mod tests {
     fn down_in_insert_returns_to_stashed_draft() {
         let mut state = InputState::new();
         state.set_history(vec!["one".into(), "two".into()]);
-        state.handle_key(key(KeyCode::Char('i')));
         for c in "draft".chars() {
             state.handle_key(key(KeyCode::Char(c)));
         }
@@ -1915,12 +1920,9 @@ mod tests {
     fn up_in_multiline_input_moves_cursor_within_text_first() {
         let mut state = InputState::new();
         state.set_history(vec!["history-entry".into()]);
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("first\nsecond");
-        // Cursor is at end of "second" (col 6). Up should land on row 0.
         state.handle_key(key(KeyCode::Up));
         assert_eq!(state.text(), "first\nsecond", "text untouched");
-        // Now another Up — already on row 0, should walk history.
         state.handle_key(key(KeyCode::Up));
         assert_eq!(state.text(), "history-entry");
     }
@@ -1929,18 +1931,10 @@ mod tests {
     fn down_in_multiline_input_moves_cursor_before_walking_history() {
         let mut state = InputState::new();
         state.set_history(vec!["older".into(), "newer".into()]);
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("aa\nbb");
-        // Move cursor to start of first row.
         state.handle_key(key(KeyCode::Home));
-        for _ in 0..5 {
-            // Reach top row, col 0 — but we already are there after Home.
-        }
-        // Down — moves cursor to row 1, no history walk.
         state.handle_key(key(KeyCode::Down));
         assert_eq!(state.text(), "aa\nbb");
-        // Down again — last row reached, history walks forward (no
-        // cursor was set up by a prior Up so this is a no-op).
         state.handle_key(key(KeyCode::Down));
         assert_eq!(state.text(), "aa\nbb");
     }
@@ -1948,10 +1942,7 @@ mod tests {
     #[test]
     fn up_clamps_column_to_shorter_previous_row() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("hi\nlonger-line");
-        // Cursor at end of "longer-line" (col 11). Previous row is "hi"
-        // (2 chars). Up should land at the end of "hi" (col 2 = byte 2).
         state.handle_key(key(KeyCode::Up));
         assert_eq!(state.cursor(), 2);
     }
@@ -1960,7 +1951,6 @@ mod tests {
     fn typing_after_history_walk_resets_navigation() {
         let mut state = InputState::new();
         state.set_history(vec!["a".into(), "b".into()]);
-        state.handle_key(key(KeyCode::Char('i')));
         state.handle_key(key(KeyCode::Up));
         assert_eq!(state.text(), "b");
         state.handle_key(key(KeyCode::Char('z')));
@@ -1981,6 +1971,7 @@ mod tests {
     #[test]
     fn paste_in_normal_is_ignored() {
         let mut state = InputState::new();
+        state.force_normal();
         state.paste("oops");
         assert_eq!(state.text(), "");
     }
@@ -1988,7 +1979,6 @@ mod tests {
     #[test]
     fn home_and_end_jump_in_insert() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         for c in "abc".chars() {
             state.handle_key(key(KeyCode::Char(c)));
         }
@@ -2007,6 +1997,7 @@ mod tests {
     #[test]
     fn ctrl_w_in_normal_emits_cycle_pane() {
         let mut state = InputState::new();
+        state.force_normal();
         let acts = state.handle_key(ctrl('w'));
         assert_eq!(acts, vec![InputAction::CyclePane]);
     }
@@ -2023,9 +2014,9 @@ mod tests {
     #[test]
     fn set_focused_pane_reports_changes() {
         let mut state = InputState::new();
-        assert!(!state.set_focused_pane(Pane::Input)); // no change
+        assert!(!state.set_focused_pane(Pane::Input));
         assert!(state.set_focused_pane(Pane::Buffer));
-        assert!(!state.set_focused_pane(Pane::Buffer)); // no change
+        assert!(!state.set_focused_pane(Pane::Buffer));
     }
 
     fn alt(c: char) -> KeyEvent {
@@ -2039,12 +2030,10 @@ mod tests {
     #[test]
     fn alt_backspace_kills_word_back_in_insert() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("hello world");
         state.handle_key(alt_code(KeyCode::Backspace));
         assert_eq!(state.text(), "hello ");
         assert_eq!(state.cursor(), 6);
-        // Again deletes the trailing space and the prior word.
         state.handle_key(alt_code(KeyCode::Backspace));
         assert_eq!(state.text(), "");
         assert_eq!(state.cursor(), 0);
@@ -2052,10 +2041,7 @@ mod tests {
 
     #[test]
     fn ctrl_w_kills_back_to_whitespace() {
-        // unix-word-rubout: hyphen is part of the word, only spaces
-        // separate.
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("foo-bar baz");
         state.handle_key(ctrl('w'));
         assert_eq!(state.text(), "foo-bar ");
@@ -2066,9 +2052,7 @@ mod tests {
     #[test]
     fn alt_d_kills_word_forward() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("hello world");
-        // Move cursor to start.
         for _ in 0..11 {
             state.handle_key(key(KeyCode::Left));
         }
@@ -2079,9 +2063,7 @@ mod tests {
     #[test]
     fn alt_b_alt_f_navigate_words() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("foo bar baz");
-        // Cursor at end. Alt+b lands at start of "baz".
         state.handle_key(alt('b'));
         assert_eq!(state.cursor(), 8);
         state.handle_key(alt('b'));
@@ -2097,9 +2079,7 @@ mod tests {
     #[test]
     fn ctrl_a_e_jump_to_line_edges() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("first\nsecond line");
-        // Cursor at end. Ctrl+a -> start of current line ("second...").
         state.handle_key(ctrl('a'));
         assert_eq!(state.cursor(), 6);
         state.handle_key(ctrl('e'));
@@ -2109,7 +2089,6 @@ mod tests {
     #[test]
     fn ctrl_u_deletes_to_line_start() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("first\nsecond line");
         state.handle_key(ctrl('u'));
         assert_eq!(state.text(), "first\n");
@@ -2119,10 +2098,8 @@ mod tests {
     #[test]
     fn h_l_move_cursor_in_input_pane() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("abcd");
         state.handle_key(key(KeyCode::Esc));
-        // Esc keeps cursor where it was. Move left twice with `h`.
         state.handle_key(key(KeyCode::Char('h')));
         state.handle_key(key(KeyCode::Char('h')));
         assert_eq!(state.cursor(), 2);
@@ -2133,7 +2110,6 @@ mod tests {
     #[test]
     fn dollar_zero_caret_jump_to_line_edges_in_input_pane() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("  hello world");
         state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('0')));
@@ -2147,10 +2123,8 @@ mod tests {
     #[test]
     fn vim_w_b_e_word_motions_in_input_pane() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("foo bar baz");
         state.handle_key(key(KeyCode::Esc));
-        // Cursor at end after Esc + at-end clamp = 11.
         state.handle_key(key(KeyCode::Char('0')));
         assert_eq!(state.cursor(), 0);
         state.handle_key(key(KeyCode::Char('w')));
@@ -2164,7 +2138,6 @@ mod tests {
     #[test]
     fn x_deletes_char_at_cursor_in_input_pane() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("abcd");
         state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('0')));
@@ -2176,7 +2149,6 @@ mod tests {
     #[test]
     fn capital_x_deletes_char_before_cursor_in_input_pane() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("abcd");
         state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('X')));
@@ -2186,11 +2158,9 @@ mod tests {
     #[test]
     fn lowercase_a_advances_cursor_then_inserts() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("ab");
         state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('0')));
-        // After Esc + 0, cursor at start. `a` advances by one then enters Insert.
         state.handle_key(key(KeyCode::Char('a')));
         assert_eq!(state.mode(), Mode::Insert);
         assert_eq!(state.cursor(), 1);
@@ -2201,25 +2171,22 @@ mod tests {
     #[test]
     fn capital_a_jumps_to_end_of_line_then_inserts() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("hello\nworld");
         state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('k')));
         state.handle_key(key(KeyCode::Char('0')));
         state.handle_key(key(KeyCode::Char('A')));
         assert_eq!(state.mode(), Mode::Insert);
-        assert_eq!(state.cursor(), 5); // end of "hello"
+        assert_eq!(state.cursor(), 5);
     }
 
     #[test]
     fn capital_o_opens_line_above() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("hello");
         state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('O')));
         assert_eq!(state.mode(), Mode::Insert);
-        // Text now starts with a newline.
         assert!(state.text().starts_with('\n'));
         assert_eq!(state.cursor(), 0);
     }
@@ -2227,7 +2194,6 @@ mod tests {
     #[test]
     fn lowercase_o_opens_line_below() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("hello");
         state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('o')));
@@ -2239,7 +2205,6 @@ mod tests {
     #[test]
     fn dw_deletes_word_in_input_pane() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("foo bar baz");
         state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('0')));
@@ -2253,12 +2218,10 @@ mod tests {
     #[test]
     fn dd_deletes_current_line() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("first\nsecond\nthird");
         state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('g')));
         state.handle_key(key(KeyCode::Char('g')));
-        // gg lands at byte 0; dd deletes "first\n".
         state.handle_key(key(KeyCode::Char('d')));
         state.handle_key(key(KeyCode::Char('d')));
         assert_eq!(state.text(), "second\nthird");
@@ -2270,7 +2233,6 @@ mod tests {
     #[test]
     fn cw_deletes_word_and_enters_insert() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("foo bar");
         state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('0')));
@@ -2283,13 +2245,11 @@ mod tests {
     #[test]
     fn yw_yanks_word_into_register() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("hello world");
         state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('0')));
         state.handle_key(key(KeyCode::Char('y')));
         state.handle_key(key(KeyCode::Char('w')));
-        // Text unchanged, cursor unchanged, register holds "hello ".
         assert_eq!(state.text(), "hello world");
         assert_eq!(state.cursor(), 0);
         assert_eq!(state.register, "hello ");
@@ -2299,38 +2259,33 @@ mod tests {
     #[test]
     fn count_prefix_repeats_motion() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("a b c d e");
         state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('0')));
         state.handle_key(key(KeyCode::Char('3')));
         state.handle_key(key(KeyCode::Char('w')));
-        // 3 word jumps from start: a -> b -> c -> d. Cursor at "d".
         assert_eq!(state.cursor(), 6);
     }
 
     #[test]
     fn count_prefix_with_operator_3dw() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("foo bar baz qux");
         state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('0')));
         state.handle_key(key(KeyCode::Char('3')));
         state.handle_key(key(KeyCode::Char('d')));
         state.handle_key(key(KeyCode::Char('w')));
-        // Delete 3 words: "foo bar baz " -> leaves "qux".
         assert_eq!(state.text(), "qux");
     }
 
     #[test]
     fn capital_d_deletes_to_end_of_line() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("hello world");
         state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('0')));
-        state.handle_key(key(KeyCode::Char('5'))); // count 5 -> jumps over
+        state.handle_key(key(KeyCode::Char('5')));
         state.handle_key(key(KeyCode::Char('l')));
         state.handle_key(key(KeyCode::Char('D')));
         assert_eq!(state.text(), "hello");
@@ -2339,20 +2294,19 @@ mod tests {
     #[test]
     fn r_replaces_char_at_cursor() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("foo");
         state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('0')));
         state.handle_key(key(KeyCode::Char('r')));
         state.handle_key(key(KeyCode::Char('B')));
         assert_eq!(state.text(), "Boo");
-        // Mode unchanged.
         assert_eq!(state.mode(), Mode::Normal);
     }
 
     #[test]
     fn undo_reverts_last_insert_session() {
         let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('i')));
         state.paste("hello");
         state.handle_key(key(KeyCode::Esc));
@@ -2364,7 +2318,6 @@ mod tests {
     #[test]
     fn undo_reverts_dw_delete() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("foo bar");
         state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('0')));
@@ -2378,54 +2331,51 @@ mod tests {
     #[test]
     fn redo_replays_undone_change() {
         let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('i')));
         state.paste("ab");
         state.handle_key(key(KeyCode::Esc));
-        state.handle_key(key(KeyCode::Char('u'))); // undo
+        state.handle_key(key(KeyCode::Char('u')));
         assert_eq!(state.text(), "");
-        state.handle_key(ctrl('r')); // redo
+        state.handle_key(ctrl('r'));
         assert_eq!(state.text(), "ab");
     }
 
     #[test]
     fn new_change_after_undo_clears_redo_stack() {
         let mut state = InputState::new();
+        state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('i')));
         state.paste("first");
         state.handle_key(key(KeyCode::Esc));
-        state.handle_key(key(KeyCode::Char('u'))); // undo to ""
-        // New change branches off - redo stack is invalidated.
+        state.handle_key(key(KeyCode::Char('u')));
         state.handle_key(key(KeyCode::Char('i')));
         state.paste("second");
         state.handle_key(key(KeyCode::Esc));
         assert_eq!(state.text(), "second");
-        state.handle_key(ctrl('r')); // redo - nothing to redo
+        state.handle_key(ctrl('r'));
         assert_eq!(state.text(), "second");
     }
 
     #[test]
     fn v_in_input_pane_starts_input_visual() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("hello");
         state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('0')));
         state.handle_key(key(KeyCode::Char('v')));
         assert_eq!(state.mode(), Mode::Visual);
         assert!(state.input_visual_range().is_some());
-        // Anchor and cursor both at 0 -> range covers char 'h'.
         assert_eq!(state.input_visual_range(), Some((0, 1)));
     }
 
     #[test]
     fn input_visual_d_deletes_selected_range() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("hello world");
         state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('0')));
         state.handle_key(key(KeyCode::Char('v')));
-        // Extend selection by 4 chars (covering "hello" inclusive).
         for _ in 0..4 {
             state.handle_key(key(KeyCode::Char('l')));
         }
@@ -2438,7 +2388,6 @@ mod tests {
     #[test]
     fn input_visual_y_yanks_selection() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("foo bar");
         state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('0')));
@@ -2447,7 +2396,7 @@ mod tests {
             state.handle_key(key(KeyCode::Char('l')));
         }
         state.handle_key(key(KeyCode::Char('y')));
-        assert_eq!(state.text(), "foo bar"); // unchanged
+        assert_eq!(state.text(), "foo bar");
         assert_eq!(state.register, "foo");
         assert_eq!(state.mode(), Mode::Normal);
     }
@@ -2455,30 +2404,22 @@ mod tests {
     #[test]
     fn p_pastes_charwise_register_after_cursor() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("hello world");
         state.handle_key(key(KeyCode::Esc));
         state.handle_key(key(KeyCode::Char('0')));
         state.handle_key(key(KeyCode::Char('y')));
         state.handle_key(key(KeyCode::Char('w')));
-        // Register holds "hello ". Cursor still at 0 (yank is non-mutating).
-        // Paste after cursor.
         state.handle_key(key(KeyCode::Char('p')));
-        // Insert position = 0 + 1 (char 'h'). New text:
-        // "h" + "hello " + "ello world" = "hhello ello world"
         assert_eq!(state.text(), "hhello ello world");
     }
 
     #[test]
     fn capital_p_pastes_linewise_register_above() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("first\nsecond");
         state.handle_key(key(KeyCode::Esc));
-        // Yank current line into linewise register.
         state.handle_key(key(KeyCode::Char('y')));
         state.handle_key(key(KeyCode::Char('y')));
-        // Cursor is on line 2 ("second"). P pastes above.
         assert_eq!(state.register, "second");
         assert!(state.register_linewise);
         state.handle_key(key(KeyCode::Char('P')));
@@ -2488,22 +2429,18 @@ mod tests {
     #[test]
     fn p_pastes_linewise_register_below() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("first\nsecond");
         state.handle_key(key(KeyCode::Esc));
-        // Cursor on "second" line.
         state.handle_key(key(KeyCode::Char('y')));
         state.handle_key(key(KeyCode::Char('y')));
         state.handle_key(key(KeyCode::Char('p')));
-        // Register "second" (linewise) pastes below the current line.
-        // Current line is "second" (last line, no trailing newline).
-        // Paste-after appends a newline + register.
         assert_eq!(state.text(), "first\nsecond\nsecond");
     }
 
     #[test]
     fn ctrl_r_in_buffer_pane_opens_session_picker() {
         let mut state = InputState::new();
+        state.force_normal();
         state.set_focused_pane(Pane::Buffer);
         let acts = state.handle_key(ctrl('r'));
         assert_eq!(acts, vec![InputAction::OpenSessionPicker]);
@@ -2512,10 +2449,8 @@ mod tests {
     #[test]
     fn d_then_esc_cancels_operator() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("hello");
         state.handle_key(key(KeyCode::Esc));
-        // `d` then Esc cancels.
         state.handle_key(key(KeyCode::Char('d')));
         assert!(state.pending_op.is_some());
         state.handle_key(key(KeyCode::Esc));
@@ -2526,6 +2461,7 @@ mod tests {
     #[test]
     fn gw_in_normal_emits_cycle_pane() {
         let mut state = InputState::new();
+        state.force_normal();
         state.handle_key(key(KeyCode::Char('g')));
         let acts = state.handle_key(key(KeyCode::Char('w')));
         assert_eq!(acts, vec![InputAction::CyclePane]);
@@ -2534,9 +2470,7 @@ mod tests {
     #[test]
     fn ctrl_k_deletes_to_line_end() {
         let mut state = InputState::new();
-        state.handle_key(key(KeyCode::Char('i')));
         state.paste("first\nsecond");
-        // Move cursor to start of "second".
         for _ in 0..6 {
             state.handle_key(key(KeyCode::Left));
         }

@@ -1755,8 +1755,7 @@ mod tests {
         let buffer = shared_buffer();
         let (tx, rx) = mpsc::channel();
         let mut app = App::new(buffer.clone(), tx);
-        // Enter insert, type "hi", press Enter.
-        app.handle_key(key('i'));
+        // Default mode is Insert; type "hi" and press Enter.
         app.handle_key(key('h'));
         app.handle_key(key('i'));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -1768,7 +1767,7 @@ mod tests {
             buf.blocks().last(),
             Some(crate::buffer::Block::User { text }) if text == "hi"
         ));
-        assert_eq!(app.input().mode(), Mode::Normal);
+        assert_eq!(app.input().mode(), Mode::Insert);
     }
 
     #[test]
@@ -1776,6 +1775,8 @@ mod tests {
         let buffer = shared_buffer();
         let (tx, rx) = mpsc::channel();
         let mut app = App::new(buffer, tx);
+        // Switch to Normal first; default is Insert.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         app.handle_key(ctrl('c'));
         assert_eq!(rx.try_recv(), Ok(RunRequest::Cancel));
     }
@@ -1785,6 +1786,8 @@ mod tests {
         let buffer = shared_buffer();
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(buffer, tx);
+        // Switch to Normal first; default is Insert.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         let flag = CancelFlag::new();
         app.set_cancel_flag(flag.clone());
         assert!(!flag.is_cancelled());
@@ -1879,6 +1882,8 @@ mod tests {
         }
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(buffer.clone(), tx);
+        // Default mode is Insert; switch to Normal for scrolling keys.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         // Stage C made k/j/G pane-aware: switch to buffer pane so
         // scrolling keys hit the buffer instead of moving the input
         // cursor.
@@ -1907,7 +1912,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(buffer, tx);
         app.set_history(vec!["older".into(), "newer".into()]);
-        app.handle_key(key('i'));
+        // Default mode is Insert; no need to press 'i'.
         app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
         assert_eq!(app.input().text(), "newer");
         app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
@@ -1925,6 +1930,8 @@ mod tests {
         }
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(buffer.clone(), tx);
+        // Default mode is Insert; switch to Normal for zM/zR.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         // zM folds all
         app.handle_key(key('z'));
         app.handle_key(KeyEvent::new(KeyCode::Char('M'), KeyModifiers::NONE));

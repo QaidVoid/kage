@@ -200,9 +200,8 @@ fn render_status(
     if let Some(model) = status.model
         && !model.is_empty()
     {
-        let short = shorten_model_name(model);
         left_spans.push(Span::styled("  ".to_owned(), bg_style));
-        left_spans.push(Span::styled(short, dim));
+        left_spans.push(Span::styled(model.to_owned(), dim));
     }
     let mut right_spans: Vec<Span<'static>> = Vec::new();
     if let Some((current, total)) = status.search_match_count {
@@ -1373,8 +1372,10 @@ fn render_modeline(frame: &mut Frame, regions: Regions, usage: Option<&SessionUs
             spans.push(Span::styled("  ", bg));
         }
         if !u.model.is_empty() {
-            let display_model = shorten_model_name(&u.model);
-            spans.push(Span::styled(display_model, fg.add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(
+                u.model.clone(),
+                fg.add_modifier(Modifier::BOLD),
+            ));
             spans.push(Span::styled(" . ", dim));
         }
         if u.context_window > 0 {
@@ -1420,18 +1421,6 @@ fn render_modeline(frame: &mut Frame, regions: Regions, usage: Option<&SessionUs
         .alignment(Alignment::Left)
         .style(bg);
     frame.render_widget(line, area);
-}
-
-/// Strip the provider prefix from a model id for display in the
-/// modeline. The full id (e.g. `anthropic:claude-sonnet-4-6`) is
-/// still available via `:model` completion; the modeline only needs
-/// the short name.
-fn shorten_model_name(id: &str) -> String {
-    if let Some(idx) = id.find(':') {
-        id[idx + 1..].to_string()
-    } else {
-        id.to_string()
-    }
 }
 
 /// Format a token count compactly so the modeline doesn't blow past

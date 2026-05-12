@@ -1372,11 +1372,9 @@ fn render_modeline(frame: &mut Frame, regions: Regions, usage: Option<&SessionUs
             spans.push(Span::styled("  ", bg));
         }
         if !u.model.is_empty() {
-            spans.push(Span::styled(
-                u.model.clone(),
-                fg.add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::styled("  ::  ", dim));
+            let display_model = shorten_model_name(&u.model);
+            spans.push(Span::styled(display_model, fg.add_modifier(Modifier::BOLD)));
+            spans.push(Span::styled(" . ", dim));
         }
         if u.context_window > 0 {
             #[allow(clippy::cast_precision_loss)]
@@ -1391,13 +1389,13 @@ fn render_modeline(frame: &mut Frame, regions: Regions, usage: Option<&SessionUs
                 ),
                 fg,
             ));
-            spans.push(Span::styled("  ::  ", dim));
+            spans.push(Span::styled(" . ", dim));
         } else if u.current_context > 0 {
             spans.push(Span::styled(
                 format!("ctx {}", format_token_count(u.current_context)),
                 fg,
             ));
-            spans.push(Span::styled("  ::  ", dim));
+            spans.push(Span::styled(" . ", dim));
         }
         // Cumulative session totals: what the user has been charged
         // for since the session started. Distinct from `ctx` above,
@@ -1405,7 +1403,7 @@ fn render_modeline(frame: &mut Frame, regions: Regions, usage: Option<&SessionUs
         // window.
         spans.push(Span::styled(
             format!(
-                "{} in / {} out",
+                "{}+{}",
                 format_token_count(u.input_tokens),
                 format_token_count(u.output_tokens)
             ),
@@ -1421,6 +1419,18 @@ fn render_modeline(frame: &mut Frame, regions: Regions, usage: Option<&SessionUs
         .alignment(Alignment::Left)
         .style(bg);
     frame.render_widget(line, area);
+}
+
+/// Strip the provider prefix from a model id for display in the
+/// modeline. The full id (e.g. `anthropic:claude-sonnet-4-6`) is
+/// still available via `:model` completion; the modeline only needs
+/// the short name.
+fn shorten_model_name(id: &str) -> String {
+    if let Some(idx) = id.find(':') {
+        id[idx + 1..].to_string()
+    } else {
+        id.to_string()
+    }
 }
 
 /// Format a token count compactly so the modeline doesn't blow past

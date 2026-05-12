@@ -1118,12 +1118,12 @@ fn build_block_lines(
 /// space. Painted on the first content row only; subsequent rows
 /// (multi-line draft, soft-wrapped continuation) align under the
 /// glyph slot but stay blank.
-pub(crate) const INPUT_GLYPH_WIDTH: u16 = 2;
+pub(crate) const INPUT_GLYPH_WIDTH: u16 = 1;
 
 /// Single-character prompt glyph painted at the start of the input
 /// content. Plain ASCII so it renders the same in every terminal and
 /// doesn't trigger our "no fancy chars" lint when grep'd.
-const INPUT_GLYPH: &str = ">";
+const INPUT_GLYPH: &str = "|";
 
 /// Default placeholder text shown when the input is empty.
 const INPUT_PLACEHOLDER_INSERT: &str = "Send a message...";
@@ -1185,7 +1185,7 @@ fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {
     let glyph_area = ratatui::layout::Rect::new(inner.x, inner.y, glyph_width, 1);
     if glyph_width >= INPUT_GLYPH_WIDTH {
         let glyph = Paragraph::new(Line::from(Span::styled(
-            format!("{INPUT_GLYPH} "),
+            INPUT_GLYPH.to_string(),
             Style::default().fg(theme.input_glyph_fg),
         )));
         frame.render_widget(glyph, glyph_area);
@@ -1467,20 +1467,16 @@ fn mode_border_color(theme: &crate::theme::Theme, mode: Mode) -> Color {
 }
 
 fn mode_pill_style(theme: &crate::theme::Theme, mode: Mode) -> Style {
-    let (bg, fg) = match mode {
-        Mode::Normal => (theme.input_pill_normal_bg, theme.input_pill_normal_fg),
-        Mode::Insert => (theme.input_pill_insert_bg, theme.input_pill_insert_fg),
-        Mode::Visual => (theme.input_pill_visual_bg, theme.input_pill_visual_fg),
+    let fg = match mode {
+        Mode::Normal => theme.input_pill_normal_fg,
+        Mode::Insert => theme.input_pill_insert_fg,
+        Mode::Visual => theme.input_pill_visual_fg,
     };
-    Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD)
+    Style::default().fg(fg).add_modifier(Modifier::BOLD)
 }
 
-fn mode_hint_text(mode: Mode) -> &'static str {
-    match mode {
-        Mode::Insert => "Enter send  ::  Shift+Enter newline  ::  Esc normal",
-        Mode::Normal => "i insert  ::  :ex  ::  /search  ::  j/k scroll",
-        Mode::Visual => "y yank  ::  Esc cancel",
-    }
+fn mode_hint_text(_mode: Mode) -> &'static str {
+    ""
 }
 
 fn placeholder_for(mode: Mode) -> Option<&'static str> {
@@ -2166,9 +2162,9 @@ pub(super) fn fold_indicator(folded: bool) -> char {
 
 fn mode_label(mode: Mode) -> &'static str {
     match mode {
-        Mode::Normal => "NOR",
-        Mode::Insert => "INS",
-        Mode::Visual => "VIS",
+        Mode::Normal => "-",
+        Mode::Insert => "*",
+        Mode::Visual => "%",
     }
 }
 
@@ -2542,15 +2538,15 @@ mod tests {
         // fits inside the card border.
         let mut buffer = Buffer::new();
         let mut input = InputState::new();
-        // Default mode is Insert; the pill should show INS without
+        // Default mode is Insert; the pill should show * without
         // pressing 'i'.
         let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 8));
         assert!(
-            lines.iter().any(|l| l.contains("INS")),
-            "expected mode pill INS somewhere on screen, got: {lines:#?}"
+            lines.iter().any(|l| l.contains("*")),
+            "expected mode pill * somewhere on screen, got: {lines:#?}"
         );
-        // Top status bar no longer carries the mode pill; just kage label.
-        assert!(!lines[0].contains("INS"));
+        // Top status bar no longer carries the mode pill.
+        assert!(!lines[0].contains("*"));
     }
 
     fn snapshot_with_cmdline(cmdline: &CommandLine, area: Rect) -> Vec<String> {

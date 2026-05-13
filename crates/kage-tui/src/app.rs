@@ -324,6 +324,13 @@ pub struct App {
     /// the App so [`view::StatusCtx`] can borrow it; rebuilt at the
     /// top of [`Self::render_into`].
     plugin_widget_texts: Vec<String>,
+    /// Transient status entries populated by `kage.set_status` /
+    /// `kage.clear_status`. Each redraw snapshots the map into
+    /// [`Self::plugin_status_cache`].
+    plugin_status: Option<kage_plugin::SharedStatus>,
+    /// Per-frame snapshot of [`Self::plugin_status`]. Owned so the
+    /// view layer can borrow without holding the plugin status mutex.
+    plugin_status_cache: Vec<(String, String)>,
     /// Pending request to toggle terminal mouse capture, applied by
     /// `run` between iterations. `None` means leave the capture state
     /// as-is. The indirection exists because `run_command` can't
@@ -403,6 +410,8 @@ impl App {
             plugin_command_specs: Vec::new(),
             plugin_widgets: Vec::new(),
             plugin_widget_texts: Vec::new(),
+            plugin_status: None,
+            plugin_status_cache: Vec::new(),
             search_line: None,
             search_pattern: None,
             mouse_drag_anchor: None,
@@ -570,12 +579,27 @@ impl App {
         self.plugin_widgets = widgets;
     }
 
+    /// Wire the shared status map populated by `kage.set_status` /
+    /// `kage.clear_status`. Without this, those Lua calls still
+    /// succeed inside the runtime but the host status bar never paints
+    /// the values.
+    pub fn set_plugin_status(&mut self, status: kage_plugin::SharedStatus) {
+        self.plugin_status = Some(status);
+    }
+
     fn refresh_plugin_widget_texts(&mut self, width: u16) {
         self.plugin_widget_texts = self
             .plugin_widgets
             .iter()
             .map(|w| w.render(width))
             .collect();
+        self.plugin_status_cache.clear();
+        if let Some(status) = self.plugin_status.as_ref()
+            && let Ok(map) = status.lock()
+        {
+            self.plugin_status_cache
+                .extend(map.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
     }
 
     /// Drive the event loop until the user quits. Returns the exit
@@ -778,6 +802,7 @@ impl App {
             search_line: self.search_line.as_ref(),
             search_match_count,
             plugin_widgets: &self.plugin_widget_texts,
+            plugin_status: &self.plugin_status_cache,
         };
         let screen_selection = self.screen_selection;
         let mut captured_rows = std::mem::take(&mut self.captured_rows);
@@ -1711,6 +1736,7 @@ impl App {
             search_line: self.search_line.as_ref(),
             search_match_count,
             plugin_widgets: &self.plugin_widget_texts,
+            plugin_status: &self.plugin_status_cache,
         };
         let screen_selection = self.screen_selection;
         let mut captured_rows = std::mem::take(&mut self.captured_rows);

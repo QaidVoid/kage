@@ -33,6 +33,7 @@ use crate::events;
 use crate::fs as plugin_fs;
 use crate::http;
 use crate::providers::{self, LuaProvider, RegisteredProviders, registered_providers};
+use crate::status::{self, SharedStatus, shared_status};
 use crate::tools::{self, RegisteredTools, registered_tools};
 use crate::widgets::{self, LuaWidget, RegisteredWidgets, registered_widgets};
 
@@ -51,6 +52,7 @@ pub struct PluginRuntime {
     commands: RegisteredCommands,
     providers: RegisteredProviders,
     widgets: RegisteredWidgets,
+    status: SharedStatus,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -173,6 +175,27 @@ impl PluginRuntime {
             .clone()
     }
 
+    /// Snapshot the transient status map populated by
+    /// `kage.set_status`. Entries are returned in key-sorted order so
+    /// the status bar paints deterministically across redraws.
+    #[must_use]
+    pub fn status_snapshot(&self) -> Vec<(String, String)> {
+        self.status
+            .lock()
+            .expect("plugin status mutex poisoned")
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Cloneable handle to the live status map. Hosts that want to
+    /// re-snapshot every redraw without going through
+    /// [`Self::status_snapshot`] (one allocation each) can hold this.
+    #[must_use]
+    pub fn shared_status(&self) -> SharedStatus {
+        Arc::clone(&self.status)
+    }
+
     /// Drop every registration that came from plugins (event handlers,
     /// tools, commands, providers) and replay every `*.lua` file in
     /// `dir`. Designed for hot reload between turns: a stale plugin
@@ -202,6 +225,10 @@ impl PluginRuntime {
         self.widgets
             .lock()
             .expect("plugin widgets mutex poisoned")
+            .clear();
+        self.status
+            .lock()
+            .expect("plugin status mutex poisoned")
             .clear();
         self.commands
             .lock()
@@ -273,6 +300,7 @@ impl PluginRuntimeBuilder {
         let command_registry = registered_commands();
         let provider_registry = registered_providers();
         let widget_registry = registered_widgets();
+        let status_map = shared_status();
         {
             let lua_guard = shared_lua.lock().expect("plugin lua mutex poisoned");
             tools::install_register_tool(
@@ -305,6 +333,7 @@ impl PluginRuntimeBuilder {
                 self.sink.clone(),
                 Arc::clone(&widget_registry),
             )?;
+            status::install_status(&lua_guard, Arc::clone(&status_map))?;
         }
         Ok(PluginRuntime {
             lua: shared_lua,
@@ -314,6 +343,7 @@ impl PluginRuntimeBuilder {
             commands: command_registry,
             providers: provider_registry,
             widgets: widget_registry,
+            status: status_map,
         })
     }
 }

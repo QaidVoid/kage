@@ -65,6 +65,10 @@ pub struct StatusCtx<'a> {
     /// calling `LuaWidget::render(width)`; non-empty texts are painted
     /// on the right edge before built-in pills.
     pub plugin_widgets: &'a [String],
+    /// Transient `(key, text)` entries set by `kage.set_status`.
+    /// Painted alongside widgets on the right edge in key-sorted
+    /// order. Empty when no plugins push status.
+    pub plugin_status: &'a [(String, String)],
 }
 
 /// `Modifier` bit reserved as the per-cell "decoration" tag - the
@@ -210,6 +214,12 @@ fn render_status(
     }
     let mut right_spans: Vec<Span<'static>> = Vec::new();
     for text in status.plugin_widgets {
+        if text.is_empty() {
+            continue;
+        }
+        right_spans.push(Span::styled(format!("{text}  "), dim));
+    }
+    for (_key, text) in status.plugin_status {
         if text.is_empty() {
             continue;
         }

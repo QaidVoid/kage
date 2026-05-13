@@ -25,6 +25,15 @@
 //! * `tool_result` - a tool invocation produced an output
 //! * `session_open` - the host opened a session writer
 //! * `session_close` - the host closed a session writer
+//! * `model_select` - the active model changed. Payload:
+//!   `{ prev, next, source }` where `source` is one of `"set"`,
+//!   `"cycle"`, or `"restore"`. Today only the `set` source fires
+//!   (from `:model` / model picker); `cycle` and `restore` are
+//!   reserved for upcoming features.
+//! * `thinking_level_select` - reserved for the thinking-level UI
+//!   (PP.C); same payload shape as `model_select`.
+//! * `user_bash` - reserved for inline (`!cmd`) and background
+//!   (`!!cmd`) bash from the input pane; not wired in v0.1.
 //!
 //! Session-op pre-hooks fire before the host runs a session action and
 //! let a plugin veto or patch the target:

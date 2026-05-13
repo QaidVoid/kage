@@ -494,11 +494,25 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                     // the next turn silently.
                     match registry.resolve(&new_model) {
                         Ok(_) => {
+                            let prev = active_qualified
+                                .lock()
+                                .expect("active model mutex poisoned")
+                                .clone();
                             active_qualified
                                 .lock()
                                 .expect("active model mutex poisoned")
                                 .clone_from(&new_model);
                             push_toast(&toasts, Toast::info(format!("switched to {new_model}")));
+                            if let Some(rt) = plugin_runtime.as_ref() {
+                                let _ = rt.dispatch_event(
+                                    "model_select",
+                                    &serde_json::json!({
+                                        "prev": prev,
+                                        "next": new_model,
+                                        "source": "set",
+                                    }),
+                                );
+                            }
                             if let Err(err) = crate::state::record_last_model(&new_model)
                                 && let Ok(mut buf) = buffer.lock()
                             {

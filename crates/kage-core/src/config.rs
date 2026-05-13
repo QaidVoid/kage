@@ -61,6 +61,28 @@ impl Config {
                 .extract()?),
         }
     }
+
+    /// Path to the project-local config inside `workdir`:
+    /// `<workdir>/.kage/config.toml`.
+    #[must_use]
+    pub fn project_path(workdir: &Path) -> PathBuf {
+        workdir.join(".kage").join("config.toml")
+    }
+
+    /// Load layered configuration: defaults < user file < project file < env.
+    ///
+    /// The project file is `<workdir>/.kage/config.toml`. Either file may be
+    /// absent; only the layers that exist contribute. Env overrides win
+    /// over both files just like in [`Self::load`].
+    pub fn load_layered(workdir: &Path) -> Result<Self> {
+        let mut figment = Figment::new().merge(Serialized::defaults(Self::default()));
+        if let Some(user) = Self::default_path() {
+            figment = figment.merge(Toml::file(user));
+        }
+        figment = figment.merge(Toml::file(Self::project_path(workdir)));
+        figment = figment.merge(Env::prefixed("KAGE_").split("__"));
+        Ok(figment.extract()?)
+    }
 }
 
 /// LLM provider configuration.
@@ -196,6 +218,45 @@ mod tests {
             jail.set_env("KAGE_UI__THEME", "catppuccin-mocha");
             let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
             assert_eq!(cfg.ui.theme, "catppuccin-mocha");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn project_file_overrides_user_file() {
+        figment::Jail::expect_with(|jail| {
+            // Point dirs::home_dir at the jail so default_path resolves
+            // beneath it. dirs reads $HOME on Linux + macOS.
+            let home = jail.directory().to_path_buf();
+            jail.set_env("HOME", home.to_string_lossy().as_ref());
+            std::fs::create_dir_all(home.join(".kage"))
+                .map_err(|e| figment::Error::from(e.to_string()))?;
+            std::fs::write(
+                home.join(".kage").join("config.toml"),
+                r#"
+                [ui]
+                theme = "user-theme"
+                mouse = true
+                "#,
+            )
+            .map_err(|e| figment::Error::from(e.to_string()))?;
+            let project = home.join("project");
+            std::fs::create_dir_all(project.join(".kage"))
+                .map_err(|e| figment::Error::from(e.to_string()))?;
+            std::fs::write(
+                project.join(".kage").join("config.toml"),
+                r#"
+                [ui]
+                theme = "project-theme"
+                "#,
+            )
+            .map_err(|e| figment::Error::from(e.to_string()))?;
+
+            let cfg =
+                Config::load_layered(&project).map_err(|e| figment::Error::from(e.to_string()))?;
+            assert_eq!(cfg.ui.theme, "project-theme");
+            // mouse not set in project file -> inherited from user file.
+            assert!(cfg.ui.mouse);
             Ok(())
         });
     }

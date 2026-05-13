@@ -118,6 +118,7 @@ impl Tool for GrepTool {
                 "matches": total,
                 "truncated": hit_cap,
             })),
+            terminate: false,
         })
     }
 }

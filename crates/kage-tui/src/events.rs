@@ -427,6 +427,7 @@ mod tests {
                 is_error: false,
                 text: "file1\nfile2".into(),
                 structured: None,
+                terminate: false,
             },
         });
         let buf = buf.lock().unwrap();

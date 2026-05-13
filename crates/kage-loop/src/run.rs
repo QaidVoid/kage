@@ -163,7 +163,7 @@ where
             } else {
                 dispatch_tool_calls
             };
-            let results = match dispatch(
+            let outcome = match dispatch(
                 pending.clone(),
                 tools,
                 &workdir,
@@ -172,12 +172,20 @@ where
                 hooks,
                 &mut emit,
             ) {
-                Ok(r) => r,
+                Ok(o) => o,
                 Err(kind) => {
                     emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
                     return Err(kind);
                 }
             };
+            let results = outcome.results;
+            // If every tool in the batch signaled `terminate`, persist the
+            // results and exit the run cleanly. The loop never asks the
+            // model for another turn, never dequeues a follow-up.
+            if outcome.all_terminate {
+                cx.history.extend(results);
+                return Ok(());
+            }
 
             let mut steering = None;
             for (call, result) in pending.iter().zip(&results) {
@@ -642,6 +650,7 @@ mod tests {
                 is_error: false,
                 text: "ran".into(),
                 structured: None,
+                terminate: false,
             })
         }
     }
@@ -844,6 +853,7 @@ mod tests {
                 is_error: false,
                 text: "ok".into(),
                 structured: None,
+                terminate: false,
             })
         }
     }
@@ -877,6 +887,7 @@ mod tests {
                 is_error: false,
                 text: "ok".into(),
                 structured: None,
+                terminate: false,
             })
         }
     }
@@ -941,6 +952,88 @@ mod tests {
         );
     }
 
+    #[derive(Debug)]
+    struct TaskDoneTool;
+
+    impl kage_tools::Tool for TaskDoneTool {
+        fn name(&self) -> &'static str {
+            "task_done"
+        }
+        fn description(&self) -> &'static str {
+            "signals successful completion"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn risk(&self) -> kage_core::Risk {
+            kage_core::Risk::Read
+        }
+        fn execute(
+            &self,
+            _input: serde_json::Value,
+            _cx: &kage_tools::ToolContext<'_>,
+        ) -> Result<kage_core::ToolOutput, kage_tools::ToolError> {
+            Ok(kage_core::ToolOutput {
+                is_error: false,
+                text: "done".into(),
+                structured: None,
+                terminate: true,
+            })
+        }
+    }
+
+    struct AlwaysFollowup;
+    impl Hooks for AlwaysFollowup {
+        fn get_followup(&mut self) -> Option<String> {
+            Some("ignored".into())
+        }
+    }
+
+    #[test]
+    fn terminate_flag_short_circuits_run_with_no_followup() {
+        let mock = MockProvider::sequence(vec![
+            vec![
+                Ok(ProviderEvent::MessageStart),
+                Ok(ProviderEvent::ToolCallStart {
+                    id: kage_core::ToolCallId::new("call_done"),
+                    name: "task_done".into(),
+                }),
+                Ok(ProviderEvent::ToolCallArgsDelta {
+                    id: kage_core::ToolCallId::new("call_done"),
+                    partial: "{}".into(),
+                }),
+                Ok(ProviderEvent::ToolCallEnd {
+                    id: kage_core::ToolCallId::new("call_done"),
+                    input: serde_json::json!({}),
+                }),
+                Ok(ProviderEvent::MessageEnd {
+                    stop_reason: StopReason::ToolUse,
+                    usage: TokenUsage::default(),
+                }),
+            ],
+            vec![Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            })],
+        ]);
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.history.push(user_msg("do it"));
+        let cfg = LoopConfig::default();
+        let mut hooks = AlwaysFollowup;
+        let cancel = CancelFlag::new();
+        let mut registry = ToolRegistry::new();
+        registry.register(std::sync::Arc::new(TaskDoneTool));
+
+        run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {}).unwrap();
+        assert_eq!(
+            mock.call_count(),
+            1,
+            "followup never dequeued after terminate"
+        );
+        let last = cx.history.last().unwrap();
+        assert_eq!(last.role, kage_core::Role::ToolResult);
+    }
+
     #[test]
     fn shell_returns_cancelled_when_cancel_flagged_up_front() {
         let mock = MockProvider::replaying(vec![]);
@@ -987,6 +1080,7 @@ mod tests {
                 is_error: false,
                 text: "static-result".into(),
                 structured: None,
+                terminate: false,
             })
         }
     }
@@ -1092,6 +1186,7 @@ mod tests {
                 is_error: false,
                 text: "cancelled".into(),
                 structured: None,
+                terminate: false,
             })
         }
     }
@@ -1154,6 +1249,7 @@ mod tests {
                 is_error: true,
                 text: "boom".into(),
                 structured: None,
+                terminate: false,
             })
         }
     }
@@ -1250,6 +1346,7 @@ mod tests {
                 is_error: false,
                 text: format!("ran #{}", self.calls.lock().expect("not poisoned").len()),
                 structured: None,
+                terminate: false,
             })
         }
     }

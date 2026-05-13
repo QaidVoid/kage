@@ -271,6 +271,7 @@ mod tests {
             is_error: false,
             text: "hi".into(),
             structured: None,
+            terminate: false,
         };
         let back = h.after_tool_call("read", out.clone());
         assert_eq!(back, out);
@@ -292,6 +293,7 @@ mod tests {
                 is_error: false,
                 text: "ok".into(),
                 structured: None,
+                terminate: false,
             },
         );
         h.on_event(&LoopEvent::MessageStart {

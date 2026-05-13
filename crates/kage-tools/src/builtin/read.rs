@@ -75,6 +75,7 @@ impl Tool for ReadTool {
             is_error: false,
             text: output,
             structured: None,
+            terminate: false,
         })
     }
 }

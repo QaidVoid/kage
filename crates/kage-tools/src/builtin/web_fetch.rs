@@ -121,6 +121,7 @@ impl Tool for WebFetchTool {
                 "content_type": content_type,
                 "truncated": truncated,
             })),
+            terminate: false,
         })
     }
 }

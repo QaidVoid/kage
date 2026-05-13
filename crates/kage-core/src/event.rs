@@ -26,7 +26,7 @@ pub struct TokenUsage {
 /// Tools may also emit progress via a separate channel during execution; this
 /// type carries the final result that the loop appends to history as a
 /// [`crate::Content::ToolResultBlock`].
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ToolOutput {
     /// Whether the tool reported failure.
     pub is_error: bool,
@@ -35,6 +35,16 @@ pub struct ToolOutput {
     /// Optional structured payload for richer rendering by the host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured: Option<serde_json::Value>,
+    /// When every tool in a single batch sets this to `true`, the loop
+    /// returns after the turn without consulting follow-ups. Used by
+    /// tools like `task_done` that signal a successful exit.
+    #[serde(default, skip_serializing_if = "is_default_false")]
+    pub terminate: bool,
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_default_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Reason the loop emitted an [`LoopEvent::Error`].
@@ -198,9 +208,34 @@ mod tests {
             is_error: false,
             text: "ok".into(),
             structured: None,
+            terminate: false,
         };
         let json = serde_json::to_value(&out).unwrap();
         assert!(json.get("structured").is_none());
+    }
+
+    #[test]
+    fn tool_output_omits_terminate_when_default_false() {
+        let out = ToolOutput {
+            is_error: false,
+            text: "ok".into(),
+            structured: None,
+            terminate: false,
+        };
+        let json = serde_json::to_value(&out).unwrap();
+        assert!(json.get("terminate").is_none());
+    }
+
+    #[test]
+    fn tool_output_emits_terminate_when_true() {
+        let out = ToolOutput {
+            is_error: false,
+            text: "done".into(),
+            structured: None,
+            terminate: true,
+        };
+        let json = serde_json::to_value(&out).unwrap();
+        assert_eq!(json["terminate"], true);
     }
 
     #[test]

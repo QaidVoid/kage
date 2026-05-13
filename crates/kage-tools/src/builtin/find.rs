@@ -114,6 +114,7 @@ impl Tool for FindTool {
                 "pattern": input.pattern,
                 "matches": count,
             })),
+            terminate: false,
         })
     }
 }

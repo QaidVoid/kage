@@ -336,6 +336,7 @@ mod tests {
                 is_error: false,
                 text: "OK".into(),
                 structured: None,
+                terminate: false,
             },
         });
         drop(hooks);
@@ -432,6 +433,7 @@ mod tests {
                 is_error: false,
                 text: String::new(),
                 structured: None,
+                terminate: false,
             },
         );
         hooks.on_event(&LoopEvent::Error {

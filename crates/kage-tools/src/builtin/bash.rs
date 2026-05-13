@@ -160,6 +160,7 @@ fn run_command(
             "stderr_truncated": stderr_truncated,
             "cwd": cwd_display(cwd),
         })),
+        terminate: false,
     })
 }
 

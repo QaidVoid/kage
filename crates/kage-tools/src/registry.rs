@@ -115,6 +115,7 @@ mod tests {
                 is_error: false,
                 text,
                 structured: None,
+                terminate: false,
             })
         }
     }

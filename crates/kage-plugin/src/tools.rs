@@ -101,6 +101,7 @@ impl Tool for LuaTool {
                     is_error: true,
                     text: err.to_string(),
                     structured: None,
+                    terminate: false,
                 })
             }
         }
@@ -113,26 +114,31 @@ fn value_to_output(value: Value) -> ToolOutput {
             is_error: false,
             text: String::new(),
             structured: None,
+            terminate: false,
         },
         Value::String(s) => ToolOutput {
             is_error: false,
             text: s.to_str().map(|s| s.to_owned()).unwrap_or_default(),
             structured: None,
+            terminate: false,
         },
         Value::Boolean(b) => ToolOutput {
             is_error: false,
             text: b.to_string(),
             structured: None,
+            terminate: false,
         },
         Value::Integer(i) => ToolOutput {
             is_error: false,
             text: i.to_string(),
             structured: None,
+            terminate: false,
         },
         Value::Number(n) => ToolOutput {
             is_error: false,
             text: n.to_string(),
             structured: None,
+            terminate: false,
         },
         Value::Table(t) => table_to_output(&t),
         other => {
@@ -141,6 +147,7 @@ fn value_to_output(value: Value) -> ToolOutput {
                 is_error: false,
                 text: json.to_string(),
                 structured: Some(json),
+                terminate: false,
             }
         }
     }
@@ -156,6 +163,7 @@ fn table_to_output(table: &Table) -> ToolOutput {
             is_error,
             text,
             structured: structured_json,
+            terminate: false,
         };
     }
     // No `text` field: serialize the table itself as JSON for the model.
@@ -164,6 +172,7 @@ fn table_to_output(table: &Table) -> ToolOutput {
         is_error,
         text: as_json.to_string(),
         structured: Some(as_json),
+        terminate: false,
     }
 }
 

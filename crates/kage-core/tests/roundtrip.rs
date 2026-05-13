@@ -90,6 +90,7 @@ fn all_loop_events_roundtrip() {
                 is_error: false,
                 text: "ok".into(),
                 structured: None,
+                terminate: false,
             },
         },
         LoopEvent::MessageEnd {
@@ -170,6 +171,7 @@ fn tool_output_with_structured_payload_roundtrips() {
         is_error: true,
         text: "out of bounds".into(),
         structured: Some(serde_json::json!({"line": 42, "kind": "syntax"})),
+        terminate: false,
     });
 }
 

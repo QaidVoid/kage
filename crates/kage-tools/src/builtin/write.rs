@@ -65,6 +65,7 @@ impl Tool for WriteTool {
                     input.path
                 ),
                 structured: None,
+                terminate: false,
             });
         }
 
@@ -86,6 +87,7 @@ impl Tool for WriteTool {
             is_error: false,
             text: format!("wrote {bytes} bytes to {}", input.path),
             structured: Some(serde_json::json!({"path": input.path, "bytes": bytes})),
+            terminate: false,
         })
     }
 }

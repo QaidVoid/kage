@@ -66,6 +66,7 @@ impl Tool for EditTool {
                 is_error: true,
                 text: format!("`old_str` not found in {}", input.path),
                 structured: None,
+                terminate: false,
             });
         }
         if count > 1 && !input.replace_all {
@@ -77,6 +78,7 @@ impl Tool for EditTool {
                     input.path,
                 ),
                 structured: None,
+                terminate: false,
             });
         }
 
@@ -98,6 +100,7 @@ impl Tool for EditTool {
                 "replacements": count,
                 "diff": diff,
             })),
+            terminate: false,
         })
     }
 }

@@ -22,6 +22,16 @@ enum Slot {
     Run,
 }
 
+/// Result of one batch of tool dispatch.
+///
+/// `results` is the message list to append to history; `all_terminate`
+/// is `true` when every tool in the batch returned `ToolOutput::terminate`
+/// so the loop can stop cleanly after appending the results.
+pub(crate) struct DispatchOutcome {
+    pub results: Vec<Message>,
+    pub all_terminate: bool,
+}
+
 /// Dispatch every pending tool call sequentially.
 ///
 /// Returns one tool-result [`Message`] per call, in input order. The caller
@@ -38,8 +48,9 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
     parent: MessageId,
     hooks: &mut dyn Hooks,
     emit: &mut F,
-) -> Result<Vec<Message>, LoopError> {
+) -> Result<DispatchOutcome, LoopError> {
     let mut results = Vec::with_capacity(pending.len());
+    let mut all_terminate = !pending.is_empty();
     for call in pending {
         if cancel.is_cancelled() {
             return Err(LoopError::Cancelled);
@@ -51,6 +62,7 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
             None => execute(tools, &call, workdir, cancel)?,
         };
         let output = hooks.after_tool_call(&call.name, raw_output);
+        all_terminate &= output.terminate;
 
         emit_one(
             hooks,
@@ -71,7 +83,10 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
             Some(parent),
         ));
     }
-    Ok(results)
+    Ok(DispatchOutcome {
+        results,
+        all_terminate,
+    })
 }
 
 /// Dispatch tool calls in parallel via [`std::thread::scope`].
@@ -92,7 +107,7 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
     parent: MessageId,
     hooks: &mut dyn Hooks,
     emit: &mut F,
-) -> Result<Vec<Message>, LoopError> {
+) -> Result<DispatchOutcome, LoopError> {
     if cancel.is_cancelled() {
         return Err(LoopError::Cancelled);
     }
@@ -135,9 +150,11 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
     });
 
     let mut results = Vec::with_capacity(pending.len());
+    let mut all_terminate = !pending.is_empty();
     for (call, raw) in pending.into_iter().zip(raw_outputs) {
         let raw = raw?;
         let output = hooks.after_tool_call(&call.name, raw);
+        all_terminate &= output.terminate;
         emit_one(
             hooks,
             emit,
@@ -156,7 +173,10 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
             Some(parent),
         ));
     }
-    Ok(results)
+    Ok(DispatchOutcome {
+        results,
+        all_terminate,
+    })
 }
 
 /// Execute a single tool through the registry, mapping errors to outputs.
@@ -175,6 +195,7 @@ fn execute(
             is_error: true,
             text: format!("tool '{}' is not registered", call.name),
             structured: None,
+            terminate: false,
         });
     };
 
@@ -186,6 +207,7 @@ fn execute(
             is_error: true,
             text: err.to_string(),
             structured: None,
+            terminate: false,
         }),
     }
 }
@@ -225,6 +247,7 @@ mod tests {
                 is_error: false,
                 text: input.to_string(),
                 structured: None,
+                terminate: false,
             })
         }
     }
@@ -289,8 +312,8 @@ mod tests {
             &mut hooks,
             &mut |ev| emitted.push(ev),
         )
-        .unwrap();
-
+        .unwrap()
+        .results;
         assert_eq!(results.len(), 2);
         for result in &results {
             assert_eq!(result.role, Role::ToolResult);
@@ -324,8 +347,8 @@ mod tests {
             &mut hooks,
             &mut |_| {},
         )
-        .unwrap();
-
+        .unwrap()
+        .results;
         assert_eq!(results.len(), 1);
         match &results[0].content[0] {
             Content::ToolResultBlock {
@@ -354,8 +377,8 @@ mod tests {
             &mut hooks,
             &mut |_| {},
         )
-        .unwrap();
-
+        .unwrap()
+        .results;
         assert_eq!(results.len(), 1);
         if let Content::ToolResultBlock {
             is_error, output, ..
@@ -380,6 +403,7 @@ mod tests {
                         is_error: true,
                         text: "blocked by host policy".into(),
                         structured: None,
+                        terminate: false,
                     })
                 } else {
                     None
@@ -401,8 +425,8 @@ mod tests {
             &mut hooks,
             &mut |_| {},
         )
-        .unwrap();
-
+        .unwrap()
+        .results;
         assert_eq!(results.len(), 1);
         match &results[0].content[0] {
             Content::ToolResultBlock {
@@ -439,8 +463,8 @@ mod tests {
             &mut hooks,
             &mut |_| {},
         )
-        .unwrap();
-
+        .unwrap()
+        .results;
         match &results[0].content[0] {
             Content::ToolResultBlock { output, .. } => {
                 assert!(output.starts_with("[redacted] "));
@@ -477,6 +501,7 @@ mod tests {
                 is_error: false,
                 text: format!("slept_{}", self.millis),
                 structured: None,
+                terminate: false,
             })
         }
     }
@@ -505,8 +530,8 @@ mod tests {
             &mut hooks,
             &mut |_| {},
         )
-        .unwrap();
-
+        .unwrap()
+        .results;
         assert_eq!(results.len(), 3);
         assert!(matches!(
             &results[0].content[0],
@@ -547,7 +572,8 @@ mod tests {
             &mut hooks,
             &mut |_| {},
         )
-        .unwrap();
+        .unwrap()
+        .results;
         let elapsed = start.elapsed();
 
         assert_eq!(results.len(), 3);
@@ -576,6 +602,7 @@ mod tests {
                         is_error: true,
                         text: "blocked".into(),
                         structured: None,
+                        terminate: false,
                     })
                 } else {
                     None
@@ -603,8 +630,8 @@ mod tests {
             &mut hooks,
             &mut |_| {},
         )
-        .unwrap();
-
+        .unwrap()
+        .results;
         assert_eq!(results.len(), 3);
         if let Content::ToolResultBlock {
             output, is_error, ..

@@ -26,6 +26,14 @@
 //! * `session_open` - the host opened a session writer
 //! * `session_close` - the host closed a session writer
 //!
+//! Session-op pre-hooks fire before the host runs a session action and
+//! let a plugin veto or patch the target:
+//! * `session_before_switch` - target is a session id or path
+//! * `session_before_fork` - target is the entry id to fork at
+//! * `session_before_tree` - target is the current session id (or empty)
+//!
+//! See [`dispatch_session_op`] and [`SessionOpDecision`].
+//!
 //! These events use special dispatch shapes:
 //! * `transform_context` (transform): the host passes the current message
 //!   history, each subscriber receives the chained payload, and may return
@@ -170,6 +178,76 @@ pub fn dispatch_transform(
         }
     }
     Ok(current)
+}
+
+/// Outcome of a session-op pre-hook (`session_before_switch`,
+/// `session_before_fork`, `session_before_tree`).
+///
+/// Mirrors the shape of `kage_loop::HookResult<String>` but stays in
+/// `kage-plugin` to avoid pulling the loop crate into plugin code. The
+/// host translates between the two when it needs to.
+///
+/// Lua handlers return one of:
+/// * nothing / `nil` / non-table value → [`SessionOpDecision::Proceed`]
+/// * `{ cancel = "reason" }` → [`SessionOpDecision::Cancel`]
+/// * `{ patch = "new-target" }` → [`SessionOpDecision::Patch`]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SessionOpDecision {
+    /// Run the action against the original target.
+    Proceed,
+    /// Abandon the action. `reason` is human-facing.
+    Cancel {
+        /// Reason text the host can show in a toast or error block.
+        reason: String,
+    },
+    /// Run the action against the patched target instead.
+    Patch(String),
+}
+
+/// Fire each handler registered for a session-op event in registration
+/// order. The first handler whose return value resolves to
+/// [`SessionOpDecision::Cancel`] or [`SessionOpDecision::Patch`] short-
+/// circuits the chain and is returned to the host.
+///
+/// Errors raised by a handler are logged through `sink` and treated as
+/// [`SessionOpDecision::Proceed`]; later handlers still run.
+pub fn dispatch_session_op(
+    lua: &Lua,
+    event_name: &str,
+    target: &str,
+    sink: &SharedHostLog,
+) -> Result<SessionOpDecision, PluginError> {
+    let Ok(handlers) = lua.named_registry_value::<Table>(HANDLERS_KEY) else {
+        return Ok(SessionOpDecision::Proceed);
+    };
+    let list: Value = handlers.get(event_name)?;
+    let Value::Table(list) = list else {
+        return Ok(SessionOpDecision::Proceed);
+    };
+    let lua_payload = lua.create_string(target)?;
+    for pair in list.clone().sequence_values::<Function>() {
+        let func = pair?;
+        match func.call::<Value>(Value::String(lua_payload.clone())) {
+            Ok(Value::Table(t)) => {
+                if let Ok(reason) = t.get::<String>("cancel") {
+                    return Ok(SessionOpDecision::Cancel { reason });
+                }
+                if let Ok(patch) = t.get::<String>("patch") {
+                    return Ok(SessionOpDecision::Patch(patch));
+                }
+            }
+            Ok(_) => {}
+            Err(err) => {
+                if let Ok(mut s) = sink.lock() {
+                    s.log(
+                        LogLevel::Error,
+                        &format!("plugin handler for '{event_name}' raised: {err}"),
+                    );
+                }
+            }
+        }
+    }
+    Ok(SessionOpDecision::Proceed)
 }
 
 /// Fire every handler for `event_name` and short-circuit on the first one
@@ -511,6 +589,82 @@ mod tests {
         )
         .unwrap();
         assert!(!stop);
+    }
+
+    #[test]
+    fn dispatch_session_op_default_proceeds() {
+        let lua = fresh_lua_with_kage();
+        let decision = dispatch_session_op(
+            &lua,
+            "session_before_switch",
+            "session-id-1",
+            &default_host_log(),
+        )
+        .unwrap();
+        assert_eq!(decision, SessionOpDecision::Proceed);
+    }
+
+    #[test]
+    fn dispatch_session_op_picks_up_cancel() {
+        let lua = fresh_lua_with_kage();
+        lua.load(
+            r"
+            kage.on('session_before_switch', function(target)
+                if target == 'locked' then return { cancel = 'busy' } end
+            end)
+            ",
+        )
+        .exec()
+        .unwrap();
+        let d = dispatch_session_op(&lua, "session_before_switch", "locked", &default_host_log())
+            .unwrap();
+        assert_eq!(
+            d,
+            SessionOpDecision::Cancel {
+                reason: "busy".into()
+            }
+        );
+        let d = dispatch_session_op(&lua, "session_before_switch", "other", &default_host_log())
+            .unwrap();
+        assert_eq!(d, SessionOpDecision::Proceed);
+    }
+
+    #[test]
+    fn dispatch_session_op_picks_up_patch() {
+        let lua = fresh_lua_with_kage();
+        lua.load(
+            r"
+            kage.on('session_before_fork', function(at)
+                return { patch = at .. '-renamed' }
+            end)
+            ",
+        )
+        .exec()
+        .unwrap();
+        let d =
+            dispatch_session_op(&lua, "session_before_fork", "abc", &default_host_log()).unwrap();
+        assert_eq!(d, SessionOpDecision::Patch("abc-renamed".into()));
+    }
+
+    #[test]
+    fn dispatch_session_op_first_decision_wins() {
+        let lua = fresh_lua_with_kage();
+        lua.load(
+            r"
+            kage.on('session_before_fork', function(_) return nil end)
+            kage.on('session_before_fork', function(_) return { cancel = 'first' } end)
+            kage.on('session_before_fork', function(_) return { cancel = 'never' } end)
+            ",
+        )
+        .exec()
+        .unwrap();
+        let d = dispatch_session_op(&lua, "session_before_fork", "x", &default_host_log()).unwrap();
+        assert_eq!(
+            d,
+            SessionOpDecision::Cancel {
+                reason: "first".into()
+            }
+        );
     }
 
     #[test]

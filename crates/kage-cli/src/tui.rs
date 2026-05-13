@@ -355,6 +355,16 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                     }
                 }
                 RunRequest::ResumeSession(path) => {
+                    let path = match consult_session_op(
+                        plugin_runtime.as_ref(),
+                        "session_before_switch",
+                        &path.display().to_string(),
+                        &buffer,
+                        &toasts,
+                    ) {
+                        Some(target) => PathBuf::from(target),
+                        None => continue,
+                    };
                     handle_resume(
                         &registry,
                         &active_qualified,
@@ -409,6 +419,15 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                 }
                 RunRequest::Cancel => cancel.cancel(),
                 RunRequest::ForkSession { at } => {
+                    let Some(at) = consult_session_op(
+                        plugin_runtime.as_ref(),
+                        "session_before_fork",
+                        &at,
+                        &buffer,
+                        &toasts,
+                    ) else {
+                        continue;
+                    };
                     handle_plugin_fork(session_path.as_ref(), &buffer, &toasts, &at);
                 }
                 RunRequest::CompactNow => {
@@ -548,6 +567,52 @@ fn open_writer_for_turn(
                 );
             }
             None
+        }
+    }
+}
+
+/// Consult plugin handlers for a session-op event before running an
+/// action. Returns the (possibly patched) target string if the action
+/// should proceed, or `None` if a plugin vetoed.
+///
+/// On veto, this also pushes a toast plus an inline error block so the
+/// user sees the reason without diving into logs. With no plugin runtime
+/// or no subscribers, returns `Some(target.to_owned())` immediately.
+fn consult_session_op(
+    runtime: Option<&Arc<PluginRuntime>>,
+    event: &str,
+    target: &str,
+    buffer: &SharedBuffer,
+    toasts: &SharedToasts,
+) -> Option<String> {
+    let Some(rt) = runtime else {
+        return Some(target.to_owned());
+    };
+    if rt.handler_count(event) == 0 {
+        return Some(target.to_owned());
+    }
+    match rt.dispatch_session_op(event, target) {
+        Ok(kage_plugin::SessionOpDecision::Proceed) => Some(target.to_owned()),
+        Ok(kage_plugin::SessionOpDecision::Patch(next)) => Some(next),
+        Ok(kage_plugin::SessionOpDecision::Cancel { reason }) => {
+            if let Ok(mut buf) = buffer.lock() {
+                buf.push_custom("kage:error", format!("{event}: {reason}"), false);
+            }
+            push_toast(
+                toasts,
+                Toast::info(format!("session op cancelled: {reason}")),
+            );
+            None
+        }
+        Err(err) => {
+            if let Ok(mut buf) = buffer.lock() {
+                buf.push_custom(
+                    "kage:error",
+                    format!("{event}: plugin dispatch failed: {err}"),
+                    false,
+                );
+            }
+            Some(target.to_owned())
         }
     }
 }

@@ -149,6 +149,18 @@ impl PluginRuntime {
         events::dispatch_predicate(&lua, event_name, payload, &self.sink)
     }
 
+    /// Consult handlers subscribed to a session-op event. The first
+    /// handler that returns a cancel or patch decision short-circuits the
+    /// chain. See [`events::dispatch_session_op`].
+    pub fn dispatch_session_op(
+        &self,
+        event_name: &str,
+        target: &str,
+    ) -> Result<events::SessionOpDecision, PluginError> {
+        let lua = self.lock_lua();
+        events::dispatch_session_op(&lua, event_name, target, &self.sink)
+    }
+
     /// Number of handlers subscribed to `event_name`.
     #[must_use]
     pub fn handler_count(&self, event_name: &str) -> usize {

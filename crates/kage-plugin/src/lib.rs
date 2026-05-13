@@ -23,6 +23,7 @@ pub mod widgets;
 pub use api::{HostLog, LogLevel, SharedHostLog, StderrHostLog, default_host_log};
 pub use commands::{CommandOutput, LuaCommand, PluginArgSpec};
 pub use error::PluginError;
+pub use events::SessionOpDecision;
 pub use lifecycle::{SharedCompactRequest, SharedUsage};
 pub use loader::{LoadReport, load_dir};
 pub use providers::LuaProvider;

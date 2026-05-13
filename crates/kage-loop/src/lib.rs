@@ -18,6 +18,6 @@ pub mod system_prompt;
 pub use compact::{COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX, force_compact};
 pub use config::LoopConfig;
 pub use context::{AgentContext, TokenBudget};
-pub use hooks::{Hooks, NoopHooks};
+pub use hooks::{HookResult, Hooks, NoopHooks};
 pub use run::run;
 pub use system_prompt::{DEFAULT_ROLE, EnvContext, compose as compose_system_prompt};

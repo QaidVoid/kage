@@ -7,6 +7,61 @@
 
 use kage_core::{LoopEvent, ToolOutput};
 
+/// Outcome of a pre-action hook that can veto, patch, or pass through.
+///
+/// Used by hook variants where the host must run code *before* an action and
+/// the hook needs to be able to block the action with a user-visible reason
+/// or replace the target with a different value. Plain observation-style
+/// hooks (e.g. [`Hooks::on_event`]) do not need this; transform-style hooks
+/// that mutate in place (e.g. a future `transform_context`) keep their
+/// `Result<()>` shape because they cannot meaningfully veto.
+///
+/// The generic parameter is the target of [`HookResult::Patch`]: a session
+/// id for `session_before_switch`, a path for `session_before_fork`, etc.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HookResult<T> {
+    /// The action should proceed unchanged.
+    Proceed,
+    /// The action is vetoed. The string is a user-facing reason the host can
+    /// surface in the UI; pick wording the end user can act on, not stack
+    /// traces.
+    Cancel {
+        /// Human-readable explanation for the veto. Surfaced verbatim by
+        /// the host (toast, error block, etc.).
+        reason: String,
+    },
+    /// The action should proceed against the patched target instead of the
+    /// original. The host substitutes this value and runs the action.
+    Patch(T),
+}
+
+impl<T> HookResult<T> {
+    /// Map the patched target to a different type while preserving the
+    /// `Proceed` and `Cancel` variants.
+    pub fn map<U, F: FnOnce(T) -> U>(self, f: F) -> HookResult<U> {
+        match self {
+            Self::Proceed => HookResult::Proceed,
+            Self::Cancel { reason } => HookResult::Cancel { reason },
+            Self::Patch(t) => HookResult::Patch(f(t)),
+        }
+    }
+
+    /// Returns `true` when the host should abandon the action.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancel { .. })
+    }
+
+    /// Returns the cancellation reason if the result is `Cancel`.
+    #[must_use]
+    pub fn cancel_reason(&self) -> Option<&str> {
+        match self {
+            Self::Cancel { reason } => Some(reason.as_str()),
+            _ => None,
+        }
+    }
+}
+
 /// Host-supplied callbacks fired during a [`run`](crate::run).
 ///
 /// All methods take `&mut self` so hosts can accumulate state (logs,
@@ -176,6 +231,47 @@ mod tests {
         assert_eq!(h.tool_calls_before, vec!["bash"]);
         assert_eq!(h.tool_calls_after, vec!["bash"]);
         assert_eq!(h.events, vec!["message_start"]);
+    }
+
+    #[test]
+    fn hook_result_proceed_is_not_cancelled() {
+        let r: HookResult<String> = HookResult::Proceed;
+        assert!(!r.is_cancelled());
+        assert!(r.cancel_reason().is_none());
+    }
+
+    #[test]
+    fn hook_result_cancel_carries_reason() {
+        let r: HookResult<String> = HookResult::Cancel {
+            reason: "no".into(),
+        };
+        assert!(r.is_cancelled());
+        assert_eq!(r.cancel_reason(), Some("no"));
+    }
+
+    #[test]
+    fn hook_result_patch_preserves_target() {
+        let r: HookResult<i32> = HookResult::Patch(42);
+        match r {
+            HookResult::Patch(v) => assert_eq!(v, 42),
+            other => panic!("expected Patch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hook_result_map_preserves_variants() {
+        let p: HookResult<i32> = HookResult::Patch(7);
+        match p.map(|v| v * 2) {
+            HookResult::Patch(v) => assert_eq!(v, 14),
+            other => panic!("expected Patch, got {other:?}"),
+        }
+        let c: HookResult<i32> = HookResult::Cancel { reason: "x".into() };
+        match c.map(|v| v + 1) {
+            HookResult::Cancel { reason } => assert_eq!(reason, "x"),
+            other => panic!("expected Cancel, got {other:?}"),
+        }
+        let s: HookResult<i32> = HookResult::Proceed;
+        assert!(matches!(s.map(|v| v.to_string()), HookResult::Proceed));
     }
 
     #[test]

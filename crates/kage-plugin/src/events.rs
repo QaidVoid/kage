@@ -27,6 +27,10 @@
 //! * `tool_result` - a tool invocation produced an output
 //! * `session_open` - the host opened a session writer
 //! * `session_close` - the host closed a session writer
+//! * `resources_discover` - fires once at startup; handlers return a
+//!   table `{ skills?, templates?, themes? }` of directory paths the
+//!   host should add to its filesystem-discovered set. See
+//!   [`dispatch_resources_discover`] and [`DiscoveryEntries`].
 //! * `model_select` - the active model changed. Payload:
 //!   `{ prev, next, source }` where `source` is one of `"set"`,
 //!   `"cycle"`, or `"restore"`. Today only the `set` source fires
@@ -57,6 +61,8 @@
 //! * `should_stop_after_turn` (predicate): the host passes a turn summary;
 //!   any handler returning `true` short-circuits the run. See
 //!   [`dispatch_predicate`].
+
+use std::path::PathBuf;
 
 use mlua::{Function, Lua, Table, Value};
 
@@ -189,6 +195,78 @@ pub fn dispatch_transform(
         }
     }
     Ok(current)
+}
+
+/// Paths collected from `resources_discover` plugin handlers.
+///
+/// Each Lua handler returns a table with optional `skills`, `templates`,
+/// and `themes` keys, each carrying a list of directory paths. The host
+/// concatenates all returned paths across all handlers; the returned
+/// fields here are the union.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DiscoveryEntries {
+    /// Directories the host should walk when loading SKILL.md files,
+    /// in addition to its built-in user/project dirs.
+    pub skills: Vec<PathBuf>,
+    /// Directories the host should walk when loading prompt templates.
+    pub templates: Vec<PathBuf>,
+    /// Directories the host should walk when loading theme files.
+    pub themes: Vec<PathBuf>,
+}
+
+/// Fire every `resources_discover` handler once and collect the returned
+/// paths into a [`DiscoveryEntries`] aggregate.
+///
+/// Each handler is called with no arguments and is expected to return a
+/// table containing optional `skills`, `templates`, `themes` keys whose
+/// values are lists of directory paths. Anything else is treated as the
+/// handler reporting "nothing extra to discover."
+///
+/// Handler errors are logged through `sink` and skipped.
+pub fn dispatch_resources_discover(
+    lua: &Lua,
+    sink: &SharedHostLog,
+) -> Result<DiscoveryEntries, PluginError> {
+    let mut entries = DiscoveryEntries::default();
+    let Ok(handlers) = lua.named_registry_value::<Table>(HANDLERS_KEY) else {
+        return Ok(entries);
+    };
+    let list: Value = handlers.get("resources_discover")?;
+    let Value::Table(list) = list else {
+        return Ok(entries);
+    };
+    for pair in list.clone().sequence_values::<Function>() {
+        let func = pair?;
+        match func.call::<Value>(()) {
+            Ok(Value::Table(table)) => {
+                collect_paths(&table, "skills", &mut entries.skills);
+                collect_paths(&table, "templates", &mut entries.templates);
+                collect_paths(&table, "themes", &mut entries.themes);
+            }
+            Ok(_) => {}
+            Err(err) => {
+                if let Ok(mut s) = sink.lock() {
+                    s.log(
+                        LogLevel::Error,
+                        &format!("plugin handler for 'resources_discover' raised: {err}"),
+                    );
+                }
+            }
+        }
+    }
+    Ok(entries)
+}
+
+fn collect_paths(table: &Table, key: &str, out: &mut Vec<PathBuf>) {
+    let Ok(list) = table.get::<Value>(key) else {
+        return;
+    };
+    let Value::Table(list) = list else {
+        return;
+    };
+    for item in list.clone().sequence_values::<String>().flatten() {
+        out.push(PathBuf::from(item));
+    }
 }
 
 /// Outcome of a session-op pre-hook (`session_before_switch`,
@@ -676,6 +754,39 @@ mod tests {
                 reason: "first".into()
             }
         );
+    }
+
+    #[test]
+    fn dispatch_resources_discover_aggregates_paths() {
+        let lua = fresh_lua_with_kage();
+        lua.load(
+            r"
+            kage.on('resources_discover', function()
+                return { skills = { '/a/skills', '/b/skills' }, themes = { '/c/themes' } }
+            end)
+            kage.on('resources_discover', function()
+                return { templates = { '/d/templates' } }
+            end)
+            ",
+        )
+        .exec()
+        .unwrap();
+        let entries = dispatch_resources_discover(&lua, &default_host_log()).unwrap();
+        assert_eq!(
+            entries.skills,
+            vec![PathBuf::from("/a/skills"), PathBuf::from("/b/skills")]
+        );
+        assert_eq!(entries.templates, vec![PathBuf::from("/d/templates")]);
+        assert_eq!(entries.themes, vec![PathBuf::from("/c/themes")]);
+    }
+
+    #[test]
+    fn dispatch_resources_discover_handles_no_handlers() {
+        let lua = fresh_lua_with_kage();
+        let entries = dispatch_resources_discover(&lua, &default_host_log()).unwrap();
+        assert!(entries.skills.is_empty());
+        assert!(entries.templates.is_empty());
+        assert!(entries.themes.is_empty());
     }
 
     #[test]

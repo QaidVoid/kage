@@ -161,6 +161,13 @@ impl PluginRuntime {
         events::dispatch_session_op(&lua, event_name, target, &self.sink)
     }
 
+    /// Fire every `resources_discover` handler and collect the aggregated
+    /// directory paths. See [`events::dispatch_resources_discover`].
+    pub fn discover_resources(&self) -> Result<events::DiscoveryEntries, PluginError> {
+        let lua = self.lock_lua();
+        events::dispatch_resources_discover(&lua, &self.sink)
+    }
+
     /// Number of handlers subscribed to `event_name`.
     #[must_use]
     pub fn handler_count(&self, event_name: &str) -> usize {

@@ -56,15 +56,16 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     let buffer = shared_buffer();
     let toasts = shared_toasts();
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let skills = crate::load_skills(&workdir);
-    let system_prompt = crate::runtime_env::build_system_prompt(system, &workdir, model, &skills);
-    let system = system_prompt.as_str();
+    // Build the plugin runtime against a bare prompt first; skills land
+    // below once plugins have had a chance to contribute extra dirs via
+    // `resources_discover`.
+    let bare_prompt = crate::runtime_env::build_system_prompt(system, &workdir, model, &[]);
     let plugin_runtime = match crate::plugins_dir() {
         Ok(dir) => match setup_runtime_with_sink(
             &dir,
             &workdir,
             model,
-            system,
+            &bare_prompt,
             buffer_host_log(buffer.clone(), toasts.clone()),
         ) {
             Ok(rt) => rt,
@@ -82,6 +83,9 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
             None
         }
     };
+    let skills = crate::load_skills(&workdir, plugin_runtime.as_deref());
+    let system_prompt = crate::runtime_env::build_system_prompt(system, &workdir, model, &skills);
+    let system = system_prompt.as_str();
 
     let mut tools = kage_tools::builtin_registry();
     let mut plugin_command_listing: Vec<kage_tui::command::PluginCommand> = Vec::new();

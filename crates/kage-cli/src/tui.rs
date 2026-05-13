@@ -84,6 +84,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
 
     let mut tools = kage_tools::builtin_registry();
     let mut plugin_command_listing: Vec<kage_tui::command::PluginCommand> = Vec::new();
+    let mut plugin_widgets: Vec<Arc<kage_plugin::LuaWidget>> = Vec::new();
     if let Some(rt) = plugin_runtime.as_ref() {
         for tool in rt.registered_tools() {
             tools.register(tool);
@@ -110,6 +111,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
                 args: cmd.args().iter().map(translate_plugin_arg).collect(),
             });
         }
+        plugin_widgets = rt.registered_widgets();
     }
     let cancel = CancelFlag::new();
     let mut initial_cx = AgentContext::new(bare_model, system).with_workdir(&workdir);
@@ -182,6 +184,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     app.set_history(crate::history::load());
     app.set_status_model(Arc::clone(&active_qualified));
     app.set_plugin_commands(plugin_command_listing);
+    app.set_plugin_widgets(plugin_widgets);
     app.set_cancel_flag(cancel.clone());
     app.set_toasts(toasts.clone());
     app.set_session_usage(session_usage);

@@ -315,6 +315,15 @@ pub struct App {
     /// the completion engine can mix them with the static builtin
     /// registry. Cleared and re-built on every `set_plugin_commands`.
     plugin_command_specs: Vec<&'static CommandSpec>,
+    /// Status-bar widgets supplied by plugins via
+    /// `kage.register_widget`. Each entry's `render(width)` runs once
+    /// per redraw and the resulting string is painted on the right
+    /// edge of the status bar.
+    plugin_widgets: Vec<Arc<kage_plugin::LuaWidget>>,
+    /// Per-frame cache of [`Self::plugin_widgets`] outputs. Lives on
+    /// the App so [`view::StatusCtx`] can borrow it; rebuilt at the
+    /// top of [`Self::render_into`].
+    plugin_widget_texts: Vec<String>,
     /// Pending request to toggle terminal mouse capture, applied by
     /// `run` between iterations. `None` means leave the capture state
     /// as-is. The indirection exists because `run_command` can't
@@ -392,6 +401,8 @@ impl App {
             status_session_id: None,
             plugin_commands: Vec::new(),
             plugin_command_specs: Vec::new(),
+            plugin_widgets: Vec::new(),
+            plugin_widget_texts: Vec::new(),
             search_line: None,
             search_pattern: None,
             mouse_drag_anchor: None,
@@ -549,6 +560,22 @@ impl App {
     /// at the moment of opening. Without this, `Ctrl+R` is a no-op.
     pub fn set_session_lister(&mut self, lister: SessionLister) {
         self.session_lister = Some(lister);
+    }
+
+    /// Replace the list of plugin-supplied status-bar widgets.
+    /// `render(width)` runs once per redraw inside the plugin runtime's
+    /// Lua mutex; widgets that produce a non-empty string are painted
+    /// on the right edge of the status bar in registration order.
+    pub fn set_plugin_widgets(&mut self, widgets: Vec<Arc<kage_plugin::LuaWidget>>) {
+        self.plugin_widgets = widgets;
+    }
+
+    fn refresh_plugin_widget_texts(&mut self, width: u16) {
+        self.plugin_widget_texts = self
+            .plugin_widgets
+            .iter()
+            .map(|w| w.render(width))
+            .collect();
     }
 
     /// Drive the event loop until the user quits. Returns the exit
@@ -736,6 +763,8 @@ impl App {
         // it BEFORE we hold the lock or we'll deadlock the moment a
         // search is active.
         let search_match_count = self.compute_search_match_count();
+        let render_width = tui.terminal().size().map_or(80, |r| r.width);
+        self.refresh_plugin_widget_texts(render_width);
         let mut buffer = self.buffer.lock().expect("buffer mutex poisoned");
         let cmdline = self.cmdline.as_ref();
         let model_snapshot = self
@@ -748,6 +777,7 @@ impl App {
             search_pattern: self.search_pattern.as_deref(),
             search_line: self.search_line.as_ref(),
             search_match_count,
+            plugin_widgets: &self.plugin_widget_texts,
         };
         let screen_selection = self.screen_selection;
         let mut captured_rows = std::mem::take(&mut self.captured_rows);
@@ -1659,6 +1689,8 @@ impl App {
         B::Error: std::error::Error + Send + Sync + 'static,
     {
         let search_match_count = self.compute_search_match_count();
+        let render_width = terminal.size().map_or(80, |r| r.width);
+        self.refresh_plugin_widget_texts(render_width);
         let mut buffer = self.buffer.lock().expect("buffer mutex poisoned");
         let session_usage = self.session_usage_snapshot();
         let live_toasts = self.live_toasts();
@@ -1678,6 +1710,7 @@ impl App {
             search_pattern: self.search_pattern.as_deref(),
             search_line: self.search_line.as_ref(),
             search_match_count,
+            plugin_widgets: &self.plugin_widget_texts,
         };
         let screen_selection = self.screen_selection;
         let mut captured_rows = std::mem::take(&mut self.captured_rows);

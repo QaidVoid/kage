@@ -60,6 +60,11 @@ pub struct StatusCtx<'a> {
     /// is `0` when the focus isn't on any match. Painted as
     /// `match X/Y` on the right side of the status bar.
     pub search_match_count: Option<(usize, usize)>,
+    /// Pre-rendered output of any plugin-registered status-bar widgets,
+    /// in registration order. The host pre-renders each entry by
+    /// calling `LuaWidget::render(width)`; non-empty texts are painted
+    /// on the right edge before built-in pills.
+    pub plugin_widgets: &'a [String],
 }
 
 /// `Modifier` bit reserved as the per-cell "decoration" tag - the
@@ -204,6 +209,12 @@ fn render_status(
         left_spans.push(Span::styled(model.to_owned(), dim));
     }
     let mut right_spans: Vec<Span<'static>> = Vec::new();
+    for text in status.plugin_widgets {
+        if text.is_empty() {
+            continue;
+        }
+        right_spans.push(Span::styled(format!("{text}  "), dim));
+    }
     if let Some((current, total)) = status.search_match_count {
         let label = if total == 0 {
             "no match".to_owned()

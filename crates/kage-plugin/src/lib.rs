@@ -15,6 +15,7 @@ pub mod providers;
 pub mod runtime;
 pub mod tools;
 pub mod watcher;
+pub mod widgets;
 
 pub use api::{HostLog, LogLevel, SharedHostLog, StderrHostLog, default_host_log};
 pub use commands::{CommandOutput, LuaCommand, PluginArgSpec};
@@ -24,3 +25,4 @@ pub use providers::LuaProvider;
 pub use runtime::{PluginRuntime, PluginRuntimeBuilder, SANDBOX_REMOVALS, SharedLua};
 pub use tools::LuaTool;
 pub use watcher::PluginWatcher;
+pub use widgets::LuaWidget;

@@ -34,6 +34,7 @@ use crate::fs as plugin_fs;
 use crate::http;
 use crate::providers::{self, LuaProvider, RegisteredProviders, registered_providers};
 use crate::tools::{self, RegisteredTools, registered_tools};
+use crate::widgets::{self, LuaWidget, RegisteredWidgets, registered_widgets};
 
 /// Shared, mutex-guarded handle to the Lua state. Plugin-defined tools
 /// hold one of these so they can call back into Lua from the host's tool
@@ -49,6 +50,7 @@ pub struct PluginRuntime {
     tool_overrides: RegisteredTools,
     commands: RegisteredCommands,
     providers: RegisteredProviders,
+    widgets: RegisteredWidgets,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -160,6 +162,17 @@ impl PluginRuntime {
             .clone()
     }
 
+    /// Snapshot the status-bar widgets registered by plugins so far.
+    /// Each call returns a fresh `Vec`; the underlying [`LuaWidget`]s
+    /// are reference-counted and share their Lua handler across clones.
+    #[must_use]
+    pub fn registered_widgets(&self) -> Vec<Arc<LuaWidget>> {
+        self.widgets
+            .lock()
+            .expect("plugin widgets mutex poisoned")
+            .clone()
+    }
+
     /// Drop every registration that came from plugins (event handlers,
     /// tools, commands, providers) and replay every `*.lua` file in
     /// `dir`. Designed for hot reload between turns: a stale plugin
@@ -185,6 +198,10 @@ impl PluginRuntime {
         self.tool_overrides
             .lock()
             .expect("plugin tool overrides mutex poisoned")
+            .clear();
+        self.widgets
+            .lock()
+            .expect("plugin widgets mutex poisoned")
             .clear();
         self.commands
             .lock()
@@ -255,6 +272,7 @@ impl PluginRuntimeBuilder {
         let tool_override_registry = registered_tools();
         let command_registry = registered_commands();
         let provider_registry = registered_providers();
+        let widget_registry = registered_widgets();
         {
             let lua_guard = shared_lua.lock().expect("plugin lua mutex poisoned");
             tools::install_register_tool(
@@ -281,6 +299,12 @@ impl PluginRuntimeBuilder {
                 self.sink.clone(),
                 Arc::clone(&provider_registry),
             )?;
+            widgets::install_register_widget(
+                &lua_guard,
+                Arc::clone(&shared_lua),
+                self.sink.clone(),
+                Arc::clone(&widget_registry),
+            )?;
         }
         Ok(PluginRuntime {
             lua: shared_lua,
@@ -289,6 +313,7 @@ impl PluginRuntimeBuilder {
             tool_overrides: tool_override_registry,
             commands: command_registry,
             providers: provider_registry,
+            widgets: widget_registry,
         })
     }
 }

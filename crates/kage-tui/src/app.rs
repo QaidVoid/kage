@@ -2094,4 +2094,117 @@ mod tests {
             "mouse with no arg should be valid, got {result:?}"
         );
     }
+
+    // --- PN.10 keystroke-level e2e tests ---
+    //
+    // These tests drive the modal state machine with raw `KeyEvent`s
+    // and confirm that `:` and `/` both reach `run_command_validated`
+    // through `dispatch_key`. They are the last gate against regressing
+    // either pathway after the unification done in PN.6.
+
+    fn type_str(app: &mut App, s: &str) {
+        for c in s.chars() {
+            app.handle_key(key(c));
+        }
+    }
+
+    #[test]
+    fn colon_keystrokes_dispatch_quit_handler() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        // Default mode is Insert; switch to Normal so `:` is bound.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        let exit = app.handle_key(key(':'));
+        assert!(exit.is_none());
+        assert!(app.cmdline.is_some(), "':' should open the command line");
+        type_str(&mut app, "quit");
+        let exit = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(exit, Some(AppExit::Quit));
+        assert!(app.cmdline.is_none(), "successful submit closes cmdline");
+    }
+
+    #[test]
+    fn slash_keystrokes_dispatch_quit_handler() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        // Default mode is Insert. `/` only opens the palette when the
+        // input buffer is empty; that is the case for a fresh App.
+        let exit = app.handle_key(key('/'));
+        assert!(exit.is_none());
+        assert!(
+            app.slash_palette.is_some(),
+            "'/' should open the slash palette"
+        );
+        type_str(&mut app, "quit");
+        let exit = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(exit, Some(AppExit::Quit));
+        assert!(
+            app.slash_palette.is_none(),
+            "successful submit closes the palette"
+        );
+    }
+
+    #[test]
+    fn colon_tab_completes_to_lcp_and_opens_popup() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.handle_key(key(':'));
+        app.handle_key(key('m'));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let cl = app.cmdline.as_ref().expect("cmdline open");
+        assert_eq!(cl.text(), "mo", "tab should extend to LCP of model/mouse");
+        assert!(cl.popup_open(), "popup should be visible after LCP step");
+        assert_eq!(cl.selected(), None, "LCP step does not pre-select a row");
+    }
+
+    #[test]
+    fn slash_tab_completes_to_lcp_and_opens_popup() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        app.handle_key(key('/'));
+        app.handle_key(key('m'));
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        let sp = app.slash_palette.as_ref().expect("palette open");
+        let cl = sp.cmdline();
+        assert_eq!(cl.text(), "mo", "tab should extend to LCP of model/mouse");
+        assert!(cl.popup_open(), "popup should be visible after LCP step");
+    }
+
+    #[test]
+    fn colon_bad_arg_keeps_cmdline_open_with_error() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.handle_key(key(':'));
+        type_str(&mut app, "mouse mayb");
+        let exit = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(exit.is_none());
+        let cl = app.cmdline.as_ref().expect("cmdline stays open on bad arg");
+        assert!(cl.error().is_some(), "validation error should be set");
+    }
+
+    #[test]
+    fn slash_bad_arg_keeps_palette_open_with_error() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        app.handle_key(key('/'));
+        type_str(&mut app, "mouse mayb");
+        let exit = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(exit.is_none());
+        let sp = app
+            .slash_palette
+            .as_ref()
+            .expect("palette stays open on bad arg");
+        assert!(
+            sp.cmdline().error().is_some(),
+            "validation error should be set on the palette"
+        );
+    }
 }

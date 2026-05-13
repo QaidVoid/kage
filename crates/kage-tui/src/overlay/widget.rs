@@ -79,7 +79,12 @@ pub trait OverlayWidget: Send + Sync {
     /// the full content of `area`, including borders and inner
     /// chrome. The host blanks `area` with [`ratatui::widgets::Clear`]
     /// before the call, so overlays can assume a clean surface.
-    fn render(&self, area: Rect, buf: &mut Buffer, ctx: &OverlayCtx<'_>);
+    ///
+    /// `&mut self` (unlike [`crate::view::widget::BlockWidget::render`])
+    /// because interactive overlays persist layout state across
+    /// frames (scroll offset, last viewport size, animation cursor).
+    /// Blocks paint a content snapshot and have no such state.
+    fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &OverlayCtx<'_>);
 
     /// Drive the overlay by one key event.
     fn handle_key(&mut self, key: KeyEvent) -> OverlayAction;
@@ -96,7 +101,7 @@ impl OverlayWidget for EmptyOverlayWidget {
         Rect::new(0, 0, 0, 0)
     }
 
-    fn render(&self, _area: Rect, _buf: &mut Buffer, _ctx: &OverlayCtx<'_>) {}
+    fn render(&mut self, _area: Rect, _buf: &mut Buffer, _ctx: &OverlayCtx<'_>) {}
 
     fn handle_key(&mut self, _key: KeyEvent) -> OverlayAction {
         OverlayAction::PropagateKey
@@ -127,7 +132,8 @@ mod tests {
         let theme = Theme::default();
         let area = Rect::new(0, 0, 10, 3);
         let mut buf = Buffer::empty(area);
-        EmptyOverlayWidget.render(area, &mut buf, &ctx(&theme));
+        let mut w = EmptyOverlayWidget;
+        w.render(area, &mut buf, &ctx(&theme));
         for x in area.left()..area.right() {
             for y in area.top()..area.bottom() {
                 assert_eq!(buf[(x, y)].symbol(), " ");
@@ -154,7 +160,10 @@ mod tests {
         let action = OverlayAction::Resolve(serde_json::json!({ "id": "anthropic:claude" }));
         match action {
             OverlayAction::Resolve(v) => {
-                assert_eq!(v["id"], serde_json::Value::String("anthropic:claude".into()));
+                assert_eq!(
+                    v["id"],
+                    serde_json::Value::String("anthropic:claude".into())
+                );
             }
             _ => panic!("expected Resolve"),
         }

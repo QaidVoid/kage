@@ -27,7 +27,7 @@ use crate::error::TuiError;
 use crate::events::SharedBuffer;
 use crate::input::{InputAction, InputState, Mode, Pane};
 use crate::layout::{input_height_for, split};
-use crate::overlay::{OverlayPicker, PickerEvent};
+use crate::overlay::{OverlayAction, OverlayPicker};
 use crate::picker::PickItem;
 use crate::slash_palette::SlashPalette;
 use crate::terminal::Tui;
@@ -1397,16 +1397,19 @@ impl App {
 
     fn dispatch_picker_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> Option<AppExit> {
         let picker = self.picker.as_mut()?;
-        match picker.handle_key(key) {
-            PickerEvent::Pending => {}
-            PickerEvent::Cancelled => {
+        match crate::overlay::OverlayWidget::handle_key(picker, key) {
+            OverlayAction::Stay | OverlayAction::PropagateKey => {}
+            OverlayAction::Close => {
                 self.picker = None;
                 self.picker_kind = None;
             }
-            PickerEvent::Picked(value) => {
+            OverlayAction::Resolve(value) => {
                 let kind = self.picker_kind;
                 self.picker = None;
                 self.picker_kind = None;
+                let serde_json::Value::String(value) = value else {
+                    return None;
+                };
                 match kind {
                     Some(PickerKind::Model) => {
                         let _ = self.send_request(RunRequest::SwitchModel(value));

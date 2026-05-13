@@ -38,7 +38,7 @@ pub use layout::{
     INPUT_CHROME_LINES, INPUT_CONTENT_MAX_LINES, INPUT_CONTENT_MIN_LINES, INPUT_MAX_LINES,
     INPUT_MIN_LINES, Regions, STATUS_BOTTOM_LINES_DEFAULT, input_height_for, split,
 };
-pub use overlay::{OverlayPicker, PickerEvent};
+pub use overlay::{OverlayAction, OverlayCtx, OverlayPicker, OverlayWidget};
 pub use picker::{PickItem, pick};
 pub use slash_palette::SlashPalette;
 pub use terminal::Tui;

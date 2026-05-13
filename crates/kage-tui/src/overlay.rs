@@ -17,6 +17,7 @@ pub mod confirm;
 pub mod editor;
 pub mod input;
 pub mod picker;
+pub mod registry;
 pub mod slash;
 pub mod widget;
 
@@ -24,5 +25,9 @@ pub use confirm::{Choice, ConfirmOverlay};
 pub use editor::EditorOverlay;
 pub use input::InputOverlay;
 pub use picker::OverlayPicker;
+pub use registry::{
+    BuiltinConfirmFactory, BuiltinEditorFactory, BuiltinInputFactory, OverlayFactory,
+    OverlayRegistry,
+};
 pub use slash::{SlashContext, SlashPalette};
 pub use widget::{EmptyOverlayWidget, OverlayAction, OverlayCtx, OverlayWidget};

@@ -2542,16 +2542,16 @@ mod tests {
         // on the top status bar). Frame is wide enough so the pill
         // fits inside the card border.
         let mut buffer = Buffer::new();
-        let mut input = InputState::new();
+        let input = InputState::new();
         // Default mode is Insert; the pill should show * without
         // pressing 'i'.
         let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 8));
         assert!(
-            lines.iter().any(|l| l.contains("*")),
+            lines.iter().any(|l| l.contains('*')),
             "expected mode pill * somewhere on screen, got: {lines:#?}"
         );
         // Top status bar no longer carries the mode pill.
-        assert!(!lines[0].contains("*"));
+        assert!(!lines[0].contains('*'));
     }
 
     fn snapshot_with_cmdline(cmdline: &CommandLine, area: Rect) -> Vec<String> {

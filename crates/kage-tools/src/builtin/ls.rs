@@ -94,7 +94,10 @@ impl Tool for LsTool {
         Ok(ToolOutput {
             is_error: false,
             text,
-            structured: Some(serde_json::json!({"entries": count})),
+            structured: Some(serde_json::json!({
+                "count": count,
+                "entries": entries,
+            })),
             terminate: false,
         })
     }

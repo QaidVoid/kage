@@ -113,6 +113,7 @@ impl Tool for FindTool {
             structured: Some(serde_json::json!({
                 "pattern": input.pattern,
                 "matches": count,
+                "paths": matches,
             })),
             terminate: false,
         })

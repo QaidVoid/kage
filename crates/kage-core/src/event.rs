@@ -32,7 +32,26 @@ pub struct ToolOutput {
     pub is_error: bool,
     /// Stringified output. Goes verbatim into the next assistant turn's input.
     pub text: String,
-    /// Optional structured payload for richer rendering by the host.
+    /// Optional structured detail channel for richer rendering by the host.
+    ///
+    /// Tools that produce structured data (diffs, file lists, exit codes,
+    /// match counts) populate this field so the TUI can render a richer
+    /// view than the plain `text` body alone. Tools that produce only
+    /// human-readable text leave it as `None`.
+    ///
+    /// Conventional fields, by tool family:
+    /// * `bash`: `{ exit_code, stdout_truncated, stderr_truncated, cwd }`
+    /// * `edit`: `{ path, replacements, diff }` (diff is unified-diff text)
+    /// * `write`: `{ path, bytes }`
+    /// * `read`: typically `None`; the body is the entire payload
+    /// * `find` / `glob`: `{ pattern, matches, paths }`
+    /// * `grep`: `{ pattern, matches, truncated }`
+    /// * `ls`: `{ entries }` (the rendered listing as a list)
+    /// * `web_fetch`: `{ url, status, content_type, truncated }`
+    ///
+    /// Hosts MUST tolerate missing fields: never `unwrap` on a structured
+    /// payload. New tools should follow the same pattern when adding
+    /// new families.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub structured: Option<serde_json::Value>,
     /// When every tool in a single batch sets this to `true`, the loop

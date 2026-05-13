@@ -189,9 +189,7 @@ fn main() -> ExitCode {
 
     let mut tools = builtin_registry();
     if let Some(rt) = plugin_runtime.as_ref() {
-        for tool in rt.registered_tools() {
-            tools.register(tool);
-        }
+        apply_plugin_tools(&mut tools, rt);
     }
     let mut cx = AgentContext::new(resolved.model.clone(), &system_prompt).with_workdir(&workdir);
     if let Some(window) = runtime_env::context_window_for(&model) {
@@ -424,9 +422,7 @@ fn run_resume(
 
     let mut tools = builtin_registry();
     if let Some(rt) = plugin_runtime.as_ref() {
-        for tool in rt.registered_tools() {
-            tools.register(tool);
-        }
+        apply_plugin_tools(&mut tools, rt);
     }
     let mut cx = AgentContext::new(resolved.model.clone(), &replay.header.system_prompt)
         .with_workdir(&workdir);
@@ -613,6 +609,26 @@ pub(crate) fn state_root() -> Result<PathBuf, String> {
 /// `$XDG_DATA_HOME/kage/sessions` (default `~/.local/share/kage/sessions`).
 pub(crate) fn sessions_dir() -> Result<PathBuf, String> {
     Ok(data_root()?.join("sessions"))
+}
+
+/// Apply a plugin runtime's registered + overridden tools to `tools`.
+/// Plain registrations land first, then overrides; an override that
+/// names a tool not present after the first pass logs a warning to
+/// stderr (headless mode only - the TUI surfaces the same message
+/// through its plugin error channel).
+fn apply_plugin_tools(tools: &mut kage_tools::ToolRegistry, rt: &kage_plugin::PluginRuntime) {
+    for tool in rt.registered_tools() {
+        tools.register(tool);
+    }
+    for tool in rt.registered_tool_overrides() {
+        if tools.get(tool.name()).is_none() {
+            eprintln!(
+                "kage: override_tool: no tool named `{}` to override; treating as new registration",
+                tool.name()
+            );
+        }
+        tools.register(tool);
+    }
 }
 
 /// Resolve the XDG-style plugin directory:

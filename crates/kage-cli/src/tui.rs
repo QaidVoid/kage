@@ -88,6 +88,21 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         for tool in rt.registered_tools() {
             tools.register(tool);
         }
+        for tool in rt.registered_tool_overrides() {
+            if tools.get(tool.name()).is_none()
+                && let Ok(mut buf) = buffer.lock()
+            {
+                buf.push_custom(
+                    "kage:error",
+                    format!(
+                        "override_tool: no tool named `{}` to override; treating as new registration",
+                        tool.name()
+                    ),
+                    false,
+                );
+            }
+            tools.register(tool);
+        }
         for cmd in rt.registered_commands() {
             plugin_command_listing.push(kage_tui::command::PluginCommand {
                 name: cmd.name().to_owned(),

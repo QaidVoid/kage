@@ -46,6 +46,7 @@ pub struct PluginRuntime {
     lua: SharedLua,
     sink: SharedHostLog,
     tools: RegisteredTools,
+    tool_overrides: RegisteredTools,
     commands: RegisteredCommands,
     providers: RegisteredProviders,
 }
@@ -129,6 +130,18 @@ impl PluginRuntime {
             .clone()
     }
 
+    /// Snapshot the tool overrides registered by plugins via
+    /// `kage.override_tool`. The host applies these after built-ins
+    /// and `register_tool` entries; an override that names a tool not
+    /// present at apply time logs a warning instead of crashing.
+    #[must_use]
+    pub fn registered_tool_overrides(&self) -> Vec<Arc<dyn kage_tools::Tool>> {
+        self.tool_overrides
+            .lock()
+            .expect("plugin tool overrides mutex poisoned")
+            .clone()
+    }
+
     /// Snapshot the slash commands registered by plugins so far.
     #[must_use]
     pub fn registered_commands(&self) -> Vec<Arc<LuaCommand>> {
@@ -168,6 +181,10 @@ impl PluginRuntime {
         self.tools
             .lock()
             .expect("plugin tools mutex poisoned")
+            .clear();
+        self.tool_overrides
+            .lock()
+            .expect("plugin tool overrides mutex poisoned")
             .clear();
         self.commands
             .lock()
@@ -235,6 +252,7 @@ impl PluginRuntimeBuilder {
         http::install_http(&lua)?;
         let shared_lua: SharedLua = Arc::new(Mutex::new(lua));
         let tool_registry = registered_tools();
+        let tool_override_registry = registered_tools();
         let command_registry = registered_commands();
         let provider_registry = registered_providers();
         {
@@ -244,6 +262,12 @@ impl PluginRuntimeBuilder {
                 Arc::clone(&shared_lua),
                 self.sink.clone(),
                 Arc::clone(&tool_registry),
+            )?;
+            tools::install_override_tool(
+                &lua_guard,
+                Arc::clone(&shared_lua),
+                self.sink.clone(),
+                Arc::clone(&tool_override_registry),
             )?;
             commands::install_register_command(
                 &lua_guard,
@@ -262,6 +286,7 @@ impl PluginRuntimeBuilder {
             lua: shared_lua,
             sink: self.sink,
             tools: tool_registry,
+            tool_overrides: tool_override_registry,
             commands: command_registry,
             providers: provider_registry,
         })

@@ -176,9 +176,33 @@ pub fn install_register_tool(
     sink: SharedHostLog,
     registered: RegisteredTools,
 ) -> Result<(), PluginError> {
+    install_tool_fn(lua, shared_lua, sink, registered, "register_tool")
+}
+
+/// Install `kage.override_tool` on the running Lua state. Semantically
+/// identical to `register_tool` from the plugin's perspective; the host
+/// distinguishes overrides via [`PluginRuntime::registered_tool_overrides`]
+/// and replaces matching built-ins (logging a warning when no
+/// existing tool with the supplied name is present).
+pub fn install_override_tool(
+    lua: &Lua,
+    shared_lua: SharedLua,
+    sink: SharedHostLog,
+    overrides: RegisteredTools,
+) -> Result<(), PluginError> {
+    install_tool_fn(lua, shared_lua, sink, overrides, "override_tool")
+}
+
+fn install_tool_fn(
+    lua: &Lua,
+    shared_lua: SharedLua,
+    sink: SharedHostLog,
+    bucket: RegisteredTools,
+    fn_name: &'static str,
+) -> Result<(), PluginError> {
     let kage: Table = lua.globals().get("kage")?;
     kage.set(
-        "register_tool",
+        fn_name,
         lua.create_function(move |lua, spec: Table| {
             let name: String = spec.get("name")?;
             let description: String = spec.get("description")?;
@@ -197,7 +221,7 @@ pub fn install_register_tool(
                 sink: sink.clone(),
                 handler_key: Arc::new(key),
             };
-            registered
+            bucket
                 .lock()
                 .map_err(|_| mlua::Error::external("plugin tools registry poisoned"))?
                 .push(Arc::new(tool) as Arc<dyn Tool>);
@@ -347,5 +371,54 @@ mod tests {
         assert_eq!(parse_risk(Some("network")), Risk::Network);
         assert_eq!(parse_risk(Some("anything-else")), Risk::Read);
         assert_eq!(parse_risk(None), Risk::Read);
+    }
+
+    #[test]
+    fn override_tool_appends_to_overrides_registry_not_register_one() {
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval(
+            r"
+            kage.override_tool({
+                name = 'bash',
+                description = 'filtered bash',
+                schema = { type = 'object' },
+                risk = 'write',
+                execute = function() return 'noop' end,
+            })
+            ",
+        )
+        .unwrap();
+        assert!(
+            rt.registered_tools().is_empty(),
+            "override_tool should not populate registered_tools"
+        );
+        let overrides = rt.registered_tool_overrides();
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].name(), "bash");
+        assert_eq!(overrides[0].risk(), Risk::Write);
+    }
+
+    #[test]
+    fn override_tool_and_register_tool_are_independent() {
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval(
+            r"
+            kage.register_tool({
+                name = 'new_tool',
+                description = '',
+                schema = {},
+                execute = function() return '' end,
+            })
+            kage.override_tool({
+                name = 'bash',
+                description = '',
+                schema = {},
+                execute = function() return '' end,
+            })
+            ",
+        )
+        .unwrap();
+        assert_eq!(rt.registered_tools().len(), 1);
+        assert_eq!(rt.registered_tool_overrides().len(), 1);
     }
 }

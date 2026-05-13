@@ -11,6 +11,10 @@
 //! to the standalone picker - both share [`crate::picker::PickItem`],
 //! [`crate::picker::filter`], and [`crate::picker::compute_window`].
 
+pub mod widget;
+
+pub use widget::{EmptyOverlayWidget, OverlayAction, OverlayCtx, OverlayWidget};
+
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};

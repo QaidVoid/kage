@@ -5,14 +5,19 @@
 //! helpers added by future tasks) at the appropriate boundaries to fire
 //! every registered handler in registration order.
 //!
-//! Events the host fires are batched at turn boundaries, never mid-stream:
-//! a slow Lua handler cannot stall delta emission. v0.1 ships these names:
+//! Most host events fire at turn boundaries; the `message_*` events are the
+//! exception and fire mid-stream so plugins can react to partial output. The
+//! host skips JSON conversion when [`handler_count`] reports zero subscribers
+//! for the streaming names, so a no-listener configuration pays no per-delta
+//! cost. v0.1 ships these names:
 //! * `before_agent_start` - fires once before the first provider call, with
 //!   the system prompt and the first user message text in scope
 //! * `agent_start` - the agent loop is about to call the provider for the first time
 //! * `agent_end` - the loop has returned (success or error)
 //! * `turn_start` - a new inner-loop iteration is about to call the provider
 //! * `turn_end` - the provider stream for the current turn has closed
+//! * `message_start` - the model began a new assistant message (mid-stream)
+//! * `message_update` - the model emitted a text delta (mid-stream)
 //! * `message_end` - the model finished one assistant turn
 //! * `tool_call` - a tool invocation has begun
 //! * `tool_result` - a tool invocation produced an output
@@ -267,6 +272,54 @@ mod tests {
                 "before:be helpful|hi".to_owned(),
                 "turn_start:0".to_owned(),
                 "turn_end:0:false".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn streaming_events_dispatch_by_name() {
+        let lua = fresh_lua_with_kage();
+        lua.load(
+            r"
+            chunks = {}
+            kage.on('message_start', function(ev) chunks[#chunks + 1] = 'start:' .. ev.id end)
+            kage.on('message_update', function(ev)
+                chunks[#chunks + 1] = 'delta:' .. ev.delta
+            end)
+            ",
+        )
+        .exec()
+        .unwrap();
+
+        dispatch(
+            &lua,
+            "message_start",
+            &json!({"id": "m1"}),
+            &default_host_log(),
+        )
+        .unwrap();
+        dispatch(
+            &lua,
+            "message_update",
+            &json!({"id": "m1", "delta": "Hel"}),
+            &default_host_log(),
+        )
+        .unwrap();
+        dispatch(
+            &lua,
+            "message_update",
+            &json!({"id": "m1", "delta": "lo"}),
+            &default_host_log(),
+        )
+        .unwrap();
+
+        let chunks: Vec<String> = lua.globals().get("chunks").unwrap();
+        assert_eq!(
+            chunks,
+            vec![
+                "start:m1".to_owned(),
+                "delta:Hel".to_owned(),
+                "delta:lo".to_owned(),
             ]
         );
     }

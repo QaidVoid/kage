@@ -134,6 +134,22 @@ impl<H: Hooks> Hooks for PluginEventHooks<H> {
 
     fn on_event(&mut self, event: &LoopEvent) {
         match event {
+            LoopEvent::MessageStart { id } if self.runtime.handler_count("message_start") > 0 => {
+                let _ = self
+                    .runtime
+                    .dispatch_event("message_start", &json!({ "id": id.to_string() }));
+            }
+            LoopEvent::TextDelta { id, delta }
+                if self.runtime.handler_count("message_update") > 0 =>
+            {
+                let _ = self.runtime.dispatch_event(
+                    "message_update",
+                    &json!({
+                        "id": id.to_string(),
+                        "delta": delta,
+                    }),
+                );
+            }
             LoopEvent::MessageEnd { id, usage } => {
                 let _ = self.runtime.dispatch_event(
                     "message_end",

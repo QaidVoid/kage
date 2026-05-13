@@ -4,7 +4,8 @@
 
 #![allow(clippy::unreadable_literal)]
 
-use super::{ModelInfo, ProviderInfo};
+#[allow(unused_imports)]
+use super::{ModelCost, ModelInfo, ProviderInfo};
 
 /// Static provider/model catalog.
 pub static PROVIDERS: &[ProviderInfo] = &[
@@ -21,6 +22,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2024-10-22"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-3-5-haiku-latest",
@@ -29,6 +31,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2024-10-22"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-3-5-sonnet-20240620",
@@ -37,6 +40,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2024-06-20"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-3-5-sonnet-20241022",
@@ -45,6 +49,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2024-10-22"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-3-7-sonnet-20250219",
@@ -53,6 +58,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: true,
                 release_date: Some("2025-02-19"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-3-haiku-20240307",
@@ -61,6 +67,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: false,
                 release_date: Some("2024-03-13"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-3-opus-20240229",
@@ -69,6 +76,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: false,
                 release_date: Some("2024-02-29"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-3-sonnet-20240229",
@@ -77,6 +85,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: false,
                 release_date: Some("2024-03-04"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-haiku-4-5",
@@ -85,6 +94,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: true,
                 release_date: Some("2025-10-15"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-haiku-4-5-20251001",
@@ -93,6 +103,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: true,
                 release_date: Some("2025-10-15"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-opus-4-0",
@@ -101,6 +112,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32000),
                 reasoning: true,
                 release_date: Some("2025-05-22"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-opus-4-1",
@@ -109,6 +121,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32000),
                 reasoning: true,
                 release_date: Some("2025-08-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-opus-4-1-20250805",
@@ -117,6 +130,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32000),
                 reasoning: true,
                 release_date: Some("2025-08-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-opus-4-20250514",
@@ -125,6 +139,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32000),
                 reasoning: true,
                 release_date: Some("2025-05-22"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-opus-4-5",
@@ -133,6 +148,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: true,
                 release_date: Some("2025-11-24"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-opus-4-5-20251101",
@@ -141,6 +157,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: true,
                 release_date: Some("2025-11-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-opus-4-6",
@@ -149,6 +166,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2026-02-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-opus-4-7",
@@ -157,6 +175,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2026-04-16"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-sonnet-4-0",
@@ -165,6 +184,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: true,
                 release_date: Some("2025-05-22"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-sonnet-4-20250514",
@@ -173,6 +193,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: true,
                 release_date: Some("2025-05-22"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-sonnet-4-5",
@@ -181,6 +202,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: true,
                 release_date: Some("2025-09-29"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-sonnet-4-5-20250929",
@@ -189,6 +211,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: true,
                 release_date: Some("2025-09-29"),
+                cost: None,
             },
             ModelInfo {
                 id: "claude-sonnet-4-6",
@@ -197,6 +220,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: true,
                 release_date: Some("2026-02-17"),
+                cost: None,
             },
         ],
     },
@@ -213,6 +237,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2023-11-06"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-4-turbo",
@@ -221,6 +246,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: false,
                 release_date: Some("2023-11-06"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-4.1",
@@ -229,6 +255,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: false,
                 release_date: Some("2025-04-14"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-4.1-mini",
@@ -237,6 +264,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: false,
                 release_date: Some("2025-04-14"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-4.1-nano",
@@ -245,6 +273,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: false,
                 release_date: Some("2025-04-14"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-4o",
@@ -253,6 +282,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: false,
                 release_date: Some("2024-05-13"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-4o-2024-05-13",
@@ -261,6 +291,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: false,
                 release_date: Some("2024-05-13"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-4o-2024-08-06",
@@ -269,6 +300,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: false,
                 release_date: Some("2024-08-06"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-4o-2024-11-20",
@@ -277,6 +309,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: false,
                 release_date: Some("2024-11-20"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-4o-mini",
@@ -285,6 +318,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: false,
                 release_date: Some("2024-07-18"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5",
@@ -293,6 +327,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-08-07"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5-codex",
@@ -301,6 +336,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-09-15"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5-mini",
@@ -309,6 +345,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-08-07"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5-nano",
@@ -317,6 +354,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-08-07"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5-pro",
@@ -325,6 +363,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(272000),
                 reasoning: true,
                 release_date: Some("2025-10-06"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5.1",
@@ -333,6 +372,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-11-13"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5.1-chat-latest",
@@ -341,6 +381,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: true,
                 release_date: Some("2025-11-13"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5.1-codex",
@@ -349,6 +390,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-11-13"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5.1-codex-max",
@@ -357,6 +399,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-11-13"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5.1-codex-mini",
@@ -365,6 +408,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-11-13"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5.2",
@@ -373,6 +417,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-12-11"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5.2-chat-latest",
@@ -381,6 +426,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: true,
                 release_date: Some("2025-12-11"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5.2-codex",
@@ -389,6 +435,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-12-11"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5.2-pro",
@@ -397,6 +444,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-12-11"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5.3-chat-latest",
@@ -405,6 +453,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: false,
                 release_date: Some("2026-03-03"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5.3-codex",
@@ -413,6 +462,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2026-02-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5.3-codex-spark",
@@ -421,6 +471,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32000),
                 reasoning: true,
                 release_date: Some("2026-02-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5.4",
@@ -429,6 +480,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2026-03-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5.4-mini",
@@ -437,6 +489,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2026-03-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5.4-nano",
@@ -445,6 +498,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2026-03-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5.4-pro",
@@ -453,6 +507,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2026-03-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5.5",
@@ -461,6 +516,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2026-04-23"),
+                cost: None,
             },
             ModelInfo {
                 id: "gpt-5.5-pro",
@@ -469,6 +525,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2026-04-23"),
+                cost: None,
             },
             ModelInfo {
                 id: "o1",
@@ -477,6 +534,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(100000),
                 reasoning: true,
                 release_date: Some("2024-12-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "o1-pro",
@@ -485,6 +543,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(100000),
                 reasoning: true,
                 release_date: Some("2025-03-19"),
+                cost: None,
             },
             ModelInfo {
                 id: "o3",
@@ -493,6 +552,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(100000),
                 reasoning: true,
                 release_date: Some("2025-04-16"),
+                cost: None,
             },
             ModelInfo {
                 id: "o3-deep-research",
@@ -501,6 +561,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(100000),
                 reasoning: true,
                 release_date: Some("2024-06-26"),
+                cost: None,
             },
             ModelInfo {
                 id: "o3-mini",
@@ -509,6 +570,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(100000),
                 reasoning: true,
                 release_date: Some("2024-12-20"),
+                cost: None,
             },
             ModelInfo {
                 id: "o3-pro",
@@ -517,6 +579,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(100000),
                 reasoning: true,
                 release_date: Some("2025-06-10"),
+                cost: None,
             },
             ModelInfo {
                 id: "o4-mini",
@@ -525,6 +588,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(100000),
                 reasoning: true,
                 release_date: Some("2025-04-16"),
+                cost: None,
             },
             ModelInfo {
                 id: "o4-mini-deep-research",
@@ -533,6 +597,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(100000),
                 reasoning: true,
                 release_date: Some("2024-06-26"),
+                cost: None,
             },
         ],
     },
@@ -549,6 +614,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(98304),
                 reasoning: true,
                 release_date: Some("2025-07-28"),
+                cost: None,
             },
             ModelInfo {
                 id: "glm-4.5-air",
@@ -557,6 +623,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(98304),
                 reasoning: true,
                 release_date: Some("2025-07-28"),
+                cost: None,
             },
             ModelInfo {
                 id: "glm-4.5-flash",
@@ -565,6 +632,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(98304),
                 reasoning: true,
                 release_date: Some("2025-07-28"),
+                cost: None,
             },
             ModelInfo {
                 id: "glm-4.5v",
@@ -573,6 +641,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: true,
                 release_date: Some("2025-08-11"),
+                cost: None,
             },
             ModelInfo {
                 id: "glm-4.6",
@@ -581,6 +650,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2025-09-30"),
+                cost: None,
             },
             ModelInfo {
                 id: "glm-4.6v",
@@ -589,6 +659,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: true,
                 release_date: Some("2025-12-08"),
+                cost: None,
             },
             ModelInfo {
                 id: "glm-4.7",
@@ -597,6 +668,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2025-12-22"),
+                cost: None,
             },
             ModelInfo {
                 id: "glm-4.7-flash",
@@ -605,6 +677,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2026-01-19"),
+                cost: None,
             },
             ModelInfo {
                 id: "glm-4.7-flashx",
@@ -613,6 +686,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2026-01-19"),
+                cost: None,
             },
             ModelInfo {
                 id: "glm-5",
@@ -621,6 +695,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2026-02-11"),
+                cost: None,
             },
             ModelInfo {
                 id: "glm-5-turbo",
@@ -629,6 +704,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2026-03-16"),
+                cost: None,
             },
             ModelInfo {
                 id: "glm-5.1",
@@ -637,6 +713,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2026-03-27"),
+                cost: None,
             },
             ModelInfo {
                 id: "glm-5v-turbo",
@@ -645,6 +722,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2026-04-01"),
+                cost: None,
             },
         ],
     },
@@ -661,6 +739,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(98304),
                 reasoning: true,
                 release_date: Some("2025-07-28"),
+                cost: None,
             },
             ModelInfo {
                 id: "glm-4.7",
@@ -669,6 +748,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2025-12-22"),
+                cost: None,
             },
             ModelInfo {
                 id: "glm-5-turbo",
@@ -677,6 +757,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2026-03-16"),
+                cost: None,
             },
             ModelInfo {
                 id: "glm-5.1",
@@ -685,6 +766,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2026-03-27"),
+                cost: None,
             },
             ModelInfo {
                 id: "glm-5v-turbo",
@@ -693,6 +775,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2026-04-01"),
+                cost: None,
             },
         ],
     },
@@ -709,6 +792,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(384000),
                 reasoning: false,
                 release_date: Some("2025-12-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "deepseek-reasoner",
@@ -717,6 +801,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(384000),
                 reasoning: true,
                 release_date: Some("2025-12-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "deepseek-v4-flash",
@@ -725,6 +810,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(384000),
                 reasoning: true,
                 release_date: Some("2026-04-24"),
+                cost: None,
             },
             ModelInfo {
                 id: "deepseek-v4-pro",
@@ -733,6 +819,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(384000),
                 reasoning: true,
                 release_date: Some("2026-04-24"),
+                cost: None,
             },
         ],
     },
@@ -749,6 +836,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: true,
                 release_date: Some("2025-01-20"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemma2-9b-it",
@@ -757,6 +845,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2024-06-27"),
+                cost: None,
             },
             ModelInfo {
                 id: "groq/compound",
@@ -765,6 +854,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: true,
                 release_date: Some("2025-09-04"),
+                cost: None,
             },
             ModelInfo {
                 id: "groq/compound-mini",
@@ -773,6 +863,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: true,
                 release_date: Some("2025-09-04"),
+                cost: None,
             },
             ModelInfo {
                 id: "llama-3.1-8b-instant",
@@ -781,6 +872,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: false,
                 release_date: Some("2024-07-23"),
+                cost: None,
             },
             ModelInfo {
                 id: "llama-3.3-70b-versatile",
@@ -789,6 +881,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: false,
                 release_date: Some("2024-12-06"),
+                cost: None,
             },
             ModelInfo {
                 id: "llama3-70b-8192",
@@ -797,6 +890,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2024-04-18"),
+                cost: None,
             },
             ModelInfo {
                 id: "llama3-8b-8192",
@@ -805,6 +899,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2024-04-18"),
+                cost: None,
             },
             ModelInfo {
                 id: "meta-llama/llama-4-maverick-17b-128e-instruct",
@@ -813,6 +908,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2025-04-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "meta-llama/llama-4-scout-17b-16e-instruct",
@@ -821,6 +917,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2025-04-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistral-saba-24b",
@@ -829,6 +926,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: false,
                 release_date: Some("2025-02-06"),
+                cost: None,
             },
             ModelInfo {
                 id: "moonshotai/kimi-k2-instruct",
@@ -837,6 +935,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: false,
                 release_date: Some("2025-07-14"),
+                cost: None,
             },
             ModelInfo {
                 id: "moonshotai/kimi-k2-instruct-0905",
@@ -845,6 +944,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: false,
                 release_date: Some("2025-09-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-oss-120b",
@@ -853,6 +953,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-08-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-oss-20b",
@@ -861,6 +962,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-08-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-oss-safeguard-20b",
@@ -869,6 +971,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-03-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "qwen-qwq-32b",
@@ -877,6 +980,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: true,
                 release_date: Some("2024-11-27"),
+                cost: None,
             },
             ModelInfo {
                 id: "qwen/qwen3-32b",
@@ -885,6 +989,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(40960),
                 reasoning: true,
                 release_date: Some("2024-12-23"),
+                cost: None,
             },
         ],
     },
@@ -901,6 +1006,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: false,
                 release_date: Some("2024-05-29"),
+                cost: None,
             },
             ModelInfo {
                 id: "devstral-2512",
@@ -909,6 +1015,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: false,
                 release_date: Some("2025-12-09"),
+                cost: None,
             },
             ModelInfo {
                 id: "devstral-medium-2507",
@@ -917,6 +1024,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: false,
                 release_date: Some("2025-07-10"),
+                cost: None,
             },
             ModelInfo {
                 id: "devstral-medium-latest",
@@ -925,6 +1033,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: false,
                 release_date: Some("2025-12-02"),
+                cost: None,
             },
             ModelInfo {
                 id: "devstral-small-2505",
@@ -933,6 +1042,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: false,
                 release_date: Some("2025-05-07"),
+                cost: None,
             },
             ModelInfo {
                 id: "devstral-small-2507",
@@ -941,6 +1051,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: false,
                 release_date: Some("2025-07-10"),
+                cost: None,
             },
             ModelInfo {
                 id: "labs-devstral-small-2512",
@@ -949,6 +1060,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(256000),
                 reasoning: false,
                 release_date: Some("2025-12-09"),
+                cost: None,
             },
             ModelInfo {
                 id: "magistral-medium-latest",
@@ -957,6 +1069,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: true,
                 release_date: Some("2025-03-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "magistral-small",
@@ -965,6 +1078,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-03-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "ministral-3b-latest",
@@ -973,6 +1087,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: false,
                 release_date: Some("2024-10-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "ministral-8b-latest",
@@ -981,6 +1096,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: false,
                 release_date: Some("2024-10-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistral-large-2411",
@@ -989,6 +1105,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: false,
                 release_date: Some("2024-11-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistral-large-2512",
@@ -997,6 +1114,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: false,
                 release_date: Some("2024-11-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistral-large-latest",
@@ -1005,6 +1123,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: false,
                 release_date: Some("2024-11-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistral-medium-2505",
@@ -1013,6 +1132,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: false,
                 release_date: Some("2025-05-07"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistral-medium-2508",
@@ -1021,6 +1141,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: false,
                 release_date: Some("2025-08-12"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistral-medium-2604",
@@ -1029,6 +1150,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: true,
                 release_date: Some("2026-04-29"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistral-medium-latest",
@@ -1037,6 +1159,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: true,
                 release_date: Some("2026-04-29"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistral-nemo",
@@ -1045,6 +1168,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: false,
                 release_date: Some("2024-07-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistral-small-2506",
@@ -1053,6 +1177,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: false,
                 release_date: Some("2025-06-20"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistral-small-2603",
@@ -1061,6 +1186,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(256000),
                 reasoning: true,
                 release_date: Some("2026-03-16"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistral-small-latest",
@@ -1069,6 +1195,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(256000),
                 reasoning: true,
                 release_date: Some("2026-03-16"),
+                cost: None,
             },
             ModelInfo {
                 id: "open-mistral-7b",
@@ -1077,6 +1204,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8000),
                 reasoning: false,
                 release_date: Some("2023-09-27"),
+                cost: None,
             },
             ModelInfo {
                 id: "open-mixtral-8x22b",
@@ -1085,6 +1213,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: false,
                 release_date: Some("2024-04-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "open-mixtral-8x7b",
@@ -1093,6 +1222,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32000),
                 reasoning: false,
                 release_date: Some("2023-12-11"),
+                cost: None,
             },
             ModelInfo {
                 id: "pixtral-12b",
@@ -1101,6 +1231,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: false,
                 release_date: Some("2024-09-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "pixtral-large-latest",
@@ -1109,6 +1240,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: false,
                 release_date: Some("2024-11-01"),
+                cost: None,
             },
         ],
     },
@@ -1125,6 +1257,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: true,
                 release_date: Some("2025-08-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "llama3.1-8b",
@@ -1133,6 +1266,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8000),
                 reasoning: false,
                 release_date: Some("2025-01-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "qwen-3-235b-a22b-instruct-2507",
@@ -1141,6 +1275,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32000),
                 reasoning: false,
                 release_date: Some("2025-07-22"),
+                cost: None,
             },
             ModelInfo {
                 id: "zai-glm-4.7",
@@ -1149,6 +1284,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(40000),
                 reasoning: false,
                 release_date: Some("2026-01-10"),
+                cost: None,
             },
         ],
     },
@@ -1165,6 +1301,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2024-08-20"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-2-1212",
@@ -1173,6 +1310,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2024-12-12"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-2-latest",
@@ -1181,6 +1319,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2024-08-20"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-2-vision",
@@ -1189,6 +1328,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: false,
                 release_date: Some("2024-08-20"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-2-vision-1212",
@@ -1197,6 +1337,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: false,
                 release_date: Some("2024-08-20"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-2-vision-latest",
@@ -1205,6 +1346,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: false,
                 release_date: Some("2024-08-20"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-3",
@@ -1213,6 +1355,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2025-02-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-3-fast",
@@ -1221,6 +1364,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2025-02-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-3-fast-latest",
@@ -1229,6 +1373,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2025-02-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-3-latest",
@@ -1237,6 +1382,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2025-02-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-3-mini",
@@ -1245,6 +1391,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: true,
                 release_date: Some("2025-02-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-3-mini-fast",
@@ -1253,6 +1400,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: true,
                 release_date: Some("2025-02-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-3-mini-fast-latest",
@@ -1261,6 +1409,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: true,
                 release_date: Some("2025-02-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-3-mini-latest",
@@ -1269,6 +1418,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: true,
                 release_date: Some("2025-02-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-4",
@@ -1277,6 +1427,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: true,
                 release_date: Some("2025-07-09"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-4-1-fast",
@@ -1285,6 +1436,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(30000),
                 reasoning: true,
                 release_date: Some("2025-11-19"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-4-1-fast-non-reasoning",
@@ -1293,6 +1445,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(30000),
                 reasoning: false,
                 release_date: Some("2025-11-19"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-4-fast",
@@ -1301,6 +1454,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(30000),
                 reasoning: true,
                 release_date: Some("2025-09-19"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-4-fast-non-reasoning",
@@ -1309,6 +1463,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(30000),
                 reasoning: false,
                 release_date: Some("2025-09-19"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-4.20-0309-non-reasoning",
@@ -1317,6 +1472,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(30000),
                 reasoning: false,
                 release_date: Some("2026-03-09"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-4.20-0309-reasoning",
@@ -1325,6 +1481,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(30000),
                 reasoning: true,
                 release_date: Some("2026-03-09"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-4.3",
@@ -1333,6 +1490,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(30000),
                 reasoning: true,
                 release_date: Some("2026-05-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-beta",
@@ -1341,6 +1499,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: false,
                 release_date: Some("2024-11-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-code-fast-1",
@@ -1349,6 +1508,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(10000),
                 reasoning: true,
                 release_date: Some("2025-08-28"),
+                cost: None,
             },
             ModelInfo {
                 id: "grok-vision-beta",
@@ -1357,6 +1517,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: false,
                 release_date: Some("2024-11-01"),
+                cost: None,
             },
         ],
     },
@@ -1373,6 +1534,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2024-10-22"),
+                cost: None,
             },
             ModelInfo {
                 id: "anthropic/claude-3.7-sonnet",
@@ -1381,6 +1543,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-02-19"),
+                cost: None,
             },
             ModelInfo {
                 id: "anthropic/claude-haiku-4.5",
@@ -1389,6 +1552,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: true,
                 release_date: Some("2025-10-15"),
+                cost: None,
             },
             ModelInfo {
                 id: "anthropic/claude-opus-4",
@@ -1397,6 +1561,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32000),
                 reasoning: true,
                 release_date: Some("2025-05-22"),
+                cost: None,
             },
             ModelInfo {
                 id: "anthropic/claude-opus-4.1",
@@ -1405,6 +1570,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32000),
                 reasoning: true,
                 release_date: Some("2025-08-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "anthropic/claude-opus-4.5",
@@ -1413,6 +1579,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32000),
                 reasoning: true,
                 release_date: Some("2025-11-24"),
+                cost: None,
             },
             ModelInfo {
                 id: "anthropic/claude-opus-4.6",
@@ -1421,6 +1588,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2026-02-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "anthropic/claude-opus-4.7",
@@ -1429,6 +1597,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2026-04-16"),
+                cost: None,
             },
             ModelInfo {
                 id: "anthropic/claude-sonnet-4",
@@ -1437,6 +1606,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: true,
                 release_date: Some("2025-05-22"),
+                cost: None,
             },
             ModelInfo {
                 id: "anthropic/claude-sonnet-4.5",
@@ -1445,6 +1615,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: true,
                 release_date: Some("2025-09-29"),
+                cost: None,
             },
             ModelInfo {
                 id: "anthropic/claude-sonnet-4.6",
@@ -1453,6 +1624,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2026-02-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "arcee-ai/trinity-large-preview:free",
@@ -1461,6 +1633,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: false,
                 release_date: Some("2026-01-28"),
+                cost: None,
             },
             ModelInfo {
                 id: "arcee-ai/trinity-large-thinking",
@@ -1469,6 +1642,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(80000),
                 reasoning: true,
                 release_date: Some("2026-04-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "deepseek/deepseek-chat-v3.1",
@@ -1477,6 +1651,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(163840),
                 reasoning: true,
                 release_date: Some("2025-08-21"),
+                cost: None,
             },
             ModelInfo {
                 id: "deepseek/deepseek-r1",
@@ -1485,6 +1660,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16000),
                 reasoning: true,
                 release_date: Some("2025-01-20"),
+                cost: None,
             },
             ModelInfo {
                 id: "deepseek/deepseek-v3.1-terminus",
@@ -1493,6 +1669,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-09-22"),
+                cost: None,
             },
             ModelInfo {
                 id: "deepseek/deepseek-v3.1-terminus:exacto",
@@ -1501,6 +1678,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-09-22"),
+                cost: None,
             },
             ModelInfo {
                 id: "deepseek/deepseek-v3.2",
@@ -1509,6 +1687,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-12-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "deepseek/deepseek-v3.2-speciale",
@@ -1517,6 +1696,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-12-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "deepseek/deepseek-v4-flash",
@@ -1525,6 +1705,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(393216),
                 reasoning: true,
                 release_date: Some("2026-04-24"),
+                cost: None,
             },
             ModelInfo {
                 id: "deepseek/deepseek-v4-pro",
@@ -1533,6 +1714,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(393216),
                 reasoning: true,
                 release_date: Some("2026-04-24"),
+                cost: None,
             },
             ModelInfo {
                 id: "google/gemini-2.0-flash-001",
@@ -1541,6 +1723,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2024-12-11"),
+                cost: None,
             },
             ModelInfo {
                 id: "google/gemini-2.5-flash",
@@ -1549,6 +1732,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-07-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "google/gemini-2.5-flash-lite",
@@ -1557,6 +1741,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-06-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "google/gemini-2.5-flash-lite-preview-09-2025",
@@ -1565,6 +1750,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-09-25"),
+                cost: None,
             },
             ModelInfo {
                 id: "google/gemini-2.5-flash-preview-09-2025",
@@ -1573,6 +1759,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-09-25"),
+                cost: None,
             },
             ModelInfo {
                 id: "google/gemini-2.5-pro",
@@ -1581,6 +1768,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-03-20"),
+                cost: None,
             },
             ModelInfo {
                 id: "google/gemini-2.5-pro-preview-05-06",
@@ -1589,6 +1777,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-05-06"),
+                cost: None,
             },
             ModelInfo {
                 id: "google/gemini-2.5-pro-preview-06-05",
@@ -1597,6 +1786,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-06-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "google/gemini-3-flash-preview",
@@ -1605,6 +1795,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-12-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "google/gemini-3-pro-preview",
@@ -1613,6 +1804,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(66000),
                 reasoning: true,
                 release_date: Some("2025-11-18"),
+                cost: None,
             },
             ModelInfo {
                 id: "google/gemini-3.1-flash-lite-preview",
@@ -1621,6 +1813,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2026-03-03"),
+                cost: None,
             },
             ModelInfo {
                 id: "google/gemini-3.1-pro-preview",
@@ -1629,6 +1822,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2026-02-19"),
+                cost: None,
             },
             ModelInfo {
                 id: "google/gemini-3.1-pro-preview-customtools",
@@ -1637,6 +1831,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2026-02-19"),
+                cost: None,
             },
             ModelInfo {
                 id: "google/gemma-3-27b-it",
@@ -1645,6 +1840,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(96000),
                 reasoning: false,
                 release_date: Some("2025-03-12"),
+                cost: None,
             },
             ModelInfo {
                 id: "google/gemma-3-27b-it:free",
@@ -1653,6 +1849,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2025-03-12"),
+                cost: None,
             },
             ModelInfo {
                 id: "google/gemma-4-26b-a4b-it",
@@ -1661,6 +1858,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: true,
                 release_date: Some("2026-04-03"),
+                cost: None,
             },
             ModelInfo {
                 id: "google/gemma-4-26b-a4b-it:free",
@@ -1669,6 +1867,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: true,
                 release_date: Some("2026-04-03"),
+                cost: None,
             },
             ModelInfo {
                 id: "google/gemma-4-31b-it",
@@ -1677,6 +1876,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: true,
                 release_date: Some("2026-04-02"),
+                cost: None,
             },
             ModelInfo {
                 id: "google/gemma-4-31b-it:free",
@@ -1685,6 +1885,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: true,
                 release_date: Some("2026-04-02"),
+                cost: None,
             },
             ModelInfo {
                 id: "inception/mercury-2",
@@ -1693,6 +1894,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(50000),
                 reasoning: true,
                 release_date: Some("2026-03-04"),
+                cost: None,
             },
             ModelInfo {
                 id: "meta-llama/llama-3.3-70b-instruct:free",
@@ -1701,6 +1903,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: false,
                 release_date: Some("2024-12-06"),
+                cost: None,
             },
             ModelInfo {
                 id: "minimax/minimax-01",
@@ -1709,6 +1912,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(1000000),
                 reasoning: true,
                 release_date: Some("2025-01-15"),
+                cost: None,
             },
             ModelInfo {
                 id: "minimax/minimax-m1",
@@ -1717,6 +1921,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(40000),
                 reasoning: true,
                 release_date: Some("2025-06-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "minimax/minimax-m2",
@@ -1725,6 +1930,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(118000),
                 reasoning: true,
                 release_date: Some("2025-10-23"),
+                cost: None,
             },
             ModelInfo {
                 id: "minimax/minimax-m2.1",
@@ -1733,6 +1939,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2025-12-23"),
+                cost: None,
             },
             ModelInfo {
                 id: "minimax/minimax-m2.5",
@@ -1741,6 +1948,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2026-02-12"),
+                cost: None,
             },
             ModelInfo {
                 id: "minimax/minimax-m2.5:free",
@@ -1749,6 +1957,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2026-02-12"),
+                cost: None,
             },
             ModelInfo {
                 id: "minimax/minimax-m2.7",
@@ -1757,6 +1966,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2026-03-18"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistralai/codestral-2508",
@@ -1765,6 +1975,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(256000),
                 reasoning: false,
                 release_date: Some("2025-08-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistralai/devstral-2512",
@@ -1773,6 +1984,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: false,
                 release_date: Some("2025-09-12"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistralai/devstral-medium-2507",
@@ -1781,6 +1993,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: false,
                 release_date: Some("2025-07-10"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistralai/devstral-small-2505",
@@ -1789,6 +2002,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: false,
                 release_date: Some("2025-05-07"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistralai/devstral-small-2507",
@@ -1797,6 +2011,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: false,
                 release_date: Some("2025-07-10"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistralai/mistral-medium-3",
@@ -1805,6 +2020,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: false,
                 release_date: Some("2025-05-07"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistralai/mistral-medium-3.1",
@@ -1813,6 +2029,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: false,
                 release_date: Some("2025-08-12"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistralai/mistral-small-2603",
@@ -1821,6 +2038,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: true,
                 release_date: Some("2026-03-16"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistralai/mistral-small-3.1-24b-instruct",
@@ -1829,6 +2047,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2025-03-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "mistralai/mistral-small-3.2-24b-instruct",
@@ -1837,6 +2056,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2025-06-20"),
+                cost: None,
             },
             ModelInfo {
                 id: "moonshotai/kimi-k2",
@@ -1845,6 +2065,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: false,
                 release_date: Some("2025-07-11"),
+                cost: None,
             },
             ModelInfo {
                 id: "moonshotai/kimi-k2-0905",
@@ -1853,6 +2074,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: false,
                 release_date: Some("2025-09-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "moonshotai/kimi-k2-0905:exacto",
@@ -1861,6 +2083,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: false,
                 release_date: Some("2025-09-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "moonshotai/kimi-k2-thinking",
@@ -1869,6 +2092,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: true,
                 release_date: Some("2025-11-06"),
+                cost: None,
             },
             ModelInfo {
                 id: "moonshotai/kimi-k2.5",
@@ -1877,6 +2101,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: true,
                 release_date: Some("2026-01-27"),
+                cost: None,
             },
             ModelInfo {
                 id: "moonshotai/kimi-k2.6",
@@ -1885,6 +2110,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: true,
                 release_date: Some("2026-04-20"),
+                cost: None,
             },
             ModelInfo {
                 id: "nousresearch/hermes-4-405b",
@@ -1893,6 +2119,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2025-08-25"),
+                cost: None,
             },
             ModelInfo {
                 id: "nousresearch/hermes-4-70b",
@@ -1901,6 +2128,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2025-08-25"),
+                cost: None,
             },
             ModelInfo {
                 id: "nvidia/nemotron-3-nano-30b-a3b:free",
@@ -1909,6 +2137,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(256000),
                 reasoning: true,
                 release_date: Some("2025-12-14"),
+                cost: None,
             },
             ModelInfo {
                 id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
@@ -1917,6 +2146,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2026-04-28"),
+                cost: None,
             },
             ModelInfo {
                 id: "nvidia/nemotron-3-super-120b-a12b",
@@ -1925,6 +2155,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: true,
                 release_date: Some("2026-03-11"),
+                cost: None,
             },
             ModelInfo {
                 id: "nvidia/nemotron-3-super-120b-a12b:free",
@@ -1933,6 +2164,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: true,
                 release_date: Some("2026-03-11"),
+                cost: None,
             },
             ModelInfo {
                 id: "nvidia/nemotron-nano-12b-v2-vl:free",
@@ -1941,6 +2173,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-10-28"),
+                cost: None,
             },
             ModelInfo {
                 id: "nvidia/nemotron-nano-9b-v2",
@@ -1949,6 +2182,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2025-08-18"),
+                cost: None,
             },
             ModelInfo {
                 id: "nvidia/nemotron-nano-9b-v2:free",
@@ -1957,6 +2191,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-09-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-4.1",
@@ -1965,6 +2200,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: false,
                 release_date: Some("2025-04-14"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-4.1-mini",
@@ -1973,6 +2209,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: false,
                 release_date: Some("2025-04-14"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-4o-mini",
@@ -1981,6 +2218,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: false,
                 release_date: Some("2024-07-18"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5",
@@ -1989,6 +2227,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-08-07"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5-codex",
@@ -1997,6 +2236,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-09-15"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5-image",
@@ -2005,6 +2245,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-10-14"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5-mini",
@@ -2013,6 +2254,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-08-07"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5-nano",
@@ -2021,6 +2263,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-08-07"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5-pro",
@@ -2029,6 +2272,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(272000),
                 reasoning: true,
                 release_date: Some("2025-10-06"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5.1",
@@ -2037,6 +2281,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-11-13"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5.1-chat",
@@ -2045,6 +2290,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: true,
                 release_date: Some("2025-11-13"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5.1-codex",
@@ -2053,6 +2299,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-11-13"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5.1-codex-max",
@@ -2061,6 +2308,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-11-13"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5.1-codex-mini",
@@ -2069,6 +2317,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(100000),
                 reasoning: true,
                 release_date: Some("2025-11-13"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5.2",
@@ -2077,6 +2326,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-12-11"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5.2-chat",
@@ -2085,6 +2335,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: true,
                 release_date: Some("2025-12-11"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5.2-codex",
@@ -2093,6 +2344,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2026-01-14"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5.2-pro",
@@ -2101,6 +2353,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-12-11"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5.3-codex",
@@ -2109,6 +2362,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2026-02-24"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5.4",
@@ -2117,6 +2371,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2026-03-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5.4-mini",
@@ -2125,6 +2380,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2026-03-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5.4-nano",
@@ -2133,6 +2389,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: false,
                 release_date: Some("2026-03-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5.4-pro",
@@ -2141,6 +2398,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2026-03-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5.5",
@@ -2149,6 +2407,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2026-04-23"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-5.5-pro",
@@ -2157,6 +2416,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2026-04-23"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-oss-120b",
@@ -2165,6 +2425,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: true,
                 release_date: Some("2025-08-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-oss-120b:exacto",
@@ -2173,6 +2434,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: true,
                 release_date: Some("2025-08-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-oss-120b:free",
@@ -2181,6 +2443,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: true,
                 release_date: Some("2025-08-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-oss-20b",
@@ -2189,6 +2452,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: true,
                 release_date: Some("2025-08-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-oss-20b:free",
@@ -2197,6 +2461,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: true,
                 release_date: Some("2025-08-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/gpt-oss-safeguard-20b",
@@ -2205,6 +2470,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-10-29"),
+                cost: None,
             },
             ModelInfo {
                 id: "openai/o4-mini",
@@ -2213,6 +2479,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(100000),
                 reasoning: true,
                 release_date: Some("2025-04-16"),
+                cost: None,
             },
             ModelInfo {
                 id: "openrouter/elephant-alpha",
@@ -2221,6 +2488,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: true,
                 release_date: Some("2026-04-13"),
+                cost: None,
             },
             ModelInfo {
                 id: "openrouter/free",
@@ -2229,6 +2497,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8000),
                 reasoning: true,
                 release_date: Some("2026-02-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "openrouter/owl-alpha",
@@ -2237,6 +2506,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: true,
                 release_date: Some("2026-04-28"),
+                cost: None,
             },
             ModelInfo {
                 id: "openrouter/pareto-code",
@@ -2245,6 +2515,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(200000),
                 reasoning: true,
                 release_date: Some("2026-04-21"),
+                cost: None,
             },
             ModelInfo {
                 id: "poolside/laguna-m.1:free",
@@ -2253,6 +2524,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: true,
                 release_date: Some("2026-04-28"),
+                cost: None,
             },
             ModelInfo {
                 id: "poolside/laguna-xs.2:free",
@@ -2261,6 +2533,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: true,
                 release_date: Some("2026-04-28"),
+                cost: None,
             },
             ModelInfo {
                 id: "prime-intellect/intellect-3",
@@ -2269,6 +2542,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: true,
                 release_date: Some("2025-01-15"),
+                cost: None,
             },
             ModelInfo {
                 id: "qwen/qwen-3.6-27b",
@@ -2277,6 +2551,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(81920),
                 reasoning: false,
                 release_date: Some("2026-04-22"),
+                cost: None,
             },
             ModelInfo {
                 id: "qwen/qwen-plus",
@@ -2285,6 +2560,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: false,
                 release_date: Some("2025-01-25"),
+                cost: None,
             },
             ModelInfo {
                 id: "qwen/qwen3-235b-a22b-07-25",
@@ -2293,6 +2569,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: false,
                 release_date: Some("2025-04-28"),
+                cost: None,
             },
             ModelInfo {
                 id: "qwen/qwen3-235b-a22b-thinking-2507",
@@ -2301,6 +2578,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(81920),
                 reasoning: true,
                 release_date: Some("2025-07-25"),
+                cost: None,
             },
             ModelInfo {
                 id: "qwen/qwen3-30b-a3b-instruct-2507",
@@ -2309,6 +2587,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262000),
                 reasoning: false,
                 release_date: Some("2025-07-29"),
+                cost: None,
             },
             ModelInfo {
                 id: "qwen/qwen3-30b-a3b-thinking-2507",
@@ -2317,6 +2596,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262000),
                 reasoning: true,
                 release_date: Some("2025-07-29"),
+                cost: None,
             },
             ModelInfo {
                 id: "qwen/qwen3-coder",
@@ -2325,6 +2605,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(66536),
                 reasoning: false,
                 release_date: Some("2025-07-23"),
+                cost: None,
             },
             ModelInfo {
                 id: "qwen/qwen3-coder-30b-a3b-instruct",
@@ -2333,6 +2614,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: false,
                 release_date: Some("2025-07-31"),
+                cost: None,
             },
             ModelInfo {
                 id: "qwen/qwen3-coder-flash",
@@ -2341,6 +2623,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(66536),
                 reasoning: false,
                 release_date: Some("2025-07-23"),
+                cost: None,
             },
             ModelInfo {
                 id: "qwen/qwen3-coder-plus",
@@ -2349,6 +2632,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: false,
                 release_date: Some("2025-09-23"),
+                cost: None,
             },
             ModelInfo {
                 id: "qwen/qwen3-coder:exacto",
@@ -2357,6 +2641,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: false,
                 release_date: Some("2025-07-23"),
+                cost: None,
             },
             ModelInfo {
                 id: "qwen/qwen3-max",
@@ -2365,6 +2650,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: true,
                 release_date: Some("2025-09-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "qwen/qwen3-next-80b-a3b-instruct",
@@ -2373,6 +2659,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: false,
                 release_date: Some("2025-09-11"),
+                cost: None,
             },
             ModelInfo {
                 id: "qwen/qwen3-next-80b-a3b-thinking",
@@ -2381,6 +2668,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: true,
                 release_date: Some("2025-09-11"),
+                cost: None,
             },
             ModelInfo {
                 id: "qwen/qwen3.5-397b-a17b",
@@ -2389,6 +2677,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2026-02-16"),
+                cost: None,
             },
             ModelInfo {
                 id: "qwen/qwen3.5-flash-02-23",
@@ -2397,6 +2686,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2026-02-25"),
+                cost: None,
             },
             ModelInfo {
                 id: "qwen/qwen3.5-plus-02-15",
@@ -2405,6 +2695,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2026-02-16"),
+                cost: None,
             },
             ModelInfo {
                 id: "qwen/qwen3.6-plus",
@@ -2413,6 +2704,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2026-04-02"),
+                cost: None,
             },
             ModelInfo {
                 id: "stepfun/step-3.5-flash",
@@ -2421,6 +2713,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(256000),
                 reasoning: true,
                 release_date: Some("2026-01-29"),
+                cost: None,
             },
             ModelInfo {
                 id: "tencent/hy3-preview",
@@ -2429,6 +2722,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: true,
                 release_date: Some("2026-04-20"),
+                cost: None,
             },
             ModelInfo {
                 id: "x-ai/grok-3",
@@ -2437,6 +2731,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2025-02-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "x-ai/grok-3-beta",
@@ -2445,6 +2740,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2025-02-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "x-ai/grok-3-mini",
@@ -2453,6 +2749,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: true,
                 release_date: Some("2025-02-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "x-ai/grok-3-mini-beta",
@@ -2461,6 +2758,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: true,
                 release_date: Some("2025-02-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "x-ai/grok-4",
@@ -2469,6 +2767,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: true,
                 release_date: Some("2025-07-09"),
+                cost: None,
             },
             ModelInfo {
                 id: "x-ai/grok-4-fast",
@@ -2477,6 +2776,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(30000),
                 reasoning: true,
                 release_date: Some("2025-08-19"),
+                cost: None,
             },
             ModelInfo {
                 id: "x-ai/grok-4.1-fast",
@@ -2485,6 +2785,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(30000),
                 reasoning: true,
                 release_date: Some("2025-11-19"),
+                cost: None,
             },
             ModelInfo {
                 id: "x-ai/grok-4.20-beta",
@@ -2493,6 +2794,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(30000),
                 reasoning: true,
                 release_date: Some("2026-03-12"),
+                cost: None,
             },
             ModelInfo {
                 id: "x-ai/grok-4.3",
@@ -2501,6 +2803,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(1000000),
                 reasoning: true,
                 release_date: Some("2026-05-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "x-ai/grok-code-fast-1",
@@ -2509,6 +2812,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(10000),
                 reasoning: true,
                 release_date: Some("2025-08-26"),
+                cost: None,
             },
             ModelInfo {
                 id: "xiaomi/mimo-v2-flash",
@@ -2517,6 +2821,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-12-16"),
+                cost: None,
             },
             ModelInfo {
                 id: "xiaomi/mimo-v2-omni",
@@ -2525,6 +2830,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2026-03-18"),
+                cost: None,
             },
             ModelInfo {
                 id: "xiaomi/mimo-v2-pro",
@@ -2533,6 +2839,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2026-03-18"),
+                cost: None,
             },
             ModelInfo {
                 id: "xiaomi/mimo-v2.5",
@@ -2541,6 +2848,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2026-04-22"),
+                cost: None,
             },
             ModelInfo {
                 id: "xiaomi/mimo-v2.5-pro",
@@ -2549,6 +2857,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2026-04-22"),
+                cost: None,
             },
             ModelInfo {
                 id: "z-ai/glm-4.5",
@@ -2557,6 +2866,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(96000),
                 reasoning: true,
                 release_date: Some("2025-07-28"),
+                cost: None,
             },
             ModelInfo {
                 id: "z-ai/glm-4.5-air",
@@ -2565,6 +2875,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(96000),
                 reasoning: true,
                 release_date: Some("2025-07-28"),
+                cost: None,
             },
             ModelInfo {
                 id: "z-ai/glm-4.5v",
@@ -2573,6 +2884,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: true,
                 release_date: Some("2025-08-11"),
+                cost: None,
             },
             ModelInfo {
                 id: "z-ai/glm-4.6",
@@ -2581,6 +2893,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-09-30"),
+                cost: None,
             },
             ModelInfo {
                 id: "z-ai/glm-4.6:exacto",
@@ -2589,6 +2902,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: true,
                 release_date: Some("2025-09-30"),
+                cost: None,
             },
             ModelInfo {
                 id: "z-ai/glm-4.7",
@@ -2597,6 +2911,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2025-12-22"),
+                cost: None,
             },
             ModelInfo {
                 id: "z-ai/glm-4.7-flash",
@@ -2605,6 +2920,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65535),
                 reasoning: true,
                 release_date: Some("2026-01-19"),
+                cost: None,
             },
             ModelInfo {
                 id: "z-ai/glm-5",
@@ -2613,6 +2929,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131000),
                 reasoning: true,
                 release_date: Some("2026-02-12"),
+                cost: None,
             },
             ModelInfo {
                 id: "z-ai/glm-5-turbo",
@@ -2621,6 +2938,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2026-03-16"),
+                cost: None,
             },
             ModelInfo {
                 id: "z-ai/glm-5.1",
@@ -2629,6 +2947,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2026-04-07"),
+                cost: None,
             },
         ],
     },
@@ -2645,6 +2964,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(163840),
                 reasoning: true,
                 release_date: Some("2025-08-21"),
+                cost: None,
             },
             ModelInfo {
                 id: "accounts/fireworks/models/deepseek-v3p2",
@@ -2653,6 +2973,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(160000),
                 reasoning: true,
                 release_date: Some("2025-12-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "accounts/fireworks/models/deepseek-v4-pro",
@@ -2661,6 +2982,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(384000),
                 reasoning: true,
                 release_date: Some("2026-04-24"),
+                cost: None,
             },
             ModelInfo {
                 id: "accounts/fireworks/models/glm-4p5",
@@ -2669,6 +2991,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2025-07-29"),
+                cost: None,
             },
             ModelInfo {
                 id: "accounts/fireworks/models/glm-4p5-air",
@@ -2677,6 +3000,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2025-08-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "accounts/fireworks/models/glm-4p7",
@@ -2685,6 +3009,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(198000),
                 reasoning: true,
                 release_date: Some("2025-12-22"),
+                cost: None,
             },
             ModelInfo {
                 id: "accounts/fireworks/models/glm-5",
@@ -2693,6 +3018,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2026-02-11"),
+                cost: None,
             },
             ModelInfo {
                 id: "accounts/fireworks/models/glm-5p1",
@@ -2701,6 +3027,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: true,
                 release_date: Some("2026-04-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "accounts/fireworks/models/gpt-oss-120b",
@@ -2709,6 +3036,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: true,
                 release_date: Some("2025-08-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "accounts/fireworks/models/gpt-oss-20b",
@@ -2717,6 +3045,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: true,
                 release_date: Some("2025-08-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "accounts/fireworks/models/kimi-k2-instruct",
@@ -2725,6 +3054,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: false,
                 release_date: Some("2025-07-11"),
+                cost: None,
             },
             ModelInfo {
                 id: "accounts/fireworks/models/kimi-k2-thinking",
@@ -2733,6 +3063,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(256000),
                 reasoning: true,
                 release_date: Some("2025-11-06"),
+                cost: None,
             },
             ModelInfo {
                 id: "accounts/fireworks/models/kimi-k2p5",
@@ -2741,6 +3072,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(256000),
                 reasoning: true,
                 release_date: Some("2026-01-27"),
+                cost: None,
             },
             ModelInfo {
                 id: "accounts/fireworks/models/kimi-k2p6",
@@ -2749,6 +3081,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262000),
                 reasoning: true,
                 release_date: Some("2026-04-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "accounts/fireworks/models/minimax-m2p1",
@@ -2757,6 +3090,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(200000),
                 reasoning: true,
                 release_date: Some("2025-12-23"),
+                cost: None,
             },
             ModelInfo {
                 id: "accounts/fireworks/models/minimax-m2p5",
@@ -2765,6 +3099,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(196608),
                 reasoning: true,
                 release_date: Some("2026-02-12"),
+                cost: None,
             },
             ModelInfo {
                 id: "accounts/fireworks/models/minimax-m2p7",
@@ -2773,6 +3108,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(196608),
                 reasoning: true,
                 release_date: Some("2026-04-12"),
+                cost: None,
             },
             ModelInfo {
                 id: "accounts/fireworks/models/qwen3p6-plus",
@@ -2781,6 +3117,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: true,
                 release_date: Some("2026-04-04"),
+                cost: None,
             },
             ModelInfo {
                 id: "accounts/fireworks/routers/kimi-k2p5-turbo",
@@ -2789,6 +3126,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(256000),
                 reasoning: true,
                 release_date: Some("2026-01-27"),
+                cost: None,
             },
         ],
     },
@@ -2805,6 +3143,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: false,
                 release_date: Some("2025-07-14"),
+                cost: None,
             },
             ModelInfo {
                 id: "kimi-k2-0905-preview",
@@ -2813,6 +3152,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: false,
                 release_date: Some("2025-09-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "kimi-k2-thinking",
@@ -2821,6 +3161,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: true,
                 release_date: Some("2025-11-06"),
+                cost: None,
             },
             ModelInfo {
                 id: "kimi-k2-thinking-turbo",
@@ -2829,6 +3170,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: true,
                 release_date: Some("2025-11-06"),
+                cost: None,
             },
             ModelInfo {
                 id: "kimi-k2-turbo-preview",
@@ -2837,6 +3179,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: false,
                 release_date: Some("2025-09-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "kimi-k2.5",
@@ -2845,6 +3188,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: true,
                 release_date: Some("2026-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "kimi-k2.6",
@@ -2853,6 +3197,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: true,
                 release_date: Some("2026-04-21"),
+                cost: None,
             },
         ],
     },
@@ -2869,6 +3214,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: true,
                 release_date: Some("2026-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "k2p6",
@@ -2877,6 +3223,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: true,
                 release_date: Some("2026-04"),
+                cost: None,
             },
             ModelInfo {
                 id: "kimi-k2-thinking",
@@ -2885,6 +3232,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: true,
                 release_date: Some("2025-11"),
+                cost: None,
             },
         ],
     },
@@ -2901,6 +3249,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2024-05-14"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-1.5-flash-8b",
@@ -2909,6 +3258,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2024-10-03"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-1.5-pro",
@@ -2917,6 +3267,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2024-02-15"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-2.0-flash",
@@ -2925,6 +3276,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2024-12-11"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-2.0-flash-lite",
@@ -2933,6 +3285,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2024-12-11"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-2.5-flash",
@@ -2941,6 +3294,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-03-20"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-2.5-flash-lite",
@@ -2949,6 +3303,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-06-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-2.5-flash-lite-preview-06-17",
@@ -2957,6 +3312,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-06-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-2.5-flash-lite-preview-09-2025",
@@ -2965,6 +3321,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-09-25"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-2.5-flash-preview-04-17",
@@ -2973,6 +3330,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-04-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-2.5-flash-preview-05-20",
@@ -2981,6 +3339,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-05-20"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-2.5-flash-preview-09-2025",
@@ -2989,6 +3348,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-09-25"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-2.5-pro",
@@ -2997,6 +3357,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-03-20"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-2.5-pro-preview-05-06",
@@ -3005,6 +3366,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-05-06"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-2.5-pro-preview-06-05",
@@ -3013,6 +3375,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-06-05"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-3-flash-preview",
@@ -3021,6 +3384,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-12-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-3-pro-preview",
@@ -3029,6 +3393,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: true,
                 release_date: Some("2025-11-18"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-3.1-flash-lite",
@@ -3037,6 +3402,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2026-05-07"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-3.1-flash-lite-preview",
@@ -3045,6 +3411,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2026-03-03"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-3.1-pro-preview",
@@ -3053,6 +3420,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2026-02-19"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-3.1-pro-preview-customtools",
@@ -3061,6 +3429,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2026-02-19"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-flash-latest",
@@ -3069,6 +3438,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-09-25"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-flash-lite-latest",
@@ -3077,6 +3447,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-09-25"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-live-2.5-flash",
@@ -3085,6 +3456,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8000),
                 reasoning: true,
                 release_date: Some("2025-09-01"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemini-live-2.5-flash-preview-native-audio",
@@ -3093,6 +3465,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: true,
                 release_date: Some("2025-06-17"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemma-3-27b-it",
@@ -3101,6 +3474,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: false,
                 release_date: Some("2025-03-12"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemma-4-26b-a4b-it",
@@ -3109,6 +3483,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: true,
                 release_date: Some("2026-04-02"),
+                cost: None,
             },
             ModelInfo {
                 id: "gemma-4-31b-it",
@@ -3117,6 +3492,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: true,
                 release_date: Some("2026-04-02"),
+                cost: None,
             },
         ],
     },

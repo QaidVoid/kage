@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 /// display. They differ because providers report each turn's
 /// `usage.input` as the entire prompt (including all prior history),
 /// so summing across turns triple-counts.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SessionUsage {
     /// Provider-qualified model id (`anthropic:claude-sonnet-4-6`).
     pub model: String,
@@ -47,6 +47,9 @@ pub struct SessionUsage {
     /// reads this to paint a spinner; the host worker thread sets
     /// it `true` on `run_with_hooks` entry and `false` on return.
     pub working: bool,
+    /// Cumulative dollar cost across every turn this session. `0.0`
+    /// when the active model has no catalog cost data.
+    pub total_cost: f64,
 }
 
 impl SessionUsage {

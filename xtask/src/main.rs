@@ -116,6 +116,8 @@ struct ApiModel {
     release_date: Option<String>,
     #[serde(default)]
     limit: Option<ApiLimit>,
+    #[serde(default)]
+    cost: Option<ApiCost>,
 }
 
 #[derive(Deserialize)]
@@ -124,6 +126,22 @@ struct ApiLimit {
     context: Option<u64>,
     #[serde(default)]
     output: Option<u64>,
+}
+
+/// Per-million-token pricing the upstream catalog reports. All four
+/// fields are USD per million tokens; `cache_read` and `cache_write`
+/// may be absent for providers that don't price the prompt cache
+/// separately.
+#[derive(Deserialize)]
+struct ApiCost {
+    #[serde(default)]
+    input: Option<f64>,
+    #[serde(default)]
+    output: Option<f64>,
+    #[serde(default)]
+    cache_read: Option<f64>,
+    #[serde(default)]
+    cache_write: Option<f64>,
 }
 
 fn refresh_models(source: &str) -> Result<PathBuf, String> {
@@ -199,11 +217,33 @@ struct CuratedModel {
     output: Option<u64>,
     reasoning: bool,
     release_date: Option<String>,
+    cost: Option<CuratedCost>,
+}
+
+/// Normalized per-million-token pricing emitted into `generated.rs`.
+struct CuratedCost {
+    input: f64,
+    output: f64,
+    cache_read: Option<f64>,
+    cache_write: Option<f64>,
 }
 
 impl CuratedModel {
     fn from(m: &ApiModel) -> Self {
         let limit = m.limit.as_ref();
+        let cost = m.cost.as_ref().and_then(|c| {
+            // input and output are both required; if either is missing
+            // there's no useful pricing to emit.
+            match (c.input, c.output) {
+                (Some(i), Some(o)) => Some(CuratedCost {
+                    input: i,
+                    output: o,
+                    cache_read: c.cache_read,
+                    cache_write: c.cache_write,
+                }),
+                _ => None,
+            }
+        });
         Self {
             id: m.id.clone(),
             name: m.name.clone(),
@@ -211,6 +251,7 @@ impl CuratedModel {
             output: limit.and_then(|l| l.output),
             reasoning: m.reasoning,
             release_date: m.release_date.clone(),
+            cost,
         }
     }
 }
@@ -224,7 +265,8 @@ fn render(providers: &[CuratedProvider]) -> String {
          \n\
          #![allow(clippy::unreadable_literal)]\n\
          \n\
-         use super::{ModelInfo, ProviderInfo};\n\
+         #[allow(unused_imports)]\n\
+         use super::{ModelCost, ModelInfo, ProviderInfo};\n\
          \n",
     );
     let _ = writeln!(out, "/// Static provider/model catalog.");
@@ -269,7 +311,33 @@ fn emit_model(out: &mut String, m: &CuratedModel) {
         "                release_date: {},",
         opt_quote(m.release_date.as_deref())
     );
+    match &m.cost {
+        Some(c) => {
+            let _ = writeln!(out, "                cost: Some(ModelCost {{");
+            let _ = writeln!(out, "                    input: {:.6},", c.input);
+            let _ = writeln!(out, "                    output: {:.6},", c.output);
+            let _ = writeln!(
+                out,
+                "                    cache_read: {},",
+                opt_float(c.cache_read)
+            );
+            let _ = writeln!(
+                out,
+                "                    cache_write: {},",
+                opt_float(c.cache_write)
+            );
+            out.push_str("                }),\n");
+        }
+        None => out.push_str("                cost: None,\n"),
+    }
     out.push_str("            },\n");
+}
+
+fn opt_float(v: Option<f64>) -> String {
+    match v {
+        Some(n) => format!("Some({n:.6})"),
+        None => "None".to_owned(),
+    }
 }
 
 fn quote(s: &str) -> String {

@@ -66,6 +66,66 @@ fn is_default_false(b: &bool) -> bool {
     !*b
 }
 
+/// Dollar cost of one turn's [`TokenUsage`] given a per-million pricing
+/// table. All values in USD.
+///
+/// Cache-read tokens fall back to the input rate when the model's
+/// cache-read price is missing; cache-write falls back to the output
+/// rate (a conservative estimate that won't undercount).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TokenCost {
+    /// Dollars spent on prompt tokens this turn.
+    pub input: f64,
+    /// Dollars spent on completion tokens this turn.
+    pub output: f64,
+    /// Dollars billed for prompt-cache reads.
+    pub cache_read: f64,
+    /// Dollars billed for prompt-cache writes.
+    pub cache_write: f64,
+    /// Sum of the other four fields.
+    pub total: f64,
+}
+
+impl TokenCost {
+    /// Apply per-million pricing to a `TokenUsage` to produce a
+    /// concrete cost in dollars. Each component is computed as
+    /// `tokens * rate_per_million / 1_000_000`.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn from_usage(
+        usage: &TokenUsage,
+        input_per_m: f64,
+        output_per_m: f64,
+        cache_read_per_m: Option<f64>,
+        cache_write_per_m: Option<f64>,
+    ) -> Self {
+        let cache_read_rate = cache_read_per_m.unwrap_or(input_per_m);
+        let cache_write_rate = cache_write_per_m.unwrap_or(output_per_m);
+        let scale = 1_000_000.0;
+        let input = usage.input as f64 * input_per_m / scale;
+        let output = usage.output as f64 * output_per_m / scale;
+        let cache_read = usage.cache_read as f64 * cache_read_rate / scale;
+        let cache_write = usage.cache_write as f64 * cache_write_rate / scale;
+        Self {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            total: input + output + cache_read + cache_write,
+        }
+    }
+
+    /// Add `other` into `self` field-by-field. Used to accumulate
+    /// session-level cost across turns.
+    pub fn add(&mut self, other: Self) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cache_read += other.cache_read;
+        self.cache_write += other.cache_write;
+        self.total += other.total;
+    }
+}
+
 /// Mid-execution progress update emitted by a long-running tool.
 ///
 /// Tools call [`ToolContext::update`](kage_tools::ToolContext::update)

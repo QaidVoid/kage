@@ -45,6 +45,26 @@ pub struct ModelInfo {
     pub reasoning: bool,
     /// ISO-8601 date string the catalog associates with this model.
     pub release_date: Option<&'static str>,
+    /// Per-million-token pricing in USD, when the catalog reports it.
+    pub cost: Option<ModelCost>,
+}
+
+/// Per-million-token pricing for one model, in USD.
+///
+/// Cache-read and cache-write are optional because not every provider
+/// distinguishes the two; when absent, callers should treat cached
+/// tokens at the input rate.
+#[derive(Debug, Clone, Copy)]
+pub struct ModelCost {
+    /// Dollars per million input (prompt) tokens.
+    pub input: f64,
+    /// Dollars per million output (completion) tokens.
+    pub output: f64,
+    /// Dollars per million tokens read from the provider's prompt cache.
+    pub cache_read: Option<f64>,
+    /// Dollars per million tokens written into the provider's prompt
+    /// cache for a future turn to reuse.
+    pub cache_write: Option<f64>,
 }
 
 /// Find a provider by its kage id.

@@ -1468,6 +1468,10 @@ fn render_modeline(frame: &mut Frame, regions: Regions, usage: Option<&SessionUs
             ),
             fg,
         ));
+        if u.total_cost > 0.0 {
+            spans.push(Span::styled(" . ", dim));
+            spans.push(Span::styled(format!("${:.4}", u.total_cost), fg));
+        }
     }
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let pad = usize::from(area.width).saturating_sub(used);

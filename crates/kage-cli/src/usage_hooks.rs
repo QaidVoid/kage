@@ -8,7 +8,7 @@
 //! modeline ticks forward as soon as each assistant turn finishes,
 //! mid-flow, mirroring the cumulative `cx.budget` the loop maintains.
 
-use kage_core::{LoopEvent, Message, ToolOutput};
+use kage_core::{LoopEvent, Message, TokenCost, ToolOutput};
 use kage_loop::{Hooks, StreamRequest, TurnSummary};
 use kage_tui::SharedSessionUsage;
 
@@ -83,6 +83,19 @@ impl<H: Hooks> Hooks for UsageHooks<H> {
                 .saturating_add(usage.output)
                 .saturating_add(usage.cache_read)
                 .saturating_add(usage.cache_write);
+            if let Some((p_id, m_id)) = self.model.split_once(':')
+                && let Some(model) = kage_provider::catalog::model(p_id, m_id)
+                && let Some(cost_rate) = model.cost
+            {
+                let cost = TokenCost::from_usage(
+                    usage,
+                    cost_rate.input,
+                    cost_rate.output,
+                    cost_rate.cache_read,
+                    cost_rate.cache_write,
+                );
+                snap.total_cost += cost.total;
+            }
         }
         self.inner.on_event(event);
     }

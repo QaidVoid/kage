@@ -16,7 +16,7 @@ pub use config::{
     UiConfig,
 };
 pub use error::{Error, Result};
-pub use event::{LoopError, LoopEvent, TokenUsage, ToolOutput, ToolUpdate};
+pub use event::{LoopError, LoopEvent, TokenCost, TokenUsage, ToolOutput, ToolUpdate};
 pub use message::{Content, ImageSource, Message, MessageId, Role, ToolCallId};
 pub use risk::{Risk, classify};
 pub use skills::{Skill, SkillError, load_skill_file, load_skills_dir};

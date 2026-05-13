@@ -1,0 +1,787 @@
+/* ---------------------------------------------------------------------- */
+/* kage docs theme                                                        */
+/* Dark-first, monochrome with one amber accent. Terminal-shaped chrome.  */
+/* ---------------------------------------------------------------------- */
+
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap");
+
+:root {
+  --bg-0: #07070a;
+  --bg-1: #0d0d12;
+  --bg-2: #15151c;
+  --bg-3: #1d1d27;
+  --fg-0: #f4f4f5;
+  --fg-1: #d4d4d8;
+  --fg-2: #9da0a8;
+  --fg-3: #65686f;
+  --rule: #232330;
+  --accent: #f4a72b;
+  --accent-soft: rgba(244, 167, 43, 0.16);
+  --accent-line: rgba(244, 167, 43, 0.4);
+  --danger: #ef6f6c;
+  --ok: #6ec18a;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg-0);
+  color: var(--fg-1);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+  transition: color 0.12s ease;
+}
+a:hover {
+  color: var(--fg-0);
+}
+
+::selection {
+  background: var(--accent-soft);
+  color: var(--fg-0);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Layout                                                                 */
+/* ---------------------------------------------------------------------- */
+
+.kage-doc {
+  min-height: 100vh;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.kage-doc__grid-bg {
+  position: fixed;
+  inset: 0;
+  background-image:
+    radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.04) 1px, transparent 0);
+  background-size: 24px 24px;
+  z-index: 0;
+  pointer-events: none;
+  mask-image: radial-gradient(ellipse at center, black 30%, transparent 75%);
+}
+
+.kage-doc__main {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr) 220px;
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 56px 32px 96px;
+  gap: 56px;
+  width: 100%;
+}
+
+.kage-doc__main.is-home {
+  display: block;
+  max-width: 1100px;
+  padding-top: 24px;
+}
+
+.kage-doc__article {
+  min-width: 0;
+}
+
+.kage-doc__content {
+  min-width: 0;
+  font-size: 15.5px;
+  line-height: 1.75;
+  color: var(--fg-1);
+}
+
+.kage-doc__content.is-home > * {
+  display: none;
+}
+
+@media (max-width: 1024px) {
+  .kage-doc__main {
+    grid-template-columns: 1fr;
+    gap: 24px;
+    padding: 40px 20px 64px;
+  }
+  .kage-doc__main .kage-rail,
+  .kage-doc__main .kage-outline {
+    display: none;
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+/* Header                                                                 */
+/* ---------------------------------------------------------------------- */
+
+.kage-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: rgba(7, 7, 10, 0.84);
+  backdrop-filter: saturate(140%) blur(12px);
+  border-bottom: 1px solid var(--rule);
+}
+
+.kage-header__inner {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 14px 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.kage-header__brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono);
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--fg-0);
+}
+.kage-header__brand:hover {
+  color: var(--accent);
+}
+
+.kage-header__prompt {
+  color: var(--accent);
+}
+
+.kage-header__caret {
+  display: inline-block;
+  width: 7px;
+  height: 14px;
+  background: var(--accent);
+  animation: blink 1.1s steps(2, start) infinite;
+  margin-left: 2px;
+}
+
+@keyframes blink {
+  to {
+    visibility: hidden;
+  }
+}
+
+.kage-header__nav {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+}
+
+.kage-header__link {
+  font-family: var(--mono);
+  font-size: 13.5px;
+  font-weight: 500;
+  color: var(--fg-2);
+  letter-spacing: 0.02em;
+  position: relative;
+  padding-bottom: 2px;
+}
+.kage-header__link:hover {
+  color: var(--fg-0);
+}
+.kage-header__link.is-active {
+  color: var(--fg-0);
+}
+.kage-header__link.is-active::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -16px;
+  height: 2px;
+  background: var(--accent);
+}
+.kage-header__link--muted {
+  color: var(--fg-3);
+}
+
+@media (max-width: 640px) {
+  .kage-header__nav {
+    gap: 14px;
+  }
+}
+
+/* ---------------------------------------------------------------------- */
+/* Side rail (left)                                                       */
+/* ---------------------------------------------------------------------- */
+
+.kage-rail {
+  position: sticky;
+  top: 80px;
+  align-self: start;
+  height: calc(100vh - 100px);
+  overflow-y: auto;
+  padding-right: 8px;
+}
+
+.kage-rail__section + .kage-rail__section {
+  margin-top: 32px;
+}
+
+.kage-rail__header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--rule);
+  margin-bottom: 10px;
+}
+
+.kage-rail__glyph {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent);
+  letter-spacing: 0.08em;
+}
+
+.kage-rail__label {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--fg-0);
+}
+
+.kage-rail__list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.kage-rail__link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+  font-family: var(--mono);
+  font-size: 13.5px;
+  color: var(--fg-2);
+  font-weight: 400;
+  transition: color 0.12s ease;
+}
+.kage-rail__link:hover {
+  color: var(--fg-0);
+}
+.kage-rail__link.is-active {
+  color: var(--accent);
+}
+
+.kage-rail__bullet {
+  display: inline-block;
+  width: 12px;
+  height: 1px;
+  background: var(--fg-3);
+  transition: background 0.12s ease, width 0.12s ease;
+}
+.kage-rail__link:hover .kage-rail__bullet {
+  background: var(--fg-0);
+  width: 18px;
+}
+.kage-rail__link.is-active .kage-rail__bullet {
+  background: var(--accent);
+  width: 18px;
+}
+
+/* ---------------------------------------------------------------------- */
+/* Outline (right)                                                        */
+/* ---------------------------------------------------------------------- */
+
+.kage-outline {
+  position: sticky;
+  top: 80px;
+  align-self: start;
+  height: calc(100vh - 100px);
+  overflow-y: auto;
+  padding-left: 12px;
+  border-left: 1px solid var(--rule);
+}
+
+.kage-outline__label {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--fg-3);
+  margin-bottom: 12px;
+}
+
+.kage-outline__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.kage-outline__item {
+  padding: 4px 0;
+}
+.kage-outline__item.is-level-3 {
+  padding-left: 12px;
+}
+
+.kage-outline__link {
+  font-size: 13px;
+  color: var(--fg-3);
+  transition: color 0.12s ease;
+}
+.kage-outline__link:hover {
+  color: var(--fg-0);
+}
+.kage-outline__item.is-active .kage-outline__link {
+  color: var(--accent);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Hero                                                                   */
+/* ---------------------------------------------------------------------- */
+
+.kage-hero {
+  padding: 40px 0 24px;
+}
+
+.kage-hero__terminal {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: linear-gradient(180deg, var(--bg-1), var(--bg-0));
+  overflow: hidden;
+  box-shadow: 0 30px 80px -20px rgba(0, 0, 0, 0.6);
+}
+
+.kage-hero__chrome {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--rule);
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-3);
+}
+
+.kage-hero__dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.kage-hero__dot--red {
+  background: #ff5f57;
+}
+.kage-hero__dot--amber {
+  background: #febc2e;
+}
+.kage-hero__dot--green {
+  background: #28c840;
+}
+
+.kage-hero__chrome-title {
+  margin-left: 8px;
+}
+
+.kage-hero__body {
+  padding: 28px 32px 36px;
+}
+
+.kage-hero__line {
+  font-family: var(--mono);
+  color: var(--fg-2);
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.kage-hero__prompt {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.kage-hero__cmd {
+  color: var(--fg-0);
+}
+
+.kage-hero__caret {
+  width: 8px;
+  height: 16px;
+  background: var(--accent);
+  display: inline-block;
+  animation: blink 1.1s steps(2, start) infinite;
+}
+
+.kage-hero__output {
+  margin-top: 28px;
+}
+
+.kage-hero__title {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: clamp(28px, 4vw, 44px);
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.01em;
+  color: var(--fg-0);
+}
+
+.kage-hero__tagline {
+  margin: 14px 0 0;
+  font-size: 17px;
+  line-height: 1.55;
+  color: var(--fg-2);
+  max-width: 60ch;
+}
+
+.kage-hero__actions {
+  margin-top: 28px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.kage-hero__action {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 14px;
+  padding: 10px 18px;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  color: var(--fg-0);
+  transition: all 0.12s ease;
+}
+.kage-hero__action--brand {
+  background: var(--accent);
+  color: #1a1003;
+  border-color: var(--accent);
+  font-weight: 600;
+}
+.kage-hero__action--brand:hover {
+  background: #ffbb52;
+}
+.kage-hero__action--ghost:hover {
+  border-color: var(--fg-2);
+  color: var(--fg-0);
+}
+
+.kage-hero__features {
+  margin-top: 56px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+}
+
+.kage-hero__feature {
+  border: 1px solid var(--rule);
+  background: var(--bg-1);
+  padding: 18px 18px 20px;
+  border-radius: 6px;
+  position: relative;
+  transition: border-color 0.12s ease;
+}
+.kage-hero__feature:hover {
+  border-color: var(--accent-line);
+}
+
+.kage-hero__feature-tag {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent);
+  letter-spacing: 0.08em;
+  margin-bottom: 10px;
+}
+
+.kage-hero__feature-title {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--fg-0);
+  margin-bottom: 6px;
+}
+
+.kage-hero__feature-text {
+  margin: 0;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--fg-2);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Markdown content                                                       */
+/* ---------------------------------------------------------------------- */
+
+.kage-doc__content h1,
+.kage-doc__content h2,
+.kage-doc__content h3,
+.kage-doc__content h4 {
+  font-family: var(--mono);
+  font-weight: 600;
+  color: var(--fg-0);
+  letter-spacing: -0.005em;
+  scroll-margin-top: 80px;
+}
+
+.kage-doc__content h1 {
+  font-size: 32px;
+  margin: 0 0 8px;
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+}
+.kage-doc__content h1::before {
+  content: "#";
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.kage-doc__content h2 {
+  font-size: 22px;
+  margin: 48px 0 14px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.kage-doc__content h3 {
+  font-size: 17px;
+  margin: 32px 0 10px;
+  color: var(--fg-0);
+}
+
+.kage-doc__content h4 {
+  font-size: 14.5px;
+  margin: 22px 0 8px;
+  color: var(--fg-1);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.kage-doc__content p {
+  margin: 0 0 16px;
+}
+
+.kage-doc__content ul,
+.kage-doc__content ol {
+  margin: 0 0 18px;
+  padding-left: 22px;
+}
+.kage-doc__content li {
+  margin-bottom: 6px;
+}
+.kage-doc__content ul li::marker {
+  color: var(--accent);
+}
+
+.kage-doc__content strong {
+  color: var(--fg-0);
+  font-weight: 600;
+}
+
+.kage-doc__content blockquote {
+  margin: 18px 0;
+  padding: 12px 18px;
+  border-left: 2px solid var(--accent);
+  background: var(--bg-1);
+  color: var(--fg-1);
+  border-radius: 0 4px 4px 0;
+}
+.kage-doc__content blockquote p {
+  margin: 0;
+}
+
+.kage-doc__content hr {
+  border: none;
+  border-top: 1px dashed var(--rule);
+  margin: 32px 0;
+}
+
+.kage-doc__content table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 13.5px;
+  margin: 18px 0;
+}
+.kage-doc__content th,
+.kage-doc__content td {
+  padding: 10px 14px;
+  text-align: left;
+  border-bottom: 1px solid var(--rule);
+}
+.kage-doc__content th {
+  font-weight: 600;
+  color: var(--fg-0);
+  background: var(--bg-1);
+}
+.kage-doc__content tr:hover td {
+  background: var(--bg-1);
+}
+
+/* Inline code */
+.kage-doc__content :not(pre) > code {
+  font-family: var(--mono);
+  font-size: 0.88em;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--bg-2);
+  color: var(--accent);
+  border: 1px solid var(--rule);
+}
+
+/* Code blocks: terminal-style chrome with language pill.
+ * VitePress emits:
+ *   <div class="language-bash vp-adaptive-theme">
+ *     <button class="copy" title="Copy Code"></button>
+ *     <span class="lang">bash</span>
+ *     <pre class="shiki shiki-themes ...">
+ *       <code>
+ *         <span class="line">
+ *           <span style="--shiki-light:#xxx;--shiki-dark:#xxx;">word</span>
+ *         </span>
+ *       </code>
+ *     </pre>
+ *   </div>
+ * Force the dark Shiki variable since this is a dark-only site. */
+.kage-doc__content div[class*="language-"] {
+  position: relative;
+  margin: 22px 0;
+  background: var(--bg-1);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.kage-doc__content div[class*="language-"] pre {
+  margin: 0;
+  padding: 18px 20px;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 13.5px;
+  line-height: 1.7;
+  background: transparent;
+}
+
+.kage-doc__content div[class*="language-"] code {
+  background: none !important;
+  border: none !important;
+  padding: 0 !important;
+  font-family: var(--mono);
+  display: block;
+}
+
+.kage-doc__content .shiki .line {
+  display: inline-block;
+  width: 100%;
+}
+
+/* Force dark Shiki colors site-wide (dark-only docs). */
+.kage-doc__content .shiki,
+.kage-doc__content .shiki span {
+  color: var(--shiki-dark) !important;
+  background-color: transparent !important;
+  font-style: var(--shiki-dark-font-style, normal) !important;
+  font-weight: var(--shiki-dark-font-weight, normal) !important;
+}
+
+/* Language pill in the top-right. */
+.kage-doc__content div[class*="language-"] > .lang {
+  position: absolute;
+  top: 10px;
+  right: 56px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--fg-3);
+  pointer-events: none;
+  background: transparent;
+  z-index: 1;
+}
+
+/* Copy button. */
+.kage-doc__content div[class*="language-"] > .copy {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 40px;
+  height: 24px;
+  padding: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--fg-2);
+  background: var(--bg-2);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.kage-doc__content div[class*="language-"] > .copy::before {
+  content: "copy";
+}
+.kage-doc__content div[class*="language-"] > .copy.copied::before {
+  content: "ok";
+  color: var(--ok);
+}
+.kage-doc__content div[class*="language-"]:hover > .copy,
+.kage-doc__content div[class*="language-"] > .copy:focus {
+  opacity: 1;
+}
+.kage-doc__content div[class*="language-"] > .copy:hover {
+  color: var(--fg-0);
+  border-color: var(--accent-line);
+}
+
+/* ---------------------------------------------------------------------- */
+/* Footer                                                                 */
+/* ---------------------------------------------------------------------- */
+
+.kage-footer {
+  border-top: 1px solid var(--rule);
+  background: var(--bg-0);
+  z-index: 1;
+  position: relative;
+}
+
+.kage-footer__inner {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 20px 32px;
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-3);
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.kage-footer__cell--brand {
+  color: var(--fg-1);
+}
+
+.kage-footer__sep {
+  color: var(--fg-3);
+  margin: 0 4px;
+}

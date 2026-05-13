@@ -26,7 +26,7 @@ use crate::compact::maybe_compact;
 use crate::dispatch::{dispatch_tool_calls, dispatch_tool_calls_parallel};
 use crate::doom::DoomTracker;
 use crate::stream::collect_turn;
-use crate::{AgentContext, Hooks, LoopConfig};
+use crate::{AgentContext, Hooks, LoopConfig, SteeringMode};
 
 /// Drive one agent run to completion.
 ///
@@ -73,10 +73,10 @@ where
                 return finish_cancelled(hooks, &mut emit);
             }
 
-            if let Some(steering) = hooks.get_steering() {
+            if let Some(text) = drain_messages(config.steering_mode, || hooks.get_steering()) {
                 cx.history.push(kage_core::Message::new(
                     kage_core::Role::User,
-                    vec![kage_core::Content::Text { text: steering }],
+                    vec![kage_core::Content::Text { text }],
                     cx.history.last().map(|m| m.id),
                 ));
             }
@@ -182,7 +182,7 @@ where
             }
         }
 
-        let Some(text) = hooks.get_followup() else {
+        let Some(text) = drain_messages(config.followup_mode, || hooks.get_followup()) else {
             return Ok(());
         };
         cx.history.push(kage_core::Message::new(
@@ -191,6 +191,25 @@ where
             cx.history.last().map(|m| m.id),
         ));
     }
+}
+
+/// Drain queued messages from a hook poll according to `mode`. In
+/// `OneAtATime`, polls once and returns whatever the hook gave us. In
+/// `All`, polls repeatedly until the hook returns `None`, then joins the
+/// collected messages with blank-line separators.
+///
+/// Returns `None` when the hook had nothing to give on the first poll.
+fn drain_messages<F: FnMut() -> Option<String>>(mode: SteeringMode, mut poll: F) -> Option<String> {
+    let first = poll()?;
+    if mode == SteeringMode::OneAtATime {
+        return Some(first);
+    }
+    let mut out = first;
+    while let Some(next) = poll() {
+        out.push_str("\n\n");
+        out.push_str(&next);
+    }
+    Some(out)
 }
 
 /// Emit one event to both the host's `Hooks::on_event` and the user emit
@@ -651,6 +670,94 @@ mod tests {
             !saw_tool_result,
             "stop predicate must run before tool dispatch"
         );
+    }
+
+    struct QueuedSteering(std::collections::VecDeque<String>);
+    impl Hooks for QueuedSteering {
+        fn get_steering(&mut self) -> Option<String> {
+            self.0.pop_front()
+        }
+    }
+
+    struct CombinedSteering {
+        queued: QueuedSteering,
+        followup: OneFollowup,
+    }
+    impl Hooks for CombinedSteering {
+        fn get_steering(&mut self) -> Option<String> {
+            self.queued.get_steering()
+        }
+        fn get_followup(&mut self) -> Option<String> {
+            self.followup.get_followup()
+        }
+    }
+
+    #[test]
+    fn steering_one_at_a_time_drains_one_per_turn() {
+        let mock = MockProvider::sequence(vec![
+            vec![Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            })],
+            vec![Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            })],
+        ]);
+
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.history.push(user_msg("hi"));
+        let cfg = LoopConfig::default();
+        let mut hooks = CombinedSteering {
+            queued: QueuedSteering(["one".into(), "two".into()].into_iter().collect()),
+            followup: OneFollowup(true),
+        };
+        let cancel = CancelFlag::new();
+        let registry = ToolRegistry::new();
+
+        run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {}).unwrap();
+        let req1 = mock.last_request().unwrap();
+        let texts: Vec<&str> = req1
+            .messages
+            .iter()
+            .filter_map(|m| match m.content.first() {
+                Some(Content::Text { text }) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.contains(&"one"));
+        assert!(texts.contains(&"two"));
+    }
+
+    #[test]
+    fn steering_all_mode_concatenates_in_one_turn() {
+        let mock = MockProvider::replaying(vec![Ok(ProviderEvent::MessageEnd {
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+        })]);
+
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.history.push(user_msg("hi"));
+        let cfg = LoopConfig {
+            steering_mode: SteeringMode::All,
+            ..LoopConfig::default()
+        };
+        let mut hooks = QueuedSteering(["one".into(), "two".into(), "three".into()].into());
+        let cancel = CancelFlag::new();
+        let registry = ToolRegistry::new();
+
+        run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {}).unwrap();
+        let req = mock.last_request().unwrap();
+        let merged = req
+            .messages
+            .iter()
+            .filter_map(|m| match m.content.first() {
+                Some(Content::Text { text }) => Some(text.as_str()),
+                _ => None,
+            })
+            .find(|t| t.contains("one") && t.contains("two") && t.contains("three"))
+            .expect("one merged user message with all three texts");
+        assert_eq!(merged, "one\n\ntwo\n\nthree");
     }
 
     #[test]

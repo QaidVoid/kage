@@ -15,7 +15,7 @@ pub mod run;
 mod stream;
 pub mod system_prompt;
 
-pub use compact::force_compact;
+pub use compact::{COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX, force_compact};
 pub use config::LoopConfig;
 pub use context::{AgentContext, TokenBudget};
 pub use hooks::{Hooks, NoopHooks};

@@ -24,21 +24,20 @@ use crate::buffer::Block;
 #[derive(Clone, Debug)]
 pub struct CompactionBlockWidget {
     text: String,
-    folded: bool,
 }
 
 impl CompactionBlockWidget {
     /// Build from a `Block::Custom`. Returns `None` for any other
     /// block kind (the registry only dispatches `kage:compaction`
     /// blocks here, but a defensive check keeps unrelated callers
-    /// safe).
+    /// safe). The block's `folded` flag is intentionally ignored:
+    /// compaction summaries are always rendered fully expanded.
     #[must_use]
     pub fn from_block(block: &Block) -> Option<Self> {
         match block {
-            Block::Custom { kind, text, folded } if kind == "kage:compaction" => Some(Self {
-                text: text.clone(),
-                folded: *folded,
-            }),
+            Block::Custom { kind, text, .. } if kind == "kage:compaction" => {
+                Some(Self { text: text.clone() })
+            }
             _ => None,
         }
     }
@@ -51,19 +50,28 @@ impl CompactionBlockWidget {
     }
 
     fn lines_for(&self, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
-        let (first, body) = match self.text.split_once('\n') {
-            Some((head, tail)) => (head, tail),
-            None => (self.text.as_str(), ""),
+        // Two on-the-wire shapes reach this widget:
+        //   live event: `[compacted: kept N, summarized M]\n<framed body>`
+        //   replayed:   `<framed body>` (no counts header)
+        // Strip the counts header when present, then unwrap the
+        // `<summary>...</summary>` framing.
+        let (counts_line, framed) = match self.text.lines().next() {
+            Some(first) if first.trim().starts_with('[') && first.contains("compacted") => {
+                let tail = self
+                    .text
+                    .get(first.len()..)
+                    .unwrap_or("")
+                    .trim_start_matches('\n');
+                (Some(first), tail)
+            }
+            _ => (None, self.text.as_str()),
         };
 
-        let header = header_line(first, self.folded);
-        let mut out: Vec<Line<'static>> = vec![header];
-
-        if !self.folded && !body.is_empty() {
-            let body_style = Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM);
-            for line in crate::markdown::render(body, body_style) {
+        let mut out: Vec<Line<'static>> = vec![header_line(counts_line)];
+        let unwrapped = strip_summary_framing(framed);
+        if !unwrapped.is_empty() {
+            let body_style = Style::default().fg(Color::White);
+            for line in crate::markdown::render(&unwrapped, body_style) {
                 out.push(prefix_line("  ", line));
             }
         }
@@ -98,29 +106,43 @@ fn extract_count(text: &str, marker: &str) -> Option<u64> {
         .and_then(|s| s.parse::<u64>().ok())
 }
 
-fn header_line(first: &str, folded: bool) -> Line<'static> {
-    let chip_style = Style::default()
-        .fg(Color::Black)
-        .bg(Color::Yellow)
+fn header_line(counts_source: Option<&str>) -> Line<'static> {
+    let label_style = Style::default()
+        .fg(Color::Yellow)
         .add_modifier(Modifier::BOLD);
     let dim = Style::default()
         .fg(Color::DarkGray)
         .add_modifier(Modifier::DIM | Modifier::ITALIC);
-    let fold = if folded { "+" } else { "-" };
-    let counts = CompactionBlockWidget::parse_counts(first);
     let mut spans = vec![
-        Span::styled(format!("{fold} "), dim),
-        Span::styled(" summary ".to_owned(), chip_style),
+        Span::styled("\u{2261} ".to_owned(), label_style),
+        Span::styled("summary".to_owned(), label_style),
     ];
-    if let Some((kept, summarized)) = counts {
+    if let Some(first) = counts_source
+        && let Some((kept, summarized)) = CompactionBlockWidget::parse_counts(first)
+    {
         spans.push(Span::styled(
             format!("  kept {kept}, summarized {summarized}"),
             dim,
         ));
-    } else {
-        spans.push(Span::styled(format!("  {first}"), dim));
     }
     Line::from(spans)
+}
+
+/// Drop the `<summary>...</summary>` framing and the prefix sentence
+/// the loop inserts before persisting the synthetic message. The
+/// resulting text is the model's actual summary content.
+fn strip_summary_framing(text: &str) -> String {
+    let start_marker = "<summary>";
+    let end_marker = "</summary>";
+    let after_open = match text.find(start_marker) {
+        Some(i) => &text[i + start_marker.len()..],
+        None => text,
+    };
+    let body = match after_open.find(end_marker) {
+        Some(i) => &after_open[..i],
+        None => after_open,
+    };
+    body.trim_matches('\n').to_owned()
 }
 
 #[cfg(test)]
@@ -180,17 +202,36 @@ mod tests {
     }
 
     #[test]
-    fn folded_block_drops_body_rows() {
+    fn folded_flag_is_ignored_always_renders_body() {
         let mut block = compaction_block("[compacted: kept 1, summarized 2]\nbody");
         if let Block::Custom { folded, .. } = &mut block {
             *folded = true;
         }
-        let w = CompactionBlockWidget::from_block(&block).unwrap();
-        let unfolded = CompactionBlockWidget::from_block(&compaction_block(
+        let folded_w = CompactionBlockWidget::from_block(&block).unwrap();
+        let unfolded_w = CompactionBlockWidget::from_block(&compaction_block(
             "[compacted: kept 1, summarized 2]\nbody",
         ))
         .unwrap();
-        assert!(w.measure(60) < unfolded.measure(60));
+        assert_eq!(
+            folded_w.measure(60),
+            unfolded_w.measure(60),
+            "compaction summary should not honour the folded flag"
+        );
+    }
+
+    #[test]
+    fn strip_summary_framing_removes_wrapper_and_prefix() {
+        let raw = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n# Title\n- item\n</summary>";
+        let stripped = strip_summary_framing(raw);
+        assert!(stripped.starts_with("# Title"), "got {stripped:?}");
+        assert!(!stripped.contains("<summary>"), "got {stripped:?}");
+        assert!(!stripped.contains("</summary>"), "got {stripped:?}");
+    }
+
+    #[test]
+    fn strip_summary_framing_no_op_when_markers_missing() {
+        let raw = "plain text with no wrapper";
+        assert_eq!(strip_summary_framing(raw), raw);
     }
 
     #[test]

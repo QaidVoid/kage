@@ -26,9 +26,14 @@ const KEEP_RECENT: usize = 4;
 /// Framing wrapper for the synthetic summary message that replaces the
 /// drained history. Mirrors pi-mono's `COMPACTION_SUMMARY_PREFIX/SUFFIX`
 /// so providers see a clearly labelled context block rather than a
-/// rogue assistant turn.
-const COMPACTION_SUMMARY_PREFIX: &str = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
-const COMPACTION_SUMMARY_SUFFIX: &str = "\n</summary>";
+/// rogue assistant turn. Exposed so the resume path can detect the
+/// same framing in replayed history and route it back through the
+/// compaction widget instead of rendering it as a plain assistant
+/// block.
+pub const COMPACTION_SUMMARY_PREFIX: &str = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
+/// Closing framing for the synthetic compaction summary message. See
+/// [`COMPACTION_SUMMARY_PREFIX`].
+pub const COMPACTION_SUMMARY_SUFFIX: &str = "\n</summary>";
 
 /// Inspect the agent context and, if usage is past the threshold, summarize
 /// the oldest turns and replace them with one synthetic user message that

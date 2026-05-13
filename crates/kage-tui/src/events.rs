@@ -105,7 +105,7 @@ fn apply_event(buf: &mut Buffer, event: &LoopEvent) {
             buf.push_custom(
                 "kage:compaction",
                 format!("[compacted: kept {kept}, summarized {summarized}]\n{summary}"),
-                true,
+                false,
             );
         }
         LoopEvent::Error { kind } => {
@@ -133,15 +133,23 @@ pub fn populate_from_history(
         match msg.role {
             Role::User => {
                 if let Some(text) = first_text(msg) {
-                    buf.push_user(text);
+                    if is_compaction_summary(&text) {
+                        buf.push_custom("kage:compaction", text, false);
+                    } else {
+                        buf.push_user(text);
+                    }
                 }
             }
             Role::Assistant => {
                 for block in &msg.content {
                     match block {
                         Content::Text { text } => {
-                            buf.append_assistant_delta(text);
-                            buf.finish_streaming();
+                            if is_compaction_summary(text) {
+                                buf.push_custom("kage:compaction", text.clone(), false);
+                            } else {
+                                buf.append_assistant_delta(text);
+                                buf.finish_streaming();
+                            }
                         }
                         Content::Thinking { text } => {
                             buf.append_thinking_delta(text);
@@ -184,6 +192,16 @@ pub fn populate_from_history(
             Role::System => {}
         }
     }
+}
+
+/// True when `text` looks like the synthetic compaction-summary
+/// message the loop inserts in place of drained history. Detection
+/// matches the framing constants in [`kage_loop::compact`] so resumed
+/// sessions route the summary through the compaction widget instead
+/// of rendering it as a plain user / assistant bubble.
+fn is_compaction_summary(text: &str) -> bool {
+    text.starts_with(kage_loop::COMPACTION_SUMMARY_PREFIX)
+        || text.contains("<summary>") && text.contains("</summary>")
 }
 
 fn first_text(msg: &Message) -> Option<String> {
@@ -492,6 +510,45 @@ mod tests {
             &blocks[4],
             Block::ToolResult { output, .. } if output == "a.rs\nb.rs"
         ));
+    }
+
+    #[test]
+    fn populate_routes_compaction_summary_to_custom_block() {
+        let framed = format!(
+            "{}{}{}",
+            kage_loop::COMPACTION_SUMMARY_PREFIX,
+            "the actual summary content",
+            kage_loop::COMPACTION_SUMMARY_SUFFIX
+        );
+        let mut buf = Buffer::new();
+        let history = vec![Message::new(
+            Role::User,
+            vec![Content::Text { text: framed }],
+            None,
+        )];
+        populate_from_history(&mut buf, &history, &std::collections::HashMap::new());
+        let blocks = buf.blocks();
+        assert_eq!(blocks.len(), 1);
+        match &blocks[0] {
+            Block::Custom { kind, .. } => assert_eq!(kind, "kage:compaction"),
+            other => panic!("expected Custom compaction block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn populate_keeps_regular_user_message_as_user_block() {
+        let mut buf = Buffer::new();
+        let history = vec![Message::new(
+            Role::User,
+            vec![Content::Text {
+                text: "just a normal message".into(),
+            }],
+            None,
+        )];
+        populate_from_history(&mut buf, &history, &std::collections::HashMap::new());
+        let blocks = buf.blocks();
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(blocks[0], Block::User { .. }));
     }
 
     #[test]

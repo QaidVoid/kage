@@ -86,6 +86,8 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     let mut plugin_command_listing: Vec<kage_tui::command::PluginCommand> = Vec::new();
     let mut plugin_widgets: Vec<Arc<kage_plugin::LuaWidget>> = Vec::new();
     let mut plugin_status: Option<kage_plugin::SharedStatus> = None;
+    let mut plugin_usage: Option<kage_plugin::SharedUsage> = None;
+    let mut plugin_compact_request: Option<kage_plugin::SharedCompactRequest> = None;
     if let Some(rt) = plugin_runtime.as_ref() {
         for tool in rt.registered_tools() {
             tools.register(tool);
@@ -114,6 +116,8 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         }
         plugin_widgets = rt.registered_widgets();
         plugin_status = Some(rt.shared_status());
+        plugin_usage = Some(rt.shared_usage());
+        plugin_compact_request = Some(rt.shared_compact_request());
     }
     let cancel = CancelFlag::new();
     let mut initial_cx = AgentContext::new(bare_model, system).with_workdir(&workdir);
@@ -189,6 +193,12 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     app.set_plugin_widgets(plugin_widgets);
     if let Some(status) = plugin_status {
         app.set_plugin_status(status);
+    }
+    if let Some(usage) = plugin_usage {
+        app.set_plugin_usage(usage);
+    }
+    if let Some(req) = plugin_compact_request {
+        app.set_plugin_compact_request(req);
     }
     app.set_cancel_flag(cancel.clone());
     app.set_toasts(toasts.clone());

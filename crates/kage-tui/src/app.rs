@@ -331,6 +331,15 @@ pub struct App {
     /// Per-frame snapshot of [`Self::plugin_status`]. Owned so the
     /// view layer can borrow without holding the plugin status mutex.
     plugin_status_cache: Vec<(String, String)>,
+    /// JSON view of the live session usage so `kage.context_usage()`
+    /// can return up-to-date numbers. The host updates the inner
+    /// value at the same cadence as the modeline (per-render and
+    /// after every turn).
+    plugin_usage: Option<kage_plugin::SharedUsage>,
+    /// Pending compact request flag populated by `kage.compact()`.
+    /// Drained between event polls; a non-empty `Some` dispatches a
+    /// [`RunRequest::CompactNow`] to the worker.
+    plugin_compact_request: Option<kage_plugin::SharedCompactRequest>,
     /// Pending request to toggle terminal mouse capture, applied by
     /// `run` between iterations. `None` means leave the capture state
     /// as-is. The indirection exists because `run_command` can't
@@ -412,6 +421,8 @@ impl App {
             plugin_widget_texts: Vec::new(),
             plugin_status: None,
             plugin_status_cache: Vec::new(),
+            plugin_usage: None,
+            plugin_compact_request: None,
             search_line: None,
             search_pattern: None,
             mouse_drag_anchor: None,
@@ -587,6 +598,19 @@ impl App {
         self.plugin_status = Some(status);
     }
 
+    /// Wire the shared usage snapshot read by `kage.context_usage()`.
+    /// Without this, plugins always see `nil`.
+    pub fn set_plugin_usage(&mut self, usage: kage_plugin::SharedUsage) {
+        self.plugin_usage = Some(usage);
+    }
+
+    /// Wire the shared pending-compact slot populated by
+    /// `kage.compact(prompt?)`. Without this, plugins can still call
+    /// the API but the host never dispatches the requested compaction.
+    pub fn set_plugin_compact_request(&mut self, request: kage_plugin::SharedCompactRequest) {
+        self.plugin_compact_request = Some(request);
+    }
+
     fn refresh_plugin_widget_texts(&mut self, width: u16) {
         self.plugin_widget_texts = self
             .plugin_widgets
@@ -599,6 +623,35 @@ impl App {
         {
             self.plugin_status_cache
                 .extend(map.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        if let Some(usage_slot) = self.plugin_usage.as_ref()
+            && let Some(snap) = self.session_usage_snapshot()
+            && let Ok(mut slot) = usage_slot.lock()
+        {
+            *slot = serde_json::json!({
+                "model": snap.model,
+                "input_tokens": snap.input_tokens,
+                "output_tokens": snap.output_tokens,
+                "cache_read_tokens": snap.cache_read_tokens,
+                "cache_write_tokens": snap.cache_write_tokens,
+                "current_context": snap.current_context,
+                "context_window": snap.context_window,
+                "working": snap.working,
+            });
+        }
+    }
+
+    /// Drain any pending `kage.compact()` request and forward it as
+    /// [`RunRequest::CompactNow`] to the worker. The optional prompt
+    /// is currently advisory; PE.C.4 will wire it into the compact
+    /// hook.
+    fn drain_plugin_compact_request(&mut self) {
+        let Some(slot) = self.plugin_compact_request.as_ref() else {
+            return;
+        };
+        let pending = slot.lock().ok().and_then(|mut g| g.take());
+        if pending.is_some() {
+            let _ = self.send_request(RunRequest::CompactNow);
         }
     }
 
@@ -614,6 +667,7 @@ impl App {
             if let Some(enable) = self.pending_mouse_capture.take() {
                 tui.set_mouse_capture(enable);
             }
+            self.drain_plugin_compact_request();
             if needs_redraw {
                 self.draw(tui)?;
                 last_buffer_version = self.buffer_version();

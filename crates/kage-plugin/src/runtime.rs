@@ -32,6 +32,9 @@ use crate::error::PluginError;
 use crate::events;
 use crate::fs as plugin_fs;
 use crate::http;
+use crate::lifecycle::{
+    self, SharedCompactRequest, SharedUsage, shared_compact_request, shared_usage,
+};
 use crate::providers::{self, LuaProvider, RegisteredProviders, registered_providers};
 use crate::status::{self, SharedStatus, shared_status};
 use crate::tools::{self, RegisteredTools, registered_tools};
@@ -53,6 +56,8 @@ pub struct PluginRuntime {
     providers: RegisteredProviders,
     widgets: RegisteredWidgets,
     status: SharedStatus,
+    usage: SharedUsage,
+    compact_request: SharedCompactRequest,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -196,6 +201,39 @@ impl PluginRuntime {
         Arc::clone(&self.status)
     }
 
+    /// Cloneable handle to the per-turn usage snapshot. The host
+    /// updates the inner value after every assistant turn; plugins
+    /// read it via `kage.context_usage()`.
+    #[must_use]
+    pub fn shared_usage(&self) -> SharedUsage {
+        Arc::clone(&self.usage)
+    }
+
+    /// Replace the current usage snapshot. Convenience wrapper around
+    /// locking [`Self::shared_usage`] and assigning.
+    pub fn set_usage(&self, usage: serde_json::Value) {
+        if let Ok(mut slot) = self.usage.lock() {
+            *slot = usage;
+        }
+    }
+
+    /// Cloneable handle to the pending-compact slot.
+    #[must_use]
+    pub fn shared_compact_request(&self) -> SharedCompactRequest {
+        Arc::clone(&self.compact_request)
+    }
+
+    /// Drain the pending compact request if any. The host calls this
+    /// between turns; `Some(prompt)` means a plugin asked for a
+    /// compaction and the host should run one.
+    #[must_use]
+    pub fn take_compact_request(&self) -> Option<String> {
+        self.compact_request
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+    }
+
     /// Drop every registration that came from plugins (event handlers,
     /// tools, commands, providers) and replay every `*.lua` file in
     /// `dir`. Designed for hot reload between turns: a stale plugin
@@ -301,6 +339,8 @@ impl PluginRuntimeBuilder {
         let provider_registry = registered_providers();
         let widget_registry = registered_widgets();
         let status_map = shared_status();
+        let usage_snapshot = shared_usage();
+        let compact_slot = shared_compact_request();
         {
             let lua_guard = shared_lua.lock().expect("plugin lua mutex poisoned");
             tools::install_register_tool(
@@ -334,6 +374,11 @@ impl PluginRuntimeBuilder {
                 Arc::clone(&widget_registry),
             )?;
             status::install_status(&lua_guard, Arc::clone(&status_map))?;
+            lifecycle::install_lifecycle(
+                &lua_guard,
+                Arc::clone(&usage_snapshot),
+                Arc::clone(&compact_slot),
+            )?;
         }
         Ok(PluginRuntime {
             lua: shared_lua,
@@ -344,6 +389,8 @@ impl PluginRuntimeBuilder {
             providers: provider_registry,
             widgets: widget_registry,
             status: status_map,
+            usage: usage_snapshot,
+            compact_request: compact_slot,
         })
     }
 }

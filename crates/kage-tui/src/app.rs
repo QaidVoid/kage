@@ -121,6 +121,15 @@ pub enum RunRequest {
     /// fires unconditionally, then emits the resulting `Compaction`
     /// event through the buffer/session hooks like an automatic pass.
     CompactNow,
+    /// Plugin-initiated fork. `at` is an entry-id prefix or an empty
+    /// string for "latest entry". The worker copies the current
+    /// session up through that entry into a fresh session file and
+    /// reseats the runtime onto it.
+    ForkSession {
+        /// Entry-id prefix the fork should stop at, or empty for the
+        /// most recent entry.
+        at: String,
+    },
 }
 
 /// Outcome of [`App::run`].
@@ -340,6 +349,12 @@ pub struct App {
     /// Drained between event polls; a non-empty `Some` dispatches a
     /// [`RunRequest::CompactNow`] to the worker.
     plugin_compact_request: Option<kage_plugin::SharedCompactRequest>,
+    /// Snapshot of resumable sessions exposed to `kage.session.list`.
+    /// Refreshed from [`Self::session_lister`] each redraw.
+    plugin_session_list: Option<kage_plugin::SharedSessionList>,
+    /// Pending fork-request slot populated by `kage.session.fork`.
+    /// Drained between event polls; the worker performs the fork.
+    plugin_fork_request: Option<kage_plugin::SharedForkRequest>,
     /// Pending request to toggle terminal mouse capture, applied by
     /// `run` between iterations. `None` means leave the capture state
     /// as-is. The indirection exists because `run_command` can't
@@ -423,6 +438,8 @@ impl App {
             plugin_status_cache: Vec::new(),
             plugin_usage: None,
             plugin_compact_request: None,
+            plugin_session_list: None,
+            plugin_fork_request: None,
             search_line: None,
             search_pattern: None,
             mouse_drag_anchor: None,
@@ -611,6 +628,19 @@ impl App {
         self.plugin_compact_request = Some(request);
     }
 
+    /// Wire the shared session list `kage.session.list()` reads from.
+    /// Without this, plugins always see an empty list.
+    pub fn set_plugin_session_list(&mut self, list: kage_plugin::SharedSessionList) {
+        self.plugin_session_list = Some(list);
+    }
+
+    /// Wire the shared pending-fork slot populated by
+    /// `kage.session.fork(at?)`. Without this, plugins can call the
+    /// API but the host never performs the fork.
+    pub fn set_plugin_fork_request(&mut self, request: kage_plugin::SharedForkRequest) {
+        self.plugin_fork_request = Some(request);
+    }
+
     fn refresh_plugin_widget_texts(&mut self, width: u16) {
         self.plugin_widget_texts = self
             .plugin_widgets
@@ -655,6 +685,45 @@ impl App {
         }
     }
 
+    /// Drain any pending `kage.session.fork()` request and forward it
+    /// as [`RunRequest::ForkSession`] to the worker. The worker copies
+    /// the current session through entry `at` into a fresh session
+    /// file.
+    fn drain_plugin_fork_request(&mut self) {
+        let Some(slot) = self.plugin_fork_request.as_ref() else {
+            return;
+        };
+        let pending = slot.lock().ok().and_then(|mut g| g.take());
+        if let Some(at) = pending {
+            let _ = self.send_request(RunRequest::ForkSession { at });
+        }
+    }
+
+    /// Refresh the session-list snapshot read by `kage.session.list`.
+    /// Builds `[{id, value}]` entries from the registered
+    /// [`SessionLister`]; called once per redraw.
+    fn refresh_plugin_session_list(&mut self) {
+        let Some(slot) = self.plugin_session_list.as_ref() else {
+            return;
+        };
+        let Some(lister) = self.session_lister.as_ref() else {
+            return;
+        };
+        let items = lister();
+        let entries: Vec<serde_json::Value> = items
+            .into_iter()
+            .map(|p| {
+                serde_json::json!({
+                    "id": p.label,
+                    "value": p.value,
+                })
+            })
+            .collect();
+        if let Ok(mut s) = slot.lock() {
+            *s = entries;
+        }
+    }
+
     /// Drive the event loop until the user quits. Returns the exit
     /// reason. The caller is expected to drop the [`Tui`] (which
     /// restores the terminal) before printing anything to stdout.
@@ -668,6 +737,8 @@ impl App {
                 tui.set_mouse_capture(enable);
             }
             self.drain_plugin_compact_request();
+            self.drain_plugin_fork_request();
+            self.refresh_plugin_session_list();
             if needs_redraw {
                 self.draw(tui)?;
                 last_buffer_version = self.buffer_version();

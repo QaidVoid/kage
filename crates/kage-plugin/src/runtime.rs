@@ -36,6 +36,9 @@ use crate::lifecycle::{
     self, SharedCompactRequest, SharedUsage, shared_compact_request, shared_usage,
 };
 use crate::providers::{self, LuaProvider, RegisteredProviders, registered_providers};
+use crate::sessions::{
+    self, SharedForkRequest, SharedSessionList, shared_fork_request, shared_session_list,
+};
 use crate::status::{self, SharedStatus, shared_status};
 use crate::tools::{self, RegisteredTools, registered_tools};
 use crate::widgets::{self, LuaWidget, RegisteredWidgets, registered_widgets};
@@ -58,6 +61,8 @@ pub struct PluginRuntime {
     status: SharedStatus,
     usage: SharedUsage,
     compact_request: SharedCompactRequest,
+    session_list: SharedSessionList,
+    fork_request: SharedForkRequest,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -234,6 +239,37 @@ impl PluginRuntime {
             .and_then(|mut slot| slot.take())
     }
 
+    /// Cloneable handle to the session-list snapshot.
+    #[must_use]
+    pub fn shared_session_list(&self) -> SharedSessionList {
+        Arc::clone(&self.session_list)
+    }
+
+    /// Replace the current session list. The host typically refreshes
+    /// this from its session lister on a redraw cadence.
+    pub fn set_session_list(&self, entries: Vec<serde_json::Value>) {
+        if let Ok(mut slot) = self.session_list.lock() {
+            *slot = entries;
+        }
+    }
+
+    /// Cloneable handle to the pending-fork slot.
+    #[must_use]
+    pub fn shared_fork_request(&self) -> SharedForkRequest {
+        Arc::clone(&self.fork_request)
+    }
+
+    /// Drain the pending fork request. `Some(at)` means the plugin
+    /// asked for a fork at entry `at` (empty string == "latest"); the
+    /// host should run a fork and create a new session file.
+    #[must_use]
+    pub fn take_fork_request(&self) -> Option<String> {
+        self.fork_request
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+    }
+
     /// Drop every registration that came from plugins (event handlers,
     /// tools, commands, providers) and replay every `*.lua` file in
     /// `dir`. Designed for hot reload between turns: a stale plugin
@@ -341,6 +377,8 @@ impl PluginRuntimeBuilder {
         let status_map = shared_status();
         let usage_snapshot = shared_usage();
         let compact_slot = shared_compact_request();
+        let session_list_slot = shared_session_list();
+        let fork_slot = shared_fork_request();
         {
             let lua_guard = shared_lua.lock().expect("plugin lua mutex poisoned");
             tools::install_register_tool(
@@ -379,6 +417,11 @@ impl PluginRuntimeBuilder {
                 Arc::clone(&usage_snapshot),
                 Arc::clone(&compact_slot),
             )?;
+            sessions::install_sessions(
+                &lua_guard,
+                Arc::clone(&session_list_slot),
+                Arc::clone(&fork_slot),
+            )?;
         }
         Ok(PluginRuntime {
             lua: shared_lua,
@@ -391,6 +434,8 @@ impl PluginRuntimeBuilder {
             status: status_map,
             usage: usage_snapshot,
             compact_request: compact_slot,
+            session_list: session_list_slot,
+            fork_request: fork_slot,
         })
     }
 }

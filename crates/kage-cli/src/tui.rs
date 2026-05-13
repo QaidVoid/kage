@@ -17,7 +17,7 @@ use kage_core::{CancelFlag, Content, Message, Role};
 use kage_loop::{AgentContext, LoopConfig, NoopHooks, force_compact, run};
 use kage_plugin::PluginRuntime;
 use kage_provider::ProviderRegistry;
-use kage_session::{SessionSummary, SessionWriter};
+use kage_session::{SessionId, SessionReader, SessionSummary, SessionWriter};
 use kage_tools::ToolRegistry;
 use kage_tui::{
     App, PickItem, RunRequest, SharedBuffer, SharedSessionUsage, SharedToasts, Toast, Tui,
@@ -88,6 +88,8 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     let mut plugin_status: Option<kage_plugin::SharedStatus> = None;
     let mut plugin_usage: Option<kage_plugin::SharedUsage> = None;
     let mut plugin_compact_request: Option<kage_plugin::SharedCompactRequest> = None;
+    let mut plugin_session_list: Option<kage_plugin::SharedSessionList> = None;
+    let mut plugin_fork_request: Option<kage_plugin::SharedForkRequest> = None;
     if let Some(rt) = plugin_runtime.as_ref() {
         for tool in rt.registered_tools() {
             tools.register(tool);
@@ -118,6 +120,8 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         plugin_status = Some(rt.shared_status());
         plugin_usage = Some(rt.shared_usage());
         plugin_compact_request = Some(rt.shared_compact_request());
+        plugin_session_list = Some(rt.shared_session_list());
+        plugin_fork_request = Some(rt.shared_fork_request());
     }
     let cancel = CancelFlag::new();
     let mut initial_cx = AgentContext::new(bare_model, system).with_workdir(&workdir);
@@ -199,6 +203,12 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     }
     if let Some(req) = plugin_compact_request {
         app.set_plugin_compact_request(req);
+    }
+    if let Some(list) = plugin_session_list {
+        app.set_plugin_session_list(list);
+    }
+    if let Some(req) = plugin_fork_request {
+        app.set_plugin_fork_request(req);
     }
     app.set_cancel_flag(cancel.clone());
     app.set_toasts(toasts.clone());
@@ -398,6 +408,9 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                     }
                 }
                 RunRequest::Cancel => cancel.cancel(),
+                RunRequest::ForkSession { at } => {
+                    handle_plugin_fork(session_path.as_ref(), &buffer, &toasts, &at);
+                }
                 RunRequest::CompactNow => {
                     cancel.reset();
                     let qualified = active_qualified
@@ -720,6 +733,106 @@ fn translate_plugin_arg(arg: &kage_plugin::PluginArgSpec) -> kage_tui::command::
 /// resume keeps the currently active model rather than failing. The
 /// replay history still loads so the substitute model continues with
 /// full context; a toast flags the substitution.
+/// Read the JSONL session at `path` and return the id of its final
+/// non-header entry, or `None` if the file holds only a header.
+fn find_last_entry(
+    path: &std::path::Path,
+) -> Result<Option<kage_session::EntryId>, kage_session::SessionError> {
+    let reader = SessionReader::iter(path)?;
+    let mut last = None;
+    for item in reader {
+        let entry = item?;
+        if !matches!(entry, kage_session::SessionEntry::Header(_)) {
+            last = Some(entry.id());
+        }
+    }
+    Ok(last)
+}
+
+/// Handle a plugin-initiated [`RunRequest::ForkSession`]. Copies the
+/// current session up through entry `at` (or the latest entry when
+/// `at` is empty) into a fresh session file and pushes a toast so the
+/// user can see the new id. Errors surface as `kage:error` blocks.
+fn handle_plugin_fork(
+    session_path: Option<&Arc<Mutex<PathBuf>>>,
+    buffer: &SharedBuffer,
+    toasts: &SharedToasts,
+    at: &str,
+) {
+    let Some(sp) = session_path else {
+        if let Ok(mut buf) = buffer.lock() {
+            buf.push_custom(
+                "kage:error",
+                "fork: no active session to fork".to_owned(),
+                false,
+            );
+        }
+        return;
+    };
+    let src_path = sp.lock().expect("session path mutex poisoned").clone();
+    if !src_path.exists() {
+        if let Ok(mut buf) = buffer.lock() {
+            buf.push_custom(
+                "kage:error",
+                "fork: current session has no committed entries yet".to_owned(),
+                false,
+            );
+        }
+        return;
+    }
+    let entry = if at.is_empty() {
+        match find_last_entry(&src_path) {
+            Ok(Some(id)) => id,
+            Ok(None) => {
+                if let Ok(mut buf) = buffer.lock() {
+                    buf.push_custom(
+                        "kage:error",
+                        "fork: current session has no entries to fork at".to_owned(),
+                        false,
+                    );
+                }
+                return;
+            }
+            Err(e) => {
+                if let Ok(mut buf) = buffer.lock() {
+                    buf.push_custom("kage:error", format!("fork: {e}"), false);
+                }
+                return;
+            }
+        }
+    } else {
+        match kage_session::resolve_entry_prefix(&src_path, at) {
+            Ok(id) => id,
+            Err(e) => {
+                if let Ok(mut buf) = buffer.lock() {
+                    buf.push_custom("kage:error", format!("fork: {e}"), false);
+                }
+                return;
+            }
+        }
+    };
+    let Some(dir) = src_path.parent() else {
+        if let Ok(mut buf) = buffer.lock() {
+            buf.push_custom(
+                "kage:error",
+                "fork: session path has no parent directory".to_owned(),
+                false,
+            );
+        }
+        return;
+    };
+    let new_session = SessionId::new();
+    let dst = dir.join(format!("{new_session}.jsonl"));
+    if let Err(e) = kage_session::fork(&src_path, &dst, new_session, entry) {
+        if let Ok(mut buf) = buffer.lock() {
+            buf.push_custom("kage:error", format!("fork failed: {e}"), false);
+        }
+        return;
+    }
+    let short: String = new_session.to_string().chars().take(8).collect();
+    push_toast(toasts, Toast::info(format!("forked session: {short}")));
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_resume(
     registry: &Arc<ProviderRegistry>,

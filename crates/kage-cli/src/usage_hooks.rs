@@ -9,7 +9,7 @@
 //! mid-flow, mirroring the cumulative `cx.budget` the loop maintains.
 
 use kage_core::{LoopEvent, Message, ToolOutput};
-use kage_loop::{Hooks, TurnSummary};
+use kage_loop::{Hooks, StreamRequest, TurnSummary};
 use kage_tui::SharedSessionUsage;
 
 /// Wraps an inner [`Hooks`] implementation and accumulates token
@@ -89,6 +89,10 @@ impl<H: Hooks> Hooks for UsageHooks<H> {
 
     fn transform_context(&mut self, messages: &mut Vec<Message>) -> Result<(), String> {
         self.inner.transform_context(messages)
+    }
+
+    fn transform_provider_request(&mut self, req: &mut StreamRequest) -> Result<(), String> {
+        self.inner.transform_provider_request(req)
     }
 
     fn on_turn_start(&mut self, index: u32) {

@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use kage_core::{LoopEvent, Message, ToolOutput};
-use kage_loop::{Hooks, TurnSummary};
+use kage_loop::{Hooks, StreamRequest, TurnSummary};
 use kage_plugin::{LogLevel, PluginRuntime, SharedHostLog, default_host_log};
 use serde_json::json;
 
@@ -151,18 +151,21 @@ impl<H: Hooks> Hooks for PluginEventHooks<H> {
                 );
             }
             LoopEvent::MessageEnd { id, usage } => {
-                let _ = self.runtime.dispatch_event(
-                    "message_end",
-                    &json!({
-                        "id": id.to_string(),
-                        "usage": {
-                            "input": usage.input,
-                            "output": usage.output,
-                            "cache_read": usage.cache_read,
-                            "cache_write": usage.cache_write,
-                        },
-                    }),
-                );
+                let payload = json!({
+                    "id": id.to_string(),
+                    "usage": {
+                        "input": usage.input,
+                        "output": usage.output,
+                        "cache_read": usage.cache_read,
+                        "cache_write": usage.cache_write,
+                    },
+                });
+                let _ = self.runtime.dispatch_event("message_end", &payload);
+                if self.runtime.handler_count("after_provider_response") > 0 {
+                    let _ = self
+                        .runtime
+                        .dispatch_event("after_provider_response", &payload);
+                }
             }
             LoopEvent::ToolCallStart {
                 id,
@@ -207,6 +210,24 @@ impl<H: Hooks> Hooks for PluginEventHooks<H> {
         let next: Vec<Message> = serde_json::from_value(result)
             .map_err(|e| format!("transform_context: plugin returned invalid history: {e}"))?;
         *messages = next;
+        Ok(())
+    }
+
+    fn transform_provider_request(&mut self, req: &mut StreamRequest) -> Result<(), String> {
+        self.inner.transform_provider_request(req)?;
+        if self.runtime.handler_count("before_provider_request") == 0 {
+            return Ok(());
+        }
+        let payload = serde_json::to_value(&*req)
+            .map_err(|e| format!("before_provider_request: serialize request: {e}"))?;
+        let result = self
+            .runtime
+            .dispatch_transform("before_provider_request", payload)
+            .map_err(|e| format!("before_provider_request: lua dispatch: {e}"))?;
+        let next: StreamRequest = serde_json::from_value(result).map_err(|e| {
+            format!("before_provider_request: plugin returned invalid request: {e}")
+        })?;
+        *req = next;
         Ok(())
     }
 

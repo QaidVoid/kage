@@ -18,17 +18,23 @@
 //! * `turn_end` - the provider stream for the current turn has closed
 //! * `message_start` - the model began a new assistant message (mid-stream)
 //! * `message_update` - the model emitted a text delta (mid-stream)
+//! * `after_provider_response` - the provider stream closed; payload
+//!   mirrors `message_end` (id + usage)
 //! * `message_end` - the model finished one assistant turn
 //! * `tool_call` - a tool invocation has begun
 //! * `tool_result` - a tool invocation produced an output
 //! * `session_open` - the host opened a session writer
 //! * `session_close` - the host closed a session writer
 //!
-//! Two events use special dispatch shapes:
+//! These events use special dispatch shapes:
 //! * `transform_context` (transform): the host passes the current message
 //!   history, each subscriber receives the chained payload, and may return
 //!   a replacement list. The host replaces history with whatever the last
 //!   handler returned. See [`dispatch_transform`].
+//! * `before_provider_request` (transform): same chaining as
+//!   `transform_context`, but the payload is the serialized
+//!   `StreamRequest` about to go out to the provider. Plugins can inject
+//!   a system header, strip tools, swap the model, etc.
 //! * `should_stop_after_turn` (predicate): the host passes a turn summary;
 //!   any handler returning `true` short-circuits the run. See
 //!   [`dispatch_predicate`].

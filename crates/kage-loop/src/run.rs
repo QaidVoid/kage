@@ -97,7 +97,15 @@ where
                 return Err(kind);
             }
 
-            let req = build_request(cx, tools);
+            let mut req = build_request(cx, tools);
+            if let Err(message) = hooks.transform_provider_request(&mut req) {
+                let kind = LoopError::HookFailed {
+                    hook: "transform_provider_request".to_owned(),
+                    message,
+                };
+                emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
+                return Err(kind);
+            }
             let stream = match provider.stream(req, cancel) {
                 Ok(s) => s,
                 Err(e) => {
@@ -758,6 +766,45 @@ mod tests {
             .find(|t| t.contains("one") && t.contains("two") && t.contains("three"))
             .expect("one merged user message with all three texts");
         assert_eq!(merged, "one\n\ntwo\n\nthree");
+    }
+
+    struct RequestSpy {
+        seen_model: Option<String>,
+        rewrite_system_to: Option<String>,
+    }
+    impl Hooks for RequestSpy {
+        fn transform_provider_request(
+            &mut self,
+            req: &mut kage_provider::StreamRequest,
+        ) -> Result<(), String> {
+            self.seen_model = Some(req.model.clone());
+            if let Some(s) = &self.rewrite_system_to {
+                req.system = Some(s.clone());
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn transform_provider_request_observes_and_can_rewrite() {
+        let mock = MockProvider::replaying(vec![Ok(ProviderEvent::MessageEnd {
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+        })]);
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.history.push(user_msg("hi"));
+        let cfg = LoopConfig::default();
+        let mut hooks = RequestSpy {
+            seen_model: None,
+            rewrite_system_to: Some("rewritten".into()),
+        };
+        let cancel = CancelFlag::new();
+        let registry = ToolRegistry::new();
+
+        run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {}).unwrap();
+        assert_eq!(hooks.seen_model.as_deref(), Some("mock:m"));
+        let req = mock.last_request().unwrap();
+        assert_eq!(req.system.as_deref(), Some("rewritten"));
     }
 
     #[test]

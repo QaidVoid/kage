@@ -352,6 +352,13 @@ impl Hooks for BoxedHooks {
         self.0.transform_context(messages)
     }
 
+    fn transform_provider_request(
+        &mut self,
+        req: &mut kage_loop::StreamRequest,
+    ) -> Result<(), String> {
+        self.0.transform_provider_request(req)
+    }
+
     fn on_turn_start(&mut self, index: u32) {
         self.0.on_turn_start(index);
     }

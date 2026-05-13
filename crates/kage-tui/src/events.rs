@@ -70,6 +70,13 @@ impl<H: Hooks> Hooks for TuiHooks<H> {
         self.inner.transform_context(messages)
     }
 
+    fn transform_provider_request(
+        &mut self,
+        req: &mut kage_loop::StreamRequest,
+    ) -> Result<(), String> {
+        self.inner.transform_provider_request(req)
+    }
+
     fn on_turn_start(&mut self, index: u32) {
         self.inner.on_turn_start(index);
     }

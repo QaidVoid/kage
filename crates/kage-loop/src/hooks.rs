@@ -6,6 +6,7 @@
 //! about.
 
 use kage_core::{LoopEvent, Message, TokenUsage, ToolOutput};
+use kage_provider::StreamRequest;
 
 /// Outcome of a pre-action hook that can veto, patch, or pass through.
 ///
@@ -115,6 +116,23 @@ pub trait Hooks {
     /// this for logging, metrics, or driving UI sinks.
     fn on_event(&mut self, event: &LoopEvent) {
         let _ = event;
+    }
+
+    /// Fired immediately before the loop hands a built [`StreamRequest`]
+    /// to the provider. Hosts can rewrite the request in place: inject a
+    /// system header, strip or rewrite tools, swap the model, etc. The
+    /// resulting request is what the provider actually receives.
+    ///
+    /// Returning an error aborts the turn with
+    /// [`kage_core::LoopError::HookFailed`]. The default implementation is
+    /// a no-op.
+    ///
+    /// Runs after [`Self::transform_context`]: that hook reshapes history,
+    /// then `build_request` produces a [`StreamRequest`], then this hook
+    /// can adjust the request as a whole.
+    fn transform_provider_request(&mut self, req: &mut StreamRequest) -> Result<(), String> {
+        let _ = req;
+        Ok(())
     }
 
     /// Fired immediately before each provider turn, with the full message

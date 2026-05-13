@@ -10,6 +10,7 @@ pub mod events;
 pub mod hostlog;
 pub mod input;
 pub mod layout;
+pub mod markdown;
 pub mod overlay;
 pub mod picker;
 pub mod syntax;

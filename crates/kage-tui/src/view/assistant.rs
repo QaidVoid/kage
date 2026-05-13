@@ -1,9 +1,12 @@
 //! `AssistantBlockWidget`: per-block renderer for assistant text.
 //!
-//! Live blocks skip syntect (the cache would miss on every streamed
-//! delta and re-highlight a growing body 30 times a second). Finished
-//! blocks run through the fenced-highlight cache. Emphasis adds the
-//! left-edge marker via `mark_emphasis`.
+//! Live blocks skip the markdown parser (the cache would miss on
+//! every streamed delta and re-parse a growing body 30 times a
+//! second). Finished blocks run through
+//! [`crate::markdown::render`], which handles headings, lists,
+//! quotes, inline bold/italic/code, and fenced code blocks (syntect-
+//! highlighted). Emphasis adds the left-edge marker via
+//! `mark_emphasis`.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -41,7 +44,7 @@ impl AssistantBlockWidget {
         let body = if self.live {
             plain_lines(&self.text, assistant_style())
         } else {
-            crate::syntax::highlight_fenced(&self.text, assistant_style())
+            crate::markdown::render(&self.text, assistant_style())
         };
         mark_emphasis(body, width, emphasis)
     }

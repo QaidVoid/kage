@@ -200,6 +200,34 @@ fn highlight_fenced_uncached(text: &str, fallback: Style) -> Vec<Line<'static>> 
     out
 }
 
+/// Highlight `code` using the syntect grammar matching `lang`
+/// (by token, then by name; e.g. `"rust"` or `"Rust"`). Falls back to
+/// `plain_lines_styled` when the language is unknown or the input
+/// exceeds [`HIGHLIGHT_BYTE_LIMIT`]. Used by [`crate::markdown::render`]
+/// for fenced code blocks.
+#[must_use]
+pub fn highlight_with_lang(code: &str, lang: &str, fallback: Style) -> Vec<Line<'static>> {
+    if code.len() > HIGHLIGHT_BYTE_LIMIT {
+        return plain_lines_styled(code, fallback);
+    }
+    let ss = syntax_set();
+    let syntax = ss
+        .find_syntax_by_token(lang)
+        .or_else(|| ss.find_syntax_by_name(lang));
+    match syntax {
+        Some(s) => highlight_with_syntax(code, s, fallback),
+        None => plain_lines_styled(code, fallback),
+    }
+}
+
+/// One-line-per-`\n` plain styled lines. Used as a fallback when
+/// syntect cannot match a language and as a building block for the
+/// markdown renderer's plain text path.
+#[must_use]
+pub fn plain_lines_styled(text: &str, style: Style) -> Vec<Line<'static>> {
+    plain_lines(text, style)
+}
+
 fn highlight_with_syntax(
     code: &str,
     syntax: &SyntaxReference,

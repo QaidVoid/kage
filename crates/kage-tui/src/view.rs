@@ -10,6 +10,7 @@
 //! [`widget::BlockWidget::lines`] into one Paragraph.
 
 pub mod assistant;
+pub mod compaction;
 pub mod custom;
 pub mod registry;
 pub mod thinking;
@@ -21,6 +22,7 @@ pub mod user;
 pub mod widget;
 
 pub use assistant::AssistantBlockWidget;
+pub use compaction::CompactionBlockWidget;
 pub use custom::CustomBlockWidget;
 pub use registry::{BlockFactory, BlockRenderer, BuiltinKind};
 pub use thinking::ThinkingBlockWidget;

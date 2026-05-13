@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use super::widget::BlockWidget;
 use super::{
-    AssistantBlockWidget, CustomBlockWidget, ThinkingBlockWidget, ToolCallAloneBlockWidget,
-    ToolPairBlockWidget, ToolResultAloneBlockWidget, UserBlockWidget,
+    AssistantBlockWidget, CompactionBlockWidget, CustomBlockWidget, ThinkingBlockWidget,
+    ToolCallAloneBlockWidget, ToolPairBlockWidget, ToolResultAloneBlockWidget, UserBlockWidget,
 };
 use crate::buffer::Block;
 
@@ -61,6 +61,8 @@ impl BlockRenderer {
     /// every built-in non-custom block kind.
     #[must_use]
     pub fn with_builtins() -> Self {
+        let mut custom: HashMap<String, Arc<dyn BlockFactory>> = HashMap::new();
+        custom.insert("kage:compaction".into(), Arc::new(BuiltinCompactionFactory));
         Self {
             user: Some(Arc::new(BuiltinUserFactory)),
             assistant: Some(Arc::new(BuiltinAssistantFactory)),
@@ -69,7 +71,7 @@ impl BlockRenderer {
             tool_call_alone: Some(Arc::new(BuiltinToolCallAloneFactory)),
             tool_result_alone: Some(Arc::new(BuiltinToolResultAloneFactory)),
             custom_default: Some(Arc::new(BuiltinCustomFactory)),
-            custom: HashMap::new(),
+            custom,
         }
     }
 
@@ -270,6 +272,18 @@ pub struct BuiltinCustomFactory;
 impl BlockFactory for BuiltinCustomFactory {
     fn make(&self, block: &Block) -> Option<Box<dyn BlockWidget>> {
         CustomBlockWidget::from_block(block).map(|w| Box::new(w) as Box<dyn BlockWidget>)
+    }
+}
+
+/// Built-in factory for `Block::Custom { kind: "kage:compaction", .. }`.
+/// Produces a [`CompactionBlockWidget`] with a styled summary card so
+/// compaction events stand out from regular custom blocks.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BuiltinCompactionFactory;
+
+impl BlockFactory for BuiltinCompactionFactory {
+    fn make(&self, block: &Block) -> Option<Box<dyn BlockWidget>> {
+        CompactionBlockWidget::from_block(block).map(|w| Box::new(w) as Box<dyn BlockWidget>)
     }
 }
 

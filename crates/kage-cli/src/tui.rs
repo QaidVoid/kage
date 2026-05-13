@@ -56,7 +56,8 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     let buffer = shared_buffer();
     let toasts = shared_toasts();
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let system_prompt = crate::runtime_env::build_system_prompt(system, &workdir, model);
+    let skills = crate::load_skills(&workdir);
+    let system_prompt = crate::runtime_env::build_system_prompt(system, &workdir, model, &skills);
     let system = system_prompt.as_str();
     let plugin_runtime = match crate::plugins_dir() {
         Ok(dir) => match setup_runtime_with_sink(

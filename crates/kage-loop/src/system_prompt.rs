@@ -9,6 +9,8 @@
 
 use std::path::Path;
 
+use kage_core::Skill;
+
 /// Inputs to [`compose`]. The CLI fills these once at startup; tests
 /// pass a fixed seed for deterministic snapshots.
 #[derive(Clone, Copy, Debug)]
@@ -60,6 +62,40 @@ pub fn compose(role: &str, env: &EnvContext<'_>) -> String {
     out
 }
 
+/// Append a `<skills>` block describing each loaded [`Skill`] so the
+/// model can invoke them by name. Skills with
+/// `disable_model_invocation: true` are still surfaced in the block (the
+/// flag only hides them from the slash palette).
+///
+/// Returns `system` unchanged when `skills` is empty.
+#[must_use]
+pub fn with_skills(system: String, skills: &[Skill]) -> String {
+    if skills.is_empty() {
+        return system;
+    }
+    let mut out = system;
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("\n<skills>\n");
+    for skill in skills {
+        out.push_str("<skill name=\"");
+        out.push_str(&skill.name);
+        out.push_str("\">\n");
+        if !skill.description.is_empty() {
+            out.push_str(skill.description.trim());
+            out.push('\n');
+        }
+        if !skill.body.is_empty() {
+            out.push_str(skill.body.trim());
+            out.push('\n');
+        }
+        out.push_str("</skill>\n");
+    }
+    out.push_str("</skills>\n");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,6 +119,26 @@ mod tests {
         assert!(out.contains("date: 2026-05-09"));
         assert!(out.contains("model: anthropic:claude-sonnet-4-6"));
         assert!(out.ends_with("</environment>\n"));
+    }
+
+    #[test]
+    fn with_skills_appends_skill_block() {
+        let base = "role\n\n<environment>\nos: linux\n</environment>\n".to_owned();
+        let skill = Skill {
+            name: "code-review".into(),
+            description: "review code".into(),
+            body: "Be terse.".into(),
+            disable_model_invocation: false,
+            path: Path::new("/x").to_path_buf(),
+        };
+        let out = with_skills(base.clone(), std::slice::from_ref(&skill));
+        assert!(out.contains("<skills>"));
+        assert!(out.contains("<skill name=\"code-review\">"));
+        assert!(out.contains("review code"));
+        assert!(out.contains("Be terse."));
+        assert!(out.contains("</skills>"));
+        // Empty list is a no-op.
+        assert_eq!(with_skills(base.clone(), &[]), base);
     }
 
     #[test]

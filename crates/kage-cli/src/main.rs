@@ -172,7 +172,8 @@ fn main() -> ExitCode {
     };
 
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let system_prompt = runtime_env::build_system_prompt(&cli.system, &workdir, &model);
+    let skills = load_skills(&workdir);
+    let system_prompt = runtime_env::build_system_prompt(&cli.system, &workdir, &model, &skills);
     let plugin_runtime = match plugins_dir() {
         Ok(dir) => match setup_runtime(&dir, &workdir, &model, &system_prompt) {
             Ok(rt) => rt,
@@ -677,6 +678,33 @@ fn plugins_dir() -> Result<PathBuf, String> {
     Ok(xdg_dir("XDG_CONFIG_HOME", ".config")?
         .join("kage")
         .join("plugins"))
+}
+
+/// Discover and load every SKILL.md under the user config dir
+/// (`$XDG_CONFIG_HOME/kage/skills/<name>/`) and the project-local
+/// `./.kage/skills/<name>/`. Project skills shadow user skills with the
+/// same name. Failing skills are logged to stderr and skipped.
+pub(crate) fn load_skills(workdir: &std::path::Path) -> Vec<kage_core::Skill> {
+    let mut out: std::collections::BTreeMap<String, kage_core::Skill> =
+        std::collections::BTreeMap::new();
+    let user_dir = xdg_dir("XDG_CONFIG_HOME", ".config")
+        .map(|p| p.join("kage").join("skills"))
+        .ok();
+    let project_dir = workdir.join(".kage").join("skills");
+    for dir in [user_dir.as_deref(), Some(project_dir.as_path())]
+        .into_iter()
+        .flatten()
+    {
+        for result in kage_core::load_skills_dir(dir) {
+            match result {
+                Ok(skill) => {
+                    out.insert(skill.name.clone(), skill);
+                }
+                Err(err) => eprintln!("kage: skill load error: {err}"),
+            }
+        }
+    }
+    out.into_values().collect()
 }
 
 /// Resolve an XDG base directory: prefers `$ENV_VAR` if set and non-empty,

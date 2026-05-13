@@ -6,6 +6,7 @@ pub mod error;
 pub mod event;
 pub mod message;
 pub mod risk;
+pub mod skills;
 pub mod tool_spec;
 
 pub use cancel::CancelFlag;
@@ -17,4 +18,5 @@ pub use error::{Error, Result};
 pub use event::{LoopError, LoopEvent, TokenUsage, ToolOutput, ToolUpdate};
 pub use message::{Content, ImageSource, Message, MessageId, Role, ToolCallId};
 pub use risk::{Risk, classify};
+pub use skills::{Skill, SkillError, load_skill_file, load_skills_dir};
 pub use tool_spec::ToolSpec;

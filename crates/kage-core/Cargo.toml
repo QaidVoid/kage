@@ -25,3 +25,4 @@ ulid.workspace = true
 
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }
+tempfile.workspace = true

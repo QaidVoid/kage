@@ -21,4 +21,4 @@ pub use context::{AgentContext, TokenBudget};
 pub use hooks::{HookResult, Hooks, NoopHooks, TurnSummary};
 pub use kage_provider::StreamRequest;
 pub use run::run;
-pub use system_prompt::{DEFAULT_ROLE, EnvContext, compose as compose_system_prompt};
+pub use system_prompt::{DEFAULT_ROLE, EnvContext, compose as compose_system_prompt, with_skills};

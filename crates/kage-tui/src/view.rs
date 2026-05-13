@@ -1249,17 +1249,16 @@ fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {
     }
 }
 
-/// Build the [`Line`]s for the input body using explicit char-based
-/// hard-wrap at `body_width`. Pre-wrapping (rather than letting
-/// `Paragraph::wrap` do it) keeps the visual layout perfectly in
-/// sync with [`input_visual_cursor`]: both walk chars in fixed-width
-/// chunks, so the cursor lands exactly under the char it indexes.
-/// Word-aware wrap would put breaks at spaces, leaving the cursor
-/// off-by-N relative to the painted text.
+/// Build the [`Line`]s for the input body using word-aware wrap at
+/// `body_width`. Pre-wrapping (rather than letting `Paragraph::wrap`
+/// do it) keeps the visual layout perfectly in sync with
+/// [`input_visual_cursor`]: both consume the same row plan from
+/// [`wrap_input_rows`], so the cursor lands exactly under the char it
+/// indexes regardless of where the wrap broke.
 ///
-/// When `visual_range` is `Some`, the chunk for each visual row is
-/// further split into pre-selection / selected / post-selection
-/// spans so the highlight paints across wrap boundaries cleanly.
+/// When `visual_range` is `Some`, each row range is further split
+/// into pre-selection / selected / post-selection spans so the
+/// highlight paints across wrap boundaries cleanly.
 fn build_input_body_lines(
     text: &str,
     visual_range: Option<(usize, usize)>,
@@ -1267,46 +1266,81 @@ fn build_input_body_lines(
     body_width: u16,
 ) -> Vec<Line<'static>> {
     let highlight = Style::default().bg(theme.selection_color);
-    let bw = usize::from(body_width.max(1));
     let mut out = Vec::new();
-    let mut byte_offset = 0usize;
-    for line in text.split('\n') {
-        let line_start_abs = byte_offset;
-        let line_bytes = line.len();
-        // Walk chars in chunks of `bw`. Track the absolute byte
-        // offset into `text` so the visual_range projection lines up.
-        let mut chunk_start_abs = line_start_abs;
-        let mut chunk_chars = 0usize;
-        for (idx, _) in line.char_indices() {
-            let abs = line_start_abs + idx;
-            if chunk_chars == bw {
-                push_input_row(
-                    &mut out,
-                    text,
-                    chunk_start_abs,
-                    abs,
-                    visual_range,
-                    highlight,
-                );
-                chunk_start_abs = abs;
-                chunk_chars = 0;
-            }
-            chunk_chars += 1;
-        }
-        // Final chunk for this logical line, including the empty
-        // trailing chunk so an empty logical line still produces one
-        // visual row.
-        push_input_row(
-            &mut out,
-            text,
-            chunk_start_abs,
-            line_start_abs + line_bytes,
-            visual_range,
-            highlight,
-        );
-        byte_offset = line_start_abs + line_bytes + 1;
+    for (start, end) in wrap_input_rows(text, body_width) {
+        push_input_row(&mut out, text, start, end, visual_range, highlight);
     }
     out
+}
+
+/// Word-aware wrap plan for the input area.
+///
+/// Returns one `(byte_start, byte_end)` per visual row. The ranges
+/// project directly into the source `text` so callers that need a
+/// cursor's `(row, col)` (or selection spans) can index the same
+/// rows that get painted.
+///
+/// Wrap rules:
+/// - Logical lines (split on `\n`) are wrapped independently. An
+///   empty logical line still produces one zero-length row so a
+///   trailing newline grows the input.
+/// - Within a logical line, a row is filled greedily by characters.
+///   When the next character would overflow `body_width`, the row is
+///   cut at the most recent ASCII space (the space is consumed and
+///   not painted on either side); if no break point exists in the
+///   row, the cut is mid-character.
+/// - A "word" longer than `body_width` is split at `body_width`
+///   character boundaries until it fits.
+fn wrap_input_rows(text: &str, body_width: u16) -> Vec<(usize, usize)> {
+    let bw = usize::from(body_width.max(1));
+    let mut rows = Vec::new();
+    let mut byte_offset = 0usize;
+    for line in text.split('\n') {
+        let line_start = byte_offset;
+        let line_bytes = line.len();
+        wrap_one_logical_line(line, line_start, bw, &mut rows);
+        byte_offset = line_start + line_bytes + 1;
+    }
+    rows
+}
+
+fn wrap_one_logical_line(
+    line: &str,
+    line_start_abs: usize,
+    bw: usize,
+    rows: &mut Vec<(usize, usize)>,
+) {
+    let line_end_abs = line_start_abs + line.len();
+    if line.is_empty() {
+        rows.push((line_start_abs, line_end_abs));
+        return;
+    }
+    let mut row_start_abs = line_start_abs;
+    let mut row_chars = 0usize;
+    let mut last_space_abs: Option<usize> = None;
+    let mut byte_pos = line_start_abs;
+    for c in line.chars() {
+        let c_len = c.len_utf8();
+        if row_chars >= bw {
+            if let Some(sb) = last_space_abs.filter(|&s| s > row_start_abs) {
+                rows.push((row_start_abs, sb));
+                row_start_abs = sb + 1;
+            } else {
+                rows.push((row_start_abs, byte_pos));
+                row_start_abs = byte_pos;
+            }
+            row_chars = line[(row_start_abs - line_start_abs)..(byte_pos - line_start_abs)]
+                .chars()
+                .count();
+            last_space_abs = None;
+        }
+        if c == ' ' {
+            last_space_abs = Some(byte_pos);
+        }
+        byte_pos += c_len;
+        row_chars += 1;
+    }
+    rows.push((row_start_abs, line_end_abs));
 }
 
 /// Append one wrapped visual row spanning `text[start..end]` to
@@ -1518,35 +1552,35 @@ fn placeholder_for(mode: Mode) -> Option<&'static str> {
 /// count for one row each (so a trailing newline grows the input).
 #[must_use]
 pub fn input_visual_row_count(text: &str, body_width: u16) -> u16 {
-    let bw = usize::from(body_width.max(1));
-    let mut total: usize = 0;
-    for line in text.split('\n') {
-        let chars = line.chars().count();
-        total += if chars == 0 { 1 } else { chars.div_ceil(bw) };
-    }
-    u16::try_from(total).unwrap_or(u16::MAX)
+    u16::try_from(wrap_input_rows(text, body_width).len()).unwrap_or(u16::MAX)
 }
 
 /// Visual `(row, col)` of the cursor in the wrapped layout. Walks
-/// every prior logical line, accumulating wrapped row counts, then
-/// adds the wrap-rows / column for the current logical line up to
-/// the cursor.
+/// the same wrap plan [`build_input_body_lines`] paints so the
+/// cursor lands on the row and column that match what's on screen,
+/// regardless of whether the row break was a soft (word) or hard
+/// (mid-character) cut.
 fn input_visual_cursor(text: &str, cursor: usize, body_width: u16) -> (u16, u16) {
-    let bw = usize::from(body_width.max(1));
-    let prefix = text.get(..cursor).unwrap_or("");
-    let mut row: usize = 0;
-    let mut last_break = 0;
-    for (i, _) in prefix.match_indices('\n') {
-        let chars = prefix[last_break..i].chars().count();
-        row += if chars == 0 { 1 } else { chars.div_ceil(bw) };
-        last_break = i + 1;
+    let rows = wrap_input_rows(text, body_width);
+    if rows.is_empty() {
+        return (0, 0);
     }
-    let chars_in_current = prefix[last_break..].chars().count();
-    row += chars_in_current / bw;
-    let col = chars_in_current % bw;
+    let cursor = cursor.min(text.len());
+    for (idx, (start, end)) in rows.iter().enumerate() {
+        if cursor <= *end {
+            let row_text = text.get(*start..cursor).unwrap_or("");
+            let col = row_text.chars().count();
+            return (
+                u16::try_from(idx).unwrap_or(u16::MAX),
+                u16::try_from(col).unwrap_or(u16::MAX),
+            );
+        }
+    }
+    let (last_start, last_end) = rows[rows.len() - 1];
+    let last_chars = text[last_start..last_end].chars().count();
     (
-        u16::try_from(row).unwrap_or(u16::MAX),
-        u16::try_from(col).unwrap_or(u16::MAX),
+        u16::try_from(rows.len() - 1).unwrap_or(u16::MAX),
+        u16::try_from(last_chars).unwrap_or(u16::MAX),
     )
 }
 
@@ -2230,6 +2264,68 @@ mod tests {
 
     use super::*;
     use crate::buffer::Buffer;
+
+    // --- Word-wrap helpers ---
+
+    #[test]
+    fn wrap_breaks_at_word_boundary_when_word_fits() {
+        // Width 10 fits "hello" (5) + space + "world" (5) = 11 chars,
+        // so "world" must wrap to a new row instead of splitting.
+        let rows = wrap_input_rows("hello world", 10);
+        let rendered: Vec<&str> = rows.iter().map(|(s, e)| &"hello world"[*s..*e]).collect();
+        assert_eq!(rendered, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn wrap_falls_back_to_char_break_for_oversize_word() {
+        // 15-char word in width 10 should char-break at 10 chars.
+        let rows = wrap_input_rows("aaaaaaaaaaaaaaa", 10);
+        let rendered: Vec<&str> = rows
+            .iter()
+            .map(|(s, e)| &"aaaaaaaaaaaaaaa"[*s..*e])
+            .collect();
+        assert_eq!(rendered, vec!["aaaaaaaaaa", "aaaaa"]);
+    }
+
+    #[test]
+    fn wrap_preserves_logical_newlines_as_row_breaks() {
+        let rows = wrap_input_rows("ab\ncd", 10);
+        assert_eq!(rows, vec![(0, 2), (3, 5)]);
+    }
+
+    #[test]
+    fn wrap_empty_logical_line_emits_one_zero_length_row() {
+        let rows = wrap_input_rows("\n", 10);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].1 - rows[0].0, 0);
+    }
+
+    #[test]
+    fn visual_cursor_word_wrapped_matches_paint() {
+        // "hello world" at width 10 wraps to ["hello", "world"].
+        // Cursor at byte 6 (start of "world") should be at (row 1, col 0).
+        let (row, col) = input_visual_cursor("hello world", 6, 10);
+        assert_eq!((row, col), (1, 0));
+    }
+
+    #[test]
+    fn visual_cursor_at_end_of_first_row_after_word_break() {
+        // Cursor at byte 5 (the space) should be at end of row 0.
+        let (row, col) = input_visual_cursor("hello world", 5, 10);
+        assert_eq!((row, col), (0, 5));
+    }
+
+    #[test]
+    fn row_count_matches_actual_painted_rows() {
+        // Three short words separated by spaces should be one row,
+        // since they total 9 + 2 spaces = 11 > 10? No: "a b c" = 5
+        // chars in width 10 = 1 row.
+        assert_eq!(input_visual_row_count("a b c", 10), 1);
+        // "alpha beta" = 10 chars, alpha+space+beta = 4+1+4 = 9 fits.
+        assert_eq!(input_visual_row_count("alpha beta", 10), 1);
+        // "alpha beta gamma" = 16 chars, wraps to 2 rows.
+        assert_eq!(input_visual_row_count("alpha beta gamma", 10), 2);
+    }
 
     fn snapshot_lines(buffer: &mut Buffer, input: &InputState, area: Rect) -> Vec<String> {
         let backend = TestBackend::new(area.width, area.height);

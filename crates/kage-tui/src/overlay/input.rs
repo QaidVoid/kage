@@ -178,4 +178,52 @@ mod tests {
         let i = InputOverlay::new("Name").with_placeholder("type something");
         assert_eq!(i.text(), "");
     }
+
+    fn snapshot(i: &mut InputOverlay, area: Rect) -> Vec<String> {
+        let mut buf = Buffer::empty(area);
+        let theme = crate::theme::Theme::default();
+        let ctx = OverlayCtx {
+            theme: &theme,
+            viewport: area,
+        };
+        let modal = i.measure(area);
+        i.render(modal, &mut buf, &ctx);
+        let mut out = Vec::with_capacity(usize::from(area.height));
+        for y in 0..area.height {
+            let mut row = String::new();
+            for x in 0..area.width {
+                row.push_str(buf[(x, y)].symbol());
+            }
+            out.push(row.trim_end().to_owned());
+        }
+        out
+    }
+
+    #[test]
+    fn render_default_paints_title_and_help_row() {
+        let mut i = InputOverlay::new("Name");
+        let lines = snapshot(&mut i, Rect::new(0, 0, 80, 24));
+        assert!(lines.iter().any(|l| l.contains("Name")), "title missing");
+        assert!(
+            lines.iter().any(|l| l.contains("enter confirm")),
+            "help row missing"
+        );
+    }
+
+    #[test]
+    fn render_with_typed_text_paints_the_text() {
+        let mut i = InputOverlay::new("Name");
+        for c in "hello".chars() {
+            i.handle_key(ch(c));
+        }
+        let lines = snapshot(&mut i, Rect::new(0, 0, 80, 24));
+        assert!(lines.iter().any(|l| l.contains("hello")));
+    }
+
+    #[test]
+    fn render_narrow_viewport_keeps_title_visible() {
+        let mut i = InputOverlay::new("Name");
+        let lines = snapshot(&mut i, Rect::new(0, 0, 32, 10));
+        assert!(lines.iter().any(|l| l.contains("Name")));
+    }
 }

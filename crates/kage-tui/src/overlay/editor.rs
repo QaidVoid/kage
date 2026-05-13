@@ -344,4 +344,47 @@ mod tests {
         let e = EditorOverlay::new("Edit").with_prefill("preset");
         assert_eq!(e.text(), "preset");
     }
+
+    fn snapshot(e: &mut EditorOverlay, area: Rect) -> Vec<String> {
+        let mut buf = Buffer::empty(area);
+        let theme = crate::theme::Theme::default();
+        let ctx = OverlayCtx {
+            theme: &theme,
+            viewport: area,
+        };
+        let modal = e.measure(area);
+        e.render(modal, &mut buf, &ctx);
+        let mut out = Vec::with_capacity(usize::from(area.height));
+        for y in 0..area.height {
+            let mut row = String::new();
+            for x in 0..area.width {
+                row.push_str(buf[(x, y)].symbol());
+            }
+            out.push(row.trim_end().to_owned());
+        }
+        out
+    }
+
+    #[test]
+    fn render_default_paints_title_and_help() {
+        let mut e = EditorOverlay::new("Compose");
+        let lines = snapshot(&mut e, Rect::new(0, 0, 80, 24));
+        assert!(lines.iter().any(|l| l.contains("Compose")));
+        assert!(lines.iter().any(|l| l.contains("ctrl-s save")));
+    }
+
+    #[test]
+    fn render_with_prefill_paints_lines() {
+        let mut e = EditorOverlay::new("Compose").with_prefill("first\nsecond");
+        let lines = snapshot(&mut e, Rect::new(0, 0, 80, 24));
+        assert!(lines.iter().any(|l| l.contains("first")));
+        assert!(lines.iter().any(|l| l.contains("second")));
+    }
+
+    #[test]
+    fn render_narrow_viewport_still_paints_box() {
+        let mut e = EditorOverlay::new("Compose");
+        let lines = snapshot(&mut e, Rect::new(0, 0, 42, 12));
+        assert!(lines.iter().any(|l| l.contains("Compose")));
+    }
 }

@@ -212,4 +212,58 @@ mod tests {
         let c = ConfirmOverlay::new("ok?", "msg").with_default(Choice::Yes);
         assert_eq!(c.selected(), Choice::Yes);
     }
+
+    fn snapshot(c: &mut ConfirmOverlay, area: Rect) -> Vec<String> {
+        let mut buf = Buffer::empty(area);
+        let theme = crate::theme::Theme::default();
+        let ctx = OverlayCtx {
+            theme: &theme,
+            viewport: area,
+        };
+        let modal = c.measure(area);
+        c.render(modal, &mut buf, &ctx);
+        let mut out = Vec::with_capacity(usize::from(area.height));
+        for y in 0..area.height {
+            let mut row = String::new();
+            for x in 0..area.width {
+                row.push_str(buf[(x, y)].symbol());
+            }
+            out.push(row.trim_end().to_owned());
+        }
+        out
+    }
+
+    #[test]
+    fn render_default_paints_title_message_and_buttons() {
+        let mut c = ConfirmOverlay::new("Delete?", "are you sure?");
+        let lines = snapshot(&mut c, Rect::new(0, 0, 80, 24));
+        assert!(lines.iter().any(|l| l.contains("Delete?")), "title missing");
+        assert!(
+            lines.iter().any(|l| l.contains("are you sure?")),
+            "message missing"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("Yes") && l.contains("No")),
+            "buttons missing"
+        );
+    }
+
+    #[test]
+    fn render_narrow_viewport_still_paints_box() {
+        let mut c = ConfirmOverlay::new("Save?", "unsaved changes");
+        let lines = snapshot(&mut c, Rect::new(0, 0, 32, 12));
+        assert!(lines.iter().any(|l| l.contains("Save?")));
+    }
+
+    #[test]
+    fn render_after_tab_highlights_yes_button() {
+        let mut c = ConfirmOverlay::new("ok?", "msg");
+        c.handle_key(key(KeyCode::Tab));
+        assert_eq!(c.selected(), Choice::Yes);
+        // After Tab, Yes is the highlighted option; render still
+        // includes both labels.
+        let lines = snapshot(&mut c, Rect::new(0, 0, 80, 24));
+        assert!(lines.iter().any(|l| l.contains("Yes")));
+        assert!(lines.iter().any(|l| l.contains("No")));
+    }
 }

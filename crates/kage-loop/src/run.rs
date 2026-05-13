@@ -119,13 +119,22 @@ where
             };
 
             cx.budget.add(turn.usage);
+            let turn_usage = turn.usage;
             let assistant_id = turn.message.id;
             let pending = turn.tool_calls.clone();
             cx.history.push(turn.message);
 
             let had_tool_calls = !pending.is_empty();
             hooks.on_turn_end(turn_index, had_tool_calls);
+            let summary = crate::hooks::TurnSummary {
+                index: turn_index,
+                had_tool_calls,
+                usage: turn_usage,
+            };
             turn_index = turn_index.saturating_add(1);
+            if hooks.should_stop_after_turn(&summary) {
+                return Ok(());
+            }
 
             if !had_tool_calls {
                 break;
@@ -535,6 +544,113 @@ mod tests {
         }
         assert_eq!(errors.len(), 1);
         assert_eq!(mock.call_count(), 0, "provider never called on hook error");
+    }
+
+    struct StopAfterFirstTurn {
+        polls: u32,
+    }
+    impl Hooks for StopAfterFirstTurn {
+        fn should_stop_after_turn(&mut self, _summary: &crate::TurnSummary) -> bool {
+            self.polls = self.polls.saturating_add(1);
+            true
+        }
+        fn get_followup(&mut self) -> Option<String> {
+            Some("must-not-be-asked".into())
+        }
+    }
+
+    #[test]
+    fn should_stop_after_turn_suppresses_followup_and_returns_ok() {
+        let mock = MockProvider::replaying(vec![Ok(ProviderEvent::MessageEnd {
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+        })]);
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.history.push(user_msg("hi"));
+        let cfg = LoopConfig::default();
+        let mut hooks = StopAfterFirstTurn { polls: 0 };
+        let cancel = CancelFlag::new();
+        let registry = ToolRegistry::new();
+
+        run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {}).unwrap();
+        assert_eq!(hooks.polls, 1, "predicate fired exactly once");
+        assert_eq!(
+            mock.call_count(),
+            1,
+            "followup never dequeued, no second turn"
+        );
+    }
+
+    #[derive(Debug)]
+    struct AlwaysCallTool;
+
+    impl kage_tools::Tool for AlwaysCallTool {
+        fn name(&self) -> &'static str {
+            "noop"
+        }
+        fn description(&self) -> &'static str {
+            "no-op tool"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn risk(&self) -> kage_core::Risk {
+            kage_core::Risk::Read
+        }
+        fn execute(
+            &self,
+            _input: serde_json::Value,
+            _cx: &kage_tools::ToolContext,
+        ) -> Result<kage_core::ToolOutput, kage_tools::ToolError> {
+            Ok(kage_core::ToolOutput {
+                is_error: false,
+                text: "ran".into(),
+                structured: None,
+            })
+        }
+    }
+
+    #[test]
+    fn should_stop_after_turn_short_circuits_pending_tool_calls() {
+        let mock = MockProvider::replaying(vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::ToolCallStart {
+                id: kage_core::ToolCallId::new("call_1"),
+                name: "noop".into(),
+            }),
+            Ok(ProviderEvent::ToolCallArgsDelta {
+                id: kage_core::ToolCallId::new("call_1"),
+                partial: "{}".into(),
+            }),
+            Ok(ProviderEvent::ToolCallEnd {
+                id: kage_core::ToolCallId::new("call_1"),
+                input: serde_json::json!({}),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::ToolUse,
+                usage: TokenUsage::default(),
+            }),
+        ]);
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.history.push(user_msg("plan it"));
+        let cfg = LoopConfig::default();
+        let mut hooks = StopAfterFirstTurn { polls: 0 };
+        let cancel = CancelFlag::new();
+        let mut registry = ToolRegistry::new();
+        registry.register(std::sync::Arc::new(AlwaysCallTool));
+
+        run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {}).unwrap();
+        assert_eq!(hooks.polls, 1);
+        assert_eq!(mock.call_count(), 1);
+        let saw_tool_result = cx.history.iter().any(|m| {
+            m.content
+                .iter()
+                .any(|c| matches!(c, kage_core::Content::ToolResultBlock { .. }))
+        });
+        assert!(
+            !saw_tool_result,
+            "stop predicate must run before tool dispatch"
+        );
     }
 
     #[test]

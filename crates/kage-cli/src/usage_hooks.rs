@@ -9,7 +9,7 @@
 //! mid-flow, mirroring the cumulative `cx.budget` the loop maintains.
 
 use kage_core::{LoopEvent, Message, ToolOutput};
-use kage_loop::Hooks;
+use kage_loop::{Hooks, TurnSummary};
 use kage_tui::SharedSessionUsage;
 
 /// Wraps an inner [`Hooks`] implementation and accumulates token
@@ -97,6 +97,10 @@ impl<H: Hooks> Hooks for UsageHooks<H> {
 
     fn on_turn_end(&mut self, index: u32, had_tool_calls: bool) {
         self.inner.on_turn_end(index, had_tool_calls);
+    }
+
+    fn should_stop_after_turn(&mut self, summary: &TurnSummary) -> bool {
+        self.inner.should_stop_after_turn(summary)
     }
 
     fn get_steering(&mut self) -> Option<String> {

@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use kage_core::{LoopEvent, Message, ToolOutput};
-use kage_loop::Hooks;
+use kage_loop::{Hooks, TurnSummary};
 use kage_plugin::{LogLevel, PluginRuntime, SharedHostLog, default_host_log};
 use serde_json::json;
 
@@ -213,6 +213,10 @@ impl<H: Hooks> Hooks for PluginEventHooks<H> {
             }),
         );
         self.inner.on_turn_end(index, had_tool_calls);
+    }
+
+    fn should_stop_after_turn(&mut self, summary: &TurnSummary) -> bool {
+        self.inner.should_stop_after_turn(summary)
     }
 
     fn get_steering(&mut self) -> Option<String> {

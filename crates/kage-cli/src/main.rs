@@ -360,6 +360,10 @@ impl Hooks for BoxedHooks {
         self.0.on_turn_end(index, had_tool_calls);
     }
 
+    fn should_stop_after_turn(&mut self, summary: &kage_loop::TurnSummary) -> bool {
+        self.0.should_stop_after_turn(summary)
+    }
+
     fn get_steering(&mut self) -> Option<String> {
         self.0.get_steering()
     }

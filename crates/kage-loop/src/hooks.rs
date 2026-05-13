@@ -5,7 +5,7 @@
 //! make the trait noop-by-default: a host overrides only the methods it cares
 //! about.
 
-use kage_core::{LoopEvent, Message, ToolOutput};
+use kage_core::{LoopEvent, Message, TokenUsage, ToolOutput};
 
 /// Outcome of a pre-action hook that can veto, patch, or pass through.
 ///
@@ -60,6 +60,26 @@ impl<T> HookResult<T> {
             _ => None,
         }
     }
+}
+
+/// Snapshot of a just-finished turn passed to [`Hooks::should_stop_after_turn`].
+///
+/// Carries the minimum a predicate needs to decide whether to abandon the
+/// run: which turn this was, whether the assistant requested tool calls,
+/// and what the provider reported for usage. Hosts that need richer state
+/// (full assistant message, current history) should keep that state on
+/// the hook implementation itself.
+#[derive(Clone, Copy, Debug)]
+pub struct TurnSummary {
+    /// Zero-based turn index within the current `run`, matching the value
+    /// passed to [`Hooks::on_turn_start`] / [`Hooks::on_turn_end`].
+    pub index: u32,
+    /// Whether the assistant requested at least one tool call. When
+    /// `true`, returning `false` from `should_stop_after_turn` will let
+    /// the inner loop dispatch those tools and continue.
+    pub had_tool_calls: bool,
+    /// Provider-reported token usage for this turn.
+    pub usage: TokenUsage,
 }
 
 /// Host-supplied callbacks fired during a [`run`](crate::run).
@@ -132,6 +152,20 @@ pub trait Hooks {
     /// break. Pair with [`Self::on_turn_start`] for tok/s-style metrics.
     fn on_turn_end(&mut self, index: u32, had_tool_calls: bool) {
         let _ = (index, had_tool_calls);
+    }
+
+    /// Polled after every turn closes. Returning `true` short-circuits the
+    /// run: pending tool calls are abandoned, follow-ups are not dequeued,
+    /// and the loop returns `Ok(())` immediately. Use this for plan-mode
+    /// plugins that halt after the model emits its plan, before the loop
+    /// can execute any tools the plan requested.
+    ///
+    /// Fires after [`Self::on_turn_end`] and before any tool dispatch or
+    /// follow-up handling. The default implementation always returns
+    /// `false`, so the loop's existing behavior is unchanged.
+    fn should_stop_after_turn(&mut self, summary: &TurnSummary) -> bool {
+        let _ = summary;
+        false
     }
 
     /// Polled before each model turn.

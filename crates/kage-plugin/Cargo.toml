@@ -1,9 +1,15 @@
 [package]
 name = "kage-plugin"
+description = "Sandboxed Lua runtime and host API surface for kage plugins."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [lints]
 workspace = true

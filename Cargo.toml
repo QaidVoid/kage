@@ -20,6 +20,11 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 rust-version = "1.86"
+repository = "https://github.com/QaidVoid/kage"
+homepage = "https://github.com/QaidVoid/kage"
+readme = "README.md"
+keywords = ["agent", "llm", "ai", "tui", "lua"]
+categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 kage-core = { path = "crates/kage-core" }

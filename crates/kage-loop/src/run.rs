@@ -149,7 +149,16 @@ where
             }
 
             let workdir = cx.workdir.clone();
-            let dispatch = if config.parallel_tools {
+            // Parallel dispatch only when the loop is configured for it AND
+            // no tool in the batch overrides to Sequential. Any sequential
+            // tool (e.g. `bash`) forces the whole batch to single-thread
+            // execution so it cannot race with the others.
+            let any_sequential = pending.iter().any(|call| {
+                tools.get(&call.name).is_some_and(|t| {
+                    matches!(t.execution_mode(), Some(kage_tools::ExecMode::Sequential))
+                })
+            });
+            let dispatch = if config.parallel_tools && !any_sequential {
                 dispatch_tool_calls_parallel
             } else {
                 dispatch_tool_calls
@@ -805,6 +814,131 @@ mod tests {
         assert_eq!(hooks.seen_model.as_deref(), Some("mock:m"));
         let req = mock.last_request().unwrap();
         assert_eq!(req.system.as_deref(), Some("rewritten"));
+    }
+
+    #[derive(Debug)]
+    struct SleepTool {
+        millis: u64,
+    }
+
+    impl kage_tools::Tool for SleepTool {
+        fn name(&self) -> &'static str {
+            "sleep"
+        }
+        fn description(&self) -> &'static str {
+            "sleeps"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn risk(&self) -> kage_core::Risk {
+            kage_core::Risk::Read
+        }
+        fn execute(
+            &self,
+            _input: serde_json::Value,
+            _cx: &kage_tools::ToolContext<'_>,
+        ) -> Result<kage_core::ToolOutput, kage_tools::ToolError> {
+            std::thread::sleep(std::time::Duration::from_millis(self.millis));
+            Ok(kage_core::ToolOutput {
+                is_error: false,
+                text: "ok".into(),
+                structured: None,
+            })
+        }
+    }
+
+    #[derive(Debug)]
+    struct SeqSleepTool;
+
+    impl kage_tools::Tool for SeqSleepTool {
+        fn name(&self) -> &'static str {
+            "seq_sleep"
+        }
+        fn description(&self) -> &'static str {
+            "sleeps and requires sequential dispatch"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn risk(&self) -> kage_core::Risk {
+            kage_core::Risk::Exec
+        }
+        fn execution_mode(&self) -> Option<kage_tools::ExecMode> {
+            Some(kage_tools::ExecMode::Sequential)
+        }
+        fn execute(
+            &self,
+            _input: serde_json::Value,
+            _cx: &kage_tools::ToolContext<'_>,
+        ) -> Result<kage_core::ToolOutput, kage_tools::ToolError> {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            Ok(kage_core::ToolOutput {
+                is_error: false,
+                text: "ok".into(),
+                structured: None,
+            })
+        }
+    }
+
+    fn three_tool_call_turn() -> Vec<Result<ProviderEvent, kage_provider::ProviderError>> {
+        let mut events = vec![Ok(ProviderEvent::MessageStart)];
+        for i in 0..3 {
+            let id = kage_core::ToolCallId::new(format!("call_{i}"));
+            events.push(Ok(ProviderEvent::ToolCallStart {
+                id: id.clone(),
+                name: if i == 0 {
+                    "seq_sleep".into()
+                } else {
+                    "sleep".into()
+                },
+            }));
+            events.push(Ok(ProviderEvent::ToolCallArgsDelta {
+                id: id.clone(),
+                partial: "{}".into(),
+            }));
+            events.push(Ok(ProviderEvent::ToolCallEnd {
+                id,
+                input: serde_json::json!({}),
+            }));
+        }
+        events.push(Ok(ProviderEvent::MessageEnd {
+            stop_reason: StopReason::ToolUse,
+            usage: TokenUsage::default(),
+        }));
+        events
+    }
+
+    #[test]
+    fn sequential_tool_in_batch_downgrades_parallel_dispatch() {
+        let mock = MockProvider::sequence(vec![
+            three_tool_call_turn(),
+            vec![Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            })],
+        ]);
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.history.push(user_msg("go"));
+        let cfg = LoopConfig {
+            parallel_tools: true,
+            ..LoopConfig::default()
+        };
+        let mut hooks = NoopHooks;
+        let cancel = CancelFlag::new();
+        let mut registry = ToolRegistry::new();
+        registry.register(std::sync::Arc::new(SeqSleepTool));
+        registry.register(std::sync::Arc::new(SleepTool { millis: 100 }));
+
+        let start = std::time::Instant::now();
+        run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {}).unwrap();
+        let elapsed = start.elapsed();
+        // Three 100ms tools serialized take ~300ms+; parallel would take ~100ms.
+        assert!(
+            elapsed.as_millis() >= 250,
+            "expected sequential fallback, elapsed {}ms",
+            elapsed.as_millis(),
+        );
     }
 
     #[test]

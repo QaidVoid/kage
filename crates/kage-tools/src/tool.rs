@@ -6,6 +6,22 @@ use kage_core::{CancelFlag, Risk, ToolOutput};
 
 use crate::ToolError;
 
+/// Per-tool override for dispatch ordering.
+///
+/// The loop runs tools in parallel when [`crate::LoopConfig::parallel_tools`]
+/// is true. A tool returning [`ExecMode::Sequential`] from
+/// [`Tool::execution_mode`] forces its batch to fall back to sequential
+/// even when parallelism is enabled, so two such tools never race for a
+/// shared resource (e.g. the user's terminal in `bash`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecMode {
+    /// Run sequentially regardless of the loop-wide parallel flag.
+    Sequential,
+    /// Run in parallel when the loop permits it. Same effect as returning
+    /// `None` from [`Tool::execution_mode`]; provided for explicitness.
+    Parallel,
+}
+
 /// One tool the agent can invoke.
 ///
 /// Implementations are synchronous, `Send + Sync`, and `Debug` so they can
@@ -25,6 +41,17 @@ pub trait Tool: Send + Sync + std::fmt::Debug {
 
     /// Coarse risk classification used by hosts to gate permission prompts.
     fn risk(&self) -> Risk;
+
+    /// Override the loop's parallel-vs-sequential dispatch decision.
+    ///
+    /// Returning `Some(ExecMode::Sequential)` forces any batch that
+    /// includes this tool to run sequentially, even when the loop's
+    /// `parallel_tools` flag is set. Use this for tools that own a
+    /// non-shareable resource (the user's terminal, a global lock).
+    /// Default `None` means "follow the loop config."
+    fn execution_mode(&self) -> Option<ExecMode> {
+        None
+    }
 
     /// Run the tool, returning either a structured output or a typed error.
     ///

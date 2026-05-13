@@ -15,7 +15,7 @@ use kage_core::{Risk, ToolOutput};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{Tool, ToolContext, ToolError, resolve, schema_for};
+use crate::{ExecMode, Tool, ToolContext, ToolError, resolve, schema_for};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_STREAM_BYTES: usize = 100_000;
@@ -54,6 +54,10 @@ impl Tool for BashTool {
 
     fn risk(&self) -> Risk {
         Risk::Exec
+    }
+
+    fn execution_mode(&self) -> Option<ExecMode> {
+        Some(ExecMode::Sequential)
     }
 
     fn execute(

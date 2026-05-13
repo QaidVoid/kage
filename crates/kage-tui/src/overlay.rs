@@ -13,10 +13,16 @@
 //! a sub-rect over the conversation buffer using ratatui widgets, and
 //! consume key events through the same path the rest of the App uses.
 
+pub mod confirm;
+pub mod editor;
+pub mod input;
 pub mod picker;
 pub mod slash;
 pub mod widget;
 
+pub use confirm::{Choice, ConfirmOverlay};
+pub use editor::EditorOverlay;
+pub use input::InputOverlay;
 pub use picker::OverlayPicker;
 pub use slash::{SlashContext, SlashPalette};
 pub use widget::{EmptyOverlayWidget, OverlayAction, OverlayCtx, OverlayWidget};

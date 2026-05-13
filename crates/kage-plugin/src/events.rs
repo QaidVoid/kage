@@ -23,10 +23,19 @@
 //! * `tool_result` - a tool invocation produced an output
 //! * `session_open` - the host opened a session writer
 //! * `session_close` - the host closed a session writer
+//!
+//! Two events use special dispatch shapes:
+//! * `transform_context` (transform): the host passes the current message
+//!   history, each subscriber receives the chained payload, and may return
+//!   a replacement list. The host replaces history with whatever the last
+//!   handler returned. See [`dispatch_transform`].
+//! * `should_stop_after_turn` (predicate): the host passes a turn summary;
+//!   any handler returning `true` short-circuits the run. See
+//!   [`dispatch_predicate`].
 
 use mlua::{Function, Lua, Table, Value};
 
-use crate::api::{LogLevel, SharedHostLog, json_to_lua};
+use crate::api::{LogLevel, SharedHostLog, json_to_lua, lua_to_json};
 use crate::error::PluginError;
 
 /// Lua-registry key under which subscribed handlers are stored.
@@ -98,6 +107,102 @@ pub fn dispatch(
         }
     }
     Ok(())
+}
+
+/// Fire every handler for `event_name` and chain their return values:
+/// each handler receives the payload produced by the previous one (or the
+/// initial payload for the first handler) and may return a replacement.
+/// A handler returning `nil` or no value is treated as "no change". The
+/// final payload is returned to the caller.
+///
+/// Used by transform-style hooks (e.g. `transform_context`) that let
+/// plugins mutate a host-supplied value before the host acts on it.
+///
+/// A handler that raises an error is logged and skipped, just like
+/// [`dispatch`]: the previous payload survives.
+pub fn dispatch_transform(
+    lua: &Lua,
+    event_name: &str,
+    payload: serde_json::Value,
+    sink: &SharedHostLog,
+) -> Result<serde_json::Value, PluginError> {
+    let Ok(handlers) = lua.named_registry_value::<Table>(HANDLERS_KEY) else {
+        return Ok(payload);
+    };
+    let list: Value = handlers.get(event_name)?;
+    let Value::Table(list) = list else {
+        return Ok(payload);
+    };
+    let mut current = payload;
+    for pair in list.clone().sequence_values::<Function>() {
+        let func = pair?;
+        let lua_payload = json_to_lua(lua, &current)?;
+        match func.call::<Value>(lua_payload) {
+            Ok(Value::Nil) => {}
+            Ok(value) => match lua_to_json(value) {
+                Ok(next) => current = next,
+                Err(err) => {
+                    if let Ok(mut s) = sink.lock() {
+                        s.log(
+                            LogLevel::Error,
+                            &format!(
+                                "plugin handler for '{event_name}' \
+                                 returned a non-serializable value: {err}",
+                            ),
+                        );
+                    }
+                }
+            },
+            Err(err) => {
+                if let Ok(mut s) = sink.lock() {
+                    s.log(
+                        LogLevel::Error,
+                        &format!("plugin handler for '{event_name}' raised: {err}"),
+                    );
+                }
+            }
+        }
+    }
+    Ok(current)
+}
+
+/// Fire every handler for `event_name` and short-circuit on the first one
+/// that returns truthy. Returns `true` when any handler vetoed.
+///
+/// Used by predicate-style hooks (e.g. `should_stop_after_turn`) where
+/// any plugin can demand the action stop.
+///
+/// A handler that raises an error is logged and treated as `false`.
+pub fn dispatch_predicate(
+    lua: &Lua,
+    event_name: &str,
+    payload: &serde_json::Value,
+    sink: &SharedHostLog,
+) -> Result<bool, PluginError> {
+    let Ok(handlers) = lua.named_registry_value::<Table>(HANDLERS_KEY) else {
+        return Ok(false);
+    };
+    let list: Value = handlers.get(event_name)?;
+    let Value::Table(list) = list else {
+        return Ok(false);
+    };
+    let lua_payload = json_to_lua(lua, payload)?;
+    for pair in list.clone().sequence_values::<Function>() {
+        let func = pair?;
+        match func.call::<Value>(lua_payload.clone()) {
+            Ok(Value::Boolean(true)) => return Ok(true),
+            Ok(_) => {}
+            Err(err) => {
+                if let Ok(mut s) = sink.lock() {
+                    s.log(
+                        LogLevel::Error,
+                        &format!("plugin handler for '{event_name}' raised: {err}"),
+                    );
+                }
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Number of handlers currently subscribed to `event_name`. Used by the
@@ -322,6 +427,84 @@ mod tests {
                 "delta:lo".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn dispatch_transform_chains_handler_returns() {
+        let lua = fresh_lua_with_kage();
+        lua.load(
+            r"
+            kage.on('transform_context', function(payload)
+                payload.tag = 'first'
+                return payload
+            end)
+            kage.on('transform_context', function(payload)
+                payload.tag = payload.tag .. ',second'
+                return payload
+            end)
+            ",
+        )
+        .exec()
+        .unwrap();
+        let out = dispatch_transform(
+            &lua,
+            "transform_context",
+            json!({"tag": "init"}),
+            &default_host_log(),
+        )
+        .unwrap();
+        assert_eq!(out["tag"], "first,second");
+    }
+
+    #[test]
+    fn dispatch_transform_passthrough_when_handler_returns_nil() {
+        let lua = fresh_lua_with_kage();
+        lua.load(r"kage.on('transform_context', function(payload) return nil end)")
+            .exec()
+            .unwrap();
+        let out = dispatch_transform(
+            &lua,
+            "transform_context",
+            json!({"keep": true}),
+            &default_host_log(),
+        )
+        .unwrap();
+        assert_eq!(out["keep"], true);
+    }
+
+    #[test]
+    fn dispatch_predicate_returns_true_when_any_handler_votes_stop() {
+        let lua = fresh_lua_with_kage();
+        lua.load(
+            r"
+            kage.on('should_stop_after_turn', function() return false end)
+            kage.on('should_stop_after_turn', function() return true end)
+            kage.on('should_stop_after_turn', function() error('never reached') end)
+            ",
+        )
+        .exec()
+        .unwrap();
+        let stop = dispatch_predicate(
+            &lua,
+            "should_stop_after_turn",
+            &json!({"index": 0}),
+            &default_host_log(),
+        )
+        .unwrap();
+        assert!(stop);
+    }
+
+    #[test]
+    fn dispatch_predicate_returns_false_when_no_handlers() {
+        let lua = fresh_lua_with_kage();
+        let stop = dispatch_predicate(
+            &lua,
+            "should_stop_after_turn",
+            &json!({}),
+            &default_host_log(),
+        )
+        .unwrap();
+        assert!(!stop);
     }
 
     #[test]

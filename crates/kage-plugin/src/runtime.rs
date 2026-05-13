@@ -126,6 +126,29 @@ impl PluginRuntime {
         events::dispatch(&lua, event_name, payload, &self.sink)
     }
 
+    /// Chain every handler subscribed to `event_name` and return the
+    /// payload after the last handler ran. See [`events::dispatch_transform`]
+    /// for the chaining semantics.
+    pub fn dispatch_transform(
+        &self,
+        event_name: &str,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, PluginError> {
+        let lua = self.lock_lua();
+        events::dispatch_transform(&lua, event_name, payload, &self.sink)
+    }
+
+    /// Poll handlers subscribed to `event_name`; return `true` as soon as
+    /// one returns a truthy value. See [`events::dispatch_predicate`].
+    pub fn dispatch_predicate(
+        &self,
+        event_name: &str,
+        payload: &serde_json::Value,
+    ) -> Result<bool, PluginError> {
+        let lua = self.lock_lua();
+        events::dispatch_predicate(&lua, event_name, payload, &self.sink)
+    }
+
     /// Number of handlers subscribed to `event_name`.
     #[must_use]
     pub fn handler_count(&self, event_name: &str) -> usize {

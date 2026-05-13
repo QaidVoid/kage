@@ -194,7 +194,20 @@ impl<H: Hooks> Hooks for PluginEventHooks<H> {
     }
 
     fn transform_context(&mut self, messages: &mut Vec<Message>) -> Result<(), String> {
-        self.inner.transform_context(messages)
+        self.inner.transform_context(messages)?;
+        if self.runtime.handler_count("transform_context") == 0 {
+            return Ok(());
+        }
+        let payload = serde_json::to_value(&*messages)
+            .map_err(|e| format!("transform_context: serialize history: {e}"))?;
+        let result = self
+            .runtime
+            .dispatch_transform("transform_context", payload)
+            .map_err(|e| format!("transform_context: lua dispatch: {e}"))?;
+        let next: Vec<Message> = serde_json::from_value(result)
+            .map_err(|e| format!("transform_context: plugin returned invalid history: {e}"))?;
+        *messages = next;
+        Ok(())
     }
 
     fn on_turn_start(&mut self, index: u32) {
@@ -216,7 +229,32 @@ impl<H: Hooks> Hooks for PluginEventHooks<H> {
     }
 
     fn should_stop_after_turn(&mut self, summary: &TurnSummary) -> bool {
-        self.inner.should_stop_after_turn(summary)
+        if self.inner.should_stop_after_turn(summary) {
+            return true;
+        }
+        if self.runtime.handler_count("should_stop_after_turn") == 0 {
+            return false;
+        }
+        let payload = json!({
+            "index": summary.index,
+            "had_tool_calls": summary.had_tool_calls,
+            "usage": {
+                "input": summary.usage.input,
+                "output": summary.usage.output,
+                "cache_read": summary.usage.cache_read,
+                "cache_write": summary.usage.cache_write,
+            },
+        });
+        match self
+            .runtime
+            .dispatch_predicate("should_stop_after_turn", &payload)
+        {
+            Ok(stop) => stop,
+            Err(err) => {
+                self.log_error(format_args!("should_stop_after_turn dispatch: {err}"));
+                false
+            }
+        }
     }
 
     fn get_steering(&mut self) -> Option<String> {

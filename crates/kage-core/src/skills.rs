@@ -160,6 +160,13 @@ pub fn load_skill_file(path: &Path) -> Result<Skill, SkillError> {
 const MAX_NAME_LEN: usize = 64;
 const MAX_DESCRIPTION_LEN: usize = 1024;
 
+/// Crate-internal alias of [`validate_name`] for reuse by sibling
+/// modules (e.g. templates) without making the function part of the
+/// public API.
+pub(crate) fn validate_name_pub(name: &str) -> Result<(), String> {
+    validate_name(name)
+}
+
 /// Validate the directory name against the `^[a-z0-9-]+$` regex with the
 /// added constraint that consecutive hyphens are not allowed.
 fn validate_name(name: &str) -> Result<(), String> {
@@ -183,6 +190,14 @@ fn validate_name(name: &str) -> Result<(), String> {
         last_was_hyphen = ch == '-';
     }
     Ok(())
+}
+
+/// Crate-internal alias of [`split_frontmatter`] for reuse by sibling
+/// modules.
+pub(crate) fn split_frontmatter_pub(
+    input: &str,
+) -> Result<(std::collections::HashMap<String, String>, &str), String> {
+    split_frontmatter(input)
 }
 
 /// Split YAML-subset frontmatter from the body. Returns

@@ -5,7 +5,7 @@
 //! make the trait noop-by-default: a host overrides only the methods it cares
 //! about.
 
-use kage_core::{LoopEvent, ToolOutput};
+use kage_core::{LoopEvent, Message, ToolOutput};
 
 /// Outcome of a pre-action hook that can veto, patch, or pass through.
 ///
@@ -95,6 +95,23 @@ pub trait Hooks {
     /// this for logging, metrics, or driving UI sinks.
     fn on_event(&mut self, event: &LoopEvent) {
         let _ = event;
+    }
+
+    /// Fired immediately before each provider turn, with the full message
+    /// history in scope. Hosts can prune, redact, or rewrite messages in
+    /// place; the loop sends the resulting `Vec<Message>` to the provider.
+    ///
+    /// Returning an error aborts the turn with
+    /// [`kage_core::LoopError::HookFailed`]; the loop emits the terminal
+    /// error event and returns. The default implementation is a no-op.
+    ///
+    /// Use cases: strip secrets from history before sending, trim old tool
+    /// outputs that have rotted, inject a per-turn system reminder. Avoid
+    /// expensive work here: this runs on every turn including compaction
+    /// follow-ups.
+    fn transform_context(&mut self, messages: &mut Vec<Message>) -> Result<(), String> {
+        let _ = messages;
+        Ok(())
     }
 
     /// Fired just before each inner-loop iteration begins a provider call.

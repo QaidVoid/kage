@@ -88,6 +88,15 @@ where
 
             hooks.on_turn_start(turn_index);
 
+            if let Err(message) = hooks.transform_context(&mut cx.history) {
+                let kind = LoopError::HookFailed {
+                    hook: "transform_context".to_owned(),
+                    message,
+                };
+                emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
+                return Err(kind);
+            }
+
             let req = build_request(cx, tools);
             let stream = match provider.stream(req, cancel) {
                 Ok(s) => s,
@@ -442,6 +451,90 @@ mod tests {
         run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {}).unwrap();
         assert_eq!(hooks.inner.starts, vec![0, 1]);
         assert_eq!(hooks.inner.ends, vec![(0, false), (1, false)]);
+    }
+
+    struct StaticTransform {
+        injection: String,
+        calls: u32,
+    }
+    impl Hooks for StaticTransform {
+        fn transform_context(
+            &mut self,
+            messages: &mut Vec<kage_core::Message>,
+        ) -> Result<(), String> {
+            self.calls = self.calls.saturating_add(1);
+            messages.push(kage_core::Message::new(
+                kage_core::Role::User,
+                vec![Content::Text {
+                    text: self.injection.clone(),
+                }],
+                messages.last().map(|m| m.id),
+            ));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn transform_context_runs_before_each_provider_call() {
+        let mock = MockProvider::replaying(vec![Ok(ProviderEvent::MessageEnd {
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+        })]);
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.history.push(user_msg("hello"));
+        let cfg = LoopConfig::default();
+        let mut hooks = StaticTransform {
+            injection: "from-hook".into(),
+            calls: 0,
+        };
+        let cancel = CancelFlag::new();
+        let registry = ToolRegistry::new();
+
+        run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {}).unwrap();
+        assert_eq!(hooks.calls, 1);
+        let req = mock.last_request().unwrap();
+        let last = req.messages.last().unwrap();
+        assert!(matches!(
+            &last.content[0],
+            Content::Text { text } if text == "from-hook"
+        ));
+    }
+
+    struct FailingTransform;
+    impl Hooks for FailingTransform {
+        fn transform_context(
+            &mut self,
+            _messages: &mut Vec<kage_core::Message>,
+        ) -> Result<(), String> {
+            Err("transform exploded".into())
+        }
+    }
+
+    #[test]
+    fn transform_context_error_aborts_with_hook_failed() {
+        let mock = MockProvider::replaying(vec![]);
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.history.push(user_msg("hi"));
+        let cfg = LoopConfig::default();
+        let mut hooks = FailingTransform;
+        let cancel = CancelFlag::new();
+        let registry = ToolRegistry::new();
+
+        let mut errors = Vec::new();
+        let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |ev| {
+            if let LoopEvent::Error { kind } = ev {
+                errors.push(kind);
+            }
+        });
+        match res {
+            Err(LoopError::HookFailed { hook, message }) => {
+                assert_eq!(hook, "transform_context");
+                assert_eq!(message, "transform exploded");
+            }
+            other => panic!("expected HookFailed, got {other:?}"),
+        }
+        assert_eq!(errors.len(), 1);
+        assert_eq!(mock.call_count(), 0, "provider never called on hook error");
     }
 
     #[test]

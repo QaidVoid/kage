@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use kage_core::{LoopEvent, ToolOutput};
+use kage_core::{LoopEvent, Message, ToolOutput};
 use kage_loop::Hooks;
 use kage_plugin::{LogLevel, PluginRuntime, SharedHostLog, default_host_log};
 use serde_json::json;
@@ -191,6 +191,10 @@ impl<H: Hooks> Hooks for PluginEventHooks<H> {
             _ => {}
         }
         self.inner.on_event(event);
+    }
+
+    fn transform_context(&mut self, messages: &mut Vec<Message>) -> Result<(), String> {
+        self.inner.transform_context(messages)
     }
 
     fn on_turn_start(&mut self, index: u32) {

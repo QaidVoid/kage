@@ -8,7 +8,7 @@
 //! modeline ticks forward as soon as each assistant turn finishes,
 //! mid-flow, mirroring the cumulative `cx.budget` the loop maintains.
 
-use kage_core::{LoopEvent, ToolOutput};
+use kage_core::{LoopEvent, Message, ToolOutput};
 use kage_loop::Hooks;
 use kage_tui::SharedSessionUsage;
 
@@ -85,6 +85,10 @@ impl<H: Hooks> Hooks for UsageHooks<H> {
                 .saturating_add(usage.cache_write);
         }
         self.inner.on_event(event);
+    }
+
+    fn transform_context(&mut self, messages: &mut Vec<Message>) -> Result<(), String> {
+        self.inner.transform_context(messages)
     }
 
     fn on_turn_start(&mut self, index: u32) {

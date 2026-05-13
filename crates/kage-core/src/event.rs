@@ -66,6 +66,16 @@ pub enum LoopError {
     /// compaction.
     #[error("context overflow: history exceeds the model's window even after compaction")]
     ContextOverflow,
+    /// A host-supplied hook returned an error the loop could not recover
+    /// from. Carries the hook name so the host can surface which extension
+    /// point failed (for example `transform_context`).
+    #[error("hook '{hook}' failed: {message}")]
+    HookFailed {
+        /// Identifier of the hook method that failed.
+        hook: String,
+        /// Human-readable detail.
+        message: String,
+    },
     /// Anything not covered above.
     #[error("{message}")]
     Other {

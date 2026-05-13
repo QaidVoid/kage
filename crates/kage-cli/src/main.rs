@@ -348,6 +348,10 @@ impl Hooks for BoxedHooks {
         self.0.on_event(event);
     }
 
+    fn transform_context(&mut self, messages: &mut Vec<kage_core::Message>) -> Result<(), String> {
+        self.0.transform_context(messages)
+    }
+
     fn on_turn_start(&mut self, index: u32) {
         self.0.on_turn_start(index);
     }

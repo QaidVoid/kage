@@ -66,6 +66,10 @@ impl<H: Hooks> Hooks for TuiHooks<H> {
         self.inner.on_event(event);
     }
 
+    fn transform_context(&mut self, messages: &mut Vec<kage_core::Message>) -> Result<(), String> {
+        self.inner.transform_context(messages)
+    }
+
     fn on_turn_start(&mut self, index: u32) {
         self.inner.on_turn_start(index);
     }

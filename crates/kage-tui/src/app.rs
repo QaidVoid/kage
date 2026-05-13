@@ -27,9 +27,8 @@ use crate::error::TuiError;
 use crate::events::SharedBuffer;
 use crate::input::{InputAction, InputState, Mode, Pane};
 use crate::layout::{input_height_for, split};
-use crate::overlay::{OverlayAction, OverlayPicker};
+use crate::overlay::{OverlayAction, OverlayPicker, SlashContext, SlashPalette};
 use crate::picker::PickItem;
-use crate::slash_palette::SlashPalette;
 use crate::terminal::Tui;
 use crate::view;
 
@@ -928,24 +927,22 @@ impl App {
         &mut self,
         key: ratatui::crossterm::event::KeyEvent,
     ) -> Option<AppExit> {
-        let registry = cmdline_registry(&self.plugin_command_specs);
-        let resolver = AppResolver {
-            models: &self.model_choices,
-            plugin_commands: &self.plugin_commands,
-            sessions: self.session_lister.as_ref(),
-        };
-        let event = self
+        let action = self
             .slash_palette
             .as_mut()
-            .map(|sp| sp.handle_key(key, &registry, &resolver));
-        let event = event?;
-        match event {
-            CommandLineEvent::Pending => None,
-            CommandLineEvent::Cancelled => {
+            .map(|sp| crate::overlay::OverlayWidget::handle_key(sp, key))?;
+        match action {
+            OverlayAction::Stay | OverlayAction::PropagateKey => None,
+            OverlayAction::Close => {
                 self.slash_palette = None;
                 None
             }
-            CommandLineEvent::Submit(text) => {
+            OverlayAction::Resolve(value) => {
+                let serde_json::Value::String(text) = value else {
+                    self.slash_palette = None;
+                    return None;
+                };
+                let registry = cmdline_registry(&self.plugin_command_specs);
                 let result = self.run_command_validated(&text, &registry);
                 match result {
                     CommandResult::Done(exit) => {
@@ -1457,13 +1454,17 @@ impl App {
             }
             InputAction::OpenCommandPalette => {
                 let registry = cmdline_registry(&self.plugin_command_specs);
-                let resolver = AppResolver {
-                    models: &self.model_choices,
-                    plugin_commands: &self.plugin_commands,
-                    sessions: self.session_lister.as_ref(),
+                let ctx = SlashContext {
+                    models: self.model_choices.iter().map(|p| p.value.clone()).collect(),
+                    plugin_commands: self.plugin_commands.clone(),
+                    sessions: self
+                        .session_lister
+                        .as_ref()
+                        .map(|f| f())
+                        .unwrap_or_default(),
                 };
-                let mut palette = SlashPalette::new();
-                palette.refresh(&registry, &resolver);
+                let mut palette = SlashPalette::new(registry, ctx);
+                palette.refresh();
                 self.slash_palette = Some(palette);
             }
             InputAction::FocusPrev => {

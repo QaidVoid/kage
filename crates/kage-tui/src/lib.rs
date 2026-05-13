@@ -12,7 +12,6 @@ pub mod input;
 pub mod layout;
 pub mod overlay;
 pub mod picker;
-pub mod slash_palette;
 pub mod syntax;
 pub mod terminal;
 pub mod theme;
@@ -38,9 +37,10 @@ pub use layout::{
     INPUT_CHROME_LINES, INPUT_CONTENT_MAX_LINES, INPUT_CONTENT_MIN_LINES, INPUT_MAX_LINES,
     INPUT_MIN_LINES, Regions, STATUS_BOTTOM_LINES_DEFAULT, input_height_for, split,
 };
-pub use overlay::{OverlayAction, OverlayCtx, OverlayPicker, OverlayWidget};
+pub use overlay::{
+    OverlayAction, OverlayCtx, OverlayPicker, OverlayWidget, SlashContext, SlashPalette,
+};
 pub use picker::{PickItem, pick};
-pub use slash_palette::SlashPalette;
 pub use terminal::Tui;
 pub use theme::{Theme, current as current_theme, set_current as set_current_theme};
 pub use toast::{

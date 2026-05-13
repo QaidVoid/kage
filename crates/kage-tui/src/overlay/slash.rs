@@ -1,6 +1,8 @@
-//! `/` command palette - a [`CommandLine`] rendered inline above the
-//! input card so the palette and the `:` ex-line share one parser,
-//! completer, and Tab/Down/Up navigation.
+//! `/` command palette overlay.
+//!
+//! A [`CommandLine`] rendered inline above the input card so the
+//! palette and the `:` ex-line share one parser, completer, and
+//! Tab/Down/Up navigation.
 //!
 //! The palette shows a `/` prefix and the typed input on a single row
 //! immediately above the input card, with a tight completion list
@@ -12,42 +14,97 @@
 //! Plugin commands appear in the list tagged `[plugin]` via the
 //! description suffix the host installs in
 //! [`crate::App::set_plugin_commands`].
+//!
+//! Implements [`OverlayWidget`]. Unlike [`crate::overlay::OverlayPicker`]
+//! the slash palette is layout-aware: it paints in three places (popup
+//! above the input card, inline error in the same band, slash-prefixed
+//! text inside the input card body). The [`OverlayWidget`] trait only
+//! exposes one rectangular paint surface, so the existing layout-aware
+//! render path stays as an inherent [`SlashPalette::render`] method;
+//! the trait render paints just the popup, and the trait `handle_key` is
+//! the canonical input entry. App still drives this overlay through
+//! the inherent render until PO.5 wires the registry.
 
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::{Clear, Paragraph, Widget};
 
 use crate::cmdline::{CommandLine, CommandLineEvent};
 use crate::cmdparse::{Completion, Resolver};
-use crate::command::CommandSpec;
+use crate::command::{ArgSource, CommandSpec};
 use crate::layout::Regions;
+use crate::overlay::widget::{OverlayAction, OverlayCtx, OverlayWidget};
+use crate::picker::PickItem;
 
 /// Maximum visible command rows in the palette body before
 /// `... N more` indicators kick in.
 const PALETTE_MAX_VISIBLE: usize = 8;
 
+/// Owned snapshot of the dynamic resolver inputs. The slash palette
+/// stores this once at open time so [`OverlayWidget::handle_key`] can
+/// rebuild a [`Resolver`] on every keystroke without borrowing from
+/// the host.
+#[derive(Debug, Default, Clone)]
+pub struct SlashContext {
+    /// Model ids the user can switch to.
+    pub models: Vec<String>,
+    /// Plugin command `(name, description)` pairs.
+    pub plugin_commands: Vec<(String, String)>,
+    /// Session ids the user can resume.
+    pub sessions: Vec<PickItem>,
+}
+
+struct SnapshotResolver<'a> {
+    ctx: &'a SlashContext,
+}
+
+impl Resolver for SnapshotResolver<'_> {
+    fn dynamic_choice(&self, source: &ArgSource) -> Vec<String> {
+        match source {
+            ArgSource::Models => self.ctx.models.clone(),
+            ArgSource::Themes => crate::theme::Theme::bundled_names()
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
+            ArgSource::PluginCommands => self
+                .ctx
+                .plugin_commands
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect(),
+            ArgSource::Sessions => self.ctx.sessions.iter().map(|p| p.value.clone()).collect(),
+            ArgSource::Custom(f) => f(),
+        }
+    }
+
+    fn sessions(&self) -> Vec<String> {
+        self.ctx.sessions.iter().map(|p| p.value.clone()).collect()
+    }
+}
+
 /// `/` command palette overlay.
 #[derive(Debug)]
 pub struct SlashPalette {
     cmdline: CommandLine,
-}
-
-impl Default for SlashPalette {
-    fn default() -> Self {
-        Self::new()
-    }
+    registry: Vec<&'static CommandSpec>,
+    ctx: SlashContext,
 }
 
 impl SlashPalette {
-    /// Construct an empty palette. Call [`Self::refresh`] right after
-    /// construction so the list reflects the full command set on open.
+    /// Construct a palette with the registry and resolver snapshot it
+    /// will use for its lifetime. The host computes both fresh on each
+    /// palette open via [`crate::App::set_plugin_commands`] and the
+    /// other setters.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(registry: Vec<&'static CommandSpec>, ctx: SlashContext) -> Self {
         Self {
             cmdline: CommandLine::new(),
+            registry,
+            ctx,
         }
     }
 
@@ -63,22 +120,12 @@ impl SlashPalette {
         self.cmdline.set_error(msg);
     }
 
-    /// Drive the palette by one keystroke. Delegates to the wrapped
-    /// [`CommandLine`].
-    pub fn handle_key(
-        &mut self,
-        key: KeyEvent,
-        registry: &[&CommandSpec],
-        resolver: &dyn Resolver,
-    ) -> CommandLineEvent {
-        self.cmdline.handle_key(key, registry, resolver)
-    }
-
     /// Populate the candidate list from the current text. Call this
-    /// once after [`Self::new`] so the palette opens already showing
+    /// once after construction so the palette opens already showing
     /// every available command.
-    pub fn refresh(&mut self, registry: &[&CommandSpec], resolver: &dyn Resolver) {
-        self.cmdline.refresh_completions(registry, resolver);
+    pub fn refresh(&mut self) {
+        let resolver = SnapshotResolver { ctx: &self.ctx };
+        self.cmdline.refresh_completions(&self.registry, &resolver);
     }
 
     /// Paint the palette as two pieces: the completion popup floats
@@ -138,6 +185,11 @@ impl SlashPalette {
         ) else {
             return;
         };
+        frame.render_widget(Clear, area);
+        self.paint_popup(area, frame.buffer_mut());
+    }
+
+    fn paint_popup(&self, area: Rect, buf: &mut Buffer) {
         let theme = crate::theme::current();
         let bg = theme.modeline_bg;
         let row_style = Style::default().fg(Color::White).bg(bg);
@@ -147,10 +199,11 @@ impl SlashPalette {
             .bg(Color::Blue)
             .add_modifier(Modifier::BOLD);
 
-        frame.render_widget(Clear, area);
-
         let completions = self.cmdline.completions();
         let total = completions.items.len();
+        if total == 0 {
+            return;
+        }
         let inner_width = usize::from(area.width);
         let max_visible = PALETTE_MAX_VISIBLE.min(total);
         let (offset, window) = scroll_window(self.cmdline.selected(), total, max_visible);
@@ -198,11 +251,9 @@ impl SlashPalette {
             )));
         }
 
-        frame.render_widget(Paragraph::new(lines).style(row_style), area);
+        Widget::render(Paragraph::new(lines).style(row_style), area, buf);
     }
 
-    /// Render an inline validation error just above the input card,
-    /// in the same position the completion popup would occupy.
     fn render_error_above_input(&self, frame: &mut Frame, regions: Regions) {
         let Some(err) = self.cmdline.error() else {
             return;
@@ -230,9 +281,41 @@ impl SlashPalette {
     }
 }
 
-/// Compute the popup's painting rectangle anchored just above the
-/// input card. Returns `None` when there are no completions to show
-/// or no vertical room.
+impl OverlayWidget for SlashPalette {
+    fn measure(&self, available: Rect) -> Rect {
+        let total = self.cmdline.completions().items.len();
+        if total == 0 {
+            return Rect::new(available.x, available.bottom().saturating_sub(1), 0, 0);
+        }
+        let max_visible = PALETTE_MAX_VISIBLE.min(total);
+        let (offset, window) = scroll_window(self.cmdline.selected(), total, max_visible);
+        let above = offset;
+        let below = total.saturating_sub(offset + window);
+        let rows = window + usize::from(above > 0) + usize::from(below > 0);
+        let height = u16::try_from(rows)
+            .unwrap_or(u16::MAX)
+            .min(available.height);
+        let y = available.bottom().saturating_sub(height);
+        Rect::new(available.x, y, available.width, height)
+    }
+
+    fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &OverlayCtx<'_>) {
+        Widget::render(Clear, area, buf);
+        self.paint_popup(area, buf);
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> OverlayAction {
+        let resolver = SnapshotResolver { ctx: &self.ctx };
+        match self.cmdline.handle_key(key, &self.registry, &resolver) {
+            CommandLineEvent::Pending => OverlayAction::Stay,
+            CommandLineEvent::Cancelled => OverlayAction::Close,
+            CommandLineEvent::Submit(text) => {
+                OverlayAction::Resolve(serde_json::Value::String(text))
+            }
+        }
+    }
+}
+
 fn popup_area(regions: Regions, total: usize, selected: Option<usize>) -> Option<Rect> {
     if total == 0 {
         return None;
@@ -262,8 +345,6 @@ fn popup_area(regions: Regions, total: usize, selected: Option<usize>) -> Option
     })
 }
 
-/// Compute the single-row error rectangle anchored just above the
-/// input card.
 fn error_area(regions: Regions) -> Option<Rect> {
     let width = regions.input.width;
     if width == 0 {
@@ -282,9 +363,6 @@ fn error_area(regions: Regions) -> Option<Rect> {
     })
 }
 
-/// Inner row of the input card where the slash text overpaints. Skips
-/// the surrounding 1-cell border. Returns `None` when the input region
-/// is too small to host a single line of content.
 fn input_inner(regions: Regions) -> Option<Rect> {
     if regions.input.width < 3 || regions.input.height < 3 {
         return None;
@@ -370,10 +448,9 @@ fn pad_to_width(s: &str, width: usize) -> String {
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui::layout::Rect;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::*;
-    use crate::cmdparse::EmptyResolver;
     use crate::command::{ArgSource, ArgSpec, CommandCategory};
 
     const MODEL: CommandSpec = CommandSpec {
@@ -415,6 +492,12 @@ mod tests {
         vec![&QUIT, &MODEL, &MOUSE]
     }
 
+    fn palette() -> SlashPalette {
+        let mut p = SlashPalette::new(registry(), SlashContext::default());
+        p.refresh();
+        p
+    }
+
     fn snapshot(palette: &SlashPalette, width: u16, height: u16) -> Vec<String> {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -438,10 +521,8 @@ mod tests {
 
     #[test]
     fn open_palette_lists_every_command() {
-        let mut palette = SlashPalette::new();
-        let reg = registry();
-        palette.refresh(&reg, &EmptyResolver);
-        let lines = snapshot(&palette, 60, 16);
+        let p = palette();
+        let lines = snapshot(&p, 60, 16);
         assert!(lines.iter().any(|l| l.contains("quit")), "{lines:#?}");
         assert!(lines.iter().any(|l| l.contains("model")), "{lines:#?}");
         assert!(lines.iter().any(|l| l.contains("mouse")), "{lines:#?}");
@@ -449,15 +530,8 @@ mod tests {
 
     #[test]
     fn slash_text_overpaints_input_card_body() {
-        let mut palette = SlashPalette::new();
-        let reg = registry();
-        palette.refresh(&reg, &EmptyResolver);
-        let lines = snapshot(&palette, 60, 16);
-        // Input card occupies the bottom 3 rows; the body row is at
-        // y = height - 2 (last row is the bottom border). With 16
-        // rows total and input_height=3, body row is y=14.
-        // The overpaint lands at input_inner.x = regions.input.x + 1,
-        // so the leading column is whitespace (the border position).
+        let p = palette();
+        let lines = snapshot(&p, 60, 16);
         assert!(
             lines[14].trim_start().starts_with('/'),
             "expected `/` near start of input body row 14, got {:?}",
@@ -467,10 +541,8 @@ mod tests {
 
     #[test]
     fn open_palette_shows_per_arg_hints_in_description() {
-        let mut palette = SlashPalette::new();
-        let reg = registry();
-        palette.refresh(&reg, &EmptyResolver);
-        let lines = snapshot(&palette, 80, 16);
+        let p = palette();
+        let lines = snapshot(&p, 80, 16);
         let model_row = lines
             .iter()
             .find(|l| l.contains("model"))
@@ -485,43 +557,67 @@ mod tests {
 
     #[test]
     fn typing_filters_the_list() {
-        use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-        let mut palette = SlashPalette::new();
-        let reg = registry();
-        palette.refresh(&reg, &EmptyResolver);
-        palette.handle_key(
+        let mut p = palette();
+        let _ = OverlayWidget::handle_key(
+            &mut p,
             KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
-            &reg,
-            &EmptyResolver,
         );
-        let lines = snapshot(&palette, 60, 16);
+        let lines = snapshot(&p, 60, 16);
         assert!(lines.iter().any(|l| l.contains("model")), "{lines:#?}");
         assert!(lines.iter().any(|l| l.contains("mouse")), "{lines:#?}");
         assert!(!lines.iter().any(|l| l.contains("quit")), "{lines:#?}");
     }
 
     #[test]
+    fn enter_resolves_with_submitted_text() {
+        let mut p = palette();
+        let _ = OverlayWidget::handle_key(
+            &mut p,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+        );
+        let action =
+            OverlayWidget::handle_key(&mut p, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match action {
+            OverlayAction::Resolve(serde_json::Value::String(s)) => {
+                assert!(s.contains('q') || s.contains("quit"));
+            }
+            other => panic!("expected Resolve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn esc_closes_when_popup_dismissed() {
+        let mut p = palette();
+        let _ = OverlayWidget::handle_key(
+            &mut p,
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+        );
+        // First Esc dismisses any popup; the cmdline stays open.
+        let _ = OverlayWidget::handle_key(&mut p, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        // Second Esc cancels the cmdline.
+        let action =
+            OverlayWidget::handle_key(&mut p, KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(action, OverlayAction::Close);
+    }
+
+    #[test]
     fn popup_anchored_above_input_card() {
-        let mut palette = SlashPalette::new();
-        let reg = registry();
-        palette.refresh(&reg, &EmptyResolver);
+        let p = palette();
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
                 let regions = crate::layout::split(frame.area(), 3, 0);
-                palette.render(frame, regions);
+                p.render(frame, regions);
             })
             .unwrap();
         let buf = terminal.backend().buffer();
-        // Input card is at y=17..20 (height=3). The popup must paint
-        // strictly above y=17.
         let row_below_input_start = (0..buf.area.width)
             .map(|x| buf[(x, 17)].symbol())
             .collect::<String>();
         assert!(
             !row_below_input_start.contains("model"),
-            "popup should not paint into the input card border, got {row_below_input_start:?}"
+            "popup should not paint into the input card border"
         );
         let mut found_in_popup_band = false;
         for y in 13..17 {
@@ -534,7 +630,5 @@ mod tests {
             }
         }
         assert!(found_in_popup_band, "expected popup to paint above input");
-        let unused = Rect::new(0, 0, 0, 0);
-        let _ = unused;
     }
 }

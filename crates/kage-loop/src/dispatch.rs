@@ -7,13 +7,63 @@
 //! per call to append to history.
 
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
-use kage_core::{CancelFlag, Content, LoopError, LoopEvent, Message, MessageId, Role, ToolOutput};
-use kage_tools::{ToolContext, ToolError, ToolRegistry};
+use kage_core::{
+    CancelFlag, Content, LoopError, LoopEvent, Message, MessageId, Role, ToolCallId, ToolOutput,
+    ToolUpdate,
+};
+use kage_tools::{ProgressSink, ToolContext, ToolError, ToolRegistry};
 
 use crate::Hooks;
 use crate::run::emit_one;
 use crate::stream::PendingToolCall;
+
+/// Per-call sink that buffers [`ToolUpdate`]s in a mutex-protected vec so
+/// the dispatcher can drain and emit them after the tool returns (sequential)
+/// or after all threads join (parallel).
+struct BufferingSink {
+    updates: Mutex<Vec<ToolUpdate>>,
+}
+
+impl BufferingSink {
+    fn new() -> Self {
+        Self {
+            updates: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn drain(&self) -> Vec<ToolUpdate> {
+        std::mem::take(&mut self.updates.lock().expect("buffering sink poisoned"))
+    }
+}
+
+impl ProgressSink for BufferingSink {
+    fn emit(&self, update: ToolUpdate) {
+        if let Ok(mut v) = self.updates.lock() {
+            v.push(update);
+        }
+    }
+}
+
+/// Emit every buffered update for one tool call as a `LoopEvent::ToolUpdate`.
+fn flush_updates<F: FnMut(LoopEvent)>(
+    sink: &BufferingSink,
+    id: &ToolCallId,
+    hooks: &mut dyn Hooks,
+    emit: &mut F,
+) {
+    for update in sink.drain() {
+        emit_one(
+            hooks,
+            emit,
+            LoopEvent::ToolUpdate {
+                id: id.clone(),
+                update,
+            },
+        );
+    }
+}
 
 /// Outcome of [`Hooks::before_tool_call`] for one entry: either a
 /// short-circuit output the host produced, or run the real tool.
@@ -57,12 +107,17 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
         }
 
         let pre = hooks.before_tool_call(&call.name, &call.input);
-        let raw_output = match pre {
-            Some(out) => out,
-            None => execute(tools, &call, workdir, cancel)?,
+        let sink = Arc::new(BufferingSink::new());
+        let raw_output = if let Some(out) = pre {
+            out
+        } else {
+            let sink_dyn: Arc<dyn ProgressSink> = Arc::clone(&sink) as Arc<dyn ProgressSink>;
+            execute(tools, &call, workdir, cancel, Some(sink_dyn))?
         };
         let output = hooks.after_tool_call(&call.name, raw_output);
         all_terminate &= output.terminate;
+
+        flush_updates(&sink, &call.id, hooks, emit);
 
         emit_one(
             hooks,
@@ -121,15 +176,21 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
         }
     }
 
+    let sinks: Vec<Arc<BufferingSink>> = (0..pending.len())
+        .map(|_| Arc::new(BufferingSink::new()))
+        .collect();
+
     let raw_outputs: Vec<Result<ToolOutput, LoopError>> = std::thread::scope(|scope| {
         let mut handles: Vec<Option<std::thread::ScopedJoinHandle<'_, _>>> =
             Vec::with_capacity(pending.len());
-        for (call, slot) in pending.iter().zip(&slots) {
+        for ((call, slot), sink) in pending.iter().zip(&slots).zip(&sinks) {
             match slot {
                 Slot::Short(_) => handles.push(None),
                 Slot::Run => {
                     let call = call.clone();
-                    let handle = scope.spawn(move || execute(tools, &call, workdir, cancel));
+                    let sink = Arc::clone(sink);
+                    let handle =
+                        scope.spawn(move || execute(tools, &call, workdir, cancel, Some(sink)));
                     handles.push(Some(handle));
                 }
             }
@@ -151,10 +212,11 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
 
     let mut results = Vec::with_capacity(pending.len());
     let mut all_terminate = !pending.is_empty();
-    for (call, raw) in pending.into_iter().zip(raw_outputs) {
+    for ((call, raw), sink) in pending.into_iter().zip(raw_outputs).zip(&sinks) {
         let raw = raw?;
         let output = hooks.after_tool_call(&call.name, raw);
         all_terminate &= output.terminate;
+        flush_updates(sink, &call.id, hooks, emit);
         emit_one(
             hooks,
             emit,
@@ -189,6 +251,7 @@ fn execute(
     call: &PendingToolCall,
     workdir: &Path,
     cancel: &CancelFlag,
+    progress: Option<Arc<dyn ProgressSink>>,
 ) -> Result<ToolOutput, LoopError> {
     let Some(tool) = tools.get(&call.name) else {
         return Ok(ToolOutput {
@@ -199,7 +262,10 @@ fn execute(
         });
     };
 
-    let cx = ToolContext::new(workdir, cancel);
+    let mut cx = ToolContext::new(workdir, cancel);
+    if let Some(sink) = progress {
+        cx = cx.with_progress(sink);
+    }
     match tool.execute(call.input.clone(), &cx) {
         Ok(out) => Ok(out),
         Err(ToolError::Cancelled) => Err(LoopError::Cancelled),
@@ -277,10 +343,49 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct ProgressTool;
+
+    impl Tool for ProgressTool {
+        fn name(&self) -> &'static str {
+            "progress"
+        }
+        fn description(&self) -> &'static str {
+            "emits two progress updates before returning"
+        }
+        fn schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn risk(&self) -> Risk {
+            Risk::Read
+        }
+        fn execute(
+            &self,
+            _input: serde_json::Value,
+            cx: &ToolContext<'_>,
+        ) -> Result<ToolOutput, ToolError> {
+            cx.update(ToolUpdate {
+                content: "step 1".into(),
+                structured: None,
+            });
+            cx.update(ToolUpdate {
+                content: "step 2".into(),
+                structured: Some(serde_json::json!({"phase": "done"})),
+            });
+            Ok(ToolOutput {
+                is_error: false,
+                text: "ok".into(),
+                structured: None,
+                terminate: false,
+            })
+        }
+    }
+
     fn registry_with_echo() -> ToolRegistry {
         ToolRegistry::new()
             .with(Arc::new(EchoTool))
             .with(Arc::new(ErrTool))
+            .with(Arc::new(ProgressTool))
     }
 
     fn pending(name: &str, input: serde_json::Value) -> PendingToolCall {
@@ -289,6 +394,79 @@ mod tests {
             name: name.to_owned(),
             input,
         }
+    }
+
+    #[test]
+    fn tool_updates_are_emitted_before_tool_call_end() {
+        let tools = registry_with_echo();
+        let cancel = CancelFlag::new();
+        let parent = MessageId::new();
+        let mut hooks = NoopHooks;
+        let mut emitted = Vec::new();
+
+        let outcome = dispatch_tool_calls(
+            vec![pending("progress", serde_json::json!({}))],
+            &tools,
+            std::path::Path::new("/tmp"),
+            &cancel,
+            parent,
+            &mut hooks,
+            &mut |ev| emitted.push(ev),
+        )
+        .unwrap();
+        assert_eq!(outcome.results.len(), 1);
+
+        let updates: Vec<_> = emitted
+            .iter()
+            .filter_map(|e| match e {
+                LoopEvent::ToolUpdate { update, .. } => Some(update.content.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(updates, vec!["step 1".to_owned(), "step 2".to_owned()]);
+
+        let update_idx = emitted
+            .iter()
+            .position(|e| matches!(e, LoopEvent::ToolUpdate { .. }))
+            .unwrap();
+        let end_idx = emitted
+            .iter()
+            .position(|e| matches!(e, LoopEvent::ToolCallEnd { .. }))
+            .unwrap();
+        assert!(
+            update_idx < end_idx,
+            "ToolUpdate must fire before ToolCallEnd"
+        );
+    }
+
+    #[test]
+    fn parallel_dispatch_emits_tool_updates_per_call() {
+        let tools = registry_with_echo();
+        let cancel = CancelFlag::new();
+        let parent = MessageId::new();
+        let mut hooks = NoopHooks;
+        let mut emitted = Vec::new();
+
+        let outcome = dispatch_tool_calls_parallel(
+            vec![
+                pending("progress", serde_json::json!({})),
+                pending("progress", serde_json::json!({})),
+            ],
+            &tools,
+            std::path::Path::new("/tmp"),
+            &cancel,
+            parent,
+            &mut hooks,
+            &mut |ev| emitted.push(ev),
+        )
+        .unwrap();
+        assert_eq!(outcome.results.len(), 2);
+
+        let updates = emitted
+            .iter()
+            .filter(|e| matches!(e, LoopEvent::ToolUpdate { .. }))
+            .count();
+        assert_eq!(updates, 4, "two tools x two updates each");
     }
 
     #[test]

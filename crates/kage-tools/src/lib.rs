@@ -14,4 +14,4 @@ pub use error::ToolError;
 pub use path::{resolve, resolve_under};
 pub use registry::ToolRegistry;
 pub use schema::schema_for;
-pub use tool::{ExecMode, Tool, ToolContext};
+pub use tool::{ExecMode, ProgressSink, Tool, ToolContext};

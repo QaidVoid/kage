@@ -191,6 +191,18 @@ impl<H: Hooks> Hooks for PluginEventHooks<H> {
                     }),
                 );
             }
+            LoopEvent::ToolUpdate { id, update }
+                if self.runtime.handler_count("tool_update") > 0 =>
+            {
+                let _ = self.runtime.dispatch_event(
+                    "tool_update",
+                    &json!({
+                        "id": id.to_string(),
+                        "content": update.content,
+                        "structured": update.structured,
+                    }),
+                );
+            }
             _ => {}
         }
         self.inner.on_event(event);

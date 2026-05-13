@@ -66,6 +66,22 @@ fn is_default_false(b: &bool) -> bool {
     !*b
 }
 
+/// Mid-execution progress update emitted by a long-running tool.
+///
+/// Tools call [`ToolContext::update`](kage_tools::ToolContext::update)
+/// during `execute` to stream progress without buffering everything into
+/// the final [`ToolOutput::text`]. The loop wraps each call in a
+/// [`LoopEvent::ToolUpdate`] event the host can render live.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolUpdate {
+    /// Human-readable progress line (e.g. `"12/45 crates compiled"`).
+    pub content: String,
+    /// Optional structured payload mirroring [`ToolOutput::structured`] for
+    /// richer rendering by the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured: Option<serde_json::Value>,
+}
+
 /// Reason the loop emitted an [`LoopEvent::Error`].
 ///
 /// Carried inside events so it can travel across the rpc boundary without
@@ -150,6 +166,13 @@ pub enum LoopEvent {
         name: String,
         /// Tool arguments as parsed so far. May be empty.
         input_partial: serde_json::Value,
+    },
+    /// Mid-execution progress update from a running tool.
+    ToolUpdate {
+        /// Correlation id matching the prior [`LoopEvent::ToolCallStart`].
+        id: ToolCallId,
+        /// The progress payload the tool reported.
+        update: ToolUpdate,
     },
     /// A tool call has completed.
     ToolCallEnd {

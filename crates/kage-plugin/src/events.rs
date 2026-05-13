@@ -22,6 +22,8 @@
 //!   mirrors `message_end` (id + usage)
 //! * `message_end` - the model finished one assistant turn
 //! * `tool_call` - a tool invocation has begun
+//! * `tool_update` - mid-execution progress payload from a running tool
+//!   (`{id, content, structured?}`); fires only when subscribers exist
 //! * `tool_result` - a tool invocation produced an output
 //! * `session_open` - the host opened a session writer
 //! * `session_close` - the host closed a session writer

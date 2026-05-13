@@ -1,10 +1,22 @@
 //! [`Tool`] trait and per-call execution context.
 
 use std::path::Path;
+use std::sync::Arc;
 
-use kage_core::{CancelFlag, Risk, ToolOutput};
+use kage_core::{CancelFlag, Risk, ToolOutput, ToolUpdate};
 
 use crate::ToolError;
+
+/// Sink the dispatcher hands to a [`ToolContext`] so a long-running tool
+/// can stream progress without blocking on the loop's emit closure.
+///
+/// Implementations must be `Send + Sync` because parallel dispatch hands
+/// the same sink to multiple worker threads. The loop's built-in sink
+/// translates each call into a [`kage_core::LoopEvent::ToolUpdate`].
+pub trait ProgressSink: Send + Sync {
+    /// Report one progress payload to the dispatcher.
+    fn emit(&self, update: ToolUpdate);
+}
 
 /// Per-tool override for dispatch ordering.
 ///
@@ -68,19 +80,41 @@ pub trait Tool: Send + Sync + std::fmt::Debug {
 /// Per-call execution context handed to [`Tool::execute`].
 ///
 /// Carries the working directory the tool must respect, a cancellation flag
-/// the tool should poll at safe points for long-running work, and (in later
-/// phases) handles to the sandbox and progress sink.
-#[derive(Debug)]
+/// the tool should poll at safe points for long-running work, and an
+/// optional [`ProgressSink`] long-running tools call to stream progress.
+#[derive(Clone)]
 pub struct ToolContext<'a> {
     workdir: &'a Path,
     cancel: &'a CancelFlag,
+    progress: Option<Arc<dyn ProgressSink>>,
+}
+
+impl std::fmt::Debug for ToolContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolContext")
+            .field("workdir", &self.workdir)
+            .field("has_progress", &self.progress.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl<'a> ToolContext<'a> {
-    /// Construct a context.
+    /// Construct a context with no progress sink.
     #[must_use]
     pub fn new(workdir: &'a Path, cancel: &'a CancelFlag) -> Self {
-        Self { workdir, cancel }
+        Self {
+            workdir,
+            cancel,
+            progress: None,
+        }
+    }
+
+    /// Attach a progress sink so [`Self::update`] can emit mid-execution
+    /// progress events. Without this the method is a no-op.
+    #[must_use]
+    pub fn with_progress(mut self, sink: Arc<dyn ProgressSink>) -> Self {
+        self.progress = Some(sink);
+        self
     }
 
     /// The directory tools must scope all filesystem operations under.
@@ -99,5 +133,15 @@ impl<'a> ToolContext<'a> {
     #[must_use]
     pub fn cancel_flag(&self) -> &CancelFlag {
         self.cancel
+    }
+
+    /// Report mid-execution progress to the host. Long-running tools call
+    /// this with structured progress (e.g. `12/45 crates compiled`); the
+    /// dispatcher wraps each call in a `LoopEvent::ToolUpdate`. Without an
+    /// attached sink this is a no-op so unit tests do not need to wire one.
+    pub fn update(&self, update: ToolUpdate) {
+        if let Some(sink) = &self.progress {
+            sink.emit(update);
+        }
     }
 }

@@ -182,7 +182,7 @@ impl<H: Hooks> Hooks for SessionRecordingHooks<H> {
                     summary: summary.clone(),
                 }));
             }
-            LoopEvent::Error { .. } => {}
+            LoopEvent::ToolUpdate { .. } | LoopEvent::Error { .. } => {}
         }
         self.inner.on_event(event);
     }

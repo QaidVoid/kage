@@ -14,7 +14,7 @@ pub use config::{
     UiConfig,
 };
 pub use error::{Error, Result};
-pub use event::{LoopError, LoopEvent, TokenUsage, ToolOutput};
+pub use event::{LoopError, LoopEvent, TokenUsage, ToolOutput, ToolUpdate};
 pub use message::{Content, ImageSource, Message, MessageId, Role, ToolCallId};
 pub use risk::{Risk, classify};
 pub use tool_spec::ToolSpec;

@@ -1764,30 +1764,90 @@ pub(super) fn wrap_in_bubble_focused(
 /// This is character-wise, not word-wise: it never breaks mid-word at
 /// a fancy boundary, just at exactly `max` chars. Trade off: simple
 /// math, OK for code/path content; English prose can mid-word break.
+/// Word-aware row split for a styled line.
+///
+/// Walks the line's spans as a flat `(char, style)` stream, packs as
+/// many chars as fit into `max` columns, and breaks at the most recent
+/// ASCII space when the next char would overflow. The space is
+/// consumed (not painted on either row) so the result reads cleanly
+/// across the wrap. Words longer than `max` fall back to a
+/// mid-character break.
+///
+/// Style boundaries are preserved: each output row is rebuilt as a
+/// minimal sequence of `Span`s, coalescing consecutive chars that
+/// share a style.
 fn split_line_into_rows(line: Line<'static>, max: usize) -> Vec<Vec<Span<'static>>> {
     if max == 0 || line.spans.is_empty() {
         return vec![Vec::new()];
     }
-    let mut rows: Vec<Vec<Span<'static>>> = vec![Vec::new()];
-    let mut row_used = 0usize;
+    let mut chars: Vec<(char, Style)> = Vec::new();
     for span in line.spans {
         let style = span.style;
-        let chars: Vec<char> = span.content.chars().collect();
-        let mut i = 0;
-        while i < chars.len() {
-            if row_used >= max {
-                rows.push(Vec::new());
-                row_used = 0;
-            }
-            let avail = max - row_used;
-            let take = avail.min(chars.len() - i);
-            let piece: String = chars[i..i + take].iter().collect();
-            rows.last_mut().unwrap().push(Span::styled(piece, style));
-            i += take;
-            row_used += take;
+        for c in span.content.chars() {
+            chars.push((c, style));
         }
     }
+    if chars.is_empty() {
+        return vec![Vec::new()];
+    }
+
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut row_start = 0usize;
+    let mut row_used = 0usize;
+    let mut last_space: Option<usize> = None;
+    let mut i = 0;
+    while i < chars.len() {
+        if row_used >= max {
+            if let Some(sp) = last_space.filter(|&s| s > row_start) {
+                ranges.push((row_start, sp));
+                row_start = sp + 1;
+                row_used = i - row_start;
+                last_space = None;
+                continue;
+            }
+            ranges.push((row_start, i));
+            row_start = i;
+            row_used = 0;
+            last_space = None;
+        }
+        if chars[i].0 == ' ' {
+            last_space = Some(i);
+        }
+        row_used += 1;
+        i += 1;
+    }
+    ranges.push((row_start, chars.len()));
+
+    let mut rows: Vec<Vec<Span<'static>>> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        rows.push(spans_for_range(&chars[start..end]));
+    }
     rows
+}
+
+fn spans_for_range(chars: &[(char, Style)]) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut current_style: Option<Style> = None;
+    let mut current_content = String::new();
+    for &(c, st) in chars {
+        if Some(st) != current_style {
+            if !current_content.is_empty() {
+                out.push(Span::styled(
+                    std::mem::take(&mut current_content),
+                    current_style.unwrap_or_default(),
+                ));
+            }
+            current_style = Some(st);
+        }
+        current_content.push(c);
+    }
+    if !current_content.is_empty() {
+        out.push(Span::styled(
+            current_content,
+            current_style.unwrap_or_default(),
+        ));
+    }
+    out
 }
 
 pub(super) fn plain_lines(text: &str, style: Style) -> Vec<Line<'static>> {
@@ -2325,6 +2385,50 @@ mod tests {
         assert_eq!(input_visual_row_count("alpha beta", 10), 1);
         // "alpha beta gamma" = 16 chars, wraps to 2 rows.
         assert_eq!(input_visual_row_count("alpha beta gamma", 10), 2);
+    }
+
+    // --- split_line_into_rows (block widgets) ---
+
+    fn row_text(row: &[Span<'_>]) -> String {
+        row.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn block_wrap_breaks_at_word_boundary_when_word_fits() {
+        let line = Line::from(Span::raw("hello world"));
+        let rows = split_line_into_rows(line, 10);
+        let texts: Vec<String> = rows.iter().map(|r| row_text(r)).collect();
+        assert_eq!(texts, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn block_wrap_falls_back_to_char_break_for_oversize_word() {
+        let line = Line::from(Span::raw("aaaaaaaaaaaaaaa"));
+        let rows = split_line_into_rows(line, 10);
+        let texts: Vec<String> = rows.iter().map(|r| row_text(r)).collect();
+        assert_eq!(texts, vec!["aaaaaaaaaa", "aaaaa"]);
+    }
+
+    #[test]
+    fn block_wrap_preserves_span_styles_across_break() {
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        let line = Line::from(vec![Span::styled("hello", bold), Span::raw(" world tail")]);
+        let rows = split_line_into_rows(line, 11);
+        // Row 0 fits "hello world" (5+1+5=11); the bold style on
+        // "hello" must survive.
+        assert!(rows.len() >= 2, "expected at least 2 rows, got {rows:?}");
+        let first_bold = rows[0]
+            .iter()
+            .any(|s| s.content == "hello" && s.style.add_modifier.contains(Modifier::BOLD));
+        assert!(first_bold, "bold style should survive the wrap");
+    }
+
+    #[test]
+    fn block_wrap_empty_line_yields_single_empty_row() {
+        let line = Line::from(Span::raw(""));
+        let rows = split_line_into_rows(line, 10);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].is_empty() || row_text(&rows[0]).is_empty());
     }
 
     fn snapshot_lines(buffer: &mut Buffer, input: &InputState, area: Rect) -> Vec<String> {

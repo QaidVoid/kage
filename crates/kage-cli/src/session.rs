@@ -187,6 +187,14 @@ impl<H: Hooks> Hooks for SessionRecordingHooks<H> {
         self.inner.on_event(event);
     }
 
+    fn on_turn_start(&mut self, index: u32) {
+        self.inner.on_turn_start(index);
+    }
+
+    fn on_turn_end(&mut self, index: u32, had_tool_calls: bool) {
+        self.inner.on_turn_end(index, had_tool_calls);
+    }
+
     fn get_steering(&mut self) -> Option<String> {
         self.inner.get_steering()
     }

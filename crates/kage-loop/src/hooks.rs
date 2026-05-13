@@ -42,6 +42,26 @@ pub trait Hooks {
         let _ = event;
     }
 
+    /// Fired just before each inner-loop iteration begins a provider call.
+    ///
+    /// `index` is the zero-based turn index within the current `run`: the
+    /// first provider call has `index == 0`. Compaction-induced extra calls
+    /// do not advance the index; follow-up rounds do. Use this for per-turn
+    /// timers, request logging, or plugin notifications.
+    fn on_turn_start(&mut self, index: u32) {
+        let _ = index;
+    }
+
+    /// Fired after the provider stream for the current turn closes.
+    ///
+    /// `had_tool_calls` is `true` when the model finished a turn that
+    /// requested at least one tool call (the inner loop will continue);
+    /// `false` when the turn produced text only and the inner loop will
+    /// break. Pair with [`Self::on_turn_start`] for tok/s-style metrics.
+    fn on_turn_end(&mut self, index: u32, had_tool_calls: bool) {
+        let _ = (index, had_tool_calls);
+    }
+
     /// Polled before each model turn.
     ///
     /// A `Some(text)` return value is appended to history as a user message

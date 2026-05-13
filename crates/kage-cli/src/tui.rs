@@ -552,6 +552,22 @@ fn open_writer_for_turn(
     }
 }
 
+/// Extract the first text block from a user message, joined with newlines
+/// if there are multiple. Returns an empty string when the message carries
+/// no text (image-only, tool-result-only, etc.).
+fn first_user_text(msg: &Message) -> String {
+    let mut out = String::new();
+    for block in &msg.content {
+        if let Content::Text { text } = block {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(text);
+        }
+    }
+    out
+}
+
 /// Run the agent loop with the right hook chain: TUI display innermost,
 /// optional session recording in the middle, optional plugin dispatch
 /// outermost, plus the [`UsageHooks`] wrapper at the very edge so the
@@ -580,6 +596,7 @@ fn run_with_hooks(
             let mut recorded = SessionRecordingHooks::new(tui_hooks, w);
             recorded.record_user_message(user_msg);
             let plugin_hooks = PluginEventHooks::new(recorded, Arc::clone(rt));
+            plugin_hooks.dispatch_before_agent_start(&cx.system_prompt, &first_user_text(user_msg));
             plugin_hooks.dispatch_agent_start();
             let mut wrapped =
                 UsageHooks::new(plugin_hooks, session_usage, qualified_model, context_window);
@@ -596,6 +613,7 @@ fn run_with_hooks(
         }
         (None, Some(rt)) => {
             let plugin_hooks = PluginEventHooks::new(tui_hooks, Arc::clone(rt));
+            plugin_hooks.dispatch_before_agent_start(&cx.system_prompt, &first_user_text(user_msg));
             plugin_hooks.dispatch_agent_start();
             let mut wrapped =
                 UsageHooks::new(plugin_hooks, session_usage, qualified_model, context_window);

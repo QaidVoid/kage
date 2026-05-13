@@ -289,6 +289,7 @@ where
 
     if let Some(runtime) = plugin_runtime {
         let mut hooks = PluginEventHooks::new(BoxedHooks(session_layer), runtime.clone());
+        hooks.dispatch_before_agent_start(&cx.system_prompt, &first_user_text(user_msg));
         hooks.dispatch_agent_start();
         let res = run(provider, tools, cx, cfg, &mut hooks, cancel, &mut emit);
         hooks.dispatch_agent_end(res.is_ok());
@@ -304,6 +305,22 @@ where
             &mut emit,
         )
     }
+}
+
+/// Extract the first text block from a user message, joined with newlines
+/// if there are multiple. Returns an empty string when the message carries
+/// no text (image-only, tool-result-only, etc.).
+fn first_user_text(msg: &Message) -> String {
+    let mut out = String::new();
+    for block in &msg.content {
+        if let Content::Text { text } = block {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(text);
+        }
+    }
+    out
 }
 
 /// Adapter so a `Box<dyn Hooks>` satisfies the static-dispatch `Hooks`
@@ -329,6 +346,14 @@ impl Hooks for BoxedHooks {
 
     fn on_event(&mut self, event: &LoopEvent) {
         self.0.on_event(event);
+    }
+
+    fn on_turn_start(&mut self, index: u32) {
+        self.0.on_turn_start(index);
+    }
+
+    fn on_turn_end(&mut self, index: u32, had_tool_calls: bool) {
+        self.0.on_turn_end(index, had_tool_calls);
     }
 
     fn get_steering(&mut self) -> Option<String> {

@@ -7,8 +7,12 @@
 //!
 //! Events the host fires are batched at turn boundaries, never mid-stream:
 //! a slow Lua handler cannot stall delta emission. v0.1 ships these names:
+//! * `before_agent_start` - fires once before the first provider call, with
+//!   the system prompt and the first user message text in scope
 //! * `agent_start` - the agent loop is about to call the provider for the first time
 //! * `agent_end` - the loop has returned (success or error)
+//! * `turn_start` - a new inner-loop iteration is about to call the provider
+//! * `turn_end` - the provider stream for the current turn has closed
 //! * `message_end` - the model finished one assistant turn
 //! * `tool_call` - a tool invocation has begun
 //! * `tool_result` - a tool invocation produced an output
@@ -212,6 +216,59 @@ mod tests {
         assert_eq!(errs.errors.len(), 1);
         assert!(errs.errors[0].contains("agent_end"));
         assert!(errs.errors[0].contains("boom"));
+    }
+
+    #[test]
+    fn turn_lifecycle_events_dispatch_by_name() {
+        let lua = fresh_lua_with_kage();
+        lua.load(
+            r"
+            seen = {}
+            kage.on('before_agent_start', function(ev)
+                seen[#seen + 1] = 'before:' .. ev.system_prompt .. '|' .. ev.first_user_message
+            end)
+            kage.on('turn_start', function(ev)
+                seen[#seen + 1] = 'turn_start:' .. ev.index
+            end)
+            kage.on('turn_end', function(ev)
+                seen[#seen + 1] = 'turn_end:' .. ev.index .. ':' .. tostring(ev.had_tool_calls)
+            end)
+            ",
+        )
+        .exec()
+        .unwrap();
+
+        dispatch(
+            &lua,
+            "before_agent_start",
+            &json!({"system_prompt": "be helpful", "first_user_message": "hi"}),
+            &default_host_log(),
+        )
+        .unwrap();
+        dispatch(
+            &lua,
+            "turn_start",
+            &json!({"index": 0}),
+            &default_host_log(),
+        )
+        .unwrap();
+        dispatch(
+            &lua,
+            "turn_end",
+            &json!({"index": 0, "had_tool_calls": false}),
+            &default_host_log(),
+        )
+        .unwrap();
+
+        let seen: Vec<String> = lua.globals().get("seen").unwrap();
+        assert_eq!(
+            seen,
+            vec![
+                "before:be helpful|hi".to_owned(),
+                "turn_start:0".to_owned(),
+                "turn_end:0:false".to_owned(),
+            ]
+        );
     }
 
     #[test]

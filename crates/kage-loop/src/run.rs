@@ -61,6 +61,7 @@ where
     F: FnMut(LoopEvent),
 {
     let mut doom = DoomTracker::default();
+    let mut turn_index: u32 = 0;
 
     loop {
         if cancel.is_cancelled() {
@@ -84,6 +85,8 @@ where
                 emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
                 return Err(kind);
             }
+
+            hooks.on_turn_start(turn_index);
 
             let req = build_request(cx, tools);
             let stream = match provider.stream(req, cancel) {
@@ -111,7 +114,11 @@ where
             let pending = turn.tool_calls.clone();
             cx.history.push(turn.message);
 
-            if pending.is_empty() {
+            let had_tool_calls = !pending.is_empty();
+            hooks.on_turn_end(turn_index, had_tool_calls);
+            turn_index = turn_index.saturating_add(1);
+
+            if !had_tool_calls {
                 break;
             }
 
@@ -354,6 +361,87 @@ mod tests {
             &last.content[0],
             Content::Text { text } if text == "be terse"
         ));
+    }
+
+    #[derive(Default)]
+    struct TurnRecording {
+        starts: Vec<u32>,
+        ends: Vec<(u32, bool)>,
+    }
+
+    impl Hooks for TurnRecording {
+        fn on_turn_start(&mut self, index: u32) {
+            self.starts.push(index);
+        }
+        fn on_turn_end(&mut self, index: u32, had_tool_calls: bool) {
+            self.ends.push((index, had_tool_calls));
+        }
+    }
+
+    #[test]
+    fn turn_boundaries_fire_once_for_text_only_turn() {
+        let mock = MockProvider::replaying(vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::TextDelta { delta: "hi".into() }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        ]);
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.history.push(user_msg("hello"));
+        let cfg = LoopConfig::default();
+        let mut hooks = TurnRecording::default();
+        let cancel = CancelFlag::new();
+        let registry = ToolRegistry::new();
+
+        run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {}).unwrap();
+        assert_eq!(hooks.starts, vec![0]);
+        assert_eq!(hooks.ends, vec![(0, false)]);
+    }
+
+    struct Combined {
+        inner: TurnRecording,
+        follow: OneFollowup,
+    }
+    impl Hooks for Combined {
+        fn on_turn_start(&mut self, index: u32) {
+            self.inner.on_turn_start(index);
+        }
+        fn on_turn_end(&mut self, index: u32, had_tool_calls: bool) {
+            self.inner.on_turn_end(index, had_tool_calls);
+        }
+        fn get_followup(&mut self) -> Option<String> {
+            self.follow.get_followup()
+        }
+    }
+
+    #[test]
+    fn turn_index_advances_across_followup_rounds() {
+        let mock = MockProvider::sequence(vec![
+            vec![Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            })],
+            vec![Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            })],
+        ]);
+
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.history.push(user_msg("hi"));
+        let cfg = LoopConfig::default();
+        let mut hooks = Combined {
+            inner: TurnRecording::default(),
+            follow: OneFollowup(true),
+        };
+        let cancel = CancelFlag::new();
+        let registry = ToolRegistry::new();
+
+        run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {}).unwrap();
+        assert_eq!(hooks.inner.starts, vec![0, 1]);
+        assert_eq!(hooks.inner.ends, vec![(0, false), (1, false)]);
     }
 
     #[test]

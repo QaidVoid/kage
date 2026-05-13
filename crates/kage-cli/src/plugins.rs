@@ -88,6 +88,19 @@ impl<H: Hooks> PluginEventHooks<H> {
         Self { inner, runtime }
     }
 
+    /// Synthesize the `before_agent_start` event before the loop's first
+    /// turn. Fires with the system prompt and the first user message text
+    /// in scope so plugins can observe the inputs to the upcoming run.
+    pub fn dispatch_before_agent_start(&self, system_prompt: &str, first_user_message: &str) {
+        let payload = json!({
+            "system_prompt": system_prompt,
+            "first_user_message": first_user_message,
+        });
+        if let Err(err) = self.runtime.dispatch_event("before_agent_start", &payload) {
+            self.log_error(format_args!("before_agent_start dispatch: {err}"));
+        }
+    }
+
     /// Synthesize the `agent_start` event before the loop's first turn.
     pub fn dispatch_agent_start(&self) {
         if let Err(err) = self.runtime.dispatch_event("agent_start", &json!({})) {
@@ -162,6 +175,24 @@ impl<H: Hooks> Hooks for PluginEventHooks<H> {
             _ => {}
         }
         self.inner.on_event(event);
+    }
+
+    fn on_turn_start(&mut self, index: u32) {
+        let _ = self
+            .runtime
+            .dispatch_event("turn_start", &json!({ "index": index }));
+        self.inner.on_turn_start(index);
+    }
+
+    fn on_turn_end(&mut self, index: u32, had_tool_calls: bool) {
+        let _ = self.runtime.dispatch_event(
+            "turn_end",
+            &json!({
+                "index": index,
+                "had_tool_calls": had_tool_calls,
+            }),
+        );
+        self.inner.on_turn_end(index, had_tool_calls);
     }
 
     fn get_steering(&mut self) -> Option<String> {

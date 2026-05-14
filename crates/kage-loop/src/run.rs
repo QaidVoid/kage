@@ -252,6 +252,7 @@ fn build_request(cx: &AgentContext, tools: &ToolRegistry) -> StreamRequest {
     }
     req.tools = tools.list_for_provider();
     req.max_output_tokens = cx.max_output_tokens;
+    req.level = cx.thinking_level;
     req
 }
 

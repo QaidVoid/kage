@@ -114,12 +114,36 @@ pub(crate) fn build_request_body(req: &StreamRequest) -> Value {
     if let Some(temp) = req.temperature {
         body["generationConfig"]["temperature"] = serde_json::json!(temp);
     }
+    if let Some(budget) = resolve_thinking_budget(req) {
+        body["generationConfig"]["thinkingConfig"] = serde_json::json!({
+            "thinkingBudget": budget,
+        });
+    }
     if !req.tools.is_empty() {
         body["tools"] = serde_json::json!([{
             "functionDeclarations": req.tools.iter().map(tool_spec_to_gemini).collect::<Vec<_>>(),
         }]);
     }
     body
+}
+
+/// Resolve the thinking-token budget for a Gemini request.
+///
+/// Mirrors the Anthropic helper: explicit [`crate::ThinkingConfig`]
+/// wins, otherwise the [`crate::ThinkingLevel`] is looked up in the
+/// per-model catalog table or falls back to the enum's default
+/// budgets.
+fn resolve_thinking_budget(req: &StreamRequest) -> Option<u32> {
+    if let Some(thinking) = &req.thinking {
+        return Some(thinking.budget_tokens);
+    }
+    let level = req.level?;
+    if level.is_off() {
+        return None;
+    }
+    crate::catalog::model("gemini", &req.model)
+        .and_then(|m| m.thinking_budget(level))
+        .or_else(|| level.default_budget_tokens())
 }
 
 fn tool_spec_to_gemini(spec: &ToolSpec) -> Value {
@@ -429,6 +453,25 @@ mod tests {
             body["systemInstruction"]["parts"][0]["text"],
             "you are kage"
         );
+    }
+
+    #[test]
+    fn body_translates_thinking_level_to_budget() {
+        let mut req = StreamRequest::new("gemini-2.5-pro", vec![user_msg("hi")]);
+        req.level = Some(crate::ThinkingLevel::High);
+        let body = build_request_body(&req);
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            crate::ThinkingLevel::High.default_budget_tokens().unwrap()
+        );
+    }
+
+    #[test]
+    fn body_omits_thinking_config_when_level_off() {
+        let mut req = StreamRequest::new("gemini-2.5-pro", vec![user_msg("hi")]);
+        req.level = Some(crate::ThinkingLevel::Off);
+        let body = build_request_body(&req);
+        assert!(body["generationConfig"].get("thinkingConfig").is_none());
     }
 
     #[test]

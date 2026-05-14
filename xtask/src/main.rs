@@ -267,6 +267,8 @@ fn render(providers: &[CuratedProvider]) -> String {
          \n\
          #[allow(unused_imports)]\n\
          use super::{ModelCost, ModelInfo, ProviderInfo};\n\
+         #[allow(unused_imports)]\n\
+         use crate::ThinkingLevel;\n\
          \n",
     );
     let _ = writeln!(out, "/// Static provider/model catalog.");
@@ -330,6 +332,7 @@ fn emit_model(out: &mut String, m: &CuratedModel) {
         }
         None => out.push_str("                cost: None,\n"),
     }
+    out.push_str("                thinking_levels: None,\n");
     out.push_str("            },\n");
 }
 

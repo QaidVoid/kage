@@ -13,6 +13,8 @@ mod generated;
 
 pub use generated::PROVIDERS;
 
+use crate::ThinkingLevel;
+
 /// Description of one provider in the catalog.
 #[derive(Debug, Clone, Copy)]
 pub struct ProviderInfo {
@@ -47,6 +49,34 @@ pub struct ModelInfo {
     pub release_date: Option<&'static str>,
     /// Per-million-token pricing in USD, when the catalog reports it.
     pub cost: Option<ModelCost>,
+    /// Per-level thinking-token budget table for this model. When
+    /// present, providers with budget-based thinking (Anthropic,
+    /// Gemini) look up the active [`ThinkingLevel`] here; absent
+    /// entries fall back to [`ThinkingLevel::default_budget_tokens`].
+    /// OpenAI-style providers ignore this field and read the level
+    /// directly via [`ThinkingLevel::openai_reasoning_effort`].
+    pub thinking_levels: Option<&'static [(ThinkingLevel, u32)]>,
+}
+
+impl ModelInfo {
+    /// Resolve the thinking-token budget for `level` using this
+    /// model's [`Self::thinking_levels`] table when present, falling
+    /// back to [`ThinkingLevel::default_budget_tokens`] otherwise.
+    /// Returns `None` for [`ThinkingLevel::Off`].
+    #[must_use]
+    pub fn thinking_budget(&self, level: ThinkingLevel) -> Option<u32> {
+        if level.is_off() {
+            return None;
+        }
+        if let Some(table) = self.thinking_levels {
+            for (lv, budget) in table {
+                if *lv == level {
+                    return Some(*budget);
+                }
+            }
+        }
+        level.default_budget_tokens()
+    }
 }
 
 /// Per-million-token pricing for one model, in USD.

@@ -165,6 +165,11 @@ pub(crate) fn build_request_body(req: &StreamRequest, stream: bool) -> Value {
     if let Some(temp) = req.temperature {
         body["temperature"] = serde_json::json!(temp);
     }
+    if let Some(level) = req.level
+        && let Some(effort) = level.openai_reasoning_effort()
+    {
+        body["reasoning_effort"] = serde_json::json!(effort);
+    }
     if !req.tools.is_empty() {
         body["tools"] = serde_json::to_value(
             req.tools
@@ -573,6 +578,30 @@ mod tests {
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["function"]["name"], "read");
         assert_eq!(tools[0]["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn body_translates_thinking_level_to_reasoning_effort() {
+        let mut req = StreamRequest::new("gpt-5", vec![user_msg("hi")]);
+        req.level = Some(crate::ThinkingLevel::Medium);
+        let body = build_request_body(&req, false);
+        assert_eq!(body["reasoning_effort"], "medium");
+    }
+
+    #[test]
+    fn body_caps_xhigh_at_high_for_openai() {
+        let mut req = StreamRequest::new("gpt-5", vec![user_msg("hi")]);
+        req.level = Some(crate::ThinkingLevel::XHigh);
+        let body = build_request_body(&req, false);
+        assert_eq!(body["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn body_omits_reasoning_effort_when_level_off() {
+        let mut req = StreamRequest::new("gpt-5", vec![user_msg("hi")]);
+        req.level = Some(crate::ThinkingLevel::Off);
+        let body = build_request_body(&req, false);
+        assert!(body.get("reasoning_effort").is_none());
     }
 
     #[test]

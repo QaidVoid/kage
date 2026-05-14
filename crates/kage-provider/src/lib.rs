@@ -27,7 +27,7 @@ pub use event::{ProviderEvent, StopReason};
 pub use kage_core::ToolSpec;
 pub use metadata::ProviderMetadata;
 pub use registry::{ProviderRegistry, ResolvedProvider};
-pub use request::{StreamRequest, ThinkingConfig};
+pub use request::{StreamRequest, ThinkingConfig, ThinkingLevel};
 
 use kage_core::CancelFlag;
 

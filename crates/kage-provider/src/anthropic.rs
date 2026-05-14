@@ -142,13 +142,32 @@ pub(crate) fn build_request_body(req: &StreamRequest, stream: bool) -> Value {
     if let Some(temp) = req.temperature {
         body["temperature"] = serde_json::json!(temp);
     }
-    if let Some(thinking) = &req.thinking {
+    if let Some(budget) = resolve_thinking_budget(req) {
         body["thinking"] = serde_json::json!({
             "type": "enabled",
-            "budget_tokens": thinking.budget_tokens,
+            "budget_tokens": budget,
         });
     }
     body
+}
+
+/// Resolve the thinking budget for an Anthropic request.
+///
+/// Prefers an explicit [`crate::ThinkingConfig`] when set; otherwise
+/// looks up the [`crate::ThinkingLevel`] in the catalog's per-model
+/// table (falling back to [`crate::ThinkingLevel::default_budget_tokens`]).
+/// Returns `None` when neither is set or when the level is `Off`.
+fn resolve_thinking_budget(req: &StreamRequest) -> Option<u32> {
+    if let Some(thinking) = &req.thinking {
+        return Some(thinking.budget_tokens);
+    }
+    let level = req.level?;
+    if level.is_off() {
+        return None;
+    }
+    crate::catalog::model("anthropic", &req.model)
+        .and_then(|m| m.thinking_budget(level))
+        .or_else(|| level.default_budget_tokens())
 }
 
 fn mark_last_block_for_caching(message: &mut Value) {
@@ -821,6 +840,35 @@ mod tests {
         let body = build_request_body(&req, false);
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 12_000);
+    }
+
+    #[test]
+    fn body_resolves_thinking_level_to_default_budget() {
+        let mut req = StreamRequest::new("unknown-model", vec![user_msg("hi")]);
+        req.level = Some(crate::ThinkingLevel::High);
+        let body = build_request_body(&req, false);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(
+            body["thinking"]["budget_tokens"],
+            crate::ThinkingLevel::High.default_budget_tokens().unwrap()
+        );
+    }
+
+    #[test]
+    fn body_omits_thinking_when_level_off() {
+        let mut req = StreamRequest::new("m", vec![user_msg("hi")]);
+        req.level = Some(crate::ThinkingLevel::Off);
+        let body = build_request_body(&req, false);
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn explicit_thinking_config_wins_over_level() {
+        let mut req = StreamRequest::new("m", vec![user_msg("hi")]);
+        req.thinking = Some(crate::ThinkingConfig { budget_tokens: 999 });
+        req.level = Some(crate::ThinkingLevel::XHigh);
+        let body = build_request_body(&req, false);
+        assert_eq!(body["thinking"]["budget_tokens"], 999);
     }
 
     #[test]

@@ -83,6 +83,12 @@ pub struct AgentContext {
     /// (typically tool calls with bulky JSON arguments) at its own
     /// conservative default. `None` defers to the provider default.
     pub max_output_tokens: Option<u32>,
+    /// Active unified thinking level. Forwarded on every
+    /// [`kage_provider::StreamRequest`]; providers translate it to
+    /// their native shape (Anthropic budget tokens, `OpenAI`
+    /// `reasoning_effort`, Gemini `thinkingConfig.thinkingBudget`).
+    /// `None` leaves thinking unconfigured (provider default).
+    pub thinking_level: Option<kage_provider::ThinkingLevel>,
     /// Running token totals.
     pub budget: TokenBudget,
 }
@@ -99,6 +105,7 @@ impl AgentContext {
             workdir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             context_window: 200_000,
             max_output_tokens: None,
+            thinking_level: None,
             budget: TokenBudget::default(),
         }
     }
@@ -121,6 +128,14 @@ impl AgentContext {
     #[must_use]
     pub fn with_max_output_tokens(mut self, tokens: u32) -> Self {
         self.max_output_tokens = Some(tokens);
+        self
+    }
+
+    /// Override the active thinking level forwarded to the provider
+    /// on every turn.
+    #[must_use]
+    pub fn with_thinking_level(mut self, level: kage_provider::ThinkingLevel) -> Self {
+        self.thinking_level = Some(level);
         self
     }
 }

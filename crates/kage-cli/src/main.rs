@@ -7,6 +7,7 @@
 
 mod auth;
 mod history;
+mod init;
 mod oauth;
 mod plugins;
 mod runtime_env;
@@ -103,6 +104,21 @@ enum Command {
         #[command(subcommand)]
         action: AuthAction,
     },
+    /// First-run setup wizard. Creates `~/.kage/config.toml`,
+    /// scaffolds the data directories, and offers to save a provider
+    /// API key. Idempotent: rerunning without `--force` keeps any
+    /// existing config in place.
+    Init {
+        /// Overwrite an existing `~/.kage/config.toml` instead of
+        /// keeping it.
+        #[arg(long = "force")]
+        force: bool,
+        /// Skip every prompt. Useful for scripted bootstrap; will
+        /// still write a fresh config when one is missing but never
+        /// asks for an API key.
+        #[arg(long = "non-interactive")]
+        non_interactive: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -121,27 +137,38 @@ enum AuthAction {
     List,
 }
 
-fn main() -> ExitCode {
-    let cli = Cli::parse();
-
-    match cli.command {
-        Some(Command::List) => return run_list(),
-        Some(Command::Resume {
+/// Dispatch a parsed subcommand. Lives outside [`main`] so its body
+/// doesn't push the entry point past clippy's `too_many_lines`
+/// threshold; the print-mode path below still runs from [`main`]
+/// directly because it needs every local in scope.
+fn run_subcommand(command: Command) -> ExitCode {
+    match command {
+        Command::List => run_list(),
+        Command::Resume {
             id,
             last,
             print,
             model,
-        }) => return run_resume(id.as_deref(), last, print.as_deref(), model.as_deref()),
-        Some(Command::Fork { id, at }) => return run_fork(&id, &at),
-        Some(Command::Search { query }) => return run_search(&query),
-        Some(Command::Auth { action }) => {
-            return match action {
-                AuthAction::Login { provider } => auth::run_login(provider.as_deref()),
-                AuthAction::Logout { provider } => auth::run_logout(&provider),
-                AuthAction::List => auth::run_list(),
-            };
-        }
-        None => {}
+        } => run_resume(id.as_deref(), last, print.as_deref(), model.as_deref()),
+        Command::Fork { id, at } => run_fork(&id, &at),
+        Command::Search { query } => run_search(&query),
+        Command::Auth { action } => match action {
+            AuthAction::Login { provider } => auth::run_login(provider.as_deref()),
+            AuthAction::Logout { provider } => auth::run_logout(&provider),
+            AuthAction::List => auth::run_list(),
+        },
+        Command::Init {
+            force,
+            non_interactive,
+        } => init::run(force, non_interactive),
+    }
+}
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+
+    if let Some(command) = cli.command {
+        return run_subcommand(command);
     }
 
     let Some(prompt) = cli.print else {

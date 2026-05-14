@@ -80,12 +80,23 @@ pub fn setup_runtime_with_sink(
 pub struct PluginEventHooks<H: Hooks> {
     inner: H,
     runtime: Arc<PluginRuntime>,
+    /// FIFO of `kage.send_message` payloads pulled out of the runtime
+    /// at most once per loop pass. The loop polls
+    /// [`Hooks::get_steering`] potentially many times; we drain the
+    /// runtime queue lazily into `pending_steering` so each call
+    /// returns at most one message and we never lose ordering across
+    /// turns.
+    pending_steering: std::collections::VecDeque<String>,
 }
 
 impl<H: Hooks> PluginEventHooks<H> {
     /// Wrap `inner` so its calls flow through `runtime`'s plugin dispatch.
     pub fn new(inner: H, runtime: Arc<PluginRuntime>) -> Self {
-        Self { inner, runtime }
+        Self {
+            inner,
+            runtime,
+            pending_steering: std::collections::VecDeque::new(),
+        }
     }
 
     /// Synthesize the `before_agent_start` event before the loop's first
@@ -291,10 +302,89 @@ impl<H: Hooks> Hooks for PluginEventHooks<H> {
     }
 
     fn get_steering(&mut self) -> Option<String> {
-        self.inner.get_steering()
+        // Inner host hooks win when they have a steering message: a
+        // CLI-issued slash command or the user's typed prompt should
+        // not be overridden by a plugin's `send_message` chatter. We
+        // only consult the plugin queue when the inner hook produced
+        // nothing.
+        if let Some(msg) = self.inner.get_steering() {
+            return Some(msg);
+        }
+        self.drain_plugin_messages();
+        self.pending_steering.pop_front()
     }
 
     fn get_followup(&mut self) -> Option<String> {
-        self.inner.get_followup()
+        if let Some(msg) = self.inner.get_followup() {
+            return Some(msg);
+        }
+        self.drain_plugin_messages();
+        self.pending_steering.pop_front()
+    }
+}
+
+impl<H: Hooks> PluginEventHooks<H> {
+    /// Move every queued `kage.send_message` payload from the runtime
+    /// into `pending_steering`. Non-user roles are filtered out and
+    /// logged because 0.1 has no synthetic-assistant or system-note
+    /// delivery path; the Lua boundary already rejects those, so
+    /// hitting this branch means a future API expansion didn't
+    /// update the host side.
+    fn drain_plugin_messages(&mut self) {
+        for msg in self.runtime.take_pending_messages() {
+            match msg.deliver_as {
+                kage_plugin::PendingRole::User => self.pending_steering.push_back(msg.text),
+                other => self.log_error(format_args!(
+                    "send_message: dropping unsupported deliver_as {other:?}"
+                )),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use kage_loop::NoopHooks;
+    use kage_plugin::PluginRuntime;
+
+    use super::*;
+
+    #[test]
+    fn get_steering_returns_send_message_payload_when_inner_is_empty() {
+        let rt = Arc::new(PluginRuntime::new().unwrap());
+        rt.eval("kage.send_message('please continue')").unwrap();
+        let mut hooks = PluginEventHooks::new(NoopHooks, Arc::clone(&rt));
+        assert_eq!(hooks.get_steering(), Some("please continue".to_owned()));
+        // Queue exhausted after one drain.
+        assert_eq!(hooks.get_steering(), None);
+    }
+
+    #[test]
+    fn inner_steering_takes_precedence_over_plugin_queue() {
+        struct InnerOnce(Option<String>);
+        impl Hooks for InnerOnce {
+            fn get_steering(&mut self) -> Option<String> {
+                self.0.take()
+            }
+        }
+        let rt = Arc::new(PluginRuntime::new().unwrap());
+        rt.eval("kage.send_message('plugin says hi')").unwrap();
+        let mut hooks =
+            PluginEventHooks::new(InnerOnce(Some("user typed this".into())), Arc::clone(&rt));
+        // First poll: inner wins.
+        assert_eq!(hooks.get_steering(), Some("user typed this".to_owned()));
+        // Second poll: plugin queue drains.
+        assert_eq!(hooks.get_steering(), Some("plugin says hi".to_owned()));
+    }
+
+    #[test]
+    fn send_message_drains_in_fifo_order() {
+        let rt = Arc::new(PluginRuntime::new().unwrap());
+        rt.eval("kage.send_message('first'); kage.send_message('second')")
+            .unwrap();
+        let mut hooks = PluginEventHooks::new(NoopHooks, Arc::clone(&rt));
+        assert_eq!(hooks.get_steering(), Some("first".to_owned()));
+        assert_eq!(hooks.get_steering(), Some("second".to_owned()));
+        assert_eq!(hooks.get_steering(), None);
     }
 }

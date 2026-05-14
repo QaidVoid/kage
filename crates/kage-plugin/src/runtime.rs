@@ -35,6 +35,7 @@ use crate::http;
 use crate::lifecycle::{
     self, SharedCompactRequest, SharedUsage, shared_compact_request, shared_usage,
 };
+use crate::messages::{self, PendingMessage, SharedPendingMessages, shared_pending_messages};
 use crate::providers::{self, LuaProvider, RegisteredProviders, registered_providers};
 use crate::sessions::{
     self, SharedForkRequest, SharedSessionList, shared_fork_request, shared_session_list,
@@ -63,6 +64,7 @@ pub struct PluginRuntime {
     compact_request: SharedCompactRequest,
     session_list: SharedSessionList,
     fork_request: SharedForkRequest,
+    pending_messages: SharedPendingMessages,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -312,6 +314,26 @@ impl PluginRuntime {
             .and_then(|mut slot| slot.take())
     }
 
+    /// Cloneable handle to the queue of plugin-supplied messages.
+    /// Hosts that want to sample the queue without consuming it (for
+    /// diagnostics) hold onto this; production drain goes through
+    /// [`Self::take_pending_messages`].
+    #[must_use]
+    pub fn shared_pending_messages(&self) -> SharedPendingMessages {
+        Arc::clone(&self.pending_messages)
+    }
+
+    /// Drain every queued message. Called by the host between turns;
+    /// returns the entries in submission order so a `send_message`
+    /// chain reads naturally.
+    #[must_use]
+    pub fn take_pending_messages(&self) -> Vec<PendingMessage> {
+        self.pending_messages
+            .lock()
+            .map(|mut q| std::mem::take(&mut *q))
+            .unwrap_or_default()
+    }
+
     /// Drop every registration that came from plugins (event handlers,
     /// tools, commands, providers) and replay every `*.lua` file in
     /// `dir`. Designed for hot reload between turns: a stale plugin
@@ -354,6 +376,9 @@ impl PluginRuntime {
             .lock()
             .expect("plugin providers mutex poisoned")
             .clear();
+        if let Ok(mut q) = self.pending_messages.lock() {
+            q.clear();
+        }
         crate::loader::load_dir(dir, self)
     }
 }
@@ -421,6 +446,7 @@ impl PluginRuntimeBuilder {
         let compact_slot = shared_compact_request();
         let session_list_slot = shared_session_list();
         let fork_slot = shared_fork_request();
+        let pending_messages_slot = shared_pending_messages();
         {
             let lua_guard = shared_lua.lock().expect("plugin lua mutex poisoned");
             tools::install_register_tool(
@@ -464,6 +490,7 @@ impl PluginRuntimeBuilder {
                 Arc::clone(&session_list_slot),
                 Arc::clone(&fork_slot),
             )?;
+            messages::install_send_message(&lua_guard, Arc::clone(&pending_messages_slot))?;
         }
         Ok(PluginRuntime {
             lua: shared_lua,
@@ -478,6 +505,7 @@ impl PluginRuntimeBuilder {
             compact_request: compact_slot,
             session_list: session_list_slot,
             fork_request: fork_slot,
+            pending_messages: pending_messages_slot,
         })
     }
 }

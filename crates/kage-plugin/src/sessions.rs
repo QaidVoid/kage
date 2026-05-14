@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use mlua::{Lua, Table, Value};
 
-use crate::api::json_to_lua;
+use crate::api::{json_to_lua, lua_to_json};
 use crate::error::PluginError;
 
 /// Shared list of session entries the host keeps current.
@@ -40,12 +40,39 @@ pub fn shared_fork_request() -> SharedForkRequest {
     Arc::new(Mutex::new(None))
 }
 
-/// Install `kage.session.list()` and `kage.session.fork(at?)` on the
-/// running Lua state.
+/// A plugin-requested write to the session file that the host should
+/// perform between turns. The host translates each variant into a
+/// `SessionEntry` and appends it through its session writer.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PendingSessionOp {
+    /// `kage.session.append_entry(kind, data)`: a `SessionEntry::Custom`
+    /// with a plugin-defined kind and JSON payload.
+    AppendCustom {
+        /// Namespaced kind tag (e.g. `"my-plugin:bookmark"`).
+        kind: String,
+        /// Free-form JSON payload. Empty object when the caller
+        /// passed `nil`.
+        data: serde_json::Value,
+    },
+}
+
+/// Shared queue of plugin-requested session writes. The host drains
+/// this between turns and applies each entry to its session writer.
+pub type SharedSessionOps = Arc<Mutex<Vec<PendingSessionOp>>>;
+
+/// Construct an empty session-op queue.
+#[must_use]
+pub fn shared_session_ops() -> SharedSessionOps {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
+/// Install `kage.session.list()`, `kage.session.fork(at?)`, and
+/// `kage.session.append_entry(kind, data?)` on the running Lua state.
 pub fn install_sessions(
     lua: &Lua,
     list: SharedSessionList,
     fork: SharedForkRequest,
+    ops: SharedSessionOps,
 ) -> Result<(), PluginError> {
     let kage: Table = lua.globals().get("kage")?;
     let session = lua.create_table()?;
@@ -86,8 +113,42 @@ pub fn install_sessions(
         })?,
     )?;
 
+    let append_ops = ops;
+    session.set(
+        "append_entry",
+        lua.create_function(move |_lua, (kind, data): (Value, Value)| {
+            let kind = string_arg(&kind).ok_or_else(|| {
+                mlua::Error::external("kage.session.append_entry: kind must be a string")
+            })?;
+            if kind.is_empty() {
+                return Err(mlua::Error::external(
+                    "kage.session.append_entry: kind must be a non-empty namespaced string",
+                ));
+            }
+            let data_json = match data {
+                Value::Nil => serde_json::Value::Object(serde_json::Map::new()),
+                other => lua_to_json(other)?,
+            };
+            let mut q = append_ops
+                .lock()
+                .map_err(|_| mlua::Error::external("plugin session ops mutex poisoned"))?;
+            q.push(PendingSessionOp::AppendCustom {
+                kind,
+                data: data_json,
+            });
+            Ok(mlua::Value::Nil)
+        })?,
+    )?;
+
     kage.set("session", session)?;
     Ok(())
+}
+
+fn string_arg(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => s.to_str().ok().map(|s| s.to_owned()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -147,5 +208,54 @@ mod tests {
         let rt = PluginRuntime::new().unwrap();
         let err = rt.eval("kage.session.fork(42)").unwrap_err();
         assert!(err.to_string().contains("string or nil"));
+    }
+
+    #[test]
+    fn append_entry_with_kind_and_table_data_queues_a_custom_op() {
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval("kage.session.append_entry('plugin:tps', { note = 'first' })")
+            .unwrap();
+        let drained = rt.take_pending_session_ops();
+        assert_eq!(drained.len(), 1);
+        let crate::sessions::PendingSessionOp::AppendCustom { kind, data } = &drained[0];
+        assert_eq!(kind, "plugin:tps");
+        assert_eq!(data["note"], "first");
+    }
+
+    #[test]
+    fn append_entry_with_nil_data_defaults_to_empty_object() {
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval("kage.session.append_entry('plugin:bookmark')")
+            .unwrap();
+        let drained = rt.take_pending_session_ops();
+        let crate::sessions::PendingSessionOp::AppendCustom { data, .. } = &drained[0];
+        assert_eq!(data, &serde_json::json!({}));
+    }
+
+    #[test]
+    fn append_entry_rejects_empty_kind() {
+        let rt = PluginRuntime::new().unwrap();
+        let err = rt.eval("kage.session.append_entry('')").unwrap_err();
+        assert!(err.to_string().contains("kind"));
+    }
+
+    #[test]
+    fn append_entry_rejects_non_string_kind() {
+        let rt = PluginRuntime::new().unwrap();
+        let err = rt.eval("kage.session.append_entry(42)").unwrap_err();
+        assert!(err.to_string().contains("string"));
+    }
+
+    #[test]
+    fn take_pending_session_ops_drains_the_queue() {
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval(
+            "kage.session.append_entry('plugin:a'); \
+             kage.session.append_entry('plugin:b')",
+        )
+        .unwrap();
+        let drained = rt.take_pending_session_ops();
+        assert_eq!(drained.len(), 2);
+        assert!(rt.take_pending_session_ops().is_empty());
     }
 }

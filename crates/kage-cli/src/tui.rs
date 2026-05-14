@@ -722,7 +722,8 @@ fn run_with_hooks(
     let tui_hooks = TuiHooks::new(NoopHooks, buffer.clone());
     match (writer, plugin_runtime) {
         (Some(w), Some(rt)) => {
-            let mut recorded = SessionRecordingHooks::new(tui_hooks, w);
+            let mut recorded =
+                SessionRecordingHooks::new(tui_hooks, w).with_plugin_runtime(Arc::clone(rt));
             recorded.record_user_message(user_msg);
             let plugin_hooks = PluginEventHooks::new(recorded, Arc::clone(rt));
             plugin_hooks.dispatch_before_agent_start(&cx.system_prompt, &first_user_text(user_msg));
@@ -774,7 +775,8 @@ fn run_compact_with_hooks(
     let tui_hooks = TuiHooks::new(NoopHooks, buffer.clone());
     match (writer, plugin_runtime) {
         (Some(w), Some(rt)) => {
-            let recorded = SessionRecordingHooks::new(tui_hooks, w);
+            let recorded =
+                SessionRecordingHooks::new(tui_hooks, w).with_plugin_runtime(Arc::clone(rt));
             let mut plugin_hooks = PluginEventHooks::new(recorded, Arc::clone(rt));
             force_compact(cx, provider, cancel, &mut plugin_hooks, &mut |_| {})
         }

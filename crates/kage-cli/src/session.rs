@@ -12,11 +12,13 @@
 //! invoking [`run`](kage_loop::run).
 
 use std::mem;
+use std::sync::Arc;
 
 use chrono::Utc;
 use kage_core::{Content, LoopEvent, Message, MessageId, Role, ToolCallId};
 use kage_loop::Hooks;
-use kage_session::{Compaction, EntryId, MessageEntry, SessionEntry, SessionWriter};
+use kage_plugin::{PendingSessionOp, PluginRuntime};
+use kage_session::{Compaction, Custom, EntryId, MessageEntry, SessionEntry, SessionWriter};
 
 /// Wraps another [`Hooks`] and persists the conversation to a session file.
 #[derive(Debug)]
@@ -24,6 +26,12 @@ pub struct SessionRecordingHooks<H: Hooks> {
     inner: H,
     writer: SessionWriter,
     pending: Pending,
+    /// Optional plugin runtime whose
+    /// [`PluginRuntime::take_pending_session_ops`] queue is drained
+    /// after each turn. When `None` the recorder behaves exactly like
+    /// pre-plugin builds; the field exists so the print and TUI
+    /// hosts can both opt in without duplicating recorder logic.
+    runtime: Option<Arc<PluginRuntime>>,
 }
 
 #[derive(Debug, Default)]
@@ -79,6 +87,43 @@ impl<H: Hooks> SessionRecordingHooks<H> {
             inner,
             writer,
             pending: Pending::default(),
+            runtime: None,
+        }
+    }
+
+    /// Attach a plugin runtime so the recorder drains its
+    /// `take_pending_session_ops` queue after every turn. Calling
+    /// this is optional; without it the recorder behaves exactly as
+    /// it did pre-PE.D.
+    #[must_use]
+    pub fn with_plugin_runtime(mut self, runtime: Arc<PluginRuntime>) -> Self {
+        self.runtime = Some(runtime);
+        self
+    }
+
+    /// Apply one plugin-requested session op to the writer.
+    fn apply_plugin_op(&mut self, op: PendingSessionOp) {
+        let entry = match op {
+            PendingSessionOp::AppendCustom { kind, data } => SessionEntry::Custom(Custom {
+                id: EntryId::new(),
+                ts: Utc::now(),
+                kind,
+                data,
+            }),
+        };
+        self.append(&entry);
+    }
+
+    /// Drain every queued plugin session op and write each as a
+    /// session entry. Called at turn boundaries so a plugin's
+    /// `append_entry` lands next to the surrounding messages.
+    fn drain_plugin_session_ops(&mut self) {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return;
+        };
+        let ops = runtime.take_pending_session_ops();
+        for op in ops {
+            self.apply_plugin_op(op);
         }
     }
 
@@ -203,6 +248,12 @@ impl<H: Hooks> Hooks for SessionRecordingHooks<H> {
     }
 
     fn on_turn_end(&mut self, index: u32, had_tool_calls: bool) {
+        // The outer `PluginEventHooks::on_turn_end` dispatched the
+        // `turn_end` Lua event before delegating to us, so any
+        // `kage.session.append_entry` / `kage.session.set_label`
+        // call from a plugin handler is already in the runtime queue
+        // by the time we run.
+        self.drain_plugin_session_ops();
         self.inner.on_turn_end(index, had_tool_calls);
     }
 
@@ -447,5 +498,35 @@ mod tests {
         assert_eq!(inner.on_event, 1);
         assert_eq!(inner.steering, 1);
         assert_eq!(inner.followup, 1);
+    }
+
+    #[test]
+    fn turn_end_drains_plugin_session_ops_and_writes_them() {
+        let (_dir, writer, _) = temp_session();
+        let path = writer.path().to_path_buf();
+        let runtime = Arc::new(PluginRuntime::new().unwrap());
+        runtime
+            .eval("kage.session.append_entry('plugin:tps', { rate = 12.5 })")
+            .unwrap();
+
+        let mut hooks =
+            SessionRecordingHooks::new(NoopHooks, writer).with_plugin_runtime(Arc::clone(&runtime));
+        hooks.on_turn_end(0, false);
+        drop(hooks);
+
+        let entries: Vec<_> = SessionReader::iter(&path)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 2); // header + custom
+        assert!(matches!(entries[0], SessionEntry::Header(_)));
+        match &entries[1] {
+            SessionEntry::Custom(c) => {
+                assert_eq!(c.kind, "plugin:tps");
+                assert_eq!(c.data["rate"], 12.5);
+            }
+            other => panic!("expected custom entry, got {other:?}"),
+        }
+        assert!(runtime.take_pending_session_ops().is_empty());
     }
 }

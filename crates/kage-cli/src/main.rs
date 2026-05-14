@@ -414,6 +414,9 @@ where
         None => Box::new(NoopHooks),
         Some(w) => {
             let mut hooks = SessionRecordingHooks::new(NoopHooks, w);
+            if let Some(rt) = plugin_runtime.as_ref() {
+                hooks = hooks.with_plugin_runtime(Arc::clone(rt));
+            }
             hooks.record_user_message(user_msg);
             Box::new(hooks)
         }

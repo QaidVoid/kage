@@ -30,7 +30,7 @@ pub use loader::{LoadReport, load_dir};
 pub use messages::{PendingMessage, PendingRole, SharedPendingMessages};
 pub use providers::LuaProvider;
 pub use runtime::{PluginRuntime, PluginRuntimeBuilder, SANDBOX_REMOVALS, SharedLua};
-pub use sessions::{SharedForkRequest, SharedSessionList};
+pub use sessions::{PendingSessionOp, SharedForkRequest, SharedSessionList, SharedSessionOps};
 pub use status::SharedStatus;
 pub use tools::LuaTool;
 pub use watcher::PluginWatcher;

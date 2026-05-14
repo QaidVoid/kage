@@ -13,6 +13,7 @@ pub mod event;
 pub mod gemini;
 pub mod metadata;
 pub mod openai;
+pub mod openai_responses;
 pub mod registry;
 pub mod request;
 pub mod tokens;

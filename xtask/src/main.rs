@@ -26,6 +26,13 @@ const MODELS_DEV_URL: &str = "https://models.dev/api.json";
 const SUPPORTED_PROVIDERS: &[ProviderMap] = &[
     ProviderMap::same("anthropic"),
     ProviderMap::same("openai"),
+    // The Responses API hits the same upstream provider; re-emit the
+    // OpenAI model list under a second kage id so the TUI's model
+    // picker offers `openai-responses:` rows alongside `openai:`.
+    ProviderMap {
+        api_id: "openai",
+        kage_id: "openai-responses",
+    },
     ProviderMap::same("zai"),
     ProviderMap::same("zai-coding-plan"),
     ProviderMap::same("deepseek"),

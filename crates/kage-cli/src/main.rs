@@ -24,7 +24,7 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use kage_core::{CancelFlag, Content, LoopEvent, Message, Role};
 use kage_loop::{AgentContext, Hooks, LoopConfig, NoopHooks, run};
-use kage_provider::{ProviderRegistry, anthropic, compat, gemini, openai};
+use kage_provider::{ProviderRegistry, anthropic, compat, gemini, openai, openai_responses};
 use kage_session::{EntryId, FORMAT_VERSION, Header, SessionId, SessionSummary, SessionWriter};
 use kage_tools::builtin_registry;
 
@@ -835,7 +835,13 @@ fn build_provider_registry() -> ProviderRegistry {
         registry.register(Arc::new(anthropic::AnthropicProvider::new(key)));
     }
     if let Some(key) = lookup_key("openai", &store) {
-        registry.register(Arc::new(openai::OpenAiProvider::new(key)));
+        registry.register(Arc::new(openai::OpenAiProvider::new(&key)));
+        // The Responses API shares OpenAI auth: any user with an
+        // OpenAI key automatically gets `openai-responses:` model
+        // addressing. The credential store keeps a single entry.
+        registry.register(Arc::new(openai_responses::OpenAiResponsesProvider::new(
+            key,
+        )));
     }
     if let Some(key) = lookup_key("gemini", &store) {
         registry.register(Arc::new(gemini::GeminiProvider::new(key)));

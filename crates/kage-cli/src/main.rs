@@ -6,6 +6,7 @@
 //! `$XDG_DATA_HOME/kage/sessions/` (default `~/.local/share/kage/sessions/`).
 
 mod auth;
+mod doctor;
 mod history;
 mod init;
 mod oauth;
@@ -119,6 +120,10 @@ enum Command {
         #[arg(long = "non-interactive")]
         non_interactive: bool,
     },
+    /// Diagnose the kage install: parses config, lists available
+    /// providers, validates plugins, reports the active sandbox.
+    /// Exit code is `0` when no check fails, `1` otherwise.
+    Doctor,
 }
 
 #[derive(Subcommand, Debug)]
@@ -161,6 +166,7 @@ fn run_subcommand(command: Command) -> ExitCode {
             force,
             non_interactive,
         } => init::run(force, non_interactive),
+        Command::Doctor => doctor::run(),
     }
 }
 

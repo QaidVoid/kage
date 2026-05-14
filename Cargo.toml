@@ -38,6 +38,7 @@ kage-tui = { path = "crates/kage-tui" }
 base64 = "0.22.1"
 syntect = { version = "5.3", default-features = false, features = ["default-fancy"] }
 clap = { version = "4.6.1", features = ["derive"] }
+clap_complete = "4.6.1"
 clap_mangen = "0.3.0"
 
 chrono = { version = "0.4.44", features = ["serde"] }

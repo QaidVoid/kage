@@ -134,6 +134,18 @@ enum Command {
         #[arg(long = "out", default_value = "man/kage.1")]
         out: PathBuf,
     },
+    /// Print a shell completion script for `kage` to stdout. Pipe to
+    /// `source` (bash / zsh) or redirect into your shell's completion
+    /// directory (fish / elvish). For example:
+    ///
+    ///   `source <(kage completions bash)`
+    ///
+    ///   `kage completions fish > ~/.config/fish/completions/kage.fish`
+    Completions {
+        /// Target shell.
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -178,7 +190,21 @@ fn run_subcommand(command: Command) -> ExitCode {
         } => init::run(force, non_interactive),
         Command::Doctor => doctor::run(),
         Command::GenManpage { out } => run_gen_manpage(&out),
+        Command::Completions { shell } => run_completions(shell),
     }
+}
+
+/// Print a shell completion script for `kage` to stdout. The script
+/// is generated fresh from the clap definition every invocation, so
+/// adding or renaming a subcommand requires no extra checked-in
+/// artifacts.
+fn run_completions(shell: clap_complete::Shell) -> ExitCode {
+    use clap::CommandFactory as _;
+    let mut cmd = Cli::command();
+    let bin_name = cmd.get_name().to_owned();
+    let mut stdout = io::stdout().lock();
+    clap_complete::generate(shell, &mut cmd, bin_name, &mut stdout);
+    ExitCode::SUCCESS
 }
 
 /// Render the manpage via `clap_mangen` and write it to `out`.

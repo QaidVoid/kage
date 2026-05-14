@@ -4,7 +4,7 @@
 .SH NAME
 kage \- kage: a minimal, extensible coding agent in your terminal.
 .SH SYNOPSIS
-\fBkage\fR [\fB\-p\fR|\fB\-\-print\fR] [\fB\-m\fR|\fB\-\-model\fR] [\fB\-\-system\fR] [\fB\-\-no\-session\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
+\fBkage\fR [\fB\-p\fR|\fB\-\-print\fR] [\fB\-m\fR|\fB\-\-model\fR] [\fB\-\-system\fR] [\fB\-\-no\-session\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
 .SH DESCRIPTION
 kage: a minimal, extensible coding agent in your terminal.
 .SH OPTIONS
@@ -20,6 +20,9 @@ System prompt to prepend
 .TP
 \fB\-\-no\-session\fR
 Disable session recording. By default every run writes a JSONL session file under `$XDG_DATA_HOME/kage/sessions/<session\-id>.jsonl`
+.TP
+\fB\-\-json\fR
+Emit one JSON object per loop event on stdout instead of plain text. Only meaningful with `\-p/\-\-print`; the same event alphabet the `rpc` transport uses (`message_start`, `text_delta`, `tool_call_start`, `tool_call_end`, `message_end`, `compaction`, `error`). Lets external tools parse the agent\*(Aqs output without screen\-scraping
 .TP
 \fB\-h\fR, \fB\-\-help\fR
 Print help

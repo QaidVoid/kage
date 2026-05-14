@@ -63,6 +63,15 @@ struct Cli {
     /// session file under `$XDG_DATA_HOME/kage/sessions/<session-id>.jsonl`.
     #[arg(long = "no-session")]
     no_session: bool,
+
+    /// Emit one JSON object per loop event on stdout instead of plain
+    /// text. Only meaningful with `-p/--print`; the same event alphabet
+    /// the `rpc` transport uses (`message_start`, `text_delta`,
+    /// `tool_call_start`, `tool_call_end`, `message_end`, `compaction`,
+    /// `error`). Lets external tools parse the agent's output without
+    /// screen-scraping.
+    #[arg(long = "json", requires = "print")]
+    json: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -84,6 +93,10 @@ enum Command {
         /// was last using.
         #[arg(short = 'm', long = "model")]
         model: Option<String>,
+        /// Emit one JSON object per loop event on stdout instead of
+        /// plain text. Same alphabet as the top-level `--json` flag.
+        #[arg(long = "json", requires = "print")]
+        json: bool,
     },
     /// Fork a recorded session at a specific entry into a new session file.
     Fork {
@@ -176,7 +189,14 @@ fn run_subcommand(command: Command) -> ExitCode {
             last,
             print,
             model,
-        } => run_resume(id.as_deref(), last, print.as_deref(), model.as_deref()),
+            json,
+        } => run_resume(
+            id.as_deref(),
+            last,
+            print.as_deref(),
+            model.as_deref(),
+            json,
+        ),
         Command::Fork { id, at } => run_fork(&id, &at),
         Command::Search { query } => run_search(&query),
         Command::Auth { action } => match action {
@@ -325,6 +345,7 @@ fn main() -> ExitCode {
         &user_msg,
         writer,
         plugin_runtime,
+        cli.json,
     );
     if let Err(err) = state::record_last_model(&model) {
         eprintln!("kage: {err}");
@@ -343,6 +364,7 @@ fn execute_print_run(
     user_msg: &Message,
     writer: Option<SessionWriter>,
     plugin_runtime: Option<std::sync::Arc<kage_plugin::PluginRuntime>>,
+    json_mode: bool,
 ) -> ExitCode {
     let cfg = LoopConfig::default();
     let cancel = CancelFlag::new();
@@ -356,9 +378,17 @@ fn execute_print_run(
         user_msg,
         writer,
         plugin_runtime,
-        |event| print_event(&mut stdout, &event),
+        |event| {
+            if json_mode {
+                print_event_json(&mut stdout, &event);
+            } else {
+                print_event(&mut stdout, &event);
+            }
+        },
     );
-    let _ = writeln!(stdout);
+    if !json_mode {
+        let _ = writeln!(stdout);
+    }
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::from(1),
@@ -490,6 +520,7 @@ fn run_resume(
     last: bool,
     print: Option<&str>,
     model_override: Option<&str>,
+    json: bool,
 ) -> ExitCode {
     let Some(prompt) = print else {
         eprintln!("kage: resume requires -p/--print in this build");
@@ -596,6 +627,7 @@ fn run_resume(
         &user_msg,
         Some(writer),
         plugin_runtime,
+        json,
     );
     if let Err(err) = state::record_last_model(&model) {
         eprintln!("kage: {err}");
@@ -1095,5 +1127,74 @@ fn print_event<W: Write>(out: &mut W, event: &LoopEvent) {
             let _ = out.flush();
         }
         _ => {}
+    }
+}
+
+/// Emit `event` as one JSONL row on `out`. Skips the trailing newline
+/// the text-mode path adds because each event already terminates with
+/// `\n`, so consumers can split on `\n` and run `serde_json::from_str`
+/// on each line. Serialization can only fail on cycle errors, which
+/// our event types can't produce; we still flush so streaming
+/// consumers see the row immediately.
+fn print_event_json<W: Write>(out: &mut W, event: &LoopEvent) {
+    match serde_json::to_string(event) {
+        Ok(line) => {
+            let _ = writeln!(out, "{line}");
+            let _ = out.flush();
+        }
+        Err(err) => {
+            let _ = writeln!(
+                out,
+                r#"{{"type":"error","kind":{{"kind":"other","message":"encode: {err}"}}}}"#
+            );
+            let _ = out.flush();
+        }
+    }
+}
+
+#[cfg(test)]
+mod json_print_tests {
+    use kage_core::{MessageId, TokenUsage};
+
+    use super::*;
+
+    #[test]
+    fn text_delta_renders_as_single_jsonl_row() {
+        let mut buf = Vec::new();
+        print_event_json(
+            &mut buf,
+            &LoopEvent::TextDelta {
+                id: MessageId::new(),
+                delta: "hi".into(),
+            },
+        );
+        let line = String::from_utf8(buf).unwrap();
+        assert!(line.ends_with('\n'));
+        let trimmed = line.trim_end();
+        // Body is one JSON value per line.
+        let parsed: serde_json::Value = serde_json::from_str(trimmed).unwrap();
+        assert_eq!(parsed["type"], "text_delta");
+        assert_eq!(parsed["delta"], "hi");
+    }
+
+    #[test]
+    fn message_end_carries_usage_through_jsonl() {
+        let mut buf = Vec::new();
+        print_event_json(
+            &mut buf,
+            &LoopEvent::MessageEnd {
+                id: MessageId::new(),
+                usage: TokenUsage {
+                    input: 12,
+                    output: 7,
+                    ..TokenUsage::default()
+                },
+            },
+        );
+        let line = String::from_utf8(buf).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+        assert_eq!(parsed["type"], "message_end");
+        assert_eq!(parsed["usage"]["input"], 12);
+        assert_eq!(parsed["usage"]["output"], 7);
     }
 }

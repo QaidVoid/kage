@@ -35,7 +35,7 @@ use crate::session::SessionRecordingHooks;
 
 /// kage: a minimal, extensible coding agent.
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+#[command(name = "kage", version, about, long_about = None)]
 struct Cli {
     /// Subcommand. Omitting one requires `-p/--print` and runs print mode.
     #[command(subcommand)]
@@ -124,6 +124,16 @@ enum Command {
     /// providers, validates plugins, reports the active sandbox.
     /// Exit code is `0` when no check fails, `1` otherwise.
     Doctor,
+    /// Render the `kage(1)` manpage from the clap CLI definition and
+    /// write it to `--out` (default `man/kage.1`). Hidden because it
+    /// is a developer / packager command: end users read the
+    /// committed file at `man/kage.1`.
+    #[command(hide = true)]
+    GenManpage {
+        /// Destination path for the generated manpage.
+        #[arg(long = "out", default_value = "man/kage.1")]
+        out: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -167,7 +177,34 @@ fn run_subcommand(command: Command) -> ExitCode {
             non_interactive,
         } => init::run(force, non_interactive),
         Command::Doctor => doctor::run(),
+        Command::GenManpage { out } => run_gen_manpage(&out),
     }
+}
+
+/// Render the manpage via `clap_mangen` and write it to `out`.
+/// Creates the parent directory when missing so a fresh checkout can
+/// run `kage gen-manpage --out man/kage.1` without a prior `mkdir`.
+fn run_gen_manpage(out: &std::path::Path) -> ExitCode {
+    use clap::CommandFactory as _;
+    let cmd = Cli::command();
+    let mut buffer: Vec<u8> = Vec::new();
+    if let Err(err) = clap_mangen::Man::new(cmd).render(&mut buffer) {
+        eprintln!("kage: render manpage: {err}");
+        return ExitCode::from(1);
+    }
+    if let Some(parent) = out.parent()
+        && !parent.as_os_str().is_empty()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        eprintln!("kage: mkdir {}: {err}", parent.display());
+        return ExitCode::from(1);
+    }
+    if let Err(err) = std::fs::write(out, &buffer) {
+        eprintln!("kage: write {}: {err}", out.display());
+        return ExitCode::from(1);
+    }
+    eprintln!("kage: wrote {}", out.display());
+    ExitCode::SUCCESS
 }
 
 fn main() -> ExitCode {

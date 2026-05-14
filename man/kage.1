@@ -1,0 +1,55 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH kage 1  "kage 0.1.0" 
+.SH NAME
+kage \- kage: a minimal, extensible coding agent in your terminal.
+.SH SYNOPSIS
+\fBkage\fR [\fB\-p\fR|\fB\-\-print\fR] [\fB\-m\fR|\fB\-\-model\fR] [\fB\-\-system\fR] [\fB\-\-no\-session\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
+.SH DESCRIPTION
+kage: a minimal, extensible coding agent in your terminal.
+.SH OPTIONS
+.TP
+\fB\-p\fR, \fB\-\-print\fR \fI<PRINT>\fR
+Run a single prompt through the agent loop and stream the response to stdout. Required in Phase 4 (the interactive TUI lands later)
+.TP
+\fB\-m\fR, \fB\-\-model\fR \fI<MODEL>\fR
+Provider\-qualified model id (`provider:model`). Defaults to `zai:glm\-4.6` when `ZAI_API_KEY` is set, otherwise the first provider with an API key in the environment
+.TP
+\fB\-\-system\fR \fI<SYSTEM>\fR [default: You are kage, a helpful coding agent.]
+System prompt to prepend
+.TP
+\fB\-\-no\-session\fR
+Disable session recording. By default every run writes a JSONL session file under `$XDG_DATA_HOME/kage/sessions/<session\-id>.jsonl`
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH SUBCOMMANDS
+.TP
+kage\-list(1)
+List recorded sessions in `$XDG_DATA_HOME/kage/sessions/`
+.TP
+kage\-resume(1)
+Resume a recorded session, appending new entries to the same file
+.TP
+kage\-fork(1)
+Fork a recorded session at a specific entry into a new session file
+.TP
+kage\-search(1)
+Regex\-search recorded sessions
+.TP
+kage\-auth(1)
+Manage saved provider API credentials
+.TP
+kage\-init(1)
+First\-run setup wizard. Creates `~/.kage/config.toml`, scaffolds the data directories, and offers to save a provider API key. Idempotent: rerunning without `\-\-force` keeps any existing config in place
+.TP
+kage\-doctor(1)
+Diagnose the kage install: parses config, lists available providers, validates plugins, reports the active sandbox. Exit code is `0` when no check fails, `1` otherwise
+.TP
+kage\-help(1)
+Print this message or the help of the given subcommand(s)
+.SH VERSION
+v0.1.0

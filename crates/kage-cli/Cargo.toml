@@ -21,6 +21,7 @@ workspace = true
 [dependencies]
 chrono.workspace = true
 clap.workspace = true
+clap_mangen.workspace = true
 dirs.workspace = true
 kage-core.workspace = true
 kage-loop.workspace = true

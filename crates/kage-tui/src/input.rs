@@ -136,6 +136,10 @@ pub enum InputAction {
     /// Force focus to a specific pane (e.g. mouse click in a
     /// particular region).
     FocusPane(Pane),
+    /// Cycle the active thinking level one step forward (`Shift+Tab`
+    /// in any mode). The host advances its tracked level and forwards
+    /// the new value on the next provider request.
+    CycleThinkingLevel,
 }
 
 /// Cap on retained history entries. The host's persistence layer is
@@ -445,6 +449,16 @@ impl InputState {
 
     /// Drive the state machine forward by one key.
     pub fn handle_key(&mut self, key: KeyEvent) -> Vec<InputAction> {
+        // Shift+Tab cycles the thinking level regardless of mode or
+        // focused pane. Different terminals report it as either
+        // `BackTab` (xterm/wezterm/kitty in default mode) or
+        // `Tab + SHIFT` (some emulators with the kitty keyboard
+        // protocol enabled); accept both.
+        if matches!(key.code, KeyCode::BackTab)
+            || (matches!(key.code, KeyCode::Tab) && key.modifiers.contains(KeyModifiers::SHIFT))
+        {
+            return vec![InputAction::CycleThinkingLevel];
+        }
         match self.mode {
             Mode::Normal => self.handle_normal(key),
             Mode::Insert => self.handle_insert(key),
@@ -2026,6 +2040,28 @@ mod tests {
         assert!(!state.set_focused_pane(Pane::Input));
         assert!(state.set_focused_pane(Pane::Buffer));
         assert!(!state.set_focused_pane(Pane::Buffer));
+    }
+
+    #[test]
+    fn backtab_in_insert_emits_cycle_thinking_level() {
+        let mut state = InputState::new();
+        let acts = state.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(acts, vec![InputAction::CycleThinkingLevel]);
+    }
+
+    #[test]
+    fn shift_tab_in_normal_emits_cycle_thinking_level() {
+        let mut state = InputState::new();
+        state.force_normal();
+        let acts = state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
+        assert_eq!(acts, vec![InputAction::CycleThinkingLevel]);
+    }
+
+    #[test]
+    fn plain_tab_in_insert_does_not_emit_cycle_thinking_level() {
+        let mut state = InputState::new();
+        let acts = state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(!acts.contains(&InputAction::CycleThinkingLevel));
     }
 
     fn alt(c: char) -> KeyEvent {

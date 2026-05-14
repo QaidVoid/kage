@@ -130,6 +130,11 @@ pub enum RunRequest {
         /// most recent entry.
         at: String,
     },
+    /// Advance the active thinking level one step forward (the
+    /// `Shift+Tab` cycle). The worker mutates the agent context's
+    /// `thinking_level`, persists the change as a session entry, and
+    /// fires the `thinking_level_select` plugin event.
+    CycleThinkingLevel,
 }
 
 /// Outcome of [`App::run`].
@@ -1690,6 +1695,9 @@ impl App {
             }
             InputAction::FocusPane(pane) => {
                 self.input.set_focused_pane(pane);
+            }
+            InputAction::CycleThinkingLevel => {
+                let _ = self.send_request(RunRequest::CycleThinkingLevel);
             }
         }
         None

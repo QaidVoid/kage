@@ -19,6 +19,6 @@ pub use compact::{COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX, force_co
 pub use config::{LoopConfig, SteeringMode};
 pub use context::{AgentContext, TokenBudget};
 pub use hooks::{HookResult, Hooks, NoopHooks, TurnSummary};
-pub use kage_provider::StreamRequest;
+pub use kage_provider::{StreamRequest, ThinkingLevel};
 pub use run::run;
 pub use system_prompt::{DEFAULT_ROLE, EnvContext, compose as compose_system_prompt, with_skills};

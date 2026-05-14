@@ -1472,6 +1472,15 @@ fn render_modeline(frame: &mut Frame, regions: Regions, usage: Option<&SessionUs
             spans.push(Span::styled(" . ", dim));
             spans.push(Span::styled(format!("${:.4}", u.total_cost), fg));
         }
+        if let Some(level) = u.thinking_level
+            && !level.is_off()
+        {
+            spans.push(Span::styled(" . ", dim));
+            spans.push(Span::styled(
+                format!("think:{}", level.label()),
+                fg.add_modifier(Modifier::BOLD),
+            ));
+        }
     }
     let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
     let pad = usize::from(area.width).saturating_sub(used);

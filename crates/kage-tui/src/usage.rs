@@ -11,6 +11,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use kage_loop::ThinkingLevel;
+
 /// Snapshot of one session's running token totals plus the active
 /// model and its context window. The host produces this from
 /// [`kage_loop::AgentContext`] after every turn.
@@ -50,6 +52,11 @@ pub struct SessionUsage {
     /// Cumulative dollar cost across every turn this session. `0.0`
     /// when the active model has no catalog cost data.
     pub total_cost: f64,
+    /// Active unified thinking level. `None` (and `Some(Off)`) leave
+    /// the modeline pill suppressed; the renderer draws a short
+    /// "think:<level>" pill for any other variant. Mutated by the
+    /// host worker when `Shift+Tab` cycles the level.
+    pub thinking_level: Option<ThinkingLevel>,
 }
 
 impl SessionUsage {

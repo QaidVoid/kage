@@ -171,6 +171,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     {
         snap.model.clone_from(&qualified_model);
         snap.context_window = cx_guard.context_window;
+        snap.thinking_level = cx_guard.thinking_level;
     }
     let worker = spawn_worker(WorkerConfig {
         registry: Arc::clone(&registry),
@@ -492,6 +493,50 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                                 );
                             }
                         }
+                    }
+                }
+                RunRequest::CycleThinkingLevel => {
+                    let mut cx_guard = cx.lock().expect("agent context mutex poisoned");
+                    let prev = cx_guard.thinking_level.unwrap_or_default();
+                    let next = prev.cycle();
+                    cx_guard.thinking_level = Some(next);
+                    drop(cx_guard);
+                    if let Ok(mut snap) = session_usage.lock() {
+                        snap.thinking_level = Some(next);
+                    }
+                    push_toast(
+                        &toasts,
+                        Toast::info(format!("thinking level: {}", next.label())),
+                    );
+                    if let Some(rt) = plugin_runtime.as_ref() {
+                        let _ = rt.dispatch_event(
+                            "thinking_level_select",
+                            &serde_json::json!({
+                                "prev": prev.as_str(),
+                                "next": next.as_str(),
+                                "source": "cycle",
+                            }),
+                        );
+                    }
+                    if let Some(mut writer) = open_writer_for_turn(
+                        session_path.as_ref(),
+                        session_header.as_ref(),
+                        &buffer,
+                    ) && let Err(err) =
+                        writer.append(&kage_session::SessionEntry::ThinkingLevelChange(
+                            kage_session::ThinkingLevelChange {
+                                id: kage_session::EntryId::new(),
+                                ts: chrono::Utc::now(),
+                                level: next.as_str().to_owned(),
+                            },
+                        ))
+                        && let Ok(mut buf) = buffer.lock()
+                    {
+                        buf.push_custom(
+                            "kage:error",
+                            format!("session: append thinking_level: {err}"),
+                            false,
+                        );
                     }
                 }
                 RunRequest::SwitchModel(new_model) => {
@@ -987,6 +1032,10 @@ fn handle_resume(
         },
     };
     let context_window;
+    let resumed_level = replay
+        .thinking_level
+        .as_deref()
+        .and_then(kage_loop::ThinkingLevel::parse);
     {
         let mut cx_guard = cx.lock().expect("agent context mutex poisoned");
         cx_guard.history.clone_from(&replay.history);
@@ -995,6 +1044,7 @@ fn handle_resume(
             cx_guard.context_window = window;
         }
         cx_guard.max_output_tokens = crate::runtime_env::max_output_tokens_for(&qualified_model);
+        cx_guard.thinking_level = resumed_level;
         cx_guard.budget.used_input = replay.usage_total.input;
         cx_guard.budget.used_output = replay.usage_total.output;
         cx_guard.budget.used_cache_read = replay.usage_total.cache_read;
@@ -1010,6 +1060,7 @@ fn handle_resume(
         snap.cache_read_tokens = replay.usage_total.cache_read;
         snap.cache_write_tokens = replay.usage_total.cache_write;
         snap.current_context = replay.usage_total.last_context;
+        snap.thinking_level = resumed_level;
     }
     active_qualified
         .lock()

@@ -42,6 +42,12 @@ pub struct ReplayResult {
     /// `kage-core` types in result-only positions; the host folds it
     /// into `AgentContext::budget` on resume.
     pub usage_total: ReplayUsage,
+    /// Wire identifier of the most recent
+    /// [`SessionEntry::ThinkingLevelChange`], or `None` if the session
+    /// never recorded one. The host parses it back into a
+    /// `ThinkingLevel` and seeds `AgentContext::thinking_level` so a
+    /// resumed session keeps the level the user last selected.
+    pub thinking_level: Option<String>,
 }
 
 /// Cumulative token totals replayed from a session file, plus the
@@ -78,6 +84,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
     };
 
     let mut model = header.model.clone();
+    let mut thinking_level: Option<String> = None;
     let mut history: Vec<Message> = Vec::new();
     // `call_starts` tracks the wall-clock time each ToolCall was
     // appended; on a matching ToolResult we compute the elapsed
@@ -149,9 +156,8 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
                 );
             }
             SessionEntry::ModelChange(mc) => model = mc.model,
-            SessionEntry::ThinkingLevelChange(_)
-            | SessionEntry::Label(_)
-            | SessionEntry::Custom(_) => {}
+            SessionEntry::ThinkingLevelChange(t) => thinking_level = Some(t.level),
+            SessionEntry::Label(_) | SessionEntry::Custom(_) => {}
         }
     }
     Ok(ReplayResult {
@@ -160,6 +166,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
         model,
         tool_durations,
         usage_total,
+        thinking_level,
     })
 }
 

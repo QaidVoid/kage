@@ -54,6 +54,16 @@ pub enum PendingSessionOp {
         /// passed `nil`.
         data: serde_json::Value,
     },
+    /// `kage.session.set_label(anchor, label?)`: a `SessionEntry::Label`
+    /// attached to the given anchor entry id. `text` is the empty
+    /// string when the caller passed `nil` (meaning "clear the
+    /// label"), since the on-disk format is append-only.
+    SetLabel {
+        /// Entry id of the entry being labeled.
+        anchor: String,
+        /// Label text; empty string when the plugin asked to clear.
+        text: String,
+    },
 }
 
 /// Shared queue of plugin-requested session writes. The host drains
@@ -66,8 +76,9 @@ pub fn shared_session_ops() -> SharedSessionOps {
     Arc::new(Mutex::new(Vec::new()))
 }
 
-/// Install `kage.session.list()`, `kage.session.fork(at?)`, and
-/// `kage.session.append_entry(kind, data?)` on the running Lua state.
+/// Install `kage.session.list()`, `kage.session.fork(at?)`,
+/// `kage.session.append_entry(kind, data?)`, and
+/// `kage.session.set_label(anchor, label?)` on the running Lua state.
 pub fn install_sessions(
     lua: &Lua,
     list: SharedSessionList,
@@ -113,7 +124,7 @@ pub fn install_sessions(
         })?,
     )?;
 
-    let append_ops = ops;
+    let append_ops = Arc::clone(&ops);
     session.set(
         "append_entry",
         lua.create_function(move |_lua, (kind, data): (Value, Value)| {
@@ -136,6 +147,37 @@ pub fn install_sessions(
                 kind,
                 data: data_json,
             });
+            Ok(mlua::Value::Nil)
+        })?,
+    )?;
+
+    let label_ops = ops;
+    session.set(
+        "set_label",
+        lua.create_function(move |_lua, (anchor, label): (Value, Value)| {
+            let anchor = string_arg(&anchor).ok_or_else(|| {
+                mlua::Error::external(
+                    "kage.session.set_label: anchor must be the target entry id as a string",
+                )
+            })?;
+            if anchor.is_empty() {
+                return Err(mlua::Error::external(
+                    "kage.session.set_label: anchor must be a non-empty entry id",
+                ));
+            }
+            let text = match label {
+                Value::Nil => String::new(),
+                Value::String(s) => s.to_str().map(|s| s.to_owned()).unwrap_or_default(),
+                other => {
+                    return Err(mlua::Error::external(format!(
+                        "kage.session.set_label: label must be a string or nil, got {other:?}"
+                    )));
+                }
+            };
+            let mut q = label_ops
+                .lock()
+                .map_err(|_| mlua::Error::external("plugin session ops mutex poisoned"))?;
+            q.push(PendingSessionOp::SetLabel { anchor, text });
             Ok(mlua::Value::Nil)
         })?,
     )?;
@@ -217,9 +259,15 @@ mod tests {
             .unwrap();
         let drained = rt.take_pending_session_ops();
         assert_eq!(drained.len(), 1);
-        let crate::sessions::PendingSessionOp::AppendCustom { kind, data } = &drained[0];
-        assert_eq!(kind, "plugin:tps");
-        assert_eq!(data["note"], "first");
+        match &drained[0] {
+            crate::sessions::PendingSessionOp::AppendCustom { kind, data } => {
+                assert_eq!(kind, "plugin:tps");
+                assert_eq!(data["note"], "first");
+            }
+            crate::sessions::PendingSessionOp::SetLabel { .. } => {
+                panic!("expected AppendCustom, got SetLabel")
+            }
+        }
     }
 
     #[test]
@@ -228,8 +276,14 @@ mod tests {
         rt.eval("kage.session.append_entry('plugin:bookmark')")
             .unwrap();
         let drained = rt.take_pending_session_ops();
-        let crate::sessions::PendingSessionOp::AppendCustom { data, .. } = &drained[0];
-        assert_eq!(data, &serde_json::json!({}));
+        match &drained[0] {
+            crate::sessions::PendingSessionOp::AppendCustom { data, .. } => {
+                assert_eq!(data, &serde_json::json!({}));
+            }
+            crate::sessions::PendingSessionOp::SetLabel { .. } => {
+                panic!("expected AppendCustom, got SetLabel")
+            }
+        }
     }
 
     #[test]
@@ -247,11 +301,48 @@ mod tests {
     }
 
     #[test]
+    fn set_label_with_anchor_and_text_queues_a_label_op() {
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval("kage.session.set_label('e01ABCD', 'milestone')")
+            .unwrap();
+        let drained = rt.take_pending_session_ops();
+        match &drained[0] {
+            crate::sessions::PendingSessionOp::SetLabel { anchor, text } => {
+                assert_eq!(anchor, "e01ABCD");
+                assert_eq!(text, "milestone");
+            }
+            crate::sessions::PendingSessionOp::AppendCustom { .. } => {
+                panic!("expected SetLabel, got AppendCustom")
+            }
+        }
+    }
+
+    #[test]
+    fn set_label_with_nil_text_clears() {
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval("kage.session.set_label('e01ABCD')").unwrap();
+        let drained = rt.take_pending_session_ops();
+        match &drained[0] {
+            crate::sessions::PendingSessionOp::SetLabel { text, .. } => assert!(text.is_empty()),
+            crate::sessions::PendingSessionOp::AppendCustom { .. } => {
+                panic!("expected SetLabel, got AppendCustom")
+            }
+        }
+    }
+
+    #[test]
+    fn set_label_rejects_empty_anchor() {
+        let rt = PluginRuntime::new().unwrap();
+        let err = rt.eval("kage.session.set_label('', 'oops')").unwrap_err();
+        assert!(err.to_string().contains("anchor"));
+    }
+
+    #[test]
     fn take_pending_session_ops_drains_the_queue() {
         let rt = PluginRuntime::new().unwrap();
         rt.eval(
             "kage.session.append_entry('plugin:a'); \
-             kage.session.append_entry('plugin:b')",
+             kage.session.set_label('e1', 'l1')",
         )
         .unwrap();
         let drained = rt.take_pending_session_ops();

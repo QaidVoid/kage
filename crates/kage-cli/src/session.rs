@@ -18,7 +18,7 @@ use chrono::Utc;
 use kage_core::{Content, LoopEvent, Message, MessageId, Role, ToolCallId};
 use kage_loop::Hooks;
 use kage_plugin::{PendingSessionOp, PluginRuntime};
-use kage_session::{Compaction, Custom, EntryId, MessageEntry, SessionEntry, SessionWriter};
+use kage_session::{Compaction, Custom, EntryId, Label, MessageEntry, SessionEntry, SessionWriter};
 
 /// Wraps another [`Hooks`] and persists the conversation to a session file.
 #[derive(Debug)]
@@ -110,6 +110,22 @@ impl<H: Hooks> SessionRecordingHooks<H> {
                 kind,
                 data,
             }),
+            PendingSessionOp::SetLabel { anchor, text } => {
+                // Parse the plugin-supplied anchor id back into a
+                // ULID. A malformed id is logged and the label is
+                // dropped: writing a label with a fresh id would
+                // silently detach from its intended target.
+                let Ok(parsed) = ulid::Ulid::from_string(&anchor) else {
+                    eprintln!("kage: set_label: invalid entry id '{anchor}', dropping");
+                    return;
+                };
+                SessionEntry::Label(Label {
+                    id: EntryId::new(),
+                    ts: Utc::now(),
+                    text,
+                    anchor: EntryId(parsed),
+                })
+            }
         };
         self.append(&entry);
     }
@@ -508,6 +524,10 @@ mod tests {
         runtime
             .eval("kage.session.append_entry('plugin:tps', { rate = 12.5 })")
             .unwrap();
+        let anchor = EntryId::new();
+        runtime
+            .eval(&format!("kage.session.set_label('{anchor}', 'milestone')"))
+            .unwrap();
 
         let mut hooks =
             SessionRecordingHooks::new(NoopHooks, writer).with_plugin_runtime(Arc::clone(&runtime));
@@ -518,7 +538,7 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(entries.len(), 2); // header + custom
+        assert_eq!(entries.len(), 3); // header + custom + label
         assert!(matches!(entries[0], SessionEntry::Header(_)));
         match &entries[1] {
             SessionEntry::Custom(c) => {
@@ -527,6 +547,35 @@ mod tests {
             }
             other => panic!("expected custom entry, got {other:?}"),
         }
+        match &entries[2] {
+            SessionEntry::Label(l) => {
+                assert_eq!(l.text, "milestone");
+                assert_eq!(l.anchor, anchor);
+            }
+            other => panic!("expected label entry, got {other:?}"),
+        }
         assert!(runtime.take_pending_session_ops().is_empty());
+    }
+
+    #[test]
+    fn set_label_with_invalid_anchor_drops_silently() {
+        let (_dir, writer, _) = temp_session();
+        let path = writer.path().to_path_buf();
+        let runtime = Arc::new(PluginRuntime::new().unwrap());
+        runtime
+            .eval("kage.session.set_label('not-a-ulid', 'oops')")
+            .unwrap();
+        let mut hooks =
+            SessionRecordingHooks::new(NoopHooks, writer).with_plugin_runtime(Arc::clone(&runtime));
+        hooks.on_turn_end(0, false);
+        drop(hooks);
+
+        // Only the header should be on disk.
+        let entries: Vec<_> = SessionReader::iter(&path)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(matches!(entries[0], SessionEntry::Header(_)));
     }
 }

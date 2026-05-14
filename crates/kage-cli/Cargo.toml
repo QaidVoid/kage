@@ -34,6 +34,7 @@ kage-tui.workspace = true
 rpassword.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+ulid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

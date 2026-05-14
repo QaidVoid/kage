@@ -7,6 +7,7 @@
 
 mod auth;
 mod history;
+mod oauth;
 mod plugins;
 mod runtime_env;
 mod session;
@@ -823,7 +824,12 @@ fn build_session_path(dir: &std::path::Path, session: SessionId) -> PathBuf {
 /// Build a registry holding every provider whose API key is reachable
 /// through either an env var (priority) or the saved auth store.
 fn build_provider_registry() -> ProviderRegistry {
-    let store = auth::AuthStore::load().unwrap_or_else(|_| auth::AuthStore::empty());
+    let mut store = auth::AuthStore::load().unwrap_or_else(|_| auth::AuthStore::empty());
+    let mut store_dirty = false;
+    refresh_expiring_oauth(&mut store, &mut store_dirty);
+    if store_dirty && let Err(err) = store.save() {
+        eprintln!("kage: persist refreshed credentials: {err}");
+    }
     let mut registry = ProviderRegistry::new();
     if let Some(key) = lookup_key("anthropic", &store) {
         registry.register(Arc::new(anthropic::AnthropicProvider::new(key)));
@@ -870,8 +876,12 @@ fn build_provider_registry() -> ProviderRegistry {
     registry
 }
 
-/// Look up `provider`'s API key, preferring the env var declared by
-/// [`auth::env_var_for`] and falling back to the auth store.
+/// Look up `provider`'s bearer credential, preferring the env var
+/// declared by [`auth::env_var_for`] and falling back to the auth
+/// store. Returns the API key string for [`auth::Credential::ApiKey`]
+/// entries and the access token for [`auth::Credential::Oauth`]
+/// entries; the refresh path in [`build_provider_registry`] runs
+/// before this is called so the returned token is fresh.
 fn lookup_key(provider: &str, store: &auth::AuthStore) -> Option<String> {
     let env = auth::env_var_for(provider);
     if !env.is_empty() {
@@ -881,7 +891,36 @@ fn lookup_key(provider: &str, store: &auth::AuthStore) -> Option<String> {
             }
         }
     }
-    store.get(provider).map(str::to_owned)
+    store.access_token(provider).map(str::to_owned)
+}
+
+/// Refresh every OAuth credential in `store` whose access token is
+/// expired or due to expire inside the configured slack window. Sets
+/// `*dirty` to `true` when at least one credential was rewritten so
+/// the caller can persist before any provider request goes out.
+fn refresh_expiring_oauth(store: &mut auth::AuthStore, dirty: &mut bool) {
+    let now = Utc::now();
+    let candidates: Vec<(String, auth::OAuthCredential)> = store
+        .providers
+        .iter()
+        .filter_map(|(id, cred)| match cred {
+            auth::Credential::Oauth(o) if o.expires_within(oauth::REFRESH_SLACK, now) => {
+                Some((id.clone(), o.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    for (id, prior) in candidates {
+        match oauth::refresh(&id, &prior) {
+            Ok(fresh) => {
+                store.set_oauth(&id, fresh);
+                *dirty = true;
+            }
+            Err(err) => {
+                eprintln!("kage: refresh {id} credentials: {err}");
+            }
+        }
+    }
 }
 
 /// Order in which `default_model` falls back when there is no saved

@@ -18,6 +18,7 @@ use ratatui::crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
 
 use crate::toast::{self, SharedToasts, Toast, ToastKind};
 
+use crate::chord::Chord;
 use crate::cmdline::{CommandLine, CommandLineEvent};
 use crate::cmdparse::{EmptyResolver, Resolver};
 use crate::command::{
@@ -135,6 +136,14 @@ pub enum RunRequest {
     /// `thinking_level`, persists the change as a session entry, and
     /// fires the `thinking_level_select` plugin event.
     CycleThinkingLevel,
+    /// Run the plugin keybinding whose canonical chord is `chord`. The
+    /// worker invokes its handler through the coroutine bridge (so it
+    /// may open `kage.ui.*` dialogs), like a plugin command.
+    InvokePluginKeybinding {
+        /// Canonical chord (e.g. `ctrl+shift+x`) identifying the
+        /// registered binding.
+        chord: String,
+    },
 }
 
 /// Outcome of [`App::run`].
@@ -442,6 +451,11 @@ pub struct App {
     /// the completion engine can mix them with the static builtin
     /// registry. Cleared and re-built on every `set_plugin_commands`.
     plugin_command_specs: Vec<&'static CommandSpec>,
+    /// Parsed plugin keybindings: `(matcher, canonical chord)`. A key
+    /// matching one dispatches [`RunRequest::InvokePluginKeybinding`].
+    /// Checked after modal layers but before builtin key handling so a
+    /// plugin chord wins over the builtin binding for that key.
+    plugin_keybindings: Vec<(Chord, String)>,
     /// Status-bar widgets supplied by plugins via
     /// `kage.register_widget`. Each entry's `render(width)` runs once
     /// per redraw and the resulting string is painted on the right
@@ -561,6 +575,7 @@ impl App {
             status_session_id: None,
             plugin_commands: Vec::new(),
             plugin_command_specs: Vec::new(),
+            plugin_keybindings: Vec::new(),
             plugin_widgets: Vec::new(),
             plugin_widget_texts: Vec::new(),
             plugin_status: None,
@@ -771,6 +786,17 @@ impl App {
     /// API but the host never performs the fork.
     pub fn set_plugin_fork_request(&mut self, request: kage_plugin::SharedForkRequest) {
         self.plugin_fork_request = Some(request);
+    }
+
+    /// Register the plugin keybindings the App should dispatch.
+    /// `chords` are canonical strings from the plugin runtime; an
+    /// entry that fails to parse is dropped (the runtime already
+    /// validated the grammar, so this only guards internal drift).
+    pub fn set_plugin_keybindings(&mut self, chords: Vec<String>) {
+        self.plugin_keybindings = chords
+            .into_iter()
+            .filter_map(|c| Chord::parse(&c).map(|m| (m, c)))
+            .collect();
     }
 
     /// Wire the channel the worker pushes blocking [`PluginDialog`]
@@ -1240,6 +1266,19 @@ impl App {
         // The `/` search line is also modal while open.
         if self.search_line.is_some() {
             return self.dispatch_search_key(key);
+        }
+
+        // Plugin keybindings win over builtin Normal/Insert handling
+        // (last writer wins), but never over an open modal layer
+        // above or the global quit hatch.
+        if let Some(chord) = self
+            .plugin_keybindings
+            .iter()
+            .find(|(matcher, _)| matcher.matches(&key))
+            .map(|(_, chord)| chord.clone())
+        {
+            let _ = self.send_request(RunRequest::InvokePluginKeybinding { chord });
+            return None;
         }
 
         let actions = self.input.handle_key(key);
@@ -2914,5 +2953,51 @@ mod tests {
         assert_eq!(reply_rx.recv().unwrap(), None);
         assert!(app.plugin_overlay.is_none());
         assert!(app.active_dialog.is_none());
+    }
+
+    #[test]
+    fn plugin_keybinding_dispatches_invoke_request() {
+        let buffer = shared_buffer();
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        app.set_plugin_keybindings(vec!["ctrl+g".to_owned()]);
+
+        app.handle_key(ctrl('g'));
+
+        assert_eq!(
+            rx.try_recv(),
+            Ok(RunRequest::InvokePluginKeybinding {
+                chord: "ctrl+g".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn unbound_chord_does_not_dispatch_keybinding() {
+        let buffer = shared_buffer();
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        app.set_plugin_keybindings(vec!["ctrl+g".to_owned()]);
+
+        app.handle_key(ctrl('h'));
+
+        assert!(!matches!(
+            rx.try_recv(),
+            Ok(RunRequest::InvokePluginKeybinding { .. })
+        ));
+    }
+
+    #[test]
+    fn open_overlay_suppresses_plugin_keybinding() {
+        let buffer = shared_buffer();
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        app.set_plugin_keybindings(vec!["ctrl+g".to_owned()]);
+        app.picker = Some(OverlayPicker::new("busy", vec![PickItem::simple("x")]));
+        app.picker_kind = Some(PickerKind::Model);
+
+        app.handle_key(ctrl('g'));
+
+        assert!(rx.try_recv().is_err(), "picker should swallow the chord");
     }
 }

@@ -7,6 +7,9 @@
 -- Because the dialogs suspend the plugin coroutine, the handlers read
 -- like ordinary blocking code even though the host services them on
 -- another thread.
+--
+-- Also binds Ctrl+Alt+K to a handler that opens the color picker, to
+-- show kage.register_keybinding driving a blocking dialog from a key.
 
 kage.register_command({
     name = 'pick-color',
@@ -62,3 +65,9 @@ kage.register_command({
         return note
     end,
 })
+
+kage.register_keybinding({ key = 'ctrl+alt+k', description = 'Quick color pick' }, function()
+    local color = kage.ui.select('Quick pick', { 'red', 'green', 'blue' })
+    kage.notify('quick-pick: ' .. (color or 'cancelled'))
+    return color or 'cancelled'
+end)

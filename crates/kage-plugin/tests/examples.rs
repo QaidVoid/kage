@@ -405,3 +405,32 @@ fn select_demo_editor_cancel_is_discarded() {
     };
     assert_eq!(CommandOutput::from_json(&value).text, "discarded");
 }
+
+#[test]
+fn select_demo_keybinding_drives_a_dialog() {
+    let (rec, sink) = forwarding_sink();
+    let rt = load_select_demo(sink);
+
+    let bindings = rt.registered_keybindings();
+    let kb = bindings
+        .iter()
+        .find(|kb| kb.chord() == "ctrl+alt+k")
+        .expect("ctrl+alt+k registered");
+    assert_eq!(kb.description(), "Quick color pick");
+
+    let handler = kb.handler().unwrap();
+    match rt.bridge_call(&handler, &[]).unwrap() {
+        BridgeStep::Suspended(req) => assert_eq!(req.kind, "ui.select"),
+        BridgeStep::Done(v) => panic!("expected suspend, got Done({v})"),
+    }
+    let BridgeStep::Done(value) = rt.bridge_resume(&json!("green")).unwrap() else {
+        panic!("expected Done after resume");
+    };
+    assert_eq!(CommandOutput::from_json(&value).text, "green");
+    let r = rec.lock().unwrap();
+    assert!(
+        r.notifies.iter().any(|s| s == "quick-pick: green"),
+        "got {:?}",
+        r.notifies
+    );
+}

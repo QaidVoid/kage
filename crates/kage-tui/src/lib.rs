@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod buffer;
+pub mod chord;
 pub mod cmdline;
 pub mod cmdparse;
 pub mod command;
@@ -22,6 +23,7 @@ pub mod view;
 
 pub use app::{App, AppExit, PluginDialog, RunRequest, SessionLister};
 pub use buffer::{Block, Buffer};
+pub use chord::Chord;
 pub use cmdline::{CommandLine, CommandLineEvent};
 pub use cmdparse::{
     Completion, Completions, EmptyResolver, ParseError, Resolver, complete, parse_input,

@@ -98,6 +98,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     let mut plugin_compact_request: Option<kage_plugin::SharedCompactRequest> = None;
     let mut plugin_session_list: Option<kage_plugin::SharedSessionList> = None;
     let mut plugin_fork_request: Option<kage_plugin::SharedForkRequest> = None;
+    let mut plugin_keybinding_chords: Vec<String> = Vec::new();
     if let Some(rt) = plugin_runtime.as_ref() {
         for tool in rt.registered_tools() {
             tools.register(tool);
@@ -130,6 +131,11 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         plugin_compact_request = Some(rt.shared_compact_request());
         plugin_session_list = Some(rt.shared_session_list());
         plugin_fork_request = Some(rt.shared_fork_request());
+        plugin_keybinding_chords = rt
+            .registered_keybindings()
+            .iter()
+            .map(|kb| kb.chord().to_owned())
+            .collect();
     }
     let cancel = CancelFlag::new();
     let mut initial_cx = AgentContext::new(bare_model, system).with_workdir(&workdir);
@@ -222,6 +228,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         app.set_plugin_fork_request(req);
     }
     app.set_plugin_dialog(dialog_rx);
+    app.set_plugin_keybindings(plugin_keybinding_chords);
     app.set_cancel_flag(cancel.clone());
     app.set_toasts(toasts.clone());
     app.set_session_usage(session_usage);
@@ -427,6 +434,27 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                                 }
                             }
                         }
+                    }
+                }
+                RunRequest::InvokePluginKeybinding { chord } => {
+                    if let Some(rt) = plugin_runtime.as_ref()
+                        && let Some(kb) = rt
+                            .registered_keybindings()
+                            .into_iter()
+                            .find(|kb| kb.chord() == chord)
+                        && let Some(out) = run_bridged_keybinding(rt, &kb, &dialog_tx, &buffer)
+                        && !out.text.is_empty()
+                        && let Ok(mut buf) = buffer.lock()
+                    {
+                        buf.push_custom(
+                            if out.is_error {
+                                "kage:error"
+                            } else {
+                                "kage:plugin"
+                            },
+                            out.text,
+                            false,
+                        );
                     }
                 }
                 RunRequest::Cancel => cancel.cancel(),
@@ -653,18 +681,55 @@ fn run_bridged_command(
     dialog_tx: &mpsc::Sender<PluginDialog>,
     buffer: &SharedBuffer,
 ) -> Option<CommandOutput> {
+    let label = format!("command {}", cmd.name());
     let prep = match cmd.prepare_bridge(raw, &serde_json::Value::Null) {
         Ok(prep) => prep,
-        Err(e) => return Some(error_output(cmd.name(), &e.to_string())),
+        Err(e) => return Some(error_output(&label, &e.to_string())),
     };
     let bargs = match prep {
         BridgePrep::Ready(bargs) => bargs,
         BridgePrep::ArgError(out) => return Some(out),
     };
-    let mut step = match rt.bridge_call(&bargs.handler, &bargs.args) {
+    let step = match rt.bridge_call(&bargs.handler, &bargs.args) {
         Ok(step) => step,
-        Err(e) => return Some(error_output(cmd.name(), &e.to_string())),
+        Err(e) => return Some(error_output(&label, &e.to_string())),
     };
+    drive_bridge(rt, &label, step, dialog_tx, buffer)
+}
+
+/// Run a plugin keybinding's handler through the coroutine bridge,
+/// same servicing path as a command (so the handler may open
+/// `kage.ui.*` dialogs). A non-empty return value is surfaced as a
+/// conversation block, just like a command's output.
+fn run_bridged_keybinding(
+    rt: &PluginRuntime,
+    kb: &kage_plugin::LuaKeybinding,
+    dialog_tx: &mpsc::Sender<PluginDialog>,
+    buffer: &SharedBuffer,
+) -> Option<CommandOutput> {
+    let label = format!("keybinding {}", kb.chord());
+    let handler = match kb.handler() {
+        Ok(handler) => handler,
+        Err(e) => return Some(error_output(&label, &e.to_string())),
+    };
+    let step = match rt.bridge_call(&handler, &[]) {
+        Ok(step) => step,
+        Err(e) => return Some(error_output(&label, &e.to_string())),
+    };
+    drive_bridge(rt, &label, step, dialog_tx, buffer)
+}
+
+/// Drive a started bridge call to completion: service each suspend
+/// through the App's dialog channel, resume/cancel, and on a terminal
+/// `Done` map the value to a [`CommandOutput`]. Shared by the command
+/// and keybinding paths.
+fn drive_bridge(
+    rt: &PluginRuntime,
+    label: &str,
+    mut step: BridgeStep,
+    dialog_tx: &mpsc::Sender<PluginDialog>,
+    buffer: &SharedBuffer,
+) -> Option<CommandOutput> {
     loop {
         match step {
             BridgeStep::Done(value) => return Some(CommandOutput::from_json(&value)),
@@ -677,7 +742,7 @@ fn run_bridged_command(
                     Ok(step) => step,
                     Err(e) => {
                         let _ = rt.bridge_abort();
-                        return Some(error_output(cmd.name(), &e.to_string()));
+                        return Some(error_output(label, &e.to_string()));
                     }
                 };
             }
@@ -753,10 +818,10 @@ fn service_dialog(
 }
 
 /// Build a one-line error [`CommandOutput`] for a failed plugin
-/// command, matching the inline-error style the old direct path used.
-fn error_output(name: &str, msg: &str) -> CommandOutput {
+/// invocation. `label` reads like `command foo` or `keybinding ctrl+g`.
+fn error_output(label: &str, msg: &str) -> CommandOutput {
     CommandOutput {
-        text: format!("plugin command {name}: {msg}"),
+        text: format!("plugin {label}: {msg}"),
         is_error: true,
         structured: None,
     }

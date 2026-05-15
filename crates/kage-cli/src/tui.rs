@@ -15,7 +15,9 @@ use std::thread;
 
 use kage_core::{CancelFlag, Content, Message, Role};
 use kage_loop::{AgentContext, LoopConfig, NoopHooks, force_compact, run};
-use kage_plugin::{BridgePrep, BridgeStep, CommandOutput, PluginRuntime, SelectRequest};
+use kage_plugin::{
+    BridgePrep, BridgeStep, CommandOutput, ConfirmRequest, PluginRuntime, SelectRequest,
+};
 use kage_provider::ProviderRegistry;
 use kage_session::{SessionId, SessionReader, SessionSummary, SessionWriter};
 use kage_tools::ToolRegistry;
@@ -682,35 +684,46 @@ fn run_bridged_command(
     }
 }
 
-/// Service one suspended dialog request. Only `ui.select` is wired
-/// today; the parked coroutine is resumed with the chosen item value,
-/// or `None` (cancel) on dismissal, an unsupported kind, or a
-/// malformed payload (the latter two are also logged to the buffer).
+/// Service one suspended dialog request (`ui.select` / `ui.confirm`).
+/// Builds the matching [`PluginDialog`], hands it to the App, and
+/// blocks on the reply. Returns the value to resume the coroutine
+/// with, or `None` (resume with `nil`) on dismissal, an unsupported
+/// kind, or a malformed payload (the latter two also logged).
 fn service_dialog(
     req: &kage_plugin::SuspendRequest,
     dialog_tx: &mpsc::Sender<PluginDialog>,
     buffer: &SharedBuffer,
 ) -> Option<serde_json::Value> {
-    if req.kind != "ui.select" {
-        push_error(buffer, &format!("unsupported plugin dialog: {}", req.kind));
-        return None;
-    }
-    let sel = match SelectRequest::from_payload(&req.payload) {
-        Ok(sel) => sel,
-        Err(e) => {
-            push_error(buffer, &format!("ui.select: {e}"));
+    let (reply_tx, reply_rx) = mpsc::channel();
+    let dialog = match req.kind.as_str() {
+        "ui.select" => match SelectRequest::from_payload(&req.payload) {
+            Ok(sel) => PluginDialog::Select {
+                title: sel.title,
+                items: sel.items,
+                reply: reply_tx,
+            },
+            Err(e) => {
+                push_error(buffer, &format!("ui.select: {e}"));
+                return None;
+            }
+        },
+        "ui.confirm" => match ConfirmRequest::from_payload(&req.payload) {
+            Ok(c) => PluginDialog::Confirm {
+                title: c.title,
+                message: c.message,
+                reply: reply_tx,
+            },
+            Err(e) => {
+                push_error(buffer, &format!("ui.confirm: {e}"));
+                return None;
+            }
+        },
+        other => {
+            push_error(buffer, &format!("unsupported plugin dialog: {other}"));
             return None;
         }
     };
-    let (reply_tx, reply_rx) = mpsc::channel();
-    if dialog_tx
-        .send(PluginDialog {
-            title: sel.title,
-            items: sel.items,
-            reply: reply_tx,
-        })
-        .is_err()
-    {
+    if dialog_tx.send(dialog).is_err() {
         return None;
     }
     reply_rx.recv().unwrap_or(None)

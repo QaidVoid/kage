@@ -157,18 +157,31 @@ enum PickerKind {
 /// A blocking plugin dialog the worker handed to the App to run.
 ///
 /// A `kage.ui.*` call suspends the plugin coroutine on the worker
-/// thread; the worker forwards this over a channel and parks on
-/// `reply`. The App hosts the matching [`OverlayWidget`], then sends
-/// the answer back (`None` = cancelled, resumes the coroutine with
-/// `nil`), and the worker resumes the coroutine with it.
-pub struct PluginDialog {
-    /// Overlay title.
-    pub title: String,
-    /// Rows to choose from, in the plugin's order.
-    pub items: Vec<kage_plugin::SelectItem>,
-    /// Channel the App answers on: `Some(value)` for the chosen
-    /// item's value, `None` for cancel.
-    pub reply: std::sync::mpsc::Sender<Option<serde_json::Value>>,
+/// thread; the worker forwards this over a channel and parks on the
+/// carried `reply`. The App hosts the matching [`OverlayWidget`],
+/// then sends the answer back, and the worker resumes the coroutine
+/// with it. `reply` carries `Some(value)` to resume with that JSON
+/// value or `None` to resume with `nil`.
+pub enum PluginDialog {
+    /// `kage.ui.select`: pick one of `items`.
+    Select {
+        /// Picker title.
+        title: String,
+        /// Rows to choose from, in the plugin's order.
+        items: Vec<kage_plugin::SelectItem>,
+        /// Channel the App answers on.
+        reply: std::sync::mpsc::Sender<Option<serde_json::Value>>,
+    },
+    /// `kage.ui.confirm`: a yes/no question. Resumes with a boolean
+    /// (cancel counts as `false`).
+    Confirm {
+        /// Overlay title.
+        title: String,
+        /// Body text explaining what is being confirmed.
+        message: String,
+        /// Channel the App answers on.
+        reply: std::sync::mpsc::Sender<Option<serde_json::Value>>,
+    },
 }
 
 /// In-flight dialog bookkeeping: the reply channel plus how to turn an
@@ -181,13 +194,18 @@ enum PluginDialogState {
         reply: std::sync::mpsc::Sender<Option<serde_json::Value>>,
         items: Vec<kage_plugin::SelectItem>,
     },
+    /// `kage.ui.confirm`: the overlay resolves with a JSON boolean;
+    /// pass it straight through.
+    Confirm {
+        reply: std::sync::mpsc::Sender<Option<serde_json::Value>>,
+    },
 }
 
 impl PluginDialogState {
     /// The channel the parked worker is waiting on.
     fn reply(&self) -> &std::sync::mpsc::Sender<Option<serde_json::Value>> {
         match self {
-            Self::Select { reply, .. } => reply,
+            Self::Select { reply, .. } | Self::Confirm { reply } => reply,
         }
     }
 
@@ -200,14 +218,17 @@ impl PluginDialogState {
                 .and_then(|s| s.parse::<usize>().ok())
                 .and_then(|idx| items.get(idx))
                 .map(|item| item.value.clone()),
+            Self::Confirm { .. } => Some(serde_json::Value::Bool(value.as_bool().unwrap_or(false))),
         }
     }
 
     /// Value to resume the coroutine with when the user dismissed the
-    /// dialog (Esc / Ctrl+C). `None` resumes with `nil`.
+    /// dialog (Esc / Ctrl+C). Select resumes with `nil`; confirm
+    /// resumes with `false` so the call always returns a boolean.
     fn cancelled(&self) -> Option<serde_json::Value> {
         match self {
             Self::Select { .. } => None,
+            Self::Confirm { .. } => Some(serde_json::Value::Bool(false)),
         }
     }
 }
@@ -801,25 +822,39 @@ impl App {
         let Ok(dialog) = rx.try_recv() else {
             return;
         };
-        if dialog.items.is_empty() {
-            let _ = dialog.reply.send(None);
-            return;
+        match dialog {
+            PluginDialog::Select {
+                title,
+                items,
+                reply,
+            } => {
+                if items.is_empty() {
+                    let _ = reply.send(None);
+                    return;
+                }
+                let picks = items
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, item)| PickItem {
+                        value: idx.to_string(),
+                        label: item.label.clone(),
+                        badge: None,
+                    })
+                    .collect();
+                self.plugin_overlay = Some(Box::new(OverlayPicker::new(title, picks)));
+                self.active_dialog = Some(PluginDialogState::Select { reply, items });
+            }
+            PluginDialog::Confirm {
+                title,
+                message,
+                reply,
+            } => {
+                self.plugin_overlay = Some(Box::new(crate::overlay::ConfirmOverlay::new(
+                    title, message,
+                )));
+                self.active_dialog = Some(PluginDialogState::Confirm { reply });
+            }
         }
-        let picks = dialog
-            .items
-            .iter()
-            .enumerate()
-            .map(|(idx, item)| PickItem {
-                value: idx.to_string(),
-                label: item.label.clone(),
-                badge: None,
-            })
-            .collect();
-        self.plugin_overlay = Some(Box::new(OverlayPicker::new(dialog.title, picks)));
-        self.active_dialog = Some(PluginDialogState::Select {
-            reply: dialog.reply,
-            items: dialog.items,
-        });
     }
 
     /// Refresh the session-list snapshot read by `kage.session.list`.
@@ -2588,7 +2623,7 @@ mod tests {
         let (dtx, drx) = mpsc::channel();
         app.set_plugin_dialog(drx);
         let (reply_tx, reply_rx) = mpsc::channel();
-        dtx.send(PluginDialog {
+        dtx.send(PluginDialog::Select {
             title: "Pick".to_owned(),
             items: vec![
                 select_item("alpha", serde_json::json!("A")),
@@ -2618,7 +2653,7 @@ mod tests {
         let (dtx, drx) = mpsc::channel();
         app.set_plugin_dialog(drx);
         let (reply_tx, reply_rx) = mpsc::channel();
-        dtx.send(PluginDialog {
+        dtx.send(PluginDialog::Select {
             title: "Pick".to_owned(),
             items: vec![select_item("only", serde_json::json!("x"))],
             reply: reply_tx,
@@ -2641,7 +2676,7 @@ mod tests {
         let (dtx, drx) = mpsc::channel();
         app.set_plugin_dialog(drx);
         let (reply_tx, reply_rx) = mpsc::channel();
-        dtx.send(PluginDialog {
+        dtx.send(PluginDialog::Select {
             title: "Empty".to_owned(),
             items: Vec::new(),
             reply: reply_tx,
@@ -2664,7 +2699,7 @@ mod tests {
         app.picker = Some(OverlayPicker::new("busy", vec![PickItem::simple("x")]));
         app.picker_kind = Some(PickerKind::Model);
         let (reply_tx, _reply_rx) = mpsc::channel();
-        dtx.send(PluginDialog {
+        dtx.send(PluginDialog::Select {
             title: "later".to_owned(),
             items: vec![select_item("a", serde_json::json!("a"))],
             reply: reply_tx,
@@ -2674,6 +2709,61 @@ mod tests {
         app.drain_plugin_dialog();
 
         assert_eq!(app.picker_kind, Some(PickerKind::Model));
+        assert!(app.plugin_overlay.is_none());
+        assert!(app.active_dialog.is_none());
+    }
+
+    fn open_confirm(app: &mut App) -> std::sync::mpsc::Receiver<Option<serde_json::Value>> {
+        let (dtx, drx) = mpsc::channel();
+        app.set_plugin_dialog(drx);
+        let (reply_tx, reply_rx) = mpsc::channel();
+        dtx.send(PluginDialog::Confirm {
+            title: "Delete?".to_owned(),
+            message: "are you sure".to_owned(),
+            reply: reply_tx,
+        })
+        .unwrap();
+        app.drain_plugin_dialog();
+        assert!(app.plugin_overlay.is_some());
+        reply_rx
+    }
+
+    #[test]
+    fn plugin_confirm_yes_resumes_with_true() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let reply_rx = open_confirm(&mut app);
+
+        app.handle_key(key('y'));
+
+        assert_eq!(reply_rx.recv().unwrap(), Some(serde_json::json!(true)));
+        assert!(app.plugin_overlay.is_none());
+        assert!(app.active_dialog.is_none());
+    }
+
+    #[test]
+    fn plugin_confirm_no_resumes_with_false() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let reply_rx = open_confirm(&mut app);
+
+        app.handle_key(key('n'));
+
+        assert_eq!(reply_rx.recv().unwrap(), Some(serde_json::json!(false)));
+    }
+
+    #[test]
+    fn plugin_confirm_cancel_resumes_with_false() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let reply_rx = open_confirm(&mut app);
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(reply_rx.recv().unwrap(), Some(serde_json::json!(false)));
         assert!(app.plugin_overlay.is_none());
         assert!(app.active_dialog.is_none());
     }

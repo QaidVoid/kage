@@ -232,3 +232,60 @@ fn select_demo_cancel_path_returns_cancelled() {
     };
     assert_eq!(CommandOutput::from_json(&value).text, "cancelled");
 }
+
+fn confirm_delete_args(rt: &PluginRuntime) -> kage_plugin::BridgeArgs {
+    let cmd = rt
+        .registered_commands()
+        .into_iter()
+        .find(|c| c.name() == "confirm-delete")
+        .expect("confirm-delete command registered");
+    match cmd.prepare_bridge("", &json!(null)).unwrap() {
+        BridgePrep::Ready(bargs) => bargs,
+        BridgePrep::ArgError(out) => panic!("unexpected arg error: {}", out.text),
+    }
+}
+
+#[test]
+fn select_demo_confirm_true_path_deletes() {
+    let (rec, sink) = forwarding_sink();
+    let rt = load_select_demo(sink);
+    let bargs = confirm_delete_args(&rt);
+
+    match rt.bridge_call(&bargs.handler, &bargs.args).unwrap() {
+        BridgeStep::Suspended(req) => {
+            assert_eq!(req.kind, "ui.confirm");
+            assert_eq!(
+                req.payload,
+                json!({ "title": "Delete everything?", "message": "This cannot be undone." })
+            );
+        }
+        BridgeStep::Done(v) => panic!("expected suspend, got Done({v})"),
+    }
+
+    let BridgeStep::Done(value) = rt.bridge_resume(&json!(true)).unwrap() else {
+        panic!("expected Done after resume");
+    };
+    assert_eq!(CommandOutput::from_json(&value).text, "deleting");
+    let r = rec.lock().unwrap();
+    assert!(
+        r.notifies.iter().any(|s| s == "confirm-delete: confirmed"),
+        "got {:?}",
+        r.notifies
+    );
+}
+
+#[test]
+fn select_demo_confirm_false_path_keeps() {
+    let (_rec, sink) = forwarding_sink();
+    let rt = load_select_demo(sink);
+    let bargs = confirm_delete_args(&rt);
+
+    assert!(matches!(
+        rt.bridge_call(&bargs.handler, &bargs.args).unwrap(),
+        BridgeStep::Suspended(_)
+    ));
+    let BridgeStep::Done(value) = rt.bridge_resume(&json!(false)).unwrap() else {
+        panic!("expected Done after resume");
+    };
+    assert_eq!(CommandOutput::from_json(&value).text, "kept");
+}

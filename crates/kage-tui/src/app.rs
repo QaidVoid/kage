@@ -152,21 +152,17 @@ pub enum AppExit {
 enum PickerKind {
     Model,
     Session,
-    /// A blocking plugin dialog (`kage.ui.select`). The chosen item's
-    /// value is sent back to the parked worker through
-    /// [`App::active_dialog`] rather than a [`RunRequest`].
-    PluginDialog,
 }
 
 /// A blocking plugin dialog the worker handed to the App to run.
 ///
-/// `kage.ui.select` suspends the plugin coroutine on the worker
+/// A `kage.ui.*` call suspends the plugin coroutine on the worker
 /// thread; the worker forwards this over a channel and parks on
-/// `reply`. The App opens a picker, then sends the chosen item's
-/// value back (`None` = the user cancelled), and the worker resumes
-/// the coroutine with it.
+/// `reply`. The App hosts the matching [`OverlayWidget`], then sends
+/// the answer back (`None` = cancelled, resumes the coroutine with
+/// `nil`), and the worker resumes the coroutine with it.
 pub struct PluginDialog {
-    /// Picker title.
+    /// Overlay title.
     pub title: String,
     /// Rows to choose from, in the plugin's order.
     pub items: Vec<kage_plugin::SelectItem>,
@@ -175,11 +171,45 @@ pub struct PluginDialog {
     pub reply: std::sync::mpsc::Sender<Option<serde_json::Value>>,
 }
 
-/// In-flight dialog bookkeeping: how to map the picker's resolved
-/// index back to a plugin value and where to send it.
-struct PluginDialogState {
-    reply: std::sync::mpsc::Sender<Option<serde_json::Value>>,
-    items: Vec<kage_plugin::SelectItem>,
+/// In-flight dialog bookkeeping: the reply channel plus how to turn an
+/// [`OverlayAction`] outcome into the value the parked coroutine is
+/// resumed with. One variant per `kage.ui.*` dialog kind.
+enum PluginDialogState {
+    /// `kage.ui.select`: the overlay resolves with a stringified item
+    /// index; map it back to that item's plugin value.
+    Select {
+        reply: std::sync::mpsc::Sender<Option<serde_json::Value>>,
+        items: Vec<kage_plugin::SelectItem>,
+    },
+}
+
+impl PluginDialogState {
+    /// The channel the parked worker is waiting on.
+    fn reply(&self) -> &std::sync::mpsc::Sender<Option<serde_json::Value>> {
+        match self {
+            Self::Select { reply, .. } => reply,
+        }
+    }
+
+    /// Value to resume the coroutine with when the overlay resolved
+    /// with `value`. `None` resumes with `nil`.
+    fn resolved(&self, value: &serde_json::Value) -> Option<serde_json::Value> {
+        match self {
+            Self::Select { items, .. } => value
+                .as_str()
+                .and_then(|s| s.parse::<usize>().ok())
+                .and_then(|idx| items.get(idx))
+                .map(|item| item.value.clone()),
+        }
+    }
+
+    /// Value to resume the coroutine with when the user dismissed the
+    /// dialog (Esc / Ctrl+C). `None` resumes with `nil`.
+    fn cancelled(&self) -> Option<serde_json::Value> {
+        match self {
+            Self::Select { .. } => None,
+        }
+    }
 }
 
 /// Closure that returns the current set of resumable sessions on
@@ -448,8 +478,12 @@ pub struct App {
     /// onto (`kage.ui.select`). Drained between event polls; while a
     /// dialog is open the worker thread is parked awaiting the answer.
     dialog_rx: Option<std::sync::mpsc::Receiver<PluginDialog>>,
-    /// Bookkeeping for the dialog currently rendered as a picker.
-    /// Present iff `picker_kind == Some(PickerKind::PluginDialog)`.
+    /// The overlay hosting the current plugin dialog, if any. A
+    /// trait object so every `kage.ui.*` dialog (picker, confirm,
+    /// input, editor) shares one hosting path.
+    plugin_overlay: Option<Box<dyn crate::overlay::OverlayWidget>>,
+    /// Bookkeeping for the dialog currently in [`Self::plugin_overlay`]:
+    /// where to send the answer and how to map the overlay's outcome.
     active_dialog: Option<PluginDialogState>,
 }
 
@@ -491,6 +525,7 @@ impl App {
             cancel_flag: None,
             toasts: None,
             dialog_rx: None,
+            plugin_overlay: None,
             active_dialog: None,
         }
     }
@@ -749,14 +784,15 @@ impl App {
         }
     }
 
-    /// Drain one pending blocking [`PluginDialog`] and open it as a
-    /// picker. Skipped while another overlay is up: the worker stays
-    /// parked and the request is taken on a later tick once the screen
-    /// is free (the bridge is single-slot, so at most one is queued).
-    /// An empty item list resolves immediately to "cancelled" rather
-    /// than opening a dead picker.
+    /// Drain one pending blocking [`PluginDialog`] and open its
+    /// overlay. Skipped while another overlay (picker or an earlier
+    /// plugin dialog) is up: the worker stays parked and the request
+    /// is taken on a later tick once the screen is free (the bridge is
+    /// single-slot, so at most one is queued). An empty item list
+    /// resolves immediately to "cancelled" rather than opening a dead
+    /// picker.
     fn drain_plugin_dialog(&mut self) {
-        if self.picker.is_some() {
+        if self.picker.is_some() || self.plugin_overlay.is_some() {
             return;
         }
         let Some(rx) = self.dialog_rx.as_ref() else {
@@ -779,9 +815,8 @@ impl App {
                 badge: None,
             })
             .collect();
-        self.picker = Some(OverlayPicker::new(dialog.title, picks));
-        self.picker_kind = Some(PickerKind::PluginDialog);
-        self.active_dialog = Some(PluginDialogState {
+        self.plugin_overlay = Some(Box::new(OverlayPicker::new(dialog.title, picks)));
+        self.active_dialog = Some(PluginDialogState::Select {
             reply: dialog.reply,
             items: dialog.items,
         });
@@ -879,7 +914,7 @@ impl App {
                             log_key_event(&key);
                             if let Some(exit) = self.dispatch_key(key) {
                                 if let Some(state) = self.active_dialog.take() {
-                                    let _ = state.reply.send(None);
+                                    let _ = state.reply().send(None);
                                 }
                                 return Ok(exit);
                             }
@@ -1031,6 +1066,7 @@ impl App {
             0
         };
         let picker = self.picker.as_mut();
+        let plugin_overlay = self.plugin_overlay.as_mut();
         let slash_palette = self.slash_palette.as_ref();
         let input = &self.input;
         tui.terminal().draw(|frame| {
@@ -1064,6 +1100,16 @@ impl App {
                 palette.render(frame, regions);
                 palette.place_cursor(frame, regions);
             }
+            if let Some(overlay) = plugin_overlay {
+                let modal = overlay.measure(frame.area());
+                frame.render_widget(ratatui::widgets::Clear, modal);
+                let theme = crate::theme::current();
+                let ctx = crate::overlay::OverlayCtx {
+                    theme: &theme,
+                    viewport: frame.area(),
+                };
+                overlay.render(modal, frame.buffer_mut(), &ctx);
+            }
         })?;
         self.captured_rows = captured_rows;
         Ok(())
@@ -1074,6 +1120,12 @@ impl App {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('q')) {
             return Some(AppExit::Quit);
+        }
+
+        // A blocking plugin dialog is the top-most modal layer: the
+        // worker is parked waiting for its answer.
+        if self.plugin_overlay.is_some() {
+            return self.dispatch_plugin_overlay_key(key);
         }
 
         // When the picker overlay is open, it owns the keyboard.
@@ -1669,30 +1721,13 @@ impl App {
         match crate::overlay::OverlayWidget::handle_key(picker, key) {
             OverlayAction::Stay | OverlayAction::PropagateKey => {}
             OverlayAction::Close => {
-                let kind = self.picker_kind;
                 self.picker = None;
                 self.picker_kind = None;
-                if matches!(kind, Some(PickerKind::PluginDialog))
-                    && let Some(state) = self.active_dialog.take()
-                {
-                    let _ = state.reply.send(None);
-                }
             }
             OverlayAction::Resolve(value) => {
                 let kind = self.picker_kind;
                 self.picker = None;
                 self.picker_kind = None;
-                if let Some(PickerKind::PluginDialog) = kind {
-                    if let Some(state) = self.active_dialog.take() {
-                        let answer = value
-                            .as_str()
-                            .and_then(|s| s.parse::<usize>().ok())
-                            .and_then(|idx| state.items.get(idx))
-                            .map(|item| item.value.clone());
-                        let _ = state.reply.send(answer);
-                    }
-                    return None;
-                }
                 let serde_json::Value::String(value) = value else {
                     return None;
                 };
@@ -1705,7 +1740,36 @@ impl App {
                             std::path::PathBuf::from(value),
                         ));
                     }
-                    Some(PickerKind::PluginDialog) | None => {}
+                    None => {}
+                }
+            }
+        }
+        None
+    }
+
+    /// Drive the active plugin dialog overlay (`kage.ui.*`). The
+    /// overlay owns its keys; on resolve/close the chosen value is
+    /// sent back to the parked worker through [`Self::active_dialog`],
+    /// mapped per the dialog kind, then the overlay is dismissed.
+    fn dispatch_plugin_overlay_key(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+    ) -> Option<AppExit> {
+        let overlay = self.plugin_overlay.as_mut()?;
+        match crate::overlay::OverlayWidget::handle_key(overlay.as_mut(), key) {
+            OverlayAction::Stay | OverlayAction::PropagateKey => {}
+            OverlayAction::Close => {
+                self.plugin_overlay = None;
+                if let Some(state) = self.active_dialog.take() {
+                    let answer = state.cancelled();
+                    let _ = state.reply().send(answer);
+                }
+            }
+            OverlayAction::Resolve(value) => {
+                self.plugin_overlay = None;
+                if let Some(state) = self.active_dialog.take() {
+                    let answer = state.resolved(&value);
+                    let _ = state.reply().send(answer);
                 }
             }
         }
@@ -2535,15 +2599,14 @@ mod tests {
         .unwrap();
 
         app.drain_plugin_dialog();
-        assert!(app.picker.is_some());
-        assert_eq!(app.picker_kind, Some(PickerKind::PluginDialog));
+        assert!(app.plugin_overlay.is_some());
+        assert!(app.active_dialog.is_some());
 
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert_eq!(reply_rx.recv().unwrap(), Some(serde_json::json!(42)));
-        assert!(app.picker.is_none());
-        assert!(app.picker_kind.is_none());
+        assert!(app.plugin_overlay.is_none());
         assert!(app.active_dialog.is_none());
     }
 
@@ -2566,7 +2629,7 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
         assert_eq!(reply_rx.recv().unwrap(), None);
-        assert!(app.picker.is_none());
+        assert!(app.plugin_overlay.is_none());
         assert!(app.active_dialog.is_none());
     }
 
@@ -2587,7 +2650,7 @@ mod tests {
 
         app.drain_plugin_dialog();
 
-        assert!(app.picker.is_none());
+        assert!(app.plugin_overlay.is_none());
         assert_eq!(reply_rx.recv().unwrap(), None);
     }
 
@@ -2611,6 +2674,7 @@ mod tests {
         app.drain_plugin_dialog();
 
         assert_eq!(app.picker_kind, Some(PickerKind::Model));
+        assert!(app.plugin_overlay.is_none());
         assert!(app.active_dialog.is_none());
     }
 }

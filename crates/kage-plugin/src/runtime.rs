@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use mlua::Lua;
 
 use crate::api::{self, SharedHostLog, default_host_log};
+use crate::bridge::{self, BridgeStep, SharedBridge, shared_bridge};
 use crate::commands::{self, LuaCommand, RegisteredCommands, registered_commands};
 use crate::error::PluginError;
 use crate::events;
@@ -67,6 +68,7 @@ pub struct PluginRuntime {
     fork_request: SharedForkRequest,
     session_ops: SharedSessionOps,
     pending_messages: SharedPendingMessages,
+    bridge: SharedBridge,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -356,6 +358,72 @@ impl PluginRuntime {
             .unwrap_or_default()
     }
 
+    /// Run `func` inside a fresh plugin coroutine with `args` as its
+    /// positional arguments. Returns [`BridgeStep::Done`] if it ran to
+    /// completion, or [`BridgeStep::Suspended`] if it called a blocking
+    /// API (`kage._suspend`); in the latter case the coroutine is
+    /// parked until [`Self::bridge_resume`] / [`Self::bridge_cancel`] /
+    /// [`Self::bridge_abort`].
+    ///
+    /// Fails with [`PluginError::BridgeBusy`] if another coroutine is
+    /// already parked. The caller must not hold [`Self::lock_lua`] when
+    /// calling this; the bridge takes the lock itself.
+    pub fn bridge_call(
+        &self,
+        func: &mlua::Function,
+        args: &[serde_json::Value],
+    ) -> Result<BridgeStep, PluginError> {
+        let mut slot = self.bridge.lock().expect("plugin bridge mutex poisoned");
+        if slot.is_some() {
+            return Err(PluginError::BridgeBusy);
+        }
+        let lua = self.lock_lua();
+        let thread = lua.create_thread(func.clone())?;
+        let resume_args = bridge::args_to_multi(&lua, args)?;
+        bridge::step(thread, resume_args, &mut slot)
+    }
+
+    /// Resume the parked coroutine, delivering `result` as the return
+    /// value of the blocking call that suspended it. Returns the next
+    /// step (done or suspended again).
+    pub fn bridge_resume(&self, result: &serde_json::Value) -> Result<BridgeStep, PluginError> {
+        let mut slot = self.bridge.lock().expect("plugin bridge mutex poisoned");
+        let thread = slot.take().ok_or(PluginError::BridgeIdle)?;
+        let lua = self.lock_lua();
+        let resume_args = bridge::args_to_multi(&lua, std::slice::from_ref(result))?;
+        bridge::step(thread, resume_args, &mut slot)
+    }
+
+    /// Resume the parked coroutine signalling the host action was
+    /// cancelled. The blocking call returns `nil` to the plugin (the
+    /// PE.B dialog contract for "user dismissed").
+    pub fn bridge_cancel(&self) -> Result<BridgeStep, PluginError> {
+        let mut slot = self.bridge.lock().expect("plugin bridge mutex poisoned");
+        let thread = slot.take().ok_or(PluginError::BridgeIdle)?;
+        let _lua = self.lock_lua();
+        bridge::step(thread, mlua::MultiValue::new(), &mut slot)
+    }
+
+    /// Abandon the parked coroutine without resuming it (hard cancel,
+    /// e.g. the run was aborted while a dialog was open). Returns
+    /// `true` if a coroutine was actually dropped. Idempotent.
+    #[must_use = "the boolean reports whether a coroutine was dropped; \
+                  discard with `let _ =` if only the side effect matters"]
+    pub fn bridge_abort(&self) -> bool {
+        self.bridge
+            .lock()
+            .expect("plugin bridge mutex poisoned")
+            .take()
+            .is_some()
+    }
+
+    /// `true` while a bridged coroutine is parked awaiting a host
+    /// action.
+    #[must_use]
+    pub fn bridge_is_suspended(&self) -> bool {
+        self.bridge.lock().is_ok_and(|slot| slot.is_some())
+    }
+
     /// Drop every registration that came from plugins (event handlers,
     /// tools, commands, providers) and replay every `*.lua` file in
     /// `dir`. Designed for hot reload between turns: a stale plugin
@@ -403,6 +471,9 @@ impl PluginRuntime {
         }
         if let Ok(mut q) = self.session_ops.lock() {
             q.clear();
+        }
+        if let Ok(mut parked) = self.bridge.lock() {
+            *parked = None;
         }
         crate::loader::load_dir(dir, self)
     }
@@ -473,8 +544,10 @@ impl PluginRuntimeBuilder {
         let fork_slot = shared_fork_request();
         let session_ops_slot = shared_session_ops();
         let pending_messages_slot = shared_pending_messages();
+        let bridge_slot = shared_bridge();
         {
             let lua_guard = shared_lua.lock().expect("plugin lua mutex poisoned");
+            bridge::install_suspend(&lua_guard)?;
             tools::install_register_tool(
                 &lua_guard,
                 Arc::clone(&shared_lua),
@@ -534,6 +607,7 @@ impl PluginRuntimeBuilder {
             fork_request: fork_slot,
             session_ops: session_ops_slot,
             pending_messages: pending_messages_slot,
+            bridge: bridge_slot,
         })
     }
 }

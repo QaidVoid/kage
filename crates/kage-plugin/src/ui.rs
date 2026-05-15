@@ -17,7 +17,9 @@
 //! `OverlayPicker`; [`ConfirmRequest::from_payload`] reads the
 //! `ui.confirm` title/message for a yes/no overlay;
 //! [`InputRequest::from_payload`] reads the `ui.input` title and
-//! optional placeholder for a single-line input overlay.
+//! optional placeholder for a single-line input overlay;
+//! [`EditorRequest::from_payload`] reads the `ui.editor` title and
+//! optional prefill for a multi-line editor overlay.
 
 use mlua::Lua;
 
@@ -53,6 +55,15 @@ const UI_LUA: &str = "kage.ui = kage.ui or {}\n\
          error('kage.ui.input: placeholder must be a string or nil', 2)\n  \
        end\n  \
        return kage._suspend('ui.input', { title = title, placeholder = placeholder })\n\
+     end\n\
+     kage.ui.editor = function(title, prefill)\n  \
+       if type(title) ~= 'string' then\n    \
+         error('kage.ui.editor: title must be a string', 2)\n  \
+       end\n  \
+       if prefill ~= nil and type(prefill) ~= 'string' then\n    \
+         error('kage.ui.editor: prefill must be a string or nil', 2)\n  \
+       end\n  \
+       return kage._suspend('ui.editor', { title = title, prefill = prefill })\n\
      end\n";
 
 /// One row the host should render in the picker for a `ui.select`.
@@ -182,6 +193,45 @@ impl InputRequest {
             }
         };
         Ok(Self { title, placeholder })
+    }
+}
+
+/// A parsed `ui.editor` request: the editor title and an optional
+/// prefilled body. The coroutine is resumed with the final text, or
+/// `nil` if the user cancelled.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditorRequest {
+    /// Editor title.
+    pub title: String,
+    /// Initial buffer contents. Empty when the plugin passed none.
+    pub prefill: Option<String>,
+}
+
+impl EditorRequest {
+    /// Parse the payload of a `kind == "ui.editor"` suspend request.
+    /// `title` is a required string; `prefill` is optional (absent or
+    /// JSON null means none) but must be a string when present.
+    pub fn from_payload(payload: &serde_json::Value) -> Result<Self, PluginError> {
+        let obj = payload.as_object().ok_or_else(|| {
+            PluginError::BridgeProtocol("ui.editor payload is not an object".to_owned())
+        })?;
+        let title = obj
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                PluginError::BridgeProtocol("ui.editor payload has no string `title`".to_owned())
+            })?
+            .to_owned();
+        let prefill = match obj.get("prefill") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(s)) => Some(s.clone()),
+            Some(_) => {
+                return Err(PluginError::BridgeProtocol(
+                    "ui.editor `prefill` must be a string".to_owned(),
+                ));
+            }
+        };
+        Ok(Self { title, prefill })
     }
 }
 
@@ -553,5 +603,92 @@ mod tests {
             InputRequest::from_payload(&json!({ "title": "T", "placeholder": 1 })).unwrap_err();
         assert!(matches!(err, PluginError::BridgeProtocol(_)));
         assert!(err.to_string().contains("placeholder"));
+    }
+
+    #[test]
+    fn editor_suspends_with_title_and_optional_prefill() {
+        let rt = PluginRuntime::new().unwrap();
+        let f = func(
+            &rt,
+            "return function() return kage.ui.editor('Note', 'draft body') end",
+        );
+        assert_eq!(
+            rt.bridge_call(&f, &[]).unwrap(),
+            BridgeStep::Suspended(SuspendRequest {
+                kind: "ui.editor".to_owned(),
+                payload: json!({ "title": "Note", "prefill": "draft body" }),
+            })
+        );
+    }
+
+    #[test]
+    fn editor_without_prefill_omits_it() {
+        let rt = PluginRuntime::new().unwrap();
+        let f = func(&rt, "return function() return kage.ui.editor('Note') end");
+        assert_eq!(
+            rt.bridge_call(&f, &[]).unwrap(),
+            BridgeStep::Suspended(SuspendRequest {
+                kind: "ui.editor".to_owned(),
+                payload: json!({ "title": "Note" }),
+            })
+        );
+    }
+
+    #[test]
+    fn editor_returns_resumed_string() {
+        let rt = PluginRuntime::new().unwrap();
+        let f = func(
+            &rt,
+            "return function() return (kage.ui.editor('e') or 'nil') end",
+        );
+        assert!(matches!(
+            rt.bridge_call(&f, &[]).unwrap(),
+            BridgeStep::Suspended(_)
+        ));
+        assert_eq!(
+            rt.bridge_resume(&json!("final text")).unwrap(),
+            BridgeStep::Done(json!("final text"))
+        );
+    }
+
+    #[test]
+    fn editor_cancel_returns_nil() {
+        let rt = PluginRuntime::new().unwrap();
+        let f = func(
+            &rt,
+            "return function() return (kage.ui.editor('e') or 'cancelled') end",
+        );
+        assert!(matches!(
+            rt.bridge_call(&f, &[]).unwrap(),
+            BridgeStep::Suspended(_)
+        ));
+        assert_eq!(
+            rt.bridge_cancel().unwrap(),
+            BridgeStep::Done(json!("cancelled"))
+        );
+    }
+
+    #[test]
+    fn editor_rejects_non_string_prefill() {
+        let rt = PluginRuntime::new().unwrap();
+        let f = func(&rt, "return function() return kage.ui.editor('t', {}) end");
+        let err = rt.bridge_call(&f, &[]).unwrap_err();
+        assert!(matches!(err, PluginError::Lua(_)));
+        assert!(err.to_string().contains("prefill"));
+    }
+
+    #[test]
+    fn editor_from_payload_parses_optional_prefill() {
+        let with = EditorRequest::from_payload(&json!({ "title": "T", "prefill": "x" })).unwrap();
+        assert_eq!(with.prefill.as_deref(), Some("x"));
+        let without = EditorRequest::from_payload(&json!({ "title": "T" })).unwrap();
+        assert_eq!(without.prefill, None);
+    }
+
+    #[test]
+    fn editor_from_payload_rejects_non_string_prefill() {
+        let err = EditorRequest::from_payload(&json!({ "title": "T", "prefill": 7 })).unwrap_err();
+        assert!(matches!(err, PluginError::BridgeProtocol(_)));
+        assert!(err.to_string().contains("prefill"));
     }
 }

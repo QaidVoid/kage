@@ -33,6 +33,7 @@ use crate::error::PluginError;
 use crate::events;
 use crate::fs as plugin_fs;
 use crate::http;
+use crate::keybindings::{self, RegisteredKeybindings, registered_keybindings};
 use crate::lifecycle::{
     self, SharedCompactRequest, SharedUsage, shared_compact_request, shared_usage,
 };
@@ -70,6 +71,7 @@ pub struct PluginRuntime {
     session_ops: SharedSessionOps,
     pending_messages: SharedPendingMessages,
     bridge: SharedBridge,
+    keybindings: RegisteredKeybindings,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -211,6 +213,17 @@ impl PluginRuntime {
         self.commands
             .lock()
             .expect("plugin commands mutex poisoned")
+            .clone()
+    }
+
+    /// Snapshot the keybindings registered by plugins so far. Each
+    /// entry pairs a canonical chord with a bridged handler; the host
+    /// matches chords against terminal key events.
+    #[must_use]
+    pub fn registered_keybindings(&self) -> Vec<Arc<crate::keybindings::LuaKeybinding>> {
+        self.keybindings
+            .lock()
+            .expect("plugin keybindings mutex poisoned")
             .clone()
     }
 
@@ -467,6 +480,10 @@ impl PluginRuntime {
             .lock()
             .expect("plugin providers mutex poisoned")
             .clear();
+        self.keybindings
+            .lock()
+            .expect("plugin keybindings mutex poisoned")
+            .clear();
         if let Ok(mut q) = self.pending_messages.lock() {
             q.clear();
         }
@@ -546,10 +563,17 @@ impl PluginRuntimeBuilder {
         let session_ops_slot = shared_session_ops();
         let pending_messages_slot = shared_pending_messages();
         let bridge_slot = shared_bridge();
+        let keybinding_registry = registered_keybindings();
         {
             let lua_guard = shared_lua.lock().expect("plugin lua mutex poisoned");
             bridge::install_suspend(&lua_guard)?;
             ui::install_ui(&lua_guard)?;
+            keybindings::install_register_keybinding(
+                &lua_guard,
+                Arc::clone(&shared_lua),
+                self.sink.clone(),
+                Arc::clone(&keybinding_registry),
+            )?;
             tools::install_register_tool(
                 &lua_guard,
                 Arc::clone(&shared_lua),
@@ -610,6 +634,7 @@ impl PluginRuntimeBuilder {
             session_ops: session_ops_slot,
             pending_messages: pending_messages_slot,
             bridge: bridge_slot,
+            keybindings: keybinding_registry,
         })
     }
 }

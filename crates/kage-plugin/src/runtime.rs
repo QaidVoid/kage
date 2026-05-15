@@ -44,6 +44,9 @@ use crate::sessions::{
     shared_fork_request, shared_session_list, shared_session_ops,
 };
 use crate::status::{self, SharedStatus, shared_status};
+use crate::theme::{
+    self, SharedThemeRequest, SharedThemeState, shared_theme_request, shared_theme_state,
+};
 use crate::tools::{self, RegisteredTools, registered_tools};
 use crate::ui;
 use crate::widgets::{self, LuaWidget, RegisteredWidgets, registered_widgets};
@@ -72,6 +75,8 @@ pub struct PluginRuntime {
     pending_messages: SharedPendingMessages,
     bridge: SharedBridge,
     keybindings: RegisteredKeybindings,
+    theme_state: SharedThemeState,
+    theme_request: SharedThemeRequest,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -332,6 +337,24 @@ impl PluginRuntime {
             .and_then(|mut slot| slot.take())
     }
 
+    /// Cloneable handle to the theme snapshot. The host overwrites
+    /// `current` / `available` on its redraw cadence so
+    /// `kage.theme.current()` and `kage.theme.list()` stay fresh.
+    #[must_use]
+    pub fn shared_theme_state(&self) -> SharedThemeState {
+        Arc::clone(&self.theme_state)
+    }
+
+    /// Drain a pending `kage.theme.set` request. `Some(name)` means
+    /// the host should validate `name` and switch to it.
+    #[must_use]
+    pub fn take_theme_request(&self) -> Option<String> {
+        self.theme_request
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+    }
+
     /// Cloneable handle to the queue of plugin-supplied messages.
     /// Hosts that want to sample the queue without consuming it (for
     /// diagnostics) hold onto this; production drain goes through
@@ -493,6 +516,9 @@ impl PluginRuntime {
         if let Ok(mut parked) = self.bridge.lock() {
             *parked = None;
         }
+        if let Ok(mut slot) = self.theme_request.lock() {
+            *slot = None;
+        }
         crate::loader::load_dir(dir, self)
     }
 }
@@ -542,6 +568,7 @@ impl PluginRuntimeBuilder {
     /// install the `kage` API table, wire `kage.on`,
     /// `kage.register_tool`, `kage.register_command`,
     /// `kage.register_provider`, and `kage.fs.*`.
+    #[allow(clippy::too_many_lines)]
     pub fn build(self) -> Result<PluginRuntime, PluginError> {
         let lua = Lua::new();
         apply_sandbox(&lua)?;
@@ -564,6 +591,8 @@ impl PluginRuntimeBuilder {
         let pending_messages_slot = shared_pending_messages();
         let bridge_slot = shared_bridge();
         let keybinding_registry = registered_keybindings();
+        let theme_state_slot = shared_theme_state();
+        let theme_request_slot = shared_theme_request();
         {
             let lua_guard = shared_lua.lock().expect("plugin lua mutex poisoned");
             bridge::install_suspend(&lua_guard)?;
@@ -617,6 +646,11 @@ impl PluginRuntimeBuilder {
                 Arc::clone(&session_ops_slot),
             )?;
             messages::install_send_message(&lua_guard, Arc::clone(&pending_messages_slot))?;
+            theme::install_theme(
+                &lua_guard,
+                Arc::clone(&theme_state_slot),
+                Arc::clone(&theme_request_slot),
+            )?;
         }
         Ok(PluginRuntime {
             lua: shared_lua,
@@ -635,6 +669,8 @@ impl PluginRuntimeBuilder {
             pending_messages: pending_messages_slot,
             bridge: bridge_slot,
             keybindings: keybinding_registry,
+            theme_state: theme_state_slot,
+            theme_request: theme_request_slot,
         })
     }
 }

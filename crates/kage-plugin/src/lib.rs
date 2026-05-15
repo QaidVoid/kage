@@ -25,7 +25,7 @@ pub mod widgets;
 
 pub use api::{HostLog, LogLevel, SharedHostLog, StderrHostLog, default_host_log};
 pub use bridge::{BridgeStep, SharedBridge, SuspendRequest};
-pub use commands::{CommandOutput, LuaCommand, PluginArgSpec};
+pub use commands::{BridgeArgs, BridgePrep, CommandOutput, LuaCommand, PluginArgSpec};
 pub use error::PluginError;
 pub use events::{DiscoveryEntries, SessionOpDecision};
 pub use lifecycle::{SharedCompactRequest, SharedUsage};

@@ -6,7 +6,9 @@
 
 use std::path::PathBuf;
 
-use kage_plugin::{HostLog, LogLevel, PluginRuntime, SharedHostLog};
+use kage_plugin::{
+    BridgePrep, BridgeStep, CommandOutput, HostLog, LogLevel, PluginRuntime, SharedHostLog,
+};
 use serde_json::json;
 
 fn examples_dir() -> PathBuf {
@@ -161,4 +163,72 @@ fn git_status_reports_not_a_repo_when_head_missing() {
         "got {:?}",
         r.notifies
     );
+}
+
+fn load_select_demo(sink: SharedHostLog) -> PluginRuntime {
+    let rt = PluginRuntime::builder().sink(sink).build().unwrap();
+    let source = std::fs::read_to_string(examples_dir().join("select_demo.lua"))
+        .expect("read select_demo.lua");
+    rt.eval(&source).expect("select_demo.lua loads");
+    rt
+}
+
+fn pick_color_args(rt: &PluginRuntime) -> kage_plugin::BridgeArgs {
+    let cmd = rt
+        .registered_commands()
+        .into_iter()
+        .find(|c| c.name() == "pick-color")
+        .expect("pick-color command registered");
+    match cmd.prepare_bridge("", &json!(null)).unwrap() {
+        BridgePrep::Ready(bargs) => bargs,
+        BridgePrep::ArgError(out) => panic!("unexpected arg error: {}", out.text),
+    }
+}
+
+#[test]
+fn select_demo_suspends_then_returns_the_resumed_color() {
+    let (rec, sink) = forwarding_sink();
+    let rt = load_select_demo(sink);
+    let bargs = pick_color_args(&rt);
+
+    let step = rt.bridge_call(&bargs.handler, &bargs.args).unwrap();
+    match step {
+        BridgeStep::Suspended(req) => {
+            assert_eq!(req.kind, "ui.select");
+            assert_eq!(
+                req.payload,
+                json!({ "title": "Pick a color", "items": ["red", "green", "blue"] })
+            );
+        }
+        BridgeStep::Done(v) => panic!("expected suspend, got Done({v})"),
+    }
+
+    let done = rt.bridge_resume(&json!("green")).unwrap();
+    let BridgeStep::Done(value) = done else {
+        panic!("expected Done after resume");
+    };
+    assert_eq!(CommandOutput::from_json(&value).text, "you picked green");
+    let r = rec.lock().unwrap();
+    assert!(r.errors.is_empty(), "no plugin errors: {:?}", r.errors);
+    assert!(
+        r.notifies.iter().any(|s| s == "pick-color: green"),
+        "got {:?}",
+        r.notifies
+    );
+}
+
+#[test]
+fn select_demo_cancel_path_returns_cancelled() {
+    let (_rec, sink) = forwarding_sink();
+    let rt = load_select_demo(sink);
+    let bargs = pick_color_args(&rt);
+
+    assert!(matches!(
+        rt.bridge_call(&bargs.handler, &bargs.args).unwrap(),
+        BridgeStep::Suspended(_)
+    ));
+    let BridgeStep::Done(value) = rt.bridge_cancel().unwrap() else {
+        panic!("expected Done after cancel");
+    };
+    assert_eq!(CommandOutput::from_json(&value).text, "cancelled");
 }

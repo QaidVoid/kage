@@ -152,6 +152,34 @@ pub enum AppExit {
 enum PickerKind {
     Model,
     Session,
+    /// A blocking plugin dialog (`kage.ui.select`). The chosen item's
+    /// value is sent back to the parked worker through
+    /// [`App::active_dialog`] rather than a [`RunRequest`].
+    PluginDialog,
+}
+
+/// A blocking plugin dialog the worker handed to the App to run.
+///
+/// `kage.ui.select` suspends the plugin coroutine on the worker
+/// thread; the worker forwards this over a channel and parks on
+/// `reply`. The App opens a picker, then sends the chosen item's
+/// value back (`None` = the user cancelled), and the worker resumes
+/// the coroutine with it.
+pub struct PluginDialog {
+    /// Picker title.
+    pub title: String,
+    /// Rows to choose from, in the plugin's order.
+    pub items: Vec<kage_plugin::SelectItem>,
+    /// Channel the App answers on: `Some(value)` for the chosen
+    /// item's value, `None` for cancel.
+    pub reply: std::sync::mpsc::Sender<Option<serde_json::Value>>,
+}
+
+/// In-flight dialog bookkeeping: how to map the picker's resolved
+/// index back to a plugin value and where to send it.
+struct PluginDialogState {
+    reply: std::sync::mpsc::Sender<Option<serde_json::Value>>,
+    items: Vec<kage_plugin::SelectItem>,
 }
 
 /// Closure that returns the current set of resumable sessions on
@@ -416,6 +444,13 @@ pub struct App {
     /// When `None`, `notify(...)` is a silent no-op: toasts are
     /// decorative and never load-bearing.
     toasts: Option<SharedToasts>,
+    /// Channel the worker pushes blocking [`PluginDialog`] requests
+    /// onto (`kage.ui.select`). Drained between event polls; while a
+    /// dialog is open the worker thread is parked awaiting the answer.
+    dialog_rx: Option<std::sync::mpsc::Receiver<PluginDialog>>,
+    /// Bookkeeping for the dialog currently rendered as a picker.
+    /// Present iff `picker_kind == Some(PickerKind::PluginDialog)`.
+    active_dialog: Option<PluginDialogState>,
 }
 
 impl App {
@@ -455,6 +490,8 @@ impl App {
             session_usage: None,
             cancel_flag: None,
             toasts: None,
+            dialog_rx: None,
+            active_dialog: None,
         }
     }
 
@@ -646,6 +683,14 @@ impl App {
         self.plugin_fork_request = Some(request);
     }
 
+    /// Wire the channel the worker pushes blocking [`PluginDialog`]
+    /// requests onto. Without this, `kage.ui.select` has nowhere to
+    /// surface and the worker's send fails, which it treats as a
+    /// cancel (the plugin call returns `nil`).
+    pub fn set_plugin_dialog(&mut self, rx: std::sync::mpsc::Receiver<PluginDialog>) {
+        self.dialog_rx = Some(rx);
+    }
+
     fn refresh_plugin_widget_texts(&mut self, width: u16) {
         self.plugin_widget_texts = self
             .plugin_widgets
@@ -704,6 +749,44 @@ impl App {
         }
     }
 
+    /// Drain one pending blocking [`PluginDialog`] and open it as a
+    /// picker. Skipped while another overlay is up: the worker stays
+    /// parked and the request is taken on a later tick once the screen
+    /// is free (the bridge is single-slot, so at most one is queued).
+    /// An empty item list resolves immediately to "cancelled" rather
+    /// than opening a dead picker.
+    fn drain_plugin_dialog(&mut self) {
+        if self.picker.is_some() {
+            return;
+        }
+        let Some(rx) = self.dialog_rx.as_ref() else {
+            return;
+        };
+        let Ok(dialog) = rx.try_recv() else {
+            return;
+        };
+        if dialog.items.is_empty() {
+            let _ = dialog.reply.send(None);
+            return;
+        }
+        let picks = dialog
+            .items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| PickItem {
+                value: idx.to_string(),
+                label: item.label.clone(),
+                badge: None,
+            })
+            .collect();
+        self.picker = Some(OverlayPicker::new(dialog.title, picks));
+        self.picker_kind = Some(PickerKind::PluginDialog);
+        self.active_dialog = Some(PluginDialogState {
+            reply: dialog.reply,
+            items: dialog.items,
+        });
+    }
+
     /// Refresh the session-list snapshot read by `kage.session.list`.
     /// Builds `[{id, value}]` entries from the registered
     /// [`SessionLister`]; called once per redraw.
@@ -743,6 +826,7 @@ impl App {
             }
             self.drain_plugin_compact_request();
             self.drain_plugin_fork_request();
+            self.drain_plugin_dialog();
             self.refresh_plugin_session_list();
             if needs_redraw {
                 self.draw(tui)?;
@@ -794,6 +878,9 @@ impl App {
                         Event::Key(key) if key.kind == KeyEventKind::Press => {
                             log_key_event(&key);
                             if let Some(exit) = self.dispatch_key(key) {
+                                if let Some(state) = self.active_dialog.take() {
+                                    let _ = state.reply.send(None);
+                                }
                                 return Ok(exit);
                             }
                         }
@@ -1582,13 +1669,30 @@ impl App {
         match crate::overlay::OverlayWidget::handle_key(picker, key) {
             OverlayAction::Stay | OverlayAction::PropagateKey => {}
             OverlayAction::Close => {
+                let kind = self.picker_kind;
                 self.picker = None;
                 self.picker_kind = None;
+                if matches!(kind, Some(PickerKind::PluginDialog))
+                    && let Some(state) = self.active_dialog.take()
+                {
+                    let _ = state.reply.send(None);
+                }
             }
             OverlayAction::Resolve(value) => {
                 let kind = self.picker_kind;
                 self.picker = None;
                 self.picker_kind = None;
+                if let Some(PickerKind::PluginDialog) = kind {
+                    if let Some(state) = self.active_dialog.take() {
+                        let answer = value
+                            .as_str()
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .and_then(|idx| state.items.get(idx))
+                            .map(|item| item.value.clone());
+                        let _ = state.reply.send(answer);
+                    }
+                    return None;
+                }
                 let serde_json::Value::String(value) = value else {
                     return None;
                 };
@@ -1601,7 +1705,7 @@ impl App {
                             std::path::PathBuf::from(value),
                         ));
                     }
-                    None => {}
+                    Some(PickerKind::PluginDialog) | None => {}
                 }
             }
         }
@@ -2402,5 +2506,111 @@ mod tests {
             sp.cmdline().error().is_some(),
             "validation error should be set on the palette"
         );
+    }
+
+    fn select_item(label: &str, value: serde_json::Value) -> kage_plugin::SelectItem {
+        kage_plugin::SelectItem {
+            label: label.to_owned(),
+            value,
+            detail: None,
+        }
+    }
+
+    #[test]
+    fn plugin_dialog_pick_sends_selected_item_value() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let (dtx, drx) = mpsc::channel();
+        app.set_plugin_dialog(drx);
+        let (reply_tx, reply_rx) = mpsc::channel();
+        dtx.send(PluginDialog {
+            title: "Pick".to_owned(),
+            items: vec![
+                select_item("alpha", serde_json::json!("A")),
+                select_item("beta", serde_json::json!(42)),
+            ],
+            reply: reply_tx,
+        })
+        .unwrap();
+
+        app.drain_plugin_dialog();
+        assert!(app.picker.is_some());
+        assert_eq!(app.picker_kind, Some(PickerKind::PluginDialog));
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(reply_rx.recv().unwrap(), Some(serde_json::json!(42)));
+        assert!(app.picker.is_none());
+        assert!(app.picker_kind.is_none());
+        assert!(app.active_dialog.is_none());
+    }
+
+    #[test]
+    fn plugin_dialog_cancel_sends_none() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let (dtx, drx) = mpsc::channel();
+        app.set_plugin_dialog(drx);
+        let (reply_tx, reply_rx) = mpsc::channel();
+        dtx.send(PluginDialog {
+            title: "Pick".to_owned(),
+            items: vec![select_item("only", serde_json::json!("x"))],
+            reply: reply_tx,
+        })
+        .unwrap();
+
+        app.drain_plugin_dialog();
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(reply_rx.recv().unwrap(), None);
+        assert!(app.picker.is_none());
+        assert!(app.active_dialog.is_none());
+    }
+
+    #[test]
+    fn plugin_dialog_empty_items_resolves_to_none_without_a_picker() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let (dtx, drx) = mpsc::channel();
+        app.set_plugin_dialog(drx);
+        let (reply_tx, reply_rx) = mpsc::channel();
+        dtx.send(PluginDialog {
+            title: "Empty".to_owned(),
+            items: Vec::new(),
+            reply: reply_tx,
+        })
+        .unwrap();
+
+        app.drain_plugin_dialog();
+
+        assert!(app.picker.is_none());
+        assert_eq!(reply_rx.recv().unwrap(), None);
+    }
+
+    #[test]
+    fn plugin_dialog_not_drained_while_another_overlay_is_open() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let (dtx, drx) = mpsc::channel();
+        app.set_plugin_dialog(drx);
+        app.picker = Some(OverlayPicker::new("busy", vec![PickItem::simple("x")]));
+        app.picker_kind = Some(PickerKind::Model);
+        let (reply_tx, _reply_rx) = mpsc::channel();
+        dtx.send(PluginDialog {
+            title: "later".to_owned(),
+            items: vec![select_item("a", serde_json::json!("a"))],
+            reply: reply_tx,
+        })
+        .unwrap();
+
+        app.drain_plugin_dialog();
+
+        assert_eq!(app.picker_kind, Some(PickerKind::Model));
+        assert!(app.active_dialog.is_none());
     }
 }

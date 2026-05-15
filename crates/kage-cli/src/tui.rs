@@ -15,13 +15,13 @@ use std::thread;
 
 use kage_core::{CancelFlag, Content, Message, Role};
 use kage_loop::{AgentContext, LoopConfig, NoopHooks, force_compact, run};
-use kage_plugin::PluginRuntime;
+use kage_plugin::{BridgePrep, BridgeStep, CommandOutput, PluginRuntime, SelectRequest};
 use kage_provider::ProviderRegistry;
 use kage_session::{SessionId, SessionReader, SessionSummary, SessionWriter};
 use kage_tools::ToolRegistry;
 use kage_tui::{
-    App, PickItem, RunRequest, SharedBuffer, SharedSessionUsage, SharedToasts, Toast, Tui,
-    TuiHooks, buffer_host_log, populate_from_history, push_toast, shared_buffer,
+    App, PickItem, PluginDialog, RunRequest, SharedBuffer, SharedSessionUsage, SharedToasts, Toast,
+    Tui, TuiHooks, buffer_host_log, populate_from_history, push_toast, shared_buffer,
     shared_session_usage, shared_toasts,
 };
 
@@ -138,6 +138,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     }
     let cx = Arc::new(Mutex::new(initial_cx));
     let (tx, rx) = mpsc::channel::<RunRequest>();
+    let (dialog_tx, dialog_rx) = mpsc::channel::<PluginDialog>();
 
     // Plan a session up-front but defer creating the file until the
     // first prompt actually lands. Otherwise quitting or resuming
@@ -186,6 +187,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         session_header: session_header.clone(),
         session_usage: session_usage.clone(),
         toasts: toasts.clone(),
+        dialog_tx,
     });
 
     let mut tui = match Tui::enter() {
@@ -216,6 +218,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     if let Some(req) = plugin_fork_request {
         app.set_plugin_fork_request(req);
     }
+    app.set_plugin_dialog(dialog_rx);
     app.set_cancel_flag(cancel.clone());
     app.set_toasts(toasts.clone());
     app.set_session_usage(session_usage);
@@ -267,6 +270,10 @@ struct WorkerConfig {
     /// notifications that should appear as overlays rather than
     /// inline conversation noise.
     toasts: SharedToasts,
+    /// Sender for blocking plugin dialogs (`kage.ui.select`). The
+    /// worker forwards a suspended coroutine's dialog request here and
+    /// parks on a per-request reply channel until the App answers.
+    dialog_tx: mpsc::Sender<PluginDialog>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -285,6 +292,7 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
             session_header,
             session_usage,
             toasts,
+            dialog_tx,
         } = cfg;
         let loop_cfg = LoopConfig::default();
 
@@ -384,42 +392,37 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                 }
                 RunRequest::InvokePluginCommand { name, args } => {
                     if let Some(rt) = plugin_runtime.as_ref() {
-                        let cmd = rt
+                        match rt
                             .registered_commands()
                             .into_iter()
-                            .find(|c| c.name() == name);
-                        if let Some(cmd) = cmd {
-                            match cmd.invoke(&args, &serde_json::Value::Null) {
-                                Ok(out) if !out.text.is_empty() => {
-                                    if let Ok(mut buf) = buffer.lock() {
-                                        buf.push_custom(
-                                            if out.is_error {
-                                                "kage:error"
-                                            } else {
-                                                "kage:plugin"
-                                            },
-                                            out.text,
-                                            false,
-                                        );
-                                    }
-                                }
-                                Ok(_) => {}
-                                Err(e) => {
-                                    if let Ok(mut buf) = buffer.lock() {
-                                        buf.push_custom(
-                                            "kage:error",
-                                            format!("plugin command {name}: {e}"),
-                                            false,
-                                        );
-                                    }
+                            .find(|c| c.name() == name)
+                        {
+                            Some(cmd) => {
+                                if let Some(out) =
+                                    run_bridged_command(rt, &cmd, &args, &dialog_tx, &buffer)
+                                    && !out.text.is_empty()
+                                    && let Ok(mut buf) = buffer.lock()
+                                {
+                                    buf.push_custom(
+                                        if out.is_error {
+                                            "kage:error"
+                                        } else {
+                                            "kage:plugin"
+                                        },
+                                        out.text,
+                                        false,
+                                    );
                                 }
                             }
-                        } else if let Ok(mut buf) = buffer.lock() {
-                            buf.push_custom(
-                                "kage:error",
-                                format!("no plugin command: {name}"),
-                                false,
-                            );
+                            None => {
+                                if let Ok(mut buf) = buffer.lock() {
+                                    buf.push_custom(
+                                        "kage:error",
+                                        format!("no plugin command: {name}"),
+                                        false,
+                                    );
+                                }
+                            }
                         }
                     }
                 }
@@ -632,6 +635,101 @@ fn open_writer_for_turn(
             }
             None
         }
+    }
+}
+
+/// Run a plugin command through the coroutine bridge so its handler
+/// may call blocking `kage.ui.*` dialogs. Drives the suspend/resume
+/// loop to completion and returns the command's output (an error
+/// output on any failure), or `None` when the handler produced
+/// nothing.
+fn run_bridged_command(
+    rt: &PluginRuntime,
+    cmd: &kage_plugin::LuaCommand,
+    raw: &str,
+    dialog_tx: &mpsc::Sender<PluginDialog>,
+    buffer: &SharedBuffer,
+) -> Option<CommandOutput> {
+    let prep = match cmd.prepare_bridge(raw, &serde_json::Value::Null) {
+        Ok(prep) => prep,
+        Err(e) => return Some(error_output(cmd.name(), &e.to_string())),
+    };
+    let bargs = match prep {
+        BridgePrep::Ready(bargs) => bargs,
+        BridgePrep::ArgError(out) => return Some(out),
+    };
+    let mut step = match rt.bridge_call(&bargs.handler, &bargs.args) {
+        Ok(step) => step,
+        Err(e) => return Some(error_output(cmd.name(), &e.to_string())),
+    };
+    loop {
+        match step {
+            BridgeStep::Done(value) => return Some(CommandOutput::from_json(&value)),
+            BridgeStep::Suspended(req) => {
+                let resumed = match service_dialog(&req, dialog_tx, buffer) {
+                    Some(value) => rt.bridge_resume(&value),
+                    None => rt.bridge_cancel(),
+                };
+                step = match resumed {
+                    Ok(step) => step,
+                    Err(e) => {
+                        let _ = rt.bridge_abort();
+                        return Some(error_output(cmd.name(), &e.to_string()));
+                    }
+                };
+            }
+        }
+    }
+}
+
+/// Service one suspended dialog request. Only `ui.select` is wired
+/// today; the parked coroutine is resumed with the chosen item value,
+/// or `None` (cancel) on dismissal, an unsupported kind, or a
+/// malformed payload (the latter two are also logged to the buffer).
+fn service_dialog(
+    req: &kage_plugin::SuspendRequest,
+    dialog_tx: &mpsc::Sender<PluginDialog>,
+    buffer: &SharedBuffer,
+) -> Option<serde_json::Value> {
+    if req.kind != "ui.select" {
+        push_error(buffer, &format!("unsupported plugin dialog: {}", req.kind));
+        return None;
+    }
+    let sel = match SelectRequest::from_payload(&req.payload) {
+        Ok(sel) => sel,
+        Err(e) => {
+            push_error(buffer, &format!("ui.select: {e}"));
+            return None;
+        }
+    };
+    let (reply_tx, reply_rx) = mpsc::channel();
+    if dialog_tx
+        .send(PluginDialog {
+            title: sel.title,
+            items: sel.items,
+            reply: reply_tx,
+        })
+        .is_err()
+    {
+        return None;
+    }
+    reply_rx.recv().unwrap_or(None)
+}
+
+/// Build a one-line error [`CommandOutput`] for a failed plugin
+/// command, matching the inline-error style the old direct path used.
+fn error_output(name: &str, msg: &str) -> CommandOutput {
+    CommandOutput {
+        text: format!("plugin command {name}: {msg}"),
+        is_error: true,
+        structured: None,
+    }
+}
+
+/// Push a `kage:error` block into the conversation buffer.
+fn push_error(buffer: &SharedBuffer, msg: &str) {
+    if let Ok(mut buf) = buffer.lock() {
+        buf.push_custom("kage:error", msg.to_owned(), false);
     }
 }
 

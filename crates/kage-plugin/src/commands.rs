@@ -158,6 +158,43 @@ impl LuaCommand {
             }
         }
     }
+
+    /// Prepare a bridged invocation: parse args against the schema and
+    /// fetch the handler, returning owned values that outlive the Lua
+    /// lock (so the caller can hand them to
+    /// [`crate::PluginRuntime::bridge_call`] without nesting locks).
+    ///
+    /// Unlike [`Self::invoke`], the handler runs inside a coroutine, so
+    /// it may call blocking `kage.ui.*` APIs. Argument-parse failures
+    /// come back as [`BridgePrep::ArgError`] (same text as `invoke`'s
+    /// inline error), not a hard `Err`.
+    pub fn prepare_bridge(
+        &self,
+        raw: &str,
+        ctx: &serde_json::Value,
+    ) -> Result<BridgePrep, PluginError> {
+        let lua = self.lua.lock().expect("plugin lua mutex poisoned");
+        let parsed = match build_parsed_args(&lua, raw, &self.args) {
+            Ok(table) => table,
+            Err(err) => {
+                return Ok(BridgePrep::ArgError(CommandOutput {
+                    text: format!("{}: {err}", self.name),
+                    is_error: true,
+                    structured: None,
+                }));
+            }
+        };
+        let parsed_json = lua_to_json(mlua::Value::Table(parsed))?;
+        let handler: Function = lua.registry_value(&self.handler_key)?;
+        Ok(BridgePrep::Ready(BridgeArgs {
+            handler,
+            args: vec![
+                serde_json::Value::String(raw.to_owned()),
+                ctx.clone(),
+                parsed_json,
+            ],
+        }))
+    }
 }
 
 /// Walk the plugin's arg schema and pull values out of the raw input
@@ -345,6 +382,75 @@ impl CommandOutput {
             },
         }
     }
+
+    /// Build a [`CommandOutput`] from a handler's return value already
+    /// converted to JSON. Used by the bridged invocation path (a
+    /// coroutine's final value comes back as `serde_json::Value`, not
+    /// `mlua::Value`). Mirrors [`Self::from_value`]: a string is the
+    /// text, an object reads `text` / `is_error` / `structured`, null
+    /// is empty, anything else is stringified.
+    #[must_use]
+    pub fn from_json(value: &serde_json::Value) -> Self {
+        match value {
+            serde_json::Value::Null => Self {
+                text: String::new(),
+                is_error: false,
+                structured: None,
+            },
+            serde_json::Value::String(s) => Self {
+                text: s.clone(),
+                is_error: false,
+                structured: None,
+            },
+            serde_json::Value::Object(map) => Self {
+                text: map
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                is_error: map
+                    .get("is_error")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                structured: map.get("structured").filter(|v| !v.is_null()).cloned(),
+            },
+            other => Self {
+                text: other.to_string(),
+                is_error: false,
+                structured: None,
+            },
+        }
+    }
+}
+
+/// Handler plus positional JSON arguments ready to run through the
+/// coroutine bridge ([`crate::PluginRuntime::bridge_call`]). The args
+/// are `[raw_arg_string, host_ctx, parsed_args]`, matching the
+/// `(args, ctx, parsed_args)` shape [`LuaCommand::invoke`] passes.
+pub struct BridgeArgs {
+    /// The plugin's Lua handler, fetched from the registry.
+    pub handler: Function,
+    /// Positional arguments for the handler, in order.
+    pub args: Vec<serde_json::Value>,
+}
+
+impl std::fmt::Debug for BridgeArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BridgeArgs")
+            .field("args", &self.args)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Outcome of [`LuaCommand::prepare_bridge`]: either everything needed
+/// to run the handler, or a ready-to-render argument error (a missing
+/// required arg is the plugin user's mistake, not a host failure).
+#[derive(Debug)]
+pub enum BridgePrep {
+    /// Arguments parsed; run [`BridgeArgs`] through the bridge.
+    Ready(BridgeArgs),
+    /// Argument parsing failed; surface this output instead of running.
+    ArgError(CommandOutput),
 }
 
 /// Shared slash-command registry. Cloned into the Lua callback so

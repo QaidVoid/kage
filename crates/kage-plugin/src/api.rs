@@ -1,9 +1,13 @@
 //! `kage` Lua module: small surface plugins use to ask the host for
 //! anything they cannot do safely on their own.
 //!
-//! v0.1 ships four entries:
+//! v0.1 ships:
 //! * `kage.now_ms()` returns wall-clock milliseconds since the Unix epoch.
-//! * `kage.notify(message)` surfaces a one-line user-visible notification.
+//! * `kage.ui.notify(message, level?)` surfaces a one-line user-visible
+//!   notification; `level` is `"info"` (default), `"warning"`, or
+//!   `"error"`. Non-info levels are also recorded via the log sink so
+//!   the severity is not lost. `kage.notify` is a back-compat alias for
+//!   the same function (the pre-PE.B name).
 //! * `kage.log(level, message)` records a structured log line; `level` is
 //!   one of `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`.
 //! * `kage.config()` returns a copy of the host-supplied configuration
@@ -92,15 +96,32 @@ pub fn install(
     kage.set("now_ms", lua.create_function(now_ms)?)?;
 
     let notify_sink = sink.clone();
-    kage.set(
-        "notify",
-        lua.create_function(move |_, msg: String| {
-            if let Ok(mut s) = notify_sink.lock() {
-                s.notify(&msg);
+    let notify = lua.create_function(move |_, (msg, level): (String, Option<String>)| {
+        let escalate = match level.as_deref().unwrap_or("info") {
+            "info" => None,
+            "warning" | "warn" => Some(LogLevel::Warn),
+            "error" => Some(LogLevel::Error),
+            other => {
+                return Err(mlua::Error::external(format!(
+                    "kage.ui.notify: level must be \"info\", \"warning\", or \"error\", \
+                     got \"{other}\""
+                )));
             }
-            Ok(())
-        })?,
-    )?;
+        };
+        if let Ok(mut s) = notify_sink.lock() {
+            s.notify(&msg);
+            if let Some(level) = escalate {
+                s.log(level, &msg);
+            }
+        }
+        Ok(())
+    })?;
+    let ui = lua.create_table()?;
+    ui.set("notify", notify.clone())?;
+    kage.set("ui", ui)?;
+    // Back-compat: `kage.notify(message)` predates the `kage.ui.*`
+    // grouping. Same function; the optional level arg is additive.
+    kage.set("notify", notify)?;
 
     let log_sink = sink;
     kage.set(
@@ -289,6 +310,54 @@ mod tests {
         let r = rec.lock().unwrap();
         assert_eq!(r.notifies, vec!["hello".to_owned()]);
         assert_eq!(r.logs, vec![(LogLevel::Warn, "careful".to_owned())]);
+    }
+
+    #[test]
+    fn ui_notify_info_only_notifies() {
+        let lua = Lua::new();
+        let rec = install_recording(&lua);
+        lua.load("kage.ui.notify('hi')").exec().unwrap();
+        let r = rec.lock().unwrap();
+        assert_eq!(r.notifies, vec!["hi".to_owned()]);
+        assert!(r.logs.is_empty());
+    }
+
+    #[test]
+    fn ui_notify_warning_and_error_also_log() {
+        let lua = Lua::new();
+        let rec = install_recording(&lua);
+        lua.load("kage.ui.notify('careful', 'warning'); kage.ui.notify('boom', 'error')")
+            .exec()
+            .unwrap();
+        let r = rec.lock().unwrap();
+        assert_eq!(r.notifies, vec!["careful".to_owned(), "boom".to_owned()]);
+        assert_eq!(
+            r.logs,
+            vec![
+                (LogLevel::Warn, "careful".to_owned()),
+                (LogLevel::Error, "boom".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn ui_notify_rejects_unknown_level() {
+        let lua = Lua::new();
+        install_recording(&lua);
+        let err = lua.load("kage.ui.notify('x', 'loud')").exec().unwrap_err();
+        assert!(err.to_string().contains("level"));
+    }
+
+    #[test]
+    fn notify_alias_matches_ui_notify() {
+        let lua = Lua::new();
+        let rec = install_recording(&lua);
+        lua.load("kage.notify('legacy'); kage.notify('warned', 'warning')")
+            .exec()
+            .unwrap();
+        let r = rec.lock().unwrap();
+        assert_eq!(r.notifies, vec!["legacy".to_owned(), "warned".to_owned()]);
+        assert_eq!(r.logs, vec![(LogLevel::Warn, "warned".to_owned())]);
     }
 
     #[test]

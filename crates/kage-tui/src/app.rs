@@ -192,6 +192,16 @@ pub enum PluginDialog {
         /// Channel the App answers on.
         reply: std::sync::mpsc::Sender<Option<serde_json::Value>>,
     },
+    /// `kage.ui.editor`: a multi-line text editor. Resumes with the
+    /// final buffer, or `nil` on cancel.
+    Editor {
+        /// Editor title.
+        title: String,
+        /// Optional initial buffer contents.
+        prefill: Option<String>,
+        /// Channel the App answers on.
+        reply: std::sync::mpsc::Sender<Option<serde_json::Value>>,
+    },
 }
 
 /// In-flight dialog bookkeeping: the reply channel plus how to turn an
@@ -214,13 +224,21 @@ enum PluginDialogState {
     Input {
         reply: std::sync::mpsc::Sender<Option<serde_json::Value>>,
     },
+    /// `kage.ui.editor`: the overlay resolves with the final buffer;
+    /// pass it straight through.
+    Editor {
+        reply: std::sync::mpsc::Sender<Option<serde_json::Value>>,
+    },
 }
 
 impl PluginDialogState {
     /// The channel the parked worker is waiting on.
     fn reply(&self) -> &std::sync::mpsc::Sender<Option<serde_json::Value>> {
         match self {
-            Self::Select { reply, .. } | Self::Confirm { reply } | Self::Input { reply } => reply,
+            Self::Select { reply, .. }
+            | Self::Confirm { reply }
+            | Self::Input { reply }
+            | Self::Editor { reply } => reply,
         }
     }
 
@@ -234,7 +252,7 @@ impl PluginDialogState {
                 .and_then(|idx| items.get(idx))
                 .map(|item| item.value.clone()),
             Self::Confirm { .. } => Some(serde_json::Value::Bool(value.as_bool().unwrap_or(false))),
-            Self::Input { .. } => Some(value.clone()),
+            Self::Input { .. } | Self::Editor { .. } => Some(value.clone()),
         }
     }
 
@@ -243,7 +261,7 @@ impl PluginDialogState {
     /// resumes with `false` so the call always returns a boolean.
     fn cancelled(&self) -> Option<serde_json::Value> {
         match self {
-            Self::Select { .. } | Self::Input { .. } => None,
+            Self::Select { .. } | Self::Input { .. } | Self::Editor { .. } => None,
             Self::Confirm { .. } => Some(serde_json::Value::Bool(false)),
         }
     }
@@ -881,6 +899,18 @@ impl App {
                 }
                 self.plugin_overlay = Some(Box::new(overlay));
                 self.active_dialog = Some(PluginDialogState::Input { reply });
+            }
+            PluginDialog::Editor {
+                title,
+                prefill,
+                reply,
+            } => {
+                let mut overlay = crate::overlay::EditorOverlay::new(title);
+                if let Some(text) = prefill {
+                    overlay = overlay.with_prefill(text);
+                }
+                self.plugin_overlay = Some(Box::new(overlay));
+                self.active_dialog = Some(PluginDialogState::Editor { reply });
             }
         }
     }
@@ -2834,6 +2864,50 @@ mod tests {
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(buffer, tx);
         let reply_rx = open_input(&mut app);
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(reply_rx.recv().unwrap(), None);
+        assert!(app.plugin_overlay.is_none());
+        assert!(app.active_dialog.is_none());
+    }
+
+    fn open_editor(app: &mut App) -> std::sync::mpsc::Receiver<Option<serde_json::Value>> {
+        let (dtx, drx) = mpsc::channel();
+        app.set_plugin_dialog(drx);
+        let (reply_tx, reply_rx) = mpsc::channel();
+        dtx.send(PluginDialog::Editor {
+            title: "Compose".to_owned(),
+            prefill: Some("hi".to_owned()),
+            reply: reply_tx,
+        })
+        .unwrap();
+        app.drain_plugin_dialog();
+        assert!(app.plugin_overlay.is_some());
+        reply_rx
+    }
+
+    #[test]
+    fn plugin_editor_ctrl_s_resumes_with_buffer() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let reply_rx = open_editor(&mut app);
+
+        app.handle_key(key('!'));
+        app.handle_key(ctrl('s'));
+
+        assert_eq!(reply_rx.recv().unwrap(), Some(serde_json::json!("hi!")));
+        assert!(app.plugin_overlay.is_none());
+        assert!(app.active_dialog.is_none());
+    }
+
+    #[test]
+    fn plugin_editor_cancel_resumes_with_nil() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let reply_rx = open_editor(&mut app);
 
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 

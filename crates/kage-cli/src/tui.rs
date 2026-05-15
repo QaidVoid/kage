@@ -16,8 +16,8 @@ use std::thread;
 use kage_core::{CancelFlag, Content, Message, Role};
 use kage_loop::{AgentContext, LoopConfig, NoopHooks, force_compact, run};
 use kage_plugin::{
-    BridgePrep, BridgeStep, CommandOutput, ConfirmRequest, InputRequest, PluginRuntime,
-    SelectRequest,
+    BridgePrep, BridgeStep, CommandOutput, ConfirmRequest, EditorRequest, InputRequest,
+    PluginRuntime, SelectRequest,
 };
 use kage_provider::ProviderRegistry;
 use kage_session::{SessionId, SessionReader, SessionSummary, SessionWriter};
@@ -727,6 +727,17 @@ fn service_dialog(
             },
             Err(e) => {
                 push_error(buffer, &format!("ui.input: {e}"));
+                return None;
+            }
+        },
+        "ui.editor" => match EditorRequest::from_payload(&req.payload) {
+            Ok(ed) => PluginDialog::Editor {
+                title: ed.title,
+                prefill: ed.prefill,
+                reply: reply_tx,
+            },
+            Err(e) => {
+                push_error(buffer, &format!("ui.editor: {e}"));
                 return None;
             }
         },

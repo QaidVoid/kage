@@ -11,10 +11,11 @@
 //! cannot cross a Rust call frame in non-async mlua. They do only
 //! shape validation, then hand off to `kage._suspend`.
 //!
-//! The host reads the parked request's payload through
-//! [`SelectRequest::from_payload`], which normalises the plugin's
-//! `items` (bare strings or `{label, value?, detail?}` tables) into a
-//! uniform list it can render in an `OverlayPicker`.
+//! The host reads each parked request's payload through a typed
+//! parser: [`SelectRequest::from_payload`] normalises `ui.select`
+//! `items` (bare strings or `{label, value?, detail?}` tables) for an
+//! `OverlayPicker`; [`ConfirmRequest::from_payload`] reads the
+//! `ui.confirm` title/message for a yes/no overlay.
 
 use mlua::Lua;
 
@@ -32,6 +33,15 @@ const UI_LUA: &str = "kage.ui = kage.ui or {}\n\
          error('kage.ui.select: items must be a table', 2)\n  \
        end\n  \
        return kage._suspend('ui.select', { title = title, items = items })\n\
+     end\n\
+     kage.ui.confirm = function(title, message)\n  \
+       if type(title) ~= 'string' then\n    \
+         error('kage.ui.confirm: title must be a string', 2)\n  \
+       end\n  \
+       if type(message) ~= 'string' then\n    \
+         error('kage.ui.confirm: message must be a string', 2)\n  \
+       end\n  \
+       return kage._suspend('ui.confirm', { title = title, message = message })\n\
      end\n";
 
 /// One row the host should render in the picker for a `ui.select`.
@@ -87,6 +97,40 @@ impl SelectRequest {
             items.push(parse_item(idx, raw)?);
         }
         Ok(Self { title, items })
+    }
+}
+
+/// A parsed `ui.confirm` request: the title and body the host shows
+/// in a yes/no overlay. The coroutine is resumed with a JSON boolean.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfirmRequest {
+    /// Overlay title.
+    pub title: String,
+    /// Body text explaining what is being confirmed.
+    pub message: String,
+}
+
+impl ConfirmRequest {
+    /// Parse the payload of a `kind == "ui.confirm"` suspend request.
+    /// Both `title` and `message` are required strings; anything else
+    /// is a plugin contract violation and surfaces as
+    /// [`PluginError::BridgeProtocol`].
+    pub fn from_payload(payload: &serde_json::Value) -> Result<Self, PluginError> {
+        let obj = payload.as_object().ok_or_else(|| {
+            PluginError::BridgeProtocol("ui.confirm payload is not an object".to_owned())
+        })?;
+        let field = |key: &str| -> Result<String, PluginError> {
+            obj.get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    PluginError::BridgeProtocol(format!("ui.confirm payload has no string `{key}`"))
+                })
+        };
+        Ok(Self {
+            title: field("title")?,
+            message: field("message")?,
+        })
     }
 }
 
@@ -300,5 +344,74 @@ mod tests {
     fn from_payload_allows_empty_items() {
         let req = SelectRequest::from_payload(&json!({ "title": "T", "items": [] })).unwrap();
         assert!(req.items.is_empty());
+    }
+
+    #[test]
+    fn confirm_suspends_with_title_and_message_payload() {
+        let rt = PluginRuntime::new().unwrap();
+        let f = func(
+            &rt,
+            "return function() return kage.ui.confirm('Delete?', 'are you sure') end",
+        );
+        let step = rt.bridge_call(&f, &[]).unwrap();
+        assert_eq!(
+            step,
+            BridgeStep::Suspended(SuspendRequest {
+                kind: "ui.confirm".to_owned(),
+                payload: json!({ "title": "Delete?", "message": "are you sure" }),
+            })
+        );
+    }
+
+    #[test]
+    fn confirm_returns_resumed_boolean() {
+        let rt = PluginRuntime::new().unwrap();
+        let f = func(
+            &rt,
+            "return function()\n  \
+               if kage.ui.confirm('t', 'm') then return 'yes' end\n  \
+               return 'no'\n\
+             end",
+        );
+        assert!(matches!(
+            rt.bridge_call(&f, &[]).unwrap(),
+            BridgeStep::Suspended(_)
+        ));
+        assert_eq!(
+            rt.bridge_resume(&json!(true)).unwrap(),
+            BridgeStep::Done(json!("yes"))
+        );
+    }
+
+    #[test]
+    fn confirm_rejects_non_string_title() {
+        let rt = PluginRuntime::new().unwrap();
+        let f = func(&rt, "return function() return kage.ui.confirm(1, 'm') end");
+        let err = rt.bridge_call(&f, &[]).unwrap_err();
+        assert!(matches!(err, PluginError::Lua(_)));
+        assert!(err.to_string().contains("title"));
+    }
+
+    #[test]
+    fn confirm_rejects_non_string_message() {
+        let rt = PluginRuntime::new().unwrap();
+        let f = func(&rt, "return function() return kage.ui.confirm('t', {}) end");
+        let err = rt.bridge_call(&f, &[]).unwrap_err();
+        assert!(matches!(err, PluginError::Lua(_)));
+        assert!(err.to_string().contains("message"));
+    }
+
+    #[test]
+    fn confirm_from_payload_parses_fields() {
+        let req = ConfirmRequest::from_payload(&json!({ "title": "T", "message": "M" })).unwrap();
+        assert_eq!(req.title, "T");
+        assert_eq!(req.message, "M");
+    }
+
+    #[test]
+    fn confirm_from_payload_rejects_missing_message() {
+        let err = ConfirmRequest::from_payload(&json!({ "title": "T" })).unwrap_err();
+        assert!(matches!(err, PluginError::BridgeProtocol(_)));
+        assert!(err.to_string().contains("message"));
     }
 }

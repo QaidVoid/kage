@@ -80,5 +80,18 @@ Editing the line clears the error.
 | `n` / `N` | Jump to next / previous search match         |
 | `Ctrl+P`  | Open model picker                            |
 | `Ctrl+S`  | Open session picker                          |
+| `Shift+Tab` | Cycle thinking level (off -> minimal -> low -> medium -> high -> xhigh) |
 | `y`       | Yank current selection                       |
 | `Y`       | Yank focused block                           |
+
+The active thinking level shows as a `think:<level>` pill in the
+modeline (hidden when off), next to the running token cost.
+
+## plugin keybindings
+
+Plugins bind their own chords with
+[`kage.register_keybinding`](/plugins/api#keybindings). A plugin
+chord is checked before built-in key handling, so it wins over the
+built-in binding for that key - but never over an open modal layer
+or the `Ctrl+Q` quit hatch. Binding a reserved chord still works
+and logs a warning.

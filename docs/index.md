@@ -17,7 +17,7 @@ features:
     text: vim-style modes, sticky search, a slash command palette, and a colon ex-line that share one autocomplete engine.
   - tag: 02
     title: lua plugins
-    text: tools, commands, status widgets, and event hooks defined in sandboxed Lua. Hot reload on file change.
+    text: tools, commands, keybindings, blocking dialogs, status widgets, and ~25 event hooks defined in sandboxed Lua. Hot reload on file change.
   - tag: 03
     title: append-only sessions
     text: every turn lands in a JSONL session file you can inspect with cat, search with rg, fork at any entry, and resume.

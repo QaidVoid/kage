@@ -1,7 +1,7 @@
 # themes
 
 kage ships bundled themes and lets you drop additional ones into
-`~/.config/kage/themes/`.
+`~/.kage/themes/`.
 
 ## switching themes
 
@@ -16,7 +16,7 @@ The change applies immediately and persists by writing to your
 
 ## writing a custom theme
 
-A theme is a TOML file under `~/.config/kage/themes/<name>.toml`:
+A theme is a TOML file under `~/.kage/themes/<name>.toml`:
 
 ```toml
 name = "amber-cli"

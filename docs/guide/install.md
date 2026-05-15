@@ -40,6 +40,30 @@ kage --help
 If your shell cannot find `kage`, restart it or re-source your shell
 init file so the new directory shows up in `PATH`.
 
+Optional shell completion (`bash`, `zsh`, `fish`, `elvish`):
+
+```bash
+kage completions zsh > ~/.zfunc/_kage
+```
+
+## first-run setup
+
+`kage init` writes a starter `~/.kage/config.toml` and offers to
+save a provider credential interactively (`--force` overwrites an
+existing file, `--non-interactive` skips the prompts):
+
+```bash
+kage init
+```
+
+`kage doctor` checks the install end to end - it parses the config,
+lists usable providers, validates discovered plugins, and reports
+the sandbox state, exiting non-zero if anything is broken:
+
+```bash
+kage doctor
+```
+
 ## set up a provider
 
 kage talks to LLM providers through API keys read from your
@@ -56,12 +80,14 @@ export ZAI_CODING_API_KEY=...
 Alternatively, save credentials with the built-in auth flow:
 
 ```bash
-kage auth login anthropic
-kage auth list
+kage auth login anthropic   # prompts silently for the key
+kage auth list              # providers with saved credentials
+kage auth logout anthropic  # remove a saved key
 ```
 
-Saved credentials live at `~/.config/kage/auth.json` with `0600`
-permissions.
+Saved credentials live at `~/.local/share/kage/auth.json`
+(`$XDG_DATA_HOME/kage/auth.json`) with `0600` permissions.
+Environment variables take precedence over saved keys.
 
 ## next step
 

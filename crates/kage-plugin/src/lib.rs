@@ -19,6 +19,7 @@ pub mod runtime;
 pub mod sessions;
 pub mod status;
 pub mod tools;
+pub mod ui;
 pub mod watcher;
 pub mod widgets;
 
@@ -35,5 +36,6 @@ pub use runtime::{PluginRuntime, PluginRuntimeBuilder, SANDBOX_REMOVALS, SharedL
 pub use sessions::{PendingSessionOp, SharedForkRequest, SharedSessionList, SharedSessionOps};
 pub use status::SharedStatus;
 pub use tools::LuaTool;
+pub use ui::{SelectItem, SelectRequest};
 pub use watcher::PluginWatcher;
 pub use widgets::LuaWidget;

@@ -44,6 +44,7 @@ use crate::sessions::{
 };
 use crate::status::{self, SharedStatus, shared_status};
 use crate::tools::{self, RegisteredTools, registered_tools};
+use crate::ui;
 use crate::widgets::{self, LuaWidget, RegisteredWidgets, registered_widgets};
 
 /// Shared, mutex-guarded handle to the Lua state. Plugin-defined tools
@@ -548,6 +549,7 @@ impl PluginRuntimeBuilder {
         {
             let lua_guard = shared_lua.lock().expect("plugin lua mutex poisoned");
             bridge::install_suspend(&lua_guard)?;
+            ui::install_ui(&lua_guard)?;
             tools::install_register_tool(
                 &lua_guard,
                 Arc::clone(&shared_lua),

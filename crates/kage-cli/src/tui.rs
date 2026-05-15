@@ -98,6 +98,10 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     let mut plugin_compact_request: Option<kage_plugin::SharedCompactRequest> = None;
     let mut plugin_session_list: Option<kage_plugin::SharedSessionList> = None;
     let mut plugin_fork_request: Option<kage_plugin::SharedForkRequest> = None;
+    let mut plugin_theme: Option<(
+        kage_plugin::SharedThemeState,
+        kage_plugin::SharedThemeRequest,
+    )> = None;
     let mut plugin_keybinding_chords: Vec<String> = Vec::new();
     if let Some(rt) = plugin_runtime.as_ref() {
         for tool in rt.registered_tools() {
@@ -131,6 +135,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         plugin_compact_request = Some(rt.shared_compact_request());
         plugin_session_list = Some(rt.shared_session_list());
         plugin_fork_request = Some(rt.shared_fork_request());
+        plugin_theme = Some((rt.shared_theme_state(), rt.shared_theme_request()));
         plugin_keybinding_chords = rt
             .registered_keybindings()
             .iter()
@@ -226,6 +231,9 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     }
     if let Some(req) = plugin_fork_request {
         app.set_plugin_fork_request(req);
+    }
+    if let Some((state, request)) = plugin_theme {
+        app.set_plugin_theme(state, request);
     }
     app.set_plugin_dialog(dialog_rx);
     app.set_plugin_keybindings(plugin_keybinding_chords);

@@ -487,6 +487,12 @@ pub struct App {
     /// Pending fork-request slot populated by `kage.session.fork`.
     /// Drained between event polls; the worker performs the fork.
     plugin_fork_request: Option<kage_plugin::SharedForkRequest>,
+    /// Theme snapshot `kage.theme.current()` / `list()` read from.
+    /// Refreshed each redraw with the active theme + bundled names.
+    plugin_theme_state: Option<kage_plugin::SharedThemeState>,
+    /// Pending `kage.theme.set` slot. Drained between event polls and
+    /// applied on this (UI) thread, the same path as `:theme set`.
+    plugin_theme_request: Option<kage_plugin::SharedThemeRequest>,
     /// Pending request to toggle terminal mouse capture, applied by
     /// `run` between iterations. `None` means leave the capture state
     /// as-is. The indirection exists because `run_command` can't
@@ -584,6 +590,8 @@ impl App {
             plugin_compact_request: None,
             plugin_session_list: None,
             plugin_fork_request: None,
+            plugin_theme_state: None,
+            plugin_theme_request: None,
             search_line: None,
             search_pattern: None,
             mouse_drag_anchor: None,
@@ -788,6 +796,19 @@ impl App {
         self.plugin_fork_request = Some(request);
     }
 
+    /// Wire the theme snapshot and pending-switch slots so
+    /// `kage.theme.*` can read the active theme / list and request a
+    /// switch. Without these the read APIs see empty values and
+    /// `kage.theme.set` is a no-op.
+    pub fn set_plugin_theme(
+        &mut self,
+        state: kage_plugin::SharedThemeState,
+        request: kage_plugin::SharedThemeRequest,
+    ) {
+        self.plugin_theme_state = Some(state);
+        self.plugin_theme_request = Some(request);
+    }
+
     /// Register the plugin keybindings the App should dispatch.
     /// `chords` are canonical strings from the plugin runtime; an
     /// entry that fails to parse is dropped (the runtime already
@@ -862,6 +883,29 @@ impl App {
         let pending = slot.lock().ok().and_then(|mut g| g.take());
         if let Some(at) = pending {
             let _ = self.send_request(RunRequest::ForkSession { at });
+        }
+    }
+
+    /// Refresh the theme snapshot `kage.theme.*` reads, then drain a
+    /// pending `kage.theme.set` and apply it on this thread (the same
+    /// path as `:theme set`, so an unknown name surfaces an inline
+    /// error rather than failing silently).
+    fn drain_plugin_theme(&mut self) {
+        let pending = self
+            .plugin_theme_request
+            .as_ref()
+            .and_then(|slot| slot.lock().ok().and_then(|mut g| g.take()));
+        if let Some(name) = pending {
+            self.apply_theme_by_name(&name);
+        }
+        if let Some(state) = self.plugin_theme_state.as_ref()
+            && let Ok(mut s) = state.lock()
+        {
+            s.current = crate::theme::current().name;
+            s.available = crate::theme::Theme::bundled_names()
+                .iter()
+                .map(|n| (*n).to_owned())
+                .collect();
         }
     }
 
@@ -981,6 +1025,7 @@ impl App {
             self.drain_plugin_compact_request();
             self.drain_plugin_fork_request();
             self.drain_plugin_dialog();
+            self.drain_plugin_theme();
             self.refresh_plugin_session_list();
             if needs_redraw {
                 self.draw(tui)?;
@@ -2999,5 +3044,32 @@ mod tests {
         app.handle_key(ctrl('g'));
 
         assert!(rx.try_recv().is_err(), "picker should swallow the chord");
+    }
+
+    #[test]
+    fn drain_plugin_theme_refreshes_snapshot_and_applies_request() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let state: kage_plugin::SharedThemeState =
+            std::sync::Arc::new(std::sync::Mutex::new(kage_plugin::ThemeState::default()));
+        let request: kage_plugin::SharedThemeRequest =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        app.set_plugin_theme(state.clone(), request.clone());
+
+        // First drain with no request: snapshot is populated.
+        app.drain_plugin_theme();
+        {
+            let s = state.lock().unwrap();
+            assert!(!s.current.is_empty());
+            assert!(s.available.iter().any(|n| n == "tokyo-night"));
+        }
+
+        // Queue a switch; next drain applies it on this thread.
+        *request.lock().unwrap() = Some("tokyo-night".to_owned());
+        app.drain_plugin_theme();
+        assert_eq!(crate::theme::current().name, "tokyo-night");
+        assert_eq!(state.lock().unwrap().current, "tokyo-night");
+        assert!(request.lock().unwrap().is_none(), "request was drained");
     }
 }

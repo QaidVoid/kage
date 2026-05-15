@@ -345,6 +345,14 @@ impl PluginRuntime {
         Arc::clone(&self.theme_state)
     }
 
+    /// Cloneable handle to the pending theme-switch slot, for a host
+    /// that drains it on its own (UI) thread rather than via
+    /// [`Self::take_theme_request`].
+    #[must_use]
+    pub fn shared_theme_request(&self) -> SharedThemeRequest {
+        Arc::clone(&self.theme_request)
+    }
+
     /// Drain a pending `kage.theme.set` request. `Some(name)` means
     /// the host should validate `name` and switch to it.
     #[must_use]

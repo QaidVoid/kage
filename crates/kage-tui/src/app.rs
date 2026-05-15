@@ -182,6 +182,16 @@ pub enum PluginDialog {
         /// Channel the App answers on.
         reply: std::sync::mpsc::Sender<Option<serde_json::Value>>,
     },
+    /// `kage.ui.input`: a single-line text prompt. Resumes with the
+    /// entered string, or `nil` on cancel.
+    Input {
+        /// Prompt title.
+        title: String,
+        /// Optional placeholder shown while the field is empty.
+        placeholder: Option<String>,
+        /// Channel the App answers on.
+        reply: std::sync::mpsc::Sender<Option<serde_json::Value>>,
+    },
 }
 
 /// In-flight dialog bookkeeping: the reply channel plus how to turn an
@@ -199,13 +209,18 @@ enum PluginDialogState {
     Confirm {
         reply: std::sync::mpsc::Sender<Option<serde_json::Value>>,
     },
+    /// `kage.ui.input`: the overlay resolves with the entered string;
+    /// pass it straight through.
+    Input {
+        reply: std::sync::mpsc::Sender<Option<serde_json::Value>>,
+    },
 }
 
 impl PluginDialogState {
     /// The channel the parked worker is waiting on.
     fn reply(&self) -> &std::sync::mpsc::Sender<Option<serde_json::Value>> {
         match self {
-            Self::Select { reply, .. } | Self::Confirm { reply } => reply,
+            Self::Select { reply, .. } | Self::Confirm { reply } | Self::Input { reply } => reply,
         }
     }
 
@@ -219,6 +234,7 @@ impl PluginDialogState {
                 .and_then(|idx| items.get(idx))
                 .map(|item| item.value.clone()),
             Self::Confirm { .. } => Some(serde_json::Value::Bool(value.as_bool().unwrap_or(false))),
+            Self::Input { .. } => Some(value.clone()),
         }
     }
 
@@ -227,7 +243,7 @@ impl PluginDialogState {
     /// resumes with `false` so the call always returns a boolean.
     fn cancelled(&self) -> Option<serde_json::Value> {
         match self {
-            Self::Select { .. } => None,
+            Self::Select { .. } | Self::Input { .. } => None,
             Self::Confirm { .. } => Some(serde_json::Value::Bool(false)),
         }
     }
@@ -853,6 +869,18 @@ impl App {
                     title, message,
                 )));
                 self.active_dialog = Some(PluginDialogState::Confirm { reply });
+            }
+            PluginDialog::Input {
+                title,
+                placeholder,
+                reply,
+            } => {
+                let mut overlay = crate::overlay::InputOverlay::new(title);
+                if let Some(hint) = placeholder {
+                    overlay = overlay.with_placeholder(hint);
+                }
+                self.plugin_overlay = Some(Box::new(overlay));
+                self.active_dialog = Some(PluginDialogState::Input { reply });
             }
         }
     }
@@ -2764,6 +2792,52 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
         assert_eq!(reply_rx.recv().unwrap(), Some(serde_json::json!(false)));
+        assert!(app.plugin_overlay.is_none());
+        assert!(app.active_dialog.is_none());
+    }
+
+    fn open_input(app: &mut App) -> std::sync::mpsc::Receiver<Option<serde_json::Value>> {
+        let (dtx, drx) = mpsc::channel();
+        app.set_plugin_dialog(drx);
+        let (reply_tx, reply_rx) = mpsc::channel();
+        dtx.send(PluginDialog::Input {
+            title: "Your name".to_owned(),
+            placeholder: Some("e.g. Ada".to_owned()),
+            reply: reply_tx,
+        })
+        .unwrap();
+        app.drain_plugin_dialog();
+        assert!(app.plugin_overlay.is_some());
+        reply_rx
+    }
+
+    #[test]
+    fn plugin_input_submit_resumes_with_text() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let reply_rx = open_input(&mut app);
+
+        app.handle_key(key('A'));
+        app.handle_key(key('d'));
+        app.handle_key(key('a'));
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(reply_rx.recv().unwrap(), Some(serde_json::json!("Ada")));
+        assert!(app.plugin_overlay.is_none());
+        assert!(app.active_dialog.is_none());
+    }
+
+    #[test]
+    fn plugin_input_cancel_resumes_with_nil() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let reply_rx = open_input(&mut app);
+
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert_eq!(reply_rx.recv().unwrap(), None);
         assert!(app.plugin_overlay.is_none());
         assert!(app.active_dialog.is_none());
     }

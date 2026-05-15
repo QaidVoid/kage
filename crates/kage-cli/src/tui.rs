@@ -16,7 +16,8 @@ use std::thread;
 use kage_core::{CancelFlag, Content, Message, Role};
 use kage_loop::{AgentContext, LoopConfig, NoopHooks, force_compact, run};
 use kage_plugin::{
-    BridgePrep, BridgeStep, CommandOutput, ConfirmRequest, PluginRuntime, SelectRequest,
+    BridgePrep, BridgeStep, CommandOutput, ConfirmRequest, InputRequest, PluginRuntime,
+    SelectRequest,
 };
 use kage_provider::ProviderRegistry;
 use kage_session::{SessionId, SessionReader, SessionSummary, SessionWriter};
@@ -715,6 +716,17 @@ fn service_dialog(
             },
             Err(e) => {
                 push_error(buffer, &format!("ui.confirm: {e}"));
+                return None;
+            }
+        },
+        "ui.input" => match InputRequest::from_payload(&req.payload) {
+            Ok(i) => PluginDialog::Input {
+                title: i.title,
+                placeholder: i.placeholder,
+                reply: reply_tx,
+            },
+            Err(e) => {
+                push_error(buffer, &format!("ui.input: {e}"));
                 return None;
             }
         },

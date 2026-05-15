@@ -289,3 +289,60 @@ fn select_demo_confirm_false_path_keeps() {
     };
     assert_eq!(CommandOutput::from_json(&value).text, "kept");
 }
+
+fn ask_name_args(rt: &PluginRuntime) -> kage_plugin::BridgeArgs {
+    let cmd = rt
+        .registered_commands()
+        .into_iter()
+        .find(|c| c.name() == "ask-name")
+        .expect("ask-name command registered");
+    match cmd.prepare_bridge("", &json!(null)).unwrap() {
+        BridgePrep::Ready(bargs) => bargs,
+        BridgePrep::ArgError(out) => panic!("unexpected arg error: {}", out.text),
+    }
+}
+
+#[test]
+fn select_demo_input_returns_greeting() {
+    let (rec, sink) = forwarding_sink();
+    let rt = load_select_demo(sink);
+    let bargs = ask_name_args(&rt);
+
+    match rt.bridge_call(&bargs.handler, &bargs.args).unwrap() {
+        BridgeStep::Suspended(req) => {
+            assert_eq!(req.kind, "ui.input");
+            assert_eq!(
+                req.payload,
+                json!({ "title": "What is your name?", "placeholder": "e.g. Ada" })
+            );
+        }
+        BridgeStep::Done(v) => panic!("expected suspend, got Done({v})"),
+    }
+
+    let BridgeStep::Done(value) = rt.bridge_resume(&json!("Ada")).unwrap() else {
+        panic!("expected Done after resume");
+    };
+    assert_eq!(CommandOutput::from_json(&value).text, "hello Ada");
+    let r = rec.lock().unwrap();
+    assert!(
+        r.notifies.iter().any(|s| s == "ask-name: Ada"),
+        "got {:?}",
+        r.notifies
+    );
+}
+
+#[test]
+fn select_demo_input_cancel_is_anonymous() {
+    let (_rec, sink) = forwarding_sink();
+    let rt = load_select_demo(sink);
+    let bargs = ask_name_args(&rt);
+
+    assert!(matches!(
+        rt.bridge_call(&bargs.handler, &bargs.args).unwrap(),
+        BridgeStep::Suspended(_)
+    ));
+    let BridgeStep::Done(value) = rt.bridge_cancel().unwrap() else {
+        panic!("expected Done after cancel");
+    };
+    assert_eq!(CommandOutput::from_json(&value).text, "anonymous");
+}

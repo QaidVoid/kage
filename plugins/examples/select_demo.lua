@@ -1,11 +1,11 @@
 -- select_demo.lua - demonstrate the blocking kage.ui.* dialogs.
 --
--- Registers `/pick-color` (kage.ui.select) and `/confirm-delete`
--- (kage.ui.confirm). Each opens a modal; the answer is reported
--- through kage.notify and returned as the command's output. Because
--- the dialogs suspend the plugin coroutine, the handlers read like
--- ordinary blocking code even though the host services them on
--- another thread.
+-- Registers `/pick-color` (kage.ui.select), `/confirm-delete`
+-- (kage.ui.confirm), and `/ask-name` (kage.ui.input). Each opens a
+-- modal; the answer is reported through kage.notify and returned as
+-- the command's output. Because the dialogs suspend the plugin
+-- coroutine, the handlers read like ordinary blocking code even
+-- though the host services them on another thread.
 
 kage.register_command({
     name = 'pick-color',
@@ -31,5 +31,19 @@ kage.register_command({
         end
         kage.notify('confirm-delete: declined')
         return 'kept'
+    end,
+})
+
+kage.register_command({
+    name = 'ask-name',
+    description = 'Prompt for a name via the ui.input dialog',
+    handler = function()
+        local name = kage.ui.input('What is your name?', 'e.g. Ada')
+        if name == nil or name == '' then
+            kage.notify('ask-name: no name given')
+            return 'anonymous'
+        end
+        kage.notify('ask-name: ' .. name)
+        return 'hello ' .. name
     end,
 })

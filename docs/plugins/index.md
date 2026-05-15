@@ -9,11 +9,15 @@ nothing carries over the boundary.
 
 - register new tools the agent can call
 - override built-in tools (filter `bash`, audit `write`)
-- add slash commands the user invokes
+- add slash / colon commands the user invokes
+- bind keyboard chords to handlers (`kage.register_keybinding`)
+- open blocking dialogs - select, confirm, input, editor
+  (`kage.ui.*`), even from a command or keybinding handler
 - contribute status-bar widgets and transient status messages
-- subscribe to loop events (turn start, message stream, tool start)
-- trigger compaction or session forks
-- bring up dialogs once `kage.ui.*` lands
+- subscribe to ~25 events (lifecycle, message stream, tool calls),
+  transform the context or provider request, veto session ops
+- trigger compaction, fork sessions, inject messages, write custom
+  session entries and labels
 
 ## what plugins cannot do
 

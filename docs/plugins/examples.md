@@ -1,45 +1,79 @@
 # examples
 
-The kage repo ships a handful of example plugins under
-`crates/kage-plugin/examples/`. Browse them as starting points; copy
-whichever fits and tweak.
+The kage repo ships example plugins under `plugins/examples/`. They
+double as integration-test fixtures, so they stay in sync with the
+runtime. Copy whichever fits and tweak.
 
 ## tokens-per-second readout
 
-Reports the throughput of the most recent assistant turn as a toast.
+`plugins/examples/tps.lua` reports the throughput of the most recent
+assistant turn as a toast. It tracks elapsed time across the turn and
+reads token counts off the `message_end` payload:
 
 ```lua
-local last_ms
+local start_ms
 
-kage.on("turn_start", function()
-  last_ms = kage.now_ms()
+kage.on("agent_start", function()
+  start_ms = kage.now_ms()
 end)
 
-kage.on("turn_end", function(ctx)
-  if not last_ms then return end
-  local elapsed = (kage.now_ms() - last_ms) / 1000
-  local tps = (ctx.usage.output_tokens or 0) / math.max(elapsed, 0.01)
-  kage.notify(string.format("%.1f tok/s", tps))
+kage.on("message_end", function(ev)
+  if not start_ms then return end
+  local elapsed = (kage.now_ms() - start_ms) / 1000
+  local out = (ev.usage and ev.usage.output) or 0
+  kage.ui.notify(string.format("%d tokens, %.1f tok/s", out,
+    out / math.max(elapsed, 0.001)))
 end)
 ```
 
 ## git branch in the status bar
 
+`plugins/examples/git-status.lua` reads `.git/HEAD` directly (the
+sandbox forbids spawning `git`) and announces the branch:
+
 ```lua
-kage.register_widget({
-  key = "git",
-  render = function(_w)
-    local head = kage.fs.read(".git/HEAD")
-    if not head then return "" end
-    local branch = head:match("ref: refs/heads/(%S+)")
-    return branch and ("on " .. branch) or ""
+kage.on("agent_start", function()
+  local ok, head = pcall(kage.fs.read, ".git/HEAD")
+  if not ok or not head then
+    kage.notify("git: not a repo")
+    return
+  end
+  local branch = head:gsub("%s+$", ""):match("^ref: refs/heads/(.+)$")
+  kage.notify("git: " .. (branch or "detached"))
+end)
+```
+
+## blocking dialogs and a keybinding
+
+`plugins/examples/select_demo.lua` exercises the whole `kage.ui.*`
+surface plus `kage.register_keybinding`. Each command opens a modal
+and the coroutine suspends until the user answers:
+
+```lua
+kage.register_command({
+  name = "pick-color",
+  description = "Pick a color via the ui.select dialog",
+  handler = function()
+    local color = kage.ui.select("Pick a color", { "red", "green", "blue" })
+    if color == nil then return "cancelled" end
+    kage.ui.notify("pick-color: " .. color)
+    return "you picked " .. color
   end,
 })
+
+kage.register_keybinding({ key = "ctrl+alt+k", description = "Quick pick" },
+  function()
+    local color = kage.ui.select("Quick pick", { "red", "green", "blue" })
+    return color or "cancelled"
+  end)
 ```
+
+It also registers `/confirm-delete` (`kage.ui.confirm`), `/ask-name`
+(`kage.ui.input`), and `/compose-note` (`kage.ui.editor`).
 
 ## safer bash
 
-Override the built-in `bash` tool to refuse destructive commands.
+Override the built-in `bash` tool to refuse destructive commands:
 
 ```lua
 local blocked = { "rm %-rf /", "mkfs", ":(){" }
@@ -56,15 +90,15 @@ kage.override_tool({
         return { is_error = true, text = "blocked: " .. pattern }
       end
     end
-    -- delegate to a shell via your preferred mechanism
     return { is_error = false, text = "ok: " .. cmd }
   end,
 })
 ```
 
-## fixture
+## testing without the TUI
 
-Test plugins in CI without spinning up the TUI: drop your plugin
-under `crates/kage-plugin/tests/fixtures/` and use the
-`PluginRuntime::eval` harness to drive it. See
-`crates/kage-plugin/tests/integration.rs` for the pattern.
+Drop a plugin under `crates/kage-plugin/tests/fixtures/` and drive it
+with the `PluginRuntime` harness. Bridged handlers (commands,
+keybindings) can be stepped with `bridge_call` / `bridge_resume` /
+`bridge_cancel`; see `crates/kage-plugin/tests/examples.rs` for the
+pattern, including how the dialog round-trips are asserted.

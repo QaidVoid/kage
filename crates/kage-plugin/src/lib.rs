@@ -36,6 +36,6 @@ pub use runtime::{PluginRuntime, PluginRuntimeBuilder, SANDBOX_REMOVALS, SharedL
 pub use sessions::{PendingSessionOp, SharedForkRequest, SharedSessionList, SharedSessionOps};
 pub use status::SharedStatus;
 pub use tools::LuaTool;
-pub use ui::{ConfirmRequest, SelectItem, SelectRequest};
+pub use ui::{ConfirmRequest, InputRequest, SelectItem, SelectRequest};
 pub use watcher::PluginWatcher;
 pub use widgets::LuaWidget;

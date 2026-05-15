@@ -15,7 +15,9 @@
 //! parser: [`SelectRequest::from_payload`] normalises `ui.select`
 //! `items` (bare strings or `{label, value?, detail?}` tables) for an
 //! `OverlayPicker`; [`ConfirmRequest::from_payload`] reads the
-//! `ui.confirm` title/message for a yes/no overlay.
+//! `ui.confirm` title/message for a yes/no overlay;
+//! [`InputRequest::from_payload`] reads the `ui.input` title and
+//! optional placeholder for a single-line input overlay.
 
 use mlua::Lua;
 
@@ -42,6 +44,15 @@ const UI_LUA: &str = "kage.ui = kage.ui or {}\n\
          error('kage.ui.confirm: message must be a string', 2)\n  \
        end\n  \
        return kage._suspend('ui.confirm', { title = title, message = message })\n\
+     end\n\
+     kage.ui.input = function(title, placeholder)\n  \
+       if type(title) ~= 'string' then\n    \
+         error('kage.ui.input: title must be a string', 2)\n  \
+       end\n  \
+       if placeholder ~= nil and type(placeholder) ~= 'string' then\n    \
+         error('kage.ui.input: placeholder must be a string or nil', 2)\n  \
+       end\n  \
+       return kage._suspend('ui.input', { title = title, placeholder = placeholder })\n\
      end\n";
 
 /// One row the host should render in the picker for a `ui.select`.
@@ -131,6 +142,46 @@ impl ConfirmRequest {
             title: field("title")?,
             message: field("message")?,
         })
+    }
+}
+
+/// A parsed `ui.input` request: the prompt title and an optional
+/// dimmed placeholder. The coroutine is resumed with the entered
+/// string, or `nil` if the user cancelled.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InputRequest {
+    /// Prompt title.
+    pub title: String,
+    /// Placeholder shown while the field is empty. Not part of the
+    /// resolved value.
+    pub placeholder: Option<String>,
+}
+
+impl InputRequest {
+    /// Parse the payload of a `kind == "ui.input"` suspend request.
+    /// `title` is a required string; `placeholder` is optional (absent
+    /// or JSON null means none) but must be a string when present.
+    pub fn from_payload(payload: &serde_json::Value) -> Result<Self, PluginError> {
+        let obj = payload.as_object().ok_or_else(|| {
+            PluginError::BridgeProtocol("ui.input payload is not an object".to_owned())
+        })?;
+        let title = obj
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                PluginError::BridgeProtocol("ui.input payload has no string `title`".to_owned())
+            })?
+            .to_owned();
+        let placeholder = match obj.get("placeholder") {
+            None | Some(serde_json::Value::Null) => None,
+            Some(serde_json::Value::String(s)) => Some(s.clone()),
+            Some(_) => {
+                return Err(PluginError::BridgeProtocol(
+                    "ui.input `placeholder` must be a string".to_owned(),
+                ));
+            }
+        };
+        Ok(Self { title, placeholder })
     }
 }
 
@@ -413,5 +464,94 @@ mod tests {
         let err = ConfirmRequest::from_payload(&json!({ "title": "T" })).unwrap_err();
         assert!(matches!(err, PluginError::BridgeProtocol(_)));
         assert!(err.to_string().contains("message"));
+    }
+
+    #[test]
+    fn input_suspends_with_title_and_optional_placeholder() {
+        let rt = PluginRuntime::new().unwrap();
+        let f = func(
+            &rt,
+            "return function() return kage.ui.input('Your name', 'e.g. Ada') end",
+        );
+        assert_eq!(
+            rt.bridge_call(&f, &[]).unwrap(),
+            BridgeStep::Suspended(SuspendRequest {
+                kind: "ui.input".to_owned(),
+                payload: json!({ "title": "Your name", "placeholder": "e.g. Ada" }),
+            })
+        );
+    }
+
+    #[test]
+    fn input_without_placeholder_omits_it() {
+        let rt = PluginRuntime::new().unwrap();
+        let f = func(&rt, "return function() return kage.ui.input('Name') end");
+        assert_eq!(
+            rt.bridge_call(&f, &[]).unwrap(),
+            BridgeStep::Suspended(SuspendRequest {
+                kind: "ui.input".to_owned(),
+                payload: json!({ "title": "Name" }),
+            })
+        );
+    }
+
+    #[test]
+    fn input_returns_resumed_string() {
+        let rt = PluginRuntime::new().unwrap();
+        let f = func(
+            &rt,
+            "return function() return (kage.ui.input('q') or 'nil') end",
+        );
+        assert!(matches!(
+            rt.bridge_call(&f, &[]).unwrap(),
+            BridgeStep::Suspended(_)
+        ));
+        assert_eq!(
+            rt.bridge_resume(&json!("Ada")).unwrap(),
+            BridgeStep::Done(json!("Ada"))
+        );
+    }
+
+    #[test]
+    fn input_cancel_returns_nil() {
+        let rt = PluginRuntime::new().unwrap();
+        let f = func(
+            &rt,
+            "return function() return (kage.ui.input('q') or 'cancelled') end",
+        );
+        assert!(matches!(
+            rt.bridge_call(&f, &[]).unwrap(),
+            BridgeStep::Suspended(_)
+        ));
+        assert_eq!(
+            rt.bridge_cancel().unwrap(),
+            BridgeStep::Done(json!("cancelled"))
+        );
+    }
+
+    #[test]
+    fn input_rejects_non_string_placeholder() {
+        let rt = PluginRuntime::new().unwrap();
+        let f = func(&rt, "return function() return kage.ui.input('t', 5) end");
+        let err = rt.bridge_call(&f, &[]).unwrap_err();
+        assert!(matches!(err, PluginError::Lua(_)));
+        assert!(err.to_string().contains("placeholder"));
+    }
+
+    #[test]
+    fn input_from_payload_parses_optional_placeholder() {
+        let with =
+            InputRequest::from_payload(&json!({ "title": "T", "placeholder": "p" })).unwrap();
+        assert_eq!(with.placeholder.as_deref(), Some("p"));
+        let without = InputRequest::from_payload(&json!({ "title": "T" })).unwrap();
+        assert_eq!(without.placeholder, None);
+    }
+
+    #[test]
+    fn input_from_payload_rejects_non_string_placeholder() {
+        let err =
+            InputRequest::from_payload(&json!({ "title": "T", "placeholder": 1 })).unwrap_err();
+        assert!(matches!(err, PluginError::BridgeProtocol(_)));
+        assert!(err.to_string().contains("placeholder"));
     }
 }

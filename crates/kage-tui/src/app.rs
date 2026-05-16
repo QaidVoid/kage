@@ -29,8 +29,8 @@ use crate::events::SharedBuffer;
 use crate::input::{InputAction, InputState, Mode, Pane};
 use crate::layout::{input_height_for, split};
 use crate::overlay::{
-    CompletionAction, InputCompletion, OverlayAction, OverlayPicker, SlashContext, SlashPalette,
-    file_completions, prefix_before_cursor,
+    CompletionAction, InputCompletion, OverlayAction, OverlayPicker, SettingsInit, SettingsOverlay,
+    SlashContext, SlashPalette, file_completions, prefix_before_cursor,
 };
 use crate::picker::PickItem;
 use crate::terminal::Tui;
@@ -423,6 +423,9 @@ pub struct App {
     /// Which picker is open, mirroring [`Self::picker`]. Used to
     /// dispatch the picked value to the right `RunRequest`.
     picker_kind: Option<PickerKind>,
+    /// Open `:settings` overlay. A modal sibling of [`Self::picker`];
+    /// on resolve its edits are applied live and persisted.
+    settings_overlay: Option<SettingsOverlay>,
     /// Provider of resumable sessions for the session picker. None
     /// disables the picker (Ctrl+R is a no-op).
     session_lister: Option<SessionLister>,
@@ -606,6 +609,7 @@ impl App {
             model_choices: Vec::new(),
             picker: None,
             picker_kind: None,
+            settings_overlay: None,
             session_lister: None,
             cmdline: None,
             slash_palette: None,
@@ -1333,8 +1337,10 @@ impl App {
             && self.cmdline.is_none()
             && self.search_line.is_none()
             && self.picker.is_none()
+            && self.settings_overlay.is_none()
             && self.plugin_overlay.is_none();
         let picker = self.picker.as_mut();
+        let settings_overlay = self.settings_overlay.as_mut();
         let plugin_overlay = self.plugin_overlay.as_mut();
         let slash_palette = self.slash_palette.as_ref();
         let input_completion = if show_completion {
@@ -1369,6 +1375,9 @@ impl App {
             );
             if let Some(picker) = picker {
                 picker.render(frame, frame.area());
+            }
+            if let Some(settings) = settings_overlay {
+                settings.render(frame, frame.area());
             }
             if let Some(palette) = slash_palette {
                 palette.render(frame, regions);
@@ -1421,6 +1430,11 @@ impl App {
         // When the picker overlay is open, it owns the keyboard.
         if self.picker.is_some() {
             return self.dispatch_picker_key(key);
+        }
+
+        // The settings dialog is a modal sibling of the picker.
+        if self.settings_overlay.is_some() {
+            return self.dispatch_settings_key(key);
         }
 
         // The slash palette is its own modal layer, taking precedence
@@ -1768,6 +1782,10 @@ impl App {
             }
             "compact" => {
                 let _ = self.send_request(RunRequest::CompactNow);
+                None
+            }
+            "settings" => {
+                self.open_settings();
                 None
             }
             "clear" => {
@@ -2124,6 +2142,121 @@ impl App {
         None
     }
 
+    fn dispatch_settings_key(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+    ) -> Option<AppExit> {
+        let overlay = self.settings_overlay.as_mut()?;
+        match crate::overlay::OverlayWidget::handle_key(overlay, key) {
+            OverlayAction::Stay | OverlayAction::PropagateKey => {}
+            OverlayAction::Close => {
+                self.settings_overlay = None;
+            }
+            OverlayAction::Resolve(value) => {
+                self.settings_overlay = None;
+                self.apply_settings(&value);
+            }
+        }
+        None
+    }
+
+    /// Open the `:settings` dialog, seeding it from the loaded
+    /// user/project config plus live state (active theme/model).
+    fn open_settings(&mut self) {
+        let workdir = self
+            .completion_workdir
+            .clone()
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let cfg = match kage_core::config::Config::load_layered(&workdir) {
+            Ok(c) => c,
+            Err(e) => {
+                self.push_error(format!("settings: config load failed: {e}"));
+                return;
+            }
+        };
+        let model = self
+            .status_model
+            .as_ref()
+            .and_then(|m| m.lock().ok().map(|g| g.clone()))
+            .unwrap_or_else(|| cfg.provider.default_model.clone());
+        let init = SettingsInit {
+            themes: crate::theme::Theme::bundled_names()
+                .iter()
+                .map(|n| (*n).to_owned())
+                .collect(),
+            theme: crate::theme::current().name,
+            models: self.model_choices.iter().map(|p| p.value.clone()).collect(),
+            model,
+            mouse: self.pending_mouse_capture.unwrap_or(cfg.ui.mouse),
+            threshold: cfg.loop_settings.compaction_threshold,
+            keybindings: cfg
+                .keybindings
+                .bindings
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+        };
+        self.settings_overlay = Some(SettingsOverlay::new(init));
+    }
+
+    /// Apply the settings-dialog result: live-switch theme / mouse /
+    /// model, then persist the four fields to the user config file
+    /// (comment-preserving). A persistence failure is surfaced, not
+    /// swallowed.
+    fn apply_settings(&mut self, value: &serde_json::Value) {
+        let theme = value.get("theme").and_then(|v| v.as_str()).unwrap_or("");
+        let model = value.get("model").and_then(|v| v.as_str()).unwrap_or("");
+        let mouse = value.get("mouse").and_then(serde_json::Value::as_bool);
+        let threshold = value
+            .get("compaction_threshold")
+            .and_then(serde_json::Value::as_f64);
+
+        if !theme.is_empty() && theme != crate::theme::current().name {
+            self.apply_theme_by_name(theme);
+        }
+        if let Some(mouse) = mouse {
+            self.pending_mouse_capture = Some(mouse);
+        }
+        let current_model = self
+            .status_model
+            .as_ref()
+            .and_then(|m| m.lock().ok().map(|g| g.clone()));
+        if !model.is_empty() && current_model.as_deref() != Some(model) {
+            let _ = self.send_request(RunRequest::SwitchModel(model.to_owned()));
+        }
+
+        let Some(path) = kage_core::config::Config::default_path() else {
+            self.push_error("settings: no home directory; not persisted");
+            return;
+        };
+        let mut cfg = match kage_core::config::Config::load(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                self.push_error(format!("settings: config load failed: {e}"));
+                return;
+            }
+        };
+        if !theme.is_empty() {
+            theme.clone_into(&mut cfg.ui.theme);
+        }
+        if !model.is_empty() {
+            model.clone_into(&mut cfg.provider.default_model);
+        }
+        if let Some(mouse) = mouse {
+            cfg.ui.mouse = mouse;
+        }
+        if let Some(t) = threshold {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                cfg.loop_settings.compaction_threshold = t as f32;
+            }
+        }
+        match cfg.save(&path) {
+            Ok(()) => self.notify("settings saved"),
+            Err(e) => self.push_error(format!("settings: save failed: {e}")),
+        }
+    }
+
     /// Drive the active plugin dialog overlay (`kage.ui.*`). The
     /// overlay owns its keys; on resolve/close the chosen value is
     /// sent back to the parked worker through [`Self::active_dialog`],
@@ -2425,8 +2558,10 @@ impl App {
             && self.cmdline.is_none()
             && self.search_line.is_none()
             && self.picker.is_none()
+            && self.settings_overlay.is_none()
             && self.plugin_overlay.is_none();
         let picker = self.picker.as_mut();
+        let settings_overlay = self.settings_overlay.as_mut();
         let input_completion = if show_completion {
             self.input_completion.as_ref()
         } else {
@@ -2456,6 +2591,9 @@ impl App {
                 );
                 if let Some(picker) = picker {
                     picker.render(frame, frame.area());
+                }
+                if let Some(settings) = settings_overlay {
+                    settings.render(frame, frame.area());
                 }
                 if let Some(completion) = input_completion {
                     completion.render(frame, regions);
@@ -2802,6 +2940,21 @@ mod tests {
         app.handle_key(key('i'));
         assert!(app.input_completion.is_none());
         assert_eq!(app.input().text(), "hi");
+    }
+
+    #[test]
+    fn settings_command_opens_overlay_and_esc_closes_it() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        // `:settings` opens the modal (reads config read-only; never
+        // writes, so this is safe in a test).
+        assert!(app.dispatch_builtin("settings", "").is_none());
+        assert!(app.settings_overlay.is_some());
+        // While open it owns the keyboard; Esc cancels without persist.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.settings_overlay.is_none());
+        assert_eq!(app.input().text(), "", "esc went to the overlay, not input");
     }
 
     fn snapshot_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {

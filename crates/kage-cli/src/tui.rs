@@ -1290,20 +1290,36 @@ fn list_session_nodes(
         .collect()
 }
 
-/// One-line description of a session for the picker: short id, last
-/// user prompt (truncated), and an updated-at timestamp.
+/// One-line description of a session for the picker. Prefers the
+/// generated title; falls back to the first line of the last user
+/// prompt for sessions written before titles existed. Shows a
+/// human relative day on the left and the wall-clock time on the
+/// right so same-day sessions read as a group at a glance.
 fn format_session_label(s: &SessionSummary) -> String {
-    let id = s.id.to_string();
-    let short_id: String = id.chars().take(8).collect();
-    let preview = s.last_user_prompt.as_deref().map_or_else(
-        || "(no user prompt)".to_owned(),
-        |t| {
-            let single_line = t.replace('\n', " ");
-            truncate(&single_line, 60)
-        },
-    );
-    let updated = s.updated_at.format("%Y-%m-%d %H:%M");
-    format!("{short_id}  {preview:<60}  {updated}")
+    let title = s
+        .title
+        .as_deref()
+        .or(s.last_user_prompt.as_deref())
+        .map_or_else(
+            || "(untitled session)".to_owned(),
+            |t| truncate(&t.replace('\n', " "), 56),
+        );
+    let day = relative_day(s.updated_at);
+    let time = s.updated_at.format("%H:%M");
+    format!("{day:<9}  {title:<56}  {time}")
+}
+
+/// A short, human day label relative to now: `Today` / `Yesterday`
+/// for the last two days, otherwise `YYYY-MM-DD`. Drives the
+/// at-a-glance grouping in the session picker.
+fn relative_day(ts: chrono::DateTime<chrono::Utc>) -> String {
+    let today = chrono::Utc::now().date_naive();
+    let day = ts.date_naive();
+    match (today - day).num_days() {
+        0 => "Today".to_owned(),
+        1 => "Yesterday".to_owned(),
+        _ => day.format("%Y-%m-%d").to_string(),
+    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -2152,5 +2168,50 @@ mod tests {
             SessionEntry::Header(h) => assert_eq!(h.parent_session, Some(src_id)),
             other => panic!("expected header, got {other:?}"),
         }
+    }
+
+    fn summary(title: Option<&str>, prompt: Option<&str>) -> SessionSummary {
+        SessionSummary {
+            id: SessionId::new(),
+            path: PathBuf::from("/s/a.jsonl"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            cwd: PathBuf::from("/work"),
+            model: "anthropic:claude".into(),
+            parent_session: None,
+            last_user_prompt: prompt.map(str::to_owned),
+            title: title.map(str::to_owned),
+            entry_count: 3,
+        }
+    }
+
+    #[test]
+    fn relative_day_labels_today_yesterday_then_date() {
+        let now = Utc::now();
+        assert_eq!(relative_day(now), "Today");
+        assert_eq!(relative_day(now - chrono::Duration::days(1)), "Yesterday");
+        let old = now - chrono::Duration::days(9);
+        assert_eq!(
+            relative_day(old),
+            old.date_naive().format("%Y-%m-%d").to_string()
+        );
+    }
+
+    #[test]
+    fn label_prefers_title_then_prompt_then_placeholder() {
+        let with_title = format_session_label(&summary(
+            Some("Refactor auth"),
+            Some("please refactor auth now"),
+        ));
+        assert!(with_title.contains("Refactor auth"), "{with_title}");
+        assert!(!with_title.contains("please refactor"), "{with_title}");
+
+        let prompt_only = format_session_label(&summary(None, Some("just the prompt")));
+        assert!(prompt_only.contains("just the prompt"), "{prompt_only}");
+
+        let neither = format_session_label(&summary(None, None));
+        assert!(neither.contains("(untitled session)"), "{neither}");
+        // Always carries the relative day + HH:MM time column.
+        assert!(neither.contains("Today"), "{neither}");
     }
 }

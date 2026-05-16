@@ -5,6 +5,7 @@
 //! and notification shape, and later modules layer the server that
 //! drives the agent loop on top of them.
 
+pub mod acp;
 pub mod client;
 pub mod framing;
 pub mod jsonrpc;

@@ -1568,22 +1568,36 @@ fn render_modeline(
     frame.render_widget(line, area);
 }
 
-/// Format a token count compactly so the modeline doesn't blow past
-/// 80 columns: under 1k as raw digits, otherwise `<n>.<n>k` (no
-/// `M` suffix - million-token windows still read fine as `1024k`).
+/// Format a token count compactly so the modeline stays narrow:
+/// under 1k as raw digits, then `k` / `M` / `B` with adaptive
+/// precision and trailing zeros trimmed (`21M`, not `21000k` or
+/// `21.0M`; `78.7k`; `1.16k`; `1.5M`).
 fn format_token_count(n: u64) -> String {
     if n < 1_000 {
         return n.to_string();
     }
     #[allow(clippy::cast_precision_loss)]
-    let value = n as f64 / 1_000.0;
-    if value >= 100.0 {
-        format!("{value:.0}k")
-    } else if value >= 10.0 {
-        format!("{value:.1}k")
+    let (value, suffix) = if n < 1_000_000 {
+        (n as f64 / 1_000.0, 'k')
+    } else if n < 1_000_000_000 {
+        (n as f64 / 1_000_000.0, 'M')
     } else {
-        format!("{value:.2}k")
+        (n as f64 / 1_000_000_000.0, 'B')
+    };
+    let decimals = if value >= 100.0 {
+        0
+    } else if value >= 10.0 {
+        1
+    } else {
+        2
+    };
+    let mut s = format!("{value:.decimals$}");
+    if s.contains('.') {
+        let trimmed = s.trim_end_matches('0').trim_end_matches('.');
+        s.truncate(trimmed.len());
     }
+    s.push(suffix);
+    s
 }
 
 /// Pick a braille spinner glyph keyed off wall-clock time so the
@@ -2279,12 +2293,15 @@ pub(super) fn tool_result_header_line(
 fn human_size(bytes: usize) -> String {
     const KB: usize = 1024;
     const MB: usize = KB * 1024;
+    const GB: usize = MB * 1024;
     if bytes < KB {
         format!("{bytes} B")
     } else if bytes < MB {
         format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
+    } else if bytes < GB {
         format!("{:.1} MB", bytes as f64 / MB as f64)
+    } else {
+        format!("{:.1} GB", bytes as f64 / GB as f64)
     }
 }
 
@@ -2759,6 +2776,20 @@ mod tests {
         assert_eq!(super::human_size(512), "512 B");
         assert_eq!(super::human_size(2048), "2.0 KB");
         assert_eq!(super::human_size(1_500_000), "1.4 MB");
+        assert_eq!(super::human_size(3 * 1024 * 1024 * 1024), "3.0 GB");
+    }
+
+    #[test]
+    fn token_counts_scale_to_k_m_b_trimmed() {
+        assert_eq!(super::format_token_count(999), "999");
+        assert_eq!(super::format_token_count(1_000), "1k");
+        assert_eq!(super::format_token_count(1_160), "1.16k");
+        assert_eq!(super::format_token_count(78_700), "78.7k");
+        assert_eq!(super::format_token_count(200_000), "200k");
+        assert_eq!(super::format_token_count(1_500_000), "1.5M");
+        assert_eq!(super::format_token_count(21_000_000), "21M");
+        assert_eq!(super::format_token_count(200_000_000), "200M");
+        assert_eq!(super::format_token_count(2_000_000_000), "2B");
     }
 
     #[test]

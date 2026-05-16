@@ -118,7 +118,7 @@ fn check_config(workdir: &Path) -> Check {
             name: "config",
             status: Status::Fail,
             body: err.to_string(),
-            hint: Some("edit ~/.kage/config.toml or rerun `kage init --force`".into()),
+            hint: Some("edit ~/.config/kage/config.toml or rerun `kage init --force`".into()),
         },
     }
 }

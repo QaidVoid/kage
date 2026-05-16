@@ -1,4 +1,4 @@
-//! Workspace configuration loaded from `~/.kage/config.toml` with env overrides.
+//! Workspace configuration loaded from `~/.config/kage/config.toml` with env overrides.
 //!
 //! Layered loading via [`figment`]: defaults are merged with the file
 //! (if present), which is then overridden by environment variables prefixed
@@ -31,12 +31,18 @@ pub struct Config {
 }
 
 impl Config {
-    /// Path to the default config file: `$HOME/.kage/config.toml`.
-    ///
-    /// Returns `None` when the home directory cannot be determined.
+    /// Path to the user config file, XDG-resolved:
+    /// `$XDG_CONFIG_HOME/kage/config.toml`, or `~/.config/kage/config.toml`
+    /// when `XDG_CONFIG_HOME` is unset. This mirrors how the rest of kage
+    /// resolves config-tier paths (plugins, skills); only the home
+    /// directory case returns `None`.
     #[must_use]
     pub fn default_path() -> Option<PathBuf> {
-        dirs::home_dir().map(|h| h.join(".kage").join("config.toml"))
+        let base = match std::env::var("XDG_CONFIG_HOME") {
+            Ok(v) if !v.is_empty() => PathBuf::from(v),
+            _ => dirs::home_dir()?.join(".config"),
+        };
+        Some(base.join("kage").join("config.toml"))
     }
 
     /// Load configuration from `path`, merging with defaults and env overrides.
@@ -125,7 +131,8 @@ impl Default for ProviderConfig {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiConfig {
-    /// Theme name (loaded from bundled themes or `~/.kage/themes/<name>.toml`).
+    /// Theme name (loaded from bundled themes or
+    /// `~/.config/kage/themes/<name>.toml`).
     pub theme: String,
     /// Whether mouse events are captured by the TUI.
     pub mouse: bool,
@@ -144,7 +151,7 @@ impl Default for UiConfig {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PluginsConfig {
-    /// Override the default plugin directory `~/.kage/plugins/`.
+    /// Override the default plugin directory `~/.config/kage/plugins/`.
     pub dir: Option<PathBuf>,
     /// If non-empty, only plugins in this allowlist are loaded.
     pub enabled: Vec<String>,
@@ -245,14 +252,17 @@ mod tests {
     #[test]
     fn project_file_overrides_user_file() {
         figment::Jail::expect_with(|jail| {
-            // Point dirs::home_dir at the jail so default_path resolves
-            // beneath it. dirs reads $HOME on Linux + macOS.
+            // Pin XDG_CONFIG_HOME at the jail so default_path resolves
+            // the user config beneath it deterministically, regardless
+            // of any XDG_CONFIG_HOME inherited by the test runner.
             let home = jail.directory().to_path_buf();
             jail.set_env("HOME", home.to_string_lossy().as_ref());
-            std::fs::create_dir_all(home.join(".kage"))
-                .map_err(|e| figment::Error::from(e.to_string()))?;
+            let xdg_config = home.join(".config");
+            jail.set_env("XDG_CONFIG_HOME", xdg_config.to_string_lossy().as_ref());
+            let user_cfg = xdg_config.join("kage");
+            std::fs::create_dir_all(&user_cfg).map_err(|e| figment::Error::from(e.to_string()))?;
             std::fs::write(
-                home.join(".kage").join("config.toml"),
+                user_cfg.join("config.toml"),
                 r#"
                 [ui]
                 theme = "user-theme"

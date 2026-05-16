@@ -118,12 +118,12 @@ enum Command {
         #[command(subcommand)]
         action: AuthAction,
     },
-    /// First-run setup wizard. Creates `~/.kage/config.toml`,
+    /// First-run setup wizard. Creates `~/.config/kage/config.toml`,
     /// scaffolds the data directories, and offers to save a provider
     /// API key. Idempotent: rerunning without `--force` keeps any
     /// existing config in place.
     Init {
-        /// Overwrite an existing `~/.kage/config.toml` instead of
+        /// Overwrite an existing `~/.config/kage/config.toml` instead of
         /// keeping it.
         #[arg(long = "force")]
         force: bool,

@@ -1,7 +1,7 @@
 //! `kage init`: first-run setup wizard.
 //!
 //! Detects existing config and credentials, optionally writes a
-//! starter `~/.kage/config.toml`, and offers to save a provider API
+//! starter `~/.config/kage/config.toml`, and offers to save a provider API
 //! key so the user can run `kage` without exporting env vars.
 //!
 //! Idempotent: rerunning is safe. Without `--force` an existing config

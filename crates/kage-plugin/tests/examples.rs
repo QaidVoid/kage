@@ -1,7 +1,7 @@
 //! Verify the bundled example plugins load and behave as documented.
 //!
 //! `plugins/examples/*.lua` ship with the repo so a clean install can copy
-//! them to `~/.kage/plugins/`. These tests load each example into a fresh
+//! them to `~/.config/kage/plugins/`. These tests load each example into a fresh
 //! [`PluginRuntime`] and exercise the events/handlers each one declares.
 
 use std::path::PathBuf;

@@ -48,7 +48,7 @@ kage completions zsh > ~/.zfunc/_kage
 
 ## first-run setup
 
-`kage init` writes a starter `~/.kage/config.toml` and offers to
+`kage init` writes a starter `~/.config/kage/config.toml` and offers to
 save a provider credential interactively (`--force` overwrites an
 existing file, `--non-interactive` skips the prompts):
 

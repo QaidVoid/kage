@@ -1,6 +1,6 @@
 # configuration
 
-kage reads its configuration from `~/.kage/config.toml`. The file is
+kage reads its configuration from `~/.config/kage/config.toml`. The file is
 optional; sane defaults work without it. `kage init` writes a
 starter one.
 
@@ -12,7 +12,7 @@ Keys are grouped into tables:
 default_model = "anthropic:claude-sonnet-4-6"
 
 [ui]
-# bundled theme name, or a user theme under ~/.kage/themes/<name>.toml.
+# bundled theme name, or a user theme under ~/.config/kage/themes/<name>.toml.
 theme = "default"
 # capture terminal mouse events. Toggle at runtime with :mouse.
 mouse = true
@@ -42,7 +42,7 @@ defaults shown above.
 Configuration is merged lowest-to-highest precedence:
 
 1. built-in defaults
-2. `~/.kage/config.toml` (user)
+2. `~/.config/kage/config.toml` (user)
 3. `<workdir>/.kage/config.toml` (project-local; commit it to share
    team settings)
 4. `KAGE_*` environment variables
@@ -67,16 +67,16 @@ configure as `model` picks the provider.
 
 ## directories
 
-| Path                            | Contents                             |
-| ------------------------------- | ------------------------------------ |
-| `~/.kage/config.toml`           | user config                          |
-| `<workdir>/.kage/config.toml`   | project-local config overlay         |
-| `~/.kage/themes/`               | user theme TOML files                |
-| `~/.config/kage/plugins/`       | Lua plugin scripts                   |
-| `~/.config/kage/skills/`        | `SKILL.md` skill directories         |
-| `~/.config/kage/templates/`     | prompt template `.md` files          |
-| `~/.local/share/kage/sessions/` | append-only session JSONL files      |
-| `~/.local/share/kage/auth.json` | saved provider credentials (`0600`)  |
+| Path                            | Contents                            |
+| ------------------------------- | ----------------------------------- |
+| `~/.config/kage/config.toml`    | user config                         |
+| `<workdir>/.kage/config.toml`   | project-local config overlay        |
+| `~/.config/kage/themes/`        | user theme TOML files               |
+| `~/.config/kage/plugins/`       | Lua plugin scripts                  |
+| `~/.config/kage/skills/`        | `SKILL.md` skill directories        |
+| `~/.config/kage/templates/`     | prompt template `.md` files         |
+| `~/.local/share/kage/sessions/` | append-only session JSONL files     |
+| `~/.local/share/kage/auth.json` | saved provider credentials (`0600`) |
 
 `XDG_CONFIG_HOME` / `XDG_DATA_HOME` override the `~/.config` and
 `~/.local/share` roots. Skills and templates are also discovered

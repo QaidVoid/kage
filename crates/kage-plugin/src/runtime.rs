@@ -28,6 +28,7 @@ use mlua::Lua;
 
 use crate::api::{self, SharedHostLog, default_host_log};
 use crate::bridge::{self, BridgeStep, SharedBridge, shared_bridge};
+use crate::chrome::{self, LuaChrome, SharedChrome, shared_chrome};
 use crate::commands::{self, LuaCommand, RegisteredCommands, registered_commands};
 use crate::error::PluginError;
 use crate::events;
@@ -77,6 +78,8 @@ pub struct PluginRuntime {
     keybindings: RegisteredKeybindings,
     theme_state: SharedThemeState,
     theme_request: SharedThemeRequest,
+    header: SharedChrome,
+    footer: SharedChrome,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -363,6 +366,30 @@ impl PluginRuntime {
             .and_then(|mut slot| slot.take())
     }
 
+    /// Snapshot the renderer a plugin installed via
+    /// `kage.ui.set_header`, if any. The host calls
+    /// [`LuaChrome::render`] on it once per redraw to paint the top
+    /// chrome row; `None` means paint the built-in status bar.
+    #[must_use]
+    pub fn header_chrome(&self) -> Option<Arc<LuaChrome>> {
+        self.header
+            .lock()
+            .expect("plugin header chrome mutex poisoned")
+            .clone()
+    }
+
+    /// Snapshot the renderer a plugin installed via
+    /// `kage.ui.set_footer`, if any. The host calls
+    /// [`LuaChrome::render`] on it once per redraw to paint the bottom
+    /// chrome row; `None` means paint the built-in modeline.
+    #[must_use]
+    pub fn footer_chrome(&self) -> Option<Arc<LuaChrome>> {
+        self.footer
+            .lock()
+            .expect("plugin footer chrome mutex poisoned")
+            .clone()
+    }
+
     /// Cloneable handle to the queue of plugin-supplied messages.
     /// Hosts that want to sample the queue without consuming it (for
     /// diagnostics) hold onto this; production drain goes through
@@ -527,6 +554,12 @@ impl PluginRuntime {
         if let Ok(mut slot) = self.theme_request.lock() {
             *slot = None;
         }
+        if let Ok(mut slot) = self.header.lock() {
+            *slot = None;
+        }
+        if let Ok(mut slot) = self.footer.lock() {
+            *slot = None;
+        }
         crate::loader::load_dir(dir, self)
     }
 }
@@ -601,6 +634,8 @@ impl PluginRuntimeBuilder {
         let keybinding_registry = registered_keybindings();
         let theme_state_slot = shared_theme_state();
         let theme_request_slot = shared_theme_request();
+        let header_slot = shared_chrome();
+        let footer_slot = shared_chrome();
         {
             let lua_guard = shared_lua.lock().expect("plugin lua mutex poisoned");
             bridge::install_suspend(&lua_guard)?;
@@ -659,6 +694,13 @@ impl PluginRuntimeBuilder {
                 Arc::clone(&theme_state_slot),
                 Arc::clone(&theme_request_slot),
             )?;
+            chrome::install_chrome(
+                &lua_guard,
+                Arc::clone(&shared_lua),
+                self.sink.clone(),
+                Arc::clone(&header_slot),
+                Arc::clone(&footer_slot),
+            )?;
         }
         Ok(PluginRuntime {
             lua: shared_lua,
@@ -679,6 +721,8 @@ impl PluginRuntimeBuilder {
             keybindings: keybinding_registry,
             theme_state: theme_state_slot,
             theme_request: theme_request_slot,
+            header: header_slot,
+            footer: footer_slot,
         })
     }
 }

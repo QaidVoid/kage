@@ -6,6 +6,7 @@
 
 pub mod api;
 pub mod bridge;
+pub mod chrome;
 pub mod commands;
 pub mod error;
 pub mod events;
@@ -27,6 +28,7 @@ pub mod widgets;
 
 pub use api::{HostLog, LogLevel, SharedHostLog, StderrHostLog, default_host_log};
 pub use bridge::{BridgeStep, SharedBridge, SuspendRequest};
+pub use chrome::{ChromeAttrs, ChromeLine, ChromeSlot, ChromeSpan, LuaChrome, SharedChrome};
 pub use commands::{BridgeArgs, BridgePrep, CommandOutput, LuaCommand, PluginArgSpec};
 pub use error::PluginError;
 pub use events::{DiscoveryEntries, SessionOpDecision};

@@ -434,3 +434,41 @@ fn select_demo_keybinding_drives_a_dialog() {
         r.notifies
     );
 }
+
+#[test]
+fn ui_extras_registers_chrome_autocomplete_and_raw_input() {
+    let (_rec, sink) = forwarding_sink();
+    let rt = PluginRuntime::builder().sink(sink).build().unwrap();
+    let source =
+        std::fs::read_to_string(examples_dir().join("ui_extras.lua")).expect("read ui_extras.lua");
+    rt.eval(&source).expect("ui_extras.lua loads");
+
+    // 1. Header / footer chrome both registered and renderable.
+    let header = rt.header_chrome().expect("header registered");
+    let footer = rt.footer_chrome().expect("footer registered");
+    assert!(!header.render(80).is_empty());
+    assert!(!footer.render(80).is_empty());
+
+    // 2. Autocomplete provider answers only on a ":" trigger.
+    let providers = rt.registered_autocomplete_providers();
+    assert_eq!(providers.len(), 1);
+    assert_eq!(providers[0].name(), "emoji");
+    let hit = providers[0].complete(":t", ":t", 2);
+    assert_eq!(hit.len(), 1);
+    assert_eq!(hit[0].value, ":tada:");
+    assert!(providers[0].complete("plain", "plain", 5).is_empty());
+
+    // 3. Raw-input observer is registered and never consumes.
+    let hooks = rt.registered_terminal_hooks();
+    assert_eq!(hooks.len(), 1);
+    assert!(!hooks[0].handle(&json!({
+        "code": "char", "char": "x", "ctrl": true, "alt": false, "shift": false
+    })));
+
+    // The runtime exposed an off-switch command.
+    assert!(
+        rt.registered_commands()
+            .iter()
+            .any(|c| c.name() == "ui-extras-off")
+    );
+}

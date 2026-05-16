@@ -17,6 +17,12 @@ use kage_core::config::Config;
 
 use crate::auth::{self, AuthStore, KNOWN_PROVIDERS};
 
+/// The `lua-language-server` definition stub, embedded so `kage init`
+/// can drop it next to a generated `.luarc.json` regardless of where
+/// the binary runs from. Kept in sync with the repo copy under
+/// `plugins/types/kage.lua`.
+const TYPE_STUB: &str = include_str!("../../../plugins/types/kage.lua");
+
 /// Default starter `config.toml` body. Written verbatim when the
 /// wizard is asked to create a fresh config; mirrors the Rust
 /// [`Config::default`] so the `[provider] default_model =
@@ -75,6 +81,10 @@ pub fn run(force: bool, non_interactive: bool) -> ExitCode {
             let _ = writeln!(stdout, "FAILED: {err}");
             return ExitCode::from(1);
         }
+    }
+
+    if let Err(err) = install_lua_lsp(&mut stdout) {
+        let _ = writeln!(stdout, "  WARN: lua lsp setup skipped: {err}");
     }
 
     if non_interactive {
@@ -141,6 +151,90 @@ fn handle_config<W: Write>(out: &mut W, force: bool) -> Result<(), String> {
 
 fn write_config(path: &Path) -> Result<(), String> {
     fs::write(path, STARTER_CONFIG).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// Drop the type stub into the data dir and point
+/// `lua-language-server` at it via a `.luarc.json` in the plugins
+/// dir. Resolves the XDG paths, then delegates the file work to
+/// [`write_lua_lsp`] so the merge logic stays unit-testable.
+fn install_lua_lsp<W: Write>(out: &mut W) -> Result<(), String> {
+    let types_dir = crate::data_root()?.join("types");
+    let luarc = crate::plugins_dir()?.join(".luarc.json");
+    write_lua_lsp(&types_dir, &luarc, out)
+}
+
+/// Write `kage.lua` into `types_dir` (always refreshed: it is a
+/// generated artifact, not user-edited) and ensure `luarc` lists
+/// `types_dir` in `workspace.library`. An existing `.luarc.json` is
+/// merged, never clobbered; if it is not valid JSON it is left
+/// untouched and the step is reported as skipped rather than
+/// silently overwriting the user's file.
+fn write_lua_lsp<W: Write>(types_dir: &Path, luarc: &Path, out: &mut W) -> Result<(), String> {
+    fs::create_dir_all(types_dir).map_err(|e| format!("mkdir {}: {e}", types_dir.display()))?;
+    let stub = types_dir.join("kage.lua");
+    fs::write(&stub, TYPE_STUB).map_err(|e| format!("write {}: {e}", stub.display()))?;
+    let _ = writeln!(out, "  types:   wrote {}", stub.display());
+
+    let lib = types_dir.to_string_lossy().into_owned();
+    let mut doc: serde_json::Value = if luarc.exists() {
+        let body =
+            fs::read_to_string(luarc).map_err(|e| format!("read {}: {e}", luarc.display()))?;
+        match serde_json::from_str(&body) {
+            Ok(v) => v,
+            Err(e) => {
+                let _ = writeln!(
+                    out,
+                    "  luarc:   {} is not valid JSON ({e}); left untouched",
+                    luarc.display()
+                );
+                return Ok(());
+            }
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    let Some(root) = doc.as_object_mut() else {
+        let _ = writeln!(
+            out,
+            "  luarc:   {} is not a JSON object; left untouched",
+            luarc.display()
+        );
+        return Ok(());
+    };
+    let workspace = root
+        .entry("workspace")
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(workspace) = workspace.as_object_mut() else {
+        let _ = writeln!(
+            out,
+            "  luarc:   workspace key is not an object; left untouched"
+        );
+        return Ok(());
+    };
+    let library = workspace
+        .entry("library")
+        .or_insert_with(|| serde_json::json!([]));
+    let Some(library) = library.as_array_mut() else {
+        let _ = writeln!(
+            out,
+            "  luarc:   workspace.library is not an array; left untouched"
+        );
+        return Ok(());
+    };
+    if library.iter().any(|v| v.as_str() == Some(lib.as_str())) {
+        let _ = writeln!(out, "  luarc:   {} (kept)", luarc.display());
+        return Ok(());
+    }
+    library.push(serde_json::Value::String(lib));
+    if let Some(parent) = luarc.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    let body =
+        serde_json::to_string_pretty(&doc).map_err(|e| format!("serialize .luarc.json: {e}"))?;
+    fs::write(luarc, format!("{body}\n")).map_err(|e| format!("write {}: {e}", luarc.display()))?;
+    let _ = writeln!(out, "  luarc:   wrote {}", luarc.display());
+    Ok(())
 }
 
 /// Show the current credential state. If no provider has a saved key
@@ -244,5 +338,74 @@ mod tests {
         write_config(&path).unwrap();
         let body = fs::read_to_string(&path).unwrap();
         assert_eq!(body, STARTER_CONFIG);
+    }
+
+    #[test]
+    fn lua_lsp_writes_stub_and_fresh_luarc() {
+        let dir = tempfile::tempdir().unwrap();
+        let types = dir.path().join("types");
+        let luarc = dir.path().join("plugins").join(".luarc.json");
+        let mut out = Vec::new();
+        write_lua_lsp(&types, &luarc, &mut out).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(types.join("kage.lua")).unwrap(),
+            TYPE_STUB
+        );
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&luarc).unwrap()).unwrap();
+        let lib = doc["workspace"]["library"].as_array().unwrap();
+        assert_eq!(lib.len(), 1);
+        assert_eq!(lib[0].as_str(), Some(types.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn lua_lsp_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let types = dir.path().join("types");
+        let luarc = dir.path().join(".luarc.json");
+        let mut out = Vec::new();
+        write_lua_lsp(&types, &luarc, &mut out).unwrap();
+        write_lua_lsp(&types, &luarc, &mut out).unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&luarc).unwrap()).unwrap();
+        assert_eq!(doc["workspace"]["library"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn lua_lsp_merges_into_existing_luarc() {
+        let dir = tempfile::tempdir().unwrap();
+        let types = dir.path().join("types");
+        let luarc = dir.path().join(".luarc.json");
+        fs::write(
+            &luarc,
+            r#"{ "runtime": { "version": "Lua 5.4" },
+                "workspace": { "library": ["/my/own/types"] } }"#,
+        )
+        .unwrap();
+        let mut out = Vec::new();
+        write_lua_lsp(&types, &luarc, &mut out).unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&luarc).unwrap()).unwrap();
+        assert_eq!(doc["runtime"]["version"], serde_json::json!("Lua 5.4"));
+        let lib = doc["workspace"]["library"].as_array().unwrap();
+        assert!(lib.iter().any(|v| v == "/my/own/types"));
+        assert!(
+            lib.iter()
+                .any(|v| v.as_str() == Some(types.to_string_lossy().as_ref()))
+        );
+    }
+
+    #[test]
+    fn lua_lsp_leaves_invalid_luarc_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let types = dir.path().join("types");
+        let luarc = dir.path().join(".luarc.json");
+        fs::write(&luarc, "{ not json at all").unwrap();
+        let mut out = Vec::new();
+        write_lua_lsp(&types, &luarc, &mut out).unwrap();
+        // The stub still lands, but the broken file is preserved.
+        assert!(types.join("kage.lua").exists());
+        assert_eq!(fs::read_to_string(&luarc).unwrap(), "{ not json at all");
     }
 }

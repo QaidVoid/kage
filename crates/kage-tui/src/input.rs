@@ -151,6 +151,10 @@ pub const HISTORY_MAX: usize = 1000;
 /// memory bounded for pathological inputs.
 const UNDO_MAX: usize = 100;
 
+/// Maximum entries kept in the Emacs kill ring. Older kills fall off
+/// the bottom; Ctrl+Y always yanks the most recent.
+const KILL_RING_MAX: usize = 60;
+
 /// One step on the undo or redo stack. We snapshot full text +
 /// cursor rather than diff-encode because input bodies are small
 /// (capped to a handful of KB by the host) and snapshot semantics
@@ -237,6 +241,10 @@ pub struct InputState {
     /// Redo stack: filled by [`Self::undo`], cleared by any new
     /// mutation. Vim's `<C-r>` pops from here.
     redo_stack: Vec<EditSnapshot>,
+    /// Emacs kill ring. Ctrl+W / Ctrl+U / Ctrl+K and the Alt word
+    /// kills push here; Ctrl+Y yanks the most recent entry. Capped at
+    /// [`KILL_RING_MAX`]; empty kills are not recorded.
+    kill_ring: Vec<String>,
 }
 
 impl Default for InputState {
@@ -258,6 +266,7 @@ impl Default for InputState {
             visual_anchor: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            kill_ring: Vec::new(),
         }
     }
 }
@@ -1102,7 +1111,9 @@ impl InputState {
         // ("unix-word-rubout"), Alt+Backspace deletes back to the
         // previous alphanumeric boundary ("backward-kill-word"),
         // Alt+d deletes forward, Alt+b/Alt+f move by word, and
-        // Ctrl+a/e/u/k operate on the current visual line.
+        // Ctrl+a/e/u/k operate on the current visual line. The kills
+        // (Ctrl+W/U/K, Alt+Backspace, Alt+d) feed a kill ring; Ctrl+Y
+        // yanks the most recent entry and Ctrl+/ (or Ctrl+_) undoes.
         if ctrl && !alt {
             match key.code {
                 KeyCode::Char('s') => {
@@ -1111,7 +1122,7 @@ impl InputState {
                 KeyCode::Char('w') => {
                     self.reset_history_navigation();
                     let to = unix_word_rubout_start(&self.text, self.cursor);
-                    self.delete_range(to, self.cursor);
+                    self.kill_range(to, self.cursor);
                     return Vec::new();
                 }
                 KeyCode::Char('a') => {
@@ -1125,13 +1136,23 @@ impl InputState {
                 KeyCode::Char('u') => {
                     self.reset_history_navigation();
                     let start = current_line_start(&self.text, self.cursor);
-                    self.delete_range(start, self.cursor);
+                    self.kill_range(start, self.cursor);
                     return Vec::new();
                 }
                 KeyCode::Char('k') => {
                     self.reset_history_navigation();
                     let end = current_line_end(&self.text, self.cursor);
-                    self.delete_range(self.cursor, end);
+                    self.kill_range(self.cursor, end);
+                    return Vec::new();
+                }
+                KeyCode::Char('y') => {
+                    self.reset_history_navigation();
+                    self.yank_kill();
+                    return Vec::new();
+                }
+                KeyCode::Char('/' | '_') => {
+                    self.reset_history_navigation();
+                    self.undo();
                     return Vec::new();
                 }
                 _ => {}
@@ -1142,13 +1163,13 @@ impl InputState {
                 KeyCode::Backspace => {
                     self.reset_history_navigation();
                     let to = backward_word_start(&self.text, self.cursor);
-                    self.delete_range(to, self.cursor);
+                    self.kill_range(to, self.cursor);
                     return Vec::new();
                 }
                 KeyCode::Delete | KeyCode::Char('d') => {
                     self.reset_history_navigation();
                     let to = forward_word_end(&self.text, self.cursor);
-                    self.delete_range(self.cursor, to);
+                    self.kill_range(self.cursor, to);
                     return Vec::new();
                 }
                 KeyCode::Char('b') | KeyCode::Left => {
@@ -1245,6 +1266,46 @@ impl InputState {
         } else if self.cursor > start {
             self.cursor = start;
         }
+    }
+
+    /// Delete `start..end` like [`Self::delete_range`], but first
+    /// snapshot for undo and push the removed text onto the kill ring
+    /// so Ctrl+Y can yank it back. Used by the Emacs line/word kills
+    /// (Ctrl+W / Ctrl+U / Ctrl+K, Alt+Backspace, Alt+d). Empty or
+    /// invalid ranges are a no-op and do not touch the ring.
+    fn kill_range(&mut self, start: usize, end: usize) {
+        if start >= end || end > self.text.len() {
+            return;
+        }
+        self.snapshot_for_undo();
+        let killed = self.text[start..end].to_owned();
+        self.kill_ring.push(killed);
+        if self.kill_ring.len() > KILL_RING_MAX {
+            self.kill_ring.remove(0);
+        }
+        self.delete_range(start, end);
+    }
+
+    /// Insert the most recent kill-ring entry at the cursor (Emacs
+    /// Ctrl+Y). A no-op when the ring is empty. Snapshots for undo and
+    /// leaves the cursor just past the inserted text.
+    fn yank_kill(&mut self) {
+        let Some(text) = self.kill_ring.last().cloned() else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        self.snapshot_for_undo();
+        self.text.insert_str(self.cursor, &text);
+        self.cursor += text.len();
+    }
+
+    /// Read-only view of the kill ring, oldest first. Test/inspection
+    /// aid; the most recent entry is what Ctrl+Y yanks.
+    #[cfg(test)]
+    pub(crate) fn kill_ring(&self) -> &[String] {
+        &self.kill_ring
     }
 
     fn handle_visual(&mut self, key: KeyEvent) -> Vec<InputAction> {
@@ -2559,5 +2620,64 @@ mod tests {
         assert_eq!(state.cursor(), 6);
         state.handle_key(ctrl('k'));
         assert_eq!(state.text(), "first\n");
+    }
+
+    #[test]
+    fn ctrl_w_kills_word_and_ctrl_y_yanks_it_back() {
+        let mut state = InputState::new();
+        state.paste("hello world");
+        state.handle_key(ctrl('w'));
+        assert_eq!(state.text(), "hello ");
+        assert_eq!(state.kill_ring(), ["world".to_owned()]);
+        state.handle_key(ctrl('y'));
+        assert_eq!(state.text(), "hello world");
+        assert_eq!(state.cursor(), 11);
+    }
+
+    #[test]
+    fn ctrl_u_and_ctrl_k_feed_the_kill_ring() {
+        let mut state = InputState::new();
+        state.paste("abc def");
+        state.handle_key(ctrl('u'));
+        assert_eq!(state.text(), "");
+        assert_eq!(state.kill_ring(), ["abc def".to_owned()]);
+
+        let mut state = InputState::new();
+        state.paste("one two");
+        state.handle_key(ctrl('a'));
+        state.handle_key(ctrl('k'));
+        assert_eq!(state.text(), "");
+        assert_eq!(state.kill_ring(), ["one two".to_owned()]);
+    }
+
+    #[test]
+    fn ctrl_y_yanks_the_most_recent_kill() {
+        let mut state = InputState::new();
+        state.paste("aaa bbb");
+        state.handle_key(ctrl('w'));
+        state.handle_key(ctrl('w'));
+        assert_eq!(state.kill_ring().len(), 2);
+        let last = state.kill_ring().last().unwrap().clone();
+        state.handle_key(ctrl('y'));
+        assert_eq!(state.text(), last);
+    }
+
+    #[test]
+    fn ctrl_y_on_empty_ring_is_a_noop() {
+        let mut state = InputState::new();
+        state.paste("abc");
+        state.handle_key(ctrl('y'));
+        assert_eq!(state.text(), "abc");
+        assert!(state.kill_ring().is_empty());
+    }
+
+    #[test]
+    fn ctrl_slash_undoes_a_kill() {
+        let mut state = InputState::new();
+        state.paste("keep this");
+        state.handle_key(ctrl('w'));
+        assert_eq!(state.text(), "keep ");
+        state.handle_key(ctrl('/'));
+        assert_eq!(state.text(), "keep this");
     }
 }

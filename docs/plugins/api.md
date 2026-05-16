@@ -142,6 +142,7 @@ Register a slash / colon command:
 ```lua
 {
   name        = "branch",
+  aliases     = { "br", "git-branch" },  -- optional
   description = "current git branch",
   args        = {
     { name = "verbose", kind = "flag" },
@@ -154,6 +155,12 @@ Register a slash / colon command:
 
 Argument `kind` values: `"text"`, `"choice"`, `"path"`, `"session"`,
 `"flag"`. For `"choice"`, also supply `choices = { "...", ... }`.
+
+`aliases` are alternate names that resolve to the same command (so
+`:br` runs `:branch`); they appear in the palette and `:help`. A
+command is rejected whole if its name *or* any alias collides with a
+built-in - use `kage.override_command` to shadow a built-in on
+purpose.
 
 The handler runs through the coroutine bridge, so it may call the
 blocking [`kage.ui.*`](#ui) dialogs directly.

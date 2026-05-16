@@ -148,6 +148,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         for cmd in rt.registered_commands() {
             plugin_command_listing.push(kage_tui::command::PluginCommand {
                 name: cmd.name().to_owned(),
+                aliases: cmd.aliases().to_vec(),
                 description: cmd.description().to_owned(),
                 args: cmd.args().iter().map(translate_plugin_arg).collect(),
             });

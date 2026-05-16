@@ -84,6 +84,7 @@
 --- `kage.ui.*` dialogs directly.
 ---@class kage.CommandSpec
 ---@field name string No leading / or :.
+---@field aliases? string[] Alternate names that resolve to this command.
 ---@field description string Shown in the palette and :help.
 ---@field args? kage.CommandArg[]
 ---@field handler fun(args: table): string?

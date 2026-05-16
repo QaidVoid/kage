@@ -487,6 +487,10 @@ pub struct App {
     /// Plugin-registered command names + descriptions for palette
     /// display. Builtin names take precedence on collision.
     plugin_commands: Vec<(String, String)>,
+    /// `(alias, canonical name)` for plugin commands. The cmdline
+    /// resolves an alias to its canonical name before dispatch so the
+    /// plugin runtime only ever needs to look a command up by name.
+    plugin_command_aliases: Vec<(String, String)>,
     /// Synthetic `CommandSpec` entries built from `plugin_commands`
     /// at registration time. Stored as `&'static` via `Box::leak` so
     /// the completion engine can mix them with the static builtin
@@ -663,6 +667,7 @@ impl App {
             status_model: None,
             status_session_id: None,
             plugin_commands: Vec::new(),
+            plugin_command_aliases: Vec::new(),
             plugin_command_specs: Vec::new(),
             plugin_keybindings: Vec::new(),
             config_keybindings: Vec::new(),
@@ -791,23 +796,42 @@ impl App {
     /// engine the builtins use. The leaked storage is bounded by the
     /// number of plugin commands the user installs.
     pub fn set_plugin_commands(&mut self, mut commands: Vec<PluginCommand>) {
-        commands.retain(|c| crate::command::find_builtin_command(&c.name).is_none());
+        // A plugin command (or any of its aliases) may not shadow a
+        // builtin; explicit shadowing is `kage.override_command`.
+        commands.retain(|c| {
+            crate::command::find_builtin_command(&c.name).is_none()
+                && c.aliases
+                    .iter()
+                    .all(|a| crate::command::find_builtin_command(a).is_none())
+        });
         self.plugin_command_specs.clear();
+        self.plugin_command_aliases.clear();
         for cmd in &commands {
             let name_static: &'static str = Box::leak(cmd.name.clone().into_boxed_str());
             let desc_static: &'static str =
                 Box::leak(format!("{}  [plugin]", cmd.description).into_boxed_str());
             let args_owned: Vec<ArgSpec> = cmd.args.iter().map(leak_argspec).collect();
             let args_static: &'static [ArgSpec] = Box::leak(args_owned.into_boxed_slice());
+            let aliases_static: &'static [&'static str] = Box::leak(
+                cmd.aliases
+                    .iter()
+                    .map(|a| &*Box::leak(a.clone().into_boxed_str()))
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice(),
+            );
             let spec: &'static CommandSpec = Box::leak(Box::new(CommandSpec {
                 name: name_static,
-                aliases: &[],
+                aliases: aliases_static,
                 description: desc_static,
                 category: CommandCategory::Both,
                 args: args_static,
                 subcommands: &[],
             }));
             self.plugin_command_specs.push(spec);
+            for alias in &cmd.aliases {
+                self.plugin_command_aliases
+                    .push((alias.clone(), cmd.name.clone()));
+            }
         }
         self.plugin_commands = commands
             .into_iter()
@@ -1842,9 +1866,17 @@ impl App {
             return CommandResult::Done(exit);
         }
 
-        if self.plugin_commands.iter().any(|(n, _)| n == head) {
+        let canonical = if self.plugin_commands.iter().any(|(n, _)| n == head) {
+            Some(head.to_owned())
+        } else {
+            self.plugin_command_aliases
+                .iter()
+                .find(|(alias, _)| alias == head)
+                .map(|(_, name)| name.clone())
+        };
+        if let Some(name) = canonical {
             let _ = self.send_request(RunRequest::InvokePluginCommand {
-                name: head.to_owned(),
+                name,
                 args: rest.to_owned(),
             });
             return CommandResult::Done(None);
@@ -3060,6 +3092,46 @@ mod tests {
         assert!(rendered.contains("ctrl+t"), "{rendered}");
         assert!(rendered.contains("theme set tokyo-night"), "{rendered}");
         assert!(rendered.contains("reserved"), "{rendered}");
+    }
+
+    #[test]
+    fn plugin_command_alias_resolves_to_canonical_invoke() {
+        let buffer = shared_buffer();
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        app.set_plugin_commands(vec![PluginCommand {
+            name: "git-status".into(),
+            aliases: vec!["gst".into(), "gs".into()],
+            description: "show git status".into(),
+            args: Vec::new(),
+        }]);
+        let registry = cmdline_registry(&app.plugin_command_specs);
+        let res = app.run_command_validated("gst --short", &registry);
+        assert!(matches!(res, CommandResult::Done(None)));
+        match rx.recv_timeout(Duration::from_millis(100)).unwrap() {
+            RunRequest::InvokePluginCommand { name, args } => {
+                assert_eq!(name, "git-status", "alias mapped to canonical");
+                assert_eq!(args, "--short");
+            }
+            other => panic!("expected InvokePluginCommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plugin_command_alias_shadowing_builtin_is_dropped() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        app.set_plugin_commands(vec![PluginCommand {
+            name: "mycmd".into(),
+            aliases: vec!["help".into()],
+            description: "tries to shadow :help via alias".into(),
+            args: Vec::new(),
+        }]);
+        assert!(
+            app.plugin_commands.is_empty(),
+            "a command whose alias collides with a builtin is rejected whole"
+        );
     }
 
     #[test]

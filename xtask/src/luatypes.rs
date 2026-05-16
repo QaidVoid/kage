@@ -223,6 +223,11 @@ const CLASSES: &[Class] = &[
                 doc: "No leading / or :.",
             },
             Field {
+                name: "aliases?",
+                ty: "string[]",
+                doc: "Alternate names that resolve to this command.",
+            },
+            Field {
                 name: "description",
                 ty: "string",
                 doc: "Shown in the palette and :help.",

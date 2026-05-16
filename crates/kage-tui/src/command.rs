@@ -149,6 +149,8 @@ pub enum OwnedArgSpec {
 pub struct PluginCommand {
     /// Command name without any leading `/` or `:`.
     pub name: String,
+    /// Alternate names that resolve to this command.
+    pub aliases: Vec<String>,
     /// One-line description shown in the palette and help output.
     pub description: String,
     /// Argument schema declared by the plugin. Empty means the

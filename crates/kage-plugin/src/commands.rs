@@ -78,6 +78,7 @@ pub enum PluginArgSpec {
 /// One slash command registered by a plugin.
 pub struct LuaCommand {
     name: String,
+    aliases: Vec<String>,
     description: String,
     args: Vec<PluginArgSpec>,
     lua: SharedLua,
@@ -98,6 +99,13 @@ impl LuaCommand {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Alternate names that resolve to this command, in declaration
+    /// order. Empty when the plugin declared no `aliases`.
+    #[must_use]
+    pub fn aliases(&self) -> &[String] {
+        &self.aliases
     }
 
     /// Short description shown by `/help` and command palettes.
@@ -479,9 +487,24 @@ pub fn install_register_command(
             let handler: Function = spec.get("handler")?;
             let args_value: mlua::Value = spec.get("args").unwrap_or(mlua::Value::Nil);
             let args = parse_arg_schema(args_value)?;
+            let aliases = match spec.get::<mlua::Value>("aliases")? {
+                mlua::Value::Nil => Vec::new(),
+                mlua::Value::Table(t) => t
+                    .sequence_values::<String>()
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| {
+                        mlua::Error::external("register_command: `aliases` must be a string array")
+                    })?,
+                _ => {
+                    return Err(mlua::Error::external(
+                        "register_command: `aliases` must be a string array",
+                    ));
+                }
+            };
             let key = lua.create_registry_value(handler)?;
             let cmd = LuaCommand {
                 name,
+                aliases,
                 description,
                 args,
                 lua: shared_lua.clone(),
@@ -522,6 +545,42 @@ mod tests {
         let cmd = &commands[0];
         assert_eq!(cmd.name(), "echo");
         assert_eq!(cmd.description(), "shouts the args back");
+        assert!(cmd.aliases().is_empty());
+    }
+
+    #[test]
+    fn register_command_records_aliases() {
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval(
+            r"
+            kage.register_command({
+                name = 'git-status',
+                aliases = { 'gst', 'gs' },
+                description = 'show git status',
+                handler = function() return 'ok' end,
+            })
+            ",
+        )
+        .unwrap();
+        let commands = rt.registered_commands();
+        assert_eq!(commands[0].aliases(), ["gst", "gs"]);
+    }
+
+    #[test]
+    fn register_command_rejects_non_array_aliases() {
+        let rt = PluginRuntime::new().unwrap();
+        assert!(
+            rt.eval(
+                r"
+                kage.register_command({
+                    name = 'x', description = 'y',
+                    aliases = 'not-an-array',
+                    handler = function() end,
+                })
+                ",
+            )
+            .is_err()
+        );
     }
 
     #[test]

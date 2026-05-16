@@ -153,6 +153,14 @@ pub fn render(
     session_usage: Option<&SessionUsage>,
     toasts: &[crate::toast::Toast],
 ) {
+    // Opaque base for the entire frame: header, conversation, input,
+    // modeline, every gap and overlay paint over this, so nothing
+    // bleeds the terminal background through as a patchwork.
+    let full = frame.area();
+    frame.render_widget(
+        RtBlock::default().style(Style::default().bg(crate::theme::current().bg)),
+        full,
+    );
     render_status(frame, regions, input, cmdline, status);
     render_buffer(frame, regions, buffer, status.search_pattern);
     render_input(frame, regions, input);
@@ -666,15 +674,8 @@ fn render_buffer(
         return;
     }
 
-    // Paint the whole conversation area with the base canvas first so
-    // blocks (which tint only their own rows) sit on one uniform
-    // surface. Without this the inter-block gaps and assistant prose
-    // are unpainted and the terminal background bleeds through as a
-    // patchwork.
-    frame.render_widget(
-        RtBlock::default().style(Style::default().bg(crate::theme::current().bg)),
-        regions.buffer,
-    );
+    // The opaque base canvas is painted once for the whole frame in
+    // `render`; blocks tint their own rows on top of it.
 
     // Owned-key snapshots of the call/result topology. Owning the
     // call_id strings here means we don't keep an immutable borrow of

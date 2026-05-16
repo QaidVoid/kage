@@ -38,6 +38,8 @@ Editing clears the error.
 | `:mouse on|off|toggle`   | Control terminal mouse capture                  |
 | `:help`                  | List every command in a readable form           |
 | `:compact`               | Run a compaction pass right now                 |
+| `:settings`              | Open the settings dialog (theme/model/mouse/..) |
+| `:tree`                  | Browse the session fork forest                  |
 | `:clear`                 | Clear the conversation buffer                   |
 
 ## plugin commands

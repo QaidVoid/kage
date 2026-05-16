@@ -424,7 +424,9 @@ Returns `nil` until the host has run at least one turn.
 ### `kage.compact(prompt?: string)`
 
 Ask the host to run a compaction pass. The optional prompt is
-advisory in v0.1 (a dedicated `on_compact_prepare` hook is planned).
+advisory; for full control over the summary subscribe to the
+[`compact_prepare`](#transform-hooks) transform event, which can
+rewrite the prompt/instruction or replace the summary outright.
 
 ## fs
 

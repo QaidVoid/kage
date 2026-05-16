@@ -32,6 +32,12 @@ suppress_warning = false
 [keybindings]
 # chord -> builtin command name.
 # bindings = { "ctrl+r" = "cancel" }
+
+[loop]
+# compact older history once the prompt fills this fraction of the
+# model context window (0.0-1.0). Applies on next launch; also
+# editable in the :settings dialog.
+compaction_threshold = 0.8
 ```
 
 Every table and key is optional; omitted values fall back to the

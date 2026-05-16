@@ -87,6 +87,29 @@ Editing the line clears the error.
 The active thinking level shows as a `think:<level>` pill in the
 modeline (hidden when off), next to the running token cost.
 
+## input editing
+
+The prompt input is a readline / Emacs-style line editor.
+
+| Key            | Effect                                            |
+| -------------- | ------------------------------------------------- |
+| `Ctrl+A` / `Ctrl+E` | Start / end of the current line              |
+| `Ctrl+W`       | Kill the word before the cursor                   |
+| `Ctrl+U`       | Kill to start of line                              |
+| `Ctrl+K`       | Kill to end of line                                |
+| `Alt+Backspace` | Kill the previous word                           |
+| `Alt+D`        | Kill the next word                                 |
+| `Alt+B` / `Alt+F` | Move backward / forward one word               |
+| `Ctrl+Y`       | Yank (paste) the most recent kill                  |
+| `Ctrl+/`       | Undo the last edit (also `Ctrl+_`)                 |
+| `Ctrl+O`       | Expand a collapsed pasted block in place           |
+
+`Ctrl+W`, `Ctrl+U`, `Ctrl+K`, `Alt+Backspace`, and `Alt+D` feed a
+kill ring; `Ctrl+Y` yanks the most recent entry. A bracketed paste
+of 10 or more lines collapses to a `[paste #N: M lines]` placeholder
+so it does not flood the input; the full text is still sent on
+submit, and `Ctrl+O` expands it inline if you want to edit it first.
+
 ## plugin keybindings
 
 Plugins bind their own chords with

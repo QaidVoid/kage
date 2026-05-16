@@ -1,27 +1,28 @@
 //! `ThinkingBlockWidget`: per-block renderer for hidden
 //! chain-of-thought blocks.
 //!
-//! Renders a `thinking` header line plus, when not folded, one body
-//! row per logical thinking line each prefixed with the themed left
-//! rule glyph. The whole block flows through `mark_emphasis` so
-//! focused / search-matching thinking blocks pick up the standard
-//! left-edge accent.
+//! Renders a plain `[thinking]` header plus, when not folded, the
+//! thinking text as markdown using the same renderer as assistant
+//! replies (`render_streaming` while the turn is live, `render`
+//! once it settles so code fences get highlighted), just with no
+//! left rule glyph and no fold chevron. The block still flows
+//! through `mark_emphasis` for per-row wrapping, the reserved
+//! (blank) left column, and the trailing pad, so its height matches
+//! the renderer's scroll math and a focused / search-matching block
+//! still picks up the standard accent like every other block.
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
 use super::widget::{BlockWidget, RenderCtx};
-use super::{
-    DECORATION_MARKER, Emphasis, fold_indicator, header_line, mark_emphasis, plain_lines,
-    thinking_style,
-};
+use super::{Emphasis, mark_emphasis, thinking_style};
 
-/// Renders a [`Block::Thinking`] with its `thinking` header line, the
-/// fold indicator, and (when unfolded) one body row per thinking line
-/// each prefixed with the themed left rule glyph.
+/// Renders a [`Block::Thinking`] as a plain `[thinking]` header and,
+/// when unfolded, its text as markdown via the same renderer as
+/// assistant replies (no left rule glyph, no fold chevron).
 #[derive(Clone, Debug)]
 pub struct ThinkingBlockWidget {
     text: String,
@@ -44,32 +45,18 @@ impl ThinkingBlockWidget {
 
     fn lines_for(&self, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
         let mut out = Vec::new();
-        out.push(header_line(
-            fold_indicator(self.folded),
-            "thinking",
-            None,
-            thinking_style(),
-        ));
+        out.push(Line::from(Span::styled(
+            "[thinking]",
+            thinking_style().add_modifier(Modifier::BOLD),
+        )));
         if !self.folded {
-            // Each body line gets a left-rule glyph in the thinking
-            // fg color so the thinking section reads distinct from
-            // assistant text even on terminals that swallow italic.
-            // The glyph is decoration so cell-based selection skips
-            // it on yank.
-            let rule = Span::styled(
-                "\u{258e} ",
-                Style::default()
-                    .fg(crate::theme::current().thinking_fg)
-                    .add_modifier(DECORATION_MARKER),
-            );
-            for body_line in plain_lines(&self.text, thinking_style()) {
-                let mut spans = Vec::with_capacity(body_line.spans.len() + 1);
-                spans.push(rule.clone());
-                spans.extend(body_line.spans);
-                out.push(Line::from(spans));
-            }
+            let body = if self.live {
+                crate::markdown::render_streaming(&self.text, thinking_style())
+            } else {
+                crate::markdown::render(&self.text, thinking_style())
+            };
+            out.extend(body);
         }
-        let _ = (Modifier::empty(), self.live);
         mark_emphasis(out, width, emphasis, None)
     }
 }
@@ -151,13 +138,14 @@ mod tests {
         let area = Rect::new(0, 0, 30, w.measure(30));
         let mut buf = Buffer::empty(area);
         w.render(area, &mut buf, &ctx(&theme));
-        // PB.5: even when not focused, column 0 holds a blank cell
-        // (no rule glyph) so toggling focus does not shift the body.
+        // PB.5: column 0 is the reserved gutter so toggling focus
+        // does not shift the body. Thinking has no visible rule
+        // glyph, so unfocused it is always a plain space.
         for y in area.top()..area.bottom() {
             let cell = buf[(area.left(), y)].symbol();
-            assert!(
-                cell == " " || cell == "\u{258e}",
-                "row {y} col 0 should be blank space or thinking rule, got {cell:?}"
+            assert_eq!(
+                cell, " ",
+                "row {y} col 0 should be the blank reserved gutter, got {cell:?}"
             );
         }
     }

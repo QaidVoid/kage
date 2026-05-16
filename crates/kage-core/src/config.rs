@@ -201,6 +201,13 @@ pub struct UiConfig {
     pub mouse: bool,
     /// Prompt-input editing model.
     pub editor: EditorMode,
+    /// Minimum content rows the input card holds (before chrome).
+    /// Clamped to a sane floor of 1.
+    pub input_min_lines: u16,
+    /// Maximum content rows the input card grows to before it stops
+    /// growing and scrolls internally. Lets a user enlarge the
+    /// composing area; clamped to a sane ceiling.
+    pub input_max_lines: u16,
 }
 
 impl Default for UiConfig {
@@ -209,6 +216,8 @@ impl Default for UiConfig {
             theme: "default".into(),
             mouse: true,
             editor: EditorMode::default(),
+            input_min_lines: 1,
+            input_max_lines: 8,
         }
     }
 }

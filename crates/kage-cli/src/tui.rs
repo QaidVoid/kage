@@ -282,6 +282,10 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         app.set_themes_dir(dir);
     }
     app.apply_startup_theme(&app_config.ui.theme);
+    kage_tui::layout::set_input_bounds(
+        app_config.ui.input_min_lines,
+        app_config.ui.input_max_lines,
+    );
     if let Some(status) = plugin_status {
         app.set_plugin_status(status);
     }

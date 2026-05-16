@@ -33,13 +33,43 @@
 //! on the input card's top border, not in the modeline; this row is
 //! reserved exclusively for plugin status widgets.
 
+use std::sync::RwLock;
+
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
-/// Minimum number of *content* rows the input card holds.
+/// Default minimum number of *content* rows the input card holds.
+/// The live value is configurable via [`set_input_bounds`].
 pub const INPUT_CONTENT_MIN_LINES: u16 = 1;
-/// Maximum number of *content* rows the input card holds before it
-/// stops growing. Past this the user scrolls inside the card.
+/// Default maximum number of *content* rows the input card holds
+/// before it stops growing. Past this the user scrolls inside the
+/// card. The live value is configurable via [`set_input_bounds`].
 pub const INPUT_CONTENT_MAX_LINES: u16 = 8;
+
+/// Hard ceiling on the configurable input content max, so a bad
+/// config value cannot let the input eat the whole screen.
+pub const INPUT_CONTENT_MAX_CEILING: u16 = 64;
+
+/// Live, host-configurable `(content_min, content_max)` bounds. The
+/// host sets this once at startup from `[ui]` config; the renderer
+/// reads it. Defaults match the `*_LINES` constants so behavior is
+/// unchanged until a user opts in. Mirrors the `theme` global.
+static INPUT_BOUNDS: RwLock<(u16, u16)> =
+    RwLock::new((INPUT_CONTENT_MIN_LINES, INPUT_CONTENT_MAX_LINES));
+
+/// Read the live `(content_min, content_max)` bounds.
+#[must_use]
+fn input_bounds() -> (u16, u16) {
+    *INPUT_BOUNDS.read().expect("input bounds rwlock poisoned")
+}
+
+/// Set the input card's content-row bounds from config. `min` is
+/// floored at 1, `max` is clamped to `min..=INPUT_CONTENT_MAX_CEILING`
+/// so an out-of-range or inverted config can never wedge the layout.
+pub fn set_input_bounds(min: u16, max: u16) {
+    let min = min.max(1);
+    let max = max.clamp(min, INPUT_CONTENT_MAX_CEILING);
+    *INPUT_BOUNDS.write().expect("input bounds rwlock poisoned") = (min, max);
+}
 /// Rows the bordered chrome around the input content claims (top
 /// border + bottom border).
 pub const INPUT_CHROME_LINES: u16 = 2;
@@ -77,7 +107,11 @@ pub struct Regions {
 /// registered themselves.
 #[must_use]
 pub fn split(area: Rect, input_height: u16, status_bottom_height: u16) -> Regions {
-    let input = input_height.clamp(INPUT_MIN_LINES, INPUT_MAX_LINES);
+    let (cmin, cmax) = input_bounds();
+    let input = input_height.clamp(
+        cmin.saturating_add(INPUT_CHROME_LINES),
+        cmax.saturating_add(INPUT_CHROME_LINES),
+    );
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -100,8 +134,10 @@ pub fn split(area: Rect, input_height: u16, status_bottom_height: u16) -> Region
 /// [`INPUT_MIN_LINES`]..=[`INPUT_MAX_LINES`].
 #[must_use]
 pub fn input_height_for(content_lines: u16) -> u16 {
-    let clamped = content_lines.clamp(INPUT_CONTENT_MIN_LINES, INPUT_CONTENT_MAX_LINES);
-    clamped.saturating_add(INPUT_CHROME_LINES)
+    let (cmin, cmax) = input_bounds();
+    content_lines
+        .clamp(cmin, cmax)
+        .saturating_add(INPUT_CHROME_LINES)
 }
 
 #[cfg(test)]
@@ -156,5 +192,31 @@ mod tests {
         assert_eq!(input_height_for(3), 3 + INPUT_CHROME_LINES);
         assert_eq!(input_height_for(8), INPUT_MAX_LINES);
         assert_eq!(input_height_for(20), INPUT_MAX_LINES);
+    }
+
+    #[test]
+    fn configured_bounds_resize_the_input_then_restore() {
+        // Enlarge the cap, verify the input grows past the old max,
+        // then restore the default so other tests are unaffected.
+        set_input_bounds(2, 20);
+        assert_eq!(input_height_for(15), 15 + INPUT_CHROME_LINES);
+        assert_eq!(input_height_for(0), 2 + INPUT_CHROME_LINES, "min floor");
+        assert_eq!(input_height_for(99), 20 + INPUT_CHROME_LINES, "max cap");
+        let r = split(Rect::new(0, 0, 80, 40), 99, 0);
+        assert_eq!(r.input.height, 20 + INPUT_CHROME_LINES);
+        // Out-of-range config is clamped, not honored verbatim.
+        set_input_bounds(0, 9999);
+        assert_eq!(
+            input_height_for(0),
+            1 + INPUT_CHROME_LINES,
+            "min floored to 1"
+        );
+        assert_eq!(
+            input_height_for(9999),
+            INPUT_CONTENT_MAX_CEILING + INPUT_CHROME_LINES,
+            "max clamped to ceiling"
+        );
+        set_input_bounds(INPUT_CONTENT_MIN_LINES, INPUT_CONTENT_MAX_LINES);
+        assert_eq!(input_height_for(20), INPUT_MAX_LINES, "restored default");
     }
 }

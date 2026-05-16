@@ -16,6 +16,12 @@ default_model = "anthropic:claude-sonnet-4-6"
 theme = "default"
 # capture terminal mouse events. Toggle at runtime with :mouse.
 mouse = true
+# input card sizing (content rows, before the 2-row border chrome).
+# the card grows with what you type, from input_min_lines up to
+# input_max_lines, then scrolls internally. raise the max for a
+# bigger composing area. min floored at 1, max capped at 64.
+input_min_lines = 1
+input_max_lines = 8
 
 [plugins]
 # override the plugin directory (default ~/.config/kage/plugins/).

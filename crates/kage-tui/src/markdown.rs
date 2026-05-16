@@ -16,11 +16,18 @@
 //! passthrough, task lists, autolinks. They render as the raw text the
 //! parser yields so users still see content rather than a silent drop.
 
+use std::ops::Range;
+
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::syntax::{highlight_with_lang, plain_lines_styled};
+
+/// Source range stand-in for a rendered line that maps to no source
+/// (a blank separator, the empty-input fallback). Callers treat a
+/// `start == usize::MAX` range as "no raw text for this row".
+const NO_SRC: Range<usize> = usize::MAX..usize::MAX;
 
 /// Convert `text` into a vector of styled [`Line`]s by walking the
 /// `CommonMark` event stream. `fallback` is the base text style for
@@ -29,6 +36,18 @@ use crate::syntax::{highlight_with_lang, plain_lines_styled};
 #[must_use]
 pub fn render(text: &str, fallback: Style) -> Vec<Line<'static>> {
     render_with(text, fallback, true)
+}
+
+/// Render like [`render`], but also return, per emitted line, the
+/// byte [`Range`] of `text` it came from. A line that maps to no
+/// source (blank separators) carries [`NO_SRC`]. Used by the yank
+/// path to turn a rendered-row selection back into the exact raw
+/// markdown substring, so copying part of a response gives verbatim
+/// source, never the reflowed render.
+#[must_use]
+pub fn render_with_src(text: &str, fallback: Style) -> Vec<(Line<'static>, Range<usize>)> {
+    let (lines, src) = render_parts(text, fallback, true);
+    lines.into_iter().zip(src).collect()
 }
 
 /// Like [`render`], but fenced code is shown as plain dim text
@@ -43,17 +62,26 @@ pub fn render_streaming(text: &str, fallback: Style) -> Vec<Line<'static>> {
 }
 
 fn render_with(text: &str, fallback: Style, highlight_code: bool) -> Vec<Line<'static>> {
-    let parser = Parser::new(text);
+    render_parts(text, fallback, highlight_code).0
+}
+
+fn render_parts(
+    text: &str,
+    fallback: Style,
+    highlight_code: bool,
+) -> (Vec<Line<'static>>, Vec<Range<usize>>) {
     let mut state = RenderState::new(fallback);
     state.highlight_code = highlight_code;
-    for event in parser {
-        state.handle(event);
+    for (event, range) in Parser::new(text).into_offset_iter() {
+        state.handle(event, range);
     }
     state.finish()
 }
 
 struct RenderState {
     lines: Vec<Line<'static>>,
+    /// Source byte range per entry in `lines`, kept in lockstep.
+    src: Vec<Range<usize>>,
     current: Vec<Span<'static>>,
     fallback: Style,
     style_stack: Vec<Style>,
@@ -63,6 +91,9 @@ struct RenderState {
     pending_blank: bool,
     has_block_content: bool,
     highlight_code: bool,
+    /// Union of every event source range seen since the last emitted
+    /// line; becomes that line's range when it flushes, then resets.
+    acc: Option<Range<usize>>,
 }
 
 struct ListFrame {
@@ -74,6 +105,7 @@ impl RenderState {
     fn new(fallback: Style) -> Self {
         Self {
             lines: Vec::new(),
+            src: Vec::new(),
             current: Vec::new(),
             fallback,
             style_stack: vec![fallback],
@@ -83,7 +115,35 @@ impl RenderState {
             pending_blank: false,
             has_block_content: false,
             highlight_code: true,
+            acc: None,
         }
+    }
+
+    /// Fold an event's source range into the line accumulator.
+    fn note(&mut self, range: Range<usize>) {
+        if range.start == usize::MAX {
+            return;
+        }
+        self.acc = Some(match self.acc.take() {
+            Some(a) => a.start.min(range.start)..a.end.max(range.end),
+            None => range,
+        });
+    }
+
+    /// Push `line` with the accumulated source range, then reset the
+    /// accumulator so the next line starts fresh.
+    fn emit_line(&mut self, line: Line<'static>) {
+        let range = self.acc.take().unwrap_or(NO_SRC);
+        self.lines.push(line);
+        self.src.push(range);
+    }
+
+    /// Push `line` with an explicit source range, leaving the
+    /// accumulator untouched (for multi-line structural emits like a
+    /// fenced block, where every row shares the block's range).
+    fn emit_line_src(&mut self, line: Line<'static>, range: Range<usize>) {
+        self.lines.push(line);
+        self.src.push(range);
     }
 
     fn current_style(&self) -> Style {
@@ -102,7 +162,7 @@ impl RenderState {
             return;
         }
         let line = std::mem::take(&mut self.current);
-        self.lines.push(Line::from(line));
+        self.emit_line(Line::from(line));
     }
 
     /// Emit one blank line between adjacent block elements unless we
@@ -117,7 +177,7 @@ impl RenderState {
 
     fn maybe_emit_pending_blank(&mut self) {
         if self.pending_blank {
-            self.lines.push(Line::from(""));
+            self.emit_line_src(Line::from(""), NO_SRC);
             self.pending_blank = false;
         }
     }
@@ -138,7 +198,8 @@ impl RenderState {
         }
     }
 
-    fn handle(&mut self, event: Event<'_>) {
+    fn handle(&mut self, event: Event<'_>, range: Range<usize>) {
+        self.note(range);
         match event {
             Event::Start(tag) => self.handle_start(tag),
             Event::End(end) => self.handle_end(end),
@@ -256,18 +317,26 @@ impl RenderState {
                     } else {
                         format!("```{lang}")
                     };
-                    self.lines
-                        .push(Line::from(Span::styled(fence_text, dim_style())));
+                    // Every row of the fence shares the block's
+                    // source span, so selecting any code row yanks
+                    // the whole verbatim fenced block.
+                    let block_src = self.acc.take().unwrap_or(NO_SRC);
+                    self.emit_line_src(
+                        Line::from(Span::styled(fence_text, dim_style())),
+                        block_src.clone(),
+                    );
                     let body_lines = if self.highlight_code {
                         highlight_with_lang(&body, &lang, self.fallback)
                     } else {
                         plain_lines_styled(&body, dim_style())
                     };
                     for line in body_lines {
-                        self.lines.push(line);
+                        self.emit_line_src(line, block_src.clone());
                     }
-                    self.lines
-                        .push(Line::from(Span::styled("```".to_owned(), dim_style())));
+                    self.emit_line_src(
+                        Line::from(Span::styled("```".to_owned(), dim_style())),
+                        block_src,
+                    );
                 }
                 self.has_block_content = true;
                 self.emit_paragraph_break();
@@ -295,18 +364,20 @@ impl RenderState {
 
     fn handle_rule(&mut self) {
         self.maybe_emit_pending_blank();
-        self.lines
-            .push(Line::from(Span::styled("\u{2500}".repeat(40), dim_style())));
+        self.emit_line(Line::from(Span::styled("\u{2500}".repeat(40), dim_style())));
         self.has_block_content = true;
         self.emit_paragraph_break();
     }
 
-    fn finish(mut self) -> Vec<Line<'static>> {
+    fn finish(mut self) -> (Vec<Line<'static>>, Vec<Range<usize>>) {
         self.flush_line();
         if self.lines.is_empty() {
-            return plain_lines_styled("", self.fallback);
+            let lines = plain_lines_styled("", self.fallback);
+            let src = vec![NO_SRC; lines.len()];
+            return (lines, src);
         }
-        self.lines
+        debug_assert_eq!(self.lines.len(), self.src.len());
+        (self.lines, self.src)
     }
 }
 

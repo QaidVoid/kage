@@ -147,6 +147,16 @@ pub enum RunRequest {
         /// registered binding.
         chord: String,
     },
+    /// Fork the session file at the given path at its last entry into
+    /// a fresh session, without reseating the runtime. Issued by the
+    /// `:tree` browser's `f` so any session (not just the active one)
+    /// can be branched.
+    ForkSessionFile(std::path::PathBuf),
+    /// Delete the session file at the given path. The worker refuses
+    /// to delete the session that is currently active and surfaces a
+    /// toast rather than orphaning the live writer. Issued by the
+    /// `:tree` browser's `d`.
+    DeleteSession(std::path::PathBuf),
 }
 
 /// Outcome of [`App::run`].

@@ -511,6 +511,12 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                     };
                     handle_plugin_fork(session_path.as_ref(), &buffer, &toasts, &at);
                 }
+                RunRequest::ForkSessionFile(path) => {
+                    handle_fork_file(&path, &buffer, &toasts);
+                }
+                RunRequest::DeleteSession(path) => {
+                    handle_delete_session(&path, session_path.as_ref(), &buffer, &toasts);
+                }
                 RunRequest::CompactNow => {
                     cancel.reset();
                     let qualified = active_qualified
@@ -1222,6 +1228,96 @@ fn handle_plugin_fork(
     push_toast(toasts, Toast::info(format!("forked session: {short}")));
 }
 
+/// Fork an arbitrary session file (the `:tree` browser's `f`) at its
+/// last entry into a fresh session, leaving the runtime untouched.
+fn handle_fork_file(path: &std::path::Path, buffer: &SharedBuffer, toasts: &SharedToasts) {
+    if !path.exists() {
+        if let Ok(mut buf) = buffer.lock() {
+            buf.push_custom(
+                "kage:error",
+                "fork: session file not found".to_owned(),
+                false,
+            );
+        }
+        return;
+    }
+    let entry = match find_last_entry(path) {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            if let Ok(mut buf) = buffer.lock() {
+                buf.push_custom(
+                    "kage:error",
+                    "fork: session has no entries to fork at".to_owned(),
+                    false,
+                );
+            }
+            return;
+        }
+        Err(e) => {
+            if let Ok(mut buf) = buffer.lock() {
+                buf.push_custom("kage:error", format!("fork: {e}"), false);
+            }
+            return;
+        }
+    };
+    let Some(dir) = path.parent() else {
+        if let Ok(mut buf) = buffer.lock() {
+            buf.push_custom(
+                "kage:error",
+                "fork: session path has no parent directory".to_owned(),
+                false,
+            );
+        }
+        return;
+    };
+    let new_session = SessionId::new();
+    let dst = dir.join(format!("{new_session}.jsonl"));
+    if let Err(e) = kage_session::fork(path, &dst, new_session, entry) {
+        if let Ok(mut buf) = buffer.lock() {
+            buf.push_custom("kage:error", format!("fork failed: {e}"), false);
+        }
+        return;
+    }
+    let short: String = new_session.to_string().chars().take(8).collect();
+    push_toast(toasts, Toast::info(format!("forked session: {short}")));
+}
+
+/// Delete a session file (the `:tree` browser's `d`). Refuses to
+/// delete the session that is currently active so the live writer is
+/// never orphaned; the refusal is surfaced, not silent.
+fn handle_delete_session(
+    path: &std::path::Path,
+    session_path: Option<&Arc<Mutex<PathBuf>>>,
+    buffer: &SharedBuffer,
+    toasts: &SharedToasts,
+) {
+    if let Some(sp) = session_path {
+        let active = sp.lock().expect("session path mutex poisoned").clone();
+        if active.as_path() == path {
+            push_toast(
+                toasts,
+                Toast::info("cannot delete the active session".to_owned()),
+            );
+            return;
+        }
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => {
+            let short: String = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.chars().take(8).collect())
+                .unwrap_or_default();
+            push_toast(toasts, Toast::info(format!("deleted session: {short}")));
+        }
+        Err(e) => {
+            if let Ok(mut buf) = buffer.lock() {
+                buf.push_custom("kage:error", format!("delete failed: {e}"), false);
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_resume(
     registry: &Arc<ProviderRegistry>,
@@ -1351,4 +1447,99 @@ fn available_model_items(registry: &ProviderRegistry, active: &str) -> Vec<kage_
         }
     }
     items
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use chrono::Utc;
+    use kage_session::{
+        EntryId, FORMAT_VERSION, Header, MessageEntry, SessionEntry, SessionId, SessionReader,
+        SessionWriter,
+    };
+
+    use super::*;
+
+    fn write_session(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        let header = Header {
+            version: FORMAT_VERSION,
+            session: SessionId::new(),
+            id: EntryId::new(),
+            ts: Utc::now(),
+            cwd: PathBuf::from("/work"),
+            model: "anthropic:claude".into(),
+            system_prompt: "be helpful".into(),
+            parent_session: None,
+            parent_entry: None,
+        };
+        let mut writer = SessionWriter::create(&path, header).unwrap();
+        writer
+            .append(&SessionEntry::Message(MessageEntry {
+                id: EntryId::new(),
+                ts: Utc::now(),
+                message: Message::new(
+                    Role::User,
+                    vec![Content::Text {
+                        text: "hello".to_owned(),
+                    }],
+                    None,
+                ),
+                usage: None,
+            }))
+            .unwrap();
+        path
+    }
+
+    fn session_id_of(path: &Path) -> SessionId {
+        let mut reader = SessionReader::iter(path).unwrap();
+        match reader.next().unwrap().unwrap() {
+            SessionEntry::Header(h) => h.session,
+            other => panic!("expected header, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_session_removes_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_session(dir.path(), "doomed.jsonl");
+        let buffer = shared_buffer();
+        let toasts = shared_toasts();
+        handle_delete_session(&path, None, &buffer, &toasts);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn delete_session_refuses_the_active_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_session(dir.path(), "live.jsonl");
+        let active = Arc::new(Mutex::new(path.clone()));
+        let buffer = shared_buffer();
+        let toasts = shared_toasts();
+        handle_delete_session(&path, Some(&active), &buffer, &toasts);
+        assert!(path.exists(), "active session must not be deleted");
+    }
+
+    #[test]
+    fn fork_file_creates_a_parent_linked_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = write_session(dir.path(), "src.jsonl");
+        let src_id = session_id_of(&src);
+        let buffer = shared_buffer();
+        let toasts = shared_toasts();
+        handle_fork_file(&src, &buffer, &toasts);
+
+        let forked = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl") && *p != src)
+            .expect("a new session file should exist");
+        let mut reader = SessionReader::iter(&forked).unwrap();
+        match reader.next().unwrap().unwrap() {
+            SessionEntry::Header(h) => assert_eq!(h.parent_session, Some(src_id)),
+            other => panic!("expected header, got {other:?}"),
+        }
+    }
 }

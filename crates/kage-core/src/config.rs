@@ -83,6 +83,26 @@ impl Config {
         figment = figment.merge(Env::prefixed("KAGE_").split("__"));
         Ok(figment.extract()?)
     }
+
+    /// Serialize this config and write it to `path`, creating the parent
+    /// directory if needed. The write is atomic: the TOML is written to a
+    /// sibling temp file and renamed over `path`, so an interrupted save
+    /// never truncates an existing config.
+    ///
+    /// This rewrites the whole file from the struct, so comments and any
+    /// keys this version does not model are dropped. The settings dialog
+    /// is the intended caller; hand-edited files keep working until the
+    /// first dialog save.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let body = toml::to_string_pretty(self)?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, body.as_bytes())?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    }
 }
 
 /// LLM provider configuration.
@@ -265,5 +285,43 @@ mod tests {
     fn sandbox_backend_serializes_kebab_case() {
         let json = serde_json::to_string(&SandboxBackend::SandboxExec).unwrap();
         assert_eq!(json, "\"sandbox-exec\"");
+    }
+
+    #[test]
+    fn save_then_load_roundtrips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("config.toml");
+        let mut cfg = Config::default();
+        cfg.ui.theme = "tokyo-night".to_owned();
+        cfg.ui.mouse = false;
+        cfg.provider.default_model = "anthropic:claude-opus-4-7".to_owned();
+        cfg.save(&path).unwrap();
+        // Parent directory was created and the file is valid TOML that
+        // parses back to an equal config.
+        assert!(path.exists());
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded, cfg);
+    }
+
+    #[test]
+    fn save_is_atomic_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save(&path).unwrap();
+        let tmp = path.with_extension("toml.tmp");
+        assert!(!tmp.exists(), "temp file should be renamed away");
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn save_overwrites_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save(&path).unwrap();
+        let mut cfg = Config::default();
+        cfg.ui.theme = "ayu".to_owned();
+        cfg.save(&path).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded.ui.theme, "ayu");
     }
 }

@@ -28,8 +28,24 @@ use crate::syntax::{highlight_with_lang, plain_lines_styled};
 /// own modifiers on top.
 #[must_use]
 pub fn render(text: &str, fallback: Style) -> Vec<Line<'static>> {
+    render_with(text, fallback, true)
+}
+
+/// Like [`render`], but fenced code is shown as plain dim text
+/// instead of syntect-highlighted. Used for the still-streaming
+/// assistant block: markdown structure (headings, lists, quotes,
+/// emphasis) renders live as deltas arrive, while running syntect
+/// over a half-written code body ~30x/sec is deferred until the
+/// turn settles and [`render`] takes over.
+#[must_use]
+pub fn render_streaming(text: &str, fallback: Style) -> Vec<Line<'static>> {
+    render_with(text, fallback, false)
+}
+
+fn render_with(text: &str, fallback: Style, highlight_code: bool) -> Vec<Line<'static>> {
     let parser = Parser::new(text);
     let mut state = RenderState::new(fallback);
+    state.highlight_code = highlight_code;
     for event in parser {
         state.handle(event);
     }
@@ -46,6 +62,7 @@ struct RenderState {
     code_body: String,
     pending_blank: bool,
     has_block_content: bool,
+    highlight_code: bool,
 }
 
 struct ListFrame {
@@ -65,6 +82,7 @@ impl RenderState {
             code_body: String::new(),
             pending_blank: false,
             has_block_content: false,
+            highlight_code: true,
         }
     }
 
@@ -240,7 +258,12 @@ impl RenderState {
                     };
                     self.lines
                         .push(Line::from(Span::styled(fence_text, dim_style())));
-                    for line in highlight_with_lang(&body, &lang, self.fallback) {
+                    let body_lines = if self.highlight_code {
+                        highlight_with_lang(&body, &lang, self.fallback)
+                    } else {
+                        plain_lines_styled(&body, dim_style())
+                    };
+                    for line in body_lines {
                         self.lines.push(line);
                     }
                     self.lines
@@ -418,6 +441,52 @@ mod tests {
         let texts: Vec<String> = lines.iter().map(spans_text).collect();
         let blank_idx = texts.iter().position(String::is_empty);
         assert!(blank_idx.is_some(), "expected a blank separator line");
+    }
+
+    #[test]
+    fn render_streaming_keeps_structure_but_leaves_code_plain() {
+        let md = "# Title\n\n```rust\nfn main() {}\n```";
+        let live = render_streaming(md, Style::default());
+
+        let head = spans_text(&live[0]);
+        assert!(
+            head.contains("# ") && head.contains("Title"),
+            "got {head:?}"
+        );
+        assert!(
+            live[0]
+                .spans
+                .iter()
+                .any(|s| s.style.add_modifier.contains(Modifier::BOLD)),
+            "heading is still styled while streaming"
+        );
+
+        let is_plain_dim = |l: &Line<'_>| {
+            !l.spans.is_empty()
+                && l.spans.iter().all(|s| {
+                    s.style.add_modifier.contains(Modifier::DIM)
+                        && s.style.fg == Some(Color::DarkGray)
+                })
+        };
+        let body = live
+            .iter()
+            .find(|l| spans_text(l).contains("fn main()"))
+            .expect("code body present");
+        assert!(
+            is_plain_dim(body),
+            "streaming code stays plain dim, not syntect: {:?}",
+            body.spans
+        );
+
+        let settled = render(md, Style::default());
+        let sbody = settled
+            .iter()
+            .find(|l| spans_text(l).contains("fn main()"))
+            .expect("code body present");
+        assert!(
+            !is_plain_dim(sbody),
+            "settled code is syntect-highlighted, not the streaming dim"
+        );
     }
 
     #[test]

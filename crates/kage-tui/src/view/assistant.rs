@@ -1,11 +1,12 @@
 //! `AssistantBlockWidget`: per-block renderer for assistant text.
 //!
-//! Live blocks skip the markdown parser (the cache would miss on
-//! every streamed delta and re-parse a growing body 30 times a
-//! second). Finished blocks run through
-//! [`crate::markdown::render`], which handles headings, lists,
-//! quotes, inline bold/italic/code, and fenced code blocks (syntect-
-//! highlighted). Emphasis adds the left-edge marker via
+//! Live blocks render markdown structure as deltas arrive
+//! ([`crate::markdown::render_streaming`]: headings, lists, quotes,
+//! inline bold/italic/code) but show fenced code as plain dim text,
+//! since running syntect over a half-written body 30 times a second
+//! is wasted work. Finished blocks run the full
+//! [`crate::markdown::render`], which adds syntect highlighting to
+//! code fences. Emphasis adds the left-edge marker via
 //! `mark_emphasis`.
 
 use ratatui::buffer::Buffer;
@@ -14,11 +15,11 @@ use ratatui::text::Line;
 use ratatui::widgets::{Paragraph, Widget};
 
 use super::widget::{BlockWidget, RenderCtx};
-use super::{Emphasis, assistant_style, mark_emphasis, plain_lines};
+use super::{Emphasis, assistant_style, mark_emphasis};
 
-/// Renders a [`Block::Assistant`] as plain text (while streaming) or
-/// fenced-syntax-highlighted text (once the turn finishes), with the
-/// usual `mark_emphasis` left rule when focused or matching a search.
+/// Renders a [`Block::Assistant`] as live markdown (structure now,
+/// code highlighted once the turn finishes), with the usual
+/// `mark_emphasis` left rule when focused or matching a search.
 #[derive(Clone, Debug)]
 pub struct AssistantBlockWidget {
     text: String,
@@ -29,9 +30,9 @@ impl AssistantBlockWidget {
     /// Construct a widget for an assistant text block.
     ///
     /// `live` mirrors [`crate::buffer::Block::Assistant::live`]: when
-    /// `true` the renderer skips syntect since each delta would
-    /// invalidate the cache; once the turn ends, set it to `false`
-    /// so the cache hits.
+    /// `true` the renderer formats markdown but leaves code fences
+    /// plain (syntect would re-run every delta); once the turn ends,
+    /// set it to `false` so code is highlighted and the cache hits.
     #[must_use]
     pub fn new(text: impl Into<String>, live: bool) -> Self {
         Self {
@@ -42,7 +43,7 @@ impl AssistantBlockWidget {
 
     fn lines_for(&self, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
         let body = if self.live {
-            plain_lines(&self.text, assistant_style())
+            crate::markdown::render_streaming(&self.text, assistant_style())
         } else {
             crate::markdown::render(&self.text, assistant_style())
         };

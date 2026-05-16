@@ -20,10 +20,90 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::acp::{
-    InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest,
-    PromptResponse, SessionNotification, SessionUpdate,
+    InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse, PermissionOption,
+    PermissionOptionKind, PermissionOutcome, PromptRequest, PromptResponse,
+    RequestPermissionRequest, RequestPermissionResponse, SessionNotification, SessionUpdate,
+    ToolCallStatus, ToolCallUpdate,
 };
 use crate::jsonrpc::{self, Inbound, Peer, RpcError};
+
+/// The verdict the agent's `before_tool_call` hook acts on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionDecision {
+    /// Run the tool call.
+    Allow,
+    /// Block it, with an optional reason for the model.
+    Deny(Option<String>),
+}
+
+/// A cloneable, `'static` handle that asks the client to allow or
+/// deny a tool call via `session/request_permission`. Detached from
+/// [`PromptContext`] so it can live inside the agent's loop hooks.
+#[derive(Clone)]
+pub struct AcpPermission {
+    peer: Peer,
+    session_id: String,
+    cancel: Arc<AtomicBool>,
+    next_id: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl AcpPermission {
+    /// Ask the client to permit a tool call. Blocks on
+    /// `session/request_permission` until the client answers or the
+    /// turn is cancelled. Never auto-approves: any error, cancel, or
+    /// rejection resolves to [`PermissionDecision::Deny`].
+    #[must_use]
+    pub fn request(&self, title: &str, raw_input: serde_json::Value) -> PermissionDecision {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let req = RequestPermissionRequest {
+            session_id: self.session_id.clone(),
+            tool_call: ToolCallUpdate {
+                tool_call_id: format!("call-{id}"),
+                status: Some(ToolCallStatus::Pending),
+                content: Vec::new(),
+                raw_output: Some(raw_input),
+            },
+            options: vec![
+                PermissionOption {
+                    option_id: "allow".to_owned(),
+                    name: format!("Allow {title}"),
+                    kind: PermissionOptionKind::AllowOnce,
+                },
+                PermissionOption {
+                    option_id: "reject".to_owned(),
+                    name: format!("Reject {title}"),
+                    kind: PermissionOptionKind::RejectOnce,
+                },
+            ],
+        };
+        let Ok(params) = serde_json::to_value(&req) else {
+            return PermissionDecision::Deny(Some("encode permission request".to_owned()));
+        };
+        let cancel = Arc::clone(&self.cancel);
+        let outcome =
+            self.peer
+                .request_cancellable("session/request_permission", params, &move || {
+                    cancel.load(Ordering::SeqCst)
+                });
+        match outcome {
+            Ok(value) => match serde_json::from_value::<RequestPermissionResponse>(value) {
+                Ok(resp) => match resp.outcome {
+                    PermissionOutcome::Selected(sel) if sel.option_id == "allow" => {
+                        PermissionDecision::Allow
+                    }
+                    PermissionOutcome::Selected(_) => {
+                        PermissionDecision::Deny(Some("rejected by client".to_owned()))
+                    }
+                    PermissionOutcome::Cancelled => {
+                        PermissionDecision::Deny(Some("cancelled".to_owned()))
+                    }
+                },
+                Err(e) => PermissionDecision::Deny(Some(format!("decode outcome: {e}"))),
+            },
+            Err(e) => PermissionDecision::Deny(Some(e.message)),
+        }
+    }
+}
 
 /// Per-session cancel flags, keyed by session id.
 type Sessions = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
@@ -34,6 +114,7 @@ pub struct PromptContext {
     peer: Peer,
     session_id: String,
     cancel: Arc<AtomicBool>,
+    next_call_id: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl PromptContext {
@@ -65,6 +146,18 @@ impl PromptContext {
     #[must_use]
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// A detached, cloneable permission handle for the agent's loop
+    /// hooks. It shares this turn's cancel flag and call-id counter.
+    #[must_use]
+    pub fn permission(&self) -> AcpPermission {
+        AcpPermission {
+            peer: self.peer.clone(),
+            session_id: self.session_id.clone(),
+            cancel: Arc::clone(&self.cancel),
+            next_id: Arc::clone(&self.next_call_id),
+        }
     }
 }
 
@@ -175,6 +268,7 @@ where
                             peer: peer.clone(),
                             session_id: req.session_id.clone(),
                             cancel: flag,
+                            next_call_id: Arc::new(std::sync::atomic::AtomicU64::new(0)),
                         };
                         let agent = Arc::clone(&agent);
                         let peer = peer.clone();

@@ -86,8 +86,9 @@ struct Session {
     workdir: PathBuf,
     record_path: Option<PathBuf>,
     /// Owns the session's MCP child processes; kept alive so their
-    /// tools stay valid for the session's lifetime.
-    _mcp_manager: kage_mcp::McpManager,
+    /// tools stay valid, and drained for restart / hot-refresh before
+    /// each prompt.
+    mcp_manager: kage_mcp::McpManager,
 }
 
 /// The ACP agent `kage rpc` exposes.
@@ -173,7 +174,7 @@ impl CliAcpAgent {
             cx,
             workdir,
             record_path: None,
-            _mcp_manager: mcp_manager,
+            mcp_manager,
         })
     }
 }
@@ -341,6 +342,17 @@ impl Agent for CliAcpAgent {
             .sessions
             .get_mut(&req.session_id)
             .ok_or_else(|| RpcError::new(-32602, format!("unknown session {}", req.session_id)))?;
+
+        if let Some(rt) = session.plugin_runtime.as_ref() {
+            for name in rt.take_mcp_restarts() {
+                if let Err(e) = session.mcp_manager.restart(&name, &mut session.tools) {
+                    eprintln!("kage: mcp restart `{name}`: {e}");
+                }
+            }
+        }
+        for (server, err) in session.mcp_manager.refresh_into(&mut session.tools) {
+            eprintln!("kage: mcp `{server}`: {err}");
+        }
 
         let text = req
             .prompt

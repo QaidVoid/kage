@@ -1,13 +1,13 @@
-//! `kage.mcp.add_server` / `kage.mcp.list_servers`: declarative MCP
-//! client config from plugins.
+//! `kage.mcp.add_server` / `list_servers` / `restart`: declarative
+//! MCP client config from plugins, plus a restart request.
 //!
 //! `kage.mcp.add_server({...})` mirrors `[mcp.servers.<name>]` in
 //! `config.toml` so a plugin can declare external MCP tool servers at
 //! runtime (the `nvim-lspconfig` analogy: plugins *configure*, core
-//! spawns). `kage.mcp.list_servers()` returns the names a plugin has
-//! declared so far, for introspection from Lua. Hot-restart of a
-//! misbehaving server needs a live manager handle the plugin layer
-//! does not own, so it is intentionally not exposed here.
+//! spawns). `kage.mcp.list_servers()` returns the declared names.
+//! `kage.mcp.restart(name)` enqueues a restart the host drains and
+//! applies against the live manager (the plugin layer does not own
+//! the process handles, so it requests rather than acts).
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -27,6 +27,16 @@ pub fn shared_mcp_servers() -> SharedMcpServers {
     Arc::new(Mutex::new(BTreeMap::new()))
 }
 
+/// FIFO of server names a plugin asked to restart, drained by the
+/// host between turns and applied against the live MCP manager.
+pub type SharedMcpRestart = Arc<Mutex<Vec<String>>>;
+
+/// Construct an empty restart queue.
+#[must_use]
+pub fn shared_mcp_restart() -> SharedMcpRestart {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
 /// Install `kage.mcp.add_server({...})` and
 /// `kage.mcp.list_servers()` on the running Lua state.
 ///
@@ -34,7 +44,11 @@ pub fn shared_mcp_servers() -> SharedMcpServers {
 ///
 /// Returns [`PluginError`] if the `kage` global is missing or the
 /// table cannot be populated.
-pub fn install_mcp(lua: &Lua, servers: SharedMcpServers) -> Result<(), PluginError> {
+pub fn install_mcp(
+    lua: &Lua,
+    servers: SharedMcpServers,
+    restart: SharedMcpRestart,
+) -> Result<(), PluginError> {
     let kage: Table = lua.globals().get("kage")?;
     let mcp = lua.create_table()?;
 
@@ -103,6 +117,22 @@ pub fn install_mcp(lua: &Lua, servers: SharedMcpServers) -> Result<(), PluginErr
         })?,
     )?;
 
+    mcp.set(
+        "restart",
+        lua.create_function(move |_lua, name: String| {
+            if name.is_empty() {
+                return Err(mlua::Error::external(
+                    "kage.mcp.restart: a server `name` is required",
+                ));
+            }
+            restart
+                .lock()
+                .map_err(|_| mlua::Error::external("plugin mcp restart queue poisoned"))?
+                .push(name);
+            Ok(())
+        })?,
+    )?;
+
     kage.set("mcp", mcp)?;
     Ok(())
 }
@@ -123,7 +153,7 @@ mod tests {
     fn add_server_records_into_shared_map() {
         let lua = lua_with_kage();
         let servers = shared_mcp_servers();
-        install_mcp(&lua, Arc::clone(&servers)).unwrap();
+        install_mcp(&lua, Arc::clone(&servers), shared_mcp_restart()).unwrap();
         lua.load(
             r#"kage.mcp.add_server({
                 name = "fs",
@@ -149,7 +179,7 @@ mod tests {
     #[test]
     fn add_server_rejects_missing_command() {
         let lua = lua_with_kage();
-        install_mcp(&lua, shared_mcp_servers()).unwrap();
+        install_mcp(&lua, shared_mcp_servers(), shared_mcp_restart()).unwrap();
         assert!(
             lua.load(r#"kage.mcp.add_server({ name = "x" })"#)
                 .exec()
@@ -160,7 +190,7 @@ mod tests {
     #[test]
     fn list_servers_returns_declared_names() {
         let lua = lua_with_kage();
-        install_mcp(&lua, shared_mcp_servers()).unwrap();
+        install_mcp(&lua, shared_mcp_servers(), shared_mcp_restart()).unwrap();
         lua.load(
             r#"
             kage.mcp.add_server({ name = "b", command = "x" })
@@ -177,5 +207,15 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(names, ["a", "b"], "sorted by BTreeMap key order");
+    }
+
+    #[test]
+    fn restart_enqueues_name_and_rejects_empty() {
+        let lua = lua_with_kage();
+        let queue = shared_mcp_restart();
+        install_mcp(&lua, shared_mcp_servers(), Arc::clone(&queue)).unwrap();
+        lua.load(r#"kage.mcp.restart("fs")"#).exec().unwrap();
+        assert_eq!(queue.lock().unwrap().as_slice(), ["fs"]);
+        assert!(lua.load(r#"kage.mcp.restart("")"#).exec().is_err());
     }
 }

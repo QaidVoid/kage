@@ -64,11 +64,20 @@ kage.mcp.add_server({
 })
 
 local names = kage.mcp.list_servers()  -- { "filesystem", ... }
+
+kage.mcp.restart("filesystem")          -- respawn a wedged server
 ```
 
 `name` and `command` are required. A plugin-declared server overrides
 a `config.toml` entry of the same name, so a plugin can ship a
 working default a user can still replace.
+
+`kage.mcp.restart(name)` enqueues a restart that the host applies
+before the next turn: the server is respawned from its original spec
+and its tools are re-registered. The respawn is brought up before the
+old child is killed, so a restart that fails leaves the existing
+server running and reports the error rather than causing downtime. An
+unknown name is reported, never silently ignored.
 
 ## running kage as an mcp server
 

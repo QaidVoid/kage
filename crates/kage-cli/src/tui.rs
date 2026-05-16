@@ -15,6 +15,7 @@ use std::thread;
 
 use kage_core::{CancelFlag, Content, Message, Role};
 use kage_loop::{AgentContext, LoopConfig, NoopHooks, force_compact, run};
+use kage_mcp::McpManager;
 use kage_plugin::{
     BridgePrep, BridgeStep, CommandOutput, ConfirmRequest, EditorRequest, InputRequest,
     PluginRuntime, SelectRequest,
@@ -167,7 +168,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
             .map(|kb| kb.chord().to_owned())
             .collect();
     }
-    let (_mcp_manager, mcp_errors) =
+    let (mcp_manager, mcp_errors) =
         crate::mcp::spawn_and_register(&mut tools, &workdir, plugin_runtime.as_deref());
     for (server, err) in mcp_errors {
         if let Ok(mut buf) = buffer.lock() {
@@ -224,6 +225,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         registry: Arc::clone(&registry),
         active_qualified: Arc::clone(&active_qualified),
         tools,
+        mcp_manager,
         cx: Arc::clone(&cx),
         buffer: buffer.clone(),
         cancel: cancel.clone(),
@@ -321,6 +323,10 @@ struct WorkerConfig {
     registry: Arc<ProviderRegistry>,
     active_qualified: Arc<Mutex<String>>,
     tools: ToolRegistry,
+    /// Owns the session's MCP child processes and mediates their
+    /// tools into `tools`. Drained for restart / hot-refresh between
+    /// turns; kept here so it lives exactly as long as the worker.
+    mcp_manager: McpManager,
     cx: Arc<Mutex<AgentContext>>,
     buffer: SharedBuffer,
     cancel: CancelFlag,
@@ -350,13 +356,47 @@ struct WorkerConfig {
     loop_cfg: LoopConfig,
 }
 
+/// Apply pending MCP changes before a turn: plugin-requested
+/// restarts (`kage.mcp.restart`) first, then a hot tool-list refresh
+/// for any server that announced `tools/list_changed`. Outcomes and
+/// failures are surfaced inline; nothing is swallowed.
+fn drain_mcp_updates(
+    manager: &mut McpManager,
+    tools: &mut ToolRegistry,
+    runtime: Option<&Arc<PluginRuntime>>,
+    buffer: &SharedBuffer,
+) {
+    if let Some(rt) = runtime {
+        for name in rt.take_mcp_restarts() {
+            match manager.restart(&name, tools) {
+                Ok(()) => {
+                    if let Ok(mut buf) = buffer.lock() {
+                        buf.push_custom("kage:mcp", format!("restarted `{name}`"), false);
+                    }
+                }
+                Err(e) => {
+                    if let Ok(mut buf) = buffer.lock() {
+                        buf.push_custom("kage:error", format!("mcp restart `{name}`: {e}"), false);
+                    }
+                }
+            }
+        }
+    }
+    for (server, err) in manager.refresh_into(tools) {
+        if let Ok(mut buf) = buffer.lock() {
+            buf.push_custom("kage:error", format!("mcp `{server}`: {err}"), false);
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let WorkerConfig {
             registry,
             active_qualified,
-            tools,
+            mut tools,
+            mut mcp_manager,
             cx,
             buffer,
             cancel,
@@ -371,6 +411,12 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
         } = cfg;
 
         for req in rx {
+            drain_mcp_updates(
+                &mut mcp_manager,
+                &mut tools,
+                plugin_runtime.as_ref(),
+                &buffer,
+            );
             match req {
                 RunRequest::Submit(text) => {
                     cancel.reset();

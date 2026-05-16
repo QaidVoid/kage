@@ -58,6 +58,9 @@ pub enum McpError {
         /// What was wrong.
         detail: String,
     },
+    /// An operation named a server the manager does not know.
+    #[error("no mcp server named `{0}`")]
+    Unknown(String),
 }
 
 /// A live, initialized MCP connection (transport + drained

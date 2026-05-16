@@ -13,14 +13,17 @@
 
 use std::sync::Arc;
 
-use kage_core::config::McpConfig;
+use kage_core::config::{McpConfig, McpServer};
 use kage_tools::ToolRegistry;
 
 use crate::server::{McpConnection, McpError, McpServerHandle};
 use crate::tools::tools_from_connection;
 
-/// One spawned server plus the tool names it currently contributes.
+/// One spawned server: its launch spec (kept so it can be
+/// respawned on `restart`), the live handle, and the tool names it
+/// currently contributes.
 struct Managed {
+    spec: McpServer,
     handle: McpServerHandle,
     registered: Vec<String>,
 }
@@ -51,6 +54,7 @@ impl McpManager {
                 Ok(handle) => servers.push((
                     name.clone(),
                     Managed {
+                        spec: spec.clone(),
                         handle,
                         registered: Vec::new(),
                     },
@@ -104,6 +108,31 @@ impl McpManager {
             }
         }
         errors
+    }
+
+    /// Restart one server by name: spawn a fresh process from its
+    /// original spec, and only on success swap it in (killing the old
+    /// child) and re-register its tools. A failed respawn leaves the
+    /// old server running and untouched, so `restart` never causes
+    /// downtime on its own failure.
+    ///
+    /// # Errors
+    ///
+    /// [`McpError::Unknown`] if no server has that name, or the spawn
+    /// / discovery error from bringing the replacement up.
+    pub fn restart(&mut self, name: &str, reg: &mut ToolRegistry) -> Result<(), McpError> {
+        let managed = self
+            .servers
+            .iter_mut()
+            .find(|(n, _)| n == name)
+            .map(|(_, m)| m)
+            .ok_or_else(|| McpError::Unknown(name.to_owned()))?;
+        let fresh = McpServerHandle::spawn(name.to_owned(), &managed.spec)?;
+        for stale in managed.registered.drain(..) {
+            reg.unregister(&stale);
+        }
+        managed.handle = fresh;
+        reload_connection(managed.handle.connection(), &mut managed.registered, reg)
     }
 
     /// Drop this server's previously registered tools and register
@@ -221,5 +250,16 @@ mod tests {
         assert!(mgr.is_empty(), "disabled skipped, broken failed to spawn");
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].0, "broken");
+    }
+
+    #[test]
+    fn restart_unknown_server_errors() {
+        let (mut mgr, _e) = McpManager::spawn_all(&McpConfig::default());
+        let mut reg = ToolRegistry::new();
+        let err = mgr.restart("ghost", &mut reg).unwrap_err();
+        assert!(
+            matches!(&err, crate::server::McpError::Unknown(n) if n == "ghost"),
+            "{err}"
+        );
     }
 }

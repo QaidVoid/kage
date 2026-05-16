@@ -43,7 +43,9 @@ use crate::keybindings::{self, RegisteredKeybindings, registered_keybindings};
 use crate::lifecycle::{
     self, SharedCompactRequest, SharedUsage, shared_compact_request, shared_usage,
 };
-use crate::mcp::{self, SharedMcpServers, shared_mcp_servers};
+use crate::mcp::{
+    self, SharedMcpRestart, SharedMcpServers, shared_mcp_restart, shared_mcp_servers,
+};
 use crate::messages::{self, PendingMessage, SharedPendingMessages, shared_pending_messages};
 use crate::providers::{self, LuaProvider, RegisteredProviders, registered_providers};
 use crate::sessions::{
@@ -77,6 +79,7 @@ pub struct PluginRuntime {
     status: SharedStatus,
     acp_agents: SharedAcpAgents,
     mcp_servers: SharedMcpServers,
+    mcp_restart: SharedMcpRestart,
     usage: SharedUsage,
     compact_request: SharedCompactRequest,
     session_list: SharedSessionList,
@@ -279,6 +282,20 @@ impl PluginRuntime {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
+    }
+
+    /// Drain the MCP server names a plugin asked to restart via
+    /// `kage.mcp.restart`. The host applies each against the live
+    /// manager between turns; an unknown name surfaces as an error
+    /// there rather than failing silently.
+    #[must_use]
+    pub fn take_mcp_restarts(&self) -> Vec<String> {
+        std::mem::take(
+            &mut *self
+                .mcp_restart
+                .lock()
+                .expect("plugin mcp restart mutex poisoned"),
+        )
     }
 
     /// Consult the plugin's `kage.on_acp_permission` handler for an
@@ -726,6 +743,7 @@ impl PluginRuntimeBuilder {
         let status_map = shared_status();
         let acp_agents = shared_acp_agents();
         let mcp_servers = shared_mcp_servers();
+        let mcp_restart = shared_mcp_restart();
         let usage_snapshot = shared_usage();
         let compact_slot = shared_compact_request();
         let session_list_slot = shared_session_list();
@@ -782,7 +800,11 @@ impl PluginRuntimeBuilder {
             )?;
             status::install_status(&lua_guard, Arc::clone(&status_map))?;
             acp::install_acp(&lua_guard, Arc::clone(&acp_agents))?;
-            mcp::install_mcp(&lua_guard, Arc::clone(&mcp_servers))?;
+            mcp::install_mcp(
+                &lua_guard,
+                Arc::clone(&mcp_servers),
+                Arc::clone(&mcp_restart),
+            )?;
             lifecycle::install_lifecycle(
                 &lua_guard,
                 Arc::clone(&usage_snapshot),
@@ -831,6 +853,7 @@ impl PluginRuntimeBuilder {
             status: status_map,
             acp_agents,
             mcp_servers,
+            mcp_restart,
             usage: usage_snapshot,
             compact_request: compact_slot,
             session_list: session_list_slot,

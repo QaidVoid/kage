@@ -21,6 +21,7 @@ export default defineConfig({
     nav: [
       { text: "guide", link: "/guide/install" },
       { text: "plugins", link: "/plugins/" },
+      { text: "editors", link: "/editors/zed" },
       { text: "reference", link: "/reference/architecture" },
     ],
     sections: [
@@ -47,8 +48,16 @@ export default defineConfig({
         ],
       },
       {
-        label: "reference",
+        label: "editors",
         glyph: "03",
+        items: [
+          { text: "zed", link: "/editors/zed" },
+          { text: "neovim", link: "/editors/neovim" },
+        ],
+      },
+      {
+        label: "reference",
+        glyph: "04",
         items: [
           { text: "architecture", link: "/reference/architecture" },
         ],

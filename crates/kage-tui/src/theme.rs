@@ -13,6 +13,7 @@
 //! also goes through this path so a swap takes effect on the next
 //! frame without restarting the TUI.
 
+use std::path::Path;
 use std::sync::RwLock;
 
 use ratatui::style::Color;
@@ -47,6 +48,11 @@ pub fn set_current(theme: Theme) {
 pub struct Theme {
     /// Display name (`"default"`, `"tokyo-night"`, etc.).
     pub name: String,
+    /// When `true`, kage does not paint the whole-frame opaque base,
+    /// letting a blurred/transparent terminal show through the entire
+    /// UI. A terminal grid has no per-cell alpha, so this is the only
+    /// meaningful "transparency" knob: opaque (default) or not.
+    pub transparent: bool,
     /// Base canvas painted behind the whole conversation so blocks
     /// sit on one uniform surface (no terminal-background patchwork
     /// between blocks). Slightly darker than the block tints.
@@ -141,6 +147,7 @@ impl Theme {
     pub fn default_dark() -> Self {
         Self {
             name: "default".into(),
+            transparent: false,
             bg: Color::Rgb(18, 20, 28),
             user_bg: Color::Rgb(36, 42, 58),
             assistant_rule: Color::Rgb(70, 80, 105),
@@ -185,6 +192,7 @@ impl Theme {
     pub fn tokyo_night() -> Self {
         Self {
             name: "tokyo-night".into(),
+            transparent: false,
             bg: Color::Rgb(22, 23, 34),
             user_bg: Color::Rgb(36, 40, 59),
             assistant_rule: Color::Rgb(86, 95, 137),
@@ -228,6 +236,7 @@ impl Theme {
     pub fn catppuccin_mocha() -> Self {
         Self {
             name: "catppuccin-mocha".into(),
+            transparent: false,
             bg: Color::Rgb(24, 24, 37),
             user_bg: Color::Rgb(49, 50, 68),
             assistant_rule: Color::Rgb(88, 91, 112),
@@ -282,6 +291,115 @@ impl Theme {
     pub fn bundled_names() -> &'static [&'static str] {
         &["default", "tokyo-night", "catppuccin-mocha"]
     }
+
+    /// Override one role by name. Unknown roles error so a typo in a
+    /// user theme is reported, not silently ignored.
+    fn set_role(&mut self, role: &str, c: Color) -> Result<(), String> {
+        macro_rules! roles {
+            ($($n:literal => $f:ident),+ $(,)?) => {
+                match role {
+                    $($n => self.$f = c,)+
+                    other => return Err(format!("unknown theme color `{other}`")),
+                }
+            };
+        }
+        roles! {
+            "bg" => bg, "user_bg" => user_bg, "assistant_rule" => assistant_rule,
+            "user_rule" => user_rule, "tool_bg" => tool_bg, "tool_error_bg" => tool_error_bg,
+            "tool_pending_bg" => tool_pending_bg, "tool_rule" => tool_rule,
+            "tool_error_rule" => tool_error_rule, "tool_pending_rule" => tool_pending_rule,
+            "assistant_fg" => assistant_fg, "thinking_fg" => thinking_fg,
+            "tool_result_fg" => tool_result_fg, "tool_error_fg" => tool_error_fg,
+            "custom_fg" => custom_fg, "status_bg" => status_bg,
+            "status_dim_fg" => status_dim_fg, "muted_fg" => muted_fg,
+            "match_color" => match_color, "selection_color" => selection_color,
+            "focus_color" => focus_color, "input_border_normal" => input_border_normal,
+            "input_border_insert" => input_border_insert,
+            "input_border_visual" => input_border_visual,
+            "input_pill_normal_bg" => input_pill_normal_bg,
+            "input_pill_normal_fg" => input_pill_normal_fg,
+            "input_pill_insert_bg" => input_pill_insert_bg,
+            "input_pill_insert_fg" => input_pill_insert_fg,
+            "input_pill_visual_bg" => input_pill_visual_bg,
+            "input_pill_visual_fg" => input_pill_visual_fg,
+            "input_glyph_fg" => input_glyph_fg,
+            "input_placeholder_fg" => input_placeholder_fg,
+            "input_hint_fg" => input_hint_fg, "modeline_bg" => modeline_bg,
+            "modeline_fg" => modeline_fg,
+        }
+        Ok(())
+    }
+
+    /// Build a theme from a user TOML document: start from the
+    /// bundled `base` (default `"default"`), flip `transparent`, then
+    /// apply every `[colors]` override.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the TOML is malformed, a color does not
+    /// parse, or a role name is unknown.
+    pub fn from_toml(toml: &str) -> Result<Self, String> {
+        let file: ThemeFile = toml::from_str(toml).map_err(|e| e.to_string())?;
+        let mut theme = Self::by_name(file.base.as_deref().unwrap_or("default"));
+        if let Some(t) = file.transparent {
+            theme.transparent = t;
+        }
+        for (role, value) in &file.colors {
+            let color = parse_color(value)?;
+            theme.set_role(role, color)?;
+        }
+        Ok(theme)
+    }
+
+    /// Resolve a theme name to a palette: a bundled name wins;
+    /// otherwise `themes_dir/<name>.toml` is loaded.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when `name` is neither bundled nor a
+    /// readable, valid `<name>.toml` under `themes_dir`.
+    pub fn resolve(name: &str, themes_dir: Option<&Path>) -> Result<Self, String> {
+        if Self::bundled_names().contains(&name) {
+            return Ok(Self::by_name(name));
+        }
+        if let Some(dir) = themes_dir {
+            let path = dir.join(format!("{name}.toml"));
+            if path.exists() {
+                let body = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("read {}: {e}", path.display()))?;
+                let mut theme =
+                    Self::from_toml(&body).map_err(|e| format!("theme `{name}`: {e}"))?;
+                name.clone_into(&mut theme.name);
+                return Ok(theme);
+            }
+        }
+        Err(format!(
+            "unknown theme `{name}` (not bundled and no `{name}.toml`)"
+        ))
+    }
+}
+
+/// A user theme file (`~/.config/kage/themes/<name>.toml`).
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThemeFile {
+    /// Bundled palette to start from. Defaults to `"default"`.
+    #[serde(default)]
+    base: Option<String>,
+    /// Whole-UI opaque (`false`, default) vs let-terminal-through.
+    #[serde(default)]
+    transparent: Option<bool>,
+    /// `role = "#rrggbb"` overrides under `[colors]`.
+    #[serde(default)]
+    colors: std::collections::BTreeMap<String, String>,
+}
+
+/// Parse a color string via ratatui's grammar: `#rrggbb` / `#rgb`
+/// hex, a named color (`cyan`), or an indexed number.
+fn parse_color(s: &str) -> Result<Color, String> {
+    s.trim()
+        .parse::<Color>()
+        .map_err(|_| format!("invalid color `{s}` (use `#rrggbb`, a name, or an index)"))
 }
 
 #[cfg(test)]
@@ -306,5 +424,77 @@ mod tests {
         assert!(names.contains(&"default"));
         assert!(names.contains(&"tokyo-night"));
         assert!(names.contains(&"catppuccin-mocha"));
+    }
+
+    #[test]
+    fn from_toml_overrides_color_on_chosen_base() {
+        let t = Theme::from_toml(
+            r##"
+            base = "tokyo-night"
+            [colors]
+            bg = "#010203"
+            focus_color = "cyan"
+            "##,
+        )
+        .expect("valid theme");
+        assert_eq!(t.bg, Color::Rgb(1, 2, 3));
+        assert_eq!(t.focus_color, Color::Cyan);
+        assert_eq!(t.assistant_rule, Theme::tokyo_night().assistant_rule);
+    }
+
+    #[test]
+    fn from_toml_defaults_base_to_default_dark() {
+        let t = Theme::from_toml("[colors]\nbg = \"#0a0b0c\"").expect("valid");
+        assert_eq!(t.bg, Color::Rgb(10, 11, 12));
+        assert_eq!(t.muted_fg, Theme::default_dark().muted_fg);
+    }
+
+    #[test]
+    fn from_toml_carries_transparent_switch() {
+        let t = Theme::from_toml("transparent = true").expect("valid");
+        assert!(t.transparent);
+        assert!(!Theme::default_dark().transparent);
+    }
+
+    #[test]
+    fn from_toml_rejects_unknown_role() {
+        let err = Theme::from_toml("[colors]\nnope = \"#000000\"").unwrap_err();
+        assert!(err.contains("unknown theme color `nope`"), "{err}");
+    }
+
+    #[test]
+    fn from_toml_rejects_bad_color() {
+        let err = Theme::from_toml("[colors]\nbg = \"not-a-color\"").unwrap_err();
+        assert!(err.contains("invalid color"), "{err}");
+    }
+
+    #[test]
+    fn from_toml_rejects_unknown_top_level_key() {
+        assert!(Theme::from_toml("wat = 1").is_err());
+    }
+
+    #[test]
+    fn resolve_bundled_name_skips_disk() {
+        let t = Theme::resolve("tokyo-night", None).expect("bundled");
+        assert_eq!(t.name, "tokyo-night");
+    }
+
+    #[test]
+    fn resolve_loads_user_file_and_keeps_name() {
+        let dir = std::env::temp_dir().join(format!("kage-theme-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("solar.toml");
+        std::fs::write(&path, "[colors]\nbg = \"#102030\"").expect("write");
+        let t = Theme::resolve("solar", Some(&dir)).expect("resolved");
+        assert_eq!(t.name, "solar");
+        assert_eq!(t.bg, Color::Rgb(16, 32, 48));
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_errors_on_unknown_theme() {
+        let err = Theme::resolve("ghost", None).unwrap_err();
+        assert!(err.contains("unknown theme `ghost`"), "{err}");
     }
 }

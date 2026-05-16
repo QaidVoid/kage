@@ -53,6 +53,7 @@ export default defineConfig({
         items: [
           { text: "zed", link: "/editors/zed" },
           { text: "neovim", link: "/editors/neovim" },
+          { text: "acp client", link: "/editors/acp-client" },
         ],
       },
       {

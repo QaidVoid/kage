@@ -136,6 +136,13 @@ pub enum RunRequest {
         /// most recent entry.
         at: String,
     },
+    /// Duplicate the active session to a fresh id and reseat the
+    /// runtime onto the copy. Unlike [`RunRequest::ForkSession`], the
+    /// original file is frozen as a snapshot and every subsequent turn
+    /// appends to the clone. History, model, and usage carry over
+    /// unchanged because the copy is byte-identical through the last
+    /// entry.
+    CloneSession,
     /// Advance the active thinking level one step forward (the
     /// `Shift+Tab` cycle). The worker mutates the agent context's
     /// `thinking_level`, persists the change as a session entry, and
@@ -1832,6 +1839,10 @@ impl App {
             }
             "tree" => {
                 self.open_session_tree();
+                None
+            }
+            "clone" => {
+                let _ = self.send_request(RunRequest::CloneSession);
                 None
             }
             "clear" => {

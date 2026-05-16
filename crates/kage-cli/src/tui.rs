@@ -520,6 +520,9 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                     };
                     handle_plugin_fork(session_path.as_ref(), &buffer, &toasts, &at);
                 }
+                RunRequest::CloneSession => {
+                    handle_clone(session_path.as_ref(), &buffer, &toasts);
+                }
                 RunRequest::ForkSessionFile(path) => {
                     handle_fork_file(&path, &buffer, &toasts);
                 }
@@ -1260,6 +1263,86 @@ fn handle_plugin_fork(
     }
     let short: String = new_session.to_string().chars().take(8).collect();
     push_toast(toasts, Toast::info(format!("forked session: {short}")));
+}
+
+/// Handle [`RunRequest::CloneSession`]. Forks the active session at
+/// its last entry into a fresh id, then reseats `session_path` onto
+/// the copy so every subsequent turn appends there. The original file
+/// is frozen as a snapshot. History, model, and usage need no
+/// adjustment: the clone is byte-identical through the last entry, so
+/// the in-memory context already matches it. Errors surface as
+/// `kage:error` blocks; success raises a toast with the new id.
+fn handle_clone(
+    session_path: Option<&Arc<Mutex<PathBuf>>>,
+    buffer: &SharedBuffer,
+    toasts: &SharedToasts,
+) {
+    let Some(sp) = session_path else {
+        if let Ok(mut buf) = buffer.lock() {
+            buf.push_custom(
+                "kage:error",
+                "clone: no active session to clone".to_owned(),
+                false,
+            );
+        }
+        return;
+    };
+    let src_path = sp.lock().expect("session path mutex poisoned").clone();
+    if !src_path.exists() {
+        if let Ok(mut buf) = buffer.lock() {
+            buf.push_custom(
+                "kage:error",
+                "clone: current session has no committed entries yet".to_owned(),
+                false,
+            );
+        }
+        return;
+    }
+    let entry = match find_last_entry(&src_path) {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            if let Ok(mut buf) = buffer.lock() {
+                buf.push_custom(
+                    "kage:error",
+                    "clone: current session has no entries to clone".to_owned(),
+                    false,
+                );
+            }
+            return;
+        }
+        Err(e) => {
+            if let Ok(mut buf) = buffer.lock() {
+                buf.push_custom("kage:error", format!("clone: {e}"), false);
+            }
+            return;
+        }
+    };
+    let Some(dir) = src_path.parent() else {
+        if let Ok(mut buf) = buffer.lock() {
+            buf.push_custom(
+                "kage:error",
+                "clone: session path has no parent directory".to_owned(),
+                false,
+            );
+        }
+        return;
+    };
+    let new_session = SessionId::new();
+    let dst = dir.join(format!("{new_session}.jsonl"));
+    if let Err(e) = kage_session::fork(&src_path, &dst, new_session, entry) {
+        if let Ok(mut buf) = buffer.lock() {
+            buf.push_custom("kage:error", format!("clone failed: {e}"), false);
+        }
+        return;
+    }
+    sp.lock()
+        .expect("session path mutex poisoned")
+        .clone_from(&dst);
+    let short: String = new_session.to_string().chars().take(8).collect();
+    push_toast(
+        toasts,
+        Toast::info(format!("cloned session: {short} (continuing in clone)")),
+    );
 }
 
 /// Fork an arbitrary session file (the `:tree` browser's `f`) at its

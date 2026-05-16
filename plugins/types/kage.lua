@@ -11,10 +11,302 @@
 ---
 --- Nothing here runs: `---@meta` marks the whole file definitions-only.
 --- The single source of truth for behavior is the Rust implementation
---- in `crates/kage-plugin`; entry points are annotated in the
---- companion sections (PD.1.2 / PD.1.3).
+--- in `crates/kage-plugin`; keep this stub in sync when the API moves.
+
+---@alias kage.LogLevel "trace"|"debug"|"info"|"warn"|"error"
+---@alias kage.NotifyLevel "info"|"warning"|"error"
+---@alias kage.ToolRisk "read"|"write"|"network"
+---@alias kage.ArgKind "text"|"choice"|"path"|"session"|"flag"
+
+--- Every event name `kage.on` accepts. Notification events ignore the
+--- handler return; transform events chain it; predicate and
+--- session-op events interpret it (see `kage.on`).
+---@alias kage.Event
+---| "before_agent_start"
+---| "agent_start"
+---| "agent_end"
+---| "turn_start"
+---| "turn_end"
+---| "message_start"
+---| "message_update"
+---| "message_end"
+---| "after_provider_response"
+---| "tool_call"
+---| "tool_update"
+---| "tool_result"
+---| "session_open"
+---| "session_close"
+---| "model_select"
+---| "thinking_level_select"
+---| "user_bash"
+---| "transform_context"
+---| "before_provider_request"
+---| "compact_prepare"
+---| "should_stop_after_turn"
+---| "session_before_switch"
+---| "session_before_fork"
+---| "session_before_tree"
+---| "resources_discover"
+
+--- One result row a tool may return instead of a bare string.
+---@class kage.ToolResult
+---@field text string Output text shown to the agent.
+---@field is_error? boolean Mark the call as failed.
+---@field structured? table Machine-readable detail (diffs, lists).
+
+--- Spec passed to `kage.register_tool` / `kage.override_tool`.
+---@class kage.ToolSpec
+---@field name string Tool name the agent calls.
+---@field description string One-line description for the model.
+---@field schema table JSON schema for the input object.
+---@field risk? kage.ToolRisk Permission tier; defaults to "read".
+---@field execute fun(input: table): string|kage.ToolResult
+
+--- One declared command argument.
+---@class kage.CommandArg
+---@field name string Argument name (becomes `args.<name>`).
+---@field kind? kage.ArgKind Defaults to "text".
+---@field choices? string[] Required when `kind == "choice"`.
+
+--- Spec passed to `kage.register_command`. The handler runs through
+--- the coroutine bridge, so it may call the blocking `kage.ui.*`
+--- dialogs directly.
+---@class kage.CommandSpec
+---@field name string Command name (no leading `/` or `:`).
+---@field description string Shown in the `/` palette and `:help`.
+---@field args? kage.CommandArg[]
+---@field handler fun(args: table): string?
+
+--- Spec passed to `kage.register_widget`. `render(width)` runs once
+--- per redraw and returns the string painted on the status bar.
+---@class kage.WidgetSpec
+---@field key string Identifier; re-registering replaces in place.
+---@field render fun(width: integer): string?
+
+--- One autocomplete candidate.
+---@class kage.CompletionItem
+---@field value string Replacement text (required).
+---@field label? string Row label; defaults to `value`.
+---@field detail? string Dim annotation beside the label.
+---@field range? integer[] `{ from, to }` 0-based byte span to replace.
+
+--- Spec passed to `kage.add_autocomplete_provider`.
+---@class kage.AutocompleteSpec
+---@field name string Identifier; re-adding replaces in place.
+---@field complete fun(prefix: string, ctx: { text: string, cursor: integer }): kage.CompletionItem[]
+
+--- Key descriptor handed to a `kage.on_terminal_input` handler.
+---@class kage.KeyEvent
+---@field code string "char"|"enter"|"esc"|"tab"|"backtab"|"backspace"|arrow/nav|"f1".."f12"|"other".
+---@field char? string Present only when `code == "char"`.
+---@field ctrl boolean
+---@field alt boolean
+---@field shift boolean
+
+--- Options for `kage.send_message`.
+---@class kage.SendOpts
+---@field trigger_turn? boolean Default true.
+---@field deliver_as? "user" In v0.1 only "user" is wired.
+
+--- Per-turn token usage from `kage.context_usage`.
+---@class kage.Usage
+---@field model string
+---@field input_tokens integer
+---@field output_tokens integer
+---@field context_window integer
 
 ---@class kage
 local kage = {}
+
+--- Wall-clock milliseconds since the Unix epoch.
+---@return integer
+function kage.now_ms() end
+
+--- Record a structured log line at `level`.
+---@param level kage.LogLevel
+---@param message string
+function kage.log(level, message) end
+
+--- A copy of the host-supplied configuration table. Mutating the
+--- returned table does not propagate back to the host.
+---@return table
+function kage.config() end
+
+--- Back-compat alias for `kage.ui.notify`.
+---@param message string
+---@param level? kage.NotifyLevel
+function kage.notify(message, level) end
+
+---@class kage.ui
+kage.ui = {}
+
+--- Show a transient toast (stderr in print mode). Non-info levels
+--- are also logged. An unrecognized level raises an error.
+---@param message string
+---@param level? kage.NotifyLevel
+function kage.ui.notify(message, level) end
+
+--- Open a fuzzy picker. Each item is a string, or a table
+--- `{ label, value?, detail? }`. Suspends the calling handler's
+--- coroutine; returns the chosen `value`, or nil if cancelled.
+---@param title string
+---@param items (string|{ label: string, value?: string, detail?: string })[]
+---@return string|nil
+function kage.ui.select(title, items) end
+
+--- Open a yes/no overlay. Cancelling counts as false, so the
+--- result is always a boolean.
+---@param title string
+---@param message string
+---@return boolean
+function kage.ui.confirm(title, message) end
+
+--- Open a single-line input. Returns the entered string, or nil if
+--- cancelled. `placeholder` is dim help text, not part of the result.
+---@param title string
+---@param placeholder? string
+---@return string|nil
+function kage.ui.input(title, placeholder) end
+
+--- Open a multi-line editor seeded with `prefill`. Ctrl+S submits,
+--- Esc cancels. Returns the final buffer, or nil if cancelled.
+---@param title string
+---@param prefill? string
+---@return string|nil
+function kage.ui.editor(title, prefill) end
+
+--- Take over the top status row. `fn(width)` runs each redraw and
+--- returns a string, a span table, or an array of those. Pass nil
+--- to restore the built-in status bar.
+---@param fn fun(width: integer): any|nil
+function kage.ui.set_header(fn) end
+
+--- Take over the bottom modeline row. Same shape as `set_header`.
+---@param fn fun(width: integer): any|nil
+function kage.ui.set_footer(fn) end
+
+--- Register a tool the agent can call like a built-in.
+---@param spec kage.ToolSpec
+function kage.register_tool(spec) end
+
+--- Like `register_tool` but replaces the existing tool by name. The
+--- host logs a warning if no such tool was registered.
+---@param spec kage.ToolSpec
+function kage.override_tool(spec) end
+
+--- Register a slash / colon command.
+---@param spec kage.CommandSpec
+function kage.register_command(spec) end
+
+--- Bind a chord to a handler. `spec` is a chord string or
+--- `{ key, description? }`. The handler runs through the coroutine
+--- bridge, so it may open `kage.ui.*` dialogs.
+---@param spec string|{ key: string, description?: string }
+---@param handler fun(): string?
+function kage.register_keybinding(spec, handler) end
+
+--- Add a prompt-input autocomplete provider. Providers form a
+--- stack; the most recently added wins. Runs synchronously in the
+--- shared Lua mutex, so keep it cheap.
+---@param spec kage.AutocompleteSpec
+function kage.add_autocomplete_provider(spec) end
+
+--- Observe every key before any modal layer. Returning a truthy
+--- value consumes the event. Returns an `off` function that
+--- unregisters this handler (idempotent). Prefer
+--- `register_keybinding` unless you must swallow arbitrary keys.
+---@param handler fun(ev: kage.KeyEvent): boolean
+---@return fun() off
+function kage.on_terminal_input(handler) end
+
+--- Register a status-bar widget.
+---@param spec kage.WidgetSpec
+function kage.register_widget(spec) end
+
+--- Push or clear a transient status entry. A nil or empty `text`
+--- clears the key.
+---@param key string
+---@param text string|nil
+function kage.set_status(key, text) end
+
+--- Clear a transient status entry.
+---@param key string
+function kage.clear_status(key) end
+
+--- Subscribe to an event. Multiple handlers fire in registration
+--- order; a raising handler is logged and skipped. Notification
+--- events ignore the return; transform events chain it; predicate
+--- and session-op events interpret it (see the docs).
+---@param event kage.Event
+---@param handler fun(payload: any): any
+function kage.on(event, handler) end
+
+--- Register a new LLM provider implementation. Advanced; see the
+--- example plugins for a realistic shape.
+---@param spec table
+function kage.register_provider(spec) end
+
+---@class kage.session
+kage.session = {}
+
+--- Sessions the host knows about, each `{ id, value }` (short id,
+--- absolute path).
+---@return { id: string, value: string }[]
+function kage.session.list() end
+
+--- Fork the current session at entry-id prefix `at` (or the latest
+--- entry when omitted). The host performs it between turns.
+---@param at? string
+function kage.session.fork(at) end
+
+--- Append a custom entry to the session JSONL. `kind` is a
+--- namespaced string; `data` is any table (defaults to `{}`).
+---@param kind string
+---@param data? table
+function kage.session.append_entry(kind, data) end
+
+--- Write a label pointing at entry id `anchor`. A nil `label`
+--- clears it.
+---@param anchor string
+---@param label? string
+function kage.session.set_label(anchor, label) end
+
+--- Queue a synthetic message the host delivers between turns.
+---@param text string
+---@param opts? kage.SendOpts
+function kage.send_message(text, opts) end
+
+--- Snapshot the current per-turn token usage. Returns nil until
+--- the host has run at least one turn.
+---@return kage.Usage|nil
+function kage.context_usage() end
+
+--- Ask the host to run a compaction pass. `prompt` is advisory;
+--- the `compact_prepare` event is the precise hook.
+---@param prompt? string
+function kage.compact(prompt) end
+
+---@class kage.fs
+kage.fs = {}
+
+--- Read a file relative to the session workdir. Paths outside the
+--- workdir tree raise an error.
+---@param path string
+---@return string
+function kage.fs.read(path) end
+
+--- Write a file under the workdir. Same path restriction as `read`.
+---@param path string
+---@param contents string
+function kage.fs.write(path, contents) end
+
+---@class kage.http
+kage.http = {}
+
+--- HTTP GET. The allow-list is host-controlled; unauthorized hosts
+--- raise an error.
+---@param url string
+---@return { status: integer, body: string, headers: table }
+function kage.http.get(url) end
 
 return kage

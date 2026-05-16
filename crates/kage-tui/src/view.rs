@@ -723,18 +723,20 @@ fn render_buffer(
             heights.push(0);
             continue;
         }
-        // Live (streaming) blocks change every frame, so caching is
-        // pointless and a precise measure runs syntect/wrap over a
-        // text that's about to be invalidated. Approximate them.
-        // Stable blocks measure-and-cache once; subsequent frames
-        // hit the cache. This is the contract scroll math depends
-        // on - approximations and real measurements can't share the
-        // same coordinate space, so anything that's emitted in pass
-        // 2 needs an exact height here.
+        // Every emitted block - live ones included - is measured by
+        // the same build-and-`line_count` path so pass 1 heights and
+        // the pass 2 lines share one coordinate space. Scroll and
+        // auto-follow math subtracts these heights, so a height that
+        // disagrees with what pass 2 actually paints makes the
+        // viewport jump as the disagreement wobbles delta to delta.
+        // A live block's cache is dropped on every streamed delta
+        // (`invalidate_last_block_caches`), so it rebuilds at most
+        // once per delta, not once per frame; that rebuild is only a
+        // markdown-structure pass, since the live path
+        // (`render_streaming`) leaves code fences plain and never
+        // runs syntect mid-stream.
         let h = if let Some(cached) = buffer.cached_height(idx, width) {
             usize::from(cached)
-        } else if buffer.is_live(idx) {
-            approximate_block_height(buffer, idx, width)
         } else {
             let block_lines = build_block_lines(
                 buffer,
@@ -1104,37 +1106,6 @@ fn slice_lines_for_window(
         }
     }
     (out, paragraph_offset)
-}
-
-/// Cheap height estimate for a streaming block. Counts logical
-/// newlines and divides each line's char count by the available
-/// width. Off vs. the real wrap-aware count when content has long
-/// lines that `WordWrapper` would break on word boundaries; that
-/// inaccuracy only shifts auto-follow scroll math by a few rows on
-/// an in-flight block, so it's an acceptable cost for skipping the
-/// per-frame wrap pass on a block whose text changes 30 times a
-/// second.
-fn approximate_block_height(buffer: &Buffer, idx: usize, width: u16) -> usize {
-    let blocks = buffer.blocks();
-    let Some(block) = blocks.get(idx) else {
-        return 0;
-    };
-    let usable = usize::from(width).max(1);
-    let text: &str = match block {
-        Block::User { text }
-        | Block::Assistant { text, .. }
-        | Block::Thinking { text, .. }
-        | Block::Custom { text, .. } => text,
-        Block::ToolCall { input_pretty, .. } => input_pretty,
-        Block::ToolResult { output, .. } => output,
-    };
-    let mut rows = 0usize;
-    for logical in text.split('\n') {
-        let chars = logical.chars().count();
-        rows = rows.saturating_add(chars.div_ceil(usable).max(1));
-    }
-    // Most block kinds add at least a header line beyond the body.
-    rows.saturating_add(1)
 }
 
 /// Build the rendered lines for the block at `idx`, automatically

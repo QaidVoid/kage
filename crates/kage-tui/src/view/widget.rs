@@ -83,9 +83,7 @@ pub struct SelectionState {
 /// `lines()` and `render()` are kept in sync.
 pub trait BlockWidget: Send + Sync {
     /// Compute the exact number of terminal rows this block occupies
-    /// when rendered at `width` columns. Replaces the
-    /// approximation-based `approximate_block_height` once every
-    /// block kind has migrated.
+    /// when rendered at `width` columns.
     fn measure(&self, width: u16) -> u16;
 
     /// Paint the block into `area` of `buf`. The widget is responsible

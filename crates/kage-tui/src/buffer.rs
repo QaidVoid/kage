@@ -318,19 +318,6 @@ impl Buffer {
         self.focus
     }
 
-    /// Whether the block at `idx` is still streaming. Used by the
-    /// renderer to skip the expensive measure-and-cache path for
-    /// blocks whose content changes every frame; an approximate
-    /// height suffices while the model is mid-emit, and a real
-    /// measure runs once on `finish_streaming`.
-    #[must_use]
-    pub fn is_live(&self, idx: usize) -> bool {
-        matches!(
-            self.blocks.get(idx),
-            Some(Block::Assistant { live: true, .. } | Block::Thinking { live: true, .. })
-        )
-    }
-
     /// Effective focus: the explicit user selection if any, otherwise
     /// the index of the last selectable block in the buffer. `None`
     /// when there are no selectable blocks at all.

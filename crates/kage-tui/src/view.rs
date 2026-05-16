@@ -1513,54 +1513,64 @@ fn render_modeline(
         } else {
             spans.push(Span::styled("  ", bg));
         }
+        // Logical groups separated by a muted dot: model, context
+        // fill, cumulative io (+ cost), thinking level. Each is
+        // labelled so a field reads on its own; the dot only ever
+        // appears between groups, never trailing.
+        let mut prior_group = false;
+        let sep = |spans: &mut Vec<Span<'static>>, prior: &mut bool| {
+            if *prior {
+                spans.push(Span::styled(" . ", dim));
+            }
+            *prior = true;
+        };
         if !u.model.is_empty() {
+            sep(&mut spans, &mut prior_group);
             spans.push(Span::styled(
                 u.model.clone(),
                 fg.add_modifier(Modifier::BOLD),
             ));
-            spans.push(Span::styled(" . ", dim));
         }
         if u.context_window > 0 {
+            sep(&mut spans, &mut prior_group);
             #[allow(clippy::cast_precision_loss)]
             let pct =
                 (u.current_context as f64 / u.context_window as f64 * 100.0).clamp(0.0, 999.9);
             spans.push(Span::styled(
                 format!(
-                    "ctx {} / {} ({:.0}%)",
+                    "ctx {}/{} ({:.0}%)",
                     format_token_count(u.current_context),
                     format_token_count(u.context_window),
                     pct
                 ),
                 fg,
             ));
-            spans.push(Span::styled(" . ", dim));
         } else if u.current_context > 0 {
+            sep(&mut spans, &mut prior_group);
             spans.push(Span::styled(
                 format!("ctx {}", format_token_count(u.current_context)),
                 fg,
             ));
-            spans.push(Span::styled(" . ", dim));
         }
-        // Cumulative session totals: what the user has been charged
-        // for since the session started. Distinct from `ctx` above,
-        // which is just the current turn's prompt fill against the
-        // window.
+        // Cumulative session totals (what the user has been charged
+        // for since the session started), distinct from `ctx` above.
+        // Cost rides in the same group as the io it paid for.
+        sep(&mut spans, &mut prior_group);
         spans.push(Span::styled(
             format!(
-                "{}+{}",
+                "io {}+{}",
                 format_token_count(u.input_tokens),
                 format_token_count(u.output_tokens)
             ),
             fg,
         ));
         if u.total_cost > 0.0 {
-            spans.push(Span::styled(" . ", dim));
-            spans.push(Span::styled(format!("${:.4}", u.total_cost), fg));
+            spans.push(Span::styled(format!(" ${:.4}", u.total_cost), fg));
         }
         if let Some(level) = u.thinking_level
             && !level.is_off()
         {
-            spans.push(Span::styled(" . ", dim));
+            sep(&mut spans, &mut prior_group);
             spans.push(Span::styled(
                 format!("think:{}", level.label()),
                 fg.add_modifier(Modifier::BOLD),

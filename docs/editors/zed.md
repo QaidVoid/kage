@@ -1,12 +1,11 @@
 # zed
 
-`kage rpc` speaks JSON-RPC 2.0 over stdio with LSP-style
-`Content-Length` framing, the same transport Zed already uses for
-language servers and external agents. Zed spawns the process, sends
-requests on stdin, and reads responses and progress notifications on
-stdout.
+`kage rpc` is a spec-conformant **Agent Client Protocol** agent:
+JSON-RPC 2.0 over stdio, one message per line (newline-delimited),
+protocol version 1. Zed speaks ACP natively, so it drives kage the
+same way it drives its other external agents - no shim, no wrapper.
 
-## start the server
+## start the agent
 
 ```sh
 kage rpc
@@ -14,18 +13,16 @@ kage rpc
 
 Optional flags:
 
-- `-m, --model <provider:model>` pins the model for the connection
-  (default: the first authed provider's default model).
+- `-m, --model <provider:model>` pins the model for the connection.
 - `--system <text>` overrides the system-prompt role.
 
-Credentials are resolved exactly as for the TUI and print mode: the OS
-keyring, `kage auth login`, or an API-key environment variable. If no
-provider is configured the process prints a message and exits with a
-non-zero code, so a wrapper can surface that to the user.
+Credentials resolve as for the TUI and print mode (OS keyring,
+`kage auth login`, or an API-key env var). With no provider
+configured `kage rpc` prints a message and exits non-zero.
 
 ## configure zed
 
-Add `kage rpc` as a custom agent server in Zed's `settings.json`:
+Add kage as an agent server in Zed's `settings.json`:
 
 ```json
 {
@@ -38,48 +35,48 @@ Add `kage rpc` as a custom agent server in Zed's `settings.json`:
 }
 ```
 
-Use an absolute `command` path if `kage` is not on Zed's `PATH`. Pass
-a model with `"args": ["rpc", "-m", "anthropic:claude-sonnet-4-6"]`.
+Use an absolute `command` if `kage` is not on Zed's `PATH`; pass a
+model with `"args": ["rpc", "-m", "anthropic:claude-sonnet-4-6"]`.
+Pick kage from Zed's agent panel and prompt as usual. Tool calls
+surface as Zed permission prompts (kage never auto-approves); the
+agent's text and reasoning stream in as it works.
 
-## protocol
+## what kage implements
 
-Every message is `Content-Length: <bytes>\r\n\r\n<json>`.
+Client to agent:
 
-Client to server (requests carry an `id`; omit `id` for a
-notification):
+| method            | params -> result                                    |
+| ----------------- | --------------------------------------------------- |
+| `initialize`      | `{protocolVersion, clientCapabilities}` -> `{protocolVersion, agentCapabilities, agentInfo, authMethods}` |
+| `session/new`     | `{cwd, mcpServers}` -> `{sessionId}`                 |
+| `session/load`    | `{sessionId, cwd, mcpServers}` -> replays history as `session/update`, then `null` |
+| `session/prompt`  | `{sessionId, prompt: ContentBlock[]}` -> `{stopReason}` |
+| `session/cancel`  | notification `{sessionId}`                           |
 
-| method               | params                                  |
-| -------------------- | --------------------------------------- |
-| `initialize`         | `{}` (optional `protocol_version`)      |
-| `prompt`             | `{ prompt, model?, session? }`          |
-| `cancel`             | none (cancels the in-flight prompt)     |
-| `permission/respond` | `{ id, allow, reason? }`                |
-| `session/load`       | `{ id }`                                |
-| `session/list`       | none                                    |
+Agent to client:
 
-`initialize` replies with `{ name, version, protocol, model,
-methods }`. `prompt` streams progress and replies once the turn
-finishes.
+- `session/update` notification `{sessionId, update}` where `update`
+  is tagged by `sessionUpdate`: `agent_message_chunk`,
+  `agent_thought_chunk`, `tool_call`, `tool_call_update`.
+- `session/request_permission` request `{sessionId, toolCall,
+  options}` -> `{outcome}`; the client returns
+  `{outcome: {outcome: "selected", optionId}}` or
+  `{outcome: {outcome: "cancelled"}}`. kage blocks the tool until the
+  client answers and never auto-approves.
 
-Server to client notifications (no `id`):
+kage advertises `agentCapabilities.loadSession: true`, empty
+`authMethods`, and `agentInfo {name: "kage", version}`. It does not
+request `fs`/`terminal` client capabilities: kage runs its own tools
+in-process and gates them through `session/request_permission`.
 
-- `event` carries one agent-loop event in `params`. The event
-  alphabet is identical to `kage -p --json`: `message_start`,
-  `text_delta`, `thinking_delta`, `tool_call_start`,
-  `tool_call_args_delta`, `tool_call_end`, `message_end`,
-  `compaction`, `error`.
-- `permission/request` carries `{ id, name, input }` for a tool the
-  agent wants to run. The agent blocks until the editor answers with
-  a `permission/respond` whose `id` matches. Permissions are never
-  auto-approved; a cancelled run resolves the prompt as denied.
-
-## minimal hand-driven session
+## hand-driven smoke test
 
 ```sh
-req='{"jsonrpc":"2.0","id":1,"method":"initialize"}'
-printf 'Content-Length: %d\r\n\r\n%s' "${#req}" "$req" | kage rpc
+printf '%s\n%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"session/new","params":{"cwd":"/tmp","mcpServers":[]}}' \
+  | kage rpc
 ```
 
-The reply is a single framed JSON-RPC result describing the server.
-Send a `prompt` the same way to drive a full turn; answer any
-`permission/request` notification with a framed `permission/respond`.
+Two framed JSON-RPC results come back, one per line: the agent's
+capabilities, then a fresh `sessionId`.

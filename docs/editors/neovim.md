@@ -1,21 +1,20 @@
 # neovim
 
-`kage rpc` is a JSON-RPC 2.0 server over stdio with LSP-style
-`Content-Length` framing. Neovim can drive it with a job and a small
-frame parser; no plugin is required.
-
-See [zed](./zed) for the full method and notification table. This
-page is a minimal, dependency-free Lua client you can drop into your
-config and grow from.
+`kage rpc` is a spec-conformant ACP agent: newline-delimited
+JSON-RPC 2.0 over stdio, protocol version 1. Neovim can drive it with
+a job and a one-line-per-message parser; no plugin required. See
+[zed](./zed) for the full method table.
 
 ## a minimal client
+
+Each message is a single JSON object terminated by `\n` - no
+`Content-Length` headers.
 
 ```lua
 local M = {}
 
-local function frame(obj)
-  local body = vim.json.encode(obj)
-  return ("Content-Length: %d\r\n\r\n%s"):format(#body, body)
+local function send(job, obj)
+  job:write(vim.json.encode(obj) .. "\n")
 end
 
 function M.start(opts)
@@ -26,8 +25,7 @@ function M.start(opts)
     table.insert(args, opts.model)
   end
 
-  local buf, want = "", nil
-  local id = 0
+  local buf, id, session = "", 0, nil
 
   local job = vim.system({ "kage", unpack(args) }, {
     stdin = true,
@@ -37,60 +35,61 @@ function M.start(opts)
       end
       buf = buf .. data
       while true do
-        if not want then
-          local s, e = buf:find("\r\n\r\n", 1, true)
-          if not s then
-            return
-          end
-          want = tonumber(buf:sub(1, s - 1):match("Content%-Length:%s*(%d+)"))
-          buf = buf:sub(e + 1)
-        end
-        if not want or #buf < want then
+        local nl = buf:find("\n", 1, true)
+        if not nl then
           return
         end
-        local msg = vim.json.decode(buf:sub(1, want))
-        buf, want = buf:sub(want + 1), nil
-        vim.schedule(function()
-          M.on_message(msg)
-        end)
+        local line = buf:sub(1, nl - 1)
+        buf = buf:sub(nl + 1)
+        if #line > 0 then
+          local msg = vim.json.decode(line)
+          vim.schedule(function()
+            M.on_message(job, msg)
+          end)
+        end
       end
     end,
   })
 
-  function M.send(obj)
-    job:write(frame(obj))
-  end
-
   function M.request(method, params)
     id = id + 1
-    M.send({ jsonrpc = "2.0", id = id, method = method, params = params })
+    send(job, { jsonrpc = "2.0", id = id, method = method, params = params })
     return id
   end
 
   M.job = job
-  M.request("initialize", {})
+  M.request("initialize", { protocolVersion = 1, clientCapabilities = {} })
+  -- session/new -> sessionId arrives in M.on_message; stash it, then
+  -- M.request("session/prompt", { sessionId = session, prompt = {
+  --   { type = "text", text = "explain this file" } } })
+  M.request("session/new", { cwd = vim.fn.getcwd(), mcpServers = {} })
   return M
 end
 
--- Override this to render events in your UI. By default it logs the
--- assistant's streamed text and answers permission prompts by
--- DENYING (never auto-approve; wire this to a real prompt).
-function M.on_message(msg)
-  if msg.method == "event" then
-    local ev = msg.params or {}
-    if ev.type == "text_delta" then
-      io.write(ev.delta or "")
+-- Override to render in your UI. Notifications carry agent output;
+-- `session/request_permission` is a request kage BLOCKS on - you must
+-- reply. The default DENIES (never auto-approve); wire it to a real
+-- prompt.
+function M.on_message(job, msg)
+  if msg.method == "session/update" then
+    local u = msg.params.update
+    if u.sessionUpdate == "agent_message_chunk" and u.content.type == "text" then
+      io.write(u.content.text)
     end
-  elseif msg.method == "permission/request" then
-    vim.notify(
-      ("kage wants to run `%s`"):format(msg.params.name),
-      vim.log.levels.WARN
-    )
-    M.request("permission/respond", {
-      id = msg.params.id,
-      allow = false,
-      reason = "answer me from a real prompt",
+  elseif msg.method == "session/request_permission" then
+    local reject = "reject"
+    for _, opt in ipairs(msg.params.options or {}) do
+      if opt.kind == "reject_once" or opt.kind == "reject_always" then
+        reject = opt.optionId
+      end
+    end
+    send(job, {
+      jsonrpc = "2.0",
+      id = msg.id,
+      result = { outcome = { outcome = "selected", optionId = reject } },
     })
+  elseif msg.result and msg.result.sessionId then
+    -- stash and prompt; see comment in M.start
   end
 end
 
@@ -101,11 +100,12 @@ return M
 
 ```lua
 local kage = require("kage").start({ model = "anthropic:claude-sonnet-4-6" })
-kage.request("prompt", { prompt = "explain this file" })
 ```
 
-To make it usable, replace `M.on_message`'s `permission/request`
-branch with `vim.ui.select` (or a confirm dialog) so a human approves
-each tool call, and route `event` payloads into a scratch buffer. The
-event alphabet matches `kage -p --json`, so the same renderer works
-for both. Send `{ method = "cancel" }` to stop the in-flight turn.
+To make it usable: capture `sessionId` from the `session/new`
+response, then send `session/prompt` with the user's text as a
+`ContentBlock` array; replace the `session/request_permission` branch
+with `vim.ui.select` so a human approves each tool call; and route
+`agent_message_chunk` / `agent_thought_chunk` content into a scratch
+buffer. Send `{ method = "session/cancel", params = { sessionId =
+session } }` (a notification, no `id`) to stop the in-flight turn.

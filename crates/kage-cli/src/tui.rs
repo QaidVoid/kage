@@ -466,7 +466,7 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                 &buffer,
             );
             match req {
-                RunRequest::Submit(text) => {
+                RunRequest::Submit { text, images } => {
                     cancel.reset();
                     if let Err(err) = crate::history::append(&text)
                         && let Ok(mut buf) = buffer.lock()
@@ -505,7 +505,26 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         cx_guard.history.iter().any(|m| m.role == Role::Assistant);
                     let title_user_text = text.clone();
                     let parent = cx_guard.history.last().map(|m| m.id);
-                    let user_msg = Message::new(Role::User, vec![Content::Text { text }], parent);
+                    // Text first, then image blocks. Skip an empty
+                    // text block when images are present (some
+                    // providers reject empty text); keep the empty
+                    // text for a bare submit so behavior is unchanged.
+                    let mut content = Vec::with_capacity(1 + images.len());
+                    if !text.is_empty() {
+                        content.push(Content::Text { text });
+                    }
+                    for img in images {
+                        content.push(Content::Image {
+                            source: img.source,
+                            mime: img.mime,
+                        });
+                    }
+                    if content.is_empty() {
+                        content.push(Content::Text {
+                            text: String::new(),
+                        });
+                    }
+                    let user_msg = Message::new(Role::User, content, parent);
                     cx_guard.history.push(user_msg.clone());
                     let writer_for_turn = open_writer_for_turn(
                         session_path.as_ref(),

@@ -9,6 +9,7 @@ pub mod command;
 pub mod error;
 pub mod events;
 pub mod hostlog;
+pub mod image;
 pub mod input;
 pub mod layout;
 pub mod markdown;

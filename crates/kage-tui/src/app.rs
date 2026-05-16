@@ -100,8 +100,16 @@ fn log_key_event(key: &ratatui::crossterm::event::KeyEvent) {
 /// or the user picked a prior session to resume into the current TUI.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RunRequest {
-    /// New user prompt to submit to the agent loop.
-    Submit(String),
+    /// New user prompt to submit to the agent loop, with any images
+    /// the user attached (pasted/dragged path, `:attach`, or OS
+    /// clipboard). The worker turns these into `Content::Image`
+    /// blocks on the outgoing user message.
+    Submit {
+        /// Prompt text (may be empty if only images were attached).
+        text: String,
+        /// Queued image attachments, in attach order.
+        images: Vec<crate::image::AttachedImage>,
+    },
     /// Trip the agent loop's cancellation flag.
     Cancel,
     /// Switch to a different `provider:model` for subsequent turns.
@@ -2001,6 +2009,10 @@ impl App {
                 self.push_events();
                 None
             }
+            "attach" => {
+                self.attach_image_path(rest);
+                None
+            }
             "compact" => {
                 let _ = self.send_request(RunRequest::CompactNow);
                 None
@@ -2402,6 +2414,25 @@ impl App {
         }
     }
 
+    /// `:attach <path>` - load an image file and queue it for the
+    /// next prompt. Errors (missing usage, unreadable file, bad
+    /// format, too large) surface inline, never silently.
+    fn attach_image_path(&mut self, rest: &str) {
+        let path = rest.trim();
+        if path.is_empty() {
+            self.push_error("attach: usage `:attach <image-path>`");
+            return;
+        }
+        match crate::image::load_path(std::path::Path::new(path)) {
+            Ok(att) => {
+                let note = att.placeholder();
+                self.input.attach_image(att);
+                self.notify(format!("attached {note}"));
+            }
+            Err(e) => self.push_error(format!("attach: {e}")),
+        }
+    }
+
     fn notify(&mut self, msg: impl Into<String>) {
         let Some(toasts) = &self.toasts else {
             return;
@@ -2721,10 +2752,14 @@ impl App {
         // modal state machine still cycles cleanly.
         match action {
             InputAction::Submit(text) => {
+                let images = self.input.take_attached();
                 if let Ok(mut buf) = self.buffer.lock() {
                     buf.push_user(text.clone());
+                    for img in &images {
+                        buf.push_custom("kage:image", img.placeholder(), false);
+                    }
                 }
-                let _ = self.send_request(RunRequest::Submit(text));
+                let _ = self.send_request(RunRequest::Submit { text, images });
             }
             InputAction::Scroll(delta) => self.scroll_by(delta),
             InputAction::ScrollToTop => self.set_scroll(usize::MAX),
@@ -3274,7 +3309,13 @@ mod tests {
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         let req = rx.recv_timeout(Duration::from_millis(100)).unwrap();
-        assert_eq!(req, RunRequest::Submit("hi".into()));
+        assert_eq!(
+            req,
+            RunRequest::Submit {
+                text: "hi".into(),
+                images: Vec::new()
+            }
+        );
         let buf = buffer.lock().unwrap();
         assert!(matches!(
             buf.blocks().last(),

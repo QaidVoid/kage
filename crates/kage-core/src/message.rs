@@ -115,7 +115,7 @@ pub enum Content {
 }
 
 /// Reference to an image, either remote or inline.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ImageSource {
     /// Remote URL.

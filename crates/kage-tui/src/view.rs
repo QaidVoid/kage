@@ -1208,8 +1208,16 @@ fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {
         Style::default().fg(theme.muted_fg)
     };
 
-    let top_line: Vec<Span<'static>> =
+    let mut top_line: Vec<Span<'static>> =
         vec![Span::styled(format!(" {} ", mode_label(mode)), pill_style)];
+    let attached = input.attached();
+    if !attached.is_empty() {
+        let labels: Vec<&str> = attached.iter().map(|a| a.label.as_str()).collect();
+        top_line.push(Span::styled(
+            format!(" + {} image(s): {} ", attached.len(), labels.join(", ")),
+            Style::default().fg(theme.muted_fg),
+        ));
+    }
 
     let block = RtBlock::default()
         .borders(Borders::ALL)

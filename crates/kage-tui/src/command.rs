@@ -481,6 +481,17 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         args: &[],
         subcommands: &[],
     },
+    CommandSpec {
+        name: "attach",
+        aliases: &["img"],
+        description: "attach an image file to the next prompt",
+        category: CommandCategory::Both,
+        args: &[ArgSpec::Path {
+            name: "path",
+            optional: false,
+        }],
+        subcommands: &[],
+    },
 ];
 
 /// Find a built-in command by primary name or alias. Returns `None`
@@ -597,7 +608,7 @@ mod tests {
 
     #[test]
     fn builtin_registry_has_expected_command_count() {
-        assert_eq!(BUILTIN_COMMANDS.len(), 17);
+        assert_eq!(BUILTIN_COMMANDS.len(), 18);
     }
 
     #[test]

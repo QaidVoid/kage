@@ -282,6 +282,10 @@ pub struct InputState {
     /// Monotonic id for the next collapsed paste, so placeholders stay
     /// unique within a draft even after edits.
     next_paste_id: u32,
+    /// Images queued for the next prompt (file/path/clipboard). Drained
+    /// into `Content::Image` blocks on submit; shown in the input
+    /// chrome so the user sees what will be sent.
+    attached: Vec<crate::image::AttachedImage>,
 }
 
 impl Default for InputState {
@@ -307,6 +311,7 @@ impl Default for InputState {
             kill_ring: Vec::new(),
             pastes: Vec::new(),
             next_paste_id: 1,
+            attached: Vec::new(),
         }
     }
 }
@@ -353,6 +358,22 @@ impl InputState {
     #[must_use]
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    /// Queue an image to send with the next prompt.
+    pub fn attach_image(&mut self, image: crate::image::AttachedImage) {
+        self.attached.push(image);
+    }
+
+    /// Images queued for the next prompt (for the input chrome hint).
+    #[must_use]
+    pub fn attached(&self) -> &[crate::image::AttachedImage] {
+        &self.attached
+    }
+
+    /// Take and clear the queued images (called on submit).
+    pub fn take_attached(&mut self) -> Vec<crate::image::AttachedImage> {
+        std::mem::take(&mut self.attached)
     }
 
     /// Byte offset of the cursor in the prompt text.

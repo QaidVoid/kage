@@ -4,6 +4,7 @@
 //! per process, evaluates plugin scripts against it, and dispatches loop
 //! events through the runtime so plugins can react.
 
+pub mod acp;
 pub mod api;
 pub mod autocomplete;
 pub mod bridge;

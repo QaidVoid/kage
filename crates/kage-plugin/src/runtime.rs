@@ -26,6 +26,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use mlua::Lua;
 
+use crate::acp::{self, SharedAcpAgents, shared_acp_agents};
 use crate::api::{self, SharedHostLog, default_host_log};
 use crate::autocomplete::{
     self, LuaAutocompleteProvider, RegisteredAutocompleteProviders,
@@ -73,6 +74,7 @@ pub struct PluginRuntime {
     providers: RegisteredProviders,
     widgets: RegisteredWidgets,
     status: SharedStatus,
+    acp_agents: SharedAcpAgents,
     usage: SharedUsage,
     compact_request: SharedCompactRequest,
     session_list: SharedSessionList,
@@ -249,6 +251,27 @@ impl PluginRuntime {
             .lock()
             .expect("plugin providers mutex poisoned")
             .clone()
+    }
+
+    /// Snapshot the ACP agents plugins declared via
+    /// `kage.acp.add_agent`. The host merges these with
+    /// `[acp.agents.*]` from config.
+    #[must_use]
+    pub fn registered_acp_agents(&self) -> Vec<(String, kage_core::config::AcpAgent)> {
+        self.acp_agents
+            .lock()
+            .expect("plugin acp agents mutex poisoned")
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Consult the plugin's `kage.on_acp_permission` handler for an
+    /// upstream agent's tool-call ask. `Some(true)` allow,
+    /// `Some(false)` explicit deny, `None` no handler (host default).
+    #[must_use]
+    pub fn acp_permission(&self, payload: &serde_json::Value) -> Option<bool> {
+        acp::decide(&self.lock_lua(), payload)
     }
 
     /// Snapshot the status-bar widgets registered by plugins so far.
@@ -686,6 +709,7 @@ impl PluginRuntimeBuilder {
         let provider_registry = registered_providers();
         let widget_registry = registered_widgets();
         let status_map = shared_status();
+        let acp_agents = shared_acp_agents();
         let usage_snapshot = shared_usage();
         let compact_slot = shared_compact_request();
         let session_list_slot = shared_session_list();
@@ -741,6 +765,7 @@ impl PluginRuntimeBuilder {
                 Arc::clone(&widget_registry),
             )?;
             status::install_status(&lua_guard, Arc::clone(&status_map))?;
+            acp::install_acp(&lua_guard, Arc::clone(&acp_agents))?;
             lifecycle::install_lifecycle(
                 &lua_guard,
                 Arc::clone(&usage_snapshot),
@@ -787,6 +812,7 @@ impl PluginRuntimeBuilder {
             providers: provider_registry,
             widgets: widget_registry,
             status: status_map,
+            acp_agents,
             usage: usage_snapshot,
             compact_request: compact_slot,
             session_list: session_list_slot,

@@ -17,9 +17,9 @@ use std::sync::Arc;
 
 use kage_acp::acp::{
     AgentCapabilities, ContentBlock, Implementation, InitializeRequest, InitializeResponse,
-    MessageChunk, NewSessionRequest, NewSessionResponse, PROTOCOL_VERSION, PromptCapabilities,
-    PromptRequest, PromptResponse, SessionUpdate, StopReason, ToolCall, ToolCallContent,
-    ToolCallStatus, ToolCallUpdate, ToolKind,
+    LoadSessionRequest, MessageChunk, NewSessionRequest, NewSessionResponse, PROTOCOL_VERSION,
+    PromptCapabilities, PromptRequest, PromptResponse, SessionUpdate, StopReason, ToolCall,
+    ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 use kage_acp::agent::{AcpPermission, Agent, PermissionDecision, PromptContext, serve_agent};
 use kage_acp::jsonrpc::RpcError;
@@ -265,7 +265,7 @@ impl Agent for CliAcpAgent {
         InitializeResponse {
             protocol_version: PROTOCOL_VERSION,
             agent_capabilities: AgentCapabilities {
-                load_session: false,
+                load_session: true,
                 prompt_capabilities: PromptCapabilities::default(),
             },
             agent_info: Some(Implementation {
@@ -282,6 +282,45 @@ impl Agent for CliAcpAgent {
         let id = SessionId::new().to_string();
         self.sessions.insert(id.clone(), session);
         Ok(NewSessionResponse { session_id: id })
+    }
+
+    fn load_session(
+        &mut self,
+        req: LoadSessionRequest,
+        ctx: &PromptContext,
+    ) -> Result<(), RpcError> {
+        let dir = crate::sessions_dir().map_err(RpcError::internal)?;
+        let path = kage_session::find_by_prefix(&dir, &req.session_id)
+            .map_err(|e| RpcError::internal(e.to_string()))?
+            .ok_or_else(|| RpcError::new(-32602, format!("unknown session {}", req.session_id)))?;
+        let replay = kage_session::replay(&path).map_err(|e| RpcError::internal(e.to_string()))?;
+        let mut session = self.build_session(&req.cwd)?;
+        for message in &replay.history {
+            let text = message
+                .content
+                .iter()
+                .filter_map(|c| match c {
+                    Content::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if text.is_empty() {
+                continue;
+            }
+            let chunk = MessageChunk {
+                content: ContentBlock::text(text),
+            };
+            match message.role {
+                Role::User => ctx.update(SessionUpdate::UserMessageChunk(chunk)),
+                Role::Assistant => ctx.update(SessionUpdate::AgentMessageChunk(chunk)),
+                _ => {}
+            }
+        }
+        session.cx.history = replay.history;
+        session.record_path = Some(path);
+        self.sessions.insert(req.session_id, session);
+        Ok(())
     }
 
     fn prompt(

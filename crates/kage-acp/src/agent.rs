@@ -20,10 +20,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use crate::acp::{
-    InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse, PermissionOption,
-    PermissionOptionKind, PermissionOutcome, PromptRequest, PromptResponse,
-    RequestPermissionRequest, RequestPermissionResponse, SessionNotification, SessionUpdate,
-    ToolCallStatus, ToolCallUpdate,
+    InitializeRequest, InitializeResponse, LoadSessionRequest, NewSessionRequest,
+    NewSessionResponse, PermissionOption, PermissionOptionKind, PermissionOutcome, PromptRequest,
+    PromptResponse, RequestPermissionRequest, RequestPermissionResponse, SessionNotification,
+    SessionUpdate, ToolCallStatus, ToolCallUpdate,
 };
 use crate::jsonrpc::{self, Inbound, Peer, RpcError};
 
@@ -174,6 +174,23 @@ pub trait Agent: Send + 'static {
     /// Returns an [`RpcError`] if a session cannot be created.
     fn new_session(&mut self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError>;
 
+    /// Resume a previously recorded session, streaming its history
+    /// back through `ctx` as `session/update` notifications. The
+    /// default rejects: only agents that advertise
+    /// `agentCapabilities.loadSession` override it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the session id is unknown or its
+    /// history cannot be replayed.
+    fn load_session(
+        &mut self,
+        _req: LoadSessionRequest,
+        _ctx: &PromptContext,
+    ) -> Result<(), RpcError> {
+        Err(RpcError::method_not_found("session/load"))
+    }
+
     /// Run one prompt turn to completion, streaming `session/update`
     /// notifications through `ctx`.
     ///
@@ -223,74 +240,115 @@ where
                     flag.store(true, Ordering::SeqCst);
                 }
             }
-            Inbound::Request { id, method, params } => match method.as_str() {
-                "initialize" => {
-                    let outcome = parse::<InitializeRequest>(params).map(|req| {
-                        let resp = agent
-                            .lock()
-                            .expect("acp agent mutex poisoned")
-                            .initialize(req);
-                        serde_json::to_value(resp).unwrap_or(serde_json::Value::Null)
-                    });
-                    let _ = peer.respond(&id, outcome);
-                }
-                "session/new" => {
-                    let result = parse::<NewSessionRequest>(params).and_then(|req| {
-                        agent
-                            .lock()
-                            .expect("acp agent mutex poisoned")
-                            .new_session(req)
-                    });
-                    if let Ok(resp) = &result {
-                        sessions
-                            .lock()
-                            .expect("acp sessions mutex poisoned")
-                            .insert(resp.session_id.clone(), Arc::new(AtomicBool::new(false)));
-                    }
-                    let _ = peer.respond(
-                        &id,
-                        result.map(|r| serde_json::to_value(r).unwrap_or(serde_json::Value::Null)),
-                    );
-                }
-                "session/prompt" => match parse::<PromptRequest>(params) {
-                    Err(e) => {
-                        let _ = peer.respond(&id, Err(e));
-                    }
-                    Ok(req) => {
-                        let flag = sessions
-                            .lock()
-                            .expect("acp sessions mutex poisoned")
-                            .entry(req.session_id.clone())
-                            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
-                            .clone();
-                        flag.store(false, Ordering::SeqCst);
-                        let ctx = PromptContext {
-                            peer: peer.clone(),
-                            session_id: req.session_id.clone(),
-                            cancel: flag,
-                            next_call_id: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-                        };
-                        let agent = Arc::clone(&agent);
-                        let peer = peer.clone();
-                        thread::spawn(move || {
-                            let outcome = agent
-                                .lock()
-                                .expect("acp agent mutex poisoned")
-                                .prompt(req, &ctx)
-                                .map(|r| {
-                                    serde_json::to_value(r).unwrap_or(serde_json::Value::Null)
-                                });
-                            let _ = peer.respond(&id, outcome);
-                        });
-                    }
-                },
-                other => {
-                    let _ = peer.respond(&id, Err(RpcError::method_not_found(other)));
-                }
-            },
+            Inbound::Request { id, method, params } => {
+                handle_request(&peer, &agent, &sessions, id, &method, params);
+            }
         }
     }
     Ok(())
+}
+
+fn jval<T: serde::Serialize>(value: T) -> serde_json::Value {
+    serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
+}
+
+/// Run a per-session operation (prompt or load) on a worker thread so
+/// the dispatch loop keeps draining inbound and the op can issue its
+/// own outgoing requests.
+fn spawn_op<A, F>(
+    peer: &Peer,
+    agent: &Arc<Mutex<A>>,
+    sessions: &Sessions,
+    id: serde_json::Value,
+    session_id: String,
+    op: F,
+) where
+    A: Agent,
+    F: FnOnce(&mut A, &PromptContext) -> Result<serde_json::Value, RpcError> + Send + 'static,
+{
+    let flag = sessions
+        .lock()
+        .expect("acp sessions mutex poisoned")
+        .entry(session_id.clone())
+        .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+        .clone();
+    flag.store(false, Ordering::SeqCst);
+    let ctx = PromptContext {
+        peer: peer.clone(),
+        session_id,
+        cancel: flag,
+        next_call_id: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+    };
+    let agent = Arc::clone(agent);
+    let peer = peer.clone();
+    thread::spawn(move || {
+        let mut guard = agent.lock().expect("acp agent mutex poisoned");
+        let outcome = op(&mut guard, &ctx);
+        let _ = peer.respond(&id, outcome);
+    });
+}
+
+fn handle_request<A: Agent>(
+    peer: &Peer,
+    agent: &Arc<Mutex<A>>,
+    sessions: &Sessions,
+    id: serde_json::Value,
+    method: &str,
+    params: serde_json::Value,
+) {
+    match method {
+        "initialize" => {
+            let outcome = parse::<InitializeRequest>(params).map(|req| {
+                jval(
+                    agent
+                        .lock()
+                        .expect("acp agent mutex poisoned")
+                        .initialize(req),
+                )
+            });
+            let _ = peer.respond(&id, outcome);
+        }
+        "session/new" => {
+            let result = parse::<NewSessionRequest>(params).and_then(|req| {
+                agent
+                    .lock()
+                    .expect("acp agent mutex poisoned")
+                    .new_session(req)
+            });
+            if let Ok(resp) = &result {
+                sessions
+                    .lock()
+                    .expect("acp sessions mutex poisoned")
+                    .insert(resp.session_id.clone(), Arc::new(AtomicBool::new(false)));
+            }
+            let _ = peer.respond(&id, result.map(jval));
+        }
+        "session/prompt" => match parse::<PromptRequest>(params) {
+            Err(e) => {
+                let _ = peer.respond(&id, Err(e));
+            }
+            Ok(req) => {
+                let sid = req.session_id.clone();
+                spawn_op(peer, agent, sessions, id, sid, move |a, ctx| {
+                    a.prompt(req, ctx).map(jval)
+                });
+            }
+        },
+        "session/load" => match parse::<LoadSessionRequest>(params) {
+            Err(e) => {
+                let _ = peer.respond(&id, Err(e));
+            }
+            Ok(req) => {
+                let sid = req.session_id.clone();
+                spawn_op(peer, agent, sessions, id, sid, move |a, ctx| {
+                    a.load_session(req, ctx).map(|()| serde_json::Value::Null)
+                });
+            }
+        },
+        other => {
+            let _ = peer.respond(&id, Err(RpcError::method_not_found(other)));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -401,6 +459,93 @@ mod tests {
 
         drop(client);
         drop(inbox);
+        server.join().unwrap().unwrap();
+    }
+
+    struct LoadAgent;
+
+    impl Agent for LoadAgent {
+        fn initialize(&mut self, _req: InitializeRequest) -> InitializeResponse {
+            InitializeResponse {
+                protocol_version: crate::acp::PROTOCOL_VERSION,
+                agent_capabilities: AgentCapabilities {
+                    load_session: true,
+                    prompt_capabilities: PromptCapabilities::default(),
+                },
+                agent_info: None,
+                auth_methods: vec![],
+            }
+        }
+
+        fn new_session(&mut self, _r: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+            Ok(NewSessionResponse {
+                session_id: "s1".into(),
+            })
+        }
+
+        fn prompt(
+            &mut self,
+            _r: PromptRequest,
+            _c: &PromptContext,
+        ) -> Result<PromptResponse, RpcError> {
+            Ok(PromptResponse {
+                stop_reason: StopReason::EndTurn,
+            })
+        }
+
+        fn load_session(
+            &mut self,
+            req: LoadSessionRequest,
+            ctx: &PromptContext,
+        ) -> Result<(), RpcError> {
+            ctx.update(SessionUpdate::AgentMessageChunk(MessageChunk {
+                content: ContentBlock::text(format!("history of {}", req.session_id)),
+            }));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn session_load_streams_history_then_resolves() {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let server = thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, LoadAgent));
+        let (client, inbox, _h) = connect(BufReader::new(cli_r), cli_w);
+
+        let res = client
+            .request(
+                "session/load",
+                serde_json::json!({"sessionId": "s9", "cwd": "/tmp", "mcpServers": []}),
+            )
+            .unwrap();
+        assert_eq!(res, serde_json::Value::Null);
+
+        match inbox.recv().unwrap() {
+            Inbound::Notification { method, params } => {
+                assert_eq!(method, "session/update");
+                assert_eq!(params["update"]["content"]["text"], "history of s9");
+            }
+            Inbound::Request { .. } => panic!("expected a notification"),
+        }
+        drop(client);
+        drop(inbox);
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn session_load_default_is_method_not_found() {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let server = thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, MockAgent));
+        let (client, _inbox, _h) = connect(BufReader::new(cli_r), cli_w);
+        let err = client
+            .request(
+                "session/load",
+                serde_json::json!({"sessionId": "x", "cwd": "/", "mcpServers": []}),
+            )
+            .unwrap_err();
+        assert_eq!(err.code, -32601);
+        drop(client);
         server.join().unwrap().unwrap();
     }
 

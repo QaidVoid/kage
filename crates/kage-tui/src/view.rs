@@ -1769,12 +1769,21 @@ pub(super) fn mark_emphasis(
     lines: Vec<Line<'static>>,
     width: u16,
     emphasis: Emphasis,
+    persistent_rule: Option<Color>,
 ) -> Vec<Line<'static>> {
     let prefix: Span<'static> = if emphasis == Emphasis::None {
-        Span::styled(
-            " ".repeat(FOCUS_RULE_WIDTH),
-            Style::default().add_modifier(DECORATION_MARKER),
-        )
+        match persistent_rule {
+            // A recessive always-on spine so the turn is anchored
+            // even when it is not the focus/search target.
+            Some(c) => Span::styled(
+                format!("{} ", emphasis.rule_glyph()),
+                Style::default().fg(c).add_modifier(DECORATION_MARKER),
+            ),
+            None => Span::styled(
+                " ".repeat(FOCUS_RULE_WIDTH),
+                Style::default().add_modifier(DECORATION_MARKER),
+            ),
+        }
     } else {
         let style = Style::default()
             .fg(emphasis.rule_color(Color::White))

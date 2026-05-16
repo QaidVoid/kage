@@ -46,7 +46,12 @@ impl AssistantBlockWidget {
         } else {
             crate::markdown::render(&self.text, assistant_style())
         };
-        mark_emphasis(body, width, emphasis)
+        mark_emphasis(
+            body,
+            width,
+            emphasis,
+            Some(crate::theme::current().assistant_rule),
+        )
     }
 }
 

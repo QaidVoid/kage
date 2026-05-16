@@ -53,6 +53,10 @@ pub struct Theme {
     pub bg: Color,
     /// Background of the user-prompt bubble.
     pub user_bg: Color,
+    /// Persistent left-spine accent for assistant turns when idle
+    /// (focus/search override it). Recessive: it anchors the turn
+    /// without competing with `user_rule` / `tool_rule`.
+    pub assistant_rule: Color,
     /// Left rule of the user-prompt bubble.
     pub user_rule: Color,
     /// Background of a successful tool block.
@@ -139,6 +143,7 @@ impl Theme {
             name: "default".into(),
             bg: Color::Rgb(18, 20, 28),
             user_bg: Color::Rgb(36, 42, 58),
+            assistant_rule: Color::Rgb(70, 80, 105),
             user_rule: Color::Cyan,
             tool_bg: Color::Rgb(30, 34, 44),
             tool_error_bg: Color::Rgb(58, 22, 28),
@@ -182,6 +187,7 @@ impl Theme {
             name: "tokyo-night".into(),
             bg: Color::Rgb(22, 23, 34),
             user_bg: Color::Rgb(36, 40, 59),
+            assistant_rule: Color::Rgb(86, 95, 137),
             user_rule: Color::Rgb(125, 207, 255),
             tool_bg: Color::Rgb(26, 30, 46),
             tool_error_bg: Color::Rgb(63, 22, 30),
@@ -224,6 +230,7 @@ impl Theme {
             name: "catppuccin-mocha".into(),
             bg: Color::Rgb(24, 24, 37),
             user_bg: Color::Rgb(49, 50, 68),
+            assistant_rule: Color::Rgb(88, 91, 112),
             user_rule: Color::Rgb(137, 220, 235),
             tool_bg: Color::Rgb(30, 30, 46),
             tool_error_bg: Color::Rgb(69, 26, 36),

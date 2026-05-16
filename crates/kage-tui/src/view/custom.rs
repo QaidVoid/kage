@@ -51,7 +51,7 @@ impl CustomBlockWidget {
                 out.push(prefix_line("  ", body_line));
             }
         }
-        mark_emphasis(out, width, emphasis)
+        mark_emphasis(out, width, emphasis, None)
     }
 }
 

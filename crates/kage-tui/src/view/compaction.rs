@@ -76,7 +76,7 @@ impl CompactionBlockWidget {
             }
         }
 
-        mark_emphasis(out, width, emphasis)
+        mark_emphasis(out, width, emphasis, None)
     }
 }
 

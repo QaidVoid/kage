@@ -157,7 +157,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
             }
             SessionEntry::ModelChange(mc) => model = mc.model,
             SessionEntry::ThinkingLevelChange(t) => thinking_level = Some(t.level),
-            SessionEntry::Label(_) | SessionEntry::Custom(_) => {}
+            SessionEntry::Label(_) | SessionEntry::Title(_) | SessionEntry::Custom(_) => {}
         }
     }
     Ok(ReplayResult {

@@ -34,6 +34,10 @@ pub struct SessionSummary {
     pub parent_session: Option<SessionId>,
     /// Text of the most recent user message, if any.
     pub last_user_prompt: Option<String>,
+    /// Generated session title (latest `Title` entry), if one was
+    /// written. `None` for pre-title sessions; callers fall back to
+    /// [`Self::last_user_prompt`] for a label.
+    pub title: Option<String>,
     /// Total number of valid entries (including the header).
     pub entry_count: usize,
 }
@@ -82,15 +86,18 @@ fn summarize_one(path: &Path) -> Option<SessionSummary> {
     };
     let mut updated_at = header.ts;
     let mut last_user_prompt = None;
+    let mut title = None;
     let mut entry_count = 1;
     for item in reader {
         let Ok(entry) = item else { continue };
         entry_count += 1;
         updated_at = entry.ts();
-        if let SessionEntry::Message(m) = &entry
-            && m.message.role == kage_core::Role::User
-        {
-            last_user_prompt = first_text(&m.message);
+        match &entry {
+            SessionEntry::Message(m) if m.message.role == kage_core::Role::User => {
+                last_user_prompt = first_text(&m.message);
+            }
+            SessionEntry::Title(t) => title = Some(t.title.clone()),
+            _ => {}
         }
     }
     Some(summary_from_header(
@@ -98,6 +105,7 @@ fn summarize_one(path: &Path) -> Option<SessionSummary> {
         path.to_path_buf(),
         updated_at,
         last_user_prompt,
+        title,
         entry_count,
     ))
 }
@@ -116,6 +124,7 @@ fn summary_from_header(
     path: PathBuf,
     updated_at: DateTime<Utc>,
     last_user_prompt: Option<String>,
+    title: Option<String>,
     entry_count: usize,
 ) -> SessionSummary {
     SessionSummary {
@@ -127,6 +136,7 @@ fn summary_from_header(
         model: header.model,
         parent_session: header.parent_session,
         last_user_prompt,
+        title,
         entry_count,
     }
 }
@@ -265,6 +275,34 @@ mod tests {
 
         let summaries = list(dir.path()).unwrap();
         assert_eq!(summaries.len(), 1);
+    }
+
+    #[test]
+    fn summary_title_is_none_without_a_title_entry() {
+        let dir = tempdir().unwrap();
+        write_session(dir.path(), "a.jsonl", "hello");
+        let summaries = list(dir.path()).unwrap();
+        assert_eq!(summaries[0].title, None, "pre-title sessions have None");
+        assert_eq!(summaries[0].last_user_prompt.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn latest_title_entry_wins_in_summary() {
+        let dir = tempdir().unwrap();
+        let path = write_session(dir.path(), "t.jsonl", "do a thing");
+        let mut writer = crate::writer::SessionWriter::open(&path).unwrap();
+        for t in ["first title", "better title"] {
+            writer
+                .append(&SessionEntry::Title(crate::SessionTitle {
+                    id: EntryId::new(),
+                    ts: Utc::now(),
+                    title: t.to_owned(),
+                }))
+                .unwrap();
+        }
+        drop(writer);
+        let summaries = list(dir.path()).unwrap();
+        assert_eq!(summaries[0].title.as_deref(), Some("better title"));
     }
 
     #[test]

@@ -18,7 +18,7 @@ pub mod writer;
 
 pub use entry::{
     Compaction, Custom, EntryId, FORMAT_VERSION, Header, Label, MessageEntry, ModelChange,
-    SessionEntry, SessionId, ThinkingLevelChange,
+    SessionEntry, SessionId, SessionTitle, ThinkingLevelChange,
 };
 pub use error::SessionError;
 pub use fork::{fork, resolve_entry_prefix};

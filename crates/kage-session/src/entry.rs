@@ -91,6 +91,9 @@ pub enum SessionEntry {
     Compaction(Compaction),
     /// A user-supplied bookmark anchored at a specific entry.
     Label(Label),
+    /// A short generated title for the session, written once after
+    /// the first assistant response. Latest one wins on read.
+    Title(SessionTitle),
     /// A plugin-defined entry the core does not interpret.
     Custom(Custom),
 }
@@ -106,6 +109,7 @@ impl SessionEntry {
             Self::ModelChange(m) => m.id,
             Self::Compaction(c) => c.id,
             Self::Label(l) => l.id,
+            Self::Title(t) => t.id,
             Self::Custom(c) => c.id,
         }
     }
@@ -120,6 +124,7 @@ impl SessionEntry {
             Self::ModelChange(m) => m.ts,
             Self::Compaction(c) => c.ts,
             Self::Label(l) => l.ts,
+            Self::Title(t) => t.ts,
             Self::Custom(c) => c.ts,
         }
     }
@@ -219,6 +224,21 @@ pub struct Label {
     pub text: String,
     /// The entry the label is attached to.
     pub anchor: EntryId,
+}
+
+/// A short generated title for the session. Written once after the
+/// first assistant response (the host generates it); the most recent
+/// `Title` entry wins when a session is summarized, so a later
+/// regeneration can override an earlier one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SessionTitle {
+    /// Entry id of the title itself.
+    pub id: EntryId,
+    /// Append time.
+    pub ts: DateTime<Utc>,
+    /// The generated title text (already trimmed to a short length
+    /// by the host).
+    pub title: String,
 }
 
 /// Plugin-defined entry. The core neither validates nor interprets `data`.

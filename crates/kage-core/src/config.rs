@@ -28,6 +28,9 @@ pub struct Config {
     pub sandbox: SandboxConfig,
     /// Keybinding overrides.
     pub keybindings: KeybindingsConfig,
+    /// Agent-loop tuning (`[loop]`): compaction threshold, etc.
+    #[serde(rename = "loop")]
+    pub loop_settings: LoopSettings,
 }
 
 impl Config {
@@ -142,6 +145,27 @@ fn merge_table(dst: &mut toml_edit::Table, src: &toml_edit::Table) {
             _ => {
                 dst.insert(key, src_item.clone());
             }
+        }
+    }
+}
+
+/// Agent-loop tuning persisted under `[loop]`. Mirrors the subset of
+/// `kage-loop`'s `LoopConfig` the user is allowed to set from config /
+/// the settings dialog; the host maps it onto the real loop config at
+/// startup.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LoopSettings {
+    /// Trigger compaction once estimated token usage exceeds this
+    /// fraction of the model's context window. The loop clamps it to
+    /// `(0.0, 1.0]`.
+    pub compaction_threshold: f32,
+}
+
+impl Default for LoopSettings {
+    fn default() -> Self {
+        Self {
+            compaction_threshold: 0.8,
         }
     }
 }
@@ -322,6 +346,23 @@ mod tests {
             assert_eq!(cfg.ui.theme, "project-theme");
             // mouse not set in project file -> inherited from user file.
             assert!(cfg.ui.mouse);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn loop_section_defaults_and_parses() {
+        assert!((Config::default().loop_settings.compaction_threshold - 0.8).abs() < f32::EPSILON);
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.toml",
+                r"
+                [loop]
+                compaction_threshold = 0.6
+                ",
+            )?;
+            let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
+            assert!((cfg.loop_settings.compaction_threshold - 0.6).abs() < f32::EPSILON);
             Ok(())
         });
     }

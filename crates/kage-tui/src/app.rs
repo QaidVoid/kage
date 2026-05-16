@@ -129,7 +129,8 @@ pub enum RunRequest {
     /// Plugin-initiated fork. `at` is an entry-id prefix or an empty
     /// string for "latest entry". The worker copies the current
     /// session up through that entry into a fresh session file and
-    /// reseats the runtime onto it.
+    /// surfaces its id as a toast. The live session is left untouched:
+    /// the fork is an independent snapshot, not a reseat.
     ForkSession {
         /// Entry-id prefix the fork should stop at, or empty for the
         /// most recent entry.

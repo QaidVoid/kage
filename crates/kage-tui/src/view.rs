@@ -666,6 +666,16 @@ fn render_buffer(
         return;
     }
 
+    // Paint the whole conversation area with the base canvas first so
+    // blocks (which tint only their own rows) sit on one uniform
+    // surface. Without this the inter-block gaps and assistant prose
+    // are unpainted and the terminal background bleeds through as a
+    // patchwork.
+    frame.render_widget(
+        RtBlock::default().style(Style::default().bg(crate::theme::current().bg)),
+        regions.buffer,
+    );
+
     // Owned-key snapshots of the call/result topology. Owning the
     // call_id strings here means we don't keep an immutable borrow of
     // `buffer.blocks()` alive across the height-cache writes below.

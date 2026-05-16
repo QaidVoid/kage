@@ -47,6 +47,10 @@ pub fn set_current(theme: Theme) {
 pub struct Theme {
     /// Display name (`"default"`, `"tokyo-night"`, etc.).
     pub name: String,
+    /// Base canvas painted behind the whole conversation so blocks
+    /// sit on one uniform surface (no terminal-background patchwork
+    /// between blocks). Slightly darker than the block tints.
+    pub bg: Color,
     /// Background of the user-prompt bubble.
     pub user_bg: Color,
     /// Left rule of the user-prompt bubble.
@@ -133,6 +137,7 @@ impl Theme {
     pub fn default_dark() -> Self {
         Self {
             name: "default".into(),
+            bg: Color::Rgb(18, 20, 28),
             user_bg: Color::Rgb(36, 42, 58),
             user_rule: Color::Cyan,
             tool_bg: Color::Rgb(30, 34, 44),
@@ -175,6 +180,7 @@ impl Theme {
     pub fn tokyo_night() -> Self {
         Self {
             name: "tokyo-night".into(),
+            bg: Color::Rgb(22, 23, 34),
             user_bg: Color::Rgb(36, 40, 59),
             user_rule: Color::Rgb(125, 207, 255),
             tool_bg: Color::Rgb(26, 30, 46),
@@ -216,6 +222,7 @@ impl Theme {
     pub fn catppuccin_mocha() -> Self {
         Self {
             name: "catppuccin-mocha".into(),
+            bg: Color::Rgb(24, 24, 37),
             user_bg: Color::Rgb(49, 50, 68),
             user_rule: Color::Rgb(137, 220, 235),
             tool_bg: Color::Rgb(30, 30, 46),

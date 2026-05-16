@@ -33,6 +33,8 @@ pub struct Config {
     pub loop_settings: LoopSettings,
     /// External ACP agents usable as `acp:<name>` (`[acp.agents.*]`).
     pub acp: AcpConfig,
+    /// External MCP tool servers (`[mcp.servers.*]`).
+    pub mcp: McpConfig,
 }
 
 impl Config {
@@ -291,6 +293,30 @@ pub struct AcpAgent {
     /// Extra environment variables for the child process.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+}
+
+/// External MCP tool servers, keyed by name (`[mcp.servers.<name>]`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpConfig {
+    /// Map of server name to its launch spec.
+    pub servers: BTreeMap<String, McpServer>,
+}
+
+/// How to launch one external MCP server over stdio.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct McpServer {
+    /// Executable to spawn (e.g. `npx`).
+    pub command: String,
+    /// Arguments passed to `command`.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Extra environment variables for the child process.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// When `true`, the server is configured but not spawned.
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 #[cfg(test)]

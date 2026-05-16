@@ -1315,6 +1315,7 @@ dependencies = [
 name = "kage-mcp"
 version = "0.1.0"
 dependencies = [
+ "kage-core",
  "serde_json",
  "thiserror 2.0.18",
 ]

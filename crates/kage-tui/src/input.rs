@@ -1377,6 +1377,11 @@ impl InputState {
                 self.cursor = self.text.len();
                 Vec::new()
             }
+            KeyCode::Delete => {
+                self.reset_history_navigation();
+                self.forward_delete();
+                Vec::new()
+            }
             KeyCode::Char('/') if self.text.is_empty() => {
                 vec![InputAction::OpenCommandPalette]
             }
@@ -1675,39 +1680,80 @@ impl InputState {
         self.cursor = prev;
     }
 
-    /// The image chip a Backspace would atomically delete right now:
-    /// `(start, end, id)` of the whole `[image #N ...]` marker (plus
-    /// an optional single trailing space) the cursor is in. The chip
-    /// is one unit - this fires for any cursor position from just
-    /// inside the opening `[` through the trailing space, not only at
-    /// the tail. `None` when the cursor is not within a chip. Used
-    /// both to perform the delete and to highlight the chip.
-    fn armed_image_marker(&self) -> Option<(usize, usize, u32)> {
+    /// The whole `[image #N ...]` chip a Backspace would remove right
+    /// now: any cursor position from just inside the opening `[`
+    /// through the optional trailing space (`open < cursor <= end`).
+    fn backspace_chip(&self) -> Option<(usize, usize, u32)> {
+        let cur = self.cursor;
         image_marker_spans(&self.text)
             .into_iter()
-            .find(|&(open, end, _)| open < self.cursor && self.cursor <= end)
+            .find(|&(open, end, _)| open < cur && cur <= end)
     }
 
-    /// Byte range of the image chip a Backspace would delete at the
-    /// current cursor, for the renderer to highlight as one block.
+    /// The whole chip a forward Delete would remove: the mirror of
+    /// [`Self::backspace_chip`], looking ahead of the cursor instead
+    /// (`open <= cursor < end`), so Delete in front of or inside a
+    /// chip takes the block, not one character.
+    fn forward_delete_chip(&self) -> Option<(usize, usize, u32)> {
+        let cur = self.cursor;
+        image_marker_spans(&self.text)
+            .into_iter()
+            .find(|&(open, end, _)| open <= cur && cur < end)
+    }
+
+    /// Byte range of the chip the cursor is touching, for the
+    /// renderer to highlight it as one solid block. This is the
+    /// union of what a Backspace or a forward Delete here would
+    /// remove (`open <= cursor <= end`), so the chip reads as atomic
+    /// whenever the caret is adjacent to or within it.
     #[must_use]
     pub fn armed_image_range(&self) -> Option<(usize, usize)> {
-        self.armed_image_marker().map(|(s, e, _)| (s, e))
+        let cur = self.cursor;
+        image_marker_spans(&self.text)
+            .into_iter()
+            .find(|&(open, end, _)| open <= cur && cur <= end)
+            .map(|(open, end, _)| (open, end))
     }
 
-    /// When the cursor sits just past a whole `[image #N ...]` marker
-    /// (optionally one trailing space), one Backspace deletes the
-    /// entire marker as an atomic chip and drops image `N`, rather
-    /// than nibbling it character by character. Returns whether it
-    /// handled the keystroke.
-    fn backspace_image_marker(&mut self) -> bool {
-        let Some((open, end, id)) = self.armed_image_marker() else {
-            return false;
-        };
+    /// Remove a resolved chip span: drop its image, cut the marker
+    /// (and trailing space) from the text, and park the cursor where
+    /// it stood.
+    fn remove_chip(&mut self, chip: (usize, usize, u32)) {
+        let (open, end, id) = chip;
         self.attached.retain(|(i, _)| *i != id);
         self.text.drain(open..end);
         self.cursor = open;
+    }
+
+    /// One Backspace deletes a whole image chip (and drops image `N`)
+    /// rather than nibbling it character by character. Returns
+    /// whether it handled the keystroke.
+    fn backspace_image_marker(&mut self) -> bool {
+        let Some(chip) = self.backspace_chip() else {
+            return false;
+        };
+        self.remove_chip(chip);
         true
+    }
+
+    /// Forward Delete counterpart of [`Self::backspace_image_marker`].
+    fn forward_delete_image_marker(&mut self) -> bool {
+        let Some(chip) = self.forward_delete_chip() else {
+            return false;
+        };
+        self.remove_chip(chip);
+        true
+    }
+
+    /// Delete the chip ahead of the cursor whole, else the single
+    /// character at the cursor (the standard forward-Delete edit).
+    fn forward_delete(&mut self) {
+        if self.forward_delete_image_marker() {
+            return;
+        }
+        if let Some((_, w)) = char_at(&self.text, self.cursor) {
+            self.text.drain(self.cursor..self.cursor + w);
+        }
     }
 
     fn move_cursor(&mut self, delta: i32) {
@@ -2130,6 +2176,31 @@ mod tests {
         s.handle_key(key(KeyCode::Backspace));
         assert_eq!(s.text(), "", "the whole chip went, not one char");
         assert!(s.attached().is_empty(), "image dropped with its chip");
+    }
+
+    #[test]
+    fn forward_delete_in_front_of_a_chip_removes_the_whole_block() {
+        let mut s = InputState::new();
+        s.attach_image(img("a.png"));
+        s.handle_key(key(KeyCode::Home));
+        assert!(
+            s.armed_image_range().is_some(),
+            "the chip highlights while the caret sits against it"
+        );
+        s.handle_key(key(KeyCode::Delete));
+        assert_eq!(s.text(), "", "Delete took the chip, not one char");
+        assert!(s.attached().is_empty(), "image dropped with its chip");
+    }
+
+    #[test]
+    fn forward_delete_off_a_chip_still_deletes_one_char() {
+        let mut s = InputState::new();
+        for c in "abc".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        s.handle_key(key(KeyCode::Home));
+        s.handle_key(key(KeyCode::Delete));
+        assert_eq!(s.text(), "bc", "plain forward delete removes one char");
     }
 
     #[test]

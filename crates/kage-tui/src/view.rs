@@ -232,14 +232,14 @@ fn render_status(
     // The bar blends into the canvas now (no band), so `DIM` grey on
     // dark would be unreadable. Use the readable muted tier instead.
     let muted = Style::default().fg(theme.muted_fg).bg(theme.status_bg);
-    let mut left_spans = vec![Span::styled(
-        " kage".to_owned(),
-        bg_style.add_modifier(Modifier::BOLD),
-    )];
+    // Quiet brand label: a recessive marker, not a headline. The
+    // model rides right next to it so the bar reads "kage <model>"
+    // as one tight unit instead of a spaced-out toolbar.
+    let mut left_spans = vec![Span::styled(" kage".to_owned(), muted)];
     if let Some(model) = status.model
         && !model.is_empty()
     {
-        left_spans.push(Span::styled("  ".to_owned(), bg_style));
+        left_spans.push(Span::styled(" ".to_owned(), bg_style));
         left_spans.push(Span::styled(model.to_owned(), muted));
     }
     let mut right_spans: Vec<Span<'static>> = Vec::new();
@@ -274,7 +274,7 @@ fn render_status(
     if let Some(sid) = status.session_id
         && !sid.is_empty()
     {
-        right_spans.push(Span::styled(format!("session {sid} "), muted));
+        right_spans.push(Span::styled(format!("#{sid} "), muted));
     }
     let total = usize::from(regions.status.width);
     let left_width: usize = left_spans.iter().map(|s| s.content.chars().count()).sum();

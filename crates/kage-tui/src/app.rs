@@ -491,6 +491,9 @@ pub struct App {
     /// resolves an alias to its canonical name before dispatch so the
     /// plugin runtime only ever needs to look a command up by name.
     plugin_command_aliases: Vec<(String, String)>,
+    /// Canonical names of `kage.override_command` registrations. These
+    /// may shadow a built-in and are dispatched ahead of it.
+    plugin_command_overrides: Vec<String>,
     /// Synthetic `CommandSpec` entries built from `plugin_commands`
     /// at registration time. Stored as `&'static` via `Box::leak` so
     /// the completion engine can mix them with the static builtin
@@ -668,6 +671,7 @@ impl App {
             status_session_id: None,
             plugin_commands: Vec::new(),
             plugin_command_aliases: Vec::new(),
+            plugin_command_overrides: Vec::new(),
             plugin_command_specs: Vec::new(),
             plugin_keybindings: Vec::new(),
             config_keybindings: Vec::new(),
@@ -796,16 +800,19 @@ impl App {
     /// engine the builtins use. The leaked storage is bounded by the
     /// number of plugin commands the user installs.
     pub fn set_plugin_commands(&mut self, mut commands: Vec<PluginCommand>) {
-        // A plugin command (or any of its aliases) may not shadow a
-        // builtin; explicit shadowing is `kage.override_command`.
+        // A regular plugin command (or any of its aliases) may not
+        // shadow a builtin; an `override_command` is allowed to and
+        // is dispatched ahead of the builtin.
         commands.retain(|c| {
-            crate::command::find_builtin_command(&c.name).is_none()
-                && c.aliases
-                    .iter()
-                    .all(|a| crate::command::find_builtin_command(a).is_none())
+            c.is_override
+                || (crate::command::find_builtin_command(&c.name).is_none()
+                    && c.aliases
+                        .iter()
+                        .all(|a| crate::command::find_builtin_command(a).is_none()))
         });
         self.plugin_command_specs.clear();
         self.plugin_command_aliases.clear();
+        self.plugin_command_overrides.clear();
         for cmd in &commands {
             let name_static: &'static str = Box::leak(cmd.name.clone().into_boxed_str());
             let desc_static: &'static str =
@@ -831,6 +838,9 @@ impl App {
             for alias in &cmd.aliases {
                 self.plugin_command_aliases
                     .push((alias.clone(), cmd.name.clone()));
+            }
+            if cmd.is_override {
+                self.plugin_command_overrides.push(cmd.name.clone());
             }
         }
         self.plugin_commands = commands
@@ -1857,6 +1867,29 @@ impl App {
             return CommandResult::Done(None);
         }
 
+        // Resolve `head` to a plugin command (direct name or alias).
+        let canonical = if self.plugin_commands.iter().any(|(n, _)| n == head) {
+            Some(head.to_owned())
+        } else {
+            self.plugin_command_aliases
+                .iter()
+                .find(|(alias, _)| alias == head)
+                .map(|(_, name)| name.clone())
+        };
+
+        // An `override_command` shadows a builtin: dispatch it ahead
+        // of the builtin lookup.
+        if let Some(name) = canonical
+            .as_deref()
+            .filter(|n| self.plugin_command_overrides.iter().any(|o| o == n))
+        {
+            let _ = self.send_request(RunRequest::InvokePluginCommand {
+                name: name.to_owned(),
+                args: rest.to_owned(),
+            });
+            return CommandResult::Done(None);
+        }
+
         if let Some(spec) = crate::command::find_builtin_command(head) {
             let (target_spec, target_rest) = Self::resolve_subcommand_tree(spec, rest);
             if let Err(e) = crate::cmdparse::parse_input(target_spec, target_rest) {
@@ -1866,14 +1899,6 @@ impl App {
             return CommandResult::Done(exit);
         }
 
-        let canonical = if self.plugin_commands.iter().any(|(n, _)| n == head) {
-            Some(head.to_owned())
-        } else {
-            self.plugin_command_aliases
-                .iter()
-                .find(|(alias, _)| alias == head)
-                .map(|(_, name)| name.clone())
-        };
         if let Some(name) = canonical {
             let _ = self.send_request(RunRequest::InvokePluginCommand {
                 name,
@@ -3102,6 +3127,7 @@ mod tests {
         app.set_plugin_commands(vec![PluginCommand {
             name: "git-status".into(),
             aliases: vec!["gst".into(), "gs".into()],
+            is_override: false,
             description: "show git status".into(),
             args: Vec::new(),
         }]);
@@ -3125,6 +3151,7 @@ mod tests {
         app.set_plugin_commands(vec![PluginCommand {
             name: "mycmd".into(),
             aliases: vec!["help".into()],
+            is_override: false,
             description: "tries to shadow :help via alias".into(),
             args: Vec::new(),
         }]);
@@ -3132,6 +3159,34 @@ mod tests {
             app.plugin_commands.is_empty(),
             "a command whose alias collides with a builtin is rejected whole"
         );
+    }
+
+    #[test]
+    fn override_command_shadows_builtin_and_dispatches_first() {
+        let buffer = shared_buffer();
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        app.set_plugin_commands(vec![PluginCommand {
+            name: "help".into(),
+            aliases: Vec::new(),
+            is_override: true,
+            description: "my help".into(),
+            args: Vec::new(),
+        }]);
+        assert_eq!(
+            app.plugin_commands.len(),
+            1,
+            "override kept despite builtin"
+        );
+        let registry = cmdline_registry(&app.plugin_command_specs);
+        let res = app.run_command_validated("help", &registry);
+        assert!(matches!(res, CommandResult::Done(None)));
+        match rx.recv_timeout(Duration::from_millis(100)).unwrap() {
+            RunRequest::InvokePluginCommand { name, .. } => {
+                assert_eq!(name, "help", "override won over builtin :help");
+            }
+            other => panic!("expected plugin invoke, got {other:?}"),
+        }
     }
 
     #[test]

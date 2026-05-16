@@ -151,6 +151,9 @@ pub struct PluginCommand {
     pub name: String,
     /// Alternate names that resolve to this command.
     pub aliases: Vec<String>,
+    /// Registered via `kage.override_command`: may shadow a built-in
+    /// and is dispatched ahead of it.
+    pub is_override: bool,
     /// One-line description shown in the palette and help output.
     pub description: String,
     /// Argument schema declared by the plugin. Empty means the

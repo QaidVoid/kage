@@ -165,6 +165,24 @@ purpose.
 The handler runs through the coroutine bridge, so it may call the
 blocking [`kage.ui.*`](#ui) dialogs directly.
 
+### `kage.override_command(spec)`
+
+Same `spec` as `register_command`, but the command is **allowed to
+shadow a built-in** of the same name and is dispatched ahead of it
+(parity with `kage.override_tool`):
+
+```lua
+kage.override_command({
+  name = "help",
+  description = "my help",
+  handler = function() return "see :keybindings and :events too" end,
+})
+```
+
+Now `:help` runs your handler instead of the built-in. Overrides
+live in their own registry, so removing the plugin restores the
+built-in.
+
 ## keybindings
 
 ### `kage.register_keybinding(spec, handler)`

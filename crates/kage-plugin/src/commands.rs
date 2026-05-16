@@ -471,16 +471,20 @@ pub fn registered_commands() -> RegisteredCommands {
     Arc::new(Mutex::new(Vec::new()))
 }
 
-/// Install `kage.register_command` on the running Lua state.
-pub fn install_register_command(
+/// Shared installer for `register_command` / `override_command`. The
+/// two are identical from the plugin's side; the host distinguishes
+/// them by which registry the [`LuaCommand`] lands in (overrides may
+/// shadow a built-in and dispatch ahead of it).
+fn install_command_fn(
     lua: &Lua,
     shared_lua: SharedLua,
     sink: SharedHostLog,
     registered: RegisteredCommands,
+    fn_name: &'static str,
 ) -> Result<(), PluginError> {
     let kage: Table = lua.globals().get("kage")?;
     kage.set(
-        "register_command",
+        fn_name,
         lua.create_function(move |lua, spec: Table| {
             let name: String = spec.get("name")?;
             let description: String = spec.get("description")?;
@@ -493,12 +497,14 @@ pub fn install_register_command(
                     .sequence_values::<String>()
                     .collect::<Result<_, _>>()
                     .map_err(|_| {
-                        mlua::Error::external("register_command: `aliases` must be a string array")
+                        mlua::Error::external(format!(
+                            "{fn_name}: `aliases` must be a string array"
+                        ))
                     })?,
                 _ => {
-                    return Err(mlua::Error::external(
-                        "register_command: `aliases` must be a string array",
-                    ));
+                    return Err(mlua::Error::external(format!(
+                        "{fn_name}: `aliases` must be a string array"
+                    )));
                 }
             };
             let key = lua.create_registry_value(handler)?;
@@ -519,6 +525,37 @@ pub fn install_register_command(
         })?,
     )?;
     Ok(())
+}
+
+/// Install `kage.register_command` on the running Lua state.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] if the `kage` global is missing.
+pub fn install_register_command(
+    lua: &Lua,
+    shared_lua: SharedLua,
+    sink: SharedHostLog,
+    registered: RegisteredCommands,
+) -> Result<(), PluginError> {
+    install_command_fn(lua, shared_lua, sink, registered, "register_command")
+}
+
+/// Install `kage.override_command` on the running Lua state.
+/// Semantically identical to `register_command` for the plugin; the
+/// host keeps these in a separate registry so they may shadow a
+/// built-in command and are dispatched ahead of it.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] if the `kage` global is missing.
+pub fn install_override_command(
+    lua: &Lua,
+    shared_lua: SharedLua,
+    sink: SharedHostLog,
+    overrides: RegisteredCommands,
+) -> Result<(), PluginError> {
+    install_command_fn(lua, shared_lua, sink, overrides, "override_command")
 }
 
 #[cfg(test)]
@@ -564,6 +601,30 @@ mod tests {
         .unwrap();
         let commands = rt.registered_commands();
         assert_eq!(commands[0].aliases(), ["gst", "gs"]);
+    }
+
+    #[test]
+    fn override_command_is_separate_from_register_command() {
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval(
+            r"
+            kage.register_command({
+                name = 'mine', description = 'a', handler = function() end,
+            })
+            kage.override_command({
+                name = 'help', aliases = { 'h' },
+                description = 'my help', handler = function() return 'hi' end,
+            })
+            ",
+        )
+        .unwrap();
+        let regular = rt.registered_commands();
+        assert_eq!(regular.len(), 1);
+        assert_eq!(regular[0].name(), "mine");
+        let overrides = rt.registered_command_overrides();
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].name(), "help");
+        assert_eq!(overrides[0].aliases(), ["h"]);
     }
 
     #[test]

@@ -603,6 +603,19 @@ const FUNCS: &[Func] = &[
     },
     Func {
         doc: &[
+            "Like `register_command`, but allowed to shadow a built-in",
+            "command of the same name and dispatched ahead of it.",
+        ],
+        path: "kage.override_command",
+        params: &[Field {
+            name: "spec",
+            ty: "kage.CommandSpec",
+            doc: "",
+        }],
+        ret: None,
+    },
+    Func {
+        doc: &[
             "Bind a chord to a handler. `spec` is a chord string or",
             "`{ key, description? }`. The handler runs through the",
             "coroutine bridge, so it may open `kage.ui.*` dialogs.",

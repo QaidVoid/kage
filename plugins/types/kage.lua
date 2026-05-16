@@ -209,6 +209,11 @@ function kage.override_tool(spec) end
 ---@param spec kage.CommandSpec
 function kage.register_command(spec) end
 
+--- Like `register_command`, but allowed to shadow a built-in
+--- command of the same name and dispatched ahead of it.
+---@param spec kage.CommandSpec
+function kage.override_command(spec) end
+
 --- Bind a chord to a handler. `spec` is a chord string or
 --- `{ key, description? }`. The handler runs through the
 --- coroutine bridge, so it may open `kage.ui.*` dialogs.

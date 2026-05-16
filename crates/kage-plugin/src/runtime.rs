@@ -74,6 +74,7 @@ pub struct PluginRuntime {
     tools: RegisteredTools,
     tool_overrides: RegisteredTools,
     commands: RegisteredCommands,
+    command_overrides: RegisteredCommands,
     providers: RegisteredProviders,
     widgets: RegisteredWidgets,
     status: SharedStatus,
@@ -235,6 +236,17 @@ impl PluginRuntime {
         self.commands
             .lock()
             .expect("plugin commands mutex poisoned")
+            .clone()
+    }
+
+    /// Snapshot the commands plugins registered via
+    /// `kage.override_command`. The host lets these shadow a built-in
+    /// of the same name and dispatches them ahead of it.
+    #[must_use]
+    pub fn registered_command_overrides(&self) -> Vec<Arc<LuaCommand>> {
+        self.command_overrides
+            .lock()
+            .expect("plugin command overrides mutex poisoned")
             .clone()
     }
 
@@ -643,6 +655,10 @@ impl PluginRuntime {
             .lock()
             .expect("plugin commands mutex poisoned")
             .clear();
+        self.command_overrides
+            .lock()
+            .expect("plugin command overrides mutex poisoned")
+            .clear();
         self.providers
             .lock()
             .expect("plugin providers mutex poisoned")
@@ -738,6 +754,7 @@ impl PluginRuntimeBuilder {
         let tool_registry = registered_tools();
         let tool_override_registry = registered_tools();
         let command_registry = registered_commands();
+        let command_override_registry = registered_commands();
         let provider_registry = registered_providers();
         let widget_registry = registered_widgets();
         let status_map = shared_status();
@@ -785,6 +802,12 @@ impl PluginRuntimeBuilder {
                 Arc::clone(&shared_lua),
                 self.sink.clone(),
                 Arc::clone(&command_registry),
+            )?;
+            commands::install_override_command(
+                &lua_guard,
+                Arc::clone(&shared_lua),
+                self.sink.clone(),
+                Arc::clone(&command_override_registry),
             )?;
             providers::install_register_provider(
                 &lua_guard,
@@ -848,6 +871,7 @@ impl PluginRuntimeBuilder {
             tools: tool_registry,
             tool_overrides: tool_override_registry,
             commands: command_registry,
+            command_overrides: command_override_registry,
             providers: provider_registry,
             widgets: widget_registry,
             status: status_map,

@@ -149,6 +149,16 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
             plugin_command_listing.push(kage_tui::command::PluginCommand {
                 name: cmd.name().to_owned(),
                 aliases: cmd.aliases().to_vec(),
+                is_override: false,
+                description: cmd.description().to_owned(),
+                args: cmd.args().iter().map(translate_plugin_arg).collect(),
+            });
+        }
+        for cmd in rt.registered_command_overrides() {
+            plugin_command_listing.push(kage_tui::command::PluginCommand {
+                name: cmd.name().to_owned(),
+                aliases: cmd.aliases().to_vec(),
+                is_override: true,
                 description: cmd.description().to_owned(),
                 args: cmd.args().iter().map(translate_plugin_arg).collect(),
             });
@@ -526,9 +536,13 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                 }
                 RunRequest::InvokePluginCommand { name, args } => {
                     if let Some(rt) = plugin_runtime.as_ref() {
+                        // Overrides are searched first so an
+                        // `override_command` shadowing a built-in
+                        // wins; then regular registrations.
                         match rt
-                            .registered_commands()
+                            .registered_command_overrides()
                             .into_iter()
+                            .chain(rt.registered_commands())
                             .find(|c| c.name() == name)
                         {
                             Some(cmd) => {

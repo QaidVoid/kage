@@ -18,7 +18,7 @@ pub mod system_prompt;
 pub use compact::{COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX, force_compact};
 pub use config::{LoopConfig, SteeringMode};
 pub use context::{AgentContext, TokenBudget};
-pub use hooks::{HookResult, Hooks, NoopHooks, TurnSummary};
+pub use hooks::{CompactionPrep, HookResult, Hooks, NoopHooks, TurnSummary};
 pub use kage_provider::{StreamRequest, ThinkingLevel};
 pub use run::run;
 pub use system_prompt::{DEFAULT_ROLE, EnvContext, compose as compose_system_prompt, with_skills};

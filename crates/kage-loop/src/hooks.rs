@@ -83,6 +83,32 @@ pub struct TurnSummary {
     pub usage: TokenUsage,
 }
 
+/// Mutable summarization plan handed to [`Hooks::prepare_compaction`]
+/// just before history compaction calls the summarizer model.
+///
+/// Rewrite [`Self::prompt`] or [`Self::instruction`] to steer the
+/// summary, or set [`Self::summary_override`] to skip the model call
+/// entirely and use the given text as the summary body.
+#[derive(Clone, Debug)]
+pub struct CompactionPrep {
+    /// Plain-text transcript of the turns being summarized. Read-only
+    /// context; change what the model sees by rewriting `prompt`.
+    pub transcript: String,
+    /// System instruction for the summarization call. Mutable.
+    pub instruction: String,
+    /// Full user-role prompt the summarizer receives. Mutable.
+    pub prompt: String,
+    /// Model id the summarization call uses.
+    pub model: String,
+    /// Number of messages being summarized away.
+    pub summarized: usize,
+    /// Number of recent messages kept verbatim after compaction.
+    pub kept: usize,
+    /// When `Some`, the loop skips the summarizer model call and uses
+    /// this text as the summary body verbatim.
+    pub summary_override: Option<String>,
+}
+
 /// Host-supplied callbacks fired during a [`run`](crate::run).
 ///
 /// All methods take `&mut self` so hosts can accumulate state (logs,
@@ -149,6 +175,18 @@ pub trait Hooks {
     /// follow-ups.
     fn transform_context(&mut self, messages: &mut Vec<Message>) -> Result<(), String> {
         let _ = messages;
+        Ok(())
+    }
+
+    /// Fired right before history compaction calls the summarizer
+    /// model. Rewrite `prep.prompt` / `prep.instruction` to steer the
+    /// summary, or set `prep.summary_override` to replace the summary
+    /// outright and skip the model call.
+    ///
+    /// Returning an error aborts compaction with
+    /// [`kage_core::LoopError::HookFailed`]. The default is a no-op.
+    fn prepare_compaction(&mut self, prep: &mut CompactionPrep) -> Result<(), String> {
+        let _ = prep;
         Ok(())
     }
 

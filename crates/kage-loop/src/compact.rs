@@ -18,7 +18,7 @@ use kage_core::{CancelFlag, Content, LoopError, LoopEvent, Message, MessageId, R
 use kage_provider::{Provider, ProviderEvent, StreamRequest};
 
 use crate::run::emit_one;
-use crate::{AgentContext, Hooks, LoopConfig, TokenBudget};
+use crate::{AgentContext, CompactionPrep, Hooks, LoopConfig, TokenBudget};
 
 /// Number of recent turns kept verbatim. Older turns are summarized.
 const KEEP_RECENT: usize = 4;
@@ -81,7 +81,26 @@ fn run_compaction<F: FnMut(LoopEvent)>(
 
     let split = cx.history.len() - KEEP_RECENT;
     let to_summarize: Vec<Message> = cx.history.drain(..split).collect();
-    let summary_text = summarize(provider, &cx.model, &to_summarize, cancel)?;
+    let transcript = serialize_conversation(&to_summarize);
+    let mut prep = CompactionPrep {
+        prompt: format!("<conversation>\n{transcript}</conversation>\n\n{SUMMARIZE_INSTRUCTION}"),
+        transcript,
+        instruction: SUMMARIZE_INSTRUCTION.to_owned(),
+        model: cx.model.clone(),
+        summarized: split,
+        kept: KEEP_RECENT,
+        summary_override: None,
+    };
+    hooks
+        .prepare_compaction(&mut prep)
+        .map_err(|message| LoopError::HookFailed {
+            hook: "compact_prepare".to_owned(),
+            message,
+        })?;
+    let summary_text = match prep.summary_override {
+        Some(text) => text,
+        None => summarize(provider, &cx.model, &prep.prompt, &prep.instruction, cancel)?,
+    };
     let summary_body =
         format!("{COMPACTION_SUMMARY_PREFIX}{summary_text}{COMPACTION_SUMMARY_SUFFIX}");
 
@@ -190,18 +209,19 @@ fn serialize_conversation(messages: &[Message]) -> String {
 fn summarize(
     provider: &dyn Provider,
     model: &str,
-    messages: &[Message],
+    prompt: &str,
+    instruction: &str,
     cancel: &CancelFlag,
 ) -> Result<String, LoopError> {
-    let transcript = serialize_conversation(messages);
-    let prompt = format!("<conversation>\n{transcript}</conversation>\n\n{SUMMARIZE_INSTRUCTION}");
     let payload = vec![Message::new(
         Role::User,
-        vec![Content::Text { text: prompt }],
+        vec![Content::Text {
+            text: prompt.to_owned(),
+        }],
         None,
     )];
     let mut req = StreamRequest::new(model, payload);
-    req.system = Some(SUMMARIZE_INSTRUCTION.to_owned());
+    req.system = Some(instruction.to_owned());
     let stream = provider
         .stream(req, cancel)
         .map_err(|e| LoopError::Provider {
@@ -367,6 +387,93 @@ mod tests {
 
         let res = maybe_compact(&mut cx, cfg, &provider, &cancel, &mut hooks, &mut |_| {});
         assert!(matches!(res, Err(LoopError::Provider { .. })));
+    }
+
+    #[test]
+    fn prepare_compaction_override_skips_model_call() {
+        struct OverrideHook;
+        impl Hooks for OverrideHook {
+            fn prepare_compaction(&mut self, prep: &mut CompactionPrep) -> Result<(), String> {
+                assert_eq!(prep.kept, KEEP_RECENT);
+                assert_eq!(prep.summarized, 10 - KEEP_RECENT);
+                assert!(prep.prompt.contains("<conversation>"));
+                prep.summary_override = Some("PLUGIN WROTE THIS".to_owned());
+                Ok(())
+            }
+        }
+        // Empty replay: if summarize() were called it would error, so
+        // a clean run proves the model call was skipped.
+        let provider = MockProvider::replaying(vec![]);
+        let cancel = CancelFlag::new();
+        let mut hooks = OverrideHook;
+        let mut cx = loaded_context(1_000, 10);
+        cx.context_window = 200_000;
+
+        let ran = force_compact(&mut cx, &provider, &cancel, &mut hooks, &mut |_| {}).unwrap();
+        assert!(ran);
+        match &cx.history[0].content[0] {
+            Content::Text { text } => {
+                assert!(text.contains("PLUGIN WROTE THIS"));
+                assert!(text.contains("<summary>"));
+            }
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_compaction_error_aborts_with_hook_failed() {
+        struct FailHook;
+        impl Hooks for FailHook {
+            fn prepare_compaction(&mut self, _prep: &mut CompactionPrep) -> Result<(), String> {
+                Err("nope".to_owned())
+            }
+        }
+        let provider = MockProvider::replaying(vec![]);
+        let cancel = CancelFlag::new();
+        let mut hooks = FailHook;
+        let mut cx = loaded_context(1_000, 10);
+        cx.context_window = 200_000;
+
+        let res = force_compact(&mut cx, &provider, &cancel, &mut hooks, &mut |_| {});
+        match res {
+            Err(LoopError::HookFailed { hook, message }) => {
+                assert_eq!(hook, "compact_prepare");
+                assert_eq!(message, "nope");
+            }
+            other => panic!("expected HookFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_compaction_prompt_rewrite_reaches_model() {
+        struct RewriteHook;
+        impl Hooks for RewriteHook {
+            fn prepare_compaction(&mut self, prep: &mut CompactionPrep) -> Result<(), String> {
+                prep.prompt = "REWRITTEN".to_owned();
+                prep.instruction = "BE TERSE".to_owned();
+                Ok(())
+            }
+        }
+        let provider = MockProvider::replaying(vec![
+            Ok(ProviderEvent::TextDelta {
+                delta: "summarized".into(),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        ]);
+        let cancel = CancelFlag::new();
+        let mut hooks = RewriteHook;
+        let mut cx = loaded_context(1_000, 10);
+        cx.context_window = 200_000;
+
+        let ran = force_compact(&mut cx, &provider, &cancel, &mut hooks, &mut |_| {}).unwrap();
+        assert!(ran);
+        match &cx.history[0].content[0] {
+            Content::Text { text } => assert!(text.contains("summarized")),
+            other => panic!("expected Text, got {other:?}"),
+        }
     }
 
     #[test]

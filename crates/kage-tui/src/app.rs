@@ -497,6 +497,12 @@ pub struct App {
     /// Checked after modal layers but before builtin key handling so a
     /// plugin chord wins over the builtin binding for that key.
     plugin_keybindings: Vec<(Chord, String)>,
+    /// Parsed `[keybindings]` config: `(matcher, chord text, command
+    /// line)`. A matching key runs the command string through the
+    /// same executor as the `:` cmdline. Checked before plugin
+    /// keybindings so user config is authoritative. The chord text is
+    /// kept for `:keybindings` to echo back.
+    config_keybindings: Vec<(Chord, String, String)>,
     /// Status-bar widgets supplied by plugins via
     /// `kage.register_widget`. Each entry's `render(width)` runs once
     /// per redraw and the resulting string is painted on the right
@@ -659,6 +665,7 @@ impl App {
             plugin_commands: Vec::new(),
             plugin_command_specs: Vec::new(),
             plugin_keybindings: Vec::new(),
+            config_keybindings: Vec::new(),
             plugin_widgets: Vec::new(),
             plugin_widget_texts: Vec::new(),
             plugin_status: None,
@@ -978,6 +985,31 @@ impl App {
             .into_iter()
             .filter_map(|c| Chord::parse(&c).map(|m| (m, c)))
             .collect();
+    }
+
+    /// Register `[keybindings]` config entries: `chord -> command
+    /// line`. A matching key runs the command through the cmdline
+    /// executor, so anything `:` can do (including `quit` and plugin
+    /// commands) is bindable. Returns one message per entry whose
+    /// chord did not parse so the caller can surface it; a bad entry
+    /// is dropped, never silently "sort of" applied.
+    #[must_use]
+    pub fn set_config_keybindings(&mut self, entries: Vec<(String, String)>) -> Vec<String> {
+        let mut errors = Vec::new();
+        self.config_keybindings = entries
+            .into_iter()
+            .filter_map(|(chord, command)| {
+                if let Some(m) = Chord::parse(&chord) {
+                    Some((m, chord, command))
+                } else {
+                    errors.push(format!(
+                        "keybindings: cannot parse chord `{chord}` (bound to `{command}`)"
+                    ));
+                    None
+                }
+            })
+            .collect();
+        errors
     }
 
     /// Wire the channel the worker pushes blocking [`PluginDialog`]
@@ -1477,9 +1509,20 @@ impl App {
     }
 
     fn dispatch_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> Option<AppExit> {
-        // Global escape hatches before passing to any modal layer.
+        // Global escape hatch before any modal layer: ctrl+q quits.
+        // It yields only when the user has explicitly bound ctrl+q to
+        // something in `[keybindings]` - then their config wins and
+        // quit is reachable via whatever chord they mapped `quit` to,
+        // so the panic hatch stays for everyone who did not rebind it.
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
-        if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('q')) {
+        let ctrl_q =
+            key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('q'));
+        if ctrl_q
+            && !self
+                .config_keybindings
+                .iter()
+                .any(|(m, _, _)| m.matches(&key))
+        {
             return Some(AppExit::Quit);
         }
 
@@ -1533,9 +1576,29 @@ impl App {
             return self.dispatch_search_key(key);
         }
 
+        // `[keybindings]` config is user-authoritative: checked before
+        // plugin and builtin handling so a user can always reclaim a
+        // key. The bound string runs through the same executor as the
+        // `:` cmdline, so `quit`, plugin commands, everything works.
+        if let Some(command) = self
+            .config_keybindings
+            .iter()
+            .find(|(matcher, _, _)| matcher.matches(&key))
+            .map(|(_, _, command)| command.clone())
+        {
+            let registry = cmdline_registry(&self.plugin_command_specs);
+            return match self.run_command_validated(&command, &registry) {
+                CommandResult::Done(exit) => exit,
+                CommandResult::ValidationError(msg) => {
+                    self.push_error(format!("keybinding `{command}`: {msg}"));
+                    None
+                }
+            };
+        }
+
         // Plugin keybindings win over builtin Normal/Insert handling
         // (last writer wins), but never over an open modal layer
-        // above or the global quit hatch.
+        // above, the global quit hatch, or user config above.
         if let Some(chord) = self
             .plugin_keybindings
             .iter()
@@ -1861,6 +1924,10 @@ impl App {
                 self.push_help();
                 None
             }
+            "keybindings" => {
+                self.push_keybindings();
+                None
+            }
             "compact" => {
                 let _ = self.send_request(RunRequest::CompactNow);
                 None
@@ -2113,6 +2180,51 @@ impl App {
         for spec in crate::command::BUILTIN_COMMANDS {
             help_render_spec(&mut lines, spec, ":", 0);
         }
+        let body = lines.join("\n");
+        if let Ok(mut buf) = self.buffer.lock() {
+            buf.push_custom("kage:help", body, false);
+        }
+    }
+
+    /// Render the active key bindings: user `[keybindings]` config
+    /// first (authoritative), then plugin-registered chords, then the
+    /// fixed reserved keys the TUI handles itself. Honest about the
+    /// last group rather than pretending everything is rebindable.
+    fn push_keybindings(&mut self) {
+        let mut lines = vec!["key bindings (first match wins, top to bottom):".to_owned()];
+
+        lines.push(String::new());
+        lines.push("[keybindings] config:".to_owned());
+        if self.config_keybindings.is_empty() {
+            lines.push("  (none; add a [keybindings] table to config.toml)".to_owned());
+        } else {
+            for (_, chord, command) in &self.config_keybindings {
+                lines.push(format!("  {chord:<16} :{command}"));
+            }
+        }
+
+        lines.push(String::new());
+        lines.push("plugin (kage.register_keybinding):".to_owned());
+        if self.plugin_keybindings.is_empty() {
+            lines.push("  (none)".to_owned());
+        } else {
+            for (_, chord) in &self.plugin_keybindings {
+                lines.push(format!("  {chord:<16} plugin handler"));
+            }
+        }
+
+        lines.push(String::new());
+        lines.push("reserved (handled by the TUI; not rebindable):".to_owned());
+        for (chord, what) in [
+            ("ctrl+q", "quit (unless you bind ctrl+q in config)"),
+            ("ctrl+c", "interrupt the in-flight turn"),
+            (":", "command line"),
+            ("/", "search"),
+            ("esc", "leave a mode / close an overlay"),
+        ] {
+            lines.push(format!("  {chord:<16} {what}"));
+        }
+
         let body = lines.join("\n");
         if let Ok(mut buf) = self.buffer.lock() {
             buf.push_custom("kage:help", body, false);
@@ -2861,6 +2973,64 @@ mod tests {
         let mut app = App::new(buffer, tx);
         let exit = app.handle_key(ctrl('q'));
         assert_eq!(exit, Some(AppExit::Quit));
+    }
+
+    #[test]
+    fn config_keybinding_runs_bound_command() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let errs = app.set_config_keybindings(vec![("ctrl+g".into(), "quit".into())]);
+        assert!(errs.is_empty(), "{errs:?}");
+        assert_eq!(app.handle_key(ctrl('g')), Some(AppExit::Quit));
+    }
+
+    #[test]
+    fn config_can_reclaim_ctrl_q_from_the_quit_hatch() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer.clone(), tx);
+        if let Ok(mut buf) = buffer.lock() {
+            buf.push_custom("note", "x", false);
+        }
+        let _ = app.set_config_keybindings(vec![("ctrl+q".into(), "clear".into())]);
+        // ctrl+q no longer quits: it runs the bound `clear` instead.
+        assert_eq!(app.handle_key(ctrl('q')), None);
+        assert!(
+            buffer.lock().unwrap().blocks().is_empty(),
+            "clear ran via ctrl+q"
+        );
+    }
+
+    #[test]
+    fn set_config_keybindings_reports_unparseable_chord() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let errs = app.set_config_keybindings(vec![
+            ("totally bogus chord".into(), "quit".into()),
+            ("ctrl+g".into(), "help".into()),
+        ]);
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("totally bogus chord"), "{}", errs[0]);
+        assert_eq!(app.config_keybindings.len(), 1, "good binding kept");
+    }
+
+    #[test]
+    fn keybindings_command_lists_config_and_reserved() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer.clone(), tx);
+        let _ = app.set_config_keybindings(vec![("ctrl+t".into(), "theme set tokyo-night".into())]);
+        app.push_keybindings();
+        let buf = buffer.lock().unwrap();
+        let rendered = match buf.blocks().last() {
+            Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
+            other => panic!("expected a custom block, got {other:?}"),
+        };
+        assert!(rendered.contains("ctrl+t"), "{rendered}");
+        assert!(rendered.contains("theme set tokyo-night"), "{rendered}");
+        assert!(rendered.contains("reserved"), "{rendered}");
     }
 
     #[test]

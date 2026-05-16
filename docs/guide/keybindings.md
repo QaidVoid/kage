@@ -110,11 +110,39 @@ of 10 or more lines collapses to a `[paste #N: M lines]` placeholder
 so it does not flood the input; the full text is still sent on
 submit, and `Ctrl+O` expands it inline if you want to edit it first.
 
+## remapping keys (`[keybindings]`)
+
+Bind any chord to any command in `config.toml`. The bound string runs
+through the same executor as the `:` command line, so anything `:`
+can do - including `quit` and plugin commands - is bindable:
+
+```toml
+[keybindings]
+"ctrl+s" = "settings"
+"ctrl+t" = "theme set tokyo-night"
+"ctrl+x" = "quit"
+```
+
+Config bindings are user-authoritative: they are checked before
+plugin keybindings and before built-in handling, so you can always
+reclaim a key. A chord that does not parse is reported inline at
+startup (never silently dropped). Prefer modified chords - a bare
+letter will shadow typing it into the prompt.
+
+`Ctrl+Q` quits as a panic hatch even from a stuck modal. It yields
+**only** if you explicitly bind `ctrl+q` to something in
+`[keybindings]` - then your config wins and quit is reachable via
+whatever chord you mapped `quit` to.
+
+Run `:keybindings` (alias `:keys`) to list every active binding:
+your config bindings, plugin-registered chords, and the reserved
+keys the TUI handles itself.
+
 ## plugin keybindings
 
 Plugins bind their own chords with
 [`kage.register_keybinding`](/plugins/api#keybindings). A plugin
-chord is checked before built-in key handling, so it wins over the
-built-in binding for that key - but never over an open modal layer
-or the `Ctrl+Q` quit hatch. Binding a reserved chord still works
-and logs a warning.
+chord is checked after `[keybindings]` config but before built-in
+key handling, so it wins over the built-in binding for that key -
+but never over user config, an open modal layer, or the `Ctrl+Q`
+quit hatch. Binding a reserved chord still works and logs a warning.

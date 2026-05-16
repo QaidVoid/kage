@@ -246,7 +246,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let mut app = App::new(buffer, tx);
+    let mut app = App::new(buffer.clone(), tx);
     app.set_model_choices(model_choices);
     app.set_history(crate::history::load());
     app.set_status_model(Arc::clone(&active_qualified));
@@ -288,6 +288,19 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     }
     app.set_plugin_dialog(dialog_rx);
     app.set_plugin_keybindings(plugin_keybinding_chords);
+    let keybinding_errors = app.set_config_keybindings(
+        app_config
+            .keybindings
+            .bindings
+            .iter()
+            .map(|(chord, command)| (chord.clone(), command.clone()))
+            .collect(),
+    );
+    for err in keybinding_errors {
+        if let Ok(mut buf) = buffer.lock() {
+            buf.push_custom("kage:error", err, false);
+        }
+    }
     app.set_cancel_flag(cancel.clone());
     app.set_toasts(toasts.clone());
     app.set_session_usage(session_usage);

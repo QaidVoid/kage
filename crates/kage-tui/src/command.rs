@@ -460,6 +460,14 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         args: &[],
         subcommands: &[],
     },
+    CommandSpec {
+        name: "keybindings",
+        aliases: &["keys"],
+        description: "list active key bindings (config, plugin, reserved)",
+        category: CommandCategory::Both,
+        args: &[],
+        subcommands: &[],
+    },
 ];
 
 /// Find a built-in command by primary name or alias. Returns `None`
@@ -576,7 +584,7 @@ mod tests {
 
     #[test]
     fn builtin_registry_has_expected_command_count() {
-        assert_eq!(BUILTIN_COMMANDS.len(), 15);
+        assert_eq!(BUILTIN_COMMANDS.len(), 16);
     }
 
     #[test]

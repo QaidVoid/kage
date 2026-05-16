@@ -49,6 +49,7 @@ use crate::sessions::{
     shared_fork_request, shared_session_list, shared_session_ops,
 };
 use crate::status::{self, SharedStatus, shared_status};
+use crate::terminal_input::{self, RegisteredTerminalHooks, registered_terminal_hooks};
 use crate::theme::{
     self, SharedThemeRequest, SharedThemeState, shared_theme_request, shared_theme_state,
 };
@@ -85,6 +86,7 @@ pub struct PluginRuntime {
     header: SharedChrome,
     footer: SharedChrome,
     autocomplete: RegisteredAutocompleteProviders,
+    terminal_hooks: RegisteredTerminalHooks,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -424,6 +426,24 @@ impl PluginRuntime {
             .clone()
     }
 
+    /// Cloneable handle to the raw terminal-input hook list from
+    /// `kage.on_terminal_input`. The host snapshots it before each
+    /// keystroke so a runtime `off` or late registration is honored.
+    #[must_use]
+    pub fn shared_terminal_hooks(&self) -> RegisteredTerminalHooks {
+        Arc::clone(&self.terminal_hooks)
+    }
+
+    /// Snapshot the active terminal-input hooks, in registration
+    /// order.
+    #[must_use]
+    pub fn registered_terminal_hooks(&self) -> Vec<Arc<crate::terminal_input::LuaTerminalHook>> {
+        self.terminal_hooks
+            .lock()
+            .expect("plugin terminal hooks mutex poisoned")
+            .clone()
+    }
+
     /// Cloneable handle to the queue of plugin-supplied messages.
     /// Hosts that want to sample the queue without consuming it (for
     /// diagnostics) hold onto this; production drain goes through
@@ -598,6 +618,10 @@ impl PluginRuntime {
             .lock()
             .expect("plugin autocomplete mutex poisoned")
             .clear();
+        self.terminal_hooks
+            .lock()
+            .expect("plugin terminal hooks mutex poisoned")
+            .clear();
         crate::loader::load_dir(dir, self)
     }
 }
@@ -675,6 +699,7 @@ impl PluginRuntimeBuilder {
         let header_slot = shared_chrome();
         let footer_slot = shared_chrome();
         let autocomplete_registry = registered_autocomplete_providers();
+        let terminal_hook_registry = registered_terminal_hooks();
         {
             let lua_guard = shared_lua.lock().expect("plugin lua mutex poisoned");
             bridge::install_suspend(&lua_guard)?;
@@ -746,6 +771,12 @@ impl PluginRuntimeBuilder {
                 self.sink.clone(),
                 Arc::clone(&autocomplete_registry),
             )?;
+            terminal_input::install_on_terminal_input(
+                &lua_guard,
+                Arc::clone(&shared_lua),
+                self.sink.clone(),
+                Arc::clone(&terminal_hook_registry),
+            )?;
         }
         Ok(PluginRuntime {
             lua: shared_lua,
@@ -769,6 +800,7 @@ impl PluginRuntimeBuilder {
             header: header_slot,
             footer: footer_slot,
             autocomplete: autocomplete_registry,
+            terminal_hooks: terminal_hook_registry,
         })
     }
 }

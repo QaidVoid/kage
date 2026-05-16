@@ -925,7 +925,14 @@ pub fn render() -> String {
         }
     }
 
-    s.push_str("\n---@class kage\nlocal kage = {}\n");
+    // Declare `kage` as a GLOBAL, not a `local` module. The host
+    // injects `kage` as a global into every plugin; modelling it as a
+    // local module (with a trailing `return kage`) makes
+    // lua-language-server treat references in plugin files as
+    // undefined globals. A global `---@class kage` table with no
+    // return types the injected global correctly and keeps
+    // `lua-language-server --check` clean on real plugins.
+    s.push_str("\n---@class kage\nkage = {}\n");
 
     let mut declared: Vec<&str> = Vec::new();
     for f in FUNCS {
@@ -962,7 +969,8 @@ pub fn render() -> String {
         let _ = writeln!(s, "function {}({}) end", f.path, args.join(", "));
     }
 
-    s.push_str("\nreturn kage\n");
+    // No trailing `return kage`: this is a global definition file, not
+    // a module. (`---@meta` already marks it definitions-only.)
     s
 }
 
@@ -996,11 +1004,18 @@ mod tests {
     }
 
     #[test]
-    fn render_has_meta_header_and_returns_kage() {
+    fn render_declares_kage_as_a_global() {
         let s = render();
         assert!(s.starts_with("---@meta\n"));
-        assert!(s.trim_end().ends_with("return kage"));
-        assert!(s.contains("---@class kage"));
+        assert!(s.contains("---@class kage\nkage = {}\n"));
+        // It is a global definition file: no `local` shadow, no
+        // module `return` statement (which would make plugin-file
+        // references read as undefined globals to
+        // lua-language-server). Checked as a statement, not a
+        // substring, so `---@return kage.Usage` does not trip it.
+        assert!(!s.contains("local kage = {}"));
+        assert!(!s.contains("\nreturn kage"));
+        assert!(!s.trim_end().ends_with("return kage"));
     }
 
     #[test]

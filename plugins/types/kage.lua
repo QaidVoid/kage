@@ -126,7 +126,7 @@
 ---@field context_window integer
 
 ---@class kage
-local kage = {}
+kage = {}
 
 --- Wall-clock milliseconds since the Unix epoch.
 ---@return integer
@@ -318,5 +318,3 @@ kage.http = {}
 ---@param url string
 ---@return { status: integer, body: string, headers: table }
 function kage.http.get(url) end
-
-return kage

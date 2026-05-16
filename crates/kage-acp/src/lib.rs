@@ -6,6 +6,7 @@
 //! drives the agent loop on top of them.
 
 pub mod acp;
+pub mod agent;
 pub mod client;
 pub mod framing;
 pub mod jsonrpc;

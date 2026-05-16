@@ -1,0 +1,326 @@
+//! ACP agent server.
+//!
+//! Drives an injected [`Agent`] over the [`jsonrpc`] peer, conformant
+//! with the published ACP spec: it answers `initialize`,
+//! `session/new`, `session/prompt`, and handles the `session/cancel`
+//! notification, streaming progress back as `session/update`
+//! notifications. `session/load` is rejected until that capability
+//! lands.
+//!
+//! A prompt turn runs on its own worker thread so the dispatch loop
+//! keeps draining inbound messages - that is what lets a
+//! `session/cancel` take effect mid-turn and (once wired) lets the
+//! agent issue its own `session/request_permission` requests without
+//! deadlocking.
+
+use std::collections::HashMap;
+use std::io::{BufRead, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+
+use crate::acp::{
+    InitializeRequest, InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest,
+    PromptResponse, SessionNotification, SessionUpdate,
+};
+use crate::jsonrpc::{self, Inbound, Peer, RpcError};
+
+/// Per-session cancel flags, keyed by session id.
+type Sessions = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
+
+/// Handed to [`Agent::prompt`]: stream updates and observe
+/// cancellation for the running session.
+pub struct PromptContext {
+    peer: Peer,
+    session_id: String,
+    cancel: Arc<AtomicBool>,
+}
+
+impl PromptContext {
+    /// Emit a `session/update` notification for this session.
+    pub fn update(&self, update: SessionUpdate) {
+        let note = SessionNotification {
+            session_id: self.session_id.clone(),
+            update,
+        };
+        if let Ok(params) = serde_json::to_value(&note) {
+            let _ = self.peer.notify("session/update", params);
+        }
+    }
+
+    /// Whether the client asked to cancel this turn.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::SeqCst)
+    }
+
+    /// The underlying peer, for agent-initiated requests
+    /// (`session/request_permission`).
+    #[must_use]
+    pub fn peer(&self) -> &Peer {
+        &self.peer
+    }
+
+    /// The session this turn belongs to.
+    #[must_use]
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+}
+
+/// The host-supplied agent the server drives. The server owns the
+/// protocol; this trait owns the agent.
+pub trait Agent: Send + 'static {
+    /// Handshake. Return the agent's capabilities and identity.
+    fn initialize(&mut self, req: InitializeRequest) -> InitializeResponse;
+
+    /// Create a session for `cwd`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if a session cannot be created.
+    fn new_session(&mut self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError>;
+
+    /// Run one prompt turn to completion, streaming `session/update`
+    /// notifications through `ctx`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the turn cannot start or fails
+    /// irrecoverably (streamed progress already reached the client).
+    fn prompt(
+        &mut self,
+        req: PromptRequest,
+        ctx: &PromptContext,
+    ) -> Result<PromptResponse, RpcError>;
+}
+
+fn parse<T: serde::de::DeserializeOwned>(params: serde_json::Value) -> Result<T, RpcError> {
+    serde_json::from_value(params)
+        .map_err(|e| RpcError::new(-32602, format!("invalid params: {e}")))
+}
+
+/// Serve the ACP agent protocol over `reader`/`writer` until the peer
+/// disconnects.
+///
+/// # Errors
+///
+/// Returns an [`RpcError`] only for a fatal transport failure; a
+/// clean disconnect is `Ok(())`.
+pub fn serve_agent<R, W, A>(reader: R, writer: W, agent: A) -> Result<(), RpcError>
+where
+    R: BufRead + Send + 'static,
+    W: Write + Send + 'static,
+    A: Agent,
+{
+    let (peer, inbound, _reader) = jsonrpc::connect(reader, writer);
+    let agent = Arc::new(Mutex::new(agent));
+    let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+
+    for message in inbound {
+        match message {
+            Inbound::Notification { method, params } => {
+                if method == "session/cancel"
+                    && let Ok(c) = parse::<crate::acp::CancelNotification>(params)
+                    && let Some(flag) = sessions
+                        .lock()
+                        .expect("acp sessions mutex poisoned")
+                        .get(&c.session_id)
+                {
+                    flag.store(true, Ordering::SeqCst);
+                }
+            }
+            Inbound::Request { id, method, params } => match method.as_str() {
+                "initialize" => {
+                    let outcome = parse::<InitializeRequest>(params).map(|req| {
+                        let resp = agent
+                            .lock()
+                            .expect("acp agent mutex poisoned")
+                            .initialize(req);
+                        serde_json::to_value(resp).unwrap_or(serde_json::Value::Null)
+                    });
+                    let _ = peer.respond(&id, outcome);
+                }
+                "session/new" => {
+                    let result = parse::<NewSessionRequest>(params).and_then(|req| {
+                        agent
+                            .lock()
+                            .expect("acp agent mutex poisoned")
+                            .new_session(req)
+                    });
+                    if let Ok(resp) = &result {
+                        sessions
+                            .lock()
+                            .expect("acp sessions mutex poisoned")
+                            .insert(resp.session_id.clone(), Arc::new(AtomicBool::new(false)));
+                    }
+                    let _ = peer.respond(
+                        &id,
+                        result.map(|r| serde_json::to_value(r).unwrap_or(serde_json::Value::Null)),
+                    );
+                }
+                "session/prompt" => match parse::<PromptRequest>(params) {
+                    Err(e) => {
+                        let _ = peer.respond(&id, Err(e));
+                    }
+                    Ok(req) => {
+                        let flag = sessions
+                            .lock()
+                            .expect("acp sessions mutex poisoned")
+                            .entry(req.session_id.clone())
+                            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+                            .clone();
+                        flag.store(false, Ordering::SeqCst);
+                        let ctx = PromptContext {
+                            peer: peer.clone(),
+                            session_id: req.session_id.clone(),
+                            cancel: flag,
+                        };
+                        let agent = Arc::clone(&agent);
+                        let peer = peer.clone();
+                        thread::spawn(move || {
+                            let outcome = agent
+                                .lock()
+                                .expect("acp agent mutex poisoned")
+                                .prompt(req, &ctx)
+                                .map(|r| {
+                                    serde_json::to_value(r).unwrap_or(serde_json::Value::Null)
+                                });
+                            let _ = peer.respond(&id, outcome);
+                        });
+                    }
+                },
+                other => {
+                    let _ = peer.respond(&id, Err(RpcError::method_not_found(other)));
+                }
+            },
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::BufReader;
+
+    use super::*;
+    use crate::acp::{
+        AgentCapabilities, ContentBlock, Implementation, MessageChunk, PromptCapabilities,
+        StopReason,
+    };
+    use crate::jsonrpc::connect;
+
+    struct MockAgent;
+
+    impl Agent for MockAgent {
+        fn initialize(&mut self, req: InitializeRequest) -> InitializeResponse {
+            assert_eq!(req.protocol_version, crate::acp::PROTOCOL_VERSION);
+            InitializeResponse {
+                protocol_version: crate::acp::PROTOCOL_VERSION,
+                agent_capabilities: AgentCapabilities {
+                    load_session: false,
+                    prompt_capabilities: PromptCapabilities::default(),
+                },
+                agent_info: Some(Implementation {
+                    name: "mock".into(),
+                    title: None,
+                    version: None,
+                }),
+                auth_methods: vec![],
+            }
+        }
+
+        fn new_session(&mut self, _req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+            Ok(NewSessionResponse {
+                session_id: "sess-1".into(),
+            })
+        }
+
+        fn prompt(
+            &mut self,
+            req: PromptRequest,
+            ctx: &PromptContext,
+        ) -> Result<PromptResponse, RpcError> {
+            assert_eq!(ctx.session_id(), "sess-1");
+            let echoed = req
+                .prompt
+                .first()
+                .and_then(ContentBlock::as_text)
+                .unwrap_or_default()
+                .to_owned();
+            ctx.update(SessionUpdate::AgentMessageChunk(MessageChunk {
+                content: ContentBlock::text(format!("echo: {echoed}")),
+            }));
+            Ok(PromptResponse {
+                stop_reason: if ctx.is_cancelled() {
+                    StopReason::Cancelled
+                } else {
+                    StopReason::EndTurn
+                },
+            })
+        }
+    }
+
+    #[test]
+    fn initialize_new_prompt_round_trip() {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let server = thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, MockAgent));
+
+        let (client, inbox, _h) = connect(BufReader::new(cli_r), cli_w);
+
+        let init = client
+            .request(
+                "initialize",
+                serde_json::json!({"protocolVersion": 1, "clientCapabilities": {}}),
+            )
+            .unwrap();
+        assert_eq!(init["protocolVersion"], 1);
+        assert_eq!(init["agentInfo"]["name"], "mock");
+
+        let new = client
+            .request("session/new", serde_json::json!({"cwd": "/tmp"}))
+            .unwrap();
+        assert_eq!(new["sessionId"], "sess-1");
+
+        let res = client
+            .request(
+                "session/prompt",
+                serde_json::json!({
+                    "sessionId": "sess-1",
+                    "prompt": [{"type": "text", "text": "hi"}]
+                }),
+            )
+            .unwrap();
+        assert_eq!(res["stopReason"], "end_turn");
+
+        let note = inbox.recv().unwrap();
+        match note {
+            Inbound::Notification { method, params } => {
+                assert_eq!(method, "session/update");
+                assert_eq!(params["sessionId"], "sess-1");
+                assert_eq!(params["update"]["sessionUpdate"], "agent_message_chunk");
+                assert_eq!(params["update"]["content"]["text"], "echo: hi");
+            }
+            Inbound::Request { .. } => panic!("expected a notification"),
+        }
+
+        drop(client);
+        drop(inbox);
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn unknown_method_is_method_not_found() {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let server = thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, MockAgent));
+        let (client, _inbox, _h) = connect(BufReader::new(cli_r), cli_w);
+        let err = client
+            .request("bogus/method", serde_json::Value::Null)
+            .unwrap_err();
+        assert_eq!(err.code, -32601);
+        drop(client);
+        server.join().unwrap().unwrap();
+    }
+}

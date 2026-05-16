@@ -143,6 +143,13 @@ pub enum RunRequest {
     /// unchanged because the copy is byte-identical through the last
     /// entry.
     CloneSession,
+    /// Abandon the active conversation and start a fresh, empty
+    /// session. The worker plans a new session file (deferred until
+    /// the first prompt, like startup), clears the agent history and
+    /// token budget, wipes the rendered buffer, and reseats
+    /// `session_path` onto the new file. The model and system prompt
+    /// carry over; the prior session file is left intact on disk.
+    NewSession,
     /// Advance the active thinking level one step forward (the
     /// `Shift+Tab` cycle). The worker mutates the agent context's
     /// `thinking_level`, persists the change as a session entry, and
@@ -1843,6 +1850,10 @@ impl App {
             }
             "clone" => {
                 let _ = self.send_request(RunRequest::CloneSession);
+                None
+            }
+            "new" => {
+                let _ = self.send_request(RunRequest::NewSession);
                 None
             }
             "clear" => {

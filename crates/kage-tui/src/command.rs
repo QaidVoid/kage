@@ -434,6 +434,14 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         subcommands: &[],
     },
     CommandSpec {
+        name: "new",
+        aliases: &[],
+        description: "start a fresh empty session, keeping the current model",
+        category: CommandCategory::Both,
+        args: &[],
+        subcommands: &[],
+    },
+    CommandSpec {
         name: "clear",
         aliases: &[],
         description: "clear the rendered conversation buffer",
@@ -557,13 +565,21 @@ mod tests {
 
     #[test]
     fn builtin_registry_has_expected_command_count() {
-        assert_eq!(BUILTIN_COMMANDS.len(), 13);
+        assert_eq!(BUILTIN_COMMANDS.len(), 14);
     }
 
     #[test]
     fn builtin_registry_includes_clone() {
         let spec = find_builtin_command("clone").expect("clone should exist");
         assert_eq!(spec.name, "clone");
+        assert_eq!(spec.args.len(), 0);
+        assert!(spec.subcommands.is_empty());
+    }
+
+    #[test]
+    fn builtin_registry_includes_new() {
+        let spec = find_builtin_command("new").expect("new should exist");
+        assert_eq!(spec.name, "new");
         assert_eq!(spec.args.len(), 0);
         assert!(spec.subcommands.is_empty());
     }

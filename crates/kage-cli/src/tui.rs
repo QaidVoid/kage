@@ -523,6 +523,17 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                 RunRequest::CloneSession => {
                     handle_clone(session_path.as_ref(), &buffer, &toasts);
                 }
+                RunRequest::NewSession => {
+                    handle_new(
+                        session_path.as_ref(),
+                        session_header.as_ref(),
+                        &cx,
+                        &active_qualified,
+                        &session_usage,
+                        &buffer,
+                        &toasts,
+                    );
+                }
                 RunRequest::ForkSessionFile(path) => {
                     handle_fork_file(&path, &buffer, &toasts);
                 }
@@ -1343,6 +1354,79 @@ fn handle_clone(
         toasts,
         Toast::info(format!("cloned session: {short} (continuing in clone)")),
     );
+}
+
+/// Handle [`RunRequest::NewSession`]. Plans a fresh session file (its
+/// creation deferred to the first prompt, exactly like startup),
+/// clears the in-memory history and token budget, zeroes the usage
+/// modeline, wipes the rendered buffer, and reseats `session_path` /
+/// `session_header` onto the new file. The active model and system
+/// prompt are preserved; the prior session file is left intact.
+fn handle_new(
+    session_path: Option<&Arc<Mutex<PathBuf>>>,
+    session_header: Option<&Arc<Mutex<Option<kage_session::Header>>>>,
+    cx: &Arc<Mutex<AgentContext>>,
+    active_qualified: &Arc<Mutex<String>>,
+    session_usage: &SharedSessionUsage,
+    buffer: &SharedBuffer,
+    toasts: &SharedToasts,
+) {
+    let (Some(sp), Some(sh)) = (session_path, session_header) else {
+        if let Ok(mut buf) = buffer.lock() {
+            buf.push_custom(
+                "kage:error",
+                "new: session storage unavailable".to_owned(),
+                false,
+            );
+        }
+        return;
+    };
+    let qualified = active_qualified
+        .lock()
+        .expect("active model mutex poisoned")
+        .clone();
+    let system_prompt = cx
+        .lock()
+        .expect("agent context mutex poisoned")
+        .system_prompt
+        .clone();
+    let (path, header) = match crate::plan_session(&qualified, &system_prompt) {
+        Ok(pair) => pair,
+        Err(e) => {
+            if let Ok(mut buf) = buffer.lock() {
+                buf.push_custom("kage:error", format!("new: {e}"), false);
+            }
+            return;
+        }
+    };
+    let short: String = header.session.to_string().chars().take(8).collect();
+    {
+        let mut cx_guard = cx.lock().expect("agent context mutex poisoned");
+        cx_guard.history.clear();
+        cx_guard.budget.used_input = 0;
+        cx_guard.budget.used_output = 0;
+        cx_guard.budget.used_cache_read = 0;
+        cx_guard.budget.used_cache_write = 0;
+        cx_guard.budget.current_context = 0;
+    }
+    sh.lock()
+        .expect("session header mutex poisoned")
+        .replace(header);
+    sp.lock()
+        .expect("session path mutex poisoned")
+        .clone_from(&path);
+    if let Ok(mut snap) = session_usage.lock() {
+        snap.input_tokens = 0;
+        snap.output_tokens = 0;
+        snap.cache_read_tokens = 0;
+        snap.cache_write_tokens = 0;
+        snap.current_context = 0;
+        snap.total_cost = 0.0;
+    }
+    if let Ok(mut buf) = buffer.lock() {
+        buf.clear();
+    }
+    push_toast(toasts, Toast::info(format!("new session: {short}")));
 }
 
 /// Fork an arbitrary session file (the `:tree` browser's `f`) at its

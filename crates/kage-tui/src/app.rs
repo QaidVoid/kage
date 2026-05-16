@@ -29,8 +29,9 @@ use crate::events::SharedBuffer;
 use crate::input::{InputAction, InputState, Mode, Pane};
 use crate::layout::{input_height_for, split};
 use crate::overlay::{
-    CompletionAction, InputCompletion, OverlayAction, OverlayPicker, SettingsInit, SettingsOverlay,
-    SlashContext, SlashPalette, file_completions, prefix_before_cursor,
+    CompletionAction, InputCompletion, OverlayAction, OverlayPicker, SessionTreeOverlay,
+    SessionTreeSource, SettingsInit, SettingsOverlay, SlashContext, SlashPalette, file_completions,
+    prefix_before_cursor,
 };
 use crate::picker::PickItem;
 use crate::terminal::Tui;
@@ -436,6 +437,12 @@ pub struct App {
     /// Open `:settings` overlay. A modal sibling of [`Self::picker`];
     /// on resolve its edits are applied live and persisted.
     settings_overlay: Option<SettingsOverlay>,
+    /// Open `:tree` session-forest browser, a modal sibling of the
+    /// picker. On resolve it dispatches resume / fork / delete.
+    session_tree: Option<SessionTreeOverlay>,
+    /// Produces the session forest for `:tree`. Wired by the host;
+    /// `None` disables the command.
+    session_tree_source: Option<SessionTreeSource>,
     /// Provider of resumable sessions for the session picker. None
     /// disables the picker (Ctrl+R is a no-op).
     session_lister: Option<SessionLister>,
@@ -620,6 +627,8 @@ impl App {
             picker: None,
             picker_kind: None,
             settings_overlay: None,
+            session_tree: None,
+            session_tree_source: None,
             session_lister: None,
             cmdline: None,
             slash_palette: None,
@@ -806,6 +815,12 @@ impl App {
     /// at the moment of opening. Without this, `Ctrl+R` is a no-op.
     pub fn set_session_lister(&mut self, lister: SessionLister) {
         self.session_lister = Some(lister);
+    }
+
+    /// Register the closure that produces the `:tree` session forest
+    /// at open time. Without this, `:tree` reports it is unavailable.
+    pub fn set_session_tree_source(&mut self, source: SessionTreeSource) {
+        self.session_tree_source = Some(source);
     }
 
     /// Replace the list of plugin-supplied status-bar widgets.
@@ -1348,9 +1363,11 @@ impl App {
             && self.search_line.is_none()
             && self.picker.is_none()
             && self.settings_overlay.is_none()
+            && self.session_tree.is_none()
             && self.plugin_overlay.is_none();
         let picker = self.picker.as_mut();
         let settings_overlay = self.settings_overlay.as_mut();
+        let session_tree = self.session_tree.as_mut();
         let plugin_overlay = self.plugin_overlay.as_mut();
         let slash_palette = self.slash_palette.as_ref();
         let input_completion = if show_completion {
@@ -1388,6 +1405,9 @@ impl App {
             }
             if let Some(settings) = settings_overlay {
                 settings.render(frame, frame.area());
+            }
+            if let Some(tree) = session_tree {
+                tree.render(frame, frame.area());
             }
             if let Some(palette) = slash_palette {
                 palette.render(frame, regions);
@@ -1445,6 +1465,11 @@ impl App {
         // The settings dialog is a modal sibling of the picker.
         if self.settings_overlay.is_some() {
             return self.dispatch_settings_key(key);
+        }
+
+        // The `:tree` session browser is also a modal sibling.
+        if self.session_tree.is_some() {
+            return self.dispatch_session_tree_key(key);
         }
 
         // The slash palette is its own modal layer, taking precedence
@@ -1796,6 +1821,10 @@ impl App {
             }
             "settings" => {
                 self.open_settings();
+                None
+            }
+            "tree" => {
+                self.open_session_tree();
                 None
             }
             "clear" => {
@@ -2267,6 +2296,55 @@ impl App {
         }
     }
 
+    /// Open the `:tree` session browser, querying the wired source.
+    fn open_session_tree(&mut self) {
+        let Some(source) = self.session_tree_source.as_ref() else {
+            self.push_error("tree: session browser unavailable");
+            return;
+        };
+        let nodes = source();
+        if nodes.is_empty() {
+            self.notify("no sessions to browse yet");
+            return;
+        }
+        self.session_tree = Some(SessionTreeOverlay::new(nodes));
+    }
+
+    fn dispatch_session_tree_key(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+    ) -> Option<AppExit> {
+        let overlay = self.session_tree.as_mut()?;
+        match crate::overlay::OverlayWidget::handle_key(overlay, key) {
+            OverlayAction::Stay | OverlayAction::PropagateKey => {}
+            OverlayAction::Close => {
+                self.session_tree = None;
+            }
+            OverlayAction::Resolve(value) => {
+                self.session_tree = None;
+                let action = value.get("action").and_then(|v| v.as_str()).unwrap_or("");
+                let path = value.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                if path.is_empty() {
+                    return None;
+                }
+                let path = std::path::PathBuf::from(path);
+                match action {
+                    "resume" => {
+                        let _ = self.send_request(RunRequest::ResumeSession(path));
+                    }
+                    "fork" => {
+                        let _ = self.send_request(RunRequest::ForkSessionFile(path));
+                    }
+                    "delete" => {
+                        let _ = self.send_request(RunRequest::DeleteSession(path));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
     /// Drive the active plugin dialog overlay (`kage.ui.*`). The
     /// overlay owns its keys; on resolve/close the chosen value is
     /// sent back to the parked worker through [`Self::active_dialog`],
@@ -2569,9 +2647,11 @@ impl App {
             && self.search_line.is_none()
             && self.picker.is_none()
             && self.settings_overlay.is_none()
+            && self.session_tree.is_none()
             && self.plugin_overlay.is_none();
         let picker = self.picker.as_mut();
         let settings_overlay = self.settings_overlay.as_mut();
+        let session_tree = self.session_tree.as_mut();
         let input_completion = if show_completion {
             self.input_completion.as_ref()
         } else {
@@ -2604,6 +2684,9 @@ impl App {
                 }
                 if let Some(settings) = settings_overlay {
                     settings.render(frame, frame.area());
+                }
+                if let Some(tree) = session_tree {
+                    tree.render(frame, frame.area());
                 }
                 if let Some(completion) = input_completion {
                     completion.render(frame, regions);
@@ -2950,6 +3033,80 @@ mod tests {
         app.handle_key(key('i'));
         assert!(app.input_completion.is_none());
         assert_eq!(app.input().text(), "hi");
+    }
+
+    #[test]
+    fn tree_command_without_source_reports_unavailable() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer.clone(), tx);
+        assert!(app.dispatch_builtin("tree", "").is_none());
+        assert!(app.session_tree.is_none());
+        let buf = buffer.lock().unwrap();
+        assert!(matches!(
+            buf.blocks().last(),
+            Some(crate::buffer::Block::Custom { kind, .. }) if kind == "kage:error"
+        ));
+    }
+
+    #[test]
+    fn tree_command_opens_and_enter_dispatches_resume() {
+        let buffer = shared_buffer();
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        app.set_session_tree_source(Box::new(|| {
+            vec![
+                crate::overlay::SessionNode {
+                    id: "root".into(),
+                    path: "/s/root.jsonl".into(),
+                    parent: None,
+                    label: "root".into(),
+                    is_current: true,
+                },
+                crate::overlay::SessionNode {
+                    id: "child".into(),
+                    path: "/s/child.jsonl".into(),
+                    parent: Some("root".into()),
+                    label: "child".into(),
+                    is_current: false,
+                },
+            ]
+        }));
+        assert!(app.dispatch_builtin("tree", "").is_none());
+        assert!(app.session_tree.is_some());
+        // Selection starts on the current session (root); Enter resumes.
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.session_tree.is_none());
+        assert_eq!(
+            rx.try_recv(),
+            Ok(RunRequest::ResumeSession(std::path::PathBuf::from(
+                "/s/root.jsonl"
+            )))
+        );
+    }
+
+    #[test]
+    fn tree_d_key_dispatches_delete_request() {
+        let buffer = shared_buffer();
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        app.set_session_tree_source(Box::new(|| {
+            vec![crate::overlay::SessionNode {
+                id: "only".into(),
+                path: "/s/only.jsonl".into(),
+                parent: None,
+                label: "only".into(),
+                is_current: false,
+            }]
+        }));
+        app.dispatch_builtin("tree", "");
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert_eq!(
+            rx.try_recv(),
+            Ok(RunRequest::DeleteSession(std::path::PathBuf::from(
+                "/s/only.jsonl"
+            )))
+        );
     }
 
     #[test]

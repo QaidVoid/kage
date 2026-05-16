@@ -278,7 +278,12 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         }
     }
     if let Ok(dir) = crate::sessions_dir() {
+        let tree_dir = dir.clone();
+        let tree_sp = session_path.clone();
         app.set_session_lister(Box::new(move || list_session_choices(&dir)));
+        app.set_session_tree_source(Box::new(move || {
+            list_session_nodes(&tree_dir, tree_sp.as_ref())
+        }));
     }
     let result = app.run(&mut tui);
     drop(tui);
@@ -1053,6 +1058,31 @@ fn list_session_choices(dir: &std::path::Path) -> Vec<PickItem> {
         .map(|s| {
             let label = format_session_label(&s);
             PickItem::simple(s.path.to_string_lossy().into_owned()).with_label(label)
+        })
+        .collect()
+}
+
+/// Build the `:tree` forest rows from the sessions directory, marking
+/// whichever file the runtime is currently writing as the active one.
+fn list_session_nodes(
+    dir: &std::path::Path,
+    session_path: Option<&Arc<Mutex<PathBuf>>>,
+) -> Vec<kage_tui::SessionNode> {
+    let current = session_path.and_then(|sp| sp.lock().ok().map(|g| g.clone()));
+    let Ok(summaries) = kage_session::list(dir) else {
+        return Vec::new();
+    };
+    summaries
+        .into_iter()
+        .map(|s| {
+            let is_current = current.as_deref() == Some(s.path.as_path());
+            kage_tui::SessionNode {
+                id: s.id.to_string(),
+                path: s.path.to_string_lossy().into_owned(),
+                parent: s.parent_session.map(|p| p.to_string()),
+                label: format_session_label(&s),
+                is_current,
+            }
         })
         .collect()
 }

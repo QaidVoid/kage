@@ -17,6 +17,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 
+mod luatypes;
+
 const MODELS_DEV_URL: &str = "https://models.dev/api.json";
 
 /// Provider ids kage carries `Provider` impls for. The catalog is
@@ -82,6 +84,13 @@ enum Command {
         #[arg(long, default_value = MODELS_DEV_URL)]
         source: String,
     },
+    /// Regenerate `plugins/types/kage.lua` from the in-tree spec.
+    GenLuaTypes {
+        /// Do not write; fail if the committed file is out of date
+        /// (the CI drift gate).
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -94,6 +103,17 @@ fn main() -> ExitCode {
             }
             Err(e) => {
                 eprintln!("xtask: refresh-models failed: {e}");
+                ExitCode::from(1)
+            }
+        },
+        Command::GenLuaTypes { check } => match luatypes::run(check) {
+            Ok(path) => {
+                let verb = if check { "up to date" } else { "wrote" };
+                eprintln!("xtask: {verb} {}", path.display());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("xtask: gen-lua-types failed: {e}");
                 ExitCode::from(1)
             }
         },

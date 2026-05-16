@@ -249,6 +249,10 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         kage_core::config::EditorMode::Modeless
     ));
     app.set_workdir(workdir.clone());
+    if let Ok(dir) = crate::themes_dir() {
+        app.set_themes_dir(dir);
+    }
+    app.apply_startup_theme(&app_config.ui.theme);
     if let Some(status) = plugin_status {
         app.set_plugin_status(status);
     }

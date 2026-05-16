@@ -56,6 +56,8 @@ pub struct SlashContext {
     pub plugin_commands: Vec<(String, String)>,
     /// Session ids the user can resume.
     pub sessions: Vec<PickItem>,
+    /// Selectable theme names (bundled plus user `*.toml`).
+    pub themes: Vec<String>,
 }
 
 struct SnapshotResolver<'a> {
@@ -66,10 +68,7 @@ impl Resolver for SnapshotResolver<'_> {
     fn dynamic_choice(&self, source: &ArgSource) -> Vec<String> {
         match source {
             ArgSource::Models => self.ctx.models.clone(),
-            ArgSource::Themes => crate::theme::Theme::bundled_names()
-                .iter()
-                .map(|s| (*s).to_owned())
-                .collect(),
+            ArgSource::Themes => self.ctx.themes.clone(),
             ArgSource::PluginCommands => self
                 .ctx
                 .plugin_commands

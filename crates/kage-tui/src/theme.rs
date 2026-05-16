@@ -292,6 +292,40 @@ impl Theme {
         &["default", "tokyo-night", "catppuccin-mocha"]
     }
 
+    /// Every selectable theme name: the bundled set first, then the
+    /// stems of every `*.toml` under `themes_dir` (sorted, with any
+    /// that shadow a bundled name dropped). Drives `:theme list`,
+    /// tab-completion, the settings dialog, and the plugin snapshot so
+    /// user themes are first-class everywhere a bundled one is.
+    #[must_use]
+    pub fn available_names(themes_dir: Option<&Path>) -> Vec<String> {
+        let mut names: Vec<String> = Self::bundled_names()
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        if let Some(dir) = themes_dir
+            && let Ok(entries) = std::fs::read_dir(dir)
+        {
+            let mut user: Vec<String> = entries
+                .filter_map(Result::ok)
+                .filter_map(|e| {
+                    let path = e.path();
+                    if path.extension().and_then(|x| x.to_str()) != Some("toml") {
+                        return None;
+                    }
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(str::to_owned)
+                        .filter(|n| !names.contains(n))
+                })
+                .collect();
+            user.sort();
+            user.dedup();
+            names.extend(user);
+        }
+        names
+    }
+
     /// Override one role by name. Unknown roles error so a typo in a
     /// user theme is reported, not silently ignored.
     fn set_role(&mut self, role: &str, c: Color) -> Result<(), String> {
@@ -496,5 +530,25 @@ mod tests {
     fn resolve_errors_on_unknown_theme() {
         let err = Theme::resolve("ghost", None).unwrap_err();
         assert!(err.contains("unknown theme `ghost`"), "{err}");
+    }
+
+    #[test]
+    fn available_names_lists_bundled_then_user_files() {
+        let dir = std::env::temp_dir().join(format!("kage-avail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join("zenburn.toml"), "").expect("write");
+        std::fs::write(dir.join("aurora.toml"), "").expect("write");
+        std::fs::write(dir.join("default.toml"), "").expect("write");
+        std::fs::write(dir.join("notes.txt"), "").expect("write");
+        let names = Theme::available_names(Some(&dir));
+        assert_eq!(&names[..3], Theme::bundled_names());
+        assert_eq!(&names[3..], ["aurora", "zenburn"]);
+        assert_eq!(names.iter().filter(|n| *n == "default").count(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn available_names_without_dir_is_just_bundled() {
+        assert_eq!(Theme::available_names(None), Theme::bundled_names());
     }
 }

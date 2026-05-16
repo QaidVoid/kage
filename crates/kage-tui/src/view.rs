@@ -155,12 +155,17 @@ pub fn render(
 ) {
     // Opaque base for the entire frame: header, conversation, input,
     // modeline, every gap and overlay paint over this, so nothing
-    // bleeds the terminal background through as a patchwork.
-    let full = frame.area();
-    frame.render_widget(
-        RtBlock::default().style(Style::default().bg(crate::theme::current().bg)),
-        full,
-    );
+    // bleeds the terminal background through as a patchwork. A theme
+    // that opts into `transparent` skips this so the terminal
+    // background (wallpaper, blur) shows through the whole UI.
+    let theme = crate::theme::current();
+    if !theme.transparent {
+        let full = frame.area();
+        frame.render_widget(
+            RtBlock::default().style(Style::default().bg(theme.bg)),
+            full,
+        );
+    }
     render_status(frame, regions, input, cmdline, status);
     render_buffer(frame, regions, buffer, status.search_pattern);
     render_input(frame, regions, input);

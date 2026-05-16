@@ -854,6 +854,14 @@ pub(crate) fn plugins_dir() -> Result<PathBuf, String> {
         .join("plugins"))
 }
 
+/// Resolve the XDG-style user theme directory:
+/// `$XDG_CONFIG_HOME/kage/themes` (default `~/.config/kage/themes`).
+pub(crate) fn themes_dir() -> Result<PathBuf, String> {
+    Ok(xdg_dir("XDG_CONFIG_HOME", ".config")?
+        .join("kage")
+        .join("themes"))
+}
+
 /// Discover and load every SKILL.md under the user config dir
 /// (`$XDG_CONFIG_HOME/kage/skills/<name>/`), the project-local
 /// `./.kage/skills/<name>/`, and any directory contributed by a plugin's

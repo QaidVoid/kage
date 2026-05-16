@@ -404,16 +404,14 @@ struct AppResolver<'a> {
     models: &'a [PickItem],
     plugin_commands: &'a [(String, String)],
     sessions: Option<&'a SessionLister>,
+    themes_dir: Option<&'a std::path::Path>,
 }
 
 impl Resolver for AppResolver<'_> {
     fn dynamic_choice(&self, source: &ArgSource) -> Vec<String> {
         match source {
             ArgSource::Models => self.models.iter().map(|p| p.value.clone()).collect(),
-            ArgSource::Themes => crate::theme::Theme::bundled_names()
-                .iter()
-                .map(|s| (*s).to_owned())
-                .collect(),
+            ArgSource::Themes => crate::theme::Theme::available_names(self.themes_dir),
             ArgSource::PluginCommands => self
                 .plugin_commands
                 .iter()
@@ -550,6 +548,10 @@ pub struct App {
     /// Workdir the built-in `@file` completion lists under. `None`
     /// disables that fallback (plugin providers still work).
     completion_workdir: Option<std::path::PathBuf>,
+    /// User theme directory (`~/.config/kage/themes`). Names that are
+    /// not bundled are resolved to `<name>.toml` here. `None` (tests,
+    /// no home) restricts theme switching to the bundled set.
+    themes_dir: Option<std::path::PathBuf>,
     /// Shared raw terminal-input hooks from `kage.on_terminal_input`.
     /// Snapshotted per keystroke (so an `off` takes effect at once)
     /// and offered each key before any modal layer; a truthy return
@@ -670,6 +672,7 @@ impl App {
             autocomplete_providers: Vec::new(),
             input_completion: None,
             completion_workdir: None,
+            themes_dir: None,
             terminal_hooks: None,
             plugin_header: None,
             plugin_footer: None,
@@ -947,6 +950,25 @@ impl App {
         self.completion_workdir = Some(workdir);
     }
 
+    /// Point theme resolution at the user theme directory
+    /// (`~/.config/kage/themes`). Without this only bundled themes
+    /// resolve; with it, `<name>.toml` files there become selectable
+    /// everywhere a bundled name is.
+    pub fn set_themes_dir(&mut self, dir: std::path::PathBuf) {
+        self.themes_dir = Some(dir);
+    }
+
+    /// Apply the configured startup theme (bundled name or a user
+    /// `<name>.toml`). Silent on success; a bad name surfaces an
+    /// inline error and leaves the default palette in place. Call
+    /// after [`Self::set_themes_dir`] so user themes resolve.
+    pub fn apply_startup_theme(&mut self, name: &str) {
+        if name.is_empty() {
+            return;
+        }
+        self.apply_theme_resolved(name, false);
+    }
+
     /// Register the plugin keybindings the App should dispatch.
     /// `chords` are canonical strings from the plugin runtime; an
     /// entry that fails to parse is dropped (the runtime already
@@ -1052,10 +1074,7 @@ impl App {
             && let Ok(mut s) = state.lock()
         {
             s.current = crate::theme::current().name;
-            s.available = crate::theme::Theme::bundled_names()
-                .iter()
-                .map(|n| (*n).to_owned())
-                .collect();
+            s.available = crate::theme::Theme::available_names(self.themes_dir.as_deref());
         }
     }
 
@@ -1669,6 +1688,7 @@ impl App {
             models: &self.model_choices,
             plugin_commands: &self.plugin_commands,
             sessions: self.session_lister.as_ref(),
+            themes_dir: self.themes_dir.as_deref(),
         };
         let event = self
             .cmdline
@@ -2110,7 +2130,7 @@ impl App {
             }
             "list" => {
                 let cur = crate::theme::current().name;
-                let names = crate::theme::Theme::bundled_names()
+                let names = crate::theme::Theme::available_names(self.themes_dir.as_deref())
                     .iter()
                     .map(|n| {
                         if *n == cur {
@@ -2141,12 +2161,22 @@ impl App {
     }
 
     fn apply_theme_by_name(&mut self, name: &str) {
-        let names = crate::theme::Theme::bundled_names();
-        if !names.contains(&name) {
-            self.push_error(format!("unknown theme: {name} (try `:theme list`)"));
-            return;
-        }
-        let theme = crate::theme::Theme::by_name(name);
+        self.apply_theme_resolved(name, true);
+    }
+
+    /// Resolve `name` against the bundled set and the user theme
+    /// directory, then make it the active palette. `announce` toasts
+    /// the switch (`:theme set`, settings, plugin); startup passes
+    /// `false`. Resolution failures (unknown name, unreadable file,
+    /// bad TOML) surface inline rather than failing silently.
+    fn apply_theme_resolved(&mut self, name: &str, announce: bool) {
+        let theme = match crate::theme::Theme::resolve(name, self.themes_dir.as_deref()) {
+            Ok(t) => t,
+            Err(e) => {
+                self.push_error(format!("theme: {e}"));
+                return;
+            }
+        };
         crate::theme::set_current(theme);
         if let Ok(mut buf) = self.buffer.lock() {
             // Force a fresh layout pass: every block's cached height
@@ -2157,7 +2187,9 @@ impl App {
             // widths, etc.).
             buf.invalidate_all_heights();
         }
-        self.notify(format!("theme: {name}"));
+        if announce {
+            self.notify(format!("theme: {name}"));
+        }
     }
 
     fn notify(&mut self, msg: impl Into<String>) {
@@ -2261,10 +2293,7 @@ impl App {
             .and_then(|m| m.lock().ok().map(|g| g.clone()))
             .unwrap_or_else(|| cfg.provider.default_model.clone());
         let init = SettingsInit {
-            themes: crate::theme::Theme::bundled_names()
-                .iter()
-                .map(|n| (*n).to_owned())
-                .collect(),
+            themes: crate::theme::Theme::available_names(self.themes_dir.as_deref()),
             theme: crate::theme::current().name,
             models: self.model_choices.iter().map(|p| p.value.clone()).collect(),
             model,
@@ -2474,6 +2503,7 @@ impl App {
                         .as_ref()
                         .map(|f| f())
                         .unwrap_or_default(),
+                    themes: crate::theme::Theme::available_names(self.themes_dir.as_deref()),
                 };
                 let mut palette = SlashPalette::new(registry, ctx);
                 palette.refresh();

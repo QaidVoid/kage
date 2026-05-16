@@ -373,6 +373,20 @@ impl OpenAiStream {
     }
 
     fn process_delta(&mut self, delta: &Value) {
+        // OpenAI-compatible reasoning models stream their thinking on
+        // a side channel, not in `content`: GLM / Zhipu / DeepSeek use
+        // `reasoning_content`, OpenRouter and others use `reasoning`.
+        // Surface it as a thinking delta so it is not silently lost.
+        if let Some(reasoning) = delta
+            .get("reasoning_content")
+            .or_else(|| delta.get("reasoning"))
+            .and_then(Value::as_str)
+            && !reasoning.is_empty()
+        {
+            self.pending.push_back(Ok(ProviderEvent::ThinkingDelta {
+                delta: reasoning.to_owned(),
+            }));
+        }
         if let Some(content) = delta.get("content").and_then(Value::as_str) {
             if !content.is_empty() {
                 self.pending.push_back(Ok(ProviderEvent::TextDelta {
@@ -685,6 +699,30 @@ mod tests {
         } else {
             panic!("expected MessageEnd");
         }
+    }
+
+    #[test]
+    fn stream_emits_thinking_from_reasoning_content_side_channel() {
+        // GLM/Zhipu/DeepSeek stream reasoning on `reasoning_content`;
+        // OpenRouter and others use `reasoning`. Both become thinking.
+        let bytes: &[u8] = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"let me\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\" think\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"answer\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+        let events = collect_ok(stream_from_bytes(bytes));
+        let thinking: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                ProviderEvent::ThinkingDelta { delta } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thinking, vec!["let me", " think"]);
+        let texts: Vec<&str> = events
+            .iter()
+            .filter_map(|e| match e {
+                ProviderEvent::TextDelta { delta } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["answer"]);
     }
 
     #[test]

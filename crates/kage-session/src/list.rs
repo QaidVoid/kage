@@ -29,6 +29,9 @@ pub struct SessionSummary {
     pub cwd: PathBuf,
     /// Provider-qualified model from the header.
     pub model: String,
+    /// Parent session this one was forked from, if any. Lets callers
+    /// reconstruct the fork forest from a flat directory listing.
+    pub parent_session: Option<SessionId>,
     /// Text of the most recent user message, if any.
     pub last_user_prompt: Option<String>,
     /// Total number of valid entries (including the header).
@@ -122,6 +125,7 @@ fn summary_from_header(
         updated_at,
         cwd: header.cwd,
         model: header.model,
+        parent_session: header.parent_session,
         last_user_prompt,
         entry_count,
     }
@@ -218,6 +222,38 @@ mod tests {
             assert_eq!(s.entry_count, 3);
             assert!(s.updated_at >= s.created_at);
         }
+    }
+
+    #[test]
+    fn summary_carries_parent_session() {
+        let dir = tempdir().unwrap();
+        write_session(dir.path(), "root.jsonl", "root prompt");
+        let parent = SessionId::new();
+        let child_path = dir.path().join("child.jsonl");
+        let header = Header {
+            version: FORMAT_VERSION,
+            session: SessionId::new(),
+            id: EntryId::new(),
+            ts: Utc::now(),
+            cwd: PathBuf::from("/work"),
+            model: "anthropic:claude".into(),
+            system_prompt: "be helpful".into(),
+            parent_session: Some(parent),
+            parent_entry: Some(EntryId::new()),
+        };
+        SessionWriter::create(&child_path, header).unwrap();
+
+        let summaries = list(dir.path()).unwrap();
+        let root = summaries
+            .iter()
+            .find(|s| s.path.ends_with("root.jsonl"))
+            .unwrap();
+        let child = summaries
+            .iter()
+            .find(|s| s.path.ends_with("child.jsonl"))
+            .unwrap();
+        assert_eq!(root.parent_session, None);
+        assert_eq!(child.parent_session, Some(parent));
     }
 
     #[test]

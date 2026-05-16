@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use kage_core::{LoopEvent, Message, ToolOutput};
-use kage_loop::{Hooks, StreamRequest, TurnSummary};
+use kage_loop::{CompactionPrep, Hooks, StreamRequest, TurnSummary};
 use kage_plugin::{LogLevel, PluginRuntime, SharedHostLog, default_host_log};
 use serde_json::json;
 
@@ -254,6 +254,37 @@ impl<H: Hooks> Hooks for PluginEventHooks<H> {
         Ok(())
     }
 
+    fn prepare_compaction(&mut self, prep: &mut CompactionPrep) -> Result<(), String> {
+        self.inner.prepare_compaction(prep)?;
+        if self.runtime.handler_count("compact_prepare") == 0 {
+            return Ok(());
+        }
+        let payload = json!({
+            "transcript": prep.transcript,
+            "instruction": prep.instruction,
+            "prompt": prep.prompt,
+            "model": prep.model,
+            "summarized": prep.summarized,
+            "kept": prep.kept,
+        });
+        let result = self
+            .runtime
+            .dispatch_transform("compact_prepare", payload)
+            .map_err(|e| format!("compact_prepare: lua dispatch: {e}"))?;
+        if let Some(obj) = result.as_object() {
+            if let Some(s) = obj.get("prompt").and_then(|v| v.as_str()) {
+                s.clone_into(&mut prep.prompt);
+            }
+            if let Some(s) = obj.get("instruction").and_then(|v| v.as_str()) {
+                s.clone_into(&mut prep.instruction);
+            }
+            if let Some(s) = obj.get("summary").and_then(|v| v.as_str()) {
+                prep.summary_override = Some(s.to_owned());
+            }
+        }
+        Ok(())
+    }
+
     fn on_turn_start(&mut self, index: u32) {
         let _ = self
             .runtime
@@ -375,6 +406,61 @@ mod tests {
         assert_eq!(hooks.get_steering(), Some("user typed this".to_owned()));
         // Second poll: plugin queue drains.
         assert_eq!(hooks.get_steering(), Some("plugin says hi".to_owned()));
+    }
+
+    fn sample_prep() -> CompactionPrep {
+        CompactionPrep {
+            transcript: "=== user ===\nhi\n".to_owned(),
+            instruction: "old instruction".to_owned(),
+            prompt: "old prompt".to_owned(),
+            model: "mock:m".to_owned(),
+            summarized: 6,
+            kept: 4,
+            summary_override: None,
+        }
+    }
+
+    #[test]
+    fn compact_prepare_summary_override_skips_model() {
+        let rt = Arc::new(PluginRuntime::new().unwrap());
+        rt.eval(
+            "kage.on('compact_prepare', function(ev)
+                 return { summary = 'PLUGIN ' .. tostring(ev.summarized) }
+             end)",
+        )
+        .unwrap();
+        let mut hooks = PluginEventHooks::new(NoopHooks, Arc::clone(&rt));
+        let mut p = sample_prep();
+        hooks.prepare_compaction(&mut p).unwrap();
+        assert_eq!(p.summary_override.as_deref(), Some("PLUGIN 6"));
+    }
+
+    #[test]
+    fn compact_prepare_rewrites_prompt_and_instruction() {
+        let rt = Arc::new(PluginRuntime::new().unwrap());
+        rt.eval(
+            "kage.on('compact_prepare', function(_ev)
+                 return { prompt = 'NEW', instruction = 'INS' }
+             end)",
+        )
+        .unwrap();
+        let mut hooks = PluginEventHooks::new(NoopHooks, Arc::clone(&rt));
+        let mut p = sample_prep();
+        hooks.prepare_compaction(&mut p).unwrap();
+        assert_eq!(p.prompt, "NEW");
+        assert_eq!(p.instruction, "INS");
+        assert_eq!(p.summary_override, None);
+    }
+
+    #[test]
+    fn compact_prepare_without_handler_is_passthrough() {
+        let rt = Arc::new(PluginRuntime::new().unwrap());
+        let mut hooks = PluginEventHooks::new(NoopHooks, Arc::clone(&rt));
+        let mut p = sample_prep();
+        hooks.prepare_compaction(&mut p).unwrap();
+        assert_eq!(p.prompt, "old prompt");
+        assert_eq!(p.instruction, "old instruction");
+        assert_eq!(p.summary_override, None);
     }
 
     #[test]

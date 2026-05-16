@@ -58,6 +58,13 @@
 //!   `transform_context`, but the payload is the serialized
 //!   `StreamRequest` about to go out to the provider. Plugins can inject
 //!   a system header, strip tools, swap the model, etc.
+//! * `compact_prepare` (transform): fired right before history
+//!   compaction calls the summarizer model. The payload is
+//!   `{ transcript, instruction, prompt, model, summarized, kept }`.
+//!   A handler may return a table with any of `prompt` / `instruction`
+//!   (rewrite what the summarizer receives) or `summary` (skip the
+//!   model call entirely and use this text as the summary body).
+//!   Returning `nil` passes through unchanged.
 //! * `should_stop_after_turn` (predicate): the host passes a turn summary;
 //!   any handler returning `true` short-circuits the run. See
 //!   [`dispatch_predicate`].

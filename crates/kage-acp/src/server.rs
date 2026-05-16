@@ -520,6 +520,119 @@ mod tests {
         );
     }
 
+    #[derive(Default)]
+    struct PermBackend;
+
+    impl AcpBackend for PermBackend {
+        fn server_info(&self) -> serde_json::Value {
+            serde_json::json!({ "name": "perm" })
+        }
+
+        fn prompt(
+            &mut self,
+            _params: &PromptParams,
+            _cancel: &Cancel,
+            permission: &Permission,
+            emit: &mut dyn FnMut(serde_json::Value),
+        ) -> Result<serde_json::Value, String> {
+            emit(serde_json::json!({ "type": "message_start" }));
+            match permission.request("bash", &serde_json::json!({ "cmd": "ls" })) {
+                PermissionOutcome::Allow => {
+                    emit(serde_json::json!({ "type": "message_end" }));
+                    Ok(serde_json::json!({ "status": "completed", "permission": "allowed" }))
+                }
+                PermissionOutcome::Deny { .. } => {
+                    Ok(serde_json::json!({ "status": "completed", "permission": "denied" }))
+                }
+            }
+        }
+
+        fn list_sessions(&mut self) -> Result<serde_json::Value, String> {
+            Ok(serde_json::json!([]))
+        }
+
+        fn load_session(&mut self, _id: &str) -> Result<serde_json::Value, String> {
+            Ok(serde_json::json!({}))
+        }
+    }
+
+    fn permission_round_trip(allow: bool) -> Vec<serde_json::Value> {
+        use std::io::BufReader;
+
+        let (c2s_r, mut c2s_w) = std::io::pipe().expect("client->server pipe");
+        let (s2c_r, s2c_w) = std::io::pipe().expect("server->client pipe");
+
+        let server = thread::spawn(move || serve(BufReader::new(c2s_r), s2c_w, PermBackend));
+
+        framing::write_message(
+            &mut c2s_w,
+            &serde_json::json!({"id": 1, "method": "prompt", "params": {"prompt": "hi"}}),
+        )
+        .unwrap();
+
+        let mut client = BufReader::new(s2c_r);
+        let mut frames = Vec::new();
+        loop {
+            let v = framing::read_message(&mut client)
+                .expect("read")
+                .expect("frame before EOF");
+            if v.get("method").and_then(|m| m.as_str()) == Some("permission/request") {
+                let pid = v["params"]["id"].as_str().unwrap().to_owned();
+                framing::write_message(
+                    &mut c2s_w,
+                    &serde_json::json!({
+                        "id": 2,
+                        "method": "permission/respond",
+                        "params": {"id": pid, "allow": allow},
+                    }),
+                )
+                .unwrap();
+            }
+            let done = v.get("id") == Some(&serde_json::json!(1)) && v.get("result").is_some();
+            frames.push(v);
+            if done {
+                break;
+            }
+        }
+
+        drop(c2s_w);
+        server.join().unwrap().expect("serve ok");
+        frames
+    }
+
+    #[test]
+    fn acp_permission_round_trip_allow() {
+        let frames = permission_round_trip(true);
+        let req = frames
+            .iter()
+            .find(|f| f.get("method").and_then(|m| m.as_str()) == Some("permission/request"))
+            .expect("a permission/request was sent");
+        assert_eq!(req["params"]["name"], "bash");
+        let resp = frames
+            .iter()
+            .find(|f| f.get("id") == Some(&serde_json::json!(1)) && f.get("result").is_some())
+            .unwrap();
+        assert_eq!(resp["result"]["permission"], "allowed");
+        assert!(
+            frames.iter().any(|f| f["params"]["type"] == "message_end"),
+            "an event must follow an allowed call"
+        );
+    }
+
+    #[test]
+    fn acp_permission_round_trip_deny() {
+        let frames = permission_round_trip(false);
+        let resp = frames
+            .iter()
+            .find(|f| f.get("id") == Some(&serde_json::json!(1)) && f.get("result").is_some())
+            .unwrap();
+        assert_eq!(resp["result"]["permission"], "denied");
+        assert!(
+            !frames.iter().any(|f| f["params"]["type"] == "message_end"),
+            "a denied call must not emit the post-tool event"
+        );
+    }
+
     #[test]
     fn permission_ignores_stale_id_then_accepts_match() {
         let (perm, slot) = make_permission();

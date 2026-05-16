@@ -39,6 +39,7 @@ use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block as RtBlock, Borders, Paragraph, Wrap};
+use unicode_width::UnicodeWidthChar;
 
 use crate::buffer::{Block, Buffer};
 use crate::cmdline::CommandLine;
@@ -1764,11 +1765,14 @@ pub(super) const FOCUS_RULE_WIDTH: usize = 2;
 ///
 /// PB.5 reserves the column unconditionally so toggling focus does
 /// not shift the body horizontally; PB.6 additionally pre-wraps
-/// each logical line to `width - FOCUS_RULE_WIDTH` chars so the
-/// rule prefix lands on **every** visual row, including wrapped
-/// continuations. Without the pre-wrap, ratatui's `Paragraph::wrap`
-/// would only see one logical line with the prefix and fold the
-/// rest of the text below the rule.
+/// each logical line to `width - FOCUS_RULE_WIDTH` display columns
+/// so the rule prefix lands on **every** visual row, including
+/// wrapped continuations. Without the pre-wrap, ratatui's
+/// `Paragraph::wrap` would only see one logical line with the
+/// prefix and fold the rest of the text below the rule. The
+/// pre-wrap must measure in the same display-width metric ratatui
+/// uses, or a row of wide glyphs overflows and ratatui re-folds it
+/// onto a prefix-less continuation.
 pub(super) fn mark_emphasis(
     lines: Vec<Line<'static>>,
     width: u16,
@@ -1949,6 +1953,15 @@ fn split_line_into_rows(line: Line<'static>, max: usize) -> Vec<Vec<Span<'static
         return vec![Vec::new()];
     }
 
+    // Accumulate display width, the unicode-width metric ratatui's
+    // `Paragraph` wrap uses. Counting `char`s instead lets a row of
+    // wide glyphs (CJK, emoji) overflow `max` cells; the outer
+    // `Paragraph::wrap` then folds the overflow onto a continuation
+    // row that never received the gutter prefix, so the left rule
+    // appears to skip wrapped text.
+    let cw = |c: char| UnicodeWidthChar::width(c).unwrap_or(0);
+    let row_width = |chars: &[(char, Style)]| -> usize { chars.iter().map(|&(c, _)| cw(c)).sum() };
+
     let mut ranges: Vec<(usize, usize)> = Vec::new();
     let mut row_start = 0usize;
     let mut row_used = 0usize;
@@ -1959,7 +1972,7 @@ fn split_line_into_rows(line: Line<'static>, max: usize) -> Vec<Vec<Span<'static
             if let Some(sp) = last_space.filter(|&s| s > row_start) {
                 ranges.push((row_start, sp));
                 row_start = sp + 1;
-                row_used = i - row_start;
+                row_used = row_width(&chars[row_start..i]);
                 last_space = None;
                 continue;
             }
@@ -1971,7 +1984,7 @@ fn split_line_into_rows(line: Line<'static>, max: usize) -> Vec<Vec<Span<'static
         if chars[i].0 == ' ' {
             last_space = Some(i);
         }
-        row_used += 1;
+        row_used += cw(chars[i].0);
         i += 1;
     }
     ranges.push((row_start, chars.len()));
@@ -2574,6 +2587,31 @@ mod tests {
             .iter()
             .any(|s| s.content == "hello" && s.style.add_modifier.contains(Modifier::BOLD));
         assert!(first_bold, "bold style should survive the wrap");
+    }
+
+    #[test]
+    fn block_wrap_uses_display_width_not_char_count() {
+        // Each CJK ideograph is two display columns. With a 6-col
+        // budget a row holds at most three; counting `char`s would
+        // pack six (12 cols) and the outer `Paragraph::wrap` would
+        // then fold the overflow onto a gutter-less continuation,
+        // which is the "rule skips wrapped text" symptom.
+        let line = Line::from(Span::raw(
+            "\u{4e00}\u{4e8c}\u{4e09}\u{56db}\u{4e94}\u{516d}",
+        ));
+        let rows = split_line_into_rows(line, 6);
+        for r in &rows {
+            let cells: usize = row_text(r)
+                .chars()
+                .map(|c| UnicodeWidthChar::width(c).unwrap_or(0))
+                .sum();
+            assert!(
+                cells <= 6,
+                "row {:?} is {cells} cols, over the 6-col budget",
+                row_text(r)
+            );
+        }
+        assert_eq!(rows.len(), 2, "6 wide glyphs at 6 cols is 2 rows of 3");
     }
 
     #[test]

@@ -37,6 +37,15 @@ impl ToolRegistry {
         self.tools.insert(tool.name().to_owned(), tool);
     }
 
+    /// Remove a tool by name, returning it if it was registered.
+    ///
+    /// Used by the MCP manager to drop a server's stale adapters on a
+    /// hot tool-list refresh so a tool the server no longer offers
+    /// does not linger.
+    pub fn unregister(&mut self, name: &str) -> Option<Arc<dyn Tool>> {
+        self.tools.remove(name)
+    }
+
     /// Look up a tool by name.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {

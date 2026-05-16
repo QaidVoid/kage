@@ -180,12 +180,34 @@ impl McpConnection {
                 source,
             })
     }
+
+    /// Like [`Self::request`] but abandons the call when
+    /// `should_cancel` trips, so a long-running `tools/call` honors
+    /// the agent loop's cancel flag.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`McpError::Rpc`] on a JSON-RPC error, a dropped
+    /// connection, or cancellation.
+    pub fn request_cancellable(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        should_cancel: &dyn Fn() -> bool,
+    ) -> Result<serde_json::Value, McpError> {
+        self.peer
+            .request_cancellable(method, params, should_cancel)
+            .map_err(|source| McpError::Rpc {
+                server: self.server.clone(),
+                source,
+            })
+    }
 }
 
 /// An initialized MCP server connection plus the child process
 /// backing it. Dropping this kills the child.
 pub struct McpServerHandle {
-    conn: McpConnection,
+    conn: Arc<McpConnection>,
     child: Child,
 }
 
@@ -223,13 +245,14 @@ impl McpServerHandle {
             .take()
             .ok_or_else(|| McpError::NoStdio(name.clone()))?;
         let (peer, inbound, _reader) = connect(BufReader::new(stdout), stdin);
-        let conn = McpConnection::initialize(name, peer, inbound)?;
+        let conn = Arc::new(McpConnection::initialize(name, peer, inbound)?);
         Ok(Self { conn, child })
     }
 
-    /// The live connection, for tool discovery and calls.
+    /// The live connection, shareable into tool adapters that must
+    /// outlive individual calls but not the child.
     #[must_use]
-    pub fn connection(&self) -> &McpConnection {
+    pub fn connection(&self) -> &Arc<McpConnection> {
         &self.conn
     }
 }

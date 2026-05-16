@@ -901,8 +901,8 @@ fn render_buffer(
     let area_y = area.y;
     let area_bottom = area.y.saturating_add(area.height);
     let screen_rows: Vec<(usize, u16, u16)> = block_layout
-        .into_iter()
-        .filter_map(|(idx, vtop, vbot)| {
+        .iter()
+        .filter_map(|&(idx, vtop, vbot)| {
             let virt_view_top = vtop.saturating_sub(visible_top);
             let virt_view_bot = vbot.saturating_sub(visible_top);
             let top = area_y.saturating_add(u16::try_from(virt_view_top).unwrap_or(u16::MAX));
@@ -913,6 +913,10 @@ fn render_buffer(
         })
         .collect();
     buffer.set_last_block_screen_rows(screen_rows);
+    // Unclamped virtual spans (same coordinate space as mouse
+    // selection rows) so yank can map a selected row to its source
+    // line even when the block is scrolled past its own top/bottom.
+    buffer.set_last_block_virtual_rows(block_layout);
     buffer.set_last_area_geometry(area.x, area.y, area.width, area.height, visible_top);
 
     let paragraph = Paragraph::new(emitted_lines).wrap(Wrap { trim: false });

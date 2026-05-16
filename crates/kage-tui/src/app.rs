@@ -2307,17 +2307,15 @@ impl App {
         let Ok(buf) = self.buffer.lock() else {
             return String::new();
         };
-        let area_y = usize::from(buf.last_area_y());
-        let virtual_top = buf.last_virtual_top();
         let width = buf.last_area_width();
-        let to_vrow = |screen: u16| virtual_top + usize::from(screen).saturating_sub(area_y);
         let mut pieces: Vec<String> = Vec::new();
         for idx in 0..buf.blocks().len() {
-            let Some((top, bot)) = buf.screen_rows_of(idx) else {
+            // Unclamped virtual span in the same coordinate space as
+            // the selection rows, so the row->source mapping holds no
+            // matter how the block is scrolled.
+            let Some((block_start, block_end)) = buf.block_virtual_rows(idx) else {
                 continue;
             };
-            let block_start = to_vrow(top);
-            let block_end = to_vrow(bot); // exclusive
             if block_end <= block_start {
                 continue;
             }
@@ -3319,8 +3317,9 @@ mod tests {
             buf.append_assistant_delta("# Title\n\n```rust\nfn x() {}\n```");
             buf.set_last_area_geometry(0, 0, 80, 40, 0);
             // block 0 (user) at vrow 0; block 1 (assistant) at vrows
-            // 1..=6 (its 5 rendered rows + 1 pad).
-            buf.set_last_block_screen_rows(vec![(0, 0, 1), (1, 1, 7)]);
+            // 1..=6 (its 5 rendered rows + 1 pad). Virtual spans are
+            // what yank maps against now (scroll-independent).
+            buf.set_last_block_virtual_rows(vec![(0, 0, 1), (1, 1, 7)]);
         }
         // Drag only the heading row -> just that source line.
         assert_eq!(app.selected_blocks_raw(1, 1), "# Title");
@@ -3338,6 +3337,26 @@ mod tests {
         );
         // No block under the span -> empty (caller uses grid cells).
         assert!(app.selected_blocks_raw(20, 25).is_empty());
+    }
+
+    #[test]
+    fn selection_maps_to_source_even_when_block_is_scrolled() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let app = App::new(buffer.clone(), tx);
+        {
+            let mut buf = buffer.lock().unwrap();
+            buf.push_user("hi");
+            buf.append_assistant_delta("# Title\n\n```rust\nfn x() {}\n```");
+            buf.set_last_area_geometry(0, 0, 80, 40, 0);
+            // The assistant block lives high up the virtual space
+            // (its top scrolled far past the viewport): rows 100..=105.
+            buf.set_last_block_virtual_rows(vec![(0, 99, 100), (1, 100, 106)]);
+        }
+        // Selecting the absolute virtual rows still resolves to the
+        // right source: row 100 -> heading, row 103 -> code block.
+        assert_eq!(app.selected_blocks_raw(100, 100), "# Title");
+        assert_eq!(app.selected_blocks_raw(103, 103), "```rust\nfn x() {}\n```");
     }
 
     #[test]

@@ -241,6 +241,14 @@ pub struct Buffer {
     /// each frame; mouse handlers read it to translate a click row
     /// into a block. Cleared whenever the buffer is empty.
     last_block_screen_rows: Vec<(usize, u16, u16)>,
+    /// `(idx, virtual_top, virtual_bottom)` per painted block in the
+    /// last frame, in the unclamped 0..total virtual-row space (the
+    /// same space mouse-selection rows live in). Unlike
+    /// [`Self::last_block_screen_rows`] this is *not* clamped to the
+    /// viewport, so a block scrolled past its own top still reports
+    /// its true first row - yank uses this to map a selected row to
+    /// the right source line regardless of scroll.
+    last_block_virtual_rows: Vec<(usize, usize, usize)>,
     /// Width and X-origin of the buffer area in the last painted
     /// frame. Mouse handlers use this to translate a click column
     /// into a block-relative char column.
@@ -412,6 +420,24 @@ impl Buffer {
     /// block index.
     pub fn set_last_block_screen_rows(&mut self, rows: Vec<(usize, u16, u16)>) {
         self.last_block_screen_rows = rows;
+    }
+
+    /// Renderer hook: stash each painted block's unclamped
+    /// `(idx, virtual_top, virtual_bottom)` for this frame. See
+    /// [`Self::last_block_virtual_rows`].
+    pub fn set_last_block_virtual_rows(&mut self, rows: Vec<(usize, usize, usize)>) {
+        self.last_block_virtual_rows = rows;
+    }
+
+    /// Unclamped `(virtual_top, virtual_bottom)` of the block at
+    /// `idx` from the last frame, `bottom` exclusive. `None` when the
+    /// block was not painted. Used by yank to map a selected row to
+    /// the block's source line correctly under any scroll.
+    #[must_use]
+    pub fn block_virtual_rows(&self, idx: usize) -> Option<(usize, usize)> {
+        self.last_block_virtual_rows
+            .iter()
+            .find_map(|(i, top, bot)| (*i == idx).then_some((*top, *bot)))
     }
 
     /// Renderer hook: stash the buffer area's bounding box and the

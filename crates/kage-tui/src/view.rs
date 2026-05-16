@@ -1191,29 +1191,22 @@ fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {
     let theme = crate::theme::current();
     let mode = input.mode();
     let pane_focused = input.focused_pane() == Pane::Input;
+    // Buffer pane focused: recede the input chrome to the muted tier
+    // so the eye tracks the focused buffer block, but stay visible
+    // (the bars no longer sit on a band, so `DIM` would vanish).
     let border_color = if pane_focused {
         mode_border_color(&theme, mode)
     } else {
-        // Buffer pane has focus: dim the input chrome so the eye
-        // tracks the buffer block focus instead.
-        theme.status_dim_fg
+        theme.muted_fg
     };
-    let mut pill_style = mode_pill_style(&theme, mode);
-    if !pane_focused {
-        pill_style = pill_style.add_modifier(Modifier::DIM);
-    }
+    let pill_style = if pane_focused {
+        mode_pill_style(&theme, mode)
+    } else {
+        Style::default().fg(theme.muted_fg)
+    };
 
-    let mut top_line: Vec<Span<'static>> =
+    let top_line: Vec<Span<'static>> =
         vec![Span::styled(format!(" {} ", mode_label(mode)), pill_style)];
-    let hint = mode_hint_text(mode);
-    if !hint.is_empty() {
-        top_line.push(Span::raw(" "));
-        let mut hint_style = Style::default().fg(theme.input_hint_fg);
-        if !pane_focused {
-            hint_style = hint_style.add_modifier(Modifier::DIM);
-        }
-        top_line.push(Span::styled(hint, hint_style));
-    }
 
     let block = RtBlock::default()
         .borders(Borders::ALL)
@@ -1649,10 +1642,6 @@ fn mode_pill_style(theme: &crate::theme::Theme, mode: Mode) -> Style {
         Mode::Visual => theme.input_pill_visual_fg,
     };
     Style::default().fg(fg).add_modifier(Modifier::BOLD)
-}
-
-fn mode_hint_text(_mode: Mode) -> &'static str {
-    ""
 }
 
 fn placeholder_for(mode: Mode) -> Option<&'static str> {

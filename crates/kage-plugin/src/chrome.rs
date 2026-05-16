@@ -200,8 +200,9 @@ impl LuaChrome {
 
 /// Parse the value a chrome render function returned into a list of
 /// styled lines. See the module docs for the accepted shapes; anything
-/// else yields no lines.
-fn parse_lines(value: &Value) -> Vec<ChromeLine> {
+/// else yields no lines. Shared with `block_renderers` so a Lua block
+/// renderer accepts the exact same return shape as `set_header`.
+pub(crate) fn parse_lines(value: &Value) -> Vec<ChromeLine> {
     match value {
         Value::String(s) => vec![ChromeLine {
             spans: vec![ChromeSpan {

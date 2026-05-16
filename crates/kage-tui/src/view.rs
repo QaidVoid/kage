@@ -12,6 +12,7 @@
 pub mod assistant;
 pub mod compaction;
 pub mod custom;
+pub mod plugin_block;
 pub mod registry;
 pub mod thinking;
 pub mod toast;
@@ -1432,7 +1433,10 @@ fn push_input_row(
 /// overrides it when the string parses, and the attribute bits map to
 /// terminal modifiers. An unparseable color is dropped so the span
 /// inherits `base` rather than failing the whole row.
-fn chrome_lines_to_ratatui(lines: &[kage_plugin::ChromeLine], base: Style) -> Vec<Line<'static>> {
+pub(crate) fn chrome_lines_to_ratatui(
+    lines: &[kage_plugin::ChromeLine],
+    base: Style,
+) -> Vec<Line<'static>> {
     lines
         .iter()
         .map(|cl| {

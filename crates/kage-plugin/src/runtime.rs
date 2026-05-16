@@ -32,6 +32,9 @@ use crate::autocomplete::{
     self, LuaAutocompleteProvider, RegisteredAutocompleteProviders,
     registered_autocomplete_providers,
 };
+use crate::block_renderers::{
+    self, LuaBlockRenderer, SharedBlockRenderers, shared_block_renderers,
+};
 use crate::bridge::{self, BridgeStep, SharedBridge, shared_bridge};
 use crate::chrome::{self, LuaChrome, SharedChrome, shared_chrome};
 use crate::commands::{self, LuaCommand, RegisteredCommands, registered_commands};
@@ -93,6 +96,7 @@ pub struct PluginRuntime {
     theme_request: SharedThemeRequest,
     header: SharedChrome,
     footer: SharedChrome,
+    block_renderers: SharedBlockRenderers,
     autocomplete: RegisteredAutocompleteProviders,
     terminal_hooks: RegisteredTerminalHooks,
 }
@@ -464,6 +468,20 @@ impl PluginRuntime {
             .clone()
     }
 
+    /// Snapshot the custom block renderers plugins installed via
+    /// `kage.register_block_renderer`. The host registers each into
+    /// the TUI block-renderer registry; an empty result means every
+    /// custom block uses the built-in card.
+    #[must_use]
+    pub fn registered_block_renderers(&self) -> Vec<Arc<LuaBlockRenderer>> {
+        self.block_renderers
+            .lock()
+            .expect("plugin block renderers mutex poisoned")
+            .values()
+            .cloned()
+            .collect()
+    }
+
     /// Cloneable handle to the header-chrome slot, for a host that
     /// snapshots it per redraw (so a `kage.ui.set_header` call made
     /// after startup, e.g. from a command, takes effect) rather than
@@ -685,6 +703,9 @@ impl PluginRuntime {
         if let Ok(mut slot) = self.footer.lock() {
             *slot = None;
         }
+        if let Ok(mut map) = self.block_renderers.lock() {
+            map.clear();
+        }
         self.autocomplete
             .lock()
             .expect("plugin autocomplete mutex poisoned")
@@ -773,6 +794,7 @@ impl PluginRuntimeBuilder {
         let theme_request_slot = shared_theme_request();
         let header_slot = shared_chrome();
         let footer_slot = shared_chrome();
+        let block_renderer_map = shared_block_renderers();
         let autocomplete_registry = registered_autocomplete_providers();
         let terminal_hook_registry = registered_terminal_hooks();
         {
@@ -852,6 +874,12 @@ impl PluginRuntimeBuilder {
                 Arc::clone(&header_slot),
                 Arc::clone(&footer_slot),
             )?;
+            block_renderers::install_block_renderers(
+                &lua_guard,
+                Arc::clone(&shared_lua),
+                self.sink.clone(),
+                Arc::clone(&block_renderer_map),
+            )?;
             autocomplete::install_add_autocomplete_provider(
                 &lua_guard,
                 Arc::clone(&shared_lua),
@@ -890,6 +918,7 @@ impl PluginRuntimeBuilder {
             theme_request: theme_request_slot,
             header: header_slot,
             footer: footer_slot,
+            block_renderers: block_renderer_map,
             autocomplete: autocomplete_registry,
             terminal_hooks: terminal_hook_registry,
         })

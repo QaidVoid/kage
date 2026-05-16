@@ -163,6 +163,15 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
                 args: cmd.args().iter().map(translate_plugin_arg).collect(),
             });
         }
+        for renderer in rt.registered_block_renderers() {
+            let kind = renderer.kind().to_owned();
+            kage_tui::view::registry::register_custom(
+                kind,
+                std::sync::Arc::new(kage_tui::view::plugin_block::PluginBlockFactory::new(
+                    renderer,
+                )),
+            );
+        }
         plugin_widgets = rt.registered_widgets();
         plugin_autocomplete = rt.registered_autocomplete_providers();
         plugin_status = Some(rt.shared_status());

@@ -7,6 +7,7 @@
 pub mod acp;
 pub mod api;
 pub mod autocomplete;
+pub mod block_renderers;
 pub mod bridge;
 pub mod chrome;
 pub mod commands;
@@ -32,6 +33,7 @@ pub mod widgets;
 
 pub use api::{HostLog, LogLevel, SharedHostLog, StderrHostLog, default_host_log};
 pub use autocomplete::{AutocompleteItem, LuaAutocompleteProvider};
+pub use block_renderers::{LuaBlockRenderer, SharedBlockRenderers};
 pub use bridge::{BridgeStep, SharedBridge, SuspendRequest};
 pub use chrome::{ChromeAttrs, ChromeLine, ChromeSlot, ChromeSpan, LuaChrome, SharedChrome};
 pub use commands::{BridgeArgs, BridgePrep, CommandOutput, LuaCommand, PluginArgSpec};

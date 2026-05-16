@@ -2074,6 +2074,12 @@ impl App {
     /// trailing whitespace per row, joins with `\n`, and clears the
     /// selection.
     fn yank_screen_selection(&mut self) {
+        if self.screen_selection.is_none() {
+            // No selection: `y` means "copy the focused response",
+            // same raw-text path as `Y`.
+            self.yank_focused_block();
+            return;
+        }
         let text = self.extract_selection_text();
         if text.is_empty() {
             self.clear_selection();
@@ -2215,6 +2221,15 @@ impl App {
         } else {
             (cursor, anchor)
         };
+        // Prefer the raw source of whatever blocks the selection
+        // touches: the user wants the assistant's verbatim markdown
+        // (fences, bullets) to paste, not the syntect-reflowed cells.
+        // Fall back to the captured grid only when the rows map to no
+        // block (chrome, blank gutter, off-screen with no geometry).
+        let raw = self.selected_blocks_raw_text(start.0, end.0);
+        if !raw.is_empty() {
+            return raw;
+        }
         let mut out = String::new();
         for vrow in start.0..=end.0 {
             let Some(grid_row) = self.captured_rows.get(&vrow) else {
@@ -2249,6 +2264,50 @@ impl App {
                 out.push('\n');
             }
             out.push_str(slice.trim_end());
+        }
+        out
+    }
+
+    /// Raw source text of the distinct blocks whose rows fall in the
+    /// virtual-row span `[start_vrow, end_vrow]`, in buffer order,
+    /// joined by a blank line. Empty when the span maps to no block
+    /// (so the caller can fall back to grid-cell extraction). Block
+    /// selection is row-granular by design: in a markdown-rendered
+    /// stream a rendered column does not correspond to a source
+    /// column, so "copy the response" means its whole raw text.
+    fn selected_blocks_raw_text(&self, start_vrow: usize, end_vrow: usize) -> String {
+        let Ok(buf) = self.buffer.lock() else {
+            return String::new();
+        };
+        let area_y = usize::from(buf.last_area_y());
+        let virtual_top = buf.last_virtual_top();
+        let mut indices: Vec<usize> = Vec::new();
+        for vrow in start_vrow..=end_vrow {
+            if vrow < virtual_top {
+                continue;
+            }
+            let Ok(screen_y) = u16::try_from(area_y + (vrow - virtual_top)) else {
+                continue;
+            };
+            if let Some(idx) = buf.block_at_screen_row(screen_y)
+                && !indices.contains(&idx)
+            {
+                indices.push(idx);
+            }
+        }
+        let mut out = String::new();
+        for idx in indices {
+            let Some(text) = buf.block_text(idx) else {
+                continue;
+            };
+            let text = text.trim_end();
+            if text.is_empty() {
+                continue;
+            }
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
+            out.push_str(text);
         }
         out
     }
@@ -3191,6 +3250,30 @@ mod tests {
 
     fn ctrl(c: char) -> KeyEvent {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn selection_yanks_raw_block_source_not_rendered_cells() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let app = App::new(buffer.clone(), tx);
+        {
+            let mut buf = buffer.lock().unwrap();
+            buf.push_user("hi");
+            buf.append_assistant_delta("# Title\n\n```rust\nfn x() {}\n```");
+            buf.set_last_area_geometry(0, 0, 80, 40, 0);
+            buf.set_last_block_screen_rows(vec![(0, 0, 1), (1, 1, 5)]);
+        }
+        // A row span landing on the assistant block yields its
+        // verbatim markdown, fences and all - not the syntect reflow.
+        let raw = app.selected_blocks_raw_text(1, 4);
+        assert_eq!(raw, "# Title\n\n```rust\nfn x() {}\n```");
+        // Spanning both blocks joins their raw sources.
+        let both = app.selected_blocks_raw_text(0, 4);
+        assert_eq!(both, "hi\n\n# Title\n\n```rust\nfn x() {}\n```");
+        // A span over no block (below the last row) maps to nothing,
+        // so the caller falls back to grid extraction.
+        assert!(app.selected_blocks_raw_text(9, 12).is_empty());
     }
 
     #[test]

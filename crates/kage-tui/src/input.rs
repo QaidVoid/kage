@@ -735,10 +735,11 @@ impl InputState {
                 self.enter_mode(Mode::Insert)
             }
             KeyCode::Char('v') => vec![InputAction::EnterVisual],
-            // Lowercase `y` yanks an existing selection (mouse or
-            // visual mode left it behind). Capital `Y` yanks the
-            // focused block whole, vim's "yank line" gesture adapted
-            // for our block-stream layout.
+            // Both yank raw block source (not the rendered cells):
+            // `y` copies the active selection's blocks, or the
+            // focused block when there is no selection; `Y` always
+            // copies the focused block, vim's "yank line" adapted to
+            // our block-stream layout.
             KeyCode::Char('y') => vec![InputAction::Yank],
             KeyCode::Char('Y') => vec![InputAction::YankFocusedBlock],
             KeyCode::Char('j') | KeyCode::Down => vec![InputAction::Scroll(1)],

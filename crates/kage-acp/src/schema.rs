@@ -148,10 +148,12 @@ pub fn parse_request(value: &serde_json::Value) -> Result<AcpRequest, SchemaErro
         .and_then(serde_json::Value::as_str)
         .ok_or(SchemaError::MissingMethod)?;
     let id = obj.get("id").cloned();
+    // Absent params default to an empty object, not null, so methods
+    // whose params are all-optional (`initialize`) still decode.
     let params = obj
         .get("params")
         .cloned()
-        .unwrap_or(serde_json::Value::Null);
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
 
     let call = match method {
         "initialize" => AcpCall::Initialize(decode_params("initialize", params)?),

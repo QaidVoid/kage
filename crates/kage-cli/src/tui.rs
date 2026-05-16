@@ -104,6 +104,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         kage_plugin::SharedThemeRequest,
     )> = None;
     let mut plugin_chrome: Option<(kage_plugin::SharedChrome, kage_plugin::SharedChrome)> = None;
+    let mut plugin_terminal_hooks: Option<kage_plugin::RegisteredTerminalHooks> = None;
     let mut plugin_keybinding_chords: Vec<String> = Vec::new();
     if let Some(rt) = plugin_runtime.as_ref() {
         for tool in rt.registered_tools() {
@@ -140,6 +141,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         plugin_fork_request = Some(rt.shared_fork_request());
         plugin_theme = Some((rt.shared_theme_state(), rt.shared_theme_request()));
         plugin_chrome = Some((rt.shared_header(), rt.shared_footer()));
+        plugin_terminal_hooks = Some(rt.shared_terminal_hooks());
         plugin_keybinding_chords = rt
             .registered_keybindings()
             .iter()
@@ -243,6 +245,9 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     }
     if let Some((header, footer)) = plugin_chrome {
         app.set_plugin_chrome(header, footer);
+    }
+    if let Some(hooks) = plugin_terminal_hooks {
+        app.set_plugin_terminal_hooks(hooks);
     }
     app.set_plugin_dialog(dialog_rx);
     app.set_plugin_keybindings(plugin_keybinding_chords);

@@ -510,6 +510,11 @@ pub struct App {
     /// Workdir the built-in `@file` completion lists under. `None`
     /// disables that fallback (plugin providers still work).
     completion_workdir: Option<std::path::PathBuf>,
+    /// Shared raw terminal-input hooks from `kage.on_terminal_input`.
+    /// Snapshotted per keystroke (so an `off` takes effect at once)
+    /// and offered each key before any modal layer; a truthy return
+    /// consumes the event. `None` until wired.
+    terminal_hooks: Option<kage_plugin::RegisteredTerminalHooks>,
     plugin_header: Option<kage_plugin::SharedChrome>,
     /// Footer-chrome slot populated by `kage.ui.set_footer`. Replaces
     /// the built-in modeline when a renderer is present.
@@ -622,6 +627,7 @@ impl App {
             autocomplete_providers: Vec::new(),
             input_completion: None,
             completion_workdir: None,
+            terminal_hooks: None,
             plugin_header: None,
             plugin_footer: None,
             plugin_header_lines: Vec::new(),
@@ -868,6 +874,15 @@ impl App {
         providers: Vec<Arc<kage_plugin::LuaAutocompleteProvider>>,
     ) {
         self.autocomplete_providers = providers;
+    }
+
+    /// Wire the raw terminal-input hook list from
+    /// `kage.on_terminal_input`. Without this the Lua calls still
+    /// register hooks in the runtime but no key is ever offered to
+    /// them. Hooks run synchronously inside the plugin runtime's Lua
+    /// mutex, before every modal layer, on each keystroke.
+    pub fn set_plugin_terminal_hooks(&mut self, hooks: kage_plugin::RegisteredTerminalHooks) {
+        self.terminal_hooks = Some(hooks);
     }
 
     /// Set the workdir the built-in `@file` autocomplete lists under.
@@ -1382,6 +1397,19 @@ impl App {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('q')) {
             return Some(AppExit::Quit);
+        }
+
+        // Raw plugin terminal-input hooks see the key before any modal
+        // layer (but never before the ctrl+q hatch above, so a hook
+        // cannot wedge the UI). A truthy return consumes it.
+        if let Some(hooks) = self.terminal_hooks.as_ref() {
+            let snapshot = hooks.lock().map(|h| h.clone()).unwrap_or_default();
+            if !snapshot.is_empty() {
+                let descriptor = key_event_to_json(key);
+                if snapshot.iter().any(|hook| hook.handle(&descriptor)) {
+                    return None;
+                }
+            }
         }
 
         // A blocking plugin dialog is the top-most modal layer: the
@@ -2451,6 +2479,40 @@ pub fn mode_label(mode: Mode) -> &'static str {
     }
 }
 
+/// Build the key descriptor a `kage.on_terminal_input` handler
+/// receives. See `kage_plugin::terminal_input` for the schema.
+fn key_event_to_json(key: ratatui::crossterm::event::KeyEvent) -> serde_json::Value {
+    use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+    let mods = key.modifiers;
+    let (code, ch): (String, Option<String>) = match key.code {
+        KeyCode::Char(c) => ("char".to_owned(), Some(c.to_string())),
+        KeyCode::F(n) => (format!("f{n}"), None),
+        KeyCode::Enter => ("enter".to_owned(), None),
+        KeyCode::Esc => ("esc".to_owned(), None),
+        KeyCode::Tab => ("tab".to_owned(), None),
+        KeyCode::BackTab => ("backtab".to_owned(), None),
+        KeyCode::Backspace => ("backspace".to_owned(), None),
+        KeyCode::Up => ("up".to_owned(), None),
+        KeyCode::Down => ("down".to_owned(), None),
+        KeyCode::Left => ("left".to_owned(), None),
+        KeyCode::Right => ("right".to_owned(), None),
+        KeyCode::Home => ("home".to_owned(), None),
+        KeyCode::End => ("end".to_owned(), None),
+        KeyCode::PageUp => ("pageup".to_owned(), None),
+        KeyCode::PageDown => ("pagedown".to_owned(), None),
+        KeyCode::Delete => ("delete".to_owned(), None),
+        KeyCode::Insert => ("insert".to_owned(), None),
+        _ => ("other".to_owned(), None),
+    };
+    serde_json::json!({
+        "code": code,
+        "char": ch,
+        "ctrl": mods.contains(KeyModifiers::CONTROL),
+        "alt": mods.contains(KeyModifiers::ALT),
+        "shift": mods.contains(KeyModifiers::SHIFT),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
@@ -2676,6 +2738,59 @@ mod tests {
         assert!(app.input_completion.is_some(), "@ opens file completion");
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.input().text(), "@README.md");
+    }
+
+    #[test]
+    fn terminal_input_hook_consumes_matching_key() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let rt = kage_plugin::PluginRuntime::new().unwrap();
+        rt.eval(
+            r"
+            kage.on_terminal_input(function(ev)
+                return ev.code == 'char' and ev.char == 'x'
+            end)
+            ",
+        )
+        .unwrap();
+        app.set_plugin_terminal_hooks(rt.shared_terminal_hooks());
+        app.handle_key(key('x'));
+        assert_eq!(app.input().text(), "", "x consumed by hook");
+        app.handle_key(key('y'));
+        assert_eq!(app.input().text(), "y", "y passes through");
+    }
+
+    #[test]
+    fn terminal_input_hook_cannot_block_ctrl_q() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let rt = kage_plugin::PluginRuntime::new().unwrap();
+        rt.eval("kage.on_terminal_input(function() return true end)")
+            .unwrap();
+        app.set_plugin_terminal_hooks(rt.shared_terminal_hooks());
+        assert_eq!(app.handle_key(ctrl('q')), Some(AppExit::Quit));
+    }
+
+    #[test]
+    fn terminal_input_off_stops_consuming() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let rt = kage_plugin::PluginRuntime::new().unwrap();
+        rt.eval(
+            r"
+            _G.off = kage.on_terminal_input(function() return true end)
+            ",
+        )
+        .unwrap();
+        app.set_plugin_terminal_hooks(rt.shared_terminal_hooks());
+        app.handle_key(key('a'));
+        assert_eq!(app.input().text(), "", "hook swallows everything");
+        rt.eval("_G.off()").unwrap();
+        app.handle_key(key('b'));
+        assert_eq!(app.input().text(), "b", "off restores normal input");
     }
 
     #[test]

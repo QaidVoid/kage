@@ -35,6 +35,7 @@ export default defineConfig({
           { text: "commands", link: "/guide/commands" },
           { text: "configuration", link: "/guide/config" },
           { text: "themes", link: "/guide/themes" },
+          { text: "mcp", link: "/guide/mcp" },
         ],
       },
       {

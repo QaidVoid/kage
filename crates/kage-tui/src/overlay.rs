@@ -19,6 +19,7 @@ pub mod editor;
 pub mod input;
 pub mod picker;
 pub mod registry;
+pub mod settings;
 pub mod slash;
 pub mod widget;
 
@@ -31,5 +32,6 @@ pub use registry::{
     BuiltinConfirmFactory, BuiltinEditorFactory, BuiltinInputFactory, OverlayFactory,
     OverlayRegistry,
 };
+pub use settings::{SettingsInit, SettingsOverlay};
 pub use slash::{SlashContext, SlashPalette};
 pub use widget::{EmptyOverlayWidget, OverlayAction, OverlayCtx, OverlayWidget};

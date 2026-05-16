@@ -410,6 +410,14 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         subcommands: &[],
     },
     CommandSpec {
+        name: "settings",
+        aliases: &[],
+        description: "open the settings dialog (theme, model, mouse, autocompaction)",
+        category: CommandCategory::Both,
+        args: &[],
+        subcommands: &[],
+    },
+    CommandSpec {
         name: "clear",
         aliases: &[],
         description: "clear the rendered conversation buffer",
@@ -533,7 +541,7 @@ mod tests {
 
     #[test]
     fn builtin_registry_has_expected_command_count() {
-        assert_eq!(BUILTIN_COMMANDS.len(), 10);
+        assert_eq!(BUILTIN_COMMANDS.len(), 11);
     }
 
     #[test]
@@ -541,5 +549,13 @@ mod tests {
         let spec = find_builtin_command("compact").expect("compact should exist");
         assert_eq!(spec.name, "compact");
         assert_eq!(spec.args.len(), 0);
+    }
+
+    #[test]
+    fn builtin_registry_includes_settings() {
+        let spec = find_builtin_command("settings").expect("settings should exist");
+        assert_eq!(spec.name, "settings");
+        assert_eq!(spec.args.len(), 0);
+        assert_eq!(spec.subcommands.len(), 0);
     }
 }

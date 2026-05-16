@@ -1380,10 +1380,12 @@ dependencies = [
  "kage-core",
  "kage-loop",
  "kage-plugin",
+ "kage-tools",
  "pulldown-cmark",
  "ratatui",
  "serde_json",
  "syntect",
+ "tempfile",
  "thiserror 2.0.18",
 ]
 

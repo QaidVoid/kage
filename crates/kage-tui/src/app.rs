@@ -30,7 +30,7 @@ use crate::input::{InputAction, InputState, Mode, Pane};
 use crate::layout::{input_height_for, split};
 use crate::overlay::{
     CompletionAction, InputCompletion, OverlayAction, OverlayPicker, SlashContext, SlashPalette,
-    prefix_before_cursor,
+    file_completions, prefix_before_cursor,
 };
 use crate::picker::PickItem;
 use crate::terminal::Tui;
@@ -507,6 +507,9 @@ pub struct App {
     /// Open input autocomplete popup, if the active provider returned
     /// candidates for the current prefix. `None` when closed.
     input_completion: Option<InputCompletion>,
+    /// Workdir the built-in `@file` completion lists under. `None`
+    /// disables that fallback (plugin providers still work).
+    completion_workdir: Option<std::path::PathBuf>,
     plugin_header: Option<kage_plugin::SharedChrome>,
     /// Footer-chrome slot populated by `kage.ui.set_footer`. Replaces
     /// the built-in modeline when a renderer is present.
@@ -618,6 +621,7 @@ impl App {
             plugin_theme_request: None,
             autocomplete_providers: Vec::new(),
             input_completion: None,
+            completion_workdir: None,
             plugin_header: None,
             plugin_footer: None,
             plugin_header_lines: Vec::new(),
@@ -864,6 +868,13 @@ impl App {
         providers: Vec<Arc<kage_plugin::LuaAutocompleteProvider>>,
     ) {
         self.autocomplete_providers = providers;
+    }
+
+    /// Set the workdir the built-in `@file` autocomplete lists under.
+    /// Without this the `@file` fallback is disabled; plugin providers
+    /// still function.
+    pub fn set_workdir(&mut self, workdir: std::path::PathBuf) {
+        self.completion_workdir = Some(workdir);
     }
 
     /// Register the plugin keybindings the App should dispatch.
@@ -1451,7 +1462,9 @@ impl App {
     /// popup) unless plugins registered providers and the user is
     /// actively typing in the input pane.
     fn refresh_input_completion(&mut self) {
-        if self.autocomplete_providers.is_empty()
+        let has_sources =
+            !self.autocomplete_providers.is_empty() || self.completion_workdir.is_some();
+        if !has_sources
             || self.input.focused_pane() != Pane::Input
             || self.input.mode() != Mode::Insert
         {
@@ -1468,6 +1481,11 @@ impl App {
                 items = got;
                 break;
             }
+        }
+        if items.is_empty()
+            && let Some(workdir) = self.completion_workdir.as_deref()
+        {
+            items = file_completions(workdir, prefix, cursor);
         }
         self.input_completion = InputCompletion::new(items);
     }
@@ -2642,6 +2660,20 @@ mod tests {
         app.set_plugin_autocomplete(rt.registered_autocomplete_providers());
         app.handle_key(key('@'));
         assert!(app.input_completion.is_some());
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.input().text(), "@README.md");
+    }
+
+    #[test]
+    fn builtin_at_file_completion_without_plugins() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "x").unwrap();
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        app.set_workdir(dir.path().to_path_buf());
+        app.handle_key(key('@'));
+        assert!(app.input_completion.is_some(), "@ opens file completion");
         app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.input().text(), "@README.md");
     }

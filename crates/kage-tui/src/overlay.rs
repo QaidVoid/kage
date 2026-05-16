@@ -22,7 +22,7 @@ pub mod registry;
 pub mod slash;
 pub mod widget;
 
-pub use completion::{CompletionAction, InputCompletion, prefix_before_cursor};
+pub use completion::{CompletionAction, InputCompletion, file_completions, prefix_before_cursor};
 pub use confirm::{Choice, ConfirmOverlay};
 pub use editor::EditorOverlay;
 pub use input::InputOverlay;

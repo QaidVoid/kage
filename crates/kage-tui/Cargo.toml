@@ -19,8 +19,12 @@ base64.workspace = true
 kage-core.workspace = true
 kage-loop.workspace = true
 kage-plugin.workspace = true
+kage-tools.workspace = true
 pulldown-cmark.workspace = true
 ratatui.workspace = true
 serde_json.workspace = true
 syntect.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -283,6 +283,71 @@ pub fn prefix_before_cursor(text: &str, cursor: usize) -> &str {
     &head[start..]
 }
 
+/// Built-in `@file` completion: the bottom of the provider stack.
+///
+/// When the token under the cursor starts with `@`, list entries of
+/// the workdir-relative directory it names and offer each as a
+/// candidate that replaces the whole `@...` token. Hidden entries are
+/// shown only when the typed fragment itself starts with `.`.
+/// Directories sort before files and gain a trailing `/`. Results are
+/// capped so a huge directory cannot blow up the popup. Paths that
+/// escape the workdir, or any IO error, yield no items.
+#[must_use]
+pub fn file_completions(
+    workdir: &std::path::Path,
+    prefix: &str,
+    cursor: usize,
+) -> Vec<AutocompleteItem> {
+    let Some(frag) = prefix.strip_prefix('@') else {
+        return Vec::new();
+    };
+    let (dir_part, name_part) = match frag.rfind('/') {
+        Some(i) => (&frag[..=i], &frag[i + 1..]),
+        None => ("", frag),
+    };
+    let listing_rel = if dir_part.is_empty() { "." } else { dir_part };
+    let Ok(dir) = kage_tools::path::resolve_under(workdir, std::path::Path::new(listing_rel))
+    else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let token_start = cursor.saturating_sub(prefix.len());
+    let mut dirs: Vec<AutocompleteItem> = Vec::new();
+    let mut files: Vec<AutocompleteItem> = Vec::new();
+    for entry in entries.flatten() {
+        let raw = entry.file_name();
+        let Some(name) = raw.to_str() else {
+            continue;
+        };
+        if name.starts_with('.') && !name_part.starts_with('.') {
+            continue;
+        }
+        if !name.starts_with(name_part) {
+            continue;
+        }
+        let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+        let suffix = if is_dir { "/" } else { "" };
+        let item = AutocompleteItem {
+            label: format!("{name}{suffix}"),
+            detail: Some(if is_dir { "dir" } else { "file" }.to_owned()),
+            value: format!("@{dir_part}{name}{suffix}"),
+            range: Some((token_start, cursor)),
+        };
+        if is_dir {
+            dirs.push(item);
+        } else {
+            files.push(item);
+        }
+    }
+    dirs.sort_by(|a, b| a.label.cmp(&b.label));
+    files.sort_by(|a, b| a.label.cmp(&b.label));
+    dirs.extend(files);
+    dirs.truncate(50);
+    dirs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -358,5 +423,58 @@ mod tests {
         assert_eq!(prefix_before_cursor("", 0), "");
         assert_eq!(prefix_before_cursor("@src/m", 6), "@src/m");
         assert_eq!(prefix_before_cursor("a b", 2), "");
+    }
+
+    #[test]
+    fn file_completions_lists_workdir_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("README.md"), "x").unwrap();
+        std::fs::write(dir.path().join(".hidden"), "x").unwrap();
+        let items = file_completions(dir.path(), "@", 1);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        // Directory sorts first with a trailing slash; dotfile hidden.
+        assert_eq!(labels, vec!["src/", "README.md"]);
+        assert_eq!(items[0].value, "@src/");
+        assert_eq!(items[0].detail.as_deref(), Some("dir"));
+        assert_eq!(items[0].range, Some((0, 1)));
+    }
+
+    #[test]
+    fn file_completions_filters_by_partial_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("README.md"), "x").unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "x").unwrap();
+        let items = file_completions(dir.path(), "@RE", 3);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].value, "@README.md");
+        assert_eq!(items[0].range, Some((0, 3)));
+    }
+
+    #[test]
+    fn file_completions_descends_into_subdir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src").join("main.rs"), "x").unwrap();
+        let items = file_completions(dir.path(), "@src/ma", 7);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].value, "@src/main.rs");
+    }
+
+    #[test]
+    fn file_completions_shows_dotfiles_when_typed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".env"), "x").unwrap();
+        std::fs::write(dir.path().join("plain"), "x").unwrap();
+        let items = file_completions(dir.path(), "@.", 2);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].value, "@.env");
+    }
+
+    #[test]
+    fn file_completions_empty_without_at_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a"), "x").unwrap();
+        assert!(file_completions(dir.path(), "a", 1).is_empty());
     }
 }

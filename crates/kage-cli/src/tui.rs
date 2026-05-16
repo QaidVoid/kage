@@ -241,6 +241,10 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     app.set_plugin_commands(plugin_command_listing);
     app.set_plugin_widgets(plugin_widgets);
     app.set_plugin_autocomplete(plugin_autocomplete);
+    app.set_editor_modeless(matches!(
+        app_config.ui.editor,
+        kage_core::config::EditorMode::Modeless
+    ));
     app.set_workdir(workdir.clone());
     if let Some(status) = plugin_status {
         app.set_plugin_status(status);

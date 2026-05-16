@@ -914,6 +914,12 @@ impl App {
         self.terminal_hooks = Some(hooks);
     }
 
+    /// Apply the configured editor model at startup (and live from
+    /// the settings dialog). `true` selects non-modal editing.
+    pub fn set_editor_modeless(&mut self, on: bool) {
+        self.input.set_modeless(on);
+    }
+
     /// Set the workdir the built-in `@file` autocomplete lists under.
     /// Without this the `@file` fallback is disabled; plugin providers
     /// still function.
@@ -2234,6 +2240,7 @@ impl App {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
+            editor_modeless: matches!(cfg.ui.editor, kage_core::config::EditorMode::Modeless),
         };
         self.settings_overlay = Some(SettingsOverlay::new(init));
     }
@@ -2249,12 +2256,23 @@ impl App {
         let threshold = value
             .get("compaction_threshold")
             .and_then(serde_json::Value::as_f64);
+        // `None` when the key is absent or unrecognized; only an
+        // explicit "modeless"/"vim" changes anything.
+        let editor_modeless = match value.get("editor").and_then(|v| v.as_str()) {
+            Some("modeless") => Some(true),
+            Some("vim") => Some(false),
+            _ => None,
+        };
 
         if !theme.is_empty() && theme != crate::theme::current().name {
             self.apply_theme_by_name(theme);
         }
         if let Some(mouse) = mouse {
             self.pending_mouse_capture = Some(mouse);
+        }
+        if let Some(modeless) = editor_modeless {
+            // Live-apply: the input editor flips immediately.
+            self.input.set_modeless(modeless);
         }
         let current_model = self
             .status_model
@@ -2289,6 +2307,13 @@ impl App {
             {
                 cfg.loop_settings.compaction_threshold = t as f32;
             }
+        }
+        if let Some(modeless) = editor_modeless {
+            cfg.ui.editor = if modeless {
+                kage_core::config::EditorMode::Modeless
+            } else {
+                kage_core::config::EditorMode::Vim
+            };
         }
         match cfg.save(&path) {
             Ok(()) => self.notify("settings saved"),
@@ -3107,6 +3132,23 @@ mod tests {
                 "/s/only.jsonl"
             )))
         );
+    }
+
+    #[test]
+    fn set_editor_modeless_flips_the_input_editor() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        // Default is vim-modal: Esc enters Normal.
+        app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.input().mode(), Mode::Normal);
+
+        app.set_editor_modeless(true);
+        assert!(app.input().is_modeless());
+        // In modeless, Esc cancels the turn instead of switching modes.
+        app.input.force_normal(); // prove set_modeless re-pins insert too
+        app.set_editor_modeless(true);
+        assert_eq!(app.input().mode(), Mode::Insert);
     }
 
     #[test]

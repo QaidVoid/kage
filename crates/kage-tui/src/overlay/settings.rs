@@ -27,7 +27,14 @@ const THRESHOLD_MAX: f32 = 1.0;
 const THRESHOLD_STEP: f32 = 0.05;
 
 /// Section tabs in display order.
-const TABS: &[&str] = &["Theme", "Model", "Mouse", "Autocompaction", "Keybindings"];
+const TABS: &[&str] = &[
+    "Theme",
+    "Model",
+    "Mouse",
+    "Autocompaction",
+    "Keybindings",
+    "Editor",
+];
 
 /// Inputs the host gathers (from the loaded config + live state) to
 /// seed the dialog.
@@ -47,6 +54,8 @@ pub struct SettingsInit {
     pub threshold: f32,
     /// Read-only `(chord, action)` pairs to display.
     pub keybindings: Vec<(String, String)>,
+    /// Whether the prompt input is non-modal (`editor = "modeless"`).
+    pub editor_modeless: bool,
 }
 
 /// The `:settings` overlay.
@@ -60,6 +69,7 @@ pub struct SettingsOverlay {
     mouse: bool,
     threshold: f32,
     keybindings: Vec<(String, String)>,
+    editor_modeless: bool,
     list_scroll: usize,
 }
 
@@ -87,6 +97,7 @@ impl SettingsOverlay {
             mouse: init.mouse,
             threshold: init.threshold.clamp(THRESHOLD_MIN, THRESHOLD_MAX),
             keybindings: init.keybindings,
+            editor_modeless: init.editor_modeless,
             list_scroll: 0,
         }
     }
@@ -127,6 +138,7 @@ impl SettingsOverlay {
             "model": self.selected_model(),
             "mouse": self.mouse,
             "compaction_threshold": threshold,
+            "editor": if self.editor_modeless { "modeless" } else { "vim" },
         })
     }
 
@@ -164,6 +176,7 @@ impl SettingsOverlay {
                     self.list_scroll = step_index(self.list_scroll, n, delta);
                 }
             }
+            5 => self.editor_modeless = !self.editor_modeless,
             _ => {}
         }
     }
@@ -244,7 +257,7 @@ impl OverlayWidget for SettingsOverlay {
         self.render_body(buf, rows[2], ctx);
 
         let help = match self.tab {
-            2 => "Tab section - Space toggle - Enter/Ctrl+S save - Esc cancel",
+            2 | 5 => "Tab section - Space toggle - Enter/Ctrl+S save - Esc cancel",
             3 => "Tab section - Left/Right adjust - Enter/Ctrl+S save - Esc cancel",
             _ => "Tab section - Up/Down move - Enter/Ctrl+S save - Esc cancel",
         };
@@ -299,6 +312,10 @@ impl OverlayWidget for SettingsOverlay {
                 self.mouse = !self.mouse;
                 OverlayAction::Stay
             }
+            KeyCode::Char(' ') if self.tab == 5 => {
+                self.editor_modeless = !self.editor_modeless;
+                OverlayAction::Stay
+            }
             _ => OverlayAction::Stay,
         }
     }
@@ -344,6 +361,27 @@ impl SettingsOverlay {
                 );
             }
             4 => self.render_keybindings(buf, area, ctx),
+            5 => {
+                let mark = if self.editor_modeless { "[x]" } else { "[ ]" };
+                buf.set_line(
+                    area.x,
+                    area.y,
+                    &Line::from(Span::styled(
+                        format!("  {mark} modeless editor (off = vim modal)"),
+                        Style::default().fg(ctx.theme.assistant_fg),
+                    )),
+                    area.width,
+                );
+                buf.set_line(
+                    area.x,
+                    area.y + 1,
+                    &Line::from(Span::styled(
+                        "  non-modal: Emacs keys, Esc cancels the turn. Applies immediately.",
+                        Style::default().fg(ctx.theme.status_dim_fg),
+                    )),
+                    area.width,
+                );
+            }
             _ => {}
         }
     }
@@ -449,6 +487,7 @@ mod tests {
             mouse: true,
             threshold: 0.8,
             keybindings: vec![("ctrl+x".into(), "compact".into())],
+            editor_modeless: false,
         })
     }
 
@@ -493,6 +532,28 @@ mod tests {
         assert!(!s.mouse());
         s.handle_key(key(KeyCode::Up));
         assert!(s.mouse());
+    }
+
+    #[test]
+    fn editor_tab_toggles_and_resolves_modeless() {
+        let mut s = sample();
+        // Editor is the last tab.
+        for _ in 0..(TABS.len() - 1) {
+            s.handle_key(key(KeyCode::Tab));
+        }
+        assert_eq!(s.tab, TABS.len() - 1);
+        // Default sample is vim (false); Space flips to modeless.
+        s.handle_key(key(KeyCode::Char(' ')));
+        match s.handle_key(key(KeyCode::Enter)) {
+            OverlayAction::Resolve(v) => assert_eq!(v["editor"], serde_json::json!("modeless")),
+            other => panic!("expected Resolve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn editor_defaults_to_vim_in_result() {
+        let s = sample();
+        assert_eq!(s.result_json()["editor"], serde_json::json!("vim"));
     }
 
     #[test]

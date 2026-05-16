@@ -113,11 +113,16 @@ fn apply_event(buf: &mut Buffer, event: &LoopEvent) {
             id,
             name,
             input_partial,
+        }
+        | LoopEvent::ToolCallArgsDelta {
+            id,
+            name,
+            input_partial,
         } => {
             let summary = summarize_input(name, input_partial);
             let pretty = serde_json::to_string_pretty(input_partial)
                 .unwrap_or_else(|_| input_partial.to_string());
-            buf.push_tool_call(id.to_string(), name, summary, pretty);
+            buf.upsert_tool_call(id.to_string(), name, summary, pretty);
         }
         LoopEvent::ToolCallEnd { id, output } => {
             buf.push_tool_result(id.to_string(), output.text.clone(), output.is_error);

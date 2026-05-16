@@ -801,6 +801,50 @@ impl Buffer {
         self.push_block_caches();
     }
 
+    /// Insert a tool-call block, or refresh the existing one with the
+    /// same `call_id` in place. Used for progressive argument
+    /// streaming: the placeholder created from the first
+    /// [`kage_core::LoopEvent::ToolCallArgsDelta`] is updated as more
+    /// arguments arrive and finalized by the authoritative
+    /// [`kage_core::LoopEvent::ToolCallStart`]. The fold state and
+    /// start time of an existing block are preserved so the timer and
+    /// the user's expand/collapse choice survive each refresh.
+    pub fn upsert_tool_call(
+        &mut self,
+        call_id: impl Into<String>,
+        name: impl Into<String>,
+        input_summary: impl Into<String>,
+        input_pretty: impl Into<String>,
+    ) {
+        let call_id = call_id.into();
+        let name = name.into();
+        let input_summary = input_summary.into();
+        let input_pretty = input_pretty.into();
+        let mut found = false;
+        for block in &mut self.blocks {
+            if let Block::ToolCall {
+                call_id: cid,
+                name: n,
+                input_summary: s,
+                input_pretty: p,
+                ..
+            } = block
+                && *cid == call_id
+            {
+                n.clone_from(&name);
+                s.clone_from(&input_summary);
+                p.clone_from(&input_pretty);
+                found = true;
+                break;
+            }
+        }
+        if found {
+            self.invalidate_pair_height(&call_id);
+        } else {
+            self.push_tool_call(call_id, name, input_summary, input_pretty);
+        }
+    }
+
     /// Add a tool-result block. Looks up the matching tool call (by id)
     /// and copies its name into the result so the renderer can display
     /// the output under the right header. Records the elapsed time
@@ -1119,6 +1163,45 @@ mod tests {
         assert_eq!(buf.total_lines(), 1, "folded contributes header line only");
         assert!(buf.toggle_fold(0));
         assert!(buf.total_lines() > 1, "unfolded shows body lines");
+    }
+
+    #[test]
+    fn upsert_tool_call_refreshes_in_place_without_duplicates() {
+        let mut buf = Buffer::new();
+        buf.upsert_tool_call("c1", "write", "write(a)", "{\"a\":1}");
+        buf.upsert_tool_call("c1", "write", "write(a,b)", "{\"a\":1,\"b\":2}");
+        let calls: Vec<&Block> = buf
+            .blocks()
+            .iter()
+            .filter(|b| matches!(b, Block::ToolCall { .. }))
+            .collect();
+        assert_eq!(calls.len(), 1, "same call_id must not duplicate the block");
+        match calls[0] {
+            Block::ToolCall {
+                name,
+                input_summary,
+                input_pretty,
+                ..
+            } => {
+                assert_eq!(name, "write");
+                assert_eq!(input_summary, "write(a,b)");
+                assert_eq!(input_pretty, "{\"a\":1,\"b\":2}");
+            }
+            other => panic!("expected ToolCall, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn upsert_tool_call_appends_distinct_ids() {
+        let mut buf = Buffer::new();
+        buf.upsert_tool_call("c1", "bash", "ls", "{}");
+        buf.upsert_tool_call("c2", "read", "read(x)", "{}");
+        let calls = buf
+            .blocks()
+            .iter()
+            .filter(|b| matches!(b, Block::ToolCall { .. }))
+            .count();
+        assert_eq!(calls, 2);
     }
 
     #[test]

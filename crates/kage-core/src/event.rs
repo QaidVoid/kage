@@ -227,6 +227,21 @@ pub enum LoopEvent {
         /// Tool arguments as parsed so far. May be empty.
         input_partial: serde_json::Value,
     },
+    /// Progressive, best-effort tool-call argument update emitted
+    /// while the model is still streaming the call's JSON. Purely a
+    /// UI hint: the authoritative call is delivered exactly once by
+    /// [`LoopEvent::ToolCallStart`] when the arguments are complete,
+    /// so recording and plugin hooks ignore this variant.
+    ToolCallArgsDelta {
+        /// Correlation id matching the eventual
+        /// [`LoopEvent::ToolCallStart`].
+        id: ToolCallId,
+        /// Tool name, known from the call's start.
+        name: String,
+        /// Arguments parsed so far. An empty object until the first
+        /// fragment forms valid JSON.
+        input_partial: serde_json::Value,
+    },
     /// Mid-execution progress update from a running tool.
     ToolUpdate {
         /// Correlation id matching the prior [`LoopEvent::ToolCallStart`].

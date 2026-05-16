@@ -1574,13 +1574,20 @@ mod tests {
             .expect("after fired");
         assert!(before_pos < after_pos, "before must precede after");
 
-        // Event order: MessageStart, TextDelta, ToolCallStart, MessageEnd
-        // (turn 1), ToolCallEnd, MessageStart (turn 2), TextDelta, MessageEnd.
+        // Event order: MessageStart, TextDelta, ToolCallArgsDelta (the
+        // early UI hint at provider tool-call start), ToolCallStart
+        // (authoritative, at provider tool-call end), MessageEnd
+        // (turn 1), ToolCallEnd, TextDelta (turn 2), MessageEnd.
         let event_seq: Vec<&str> = order
             .iter()
             .filter_map(|s| s.strip_prefix("event:"))
             .collect();
-        assert!(event_seq.starts_with(&["message_start", "text_delta", "tool_call_start"]));
+        assert!(event_seq.starts_with(&[
+            "message_start",
+            "text_delta",
+            "tool_call_args_delta",
+            "tool_call_start",
+        ]));
         assert!(event_seq.contains(&"tool_call_end"));
         assert!(event_seq.last() == Some(&"message_end"));
         // The before/after hook must bracket the tool_call_end event.

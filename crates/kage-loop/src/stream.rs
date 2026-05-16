@@ -99,14 +99,37 @@ fn handle_event<F: FnMut(LoopEvent)>(
         }
         ProviderEvent::ToolCallStart { id: call_id, name } => {
             ensure_started(hooks, emit);
+            emit_one(
+                hooks,
+                emit,
+                LoopEvent::ToolCallArgsDelta {
+                    id: call_id.clone(),
+                    name: name.clone(),
+                    input_partial: serde_json::json!({}),
+                },
+            );
             assembler.begin_tool(call_id, name);
         }
-        ProviderEvent::ToolCallArgsDelta { .. } => {
-            // 0.1 ignores partial argument deltas; final input arrives
-            // in `ProviderEvent::ToolCallEnd`. Streaming-arg renderers
-            // can tap this provider event directly in a later phase.
+        ProviderEvent::ToolCallArgsDelta {
+            id: call_id,
+            partial,
+        } => {
+            let acc = assembler.partial_args.entry(call_id.clone()).or_default();
+            acc.push_str(&partial);
+            let parsed = serde_json::from_str::<serde_json::Value>(acc.as_str()).ok();
+            if let Some(value) = parsed
+                && let Some(name) = assembler.pending_tools.get(&call_id)
+            {
+                let ev = LoopEvent::ToolCallArgsDelta {
+                    id: call_id.clone(),
+                    name: name.clone(),
+                    input_partial: value,
+                };
+                emit_one(hooks, emit, ev);
+            }
         }
         ProviderEvent::ToolCallEnd { id: call_id, input } => {
+            assembler.partial_args.remove(&call_id);
             let (call_id, name, input) = assembler.complete_tool(call_id, input)?;
             emit_one(
                 hooks,
@@ -138,6 +161,7 @@ struct Assembler {
     parent: Option<MessageId>,
     blocks: Vec<Content>,
     pending_tools: std::collections::HashMap<ToolCallId, String>,
+    partial_args: std::collections::HashMap<ToolCallId, String>,
     tool_calls: Vec<PendingToolCall>,
 }
 
@@ -148,6 +172,7 @@ impl Assembler {
             parent,
             blocks: Vec::new(),
             pending_tools: std::collections::HashMap::new(),
+            partial_args: std::collections::HashMap::new(),
             tool_calls: Vec::new(),
         }
     }
@@ -387,6 +412,83 @@ mod tests {
             .find(|e| matches!(e, LoopEvent::ToolCallStart { .. }))
             .unwrap();
         match start {
+            LoopEvent::ToolCallStart {
+                name,
+                input_partial,
+                ..
+            } => {
+                assert_eq!(name, "ls");
+                assert_eq!(input_partial["path"], ".");
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn tool_call_streams_partial_args_before_final_start() {
+        let id = ToolCallId::new("call_1");
+        let (_, emitted) = run_collect_with_emits(vec![
+            Ok(ProviderEvent::ToolCallStart {
+                id: id.clone(),
+                name: "ls".into(),
+            }),
+            Ok(ProviderEvent::ToolCallArgsDelta {
+                id: id.clone(),
+                partial: "{\"path\":".into(),
+            }),
+            Ok(ProviderEvent::ToolCallArgsDelta {
+                id: id.clone(),
+                partial: "\".\"}".into(),
+            }),
+            Ok(ProviderEvent::ToolCallEnd {
+                id: id.clone(),
+                input: serde_json::json!({"path": "."}),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::ToolUse,
+                usage: TokenUsage::default(),
+            }),
+        ]);
+
+        let first = emitted
+            .iter()
+            .find(|e| matches!(e, LoopEvent::ToolCallArgsDelta { .. }))
+            .expect("an args-delta should fire at provider tool-call start");
+        match first {
+            LoopEvent::ToolCallArgsDelta {
+                name,
+                input_partial,
+                ..
+            } => {
+                assert_eq!(name, "ls");
+                assert_eq!(*input_partial, serde_json::json!({}));
+            }
+            _ => unreachable!(),
+        }
+
+        let populated = emitted
+            .iter()
+            .find_map(|e| match e {
+                LoopEvent::ToolCallArgsDelta { input_partial, .. }
+                    if input_partial.get("path").is_some() =>
+                {
+                    Some(input_partial.clone())
+                }
+                _ => None,
+            })
+            .expect("a populated args-delta should fire once fragments parse");
+        assert_eq!(populated["path"], ".");
+
+        let starts: Vec<&LoopEvent> = emitted
+            .iter()
+            .filter(|e| matches!(e, LoopEvent::ToolCallStart { .. }))
+            .collect();
+        assert_eq!(
+            starts.len(),
+            1,
+            "the authoritative tool-call start must fire exactly once"
+        );
+        match starts[0] {
             LoopEvent::ToolCallStart {
                 name,
                 input_partial,

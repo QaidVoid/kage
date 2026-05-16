@@ -84,6 +84,11 @@ fn all_loop_events_roundtrip() {
             name: "n".into(),
             input_partial: serde_json::Value::Null,
         },
+        LoopEvent::ToolCallArgsDelta {
+            id: cid.clone(),
+            name: "n".into(),
+            input_partial: serde_json::json!({"path": "."}),
+        },
         LoopEvent::ToolCallEnd {
             id: cid.clone(),
             output: ToolOutput {

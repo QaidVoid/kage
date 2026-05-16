@@ -7,7 +7,8 @@
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 
 use kage_core::config::Config;
 use kage_plugin::{HostLog, LogLevel, PluginRuntime};
@@ -84,7 +85,117 @@ fn collect_checks() -> Vec<Check> {
         check_providers(),
         check_plugins(&workdir),
         check_sandbox(&workdir),
+        check_mcp(&workdir),
     ]
+}
+
+/// Per-server bound for the spawn + `initialize` + `tools/list`
+/// probe. A server that never answers `initialize` is exactly what
+/// this check should flag, so we cap the wait rather than block
+/// `doctor` forever.
+const MCP_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Spawn each enabled `[mcp.servers.*]`, handshake, and list its
+/// tools, reporting one aggregate row. A server that fails to spawn,
+/// errors during discovery, or does not answer within
+/// [`MCP_PROBE_TIMEOUT`] makes the check FAIL with the offender
+/// named. Plugin-declared servers are not probed here: `doctor` has
+/// no plugin runtime loaded and only validates static config.
+fn check_mcp(workdir: &Path) -> Check {
+    let servers = match Config::load_layered(workdir) {
+        Ok(c) => c.mcp.servers,
+        Err(err) => {
+            return Check {
+                name: "mcp",
+                status: Status::Warn,
+                body: format!("config unreadable: {err} (skipped)"),
+                hint: None,
+            };
+        }
+    };
+    if servers.is_empty() {
+        return Check {
+            name: "mcp",
+            status: Status::Ok,
+            body: "no mcp servers configured (skipped)".into(),
+            hint: None,
+        };
+    }
+
+    let mut ok: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
+    for (name, spec) in servers {
+        if spec.disabled {
+            skipped.push(name);
+            continue;
+        }
+        match probe_mcp_server(&name, &spec) {
+            Ok(count) => ok.push(format!("{name} ({count} tools)")),
+            Err(err) => failures.push(format!("{name}: {err}")),
+        }
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    if !ok.is_empty() {
+        parts.push(format!("ok: {}", ok.join(", ")));
+    }
+    if !skipped.is_empty() {
+        parts.push(format!("disabled: {}", skipped.join(", ")));
+    }
+    if !failures.is_empty() {
+        parts.push(format!("failed: {}", failures.join("; ")));
+    }
+    let body = parts.join(" | ");
+    if failures.is_empty() {
+        Check {
+            name: "mcp",
+            status: Status::Ok,
+            body,
+            hint: None,
+        }
+    } else {
+        Check {
+            name: "mcp",
+            status: Status::Fail,
+            body,
+            hint: Some(
+                "check the server `command`/`args`; run it by hand to see its stderr".into(),
+            ),
+        }
+    }
+}
+
+/// Spawn one server in a worker thread and wait at most
+/// [`MCP_PROBE_TIMEOUT`] for the handshake + tool list. The worker
+/// owns the [`kage_mcp::McpServerHandle`], so it kills the child when
+/// it finishes; a pathologically hung server (never answers
+/// `initialize`) leaks only this diagnostic thread, never affecting a
+/// real `kage` run.
+fn probe_mcp_server(name: &str, spec: &kage_core::config::McpServer) -> Result<usize, String> {
+    let (tx, rx) = mpsc::channel();
+    let server_name = name.to_owned();
+    let spec = spec.clone();
+    std::thread::spawn(move || {
+        let result = kage_mcp::McpServerHandle::spawn(&server_name, &spec)
+            .map_err(|e| e.to_string())
+            .and_then(|handle| {
+                handle
+                    .connection()
+                    .list_tools()
+                    .map(|tools| tools.len())
+                    .map_err(|e| e.to_string())
+            });
+        let _ = tx.send(result);
+    });
+    match rx.recv_timeout(MCP_PROBE_TIMEOUT) {
+        Ok(outcome) => outcome,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "no response within {}s",
+            MCP_PROBE_TIMEOUT.as_secs()
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err("probe thread died".into()),
+    }
 }
 
 fn check_config(workdir: &Path) -> Check {
@@ -345,6 +456,43 @@ mod tests {
         .unwrap();
         let check = run_check_config(dir.path());
         assert_eq!(check.status, Status::Fail);
+        assert!(check.hint.is_some());
+    }
+
+    #[test]
+    fn mcp_check_ok_when_no_servers_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = check_mcp(dir.path());
+        assert_eq!(check.status, Status::Ok);
+        assert!(check.body.contains("no mcp servers"));
+    }
+
+    #[test]
+    fn mcp_check_lists_disabled_without_spawning() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".kage")).unwrap();
+        fs::write(
+            dir.path().join(".kage").join("config.toml"),
+            "[mcp.servers.off]\ncommand = \"no-such-binary-xyz\"\ndisabled = true\n",
+        )
+        .unwrap();
+        let check = check_mcp(dir.path());
+        assert_eq!(check.status, Status::Ok, "{}", check.body);
+        assert!(check.body.contains("disabled: off"), "{}", check.body);
+    }
+
+    #[test]
+    fn mcp_check_fails_on_unspawnable_server() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".kage")).unwrap();
+        fs::write(
+            dir.path().join(".kage").join("config.toml"),
+            "[mcp.servers.broken]\ncommand = \"definitely-not-a-real-binary-xyz\"\n",
+        )
+        .unwrap();
+        let check = check_mcp(dir.path());
+        assert_eq!(check.status, Status::Fail, "{}", check.body);
+        assert!(check.body.contains("broken"), "{}", check.body);
         assert!(check.hint.is_some());
     }
 

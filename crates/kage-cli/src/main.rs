@@ -17,6 +17,7 @@ mod rpc;
 mod runtime_env;
 mod session;
 mod state;
+mod title;
 mod tui;
 mod usage_hooks;
 

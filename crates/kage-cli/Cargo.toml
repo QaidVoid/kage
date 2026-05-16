@@ -41,6 +41,7 @@ ulid.workspace = true
 [dev-dependencies]
 kage-core.workspace = true
 kage-mcp = { path = "../kage-mcp" }
+kage-provider = { workspace = true, features = ["testing"] }
 kage-tools.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

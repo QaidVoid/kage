@@ -450,6 +450,11 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
             loop_cfg,
         } = cfg;
 
+        // A generated title is written at most once per session per
+        // process, only for a session that began this run (no prior
+        // assistant turn). Resumed sessions keep their stored title.
+        let mut title_attempted = false;
+
         for req in rx {
             drain_mcp_updates(
                 &mut mcp_manager,
@@ -493,6 +498,9 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                     }
                     cx_guard.max_output_tokens =
                         crate::runtime_env::max_output_tokens_for(&qualified);
+                    let had_prior_assistant =
+                        cx_guard.history.iter().any(|m| m.role == Role::Assistant);
+                    let title_user_text = text.clone();
                     let parent = cx_guard.history.last().map(|m| m.id);
                     let user_msg = Message::new(Role::User, vec![Content::Text { text }], parent);
                     cx_guard.history.push(user_msg.clone());
@@ -526,6 +534,32 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         if let Ok(mut buf) = buffer.lock() {
                             buf.push_custom("kage:error", format!("state: {err}"), false);
                         }
+                    }
+                    if ok
+                        && !title_attempted
+                        && !had_prior_assistant
+                        && let Some(sp) = session_path.as_ref()
+                    {
+                        title_attempted = true;
+                        let assistant_text = cx_guard
+                            .history
+                            .iter()
+                            .rev()
+                            .find(|m| m.role == Role::Assistant)
+                            .and_then(first_text_of)
+                            .unwrap_or_default();
+                        let title_model = cx_guard.model.clone();
+                        let path = sp.lock().expect("session path mutex poisoned").clone();
+                        drop(cx_guard);
+                        write_session_title(
+                            provider.as_ref(),
+                            &title_model,
+                            &path,
+                            &title_user_text,
+                            &assistant_text,
+                            &cancel,
+                            &buffer,
+                        );
                     }
                 }
                 RunRequest::ResumeSession(path) => {
@@ -794,6 +828,50 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
             }
         }
     })
+}
+
+/// First text block of a message, if any. Used to pull the first
+/// assistant reply out of history for the title prompt.
+fn first_text_of(m: &Message) -> Option<String> {
+    m.content.iter().find_map(|c| match c {
+        Content::Text { text } => Some(text.clone()),
+        _ => None,
+    })
+}
+
+/// Generate a session title from the first exchange and append it as
+/// a [`kage_session::SessionEntry::Title`]. A file error is surfaced
+/// in the buffer, never swallowed; a model failure already degraded
+/// to the heuristic inside [`crate::title::generate`].
+fn write_session_title(
+    provider: &dyn kage_provider::Provider,
+    model: &str,
+    path: &std::path::Path,
+    user_text: &str,
+    assistant_text: &str,
+    cancel: &CancelFlag,
+    buffer: &SharedBuffer,
+) {
+    let title = crate::title::generate(provider, model, user_text, assistant_text, cancel);
+    let entry = kage_session::SessionEntry::Title(kage_session::SessionTitle {
+        id: kage_session::EntryId::new(),
+        ts: chrono::Utc::now(),
+        title,
+    });
+    match SessionWriter::open(path) {
+        Ok(mut w) => {
+            if let Err(e) = w.append(&entry)
+                && let Ok(mut buf) = buffer.lock()
+            {
+                buf.push_custom("kage:error", format!("session title: {e}"), false);
+            }
+        }
+        Err(e) => {
+            if let Ok(mut buf) = buffer.lock() {
+                buf.push_custom("kage:error", format!("session title: {e}"), false);
+            }
+        }
+    }
 }
 
 /// Open or create the session file for the duration of one turn.

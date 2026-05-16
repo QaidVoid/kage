@@ -13,6 +13,7 @@
 //! a sub-rect over the conversation buffer using ratatui widgets, and
 //! consume key events through the same path the rest of the App uses.
 
+pub mod completion;
 pub mod confirm;
 pub mod editor;
 pub mod input;
@@ -21,6 +22,7 @@ pub mod registry;
 pub mod slash;
 pub mod widget;
 
+pub use completion::{CompletionAction, InputCompletion, prefix_before_cursor};
 pub use confirm::{Choice, ConfirmOverlay};
 pub use editor::EditorOverlay;
 pub use input::InputOverlay;

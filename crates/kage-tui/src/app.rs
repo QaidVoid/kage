@@ -28,7 +28,10 @@ use crate::error::TuiError;
 use crate::events::SharedBuffer;
 use crate::input::{InputAction, InputState, Mode, Pane};
 use crate::layout::{input_height_for, split};
-use crate::overlay::{OverlayAction, OverlayPicker, SlashContext, SlashPalette};
+use crate::overlay::{
+    CompletionAction, InputCompletion, OverlayAction, OverlayPicker, SlashContext, SlashPalette,
+    prefix_before_cursor,
+};
 use crate::picker::PickItem;
 use crate::terminal::Tui;
 use crate::view;
@@ -496,6 +499,14 @@ pub struct App {
     /// Header-chrome slot populated by `kage.ui.set_header`. Snapshotted
     /// per redraw; when a renderer is present its styled lines replace
     /// the built-in status bar.
+    /// Autocomplete providers from `kage.add_autocomplete_provider`,
+    /// in registration order. Consulted in reverse (last registered
+    /// wins) on each prompt-input change; the first provider that
+    /// returns items populates [`Self::input_completion`].
+    autocomplete_providers: Vec<Arc<kage_plugin::LuaAutocompleteProvider>>,
+    /// Open input autocomplete popup, if the active provider returned
+    /// candidates for the current prefix. `None` when closed.
+    input_completion: Option<InputCompletion>,
     plugin_header: Option<kage_plugin::SharedChrome>,
     /// Footer-chrome slot populated by `kage.ui.set_footer`. Replaces
     /// the built-in modeline when a renderer is present.
@@ -605,6 +616,8 @@ impl App {
             plugin_fork_request: None,
             plugin_theme_state: None,
             plugin_theme_request: None,
+            autocomplete_providers: Vec::new(),
+            input_completion: None,
             plugin_header: None,
             plugin_footer: None,
             plugin_header_lines: Vec::new(),
@@ -839,6 +852,18 @@ impl App {
     ) {
         self.plugin_header = Some(header);
         self.plugin_footer = Some(footer);
+    }
+
+    /// Wire the autocomplete provider stack from
+    /// `kage.add_autocomplete_provider`. Without this the Lua calls
+    /// still register providers in the runtime but the input never
+    /// queries them. Providers run synchronously inside the plugin
+    /// runtime's Lua mutex on each prompt-input change.
+    pub fn set_plugin_autocomplete(
+        &mut self,
+        providers: Vec<Arc<kage_plugin::LuaAutocompleteProvider>>,
+    ) {
+        self.autocomplete_providers = providers;
     }
 
     /// Register the plugin keybindings the App should dispatch.
@@ -1275,9 +1300,22 @@ impl App {
         } else {
             0
         };
+        // The autocomplete popup yields to every modal layer; it only
+        // paints during plain input editing.
+        let show_completion = self.input_completion.is_some()
+            && self.slash_palette.is_none()
+            && self.cmdline.is_none()
+            && self.search_line.is_none()
+            && self.picker.is_none()
+            && self.plugin_overlay.is_none();
         let picker = self.picker.as_mut();
         let plugin_overlay = self.plugin_overlay.as_mut();
         let slash_palette = self.slash_palette.as_ref();
+        let input_completion = if show_completion {
+            self.input_completion.as_ref()
+        } else {
+            None
+        };
         let input = &self.input;
         tui.terminal().draw(|frame| {
             // Compute the input region size from the *visual* row
@@ -1309,6 +1347,9 @@ impl App {
             if let Some(palette) = slash_palette {
                 palette.render(frame, regions);
                 palette.place_cursor(frame, regions);
+            }
+            if let Some(completion) = input_completion {
+                completion.render(frame, regions);
             }
             if let Some(overlay) = plugin_overlay {
                 let modal = overlay.measure(frame.area());
@@ -1372,13 +1413,80 @@ impl App {
             return None;
         }
 
+        // The autocomplete popup is non-modal: it only consumes its
+        // own navigation/accept/dismiss keys. Anything else falls
+        // through to normal editing and then re-queries the stack.
+        if self.input_completion.is_some() {
+            let action = self
+                .input_completion
+                .as_mut()
+                .expect("input completion present")
+                .handle_key(key);
+            match action {
+                CompletionAction::Navigated => return None,
+                CompletionAction::Dismissed => {
+                    self.input_completion = None;
+                    return None;
+                }
+                CompletionAction::Accepted(item) => {
+                    self.accept_completion(&item);
+                    return None;
+                }
+                CompletionAction::PassThrough => {}
+            }
+        }
+
         let actions = self.input.handle_key(key);
         for action in actions {
             if let Some(exit) = self.apply(action) {
                 return Some(exit);
             }
         }
+        self.refresh_input_completion();
         None
+    }
+
+    /// Re-query the autocomplete provider stack from the current
+    /// prompt text and rebuild the popup. A no-op (and closes any open
+    /// popup) unless plugins registered providers and the user is
+    /// actively typing in the input pane.
+    fn refresh_input_completion(&mut self) {
+        if self.autocomplete_providers.is_empty()
+            || self.input.focused_pane() != Pane::Input
+            || self.input.mode() != Mode::Insert
+        {
+            self.input_completion = None;
+            return;
+        }
+        let text = self.input.text();
+        let cursor = self.input.cursor();
+        let prefix = prefix_before_cursor(text, cursor);
+        let mut items = Vec::new();
+        for provider in self.autocomplete_providers.iter().rev() {
+            let got = provider.complete(prefix, text, cursor);
+            if !got.is_empty() {
+                items = got;
+                break;
+            }
+        }
+        self.input_completion = InputCompletion::new(items);
+    }
+
+    /// Splice an accepted candidate into the input. Uses the item's
+    /// explicit `range` when present, otherwise replaces the prefix
+    /// span the host computed. Re-queries afterward so a provider can
+    /// offer a follow-up (e.g. path segments).
+    fn accept_completion(&mut self, item: &kage_plugin::AutocompleteItem) {
+        let cursor = self.input.cursor();
+        let (start, end) = if let Some((from, to)) = item.range {
+            (from, to)
+        } else {
+            let plen = prefix_before_cursor(self.input.text(), cursor).len();
+            (cursor.saturating_sub(plen), cursor)
+        };
+        self.input.splice(start, end, &item.value);
+        self.input_completion = None;
+        self.refresh_input_completion();
     }
 
     fn dispatch_search_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> Option<AppExit> {
@@ -2266,7 +2374,18 @@ impl App {
         };
         let screen_selection = self.screen_selection;
         let mut captured_rows = std::mem::take(&mut self.captured_rows);
+        let show_completion = self.input_completion.is_some()
+            && self.slash_palette.is_none()
+            && self.cmdline.is_none()
+            && self.search_line.is_none()
+            && self.picker.is_none()
+            && self.plugin_overlay.is_none();
         let picker = self.picker.as_mut();
+        let input_completion = if show_completion {
+            self.input_completion.as_ref()
+        } else {
+            None
+        };
         let input = &self.input;
         terminal
             .draw(|frame| {
@@ -2291,6 +2410,9 @@ impl App {
                 );
                 if let Some(picker) = picker {
                     picker.render(frame, frame.area());
+                }
+                if let Some(completion) = input_completion {
+                    completion.render(frame, regions);
                 }
             })
             .map_err(|err| TuiError::Io(std::io::Error::other(err.to_string())))?;
@@ -2470,6 +2592,69 @@ mod tests {
         let rows = snapshot_rows(&terminal);
         let bottom = rows.last().unwrap();
         assert!(bottom.contains("PLUGINFOOTER"), "bottom row: {bottom:?}");
+    }
+
+    #[test]
+    fn autocomplete_popup_opens_and_tab_accepts() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let rt = kage_plugin::PluginRuntime::new().unwrap();
+        rt.eval(
+            r"
+            kage.add_autocomplete_provider({
+                name = 'demo',
+                complete = function(prefix, _ctx)
+                    if prefix == '' or prefix:sub(-3) == 'bar' then return {} end
+                    return { { value = prefix .. 'bar' } }
+                end,
+            })
+            ",
+        )
+        .unwrap();
+        app.set_plugin_autocomplete(rt.registered_autocomplete_providers());
+        app.handle_key(key('f'));
+        app.handle_key(key('o'));
+        assert!(app.input_completion.is_some(), "popup should open");
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.input().text(), "fobar");
+        assert!(app.input_completion.is_none(), "popup closes after accept");
+    }
+
+    #[test]
+    fn autocomplete_respects_explicit_range() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let rt = kage_plugin::PluginRuntime::new().unwrap();
+        rt.eval(
+            r"
+            kage.add_autocomplete_provider({
+                name = 'at',
+                complete = function(prefix, ctx)
+                    if prefix:sub(1, 1) ~= '@' then return {} end
+                    return { { value = '@README.md', range = { 0, ctx.cursor } } }
+                end,
+            })
+            ",
+        )
+        .unwrap();
+        app.set_plugin_autocomplete(rt.registered_autocomplete_providers());
+        app.handle_key(key('@'));
+        assert!(app.input_completion.is_some());
+        app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.input().text(), "@README.md");
+    }
+
+    #[test]
+    fn autocomplete_inert_without_providers() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        app.handle_key(key('h'));
+        app.handle_key(key('i'));
+        assert!(app.input_completion.is_none());
+        assert_eq!(app.input().text(), "hi");
     }
 
     fn snapshot_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {

@@ -374,6 +374,27 @@ impl InputState {
         }
     }
 
+    /// Replace the byte range `start..end` of the prompt with
+    /// `replacement` and move the cursor to just past the inserted
+    /// text. Used by the autocomplete popup to accept a candidate.
+    ///
+    /// Returns `false` without mutating when the range is out of
+    /// bounds, inverted, or not on `char` boundaries, so a bad range
+    /// from a plugin provider degrades to a no-op rather than a panic.
+    /// A successful splice records one undo snapshot.
+    pub fn splice(&mut self, start: usize, end: usize, replacement: &str) -> bool {
+        if start > end || end > self.text.len() {
+            return false;
+        }
+        if !self.text.is_char_boundary(start) || !self.text.is_char_boundary(end) {
+            return false;
+        }
+        self.snapshot_for_undo();
+        self.text.replace_range(start..end, replacement);
+        self.cursor = start + replacement.len();
+        true
+    }
+
     /// Read-only slice of history entries, oldest first.
     #[must_use]
     pub fn history(&self) -> &[String] {

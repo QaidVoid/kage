@@ -17,6 +17,7 @@ pub mod http;
 pub mod keybindings;
 pub mod lifecycle;
 pub mod loader;
+pub mod mcp;
 pub mod messages;
 pub mod providers;
 pub mod runtime;

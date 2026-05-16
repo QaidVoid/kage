@@ -43,6 +43,7 @@ use crate::keybindings::{self, RegisteredKeybindings, registered_keybindings};
 use crate::lifecycle::{
     self, SharedCompactRequest, SharedUsage, shared_compact_request, shared_usage,
 };
+use crate::mcp::{self, SharedMcpServers, shared_mcp_servers};
 use crate::messages::{self, PendingMessage, SharedPendingMessages, shared_pending_messages};
 use crate::providers::{self, LuaProvider, RegisteredProviders, registered_providers};
 use crate::sessions::{
@@ -75,6 +76,7 @@ pub struct PluginRuntime {
     widgets: RegisteredWidgets,
     status: SharedStatus,
     acp_agents: SharedAcpAgents,
+    mcp_servers: SharedMcpServers,
     usage: SharedUsage,
     compact_request: SharedCompactRequest,
     session_list: SharedSessionList,
@@ -261,6 +263,19 @@ impl PluginRuntime {
         self.acp_agents
             .lock()
             .expect("plugin acp agents mutex poisoned")
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Snapshot the MCP servers plugins declared via
+    /// `kage.mcp.add_server`. The host merges these with
+    /// `[mcp.servers.*]` from config.
+    #[must_use]
+    pub fn registered_mcp_servers(&self) -> Vec<(String, kage_core::config::McpServer)> {
+        self.mcp_servers
+            .lock()
+            .expect("plugin mcp servers mutex poisoned")
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
@@ -710,6 +725,7 @@ impl PluginRuntimeBuilder {
         let widget_registry = registered_widgets();
         let status_map = shared_status();
         let acp_agents = shared_acp_agents();
+        let mcp_servers = shared_mcp_servers();
         let usage_snapshot = shared_usage();
         let compact_slot = shared_compact_request();
         let session_list_slot = shared_session_list();
@@ -766,6 +782,7 @@ impl PluginRuntimeBuilder {
             )?;
             status::install_status(&lua_guard, Arc::clone(&status_map))?;
             acp::install_acp(&lua_guard, Arc::clone(&acp_agents))?;
+            mcp::install_mcp(&lua_guard, Arc::clone(&mcp_servers))?;
             lifecycle::install_lifecycle(
                 &lua_guard,
                 Arc::clone(&usage_snapshot),
@@ -813,6 +830,7 @@ impl PluginRuntimeBuilder {
             widgets: widget_registry,
             status: status_map,
             acp_agents,
+            mcp_servers,
             usage: usage_snapshot,
             compact_request: compact_slot,
             session_list: session_list_slot,

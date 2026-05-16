@@ -34,18 +34,37 @@ use kage_provider::{
 
 use crate::acp::{
     ClientCapabilities, ContentBlock, Implementation, InitializeRequest, NewSessionRequest,
-    NewSessionResponse, PROTOCOL_VERSION, PermissionOptionKind, PromptRequest,
-    RequestPermissionRequest, SelectedOption, SessionNotification, SessionUpdate,
+    NewSessionResponse, PROTOCOL_VERSION, PermissionOption, PermissionOptionKind,
+    PermissionOutcome, PromptRequest, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedOption, SessionNotification, SessionUpdate,
 };
+use crate::agent::PermissionDecision;
 use crate::jsonrpc::{self, Inbound, Peer, RpcError};
+
+/// Decides whether an upstream agent's tool call is permitted. Called
+/// on the client's drain thread (`Send + Sync`); must not block on
+/// the agent loop. The default (no resolver) denies - kage never
+/// auto-approves an upstream agent's tools.
+pub type PermissionResolver =
+    Arc<dyn Fn(&RequestPermissionRequest) -> PermissionDecision + Send + Sync>;
 
 /// A [`Provider`] that multiplexes over user-configured external ACP
 /// agents. The model id selects the agent: `acp:<name>` resolves to
 /// `req.model == "<name>"`, looked up in the configured agents map.
-#[derive(Debug)]
 pub struct AcpProvider {
     agents: std::collections::BTreeMap<String, kage_core::config::AcpAgent>,
     metadata: ProviderMetadata,
+    permission: Option<PermissionResolver>,
+}
+
+impl std::fmt::Debug for AcpProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AcpProvider")
+            .field("agents", &self.agents)
+            .field("metadata", &self.metadata)
+            .field("permission", &self.permission.as_ref().map(|_| "set"))
+            .finish()
+    }
 }
 
 impl AcpProvider {
@@ -61,7 +80,16 @@ impl AcpProvider {
                 supports_thinking: true,
                 supports_tool_use: false,
             },
+            permission: None,
         }
+    }
+
+    /// Set the resolver consulted when an upstream agent asks to run
+    /// a tool. Without one, every upstream permission ask is denied.
+    #[must_use]
+    pub fn with_permission(mut self, resolver: PermissionResolver) -> Self {
+        self.permission = Some(resolver);
+        self
     }
 }
 
@@ -108,18 +136,30 @@ fn translate(update: &SessionUpdate) -> Option<ProviderEvent> {
     })
 }
 
-/// Pick a reject option's id, so an upstream permission prompt is
-/// always denied (never auto-approved).
-fn reject_option_id(req: &RequestPermissionRequest) -> Option<String> {
-    req.options
-        .iter()
-        .find(|o| {
-            matches!(
-                o.kind,
-                PermissionOptionKind::RejectOnce | PermissionOptionKind::RejectAlways
-            )
-        })
-        .map(|o| o.option_id.clone())
+fn option_id(req: &RequestPermissionRequest, allow: bool) -> Option<String> {
+    let want = |o: &&PermissionOption| {
+        let is_allow = matches!(
+            o.kind,
+            PermissionOptionKind::AllowOnce | PermissionOptionKind::AllowAlways
+        );
+        is_allow == allow
+    };
+    req.options.iter().find(want).map(|o| o.option_id.clone())
+}
+
+/// Resolve an upstream `session/request_permission` into the JSON-RPC
+/// result value. Without a resolver, or on `Deny`, a reject option is
+/// selected (kage never auto-approves an upstream agent's tools).
+fn permission_result(
+    resolver: Option<&PermissionResolver>,
+    req: &RequestPermissionRequest,
+) -> serde_json::Value {
+    let allow = matches!(resolver.map(|r| r(req)), Some(PermissionDecision::Allow));
+    let outcome = match option_id(req, allow) {
+        Some(option_id) => PermissionOutcome::Selected(SelectedOption { option_id }),
+        None => PermissionOutcome::Cancelled,
+    };
+    serde_json::to_value(RequestPermissionResponse { outcome }).unwrap_or(serde_json::Value::Null)
 }
 
 /// The translating iterator returned by [`AcpProvider::stream`].
@@ -178,6 +218,7 @@ fn spawn_drain(
     shutdown: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
     terminal: Terminal,
+    resolver: Option<PermissionResolver>,
 ) {
     thread::spawn(move || {
         loop {
@@ -217,21 +258,10 @@ fn spawn_drain(
                 Inbound::Notification { .. } => {}
                 Inbound::Request { id, method, params } => {
                     let reply = if method == "session/request_permission" {
-                        let outcome = serde_json::from_value::<RequestPermissionRequest>(params)
-                            .ok()
-                            .and_then(|r| reject_option_id(&r))
-                            .map_or_else(
-                                || serde_json::json!({"outcome": {"outcome": "cancelled"}}),
-                                |id| {
-                                    serde_json::json!({"outcome": serde_json::to_value(
-                                        crate::acp::PermissionOutcome::Selected(
-                                            SelectedOption { option_id: id },
-                                        )
-                                    )
-                                    .unwrap_or(serde_json::Value::Null)})
-                                },
-                            );
-                        Ok(outcome)
+                        match serde_json::from_value::<RequestPermissionRequest>(params) {
+                            Ok(req) => Ok(permission_result(resolver.as_ref(), &req)),
+                            Err(e) => Err(RpcError::new(-32602, format!("bad params: {e}"))),
+                        }
                     } else {
                         Err(RpcError::method_not_found(&method))
                     };
@@ -279,6 +309,7 @@ fn run_turn<R, W>(
     prompt: String,
     cwd: String,
     cancel: &CancelFlag,
+    resolver: Option<PermissionResolver>,
 ) -> Result<AcpClientStream, ProviderError>
 where
     R: BufRead + Send + 'static,
@@ -333,6 +364,7 @@ where
         Arc::clone(&shutdown),
         Arc::clone(&done),
         Arc::clone(&terminal),
+        resolver,
     );
     spawn_prompt(
         peer,
@@ -387,11 +419,18 @@ impl Provider for AcpProvider {
             .map(|p| p.display().to_string())
             .unwrap_or_default();
 
-        let mut stream =
-            run_turn(BufReader::new(stdout), stdin, prompt, cwd, cancel).inspect_err(|_| {
-                let _ = child.kill();
-                let _ = child.wait();
-            })?;
+        let mut stream = run_turn(
+            BufReader::new(stdout),
+            stdin,
+            prompt,
+            cwd,
+            cancel,
+            self.permission.clone(),
+        )
+        .inspect_err(|_| {
+            let _ = child.kill();
+            let _ = child.wait();
+        })?;
         stream.child = Some(child);
         Ok(Box::new(stream))
     }
@@ -461,6 +500,7 @@ mod tests {
             "hi".to_owned(),
             "/tmp".to_owned(),
             &cancel,
+            None,
         )
         .expect("turn starts");
 
@@ -539,13 +579,42 @@ mod tests {
             "do it".to_owned(),
             "/tmp".to_owned(),
             &cancel,
+            None,
         )
         .expect("turn starts");
 
         let events: Vec<_> = stream.take(2).map(Result::unwrap).collect();
         assert!(
             matches!(&events[0], ProviderEvent::TextDelta { delta } if delta == "denied"),
-            "kage's ACP client must reject the upstream permission ask"
+            "no resolver must deny the upstream permission ask"
+        );
+        assert!(matches!(events[1], ProviderEvent::MessageEnd { .. }));
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn resolver_allow_lets_the_upstream_proceed() {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let server =
+            thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, PermissionAgent));
+
+        let resolver: PermissionResolver = Arc::new(|_req| PermissionDecision::Allow);
+        let cancel = CancelFlag::new();
+        let stream = run_turn(
+            BufReader::new(cli_r),
+            cli_w,
+            "do it".to_owned(),
+            "/tmp".to_owned(),
+            &cancel,
+            Some(resolver),
+        )
+        .expect("turn starts");
+
+        let events: Vec<_> = stream.take(2).map(Result::unwrap).collect();
+        assert!(
+            matches!(&events[0], ProviderEvent::TextDelta { delta } if delta == "allowed"),
+            "an Allow resolver must let the upstream tool run"
         );
         assert!(matches!(events[1], ProviderEvent::MessageEnd { .. }));
         server.join().unwrap().unwrap();

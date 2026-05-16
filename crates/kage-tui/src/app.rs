@@ -1338,7 +1338,7 @@ impl App {
                                 return Ok(exit);
                             }
                         }
-                        Event::Paste(text) => self.input.paste(&text),
+                        Event::Paste(text) => self.handle_paste(&text),
                         Event::Mouse(mouse) => match mouse.kind {
                             MouseEventKind::ScrollUp => self.scroll_by(-MOUSE_SCROLL_LINES),
                             MouseEventKind::ScrollDown => self.scroll_by(MOUSE_SCROLL_LINES),
@@ -2412,6 +2412,26 @@ impl App {
         if announce {
             self.notify(format!("theme: {name}"));
         }
+    }
+
+    /// Handle a bracketed paste. If the pasted text is just a path to
+    /// an existing image (a drag-drop, or a copied file), attach it
+    /// instead of inserting the raw path as prompt text; otherwise
+    /// paste verbatim. A path that looks like an image but fails to
+    /// load surfaces the error rather than silently pasting the path.
+    fn handle_paste(&mut self, text: &str) {
+        if let Some(path) = crate::image::path_if_image(text) {
+            match crate::image::load_path(&path) {
+                Ok(att) => {
+                    let note = att.placeholder();
+                    self.input.attach_image(att);
+                    self.notify(format!("attached {note}"));
+                }
+                Err(e) => self.push_error(format!("attach: {e}")),
+            }
+            return;
+        }
+        self.input.paste(text);
     }
 
     /// `:attach <path>` - load an image file and queue it for the
@@ -4359,6 +4379,32 @@ mod tests {
         assert_eq!(crate::theme::current().name, "tokyo-night");
         assert_eq!(state.lock().unwrap().current, "tokyo-night");
         assert!(request.lock().unwrap().is_none(), "request was drained");
+    }
+
+    #[test]
+    fn pasting_an_image_path_attaches_instead_of_inserting_text() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let dir = std::env::temp_dir().join(format!("kage-paste-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("shot.png");
+        std::fs::write(&png, [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 1]).unwrap();
+
+        app.handle_paste(&png.to_string_lossy());
+        assert_eq!(app.input.attached().len(), 1, "image path attached");
+        assert!(
+            app.input.text().is_empty(),
+            "path was not pasted as prompt text"
+        );
+
+        app.handle_paste("just some text");
+        assert_eq!(app.input.attached().len(), 1, "no new attachment");
+        assert!(
+            app.input.text().contains("just some text"),
+            "non-image paste inserted verbatim"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

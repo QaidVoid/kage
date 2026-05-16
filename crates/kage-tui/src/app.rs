@@ -493,6 +493,19 @@ pub struct App {
     /// Pending `kage.theme.set` slot. Drained between event polls and
     /// applied on this (UI) thread, the same path as `:theme set`.
     plugin_theme_request: Option<kage_plugin::SharedThemeRequest>,
+    /// Header-chrome slot populated by `kage.ui.set_header`. Snapshotted
+    /// per redraw; when a renderer is present its styled lines replace
+    /// the built-in status bar.
+    plugin_header: Option<kage_plugin::SharedChrome>,
+    /// Footer-chrome slot populated by `kage.ui.set_footer`. Replaces
+    /// the built-in modeline when a renderer is present.
+    plugin_footer: Option<kage_plugin::SharedChrome>,
+    /// Per-frame snapshot of the header renderer's output. Lives on the
+    /// App so [`view::StatusCtx`] can borrow it without holding the
+    /// chrome mutex; rebuilt by [`Self::refresh_plugin_widget_texts`].
+    plugin_header_lines: Vec<kage_plugin::ChromeLine>,
+    /// Per-frame snapshot of the footer renderer's output.
+    plugin_footer_lines: Vec<kage_plugin::ChromeLine>,
     /// Pending request to toggle terminal mouse capture, applied by
     /// `run` between iterations. `None` means leave the capture state
     /// as-is. The indirection exists because `run_command` can't
@@ -592,6 +605,10 @@ impl App {
             plugin_fork_request: None,
             plugin_theme_state: None,
             plugin_theme_request: None,
+            plugin_header: None,
+            plugin_footer: None,
+            plugin_header_lines: Vec::new(),
+            plugin_footer_lines: Vec::new(),
             search_line: None,
             search_pattern: None,
             mouse_drag_anchor: None,
@@ -809,6 +826,21 @@ impl App {
         self.plugin_theme_request = Some(request);
     }
 
+    /// Wire the header/footer chrome slots populated by
+    /// `kage.ui.set_header` / `kage.ui.set_footer`. Each redraw the
+    /// active renderer (if any) is called with the row width and its
+    /// styled lines replace the built-in status bar / modeline. Without
+    /// this the Lua calls still register a renderer but the host never
+    /// paints it.
+    pub fn set_plugin_chrome(
+        &mut self,
+        header: kage_plugin::SharedChrome,
+        footer: kage_plugin::SharedChrome,
+    ) {
+        self.plugin_header = Some(header);
+        self.plugin_footer = Some(footer);
+    }
+
     /// Register the plugin keybindings the App should dispatch.
     /// `chords` are canonical strings from the plugin runtime; an
     /// entry that fails to parse is dropped (the runtime already
@@ -834,6 +866,18 @@ impl App {
             .iter()
             .map(|w| w.render(width))
             .collect();
+        self.plugin_header_lines = self
+            .plugin_header
+            .as_ref()
+            .and_then(|slot| slot.lock().ok().and_then(|g| g.clone()))
+            .map(|c| c.render(width))
+            .unwrap_or_default();
+        self.plugin_footer_lines = self
+            .plugin_footer
+            .as_ref()
+            .and_then(|slot| slot.lock().ok().and_then(|g| g.clone()))
+            .map(|c| c.render(width))
+            .unwrap_or_default();
         self.plugin_status_cache.clear();
         if let Some(status) = self.plugin_status.as_ref()
             && let Ok(map) = status.lock()
@@ -1219,6 +1263,8 @@ impl App {
             search_match_count,
             plugin_widgets: &self.plugin_widget_texts,
             plugin_status: &self.plugin_status_cache,
+            plugin_header: &self.plugin_header_lines,
+            plugin_footer: &self.plugin_footer_lines,
         };
         let screen_selection = self.screen_selection;
         let mut captured_rows = std::mem::take(&mut self.captured_rows);
@@ -2215,6 +2261,8 @@ impl App {
             search_match_count,
             plugin_widgets: &self.plugin_widget_texts,
             plugin_status: &self.plugin_status_cache,
+            plugin_header: &self.plugin_header_lines,
+            plugin_footer: &self.plugin_footer_lines,
         };
         let screen_selection = self.screen_selection;
         let mut captured_rows = std::mem::take(&mut self.captured_rows);
@@ -2383,6 +2431,45 @@ mod tests {
             }
         }
         assert!(found_user);
+    }
+
+    #[test]
+    fn plugin_header_replaces_builtin_status_bar() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let rt = kage_plugin::PluginRuntime::new().unwrap();
+        rt.eval("kage.ui.set_header(function() return 'PLUGINHEADER' end)")
+            .unwrap();
+        app.set_plugin_chrome(rt.shared_header(), rt.shared_footer());
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        app.render_into(&mut terminal).unwrap();
+        let rows = snapshot_rows(&terminal);
+        assert!(rows[0].contains("PLUGINHEADER"), "top row: {:?}", rows[0]);
+        assert!(
+            !rows[0].contains("kage"),
+            "builtin label leaked: {:?}",
+            rows[0]
+        );
+    }
+
+    #[test]
+    fn plugin_footer_replaces_builtin_modeline() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        app.set_session_usage(crate::usage::shared_session_usage());
+        let rt = kage_plugin::PluginRuntime::new().unwrap();
+        rt.eval("kage.ui.set_footer(function() return 'PLUGINFOOTER' end)")
+            .unwrap();
+        app.set_plugin_chrome(rt.shared_header(), rt.shared_footer());
+        let backend = TestBackend::new(40, 8);
+        let mut terminal = Terminal::new(backend).unwrap();
+        app.render_into(&mut terminal).unwrap();
+        let rows = snapshot_rows(&terminal);
+        let bottom = rows.last().unwrap();
+        assert!(bottom.contains("PLUGINFOOTER"), "bottom row: {bottom:?}");
     }
 
     fn snapshot_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {

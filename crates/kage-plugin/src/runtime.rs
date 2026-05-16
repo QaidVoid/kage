@@ -390,6 +390,22 @@ impl PluginRuntime {
             .clone()
     }
 
+    /// Cloneable handle to the header-chrome slot, for a host that
+    /// snapshots it per redraw (so a `kage.ui.set_header` call made
+    /// after startup, e.g. from a command, takes effect) rather than
+    /// reading a one-time [`Self::header_chrome`].
+    #[must_use]
+    pub fn shared_header(&self) -> SharedChrome {
+        Arc::clone(&self.header)
+    }
+
+    /// Cloneable handle to the footer-chrome slot. See
+    /// [`Self::shared_header`].
+    #[must_use]
+    pub fn shared_footer(&self) -> SharedChrome {
+        Arc::clone(&self.footer)
+    }
+
     /// Cloneable handle to the queue of plugin-supplied messages.
     /// Hosts that want to sample the queue without consuming it (for
     /// diagnostics) hold onto this; production drain goes through

@@ -71,6 +71,14 @@ pub struct StatusCtx<'a> {
     /// Painted alongside widgets on the right edge in key-sorted
     /// order. Empty when no plugins push status.
     pub plugin_status: &'a [(String, String)],
+    /// Pre-rendered styled lines from a plugin `kage.ui.set_header`
+    /// renderer. When non-empty the host paints these in place of the
+    /// built-in status bar; the `:` command line and `/` search line
+    /// still take priority.
+    pub plugin_header: &'a [kage_plugin::ChromeLine],
+    /// Pre-rendered styled lines from a plugin `kage.ui.set_footer`
+    /// renderer. When non-empty they replace the built-in modeline.
+    pub plugin_footer: &'a [kage_plugin::ChromeLine],
 }
 
 /// `Modifier` bit reserved as the per-cell "decoration" tag - the
@@ -148,7 +156,7 @@ pub fn render(
     render_status(frame, regions, input, cmdline, status);
     render_buffer(frame, regions, buffer, status.search_pattern);
     render_input(frame, regions, input);
-    render_modeline(frame, regions, session_usage);
+    render_modeline(frame, regions, session_usage, status.plugin_footer);
     if !toasts.is_empty() {
         let theme = crate::theme::current();
         render_toasts(frame, regions.buffer, toasts, &theme);
@@ -195,6 +203,14 @@ fn render_status(
         let paragraph = Paragraph::new(line)
             .alignment(Alignment::Left)
             .style(Style::default().bg(theme.status_bg));
+        frame.render_widget(paragraph, regions.status);
+        return;
+    }
+
+    if !status.plugin_header.is_empty() {
+        let base = Style::default().fg(theme.status_dim_fg).bg(theme.status_bg);
+        let lines = chrome_lines_to_ratatui(status.plugin_header, base);
+        let paragraph = Paragraph::new(lines).alignment(Alignment::Left).style(base);
         frame.render_widget(paragraph, regions.status);
         return;
     }
@@ -1401,7 +1417,60 @@ fn push_input_row(
 /// so the chrome reads as a coherent strip rather than an unstyled
 /// terminal row. Mode is intentionally absent here - the colored
 /// pill on the input border is the canonical mode display.
-fn render_modeline(frame: &mut Frame, regions: Regions, usage: Option<&SessionUsage>) {
+/// Map plugin-supplied [`kage_plugin::ChromeLine`]s onto ratatui
+/// lines. `base` carries the row's default fg/bg; a span's `fg` / `bg`
+/// overrides it when the string parses, and the attribute bits map to
+/// terminal modifiers. An unparseable color is dropped so the span
+/// inherits `base` rather than failing the whole row.
+fn chrome_lines_to_ratatui(lines: &[kage_plugin::ChromeLine], base: Style) -> Vec<Line<'static>> {
+    lines
+        .iter()
+        .map(|cl| {
+            let spans: Vec<Span<'static>> = cl
+                .spans
+                .iter()
+                .map(|sp| {
+                    let mut style = base;
+                    if let Some(c) = sp.fg.as_deref().and_then(parse_chrome_color) {
+                        style = style.fg(c);
+                    }
+                    if let Some(c) = sp.bg.as_deref().and_then(parse_chrome_color) {
+                        style = style.bg(c);
+                    }
+                    let a = sp.attrs;
+                    if a.bold() {
+                        style = style.add_modifier(Modifier::BOLD);
+                    }
+                    if a.dim() {
+                        style = style.add_modifier(Modifier::DIM);
+                    }
+                    if a.italic() {
+                        style = style.add_modifier(Modifier::ITALIC);
+                    }
+                    if a.underline() {
+                        style = style.add_modifier(Modifier::UNDERLINED);
+                    }
+                    Span::styled(sp.text.clone(), style)
+                })
+                .collect();
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// Resolve a plugin color string via ratatui's color grammar (named
+/// colors such as `red`, `#rrggbb` hex, or an indexed number).
+/// Unparseable input yields `None`.
+fn parse_chrome_color(name: &str) -> Option<Color> {
+    name.parse::<Color>().ok()
+}
+
+fn render_modeline(
+    frame: &mut Frame,
+    regions: Regions,
+    usage: Option<&SessionUsage>,
+    plugin_footer: &[kage_plugin::ChromeLine],
+) {
     let area = regions.status_bottom;
     if area.height == 0 || area.width == 0 {
         return;
@@ -1409,6 +1478,12 @@ fn render_modeline(frame: &mut Frame, regions: Regions, usage: Option<&SessionUs
     let theme = crate::theme::current();
     let bg = Style::default().bg(theme.modeline_bg);
     let fg = Style::default().fg(theme.modeline_fg).bg(theme.modeline_bg);
+    if !plugin_footer.is_empty() {
+        let lines = chrome_lines_to_ratatui(plugin_footer, fg);
+        let paragraph = Paragraph::new(lines).alignment(Alignment::Left).style(bg);
+        frame.render_widget(paragraph, area);
+        return;
+    }
     let dim = fg.add_modifier(Modifier::DIM);
     let mut spans: Vec<Span<'static>> = Vec::new();
     if let Some(u) = usage

@@ -1377,10 +1377,10 @@ name = "kage-tui"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "ignore",
  "kage-core",
  "kage-loop",
  "kage-plugin",
- "kage-tools",
  "pulldown-cmark",
  "ratatui",
  "serde_json",

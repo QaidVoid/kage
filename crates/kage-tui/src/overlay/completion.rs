@@ -283,15 +283,25 @@ pub fn prefix_before_cursor(text: &str, cursor: usize) -> &str {
     &head[start..]
 }
 
+/// Filesystem entries the recursive `@file` walk scans before giving
+/// up, so a huge tree cannot stall a keystroke.
+const FILE_WALK_CAP: usize = 20_000;
+
+/// Most `@file` candidates handed to the popup.
+const FILE_RESULT_CAP: usize = 50;
+
 /// Built-in `@file` completion: the bottom of the provider stack.
 ///
-/// When the token under the cursor starts with `@`, list entries of
-/// the workdir-relative directory it names and offer each as a
-/// candidate that replaces the whole `@...` token. Hidden entries are
-/// shown only when the typed fragment itself starts with `.`.
-/// Directories sort before files and gain a trailing `/`. Results are
-/// capped so a huge directory cannot blow up the popup. Paths that
-/// escape the workdir, or any IO error, yield no items.
+/// When the token under the cursor starts with `@`, fuzzy-match the
+/// text after it against every workdir-relative path (recursively,
+/// honoring `.gitignore` / `.kageignore` like the `find` and `ls`
+/// tools) and offer the best matches as candidates that replace the
+/// whole `@...` token. A bare `@` lists the immediate children only
+/// (fast); once you type, the match is recursive, so `@main` finds
+/// `src/main.rs`. Directories gain a trailing `/`. Ranking prefers a
+/// substring of the file name, then of the full path, then a
+/// subsequence; ties break on shorter path then name. Results are
+/// capped so a large tree cannot blow up the popup.
 #[must_use]
 pub fn file_completions(
     workdir: &std::path::Path,
@@ -301,51 +311,94 @@ pub fn file_completions(
     let Some(frag) = prefix.strip_prefix('@') else {
         return Vec::new();
     };
-    let (dir_part, name_part) = match frag.rfind('/') {
-        Some(i) => (&frag[..=i], &frag[i + 1..]),
-        None => ("", frag),
-    };
-    let listing_rel = if dir_part.is_empty() { "." } else { dir_part };
-    let Ok(dir) = kage_tools::path::resolve_under(workdir, std::path::Path::new(listing_rel))
-    else {
-        return Vec::new();
-    };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
     let token_start = cursor.saturating_sub(prefix.len());
-    let mut dirs: Vec<AutocompleteItem> = Vec::new();
-    let mut files: Vec<AutocompleteItem> = Vec::new();
-    for entry in entries.flatten() {
-        let raw = entry.file_name();
-        let Some(name) = raw.to_str() else {
-            continue;
-        };
-        if name.starts_with('.') && !name_part.starts_with('.') {
-            continue;
-        }
-        if !name.starts_with(name_part) {
-            continue;
-        }
-        let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
-        let suffix = if is_dir { "/" } else { "" };
-        let item = AutocompleteItem {
-            label: format!("{name}{suffix}"),
-            detail: Some(if is_dir { "dir" } else { "file" }.to_owned()),
-            value: format!("@{dir_part}{name}{suffix}"),
-            range: Some((token_start, cursor)),
-        };
-        if is_dir {
-            dirs.push(item);
-        } else {
-            files.push(item);
-        }
+    let query = frag.to_lowercase();
+
+    let mut builder = ignore::WalkBuilder::new(workdir);
+    builder.add_custom_ignore_filename(".kageignore");
+    if query.is_empty() {
+        // Bare `@`: a shallow listing keeps the first keystroke snappy.
+        builder.max_depth(Some(1));
     }
-    dirs.sort_by(|a, b| a.label.cmp(&b.label));
-    files.sort_by(|a, b| a.label.cmp(&b.label));
-    dirs.extend(files);
-    dirs.truncate(50);
-    dirs
+
+    let mut scored: Vec<(u8, usize, String, bool)> = Vec::new();
+    for (scanned, entry) in builder.build().enumerate() {
+        if scanned >= FILE_WALK_CAP {
+            break;
+        }
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let Ok(rel) = entry.path().strip_prefix(workdir) else {
+            continue;
+        };
+        if rel.as_os_str().is_empty() {
+            continue;
+        }
+        let Some(rel) = rel.to_str() else {
+            continue;
+        };
+        let Some(rank) = match_rank(&query, rel) else {
+            continue;
+        };
+        let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
+        scored.push((rank, rel.len(), rel.to_owned(), is_dir));
+    }
+    scored.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    scored.truncate(FILE_RESULT_CAP);
+    scored
+        .into_iter()
+        .map(|(_, _, rel, is_dir)| {
+            let suffix = if is_dir { "/" } else { "" };
+            AutocompleteItem {
+                label: format!("{rel}{suffix}"),
+                detail: Some(if is_dir { "dir" } else { "file" }.to_owned()),
+                value: format!("@{rel}{suffix}"),
+                range: Some((token_start, cursor)),
+            }
+        })
+        .collect()
+}
+
+/// Rank a workdir-relative path against the already-lowercased
+/// `query`. Lower is better; `None` means no match. An empty query
+/// matches everything at a neutral rank so a bare `@` still lists.
+fn match_rank(query: &str, rel: &str) -> Option<u8> {
+    if query.is_empty() {
+        return Some(4);
+    }
+    let lower = rel.to_lowercase();
+    let base = lower.rsplit('/').next().unwrap_or(lower.as_str());
+    if base.contains(query) {
+        Some(0)
+    } else if lower.contains(query) {
+        Some(1)
+    } else if is_subsequence(query, base) {
+        Some(2)
+    } else if is_subsequence(query, &lower) {
+        Some(3)
+    } else {
+        None
+    }
+}
+
+/// `true` if every char of `needle` appears in `haystack` in order
+/// (not necessarily contiguously). Both are expected lowercased.
+fn is_subsequence(needle: &str, haystack: &str) -> bool {
+    let mut chars = haystack.chars();
+    'next: for want in needle.chars() {
+        for have in chars.by_ref() {
+            if have == want {
+                continue 'next;
+            }
+        }
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -462,13 +515,62 @@ mod tests {
     }
 
     #[test]
-    fn file_completions_shows_dotfiles_when_typed() {
+    fn file_completions_finds_nested_file_by_name() {
+        // Regression: typing a bare name must reach files in
+        // subdirectories, not only the top level.
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(".env"), "x").unwrap();
-        std::fs::write(dir.path().join("plain"), "x").unwrap();
-        let items = file_completions(dir.path(), "@.", 2);
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].value, "@.env");
+        std::fs::create_dir_all(dir.path().join("src/loop")).unwrap();
+        std::fs::write(dir.path().join("src/loop/run.rs"), "x").unwrap();
+        std::fs::write(dir.path().join("README.md"), "x").unwrap();
+        let items = file_completions(dir.path(), "@run", 4);
+        let values: Vec<&str> = items.iter().map(|i| i.value.as_str()).collect();
+        assert!(
+            values.contains(&"@src/loop/run.rs"),
+            "expected nested hit, got {values:?}"
+        );
+    }
+
+    #[test]
+    fn file_completions_ranks_basename_substring_first() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("app")).unwrap();
+        std::fs::write(dir.path().join("app/main.rs"), "x").unwrap();
+        std::fs::write(dir.path().join("mainframe.txt"), "x").unwrap();
+        // "main" is a basename substring of both; the shorter path
+        // wins the tie, but both rank above a mere subsequence.
+        let items = file_completions(dir.path(), "@main", 5);
+        let values: Vec<&str> = items.iter().map(|i| i.value.as_str()).collect();
+        assert!(values.contains(&"@app/main.rs"));
+        assert!(values.contains(&"@mainframe.txt"));
+    }
+
+    #[test]
+    fn file_completions_fuzzy_subsequence_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("crates/kage-tui/src")).unwrap();
+        std::fs::write(dir.path().join("crates/kage-tui/src/app.rs"), "x").unwrap();
+        // Non-contiguous subsequence: c..t..app should still hit.
+        let items = file_completions(dir.path(), "@ktapp", 6);
+        let values: Vec<&str> = items.iter().map(|i| i.value.as_str()).collect();
+        assert!(
+            values.contains(&"@crates/kage-tui/src/app.rs"),
+            "expected subsequence hit, got {values:?}"
+        );
+    }
+
+    #[test]
+    fn file_completions_skips_hidden_entries() {
+        // Hidden entries are skipped (consistent with the `find` /
+        // `ls` tools' walker defaults). `.gitignore` rules also apply
+        // in a real git workdir; that path is not exercised here
+        // because the walker requires a repo for git rules.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".secret"), "x").unwrap();
+        std::fs::write(dir.path().join("visible.txt"), "x").unwrap();
+        let items = file_completions(dir.path(), "@", 1);
+        let values: Vec<&str> = items.iter().map(|i| i.value.as_str()).collect();
+        assert!(values.contains(&"@visible.txt"));
+        assert!(!values.iter().any(|v| v.contains(".secret")));
     }
 
     #[test]

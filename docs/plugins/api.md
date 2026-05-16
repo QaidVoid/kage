@@ -100,6 +100,37 @@ end)
 The render function runs inside the shared Lua mutex, so keep it
 cheap: no blocking dialogs, no network.
 
+### `kage.register_block_renderer(kind, render | nil)`
+
+Own how a custom conversation block draws - the Emacs-style UI
+overhaul seam. Any `Block::Custom` whose `kind` matches (e.g. a
+`kage.session.append_entry("myplugin:card", ...)` entry) is painted
+by your `render` instead of the built-in header+body card. Pass
+`nil` to remove the renderer.
+
+`render(block)` receives `{ kind, text, width }` and returns the
+**exact same shape** as `set_header`: a string, a span table, or an
+array of either (one line each). The host still adds the
+conversation's focus rule and spacing - the plugin owns the content.
+An error / non-conforming / empty return paints a visible
+`[block renderer ... produced no output]` marker, never a silent
+blank.
+
+```lua
+kage.register_block_renderer("myplugin:card", function(b)
+  return {
+    { text = ".----.", fg = "cyan" },
+    { { text = "| ", fg = "cyan" },
+      { text = b.text, fg = "green", bold = true } },
+    { text = "'----'", fg = "cyan" },
+  }
+end)
+```
+
+Same mutex/cost rule as `set_header`. The picker a plugin needs for
+interactive UI is [`kage.ui.select`](#blocking-dialogs) - there is no
+separate `open_picker`. See `plugins/examples/block_renderer_demo.lua`.
+
 ## tools
 
 ### `kage.register_tool(spec)`

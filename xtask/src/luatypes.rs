@@ -616,6 +616,28 @@ const FUNCS: &[Func] = &[
     },
     Func {
         doc: &[
+            "Own how a custom block of `kind` is drawn. `render` gets",
+            "`{ kind, text, width }` and returns the same shape as",
+            "`kage.ui.set_header` (a string, a span table, or an array",
+            "of either). Pass `nil` to remove a renderer.",
+        ],
+        path: "kage.register_block_renderer",
+        params: &[
+            Field {
+                name: "kind",
+                ty: "string",
+                doc: "Custom block kind to take over.",
+            },
+            Field {
+                name: "render",
+                ty: "fun(block: table): any|nil",
+                doc: "Gets { kind, text, width }; nil unregisters.",
+            },
+        ],
+        ret: None,
+    },
+    Func {
+        doc: &[
             "Bind a chord to a handler. `spec` is a chord string or",
             "`{ key, description? }`. The handler runs through the",
             "coroutine bridge, so it may open `kage.ui.*` dialogs.",

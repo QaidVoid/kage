@@ -85,6 +85,9 @@ struct Session {
     cx: AgentContext,
     workdir: PathBuf,
     record_path: Option<PathBuf>,
+    /// Owns the session's MCP child processes; kept alive so their
+    /// tools stay valid for the session's lifetime.
+    _mcp_manager: kage_mcp::McpManager,
 }
 
 /// The ACP agent `kage rpc` exposes.
@@ -150,6 +153,11 @@ impl CliAcpAgent {
         if let Some(rt) = plugin_runtime.as_ref() {
             crate::apply_plugin_tools(&mut tools, rt);
         }
+        let (mcp_manager, mcp_errors) =
+            crate::mcp::spawn_and_register(&mut tools, &workdir, plugin_runtime.as_deref());
+        for (server, err) in mcp_errors {
+            eprintln!("kage: mcp `{server}`: {err}");
+        }
         let mut cx = AgentContext::new(resolved, &system_prompt).with_workdir(&workdir);
         if let Some(w) = runtime_env::context_window_for(&model) {
             cx = cx.with_context_window(w);
@@ -165,6 +173,7 @@ impl CliAcpAgent {
             cx,
             workdir,
             record_path: None,
+            _mcp_manager: mcp_manager,
         })
     }
 }

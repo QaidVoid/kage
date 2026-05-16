@@ -350,6 +350,11 @@ fn main() -> ExitCode {
     if let Some(rt) = plugin_runtime.as_ref() {
         apply_plugin_tools(&mut tools, rt);
     }
+    let (_mcp_manager, mcp_errors) =
+        mcp::spawn_and_register(&mut tools, &workdir, plugin_runtime.as_deref());
+    for (server, err) in mcp_errors {
+        eprintln!("kage: mcp `{server}`: {err}");
+    }
     let mut cx = AgentContext::new(resolved.model.clone(), &system_prompt).with_workdir(&workdir);
     if let Some(window) = runtime_env::context_window_for(&model) {
         cx = cx.with_context_window(window);
@@ -652,6 +657,11 @@ fn run_resume(
     let mut tools = builtin_registry();
     if let Some(rt) = plugin_runtime.as_ref() {
         apply_plugin_tools(&mut tools, rt);
+    }
+    let (_mcp_manager, mcp_errors) =
+        mcp::spawn_and_register(&mut tools, &workdir, plugin_runtime.as_deref());
+    for (server, err) in mcp_errors {
+        eprintln!("kage: mcp `{server}`: {err}");
     }
     let mut cx = AgentContext::new(resolved.model.clone(), &replay.header.system_prompt)
         .with_workdir(&workdir);

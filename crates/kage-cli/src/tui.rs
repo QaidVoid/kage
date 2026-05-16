@@ -167,6 +167,13 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
             .map(|kb| kb.chord().to_owned())
             .collect();
     }
+    let (_mcp_manager, mcp_errors) =
+        crate::mcp::spawn_and_register(&mut tools, &workdir, plugin_runtime.as_deref());
+    for (server, err) in mcp_errors {
+        if let Ok(mut buf) = buffer.lock() {
+            buf.push_custom("kage:error", format!("mcp `{server}`: {err}"), false);
+        }
+    }
     let cancel = CancelFlag::new();
     let mut initial_cx = AgentContext::new(bare_model, system).with_workdir(&workdir);
     if let Some(window) = crate::runtime_env::context_window_for(model) {

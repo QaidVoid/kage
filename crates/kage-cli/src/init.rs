@@ -43,6 +43,10 @@ theme = "default"
 # Capture mouse events (drag-to-select, click-to-focus). Set to false
 # if you prefer your terminal's native selection.
 mouse = true
+# Prompt-input editing model: "vim" (modal: Normal/Insert/Visual) or
+# "modeless" (always-editable, Emacs/readline keys, Esc cancels the
+# turn). Takes effect on next launch; also in the :settings dialog.
+editor = "vim"
 
 [plugins]
 # Defaults: `~/.config/kage/plugins/`. Set `dir` to an absolute path

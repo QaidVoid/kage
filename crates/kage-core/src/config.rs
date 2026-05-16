@@ -195,6 +195,8 @@ pub struct UiConfig {
     pub theme: String,
     /// Whether mouse events are captured by the TUI.
     pub mouse: bool,
+    /// Prompt-input editing model.
+    pub editor: EditorMode,
 }
 
 impl Default for UiConfig {
@@ -202,8 +204,26 @@ impl Default for UiConfig {
         Self {
             theme: "default".into(),
             mouse: true,
+            editor: EditorMode::default(),
         }
     }
+}
+
+/// How the prompt input behaves.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum EditorMode {
+    /// Modal editing in the vim style: a normal mode, an insert
+    /// mode, and a visual mode, with motions, operators, and
+    /// registers. The historical (and default) behavior.
+    #[default]
+    Vim,
+    /// Always-editable, non-modal editing. Readline / Emacs keys do
+    /// all editing (`Ctrl+A`/`E`/`W`/`U`/`K`/`Y`, `Ctrl+/`,
+    /// `Alt+B`/`F`); `Esc` cancels the in-flight turn; the buffer
+    /// scrolls with `PageUp` / `PageDown` and the mouse. No modal
+    /// states.
+    Modeless,
 }
 
 /// Plugin loader configuration.
@@ -348,6 +368,32 @@ mod tests {
             assert!(cfg.ui.mouse);
             Ok(())
         });
+    }
+
+    #[test]
+    fn editor_mode_defaults_vim_and_parses_modeless() {
+        assert_eq!(Config::default().ui.editor, EditorMode::Vim);
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.toml",
+                r#"
+                [ui]
+                editor = "modeless"
+                "#,
+            )?;
+            let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
+            assert_eq!(cfg.ui.editor, EditorMode::Modeless);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn editor_mode_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&EditorMode::Modeless).unwrap(),
+            "\"modeless\""
+        );
+        assert_eq!(serde_json::to_string(&EditorMode::Vim).unwrap(), "\"vim\"");
     }
 
     #[test]

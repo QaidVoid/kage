@@ -162,6 +162,35 @@ pub fn register_custom(name: impl Into<String>, factory: Arc<dyn BlockFactory>) 
         .set_custom(name, factory);
 }
 
+/// Override a built-in block kind's renderer in the global registry
+/// (Lua `kage.register_block_renderer` with a reserved kind name).
+pub fn register_builtin(kind: BuiltinKind, factory: Arc<dyn BlockFactory>) {
+    global()
+        .write()
+        .expect("block registry rwlock poisoned")
+        .set_builtin(kind, factory);
+}
+
+/// Map a reserved builtin-kind name (as a plugin would pass to
+/// `kage.register_block_renderer`) to a [`BuiltinKind`]. `None` for
+/// any other string, which the host then treats as a custom kind.
+///
+/// `tool_pair` is intentionally absent: a merged call+result spans
+/// two blocks and needs a different (two-block) renderer shape, so
+/// it is not overridable through this single-block path.
+#[must_use]
+pub fn builtin_kind_from_name(name: &str) -> Option<BuiltinKind> {
+    match name {
+        "user" => Some(BuiltinKind::User),
+        "assistant" => Some(BuiltinKind::Assistant),
+        "thinking" => Some(BuiltinKind::Thinking),
+        "tool_call" => Some(BuiltinKind::ToolCallAlone),
+        "tool_result" => Some(BuiltinKind::ToolResultAlone),
+        "custom" => Some(BuiltinKind::Custom),
+        _ => None,
+    }
+}
+
 /// Drop every plugin-registered custom renderer, restoring the
 /// builtin defaults. Called on plugin hot-reload so a removed
 /// renderer stops taking effect.
@@ -487,6 +516,18 @@ mod tests {
     fn factory_trait_is_send_and_sync_for_arc_storage() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Arc<dyn BlockFactory>>();
+    }
+
+    #[test]
+    fn builtin_kind_names_map_and_tool_pair_is_excluded() {
+        assert_eq!(builtin_kind_from_name("user"), Some(BuiltinKind::User));
+        assert_eq!(
+            builtin_kind_from_name("assistant"),
+            Some(BuiltinKind::Assistant)
+        );
+        assert_eq!(builtin_kind_from_name("custom"), Some(BuiltinKind::Custom));
+        assert_eq!(builtin_kind_from_name("tool_pair"), None);
+        assert_eq!(builtin_kind_from_name("myplugin:card"), None);
     }
 
     #[test]

@@ -127,6 +127,23 @@ kage.register_block_renderer("myplugin:card", function(b)
 end)
 ```
 
+**Overriding built-in blocks.** Pass one of the reserved kinds
+instead of a custom one to re-skin a built-in block type:
+
+| kind          | block                              |
+| ------------- | ---------------------------------- |
+| `user`        | `{ text }`                         |
+| `assistant`   | `{ text, live }`                   |
+| `thinking`    | `{ text, folded, live }`           |
+| `tool_call`   | `{ name, input_summary, input_pretty, folded }` (unpaired) |
+| `tool_result` | `{ name, output, is_error, folded, duration_ms }` (orphan) |
+| `custom`      | default `{ kind, text, folded }` fallback for any unhandled custom kind |
+
+Every payload also carries `kind` and `width`. `tool_call` /
+`tool_result` overrides only affect *unpaired* tool blocks; a merged
+call+result pair spans two blocks and is not overridable through this
+single-block path.
+
 Same mutex/cost rule as `set_header`. The picker a plugin needs for
 interactive UI is [`kage.ui.select`](#blocking-dialogs) - there is no
 separate `open_picker`. See `plugins/examples/block_renderer_demo.lua`.

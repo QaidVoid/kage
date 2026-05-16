@@ -616,10 +616,12 @@ const FUNCS: &[Func] = &[
     },
     Func {
         doc: &[
-            "Own how a custom block of `kind` is drawn. `render` gets",
-            "`{ kind, text, width }` and returns the same shape as",
-            "`kage.ui.set_header` (a string, a span table, or an array",
-            "of either). Pass `nil` to remove a renderer.",
+            "Own how a block of `kind` is drawn. `render` gets a block",
+            "table (`{ kind, width, ... }`) and returns the same shape",
+            "as `kage.ui.set_header`. A custom kind re-skins that block",
+            "type; the reserved names `user`/`assistant`/`thinking`/",
+            "`tool_call`/`tool_result`/`custom` override a built-in.",
+            "Pass `nil` to remove a renderer.",
         ],
         path: "kage.register_block_renderer",
         params: &[

@@ -214,10 +214,12 @@ function kage.register_command(spec) end
 ---@param spec kage.CommandSpec
 function kage.override_command(spec) end
 
---- Own how a custom block of `kind` is drawn. `render` gets
---- `{ kind, text, width }` and returns the same shape as
---- `kage.ui.set_header` (a string, a span table, or an array
---- of either). Pass `nil` to remove a renderer.
+--- Own how a block of `kind` is drawn. `render` gets a block
+--- table (`{ kind, width, ... }`) and returns the same shape
+--- as `kage.ui.set_header`. A custom kind re-skins that block
+--- type; the reserved names `user`/`assistant`/`thinking`/
+--- `tool_call`/`tool_result`/`custom` override a built-in.
+--- Pass `nil` to remove a renderer.
 ---@param kind string Custom block kind to take over.
 ---@param render fun(block: table): any|nil Gets { kind, text, width }; nil unregisters.
 function kage.register_block_renderer(kind, render) end

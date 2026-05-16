@@ -43,22 +43,61 @@ impl PluginBlockFactory {
 
 impl BlockFactory for PluginBlockFactory {
     fn make(&self, block: &Block) -> Option<Box<dyn BlockWidget>> {
-        match block {
-            Block::Custom { kind, text, .. } if kind == self.renderer.kind() => {
-                Some(Box::new(PluginBlockWidget {
-                    renderer: Arc::clone(&self.renderer),
-                    text: text.clone(),
-                }))
-            }
-            _ => None,
-        }
+        // The registry only routes a block to the factory registered
+        // for its slot (a custom kind, or a builtin variant), so any
+        // variant that arrives here is one this renderer owns.
+        Some(Box::new(PluginBlockWidget {
+            renderer: Arc::clone(&self.renderer),
+            payload: block_payload(block),
+        }))
     }
 }
 
-/// One custom block rendered by a plugin's Lua handler.
+/// Serialize a block into the JSON payload its Lua renderer sees.
+/// Always carries `kind`; per-variant fields let a builtin override
+/// (e.g. `assistant`) read the same data the built-in widget would.
+/// `width` is injected per-frame by the widget, not here.
+fn block_payload(block: &Block) -> serde_json::Value {
+    match block {
+        Block::User { text } => serde_json::json!({ "kind": "user", "text": text }),
+        Block::Assistant { text, live } => {
+            serde_json::json!({ "kind": "assistant", "text": text, "live": live })
+        }
+        Block::Thinking { text, folded, live } => serde_json::json!({
+            "kind": "thinking", "text": text, "folded": folded, "live": live,
+        }),
+        Block::ToolCall {
+            name,
+            input_summary,
+            input_pretty,
+            folded,
+            ..
+        } => serde_json::json!({
+            "kind": "tool_call", "name": name, "input_summary": input_summary,
+            "input_pretty": input_pretty, "folded": folded,
+        }),
+        Block::ToolResult {
+            name,
+            output,
+            is_error,
+            folded,
+            duration_ms,
+            ..
+        } => serde_json::json!({
+            "kind": "tool_result", "name": name, "output": output,
+            "is_error": is_error, "folded": folded, "duration_ms": duration_ms,
+        }),
+        Block::Custom { kind, text, folded } => serde_json::json!({
+            "kind": kind, "text": text, "folded": folded,
+        }),
+    }
+}
+
+/// One block rendered by a plugin's Lua handler (custom kind or a
+/// builtin-variant override).
 struct PluginBlockWidget {
     renderer: Arc<kage_plugin::LuaBlockRenderer>,
-    text: String,
+    payload: serde_json::Value,
 }
 
 impl PluginBlockWidget {
@@ -68,7 +107,11 @@ impl PluginBlockWidget {
     /// one marker line so the failure is visible, never a silent
     /// blank block.
     fn lines_for(&self, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
-        let chrome = self.renderer.render(&self.text, width);
+        let mut payload = self.payload.clone();
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("width".into(), serde_json::json!(width));
+        }
+        let chrome = self.renderer.render(&payload);
         let body = if chrome.is_empty() {
             vec![Line::from(format!(
                 "[block renderer `{}` produced no output]",
@@ -127,30 +170,34 @@ mod tests {
     }
 
     #[test]
-    fn factory_only_matches_its_kind() {
-        let f = PluginBlockFactory::new(echo_renderer());
-        assert!(
-            f.make(&Block::User { text: "x".into() }).is_none(),
-            "non-custom rejected"
-        );
-        assert!(
-            f.make(&Block::Custom {
-                kind: "other".into(),
-                text: "x".into(),
-                folded: false,
+    fn builtin_override_receives_variant_payload() {
+        // An "assistant" override sees the assistant block's text +
+        // live fields - not just a custom {kind,text}. Routing by
+        // slot is the registry's job; the factory shapes the payload.
+        let rt = kage_plugin::PluginRuntime::new().unwrap();
+        rt.eval(
+            r#"kage.register_block_renderer("assistant", function(b)
+                 return "A[" .. b.text .. "|" .. tostring(b.live) .. "]"
+               end)"#,
+        )
+        .unwrap();
+        let renderer = rt.registered_block_renderers().into_iter().next().unwrap();
+        let f = PluginBlockFactory::new(renderer);
+        let w = f
+            .make(&Block::Assistant {
+                text: "hi".into(),
+                live: true,
             })
-            .is_none(),
-            "wrong kind rejected"
-        );
-        assert!(
-            f.make(&Block::Custom {
-                kind: "demo:card".into(),
-                text: "x".into(),
-                folded: false,
-            })
-            .is_some(),
-            "matching kind accepted"
-        );
+            .unwrap();
+        let theme = Theme::default();
+        let text: String = w
+            .lines(40, &ctx(&theme))
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.clone()))
+            .collect::<String>()
+            .split_whitespace()
+            .collect();
+        assert!(text.contains("A[hi|true]"), "rendered: {text}");
     }
 
     #[test]

@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use mlua::{Function, Lua, Table, Value};
 
-use crate::api::{LogLevel, SharedHostLog};
+use crate::api::{LogLevel, SharedHostLog, json_to_lua};
 use crate::chrome::{ChromeLine, parse_lines};
 use crate::error::PluginError;
 use crate::runtime::SharedLua;
@@ -58,13 +58,15 @@ impl LuaBlockRenderer {
         &self.kind
     }
 
-    /// Call into Lua to produce the block's styled lines for `text`
-    /// at `width` columns. A Lua error, poisoned mutex, or
-    /// non-conforming return logs to the sink and yields no lines;
-    /// the host then falls back to the default custom-block card so
-    /// a broken renderer never blanks the conversation silently.
+    /// Call into Lua with a host-built `block` payload (a JSON object
+    /// the host shapes per block variant: always `kind` + `width`,
+    /// plus `text` / `name` / `output` / `folded` / ... as relevant).
+    /// A Lua error, poisoned mutex, or non-conforming return logs to
+    /// the sink and yields no lines; the host then paints the
+    /// built-in block so a broken renderer never blanks the
+    /// conversation silently.
     #[must_use]
-    pub fn render(&self, text: &str, width: u16) -> Vec<ChromeLine> {
+    pub fn render(&self, payload: &serde_json::Value) -> Vec<ChromeLine> {
         let Ok(lua) = self.lua.lock() else {
             return Vec::new();
         };
@@ -75,8 +77,8 @@ impl LuaBlockRenderer {
                 return Vec::new();
             }
         };
-        let block = match build_block_table(&lua, &self.kind, text, width) {
-            Ok(t) => t,
+        let block = match json_to_lua(&lua, payload) {
+            Ok(v) => v,
             Err(e) => {
                 self.log_error(&e);
                 return Vec::new();
@@ -99,14 +101,6 @@ impl LuaBlockRenderer {
             );
         }
     }
-}
-
-fn build_block_table(lua: &Lua, kind: &str, text: &str, width: u16) -> Result<Table, mlua::Error> {
-    let t = lua.create_table()?;
-    t.set("kind", kind)?;
-    t.set("text", text)?;
-    t.set("width", width)?;
-    Ok(t)
 }
 
 /// Install `kage.register_block_renderer(kind, fn|nil)` on the
@@ -180,7 +174,9 @@ mod tests {
         assert_eq!(map.len(), 1);
         let r = &map[0];
         assert_eq!(r.kind(), "demo:card");
-        let lines = r.render("hello", 42);
+        let lines = r.render(&serde_json::json!({
+            "kind": "demo:card", "text": "hello", "width": 42
+        }));
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].spans[0].text, "[demo:card] hello @42");
     }
@@ -213,6 +209,10 @@ mod tests {
         rt.eval(r#"kage.register_block_renderer("b", function() error("boom") end)"#)
             .unwrap();
         let map = rt.registered_block_renderers();
-        assert!(map[0].render("t", 10).is_empty());
+        assert!(
+            map[0]
+                .render(&serde_json::json!({ "kind": "b", "text": "t" }))
+                .is_empty()
+        );
     }
 }

@@ -39,4 +39,8 @@ serde_json.workspace = true
 ulid.workspace = true
 
 [dev-dependencies]
+kage-core.workspace = true
+kage-mcp = { path = "../kage-mcp" }
+kage-tools.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true

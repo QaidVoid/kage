@@ -468,6 +468,14 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         args: &[],
         subcommands: &[],
     },
+    CommandSpec {
+        name: "events",
+        aliases: &[],
+        description: "list events plugins can hook with kage.on",
+        category: CommandCategory::Both,
+        args: &[],
+        subcommands: &[],
+    },
 ];
 
 /// Find a built-in command by primary name or alias. Returns `None`
@@ -584,7 +592,7 @@ mod tests {
 
     #[test]
     fn builtin_registry_has_expected_command_count() {
-        assert_eq!(BUILTIN_COMMANDS.len(), 16);
+        assert_eq!(BUILTIN_COMMANDS.len(), 17);
     }
 
     #[test]

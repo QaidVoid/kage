@@ -1928,6 +1928,10 @@ impl App {
                 self.push_keybindings();
                 None
             }
+            "events" => {
+                self.push_events();
+                None
+            }
             "compact" => {
                 let _ = self.send_request(RunRequest::CompactNow);
                 None
@@ -2225,6 +2229,31 @@ impl App {
             lines.push(format!("  {chord:<16} {what}"));
         }
 
+        let body = lines.join("\n");
+        if let Ok(mut buf) = self.buffer.lock() {
+            buf.push_custom("kage:help", body, false);
+        }
+    }
+
+    /// Render every event a plugin can hook with `kage.on`, grouped
+    /// by dispatch kind, sourced from the single
+    /// [`kage_plugin::KNOWN_EVENTS`] catalog so it cannot drift from
+    /// what the host actually fires.
+    fn push_events(&mut self) {
+        let mut lines = vec![
+            "events (kage.on(name, fn)); kinds: notification | transform | predicate | veto"
+                .to_owned(),
+        ];
+        for kind in ["notification", "transform", "predicate", "veto"] {
+            lines.push(String::new());
+            lines.push(format!("{kind}:"));
+            for (name, _, desc) in kage_plugin::KNOWN_EVENTS
+                .iter()
+                .filter(|(_, k, _)| *k == kind)
+            {
+                lines.push(format!("  {name:<24} {desc}"));
+            }
+        }
         let body = lines.join("\n");
         if let Ok(mut buf) = self.buffer.lock() {
             buf.push_custom("kage:help", body, false);
@@ -3031,6 +3060,23 @@ mod tests {
         assert!(rendered.contains("ctrl+t"), "{rendered}");
         assert!(rendered.contains("theme set tokyo-night"), "{rendered}");
         assert!(rendered.contains("reserved"), "{rendered}");
+    }
+
+    #[test]
+    fn events_command_lists_known_hooks_by_kind() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer.clone(), tx);
+        app.push_events();
+        let buf = buffer.lock().unwrap();
+        let rendered = match buf.blocks().last() {
+            Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
+            other => panic!("expected a custom block, got {other:?}"),
+        };
+        assert!(rendered.contains("tool_call"), "{rendered}");
+        assert!(rendered.contains("transform_context"), "{rendered}");
+        assert!(rendered.contains("should_stop_after_turn"), "{rendered}");
+        assert!(rendered.contains("predicate:"), "{rendered}");
     }
 
     #[test]

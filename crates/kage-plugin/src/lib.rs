@@ -36,7 +36,7 @@ pub use bridge::{BridgeStep, SharedBridge, SuspendRequest};
 pub use chrome::{ChromeAttrs, ChromeLine, ChromeSlot, ChromeSpan, LuaChrome, SharedChrome};
 pub use commands::{BridgeArgs, BridgePrep, CommandOutput, LuaCommand, PluginArgSpec};
 pub use error::PluginError;
-pub use events::{DiscoveryEntries, SessionOpDecision};
+pub use events::{DiscoveryEntries, KNOWN_EVENTS, SessionOpDecision};
 pub use keybindings::LuaKeybinding;
 pub use lifecycle::{SharedCompactRequest, SharedUsage};
 pub use loader::{LoadReport, load_dir};

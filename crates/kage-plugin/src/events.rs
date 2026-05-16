@@ -76,6 +76,108 @@ use mlua::{Function, Lua, Table, Value};
 use crate::api::{LogLevel, SharedHostLog, json_to_lua, lua_to_json};
 use crate::error::PluginError;
 
+/// Every event name `kage.on` recognises, with its dispatch kind and
+/// a one-line summary. The single source of truth for runtime
+/// introspection (`:events`) so the catalog cannot drift from what
+/// the host actually fires. Kinds: `notification` (return ignored),
+/// `transform` (chained, may replace the payload), `predicate` (any
+/// `true` short-circuits), `veto` (first decision wins).
+pub const KNOWN_EVENTS: &[(&str, &str, &str)] = &[
+    (
+        "before_agent_start",
+        "notification",
+        "before the first provider call",
+    ),
+    (
+        "agent_start",
+        "notification",
+        "loop about to call the provider",
+    ),
+    ("agent_end", "notification", "loop returned (ok or error)"),
+    ("turn_start", "notification", "a new inner turn is starting"),
+    (
+        "turn_end",
+        "notification",
+        "the turn's provider stream closed",
+    ),
+    (
+        "message_start",
+        "notification",
+        "model began an assistant message",
+    ),
+    (
+        "message_update",
+        "notification",
+        "model emitted a text delta",
+    ),
+    (
+        "message_end",
+        "notification",
+        "model finished an assistant turn",
+    ),
+    (
+        "after_provider_response",
+        "notification",
+        "provider stream closed (id + usage)",
+    ),
+    ("tool_call", "notification", "a tool invocation began"),
+    ("tool_update", "notification", "mid-execution tool progress"),
+    ("tool_result", "notification", "a tool produced output"),
+    (
+        "session_open",
+        "notification",
+        "host opened a session writer",
+    ),
+    (
+        "session_close",
+        "notification",
+        "host closed a session writer",
+    ),
+    ("model_select", "notification", "active model changed"),
+    (
+        "thinking_level_select",
+        "notification",
+        "thinking level changed (reserved)",
+    ),
+    (
+        "user_bash",
+        "notification",
+        "inline `!cmd` from input (reserved)",
+    ),
+    (
+        "resources_discover",
+        "notification",
+        "return {skills?,templates?,themes?} dirs",
+    ),
+    (
+        "transform_context",
+        "transform",
+        "rewrite message history before send",
+    ),
+    (
+        "before_provider_request",
+        "transform",
+        "patch the outgoing StreamRequest",
+    ),
+    (
+        "compact_prepare",
+        "transform",
+        "customize or skip compaction summary",
+    ),
+    (
+        "should_stop_after_turn",
+        "predicate",
+        "true abandons the run after a turn",
+    ),
+    (
+        "session_before_switch",
+        "veto",
+        "veto/patch a session switch",
+    ),
+    ("session_before_fork", "veto", "veto/patch a fork point"),
+    ("session_before_tree", "veto", "veto/patch a tree action"),
+];
+
 /// Lua-registry key under which subscribed handlers are stored.
 const HANDLERS_KEY: &str = "kage._handlers";
 

@@ -37,6 +37,8 @@ Editing clears the error.
 | `:theme current`         | Print the active theme name                     |
 | `:mouse on|off|toggle`   | Control terminal mouse capture                  |
 | `:help`                  | List every command in a readable form           |
+| `:keybindings` / `:keys` | List active key bindings (config/plugin/reserved) |
+| `:events`                | List events plugins can hook with `kage.on`     |
 | `:compact`               | Run a compaction pass right now                 |
 | `:settings`              | Open the settings dialog (theme/model/mouse/..) |
 | `:tree`                  | Browse the session fork forest                  |

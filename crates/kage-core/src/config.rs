@@ -31,6 +31,8 @@ pub struct Config {
     /// Agent-loop tuning (`[loop]`): compaction threshold, etc.
     #[serde(rename = "loop")]
     pub loop_settings: LoopSettings,
+    /// External ACP agents usable as `acp:<name>` (`[acp.agents.*]`).
+    pub acp: AcpConfig,
 }
 
 impl Config {
@@ -269,6 +271,28 @@ pub struct KeybindingsConfig {
     pub bindings: BTreeMap<String, String>,
 }
 
+/// External ACP agents kage can drive as a provider. Each entry is
+/// addressable as the model id `acp:<name>`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AcpConfig {
+    /// Map of agent name to its launch spec.
+    pub agents: BTreeMap<String, AcpAgent>,
+}
+
+/// How to launch one external ACP agent over stdio.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AcpAgent {
+    /// Executable to spawn.
+    pub command: String,
+    /// Arguments passed to `command`.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Extra environment variables for the child process.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
 #[cfg(test)]
 #[allow(clippy::result_large_err)]
 mod tests {
@@ -285,6 +309,33 @@ mod tests {
         figment::Jail::expect_with(|jail| {
             let cfg = Config::load(jail.directory().join("nope.toml").as_path()).unwrap();
             assert_eq!(cfg, Config::default());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn acp_agents_default_empty_and_parse_from_table() {
+        assert!(Config::default().acp.agents.is_empty());
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.toml",
+                r#"
+                [acp.agents.claude-code]
+                command = "npx"
+                args = ["-y", "@zed-industries/claude-code-acp"]
+
+                [acp.agents.claude-code.env]
+                ANTHROPIC_API_KEY = "xxx"
+                "#,
+            )?;
+            let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
+            let agent = cfg.acp.agents.get("claude-code").expect("agent parsed");
+            assert_eq!(agent.command, "npx");
+            assert_eq!(agent.args, ["-y", "@zed-industries/claude-code-acp"]);
+            assert_eq!(
+                agent.env.get("ANTHROPIC_API_KEY").map(String::as_str),
+                Some("xxx")
+            );
             Ok(())
         });
     }

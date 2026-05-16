@@ -366,7 +366,17 @@ fn execute_print_run(
     plugin_runtime: Option<std::sync::Arc<kage_plugin::PluginRuntime>>,
     json_mode: bool,
 ) -> ExitCode {
-    let cfg = LoopConfig::default();
+    let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let cfg = match kage_core::config::Config::load_layered(&workdir) {
+        Ok(c) => LoopConfig {
+            compaction_threshold: c.loop_settings.compaction_threshold,
+            ..LoopConfig::default()
+        },
+        Err(e) => {
+            eprintln!("kage: config error: {e}; using defaults");
+            LoopConfig::default()
+        }
+    };
     let cancel = CancelFlag::new();
     let mut stdout = io::stdout().lock();
     let result = run_with_hooks(

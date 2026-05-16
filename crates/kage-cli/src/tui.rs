@@ -59,6 +59,22 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     let buffer = shared_buffer();
     let toasts = shared_toasts();
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // Load user/project config and map the loop-tunable subset onto
+    // the real LoopConfig. A malformed config is surfaced as an inline
+    // error block rather than silently falling back to defaults.
+    let app_config = match kage_core::config::Config::load_layered(&workdir) {
+        Ok(c) => c,
+        Err(e) => {
+            if let Ok(mut buf) = buffer.lock() {
+                buf.push_custom("kage:error", format!("config: {e}"), false);
+            }
+            kage_core::config::Config::default()
+        }
+    };
+    let loop_cfg = LoopConfig {
+        compaction_threshold: app_config.loop_settings.compaction_threshold,
+        ..LoopConfig::default()
+    };
     // Build the plugin runtime against a bare prompt first; skills land
     // below once plugins have had a chance to contribute extra dirs via
     // `resources_discover`.
@@ -208,6 +224,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         session_usage: session_usage.clone(),
         toasts: toasts.clone(),
         dialog_tx,
+        loop_cfg,
     });
 
     let mut tui = match Tui::enter() {
@@ -306,6 +323,8 @@ struct WorkerConfig {
     /// worker forwards a suspended coroutine's dialog request here and
     /// parks on a per-request reply channel until the App answers.
     dialog_tx: mpsc::Sender<PluginDialog>,
+    /// Loop tuning resolved from user/project config at startup.
+    loop_cfg: LoopConfig,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -325,8 +344,8 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
             session_usage,
             toasts,
             dialog_tx,
+            loop_cfg,
         } = cfg;
-        let loop_cfg = LoopConfig::default();
 
         for req in rx {
             match req {

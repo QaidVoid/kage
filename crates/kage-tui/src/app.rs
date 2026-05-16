@@ -150,6 +150,11 @@ pub enum RunRequest {
     /// `session_path` onto the new file. The model and system prompt
     /// carry over; the prior session file is left intact on disk.
     NewSession,
+    /// Render the active session transcript to a Markdown file. `None`
+    /// writes `<short-session-id>.md` in the working directory; `Some`
+    /// uses the given path. The worker replays the session file (the
+    /// source of truth) rather than the rendered buffer.
+    ExportSession(Option<std::path::PathBuf>),
     /// Advance the active thinking level one step forward (the
     /// `Shift+Tab` cycle). The worker mutates the agent context's
     /// `thinking_level`, persists the change as a session entry, and
@@ -1854,6 +1859,14 @@ impl App {
             }
             "new" => {
                 let _ = self.send_request(RunRequest::NewSession);
+                None
+            }
+            "export" => {
+                let dest = match rest.trim() {
+                    "" => None,
+                    path => Some(std::path::PathBuf::from(path)),
+                };
+                let _ = self.send_request(RunRequest::ExportSession(dest));
                 None
             }
             "clear" => {

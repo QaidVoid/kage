@@ -442,6 +442,17 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         subcommands: &[],
     },
     CommandSpec {
+        name: "export",
+        aliases: &[],
+        description: "write the session transcript to a Markdown file",
+        category: CommandCategory::Both,
+        args: &[ArgSpec::Path {
+            name: "file",
+            optional: true,
+        }],
+        subcommands: &[],
+    },
+    CommandSpec {
         name: "clear",
         aliases: &[],
         description: "clear the rendered conversation buffer",
@@ -565,7 +576,15 @@ mod tests {
 
     #[test]
     fn builtin_registry_has_expected_command_count() {
-        assert_eq!(BUILTIN_COMMANDS.len(), 14);
+        assert_eq!(BUILTIN_COMMANDS.len(), 15);
+    }
+
+    #[test]
+    fn builtin_registry_includes_export() {
+        let spec = find_builtin_command("export").expect("export should exist");
+        assert_eq!(spec.name, "export");
+        assert_eq!(spec.args.len(), 1);
+        assert!(spec.subcommands.is_empty());
     }
 
     #[test]

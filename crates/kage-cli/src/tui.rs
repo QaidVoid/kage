@@ -534,6 +534,9 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         &toasts,
                     );
                 }
+                RunRequest::ExportSession(dest) => {
+                    handle_export(session_path.as_ref(), dest, &buffer, &toasts);
+                }
                 RunRequest::ForkSessionFile(path) => {
                     handle_fork_file(&path, &buffer, &toasts);
                 }
@@ -1429,6 +1432,147 @@ fn handle_new(
     push_toast(toasts, Toast::info(format!("new session: {short}")));
 }
 
+/// Handle [`RunRequest::ExportSession`]. Replays the active session
+/// file (the source of truth, not the rendered buffer) and writes a
+/// Markdown transcript. `None` targets `<short-id>.md` in the working
+/// directory. Errors surface as `kage:error` blocks; success raises a
+/// toast with the written path.
+fn handle_export(
+    session_path: Option<&Arc<Mutex<PathBuf>>>,
+    dest: Option<PathBuf>,
+    buffer: &SharedBuffer,
+    toasts: &SharedToasts,
+) {
+    let Some(sp) = session_path else {
+        if let Ok(mut buf) = buffer.lock() {
+            buf.push_custom("kage:error", "export: no active session".to_owned(), false);
+        }
+        return;
+    };
+    let src = sp.lock().expect("session path mutex poisoned").clone();
+    if !src.exists() {
+        if let Ok(mut buf) = buffer.lock() {
+            buf.push_custom(
+                "kage:error",
+                "export: current session has no committed entries yet".to_owned(),
+                false,
+            );
+        }
+        return;
+    }
+    let replay = match kage_session::replay(&src) {
+        Ok(r) => r,
+        Err(e) => {
+            if let Ok(mut buf) = buffer.lock() {
+                buf.push_custom("kage:error", format!("export: {e}"), false);
+            }
+            return;
+        }
+    };
+    let out = dest.unwrap_or_else(|| {
+        let short: String = replay.header.session.to_string().chars().take(8).collect();
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(format!("{short}.md"))
+    });
+    let markdown = render_session_markdown(&replay);
+    if let Err(e) = std::fs::write(&out, markdown) {
+        if let Ok(mut buf) = buffer.lock() {
+            buf.push_custom(
+                "kage:error",
+                format!("export: write {}: {e}", out.display()),
+                false,
+            );
+        }
+        return;
+    }
+    push_toast(
+        toasts,
+        Toast::info(format!("exported to {}", out.display())),
+    );
+}
+
+/// Render a replayed session as a Markdown transcript. Plain text and
+/// fenced code only, no HTML, so the file stays greppable and
+/// ASCII-clean.
+fn render_session_markdown(replay: &kage_session::ReplayResult) -> String {
+    use std::fmt::Write as _;
+    let short: String = replay.header.session.to_string().chars().take(8).collect();
+    let mut md = String::new();
+    let _ = writeln!(md, "# kage session {short}");
+    let _ = writeln!(md);
+    let _ = writeln!(md, "- model: `{}`", replay.model);
+    let _ = writeln!(md, "- created: {}", replay.header.ts.to_rfc3339());
+    let _ = writeln!(md, "- cwd: `{}`", replay.header.cwd.display());
+    let _ = writeln!(md);
+    for msg in &replay.history {
+        let role = match msg.role {
+            Role::User => "User",
+            Role::Assistant => "Assistant",
+            Role::ToolResult => "Tool",
+            Role::System => "System",
+        };
+        let _ = writeln!(md, "## {role}");
+        let _ = writeln!(md);
+        for block in &msg.content {
+            match block {
+                Content::Text { text } => {
+                    let _ = writeln!(md, "{text}");
+                    let _ = writeln!(md);
+                }
+                Content::Thinking { text } => {
+                    let _ = writeln!(md, "**thinking**");
+                    let _ = writeln!(md);
+                    for line in text.lines() {
+                        let _ = writeln!(md, "> {line}");
+                    }
+                    let _ = writeln!(md);
+                }
+                Content::ToolCall { name, input, .. } => {
+                    let pretty =
+                        serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string());
+                    let _ = writeln!(md, "**tool call: `{name}`**");
+                    let _ = writeln!(md);
+                    let _ = writeln!(md, "```json");
+                    let _ = writeln!(md, "{pretty}");
+                    let _ = writeln!(md, "```");
+                    let _ = writeln!(md);
+                }
+                Content::ToolResultBlock {
+                    output, is_error, ..
+                } => {
+                    let label = if *is_error {
+                        "tool result (error)"
+                    } else {
+                        "tool result"
+                    };
+                    let _ = writeln!(md, "**{label}**");
+                    let _ = writeln!(md);
+                    let _ = writeln!(md, "```");
+                    let _ = writeln!(md, "{output}");
+                    let _ = writeln!(md, "```");
+                    let _ = writeln!(md);
+                }
+                Content::Image { mime, .. } => {
+                    let _ = writeln!(md, "_[image omitted: {mime}]_");
+                    let _ = writeln!(md);
+                }
+                Content::Custom { kind, data } => {
+                    let pretty =
+                        serde_json::to_string_pretty(data).unwrap_or_else(|_| data.to_string());
+                    let _ = writeln!(md, "_[custom block: {kind}]_");
+                    let _ = writeln!(md);
+                    let _ = writeln!(md, "```json");
+                    let _ = writeln!(md, "{pretty}");
+                    let _ = writeln!(md, "```");
+                    let _ = writeln!(md);
+                }
+            }
+        }
+    }
+    md
+}
+
 /// Fork an arbitrary session file (the `:tree` browser's `f`) at its
 /// last entry into a fresh session, leaving the runtime untouched.
 fn handle_fork_file(path: &std::path::Path, buffer: &SharedBuffer, toasts: &SharedToasts) {
@@ -1720,6 +1864,90 @@ mod tests {
         let toasts = shared_toasts();
         handle_delete_session(&path, Some(&active), &buffer, &toasts);
         assert!(path.exists(), "active session must not be deleted");
+    }
+
+    #[test]
+    fn render_session_markdown_covers_roles_and_blocks() {
+        let header = Header {
+            version: FORMAT_VERSION,
+            session: SessionId::new(),
+            id: EntryId::new(),
+            ts: Utc::now(),
+            cwd: PathBuf::from("/work"),
+            model: "anthropic:claude".into(),
+            system_prompt: "sp".into(),
+            parent_session: None,
+            parent_entry: None,
+        };
+        let history = vec![
+            Message::new(
+                Role::User,
+                vec![Content::Text {
+                    text: "hi there".into(),
+                }],
+                None,
+            ),
+            Message::new(
+                Role::Assistant,
+                vec![
+                    Content::Thinking {
+                        text: "consider\noptions".into(),
+                    },
+                    Content::Text {
+                        text: "answer".into(),
+                    },
+                    Content::ToolCall {
+                        id: kage_core::ToolCallId::new("c1"),
+                        name: "read".into(),
+                        input: serde_json::json!({"path": "x"}),
+                    },
+                ],
+                None,
+            ),
+            Message::new(
+                Role::ToolResult,
+                vec![Content::ToolResultBlock {
+                    call_id: kage_core::ToolCallId::new("c1"),
+                    output: "file body".into(),
+                    is_error: false,
+                }],
+                None,
+            ),
+        ];
+        let replay = kage_session::ReplayResult {
+            header,
+            history,
+            model: "anthropic:claude".into(),
+            tool_durations: std::collections::HashMap::new(),
+            usage_total: kage_session::ReplayUsage::default(),
+            thinking_level: None,
+        };
+        let md = render_session_markdown(&replay);
+        assert!(md.starts_with("# kage session "));
+        assert!(md.contains("## User"));
+        assert!(md.contains("## Assistant"));
+        assert!(md.contains("## Tool"));
+        assert!(md.contains("**thinking**"));
+        assert!(md.contains("> consider"));
+        assert!(md.contains("**tool call: `read`**"));
+        assert!(md.contains("```json"));
+        assert!(md.contains("file body"));
+    }
+
+    #[test]
+    fn handle_export_writes_markdown_to_the_given_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = write_session(dir.path(), "s.jsonl");
+        let active = Arc::new(Mutex::new(src.clone()));
+        let out = dir.path().join("out.md");
+        let buffer = shared_buffer();
+        let toasts = shared_toasts();
+        handle_export(Some(&active), Some(out.clone()), &buffer, &toasts);
+        assert!(out.exists());
+        let body = std::fs::read_to_string(&out).unwrap();
+        assert!(body.contains("# kage session "));
+        assert!(body.contains("## User"));
+        assert!(body.contains("hello"));
     }
 
     #[test]

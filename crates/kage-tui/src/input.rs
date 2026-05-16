@@ -266,6 +266,11 @@ pub struct InputState {
     /// Redo stack: filled by [`Self::undo`], cleared by any new
     /// mutation. Vim's `<C-r>` pops from here.
     redo_stack: Vec<EditSnapshot>,
+    /// When true the editor is non-modal (`[ui] editor = "modeless"`):
+    /// it never leaves an insert-like state, `Esc` cancels the turn,
+    /// and `PageUp` / `PageDown` scroll the buffer. Set by the host
+    /// from config / the settings dialog.
+    modeless: bool,
     /// Emacs kill ring. Ctrl+W / Ctrl+U / Ctrl+K and the Alt word
     /// kills push here; Ctrl+Y yanks the most recent entry. Capped at
     /// [`KILL_RING_MAX`]; empty kills are not recorded.
@@ -298,6 +303,7 @@ impl Default for InputState {
             visual_anchor: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            modeless: false,
             kill_ring: Vec::new(),
             pastes: Vec::new(),
             next_paste_id: 1,
@@ -323,6 +329,24 @@ impl InputState {
     #[must_use]
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// Switch between vim-modal and non-modal (modeless) editing.
+    /// Turning modeless on snaps the editor into the insert-like
+    /// state and keeps it there; `Esc` then cancels the turn rather
+    /// than entering Normal. Live-applicable from the settings
+    /// dialog.
+    pub fn set_modeless(&mut self, on: bool) {
+        self.modeless = on;
+        if on {
+            self.mode = Mode::Insert;
+        }
+    }
+
+    /// Whether the editor is in non-modal mode.
+    #[must_use]
+    pub fn is_modeless(&self) -> bool {
+        self.modeless
     }
 
     /// Current prompt-input text.
@@ -523,10 +547,32 @@ impl InputState {
         {
             return vec![InputAction::CycleThinkingLevel];
         }
+        if self.modeless {
+            return self.handle_modeless(key);
+        }
         match self.mode {
             Mode::Normal => self.handle_normal(key),
             Mode::Insert => self.handle_insert(key),
             Mode::Visual => self.handle_visual(key),
+        }
+    }
+
+    /// Non-modal dispatch. The editor is always insert-like: `Esc`
+    /// cancels the in-flight turn (never enters Normal), `PageUp` /
+    /// `PageDown` scroll the conversation buffer (there is no buffer
+    /// pane to focus), and every other key goes through the insert
+    /// handler. The insert handler's only mode transition is its own
+    /// `Esc` arm, which is intercepted here, so the editor can never
+    /// leave the insert state.
+    fn handle_modeless(&mut self, key: KeyEvent) -> Vec<InputAction> {
+        match key.code {
+            KeyCode::Esc => {
+                self.reset_history_navigation();
+                vec![InputAction::Cancel]
+            }
+            KeyCode::PageUp => vec![InputAction::Scroll(-10)],
+            KeyCode::PageDown => vec![InputAction::Scroll(10)],
+            _ => self.handle_insert(key),
         }
     }
 
@@ -2834,5 +2880,83 @@ mod tests {
             }
             other => panic!("expected Submit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn set_modeless_forces_insert() {
+        let mut state = InputState::new();
+        state.force_normal();
+        assert_eq!(state.mode(), Mode::Normal);
+        state.set_modeless(true);
+        assert!(state.is_modeless());
+        assert_eq!(state.mode(), Mode::Insert);
+    }
+
+    #[test]
+    fn modeless_esc_cancels_turn_and_stays_insert() {
+        let mut state = InputState::new();
+        state.set_modeless(true);
+        let acts = state.handle_key(key(KeyCode::Esc));
+        assert_eq!(acts, vec![InputAction::Cancel]);
+        // Never leaves the insert-like state.
+        assert_eq!(state.mode(), Mode::Insert);
+        // ... and is still editable afterward.
+        state.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(state.text(), "x");
+        assert_eq!(state.mode(), Mode::Insert);
+    }
+
+    #[test]
+    fn modeless_pageup_pagedown_scroll_the_buffer() {
+        let mut state = InputState::new();
+        state.set_modeless(true);
+        assert_eq!(
+            state.handle_key(key(KeyCode::PageUp)),
+            vec![InputAction::Scroll(-10)]
+        );
+        assert_eq!(
+            state.handle_key(key(KeyCode::PageDown)),
+            vec![InputAction::Scroll(10)]
+        );
+    }
+
+    #[test]
+    fn modeless_slash_on_empty_opens_command_palette() {
+        let mut state = InputState::new();
+        state.set_modeless(true);
+        assert_eq!(
+            state.handle_key(key(KeyCode::Char('/'))),
+            vec![InputAction::OpenCommandPalette]
+        );
+    }
+
+    #[test]
+    fn modeless_enter_submits_like_insert() {
+        let mut state = InputState::new();
+        state.set_modeless(true);
+        state.handle_key(key(KeyCode::Char('h')));
+        state.handle_key(key(KeyCode::Char('i')));
+        let acts = state.handle_key(key(KeyCode::Enter));
+        assert_eq!(acts, vec![InputAction::Submit("hi".into())]);
+    }
+
+    #[test]
+    fn modeless_emacs_keys_still_work() {
+        let mut state = InputState::new();
+        state.set_modeless(true);
+        state.paste("hello world");
+        state.handle_key(ctrl('w')); // kill word back
+        assert_eq!(state.text(), "hello ");
+        state.handle_key(ctrl('y')); // yank it back
+        assert_eq!(state.text(), "hello world");
+    }
+
+    #[test]
+    fn vim_default_esc_still_enters_normal() {
+        // Regression: the default (non-modeless) editor is unchanged.
+        let mut state = InputState::new();
+        assert!(!state.is_modeless());
+        state.handle_key(key(KeyCode::Esc));
+        assert_eq!(state.mode(), Mode::Normal);
     }
 }

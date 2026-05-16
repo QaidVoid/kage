@@ -27,6 +27,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use mlua::Lua;
 
 use crate::api::{self, SharedHostLog, default_host_log};
+use crate::autocomplete::{
+    self, LuaAutocompleteProvider, RegisteredAutocompleteProviders,
+    registered_autocomplete_providers,
+};
 use crate::bridge::{self, BridgeStep, SharedBridge, shared_bridge};
 use crate::chrome::{self, LuaChrome, SharedChrome, shared_chrome};
 use crate::commands::{self, LuaCommand, RegisteredCommands, registered_commands};
@@ -80,6 +84,7 @@ pub struct PluginRuntime {
     theme_request: SharedThemeRequest,
     header: SharedChrome,
     footer: SharedChrome,
+    autocomplete: RegisteredAutocompleteProviders,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -406,6 +411,19 @@ impl PluginRuntime {
         Arc::clone(&self.footer)
     }
 
+    /// Snapshot the autocomplete providers registered via
+    /// `kage.add_autocomplete_provider`, in registration order. The
+    /// host consults them in reverse order (last registered first) and
+    /// calls [`LuaAutocompleteProvider::complete`] on each as the
+    /// prompt input changes.
+    #[must_use]
+    pub fn registered_autocomplete_providers(&self) -> Vec<Arc<LuaAutocompleteProvider>> {
+        self.autocomplete
+            .lock()
+            .expect("plugin autocomplete mutex poisoned")
+            .clone()
+    }
+
     /// Cloneable handle to the queue of plugin-supplied messages.
     /// Hosts that want to sample the queue without consuming it (for
     /// diagnostics) hold onto this; production drain goes through
@@ -576,6 +594,10 @@ impl PluginRuntime {
         if let Ok(mut slot) = self.footer.lock() {
             *slot = None;
         }
+        self.autocomplete
+            .lock()
+            .expect("plugin autocomplete mutex poisoned")
+            .clear();
         crate::loader::load_dir(dir, self)
     }
 }
@@ -652,6 +674,7 @@ impl PluginRuntimeBuilder {
         let theme_request_slot = shared_theme_request();
         let header_slot = shared_chrome();
         let footer_slot = shared_chrome();
+        let autocomplete_registry = registered_autocomplete_providers();
         {
             let lua_guard = shared_lua.lock().expect("plugin lua mutex poisoned");
             bridge::install_suspend(&lua_guard)?;
@@ -717,6 +740,12 @@ impl PluginRuntimeBuilder {
                 Arc::clone(&header_slot),
                 Arc::clone(&footer_slot),
             )?;
+            autocomplete::install_add_autocomplete_provider(
+                &lua_guard,
+                Arc::clone(&shared_lua),
+                self.sink.clone(),
+                Arc::clone(&autocomplete_registry),
+            )?;
         }
         Ok(PluginRuntime {
             lua: shared_lua,
@@ -739,6 +768,7 @@ impl PluginRuntimeBuilder {
             theme_request: theme_request_slot,
             header: header_slot,
             footer: footer_slot,
+            autocomplete: autocomplete_registry,
         })
     }
 }

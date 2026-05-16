@@ -14,8 +14,15 @@ nothing carries over the boundary.
 - open blocking dialogs - select, confirm, input, editor
   (`kage.ui.*`), even from a command or keybinding handler
 - contribute status-bar widgets and transient status messages
+- take over the header / footer chrome rows (`kage.ui.set_header`
+  / `set_footer`)
+- add prompt-input autocomplete providers, including a built-in
+  `@file` path completer (`kage.add_autocomplete_provider`)
+- intercept raw key events before the dispatcher
+  (`kage.on_terminal_input`)
 - subscribe to ~25 events (lifecycle, message stream, tool calls),
-  transform the context or provider request, veto session ops
+  transform the context or provider request, rewrite or replace the
+  compaction summary, veto session ops
 - trigger compaction, fork sessions, inject messages, write custom
   session entries and labels
 

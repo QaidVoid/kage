@@ -73,6 +73,33 @@ result.
 Open a multi-line editor seeded with `prefill`. `Ctrl+S` submits,
 `Esc` cancels. Returns the final buffer, or `nil` if cancelled.
 
+### `kage.ui.set_header(fn | nil)` / `kage.ui.set_footer(fn | nil)`
+
+Take over the top status row (`set_header`) or the bottom modeline
+row (`set_footer`). The host calls `fn(width)` once per redraw and
+paints the returned styled lines in place of the built-in chrome.
+Passing `nil` clears the slot and restores the built-in row. The `:`
+command line and `/` search line still take priority over a custom
+header.
+
+`fn(width)` returns one of: a plain string (one unstyled span), a
+span table, or an array of those (one line per element; an element
+that is itself an array of spans is a multi-span line). A span table
+is `{ text, fg?, bg?, bold?, dim?, italic?, underline? }`; colors are
+strings the host resolves against the active theme (`"red"`,
+`"#1f1f28"`). A `nil` return, a non-conforming value, or an error
+logs and paints the built-in row instead (no silent failure).
+
+```lua
+kage.ui.set_footer(function(width)
+  return { { text = "branch: ", dim = true },
+           { text = "main", fg = "green", bold = true } }
+end)
+```
+
+The render function runs inside the shared Lua mutex, so keep it
+cheap: no blocking dialogs, no network.
+
 ## tools
 
 ### `kage.register_tool(spec)`
@@ -161,6 +188,81 @@ works but logs a warning. The handler runs through the coroutine
 bridge, so it too may open [`kage.ui.*`](#ui) dialogs; a non-empty
 string return is shown as a conversation block, like a command.
 
+## autocomplete
+
+### `kage.add_autocomplete_provider({ name, complete })`
+
+Add a completion provider for the prompt input. Providers form a
+stack: the host consults them in reverse registration order (the
+most recently added wins) on each input change and shows the first
+non-empty result in a popup above the input card. Re-adding a
+provider with the same `name` replaces it in place.
+
+`complete(prefix, ctx)` is called with the run of non-whitespace
+characters before the cursor and `ctx = { text, cursor }` (the full
+input and the cursor byte offset, so a provider can tokenize
+differently, e.g. an `@`-trigger). It returns an array of items:
+
+```lua
+kage.add_autocomplete_provider({
+  name = "emoji",
+  complete = function(prefix, _ctx)
+    if prefix:sub(1, 1) ~= ":" then return {} end
+    return {
+      { value = ":tada:", label = ":tada:", detail = "party" },
+    }
+  end,
+})
+```
+
+Item fields: `value` (required; the replacement text), `label`
+(defaults to `value`), `detail` (optional dim annotation), `range`
+(optional `{ from, to }` 0-based byte offsets to overwrite; absent
+means the host replaces the matched prefix). A `nil`/non-table
+return or an error yields no items.
+
+In the popup: `Up`/`Down` (or `Ctrl-p`/`Ctrl-n`) navigate, `Tab`
+accepts, `Esc` dismisses; any other key passes through to normal
+editing and re-queries. Providers run inside the shared Lua mutex
+(synchronous; keep them cheap).
+
+A built-in provider sits at the bottom of the stack: when the token
+under the cursor starts with `@`, it completes workdir-relative file
+paths (directories first, dotfiles only when typed). It is the
+foundation for `@file` references and needs no plugin.
+
+## raw input
+
+### `kage.on_terminal_input(handler) -> off`
+
+Register a handler the host calls for every key *before* any modal
+layer or built-in binding sees it. Returning a truthy value consumes
+the event. The call returns an `off` function; invoking it
+unregisters that handler (idempotent).
+
+```lua
+local off = kage.on_terminal_input(function(ev)
+  -- ev = { code, char?, ctrl, alt, shift }
+  if ev.ctrl and ev.code == "char" and ev.char == "g" then
+    kage.ui.notify("intercepted ctrl+g")
+    return true                              -- consume
+  end
+  return false
+end)
+```
+
+`code` is `"char"` (with `char` set), `"enter"`, `"esc"`, `"tab"`,
+`"backtab"`, `"backspace"`, an arrow / nav key, `"f1"`..`"f12"`, or
+`"other"`. Handlers run synchronously in the shared Lua mutex.
+
+This is a sharp tool. Prefer
+[`kage.register_keybinding`](#keybindings) for "run X on chord Y":
+it is declarative, appears in help, and cannot wedge the UI. A
+handler that always returns truthy makes the editor unusable, so
+the host still honors its hard `Ctrl+Q` quit hatch ahead of these
+hooks. A handler error or non-boolean return is treated as "not
+consumed".
+
 ## widgets and status
 
 ### `kage.register_widget({ key, render })`
@@ -231,6 +333,13 @@ produced and returns a replacement, or `nil` for "no change".
 - `before_provider_request` - argument is the serialized provider
   request; rewrite it to inject a system header, strip a tool, or
   swap the model.
+- `compact_prepare` - fired right before history compaction calls
+  the summarizer model. Argument is
+  `{ transcript, instruction, prompt, model, summarized, kept }`.
+  Return a table with `prompt` and/or `instruction` to steer the
+  summary, or `summary` to skip the model call entirely and use
+  that text as the summary body. `nil` passes through unchanged; an
+  error aborts compaction.
 
 ### predicate hook
 

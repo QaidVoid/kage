@@ -41,7 +41,8 @@ pub use layout::{
     INPUT_MIN_LINES, Regions, STATUS_BOTTOM_LINES_DEFAULT, input_height_for, split,
 };
 pub use overlay::{
-    OverlayAction, OverlayCtx, OverlayPicker, OverlayWidget, SlashContext, SlashPalette,
+    OverlayAction, OverlayCtx, OverlayPicker, OverlayWidget, SessionNode, SlashContext,
+    SlashPalette,
 };
 pub use picker::{PickItem, pick};
 pub use terminal::Tui;

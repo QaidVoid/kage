@@ -418,6 +418,14 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         subcommands: &[],
     },
     CommandSpec {
+        name: "tree",
+        aliases: &[],
+        description: "browse the session fork forest (resume, fork, delete)",
+        category: CommandCategory::Both,
+        args: &[],
+        subcommands: &[],
+    },
+    CommandSpec {
         name: "clear",
         aliases: &[],
         description: "clear the rendered conversation buffer",
@@ -541,7 +549,7 @@ mod tests {
 
     #[test]
     fn builtin_registry_has_expected_command_count() {
-        assert_eq!(BUILTIN_COMMANDS.len(), 11);
+        assert_eq!(BUILTIN_COMMANDS.len(), 12);
     }
 
     #[test]
@@ -555,6 +563,14 @@ mod tests {
     fn builtin_registry_includes_settings() {
         let spec = find_builtin_command("settings").expect("settings should exist");
         assert_eq!(spec.name, "settings");
+        assert_eq!(spec.args.len(), 0);
+        assert_eq!(spec.subcommands.len(), 0);
+    }
+
+    #[test]
+    fn builtin_registry_includes_tree() {
+        let spec = find_builtin_command("tree").expect("tree should exist");
+        assert_eq!(spec.name, "tree");
         assert_eq!(spec.args.len(), 0);
         assert_eq!(spec.subcommands.len(), 0);
     }

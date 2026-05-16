@@ -30,6 +30,17 @@ pub struct PickItem {
     pub label: String,
     /// Optional one-character status ('*' for "ready", '-' for "missing").
     pub badge: Option<char>,
+    /// Optional section this row belongs to. When set, the overlay
+    /// picker draws a non-selectable header each time the group
+    /// changes (e.g. a date for sessions, a provider for models).
+    /// Rows must already be ordered so a group is contiguous; the
+    /// caller owns that ordering.
+    pub group: Option<String>,
+    /// Optional right-aligned trailing column (e.g. a session time).
+    /// The overlay picker flushes it to the right edge and truncates
+    /// the label if needed so it always fits, so callers must not pad
+    /// the label themselves.
+    pub right: Option<String>,
 }
 
 impl PickItem {
@@ -42,6 +53,8 @@ impl PickItem {
             label: value.clone(),
             value,
             badge: None,
+            group: None,
+            right: None,
         }
     }
 
@@ -56,6 +69,20 @@ impl PickItem {
     #[must_use]
     pub fn with_label(mut self, label: impl Into<String>) -> Self {
         self.label = label.into();
+        self
+    }
+
+    /// Assign the section this row belongs to (see [`Self::group`]).
+    #[must_use]
+    pub fn with_group(mut self, group: impl Into<String>) -> Self {
+        self.group = Some(group.into());
+        self
+    }
+
+    /// Set the right-aligned trailing column (see [`Self::right`]).
+    #[must_use]
+    pub fn with_right(mut self, right: impl Into<String>) -> Self {
+        self.right = Some(right.into());
         self
     }
 }

@@ -1178,6 +1178,8 @@ impl App {
                         value: idx.to_string(),
                         label: item.label.clone(),
                         badge: None,
+                        group: None,
+                        right: None,
                     })
                     .collect();
                 self.plugin_overlay = Some(Box::new(OverlayPicker::new(title, picks)));

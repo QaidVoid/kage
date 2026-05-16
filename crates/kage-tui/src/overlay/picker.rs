@@ -36,11 +36,16 @@ pub struct OverlayPicker {
 }
 
 impl OverlayPicker {
-    /// Construct a picker with the given header and rows. Items are
-    /// sorted alphabetically by label to match the standalone picker.
+    /// Construct a picker with the given header and rows. Ungrouped
+    /// rows are sorted alphabetically by label (predictable for
+    /// arbitrary lists); grouped rows keep the caller's order so the
+    /// caller controls section ordering (chronological for sessions,
+    /// provider order for models).
     #[must_use]
     pub fn new(title: impl Into<String>, mut items: Vec<PickItem>) -> Self {
-        items.sort_by(|a, b| a.label.cmp(&b.label));
+        if items.iter().all(|i| i.group.is_none()) {
+            items.sort_by(|a, b| a.label.cmp(&b.label));
+        }
         Self {
             title: title.into(),
             items,
@@ -196,34 +201,41 @@ impl OverlayPicker {
         let above = offset;
         let below = total.saturating_sub(end);
 
-        let mut items: Vec<ListItem<'static>> = Vec::with_capacity(window + 2);
+        let mut items: Vec<ListItem<'static>> = Vec::with_capacity(window + 4);
         if above > 0 {
             items.push(ListItem::new(Line::from(Span::styled(
                 format!("... {above} more above"),
                 Style::default().fg(Color::DarkGray),
             ))));
         }
+        // Section headers are non-selectable render-only rows emitted
+        // whenever the group changes within the visible window (the
+        // first visible row always gets one so a scrolled-into group
+        // keeps its label). `sel_render` tracks the selected item's
+        // index *after* headers/spacers so the highlight lands right.
+        let mut prev_group: Option<String> = None;
+        let mut sel_render = 0usize;
         for (vi, &idx) in filtered.iter().enumerate().take(end).skip(offset) {
             let item = &self.items[idx];
+            if let Some(group) = item.group.as_deref()
+                && prev_group.as_deref() != Some(group)
+            {
+                if !items.is_empty() {
+                    items.push(ListItem::new(Line::raw("")));
+                }
+                items.push(ListItem::new(Line::from(Span::styled(
+                    group.to_owned(),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                ))));
+                prev_group = Some(group.to_owned());
+            }
             let is_sel = vi == self.selected;
-            let badge = item.badge.unwrap_or(' ');
-            let badge_color = if item.badge == Some('*') {
-                Color::Green
-            } else {
-                Color::DarkGray
-            };
-            let label_style = if is_sel {
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::Blue)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::White)
-            };
-            items.push(ListItem::new(Line::from(vec![
-                Span::styled(format!(" {badge} "), Style::default().fg(badge_color)),
-                Span::styled(item.label.clone(), label_style),
-            ])));
+            if is_sel {
+                sel_render = items.len();
+            }
+            items.push(ListItem::new(row_line(item, is_sel, area.width)));
         }
         if below > 0 {
             items.push(ListItem::new(Line::from(Span::styled(
@@ -232,9 +244,8 @@ impl OverlayPicker {
             ))));
         }
 
-        let visible_index = self.selected.saturating_sub(offset) + usize::from(above > 0);
         let mut state = ListState::default();
-        state.select(Some(visible_index));
+        state.select(Some(sel_render));
         StatefulWidget::render(
             List::new(items).highlight_style(Style::default().add_modifier(Modifier::BOLD)),
             area,
@@ -249,6 +260,48 @@ impl OverlayPicker {
             Style::default().fg(Color::DarkGray),
         ));
         Widget::render(Paragraph::new(line), area, buf);
+    }
+}
+
+/// Build one selectable row: ` badge ` chrome, the label, and an
+/// optional right-aligned column flushed to the row's right edge.
+/// The label is truncated so a >=2 col gap before the right column
+/// always remains, at any terminal width (no fixed label padding).
+fn row_line(item: &PickItem, is_sel: bool, width: u16) -> Line<'static> {
+    let badge = item.badge.unwrap_or(' ');
+    let badge_color = if item.badge == Some('*') {
+        Color::Green
+    } else {
+        Color::DarkGray
+    };
+    let label_style = if is_sel {
+        Style::default()
+            .fg(Color::White)
+            .bg(Color::Blue)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let badge_span = Span::styled(format!(" {badge} "), Style::default().fg(badge_color));
+    match item.right.as_deref() {
+        None | Some("") => Line::from(vec![
+            badge_span,
+            Span::styled(item.label.clone(), label_style),
+        ]),
+        Some(right) => {
+            let total = usize::from(width);
+            let rlen = right.chars().count();
+            let avail = total.saturating_sub(3 + rlen + 2);
+            let label: String = item.label.chars().take(avail).collect();
+            let lw = label.chars().count();
+            let pad = total.saturating_sub(3 + lw + rlen);
+            Line::from(vec![
+                badge_span,
+                Span::styled(label, label_style),
+                Span::raw(" ".repeat(pad)),
+                Span::styled(right.to_owned(), Style::default().fg(Color::DarkGray)),
+            ])
+        }
     }
 }
 
@@ -348,5 +401,64 @@ mod tests {
             p.handle_key(key(KeyCode::Char(c)));
         }
         assert_eq!(p.handle_key(key(KeyCode::Enter)), OverlayAction::Stay);
+    }
+
+    #[test]
+    fn grouped_items_keep_caller_order_and_resolve_correctly() {
+        // Two sections; caller order is preserved (no alphabetical
+        // re-sort) so groups stay contiguous, and selection still
+        // maps to the right value despite render-only headers.
+        let items = vec![
+            PickItem::simple("s1")
+                .with_label("first")
+                .with_group("Today"),
+            PickItem::simple("s2")
+                .with_label("second")
+                .with_group("Today"),
+            PickItem::simple("s3")
+                .with_label("third")
+                .with_group("Yesterday"),
+        ];
+        let mut p = OverlayPicker::new("Sessions", items);
+        // Order unchanged (would be s1,s2,s3 alphabetically too, so
+        // assert via a group that would re-sort if sorting ran).
+        p.handle_key(key(KeyCode::Down));
+        p.handle_key(key(KeyCode::Down));
+        let action = p.handle_key(key(KeyCode::Enter));
+        assert_eq!(resolved(action), Some("s3".into()));
+    }
+
+    #[test]
+    fn render_emits_section_headers_for_groups() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let items = vec![
+            PickItem::simple("s1")
+                .with_label("alpha")
+                .with_group("Today"),
+            PickItem::simple("s2")
+                .with_label("beta")
+                .with_group("Yesterday"),
+        ];
+        let mut p = OverlayPicker::new("Sessions", items);
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let theme = crate::theme::Theme::default();
+        let ctx = OverlayCtx {
+            theme: &theme,
+            viewport: area,
+        };
+        OverlayWidget::render(&mut p, area, &mut buf, &ctx);
+        let mut text = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                text.push_str(buf[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        assert!(text.contains("Today"), "section header missing:\n{text}");
+        assert!(text.contains("Yesterday"), "second header missing");
+        assert!(text.contains("alpha") && text.contains("beta"));
     }
 }

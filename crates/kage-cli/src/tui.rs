@@ -1253,14 +1253,24 @@ fn run_compact_with_hooks(
 /// happens at picker-open time so newly recorded sessions appear
 /// without needing to restart the TUI.
 fn list_session_choices(dir: &std::path::Path) -> Vec<PickItem> {
-    let Ok(summaries) = kage_session::list(dir) else {
+    let Ok(mut summaries) = kage_session::list(dir) else {
         return Vec::new();
     };
+    // Order by last activity, newest first, so the date sections are
+    // contiguous (the rows are grouped by `updated_at`'s day) and the
+    // time column reads top-to-bottom within each day. `list` sorts
+    // by `created_at`, which would split a day whose session was
+    // resumed later.
+    summaries.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
     summaries
         .into_iter()
         .map(|s| {
-            let label = format_session_label(&s);
-            PickItem::simple(s.path.to_string_lossy().into_owned()).with_label(label)
+            let day = relative_day(s.updated_at);
+            let time = s.updated_at.format("%H:%M").to_string();
+            PickItem::simple(s.path.to_string_lossy().into_owned())
+                .with_label(format_session_label(&s))
+                .with_group(day)
+                .with_right(time)
         })
         .collect()
 }
@@ -1290,23 +1300,22 @@ fn list_session_nodes(
         .collect()
 }
 
-/// One-line description of a session for the picker. Prefers the
-/// generated title; falls back to the first line of the last user
-/// prompt for sessions written before titles existed. Shows a
-/// human relative day on the left and the wall-clock time on the
-/// right so same-day sessions read as a group at a glance.
+/// The session picker row's label: just the title, cleaned to one
+/// line. Prefers the generated title; falls back to the first line
+/// of the last user prompt for sessions written before titles
+/// existed. The picker right-aligns the time and truncates this to
+/// fit, so no padding is baked in here.
 fn format_session_label(s: &SessionSummary) -> String {
-    let title = s
-        .title
+    s.title
         .as_deref()
         .or(s.last_user_prompt.as_deref())
         .map_or_else(
             || "(untitled session)".to_owned(),
-            |t| truncate(&t.replace('\n', " "), 56),
-        );
-    let day = relative_day(s.updated_at);
-    let time = s.updated_at.format("%H:%M");
-    format!("{day:<9}  {title:<56}  {time}")
+            |t| {
+                let one_line = t.replace('\n', " ");
+                one_line.split_whitespace().collect::<Vec<_>>().join(" ")
+            },
+        )
 }
 
 /// A short, human day label relative to now: `Today` / `Yesterday`
@@ -1320,14 +1329,6 @@ fn relative_day(ts: chrono::DateTime<chrono::Utc>) -> String {
         1 => "Yesterday".to_owned(),
         _ => day.format("%Y-%m-%d").to_string(),
     }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_owned();
-    }
-    let cut: String = s.chars().take(max.saturating_sub(3)).collect();
-    format!("{cut}...")
 }
 
 /// Bridge a plugin runtime arg-spec entry over to the TUI's owned
@@ -1980,12 +1981,12 @@ fn available_model_items(registry: &ProviderRegistry, active: &str) -> Vec<kage_
         let models = catalog_provider.map_or::<&[_], _>(&[], |p| p.models);
         for model in models {
             let value = format!("{provider_id}:{}", model.id);
-            let label = format!("{display_name:<20}  {}", model.name);
             let badge = if value == active { '*' } else { ' ' };
             items.push(
                 kage_tui::PickItem::simple(value)
-                    .with_label(label)
-                    .with_badge(badge),
+                    .with_label(model.name)
+                    .with_badge(badge)
+                    .with_group(display_name),
             );
         }
     }
@@ -2210,8 +2211,10 @@ mod tests {
         assert!(prompt_only.contains("just the prompt"), "{prompt_only}");
 
         let neither = format_session_label(&summary(None, None));
-        assert!(neither.contains("(untitled session)"), "{neither}");
-        // Always carries the relative day + HH:MM time column.
-        assert!(neither.contains("Today"), "{neither}");
+        assert_eq!(
+            neither, "(untitled session)",
+            "label is just the title; date is the section header and \
+             time is the picker's right column, neither baked in"
+        );
     }
 }

@@ -155,6 +155,12 @@ const UNDO_MAX: usize = 100;
 /// the bottom; Ctrl+Y always yanks the most recent.
 const KILL_RING_MAX: usize = 60;
 
+/// A bracketed paste of at least this many lines is collapsed to a
+/// `[paste #N: M lines]` placeholder in the draft until the user
+/// expands it (Ctrl+O) or submits (submission always sends the full
+/// text). Keeps a multi-hundred-line paste from flooding the input.
+const PASTE_COLLAPSE_LINES: usize = 10;
+
 /// One step on the undo or redo stack. We snapshot full text +
 /// cursor rather than diff-encode because input bodies are small
 /// (capped to a handful of KB by the host) and snapshot semantics
@@ -164,6 +170,25 @@ const KILL_RING_MAX: usize = 60;
 struct EditSnapshot {
     text: String,
     cursor: usize,
+}
+
+/// A large bracketed paste held out of the visible draft. The draft
+/// shows `[paste #id: lines lines]`; the real text is restored when
+/// the user expands (Ctrl+O) or submits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PasteBlob {
+    id: u32,
+    text: String,
+    lines: usize,
+}
+
+impl PasteBlob {
+    /// The exact ASCII placeholder token that stands in for this blob
+    /// in the draft. Resolution matches it verbatim, so editing into
+    /// it simply drops the substitution (the literal token is sent).
+    fn placeholder(&self) -> String {
+        format!("[paste #{}: {} lines]", self.id, self.lines)
+    }
 }
 
 /// Vim-style operator pending after `d`, `c`, or `y`. Combines with
@@ -245,6 +270,13 @@ pub struct InputState {
     /// kills push here; Ctrl+Y yanks the most recent entry. Capped at
     /// [`KILL_RING_MAX`]; empty kills are not recorded.
     kill_ring: Vec<String>,
+    /// Collapsed large pastes, keyed by the placeholder embedded in
+    /// the draft. Resolved back to full text on submit (or inline via
+    /// Ctrl+O). Empty in the common case.
+    pastes: Vec<PasteBlob>,
+    /// Monotonic id for the next collapsed paste, so placeholders stay
+    /// unique within a draft even after edits.
+    next_paste_id: u32,
 }
 
 impl Default for InputState {
@@ -267,6 +299,8 @@ impl Default for InputState {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             kill_ring: Vec::new(),
+            pastes: Vec::new(),
+            next_paste_id: 1,
         }
     }
 }
@@ -1113,7 +1147,8 @@ impl InputState {
         // Alt+d deletes forward, Alt+b/Alt+f move by word, and
         // Ctrl+a/e/u/k operate on the current visual line. The kills
         // (Ctrl+W/U/K, Alt+Backspace, Alt+d) feed a kill ring; Ctrl+Y
-        // yanks the most recent entry and Ctrl+/ (or Ctrl+_) undoes.
+        // yanks the most recent entry, Ctrl+/ (or Ctrl+_) undoes, and
+        // Ctrl+O expands any collapsed bracketed paste inline.
         if ctrl && !alt {
             match key.code {
                 KeyCode::Char('s') => {
@@ -1153,6 +1188,10 @@ impl InputState {
                 KeyCode::Char('/' | '_') => {
                     self.reset_history_navigation();
                     self.undo();
+                    return Vec::new();
+                }
+                KeyCode::Char('o') => {
+                    self.expand_pastes();
                     return Vec::new();
                 }
                 _ => {}
@@ -1199,7 +1238,9 @@ impl InputState {
                 } else if self.text.is_empty() {
                     Vec::new()
                 } else {
-                    let text = std::mem::take(&mut self.text);
+                    let raw = std::mem::take(&mut self.text);
+                    let text = self.resolve_pastes(&raw);
+                    self.pastes.clear();
                     self.cursor = 0;
                     self.push_history(&text);
                     self.reset_history_navigation();
@@ -1475,8 +1516,54 @@ impl InputState {
         if self.mode != Mode::Insert {
             return;
         }
+        let lines = text.split('\n').count();
+        if lines >= PASTE_COLLAPSE_LINES {
+            let id = self.next_paste_id;
+            self.next_paste_id = self.next_paste_id.wrapping_add(1);
+            let blob = PasteBlob {
+                id,
+                text: text.to_owned(),
+                lines,
+            };
+            let token = blob.placeholder();
+            self.pastes.push(blob);
+            self.text.insert_str(self.cursor, &token);
+            self.cursor += token.len();
+            return;
+        }
         self.text.insert_str(self.cursor, text);
         self.cursor += text.len();
+    }
+
+    /// Replace every collapsed-paste placeholder in `s` with its full
+    /// text. A placeholder a user has edited no longer matches and is
+    /// left as-is (the literal token is what gets sent), which is
+    /// visible rather than silent.
+    fn resolve_pastes(&self, s: &str) -> String {
+        let mut out = s.to_owned();
+        for blob in &self.pastes {
+            out = out.replace(&blob.placeholder(), &blob.text);
+        }
+        out
+    }
+
+    /// Expand all collapsed pastes inline (Ctrl+O): the draft becomes
+    /// the full text and the registry is cleared. The cursor lands at
+    /// the end so the user can keep typing after the expanded block.
+    fn expand_pastes(&mut self) {
+        if self.pastes.is_empty() {
+            return;
+        }
+        self.snapshot_for_undo();
+        self.text = self.resolve_pastes(&self.text);
+        self.cursor = self.text.len();
+        self.pastes.clear();
+    }
+
+    /// Number of collapsed pastes currently held. Test/inspection aid.
+    #[cfg(test)]
+    pub(crate) fn collapsed_paste_count(&self) -> usize {
+        self.pastes.len()
     }
 
     fn backspace(&mut self) {
@@ -2679,5 +2766,73 @@ mod tests {
         assert_eq!(state.text(), "keep ");
         state.handle_key(ctrl('/'));
         assert_eq!(state.text(), "keep this");
+    }
+
+    #[test]
+    fn large_paste_collapses_to_placeholder() {
+        let mut state = InputState::new();
+        let blob = "row\n".repeat(12);
+        state.paste(&blob);
+        assert_eq!(state.collapsed_paste_count(), 1);
+        assert!(state.text().starts_with("[paste #1: "));
+        assert!(state.text().ends_with(" lines]"));
+        assert!(!state.text().contains("row"));
+    }
+
+    #[test]
+    fn small_paste_is_inserted_verbatim() {
+        let mut state = InputState::new();
+        state.paste("a\nb\nc");
+        assert_eq!(state.text(), "a\nb\nc");
+        assert_eq!(state.collapsed_paste_count(), 0);
+    }
+
+    #[test]
+    fn submit_resolves_collapsed_paste_to_full_text() {
+        let mut state = InputState::new();
+        let blob = "x\n".repeat(15);
+        state.paste(&blob);
+        state.handle_key(key(KeyCode::Char('!')));
+        let acts = state.handle_key(key(KeyCode::Enter));
+        match acts.as_slice() {
+            [InputAction::Submit(t)] => {
+                assert!(t.contains(&blob), "full paste text must be sent");
+                assert!(t.ends_with('!'));
+                assert!(!t.contains("[paste #"), "placeholder must not leak");
+            }
+            other => panic!("expected Submit, got {other:?}"),
+        }
+        assert_eq!(state.collapsed_paste_count(), 0);
+    }
+
+    #[test]
+    fn ctrl_o_expands_collapsed_paste_inline() {
+        let mut state = InputState::new();
+        let blob = "L\n".repeat(11);
+        state.paste(&blob);
+        assert_eq!(state.collapsed_paste_count(), 1);
+        state.handle_key(ctrl('o'));
+        assert_eq!(state.text(), blob);
+        assert_eq!(state.cursor(), blob.len());
+        assert_eq!(state.collapsed_paste_count(), 0);
+    }
+
+    #[test]
+    fn two_large_pastes_get_distinct_placeholders() {
+        let mut state = InputState::new();
+        state.paste(&"a\n".repeat(10));
+        state.paste(&"b\n".repeat(10));
+        assert_eq!(state.collapsed_paste_count(), 2);
+        assert!(state.text().contains("[paste #1: "));
+        assert!(state.text().contains("[paste #2: "));
+        let acts = state.handle_key(key(KeyCode::Enter));
+        match acts.as_slice() {
+            [InputAction::Submit(t)] => {
+                assert!(t.contains(&"a\n".repeat(10)));
+                assert!(t.contains(&"b\n".repeat(10)));
+                assert!(!t.contains("[paste #"));
+            }
+            other => panic!("expected Submit, got {other:?}"),
+        }
     }
 }

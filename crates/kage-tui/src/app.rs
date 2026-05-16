@@ -314,7 +314,12 @@ impl PluginDialogState {
 /// demand. Listing happens on the main thread when the user presses
 /// `Ctrl+R`, so a fresh scan reflects any sessions written elsewhere
 /// since the TUI started.
-pub type SessionLister = Box<dyn Fn() -> Vec<PickItem> + Send + 'static>;
+///
+/// The `bool` argument is `include_all`: `false` restricts the result
+/// to sessions created in the current working directory (the picker
+/// default), `true` returns every session (used by `kage.session.list`
+/// and `:resume` completion, and by the in-picker "all dirs" toggle).
+pub type SessionLister = Box<dyn Fn(bool) -> Vec<PickItem> + Send + 'static>;
 
 /// Unified command registry the completion engine consumes: builtin
 /// commands first, then any plugin-registered commands (built once at
@@ -419,7 +424,7 @@ impl Resolver for AppResolver<'_> {
                 .collect(),
             ArgSource::Sessions => self
                 .sessions
-                .map(|f| f())
+                .map(|f| f(true))
                 .unwrap_or_default()
                 .into_iter()
                 .map(|item| item.value)
@@ -430,7 +435,7 @@ impl Resolver for AppResolver<'_> {
 
     fn sessions(&self) -> Vec<String> {
         self.sessions
-            .map(|f| f())
+            .map(|f| f(true))
             .unwrap_or_default()
             .into_iter()
             .map(|item| item.value)
@@ -452,6 +457,10 @@ pub struct App {
     /// Which picker is open, mirroring [`Self::picker`]. Used to
     /// dispatch the picked value to the right `RunRequest`.
     picker_kind: Option<PickerKind>,
+    /// Scope of the open session picker: `false` (default) shows only
+    /// this directory's sessions; `true` shows all. Toggled in-picker
+    /// with `Ctrl+A`.
+    session_scope_all: bool,
     /// Open `:settings` overlay. A modal sibling of [`Self::picker`];
     /// on resolve its edits are applied live and persisted.
     settings_overlay: Option<SettingsOverlay>,
@@ -661,6 +670,7 @@ impl App {
             model_choices: Vec::new(),
             picker: None,
             picker_kind: None,
+            session_scope_all: false,
             settings_overlay: None,
             session_tree: None,
             session_tree_source: None,
@@ -1232,7 +1242,7 @@ impl App {
         let Some(lister) = self.session_lister.as_ref() else {
             return;
         };
-        let items = lister();
+        let items = lister(true);
         let entries: Vec<serde_json::Value> = items
             .into_iter()
             .map(|p| {
@@ -2424,7 +2434,48 @@ impl App {
         }
     }
 
+    /// Title for the session picker, encoding the active scope and
+    /// the `Ctrl+A` toggle so the binding is discoverable in-place.
+    fn session_picker_title(all: bool) -> &'static str {
+        if all {
+            "Resume session - all dirs (Ctrl+A: this dir)"
+        } else {
+            "Resume session - this dir (Ctrl+A: all dirs)"
+        }
+    }
+
+    /// (Re)build the session picker for the current
+    /// [`Self::session_scope_all`] scope. `allow_empty` keeps the
+    /// modal open with no rows (used by the toggle so the user can
+    /// flip back); the initial open passes `false` so `Ctrl+R` with
+    /// nothing to resume is a no-op rather than an empty dialog.
+    fn open_session_picker(&mut self, allow_empty: bool) {
+        let Some(lister) = self.session_lister.as_ref() else {
+            return;
+        };
+        let items = lister(self.session_scope_all);
+        if items.is_empty() && !allow_empty {
+            return;
+        }
+        let title = Self::session_picker_title(self.session_scope_all);
+        self.picker = Some(OverlayPicker::new(title, items));
+        self.picker_kind = Some(PickerKind::Session);
+    }
+
     fn dispatch_picker_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> Option<AppExit> {
+        // Ctrl+A toggles the session picker between this-directory and
+        // all-directories scope, rebuilding it in place. Intercepted
+        // before the picker sees the key (its Char arm would
+        // otherwise treat `a` as search input).
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        if self.picker_kind == Some(PickerKind::Session)
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('a'))
+        {
+            self.session_scope_all = !self.session_scope_all;
+            self.open_session_picker(true);
+            return None;
+        }
         let picker = self.picker.as_mut()?;
         match crate::overlay::OverlayWidget::handle_key(picker, key) {
             OverlayAction::Stay | OverlayAction::PropagateKey => {}
@@ -2701,7 +2752,7 @@ impl App {
                     sessions: self
                         .session_lister
                         .as_ref()
-                        .map(|f| f())
+                        .map(|f| f(true))
                         .unwrap_or_default(),
                     themes: crate::theme::Theme::available_names(self.themes_dir.as_deref()),
                 };
@@ -2720,13 +2771,17 @@ impl App {
                 }
             }
             InputAction::OpenSessionPicker => {
-                if let Some(lister) = self.session_lister.as_ref() {
-                    let items = lister();
-                    if !items.is_empty() {
-                        self.picker = Some(OverlayPicker::new("Resume session", items));
-                        self.picker_kind = Some(PickerKind::Session);
-                    }
+                // Default to this directory's sessions. If there are
+                // none here but some elsewhere, open in all-dirs
+                // scope so Ctrl+R is never a dead key in a fresh dir.
+                self.session_scope_all = false;
+                if let Some(lister) = self.session_lister.as_ref()
+                    && lister(false).is_empty()
+                    && !lister(true).is_empty()
+                {
+                    self.session_scope_all = true;
                 }
+                self.open_session_picker(false);
             }
             InputAction::BeginCommand => {
                 self.cmdline = Some(CommandLine::new());
@@ -4263,5 +4318,53 @@ mod tests {
         assert_eq!(crate::theme::current().name, "tokyo-night");
         assert_eq!(state.lock().unwrap().current, "tokyo-night");
         assert!(request.lock().unwrap().is_none(), "request was drained");
+    }
+
+    #[test]
+    fn session_picker_defaults_to_cwd_and_ctrl_a_toggles_all() {
+        let buffer = shared_buffer();
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        // cwd scope -> only "here"; all scope -> "here" + "elsewhere".
+        app.set_session_lister(Box::new(|all| {
+            if all {
+                vec![PickItem::simple("here"), PickItem::simple("elsewhere")]
+            } else {
+                vec![PickItem::simple("here")]
+            }
+        }));
+
+        app.session_scope_all = false;
+        app.open_session_picker(false);
+        assert_eq!(app.picker_kind, Some(PickerKind::Session));
+        // cwd scope: Enter resolves the only cwd session.
+        app.dispatch_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match rx.recv_timeout(Duration::from_millis(100)).unwrap() {
+            RunRequest::ResumeSession(p) => assert_eq!(p, std::path::PathBuf::from("here")),
+            other => panic!("expected ResumeSession(here), got {other:?}"),
+        }
+
+        // Reopen, toggle to all dirs with Ctrl+A, pick the 2nd row.
+        app.session_scope_all = false;
+        app.open_session_picker(false);
+        assert!(app.dispatch_picker_key(ctrl('a')).is_none());
+        assert!(app.session_scope_all, "Ctrl+A switched to all dirs");
+        // Ungrouped rows sort alphabetically, so row 0 is now
+        // "elsewhere" - which only exists in the all-dirs dataset,
+        // proving the toggle re-listed with the wider scope.
+        app.dispatch_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match rx.recv_timeout(Duration::from_millis(100)).unwrap() {
+            RunRequest::ResumeSession(p) => {
+                assert_eq!(p, std::path::PathBuf::from("elsewhere"));
+            }
+            other => panic!("expected ResumeSession(elsewhere), got {other:?}"),
+        }
+        // Toggle back to cwd-only.
+        app.session_scope_all = false;
+        app.open_session_picker(false);
+        assert!(app.dispatch_picker_key(ctrl('a')).is_none());
+        assert!(app.session_scope_all);
+        assert!(app.dispatch_picker_key(ctrl('a')).is_none());
+        assert!(!app.session_scope_all, "Ctrl+A toggles back");
     }
 }

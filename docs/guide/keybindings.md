@@ -78,8 +78,8 @@ Editing the line clears the error.
 | `zM`      | Fold all blocks                              |
 | `zR`      | Unfold all blocks                            |
 | `n` / `N` | Jump to next / previous search match         |
-| `Ctrl+P`  | Open model picker                            |
-| `Ctrl+S`  | Open session picker                          |
+| `Ctrl+P`  | Open model picker (grouped by provider)      |
+| `Ctrl+S`  | Open session picker (this dir; `Ctrl+A` toggles all dirs) |
 | `Shift+Tab` | Cycle thinking level (off -> minimal -> low -> medium -> high -> xhigh) |
 | `y`       | Yank current selection                       |
 | `Y`       | Yank focused block                           |

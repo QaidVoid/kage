@@ -340,7 +340,10 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     if let Ok(dir) = crate::sessions_dir() {
         let tree_dir = dir.clone();
         let tree_sp = session_path.clone();
-        app.set_session_lister(Box::new(move || list_session_choices(&dir)));
+        let lister_workdir = workdir.clone();
+        app.set_session_lister(Box::new(move |all| {
+            list_session_choices(&dir, &lister_workdir, all)
+        }));
         app.set_session_tree_source(Box::new(move || {
             list_session_nodes(&tree_dir, tree_sp.as_ref())
         }));
@@ -1251,11 +1254,20 @@ fn run_compact_with_hooks(
 
 /// Build the picker rows for the `Ctrl+R` session picker. Listing
 /// happens at picker-open time so newly recorded sessions appear
-/// without needing to restart the TUI.
-fn list_session_choices(dir: &std::path::Path) -> Vec<PickItem> {
+/// without needing to restart the TUI. Unless `all` is set, only
+/// sessions whose recorded `cwd` is `workdir` are shown (the picker
+/// default); the in-picker `Ctrl+A` toggle re-lists with `all`.
+fn list_session_choices(
+    dir: &std::path::Path,
+    workdir: &std::path::Path,
+    all: bool,
+) -> Vec<PickItem> {
     let Ok(mut summaries) = kage_session::list(dir) else {
         return Vec::new();
     };
+    if !all {
+        summaries.retain(|s| s.cwd == workdir);
+    }
     // Order by last activity, newest first, so the date sections are
     // contiguous (the rows are grouped by `updated_at`'s day) and the
     // time column reads top-to-bottom within each day. `list` sorts

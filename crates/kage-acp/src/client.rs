@@ -1,25 +1,30 @@
 //! ACP client adapter: drive another ACP agent as a kage provider.
 //!
-//! [`AcpProvider`] implements [`kage_provider::Provider`] by spawning
-//! an external ACP agent (anything that speaks `kage rpc`'s protocol)
-//! and forwarding the latest user turn to it as a `prompt`. The
-//! upstream agent's streamed text and thinking are translated back
-//! into [`ProviderEvent`]s so kage's loop can consume another agent
-//! as if it were a model. This is the "stacking" seam: `kage -> kage`,
-//! `kage -> goose`, `kage -> claude-code`.
+//! [`AcpProvider`] implements [`kage_provider::Provider`] by speaking
+//! real ACP (newline-delimited JSON-RPC 2.0, protocol version 1) as
+//! the *client* to an external agent process - `claude-code-acp`,
+//! `goose`, `gemini` in ACP mode, or another `kage rpc`. The latest
+//! user turn is forwarded as a `session/prompt`; the agent's
+//! `session/update` stream is translated back into [`ProviderEvent`]s
+//! so kage's loop can stack on top of another agent.
 //!
 //! ## v1 scope and limitations
 //!
 //! The upstream agent runs its *own* tool loop; only its assistant
-//! text and thinking reach kage. Upstream tool-call events are not
-//! relayed (`supports_tool_use` is `false`), and an upstream
-//! `permission/request` is **denied**, never auto-approved, because a
-//! provider has no seam to forward it to kage's permission hook. Use
-//! this adapter with upstream agents that complete a turn from text
-//! alone, or accept that the upstream cannot use tools through it.
+//! text and thinking are surfaced (`supports_tool_use` is `false`).
+//! kage advertises **no** `fs`/`terminal` client capabilities, so a
+//! conformant agent will not ask kage to touch the filesystem. An
+//! upstream `session/request_permission` is **rejected** - a provider
+//! has no seam to forward it to kage's own permission hook, and
+//! nothing is ever auto-approved.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
+use std::time::Duration;
 
 use kage_core::{CancelFlag, Content, Message, Role, TokenUsage};
 use kage_provider::{
@@ -27,20 +32,12 @@ use kage_provider::{
     StreamRequest,
 };
 
-use crate::framing;
-
-/// JSON-RPC id used for the forwarded `prompt`.
-const PROMPT_ID: i64 = 1;
-
-/// Outcome of classifying one upstream message.
-enum Step {
-    /// Surface this provider event (or error) to the caller.
-    Yield(Result<ProviderEvent, ProviderError>),
-    /// Nothing to surface; read the next message.
-    Continue,
-    /// The stream is finished; no more events.
-    Stop,
-}
+use crate::acp::{
+    ClientCapabilities, ContentBlock, Implementation, InitializeRequest, NewSessionRequest,
+    NewSessionResponse, PROTOCOL_VERSION, PermissionOptionKind, PromptRequest,
+    RequestPermissionRequest, SelectedOption, SessionNotification, SessionUpdate,
+};
+use crate::jsonrpc::{self, Inbound, Peer, RpcError};
 
 /// A [`Provider`] backed by an external ACP agent process.
 #[derive(Debug)]
@@ -50,8 +47,8 @@ pub struct AcpProvider {
 }
 
 impl AcpProvider {
-    /// Build an adapter that spawns `command` (argv; the first element
-    /// is the executable) for each turn.
+    /// Build an adapter that spawns `command` (argv; first element is
+    /// the executable) for each turn.
     #[must_use]
     pub fn new<I, S>(command: I) -> Self
     where
@@ -73,16 +70,288 @@ impl AcpProvider {
 
 fn last_user_text(messages: &[Message]) -> Option<String> {
     let msg = messages.iter().rev().find(|m| m.role == Role::User)?;
-    let text = msg
-        .content
-        .iter()
-        .filter_map(|c| match c {
-            Content::Text { text } => Some(text.as_str()),
-            _ => None,
+    Some(
+        msg.content
+            .iter()
+            .filter_map(|c| match c {
+                Content::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+fn rpc_to_provider(e: RpcError) -> ProviderError {
+    let RpcError { code, message } = e;
+    if code == -32800 {
+        ProviderError::Cancelled
+    } else {
+        ProviderError::Transport(format!("acp: {message}"))
+    }
+}
+
+/// Translate one `session/update` payload into a provider event.
+/// `None` for updates kage's loop has no slot for (the upstream
+/// agent's own tool calls, plans, mode changes).
+fn translate(update: &SessionUpdate) -> Option<ProviderEvent> {
+    let chunk = match update {
+        SessionUpdate::AgentMessageChunk(c) => {
+            return c.content.as_text().map(|t| ProviderEvent::TextDelta {
+                delta: t.to_owned(),
+            });
+        }
+        SessionUpdate::AgentThoughtChunk(c) => Some(c),
+        _ => None,
+    };
+    chunk.and_then(|c| {
+        c.content.as_text().map(|t| ProviderEvent::ThinkingDelta {
+            delta: t.to_owned(),
         })
-        .collect::<Vec<_>>()
-        .join("\n");
-    Some(text)
+    })
+}
+
+/// Pick a reject option's id, so an upstream permission prompt is
+/// always denied (never auto-approved).
+fn reject_option_id(req: &RequestPermissionRequest) -> Option<String> {
+    req.options
+        .iter()
+        .find(|o| {
+            matches!(
+                o.kind,
+                PermissionOptionKind::RejectOnce | PermissionOptionKind::RejectAlways
+            )
+        })
+        .map(|o| o.option_id.clone())
+}
+
+/// The translating iterator returned by [`AcpProvider::stream`].
+struct AcpClientStream {
+    rx: Receiver<Result<ProviderEvent, ProviderError>>,
+    child: Option<Child>,
+    finished: bool,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl Iterator for AcpClientStream {
+    type Item = Result<ProviderEvent, ProviderError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        let Ok(item) = self.rx.recv() else {
+            self.finished = true;
+            return None;
+        };
+        if matches!(item, Ok(ProviderEvent::MessageEnd { .. }) | Err(_)) {
+            self.finished = true;
+        }
+        Some(item)
+    }
+}
+
+impl Drop for AcpClientStream {
+    fn drop(&mut self) {
+        // Tear the turn down: the drain/prompt threads observe this
+        // and unwind even when there is no child to kill.
+        self.shutdown.store(true, Ordering::SeqCst);
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// Slot the prompt thread parks its terminal event in; the drain
+/// thread emits it only once `inbound` is empty, preserving wire
+/// order (the upstream sends every `session/update` before it
+/// answers `session/prompt`).
+type Terminal = Arc<std::sync::Mutex<Option<Result<ProviderEvent, ProviderError>>>>;
+
+type Events = mpsc::Sender<Result<ProviderEvent, ProviderError>>;
+
+/// Drain inbound: translate notifications to events, reject upstream
+/// permission asks, and - once the prompt has resolved and every
+/// buffered notification is forwarded - emit the terminal event.
+fn spawn_drain(
+    inbound: Receiver<Inbound>,
+    peer: Peer,
+    tx: Events,
+    shutdown: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+    terminal: Terminal,
+) {
+    thread::spawn(move || {
+        loop {
+            let message = match inbound.recv_timeout(Duration::from_millis(50)) {
+                Ok(m) => m,
+                Err(RecvTimeoutError::Timeout) => {
+                    if shutdown.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    if done.load(Ordering::SeqCst) {
+                        if let Some(item) =
+                            terminal.lock().expect("acp terminal mutex poisoned").take()
+                        {
+                            let _ = tx.send(item);
+                        }
+                        break;
+                    }
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    if let Some(item) = terminal.lock().expect("acp terminal mutex poisoned").take()
+                    {
+                        let _ = tx.send(item);
+                    }
+                    break;
+                }
+            };
+            match message {
+                Inbound::Notification { method, params } if method == "session/update" => {
+                    if let Ok(note) = serde_json::from_value::<SessionNotification>(params)
+                        && let Some(ev) = translate(&note.update)
+                        && tx.send(Ok(ev)).is_err()
+                    {
+                        break;
+                    }
+                }
+                Inbound::Notification { .. } => {}
+                Inbound::Request { id, method, params } => {
+                    let reply = if method == "session/request_permission" {
+                        let outcome = serde_json::from_value::<RequestPermissionRequest>(params)
+                            .ok()
+                            .and_then(|r| reject_option_id(&r))
+                            .map_or_else(
+                                || serde_json::json!({"outcome": {"outcome": "cancelled"}}),
+                                |id| {
+                                    serde_json::json!({"outcome": serde_json::to_value(
+                                        crate::acp::PermissionOutcome::Selected(
+                                            SelectedOption { option_id: id },
+                                        )
+                                    )
+                                    .unwrap_or(serde_json::Value::Null)})
+                                },
+                            );
+                        Ok(outcome)
+                    } else {
+                        Err(RpcError::method_not_found(&method))
+                    };
+                    let _ = peer.respond(&id, reply);
+                }
+            }
+        }
+    });
+}
+
+/// Drive `session/prompt`; park its outcome for the drain thread to
+/// emit in order, then mark the turn done.
+fn spawn_prompt(
+    peer: Peer,
+    params: serde_json::Value,
+    cancel: CancelFlag,
+    shutdown: Arc<AtomicBool>,
+    done: Arc<AtomicBool>,
+    terminal: Terminal,
+) {
+    thread::spawn(move || {
+        let poll_shutdown = Arc::clone(&shutdown);
+        let outcome = peer.request_cancellable("session/prompt", params, &move || {
+            cancel.is_cancelled() || poll_shutdown.load(Ordering::SeqCst)
+        });
+        let item = match outcome {
+            Ok(_) => Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+            Err(e) => Err(rpc_to_provider(e)),
+        };
+        *terminal.lock().expect("acp terminal mutex poisoned") = Some(item);
+        done.store(true, Ordering::SeqCst);
+    });
+}
+
+/// Run a full ACP client turn over an established transport: hand
+/// shake, open a session, forward the prompt, and stream the agent's
+/// reply back as provider events. Generic over the transport so it is
+/// unit-testable against an in-process [`crate::agent::serve_agent`].
+fn run_turn<R, W>(
+    reader: R,
+    writer: W,
+    prompt: String,
+    cwd: String,
+    cancel: &CancelFlag,
+) -> Result<AcpClientStream, ProviderError>
+where
+    R: BufRead + Send + 'static,
+    W: Write + Send + 'static,
+{
+    let (peer, inbound, _rh) = jsonrpc::connect(reader, writer);
+
+    let init = InitializeRequest {
+        protocol_version: PROTOCOL_VERSION,
+        client_capabilities: ClientCapabilities::default(),
+        client_info: Some(Implementation {
+            name: "kage".to_owned(),
+            title: None,
+            version: Some(env!("CARGO_PKG_VERSION").to_owned()),
+        }),
+    };
+    peer.request(
+        "initialize",
+        serde_json::to_value(&init).map_err(|e| ProviderError::Decode(e.to_string()))?,
+    )
+    .map_err(rpc_to_provider)?;
+
+    let new_session = NewSessionRequest {
+        cwd,
+        mcp_servers: vec![],
+    };
+    let session: NewSessionResponse = serde_json::from_value(
+        peer.request(
+            "session/new",
+            serde_json::to_value(&new_session).map_err(|e| ProviderError::Decode(e.to_string()))?,
+        )
+        .map_err(rpc_to_provider)?,
+    )
+    .map_err(|e| ProviderError::Decode(format!("session/new: {e}")))?;
+
+    let (tx, rx) = mpsc::channel();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let terminal: Terminal = Arc::new(std::sync::Mutex::new(None));
+
+    let prompt_req = PromptRequest {
+        session_id: session.session_id,
+        prompt: vec![ContentBlock::text(prompt)],
+    };
+    let params =
+        serde_json::to_value(&prompt_req).map_err(|e| ProviderError::Decode(e.to_string()))?;
+
+    spawn_drain(
+        inbound,
+        peer.clone(),
+        tx,
+        Arc::clone(&shutdown),
+        Arc::clone(&done),
+        Arc::clone(&terminal),
+    );
+    spawn_prompt(
+        peer,
+        params,
+        cancel.clone(),
+        Arc::clone(&shutdown),
+        done,
+        terminal,
+    );
+
+    Ok(AcpClientStream {
+        rx,
+        child: None,
+        finished: false,
+        shutdown,
+    })
 }
 
 impl Provider for AcpProvider {
@@ -108,7 +377,7 @@ impl Provider for AcpProvider {
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| ProviderError::Transport(format!("acp: spawn {cmd}: {e}")))?;
-        let mut stdin = child
+        let stdin = child
             .stdin
             .take()
             .ok_or_else(|| ProviderError::Transport("acp: no child stdin".to_owned()))?;
@@ -116,320 +385,103 @@ impl Provider for AcpProvider {
             .stdout
             .take()
             .ok_or_else(|| ProviderError::Transport("acp: no child stdout".to_owned()))?;
+        let cwd = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
 
-        framing::write_message(
-            &mut stdin,
-            &serde_json::json!({"jsonrpc": "2.0", "id": 0, "method": "initialize"}),
-        )
-        .map_err(|e| ProviderError::Transport(format!("acp: {e}")))?;
-        framing::write_message(
-            &mut stdin,
-            &serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": PROMPT_ID,
-                "method": "prompt",
-                "params": { "prompt": prompt },
-            }),
-        )
-        .map_err(|e| ProviderError::Transport(format!("acp: {e}")))?;
-
-        Ok(Box::new(AcpStream {
-            reader: BufReader::new(stdout),
-            stdin,
-            child: Some(child),
-            cancel: cancel.clone(),
-            done: false,
-            ended: false,
-        }))
-    }
-}
-
-/// The translating iterator returned by [`AcpProvider::stream`].
-/// Generic over the transport so it is unit-testable with in-memory
-/// streams and no child process.
-struct AcpStream<R: BufRead, W: Write> {
-    reader: R,
-    stdin: W,
-    child: Option<Child>,
-    cancel: CancelFlag,
-    done: bool,
-    ended: bool,
-}
-
-impl<R: BufRead, W: Write> AcpStream<R, W> {
-    fn finish(&mut self) {
-        self.done = true;
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-
-    fn end_turn(&mut self) -> Step {
-        self.finish();
-        if self.ended {
-            return Step::Stop;
-        }
-        self.ended = true;
-        Step::Yield(Ok(ProviderEvent::MessageEnd {
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-        }))
-    }
-
-    /// Classify one upstream message into a [`Step`], performing any
-    /// side effect it requires (denying a permission request, killing
-    /// the child on the prompt response).
-    fn classify(&mut self, value: &serde_json::Value) -> Step {
-        match value.get("method").and_then(serde_json::Value::as_str) {
-            Some("event") => self.classify_event(value),
-            Some("permission/request") => {
-                if let Some(id) = value
-                    .get("params")
-                    .and_then(|p| p.get("id"))
-                    .and_then(serde_json::Value::as_str)
-                {
-                    let _ = framing::write_message(
-                        &mut self.stdin,
-                        &serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "method": "permission/respond",
-                            "params": {
-                                "id": id,
-                                "allow": false,
-                                "reason": "kage acp provider does not forward tool permissions",
-                            },
-                        }),
-                    );
-                }
-                Step::Continue
-            }
-            _ => {
-                if value.get("id") != Some(&serde_json::json!(PROMPT_ID)) {
-                    return Step::Continue;
-                }
-                if let Some(err) = value.get("error") {
-                    self.finish();
-                    let msg = err
-                        .get("message")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("acp prompt error")
-                        .to_owned();
-                    return Step::Yield(Err(ProviderError::Transport(msg)));
-                }
-                self.end_turn()
-            }
-        }
-    }
-
-    fn classify_event(&mut self, value: &serde_json::Value) -> Step {
-        let ev = value
-            .get("params")
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
-        let delta = || {
-            ev.get("delta")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_owned()
-        };
-        match ev.get("type").and_then(serde_json::Value::as_str) {
-            Some("message_start") => Step::Yield(Ok(ProviderEvent::MessageStart)),
-            Some("text_delta") => Step::Yield(Ok(ProviderEvent::TextDelta { delta: delta() })),
-            Some("thinking_delta") => {
-                Step::Yield(Ok(ProviderEvent::ThinkingDelta { delta: delta() }))
-            }
-            Some("message_end") => {
-                self.ended = true;
-                Step::Yield(Ok(ProviderEvent::MessageEnd {
-                    stop_reason: StopReason::EndTurn,
-                    usage: TokenUsage::default(),
-                }))
-            }
-            Some("error") => {
-                self.finish();
-                let msg = ev
-                    .get("kind")
-                    .and_then(|k| k.get("message"))
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or("acp upstream error")
-                    .to_owned();
-                Step::Yield(Err(ProviderError::Transport(msg)))
-            }
-            // tool_call_* and the rest are the upstream agent's
-            // internal business; not relayed in v1.
-            _ => Step::Continue,
-        }
-    }
-}
-
-impl<R: BufRead, W: Write> Drop for AcpStream<R, W> {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
-
-impl<R: BufRead, W: Write> Iterator for AcpStream<R, W> {
-    type Item = Result<ProviderEvent, ProviderError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.done {
-            return None;
-        }
-        loop {
-            if self.cancel.is_cancelled() {
-                self.finish();
-                return Some(Err(ProviderError::Cancelled));
-            }
-            let value = match framing::read_message(&mut self.reader) {
-                Ok(Some(v)) => v,
-                Ok(None) => {
-                    let ended = self.ended;
-                    self.finish();
-                    return if ended {
-                        None
-                    } else {
-                        Some(Err(ProviderError::Transport(
-                            "acp: upstream closed before message_end".to_owned(),
-                        )))
-                    };
-                }
-                Err(e) => {
-                    self.finish();
-                    return Some(Err(ProviderError::Transport(format!("acp: {e}"))));
-                }
-            };
-            match self.classify(&value) {
-                Step::Yield(item) => return Some(item),
-                Step::Continue => {}
-                Step::Stop => return None,
-            }
-        }
+        let mut stream =
+            run_turn(BufReader::new(stdout), stdin, prompt, cwd, cancel).inspect_err(|_| {
+                let _ = child.kill();
+                let _ = child.wait();
+            })?;
+        stream.child = Some(child);
+        Ok(Box::new(stream))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::io::BufReader;
 
     use super::*;
+    use crate::acp::{
+        AgentCapabilities, InitializeResponse, MessageChunk, NewSessionResponse, PromptResponse,
+    };
+    use crate::agent::{Agent, PromptContext, serve_agent};
 
-    fn frames(values: &[serde_json::Value]) -> Vec<u8> {
-        let mut buf = Vec::new();
-        for v in values {
-            framing::write_message(&mut buf, v).unwrap();
+    struct EchoAgent;
+
+    impl Agent for EchoAgent {
+        fn initialize(&mut self, _req: InitializeRequest) -> InitializeResponse {
+            InitializeResponse {
+                protocol_version: PROTOCOL_VERSION,
+                agent_capabilities: AgentCapabilities::default(),
+                agent_info: None,
+                auth_methods: vec![],
+            }
         }
-        buf
-    }
 
-    fn stream_over(input: Vec<u8>) -> AcpStream<Cursor<Vec<u8>>, Vec<u8>> {
-        AcpStream {
-            reader: Cursor::new(input),
-            stdin: Vec::new(),
-            child: None,
-            cancel: CancelFlag::new(),
-            done: false,
-            ended: false,
+        fn new_session(&mut self, _req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+            Ok(NewSessionResponse {
+                session_id: "s1".to_owned(),
+            })
+        }
+
+        fn prompt(
+            &mut self,
+            req: PromptRequest,
+            ctx: &PromptContext,
+        ) -> Result<PromptResponse, RpcError> {
+            let text = req
+                .prompt
+                .first()
+                .and_then(ContentBlock::as_text)
+                .unwrap_or_default()
+                .to_owned();
+            ctx.update(SessionUpdate::AgentThoughtChunk(MessageChunk {
+                content: ContentBlock::text("thinking"),
+            }));
+            ctx.update(SessionUpdate::AgentMessageChunk(MessageChunk {
+                content: ContentBlock::text(format!("echo: {text}")),
+            }));
+            Ok(PromptResponse {
+                stop_reason: crate::acp::StopReason::EndTurn,
+            })
         }
     }
 
     #[test]
-    fn last_user_text_joins_text_blocks_of_the_last_user_turn() {
-        let msgs = vec![
-            Message::new(Role::User, vec![Content::Text { text: "old".into() }], None),
-            Message::new(
-                Role::Assistant,
-                vec![Content::Text { text: "hi".into() }],
-                None,
-            ),
-            Message::new(
-                Role::User,
-                vec![
-                    Content::Text { text: "a".into() },
-                    Content::Text { text: "b".into() },
-                ],
-                None,
-            ),
-        ];
-        assert_eq!(last_user_text(&msgs).as_deref(), Some("a\nb"));
-        assert_eq!(last_user_text(&[]), None);
-    }
+    fn consumes_an_upstream_acp_agent() {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let server = thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, EchoAgent));
 
-    #[test]
-    fn translates_upstream_events_into_provider_events() {
-        let input = frames(&[
-            serde_json::json!({"method": "event", "params": {"type": "message_start"}}),
-            serde_json::json!({"method": "event", "params": {"type": "text_delta", "delta": "he"}}),
-            serde_json::json!({"method": "event", "params": {"type": "thinking_delta", "delta": "mm"}}),
-            serde_json::json!({"method": "event", "params": {"type": "message_end"}}),
-            serde_json::json!({"id": PROMPT_ID, "result": {"status": "completed"}}),
-        ]);
-        let got: Vec<_> = stream_over(input).map(Result::unwrap).collect();
-        assert!(matches!(got[0], ProviderEvent::MessageStart));
-        assert!(matches!(&got[1], ProviderEvent::TextDelta { delta } if delta == "he"));
-        assert!(matches!(&got[2], ProviderEvent::ThinkingDelta { delta } if delta == "mm"));
+        let cancel = CancelFlag::new();
+        let stream = run_turn(
+            BufReader::new(cli_r),
+            cli_w,
+            "hi".to_owned(),
+            "/tmp".to_owned(),
+            &cancel,
+        )
+        .expect("turn starts");
+
+        let events: Vec<_> = stream.take(3).map(Result::unwrap).collect();
         assert!(matches!(
-            got[3],
+            &events[0],
+            ProviderEvent::ThinkingDelta { delta } if delta == "thinking"
+        ));
+        assert!(matches!(
+            &events[1],
+            ProviderEvent::TextDelta { delta } if delta == "echo: hi"
+        ));
+        assert!(matches!(
+            events[2],
             ProviderEvent::MessageEnd {
                 stop_reason: StopReason::EndTurn,
                 ..
             }
         ));
-        assert_eq!(
-            got.len(),
-            4,
-            "prompt response ends the stream, no extra event"
-        );
-    }
-
-    #[test]
-    fn denies_upstream_permission_requests() {
-        let input = frames(&[
-            serde_json::json!({
-                "method": "permission/request",
-                "params": {"id": "p1", "name": "bash", "input": {}}
-            }),
-            serde_json::json!({"method": "event", "params": {"type": "message_end"}}),
-            serde_json::json!({"id": PROMPT_ID, "result": {}}),
-        ]);
-        let mut s = stream_over(input);
-        let first = s.next().unwrap().unwrap();
-        assert!(matches!(
-            first,
-            ProviderEvent::MessageEnd {
-                stop_reason: StopReason::EndTurn,
-                ..
-            }
-        ));
-        let mut cur = Cursor::new(s.stdin.clone());
-        let reply = framing::read_message(&mut cur).unwrap().unwrap();
-        assert_eq!(reply["method"], "permission/respond");
-        assert_eq!(reply["params"]["allow"], false);
-    }
-
-    #[test]
-    fn upstream_error_event_becomes_transport_error() {
-        let input = frames(&[serde_json::json!({
-            "method": "event",
-            "params": {"type": "error", "kind": {"message": "boom"}}
-        })]);
-        let mut s = stream_over(input);
-        assert!(matches!(
-            s.next().unwrap(),
-            Err(ProviderError::Transport(m)) if m == "boom"
-        ));
-        assert!(s.next().is_none());
-    }
-
-    #[test]
-    fn early_eof_is_a_transport_error() {
-        let mut s = stream_over(Vec::new());
-        assert!(matches!(
-            s.next().unwrap(),
-            Err(ProviderError::Transport(_))
-        ));
+        server.join().unwrap().unwrap();
     }
 }

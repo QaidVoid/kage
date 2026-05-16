@@ -2002,9 +2002,7 @@ pub(super) fn tool_pair_to_lines(
     };
 
     let style = tool_call_style();
-    let dim = Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::DIM);
+    let dim = Style::default().fg(crate::theme::current().muted_fg);
     let mut content: Vec<Line<'static>> = Vec::new();
 
     // Header: `<fold> <name> <summary>  <size>  Took <ms>` packs the
@@ -2217,9 +2215,7 @@ fn truncated_body(
         taken.reverse();
     }
     let elided = total - taken.len();
-    let dim = Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::DIM);
+    let dim = Style::default().fg(crate::theme::current().muted_fg);
     let elision = match trim {
         BodyTrim::Head => format!("... ({elided} more lines, zo to expand)"),
         BodyTrim::Tail => format!("... ({elided} earlier lines, zo to expand)"),
@@ -2269,18 +2265,14 @@ pub(super) fn tool_result_header_line(
     } else {
         spans.push(Span::styled(
             human_size(output.len()),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
+            Style::default().fg(crate::theme::current().muted_fg),
         ));
     }
     if folded && let Some(preview) = first_line_preview(output, 60) {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
             format!("· {preview}"),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::DIM),
+            Style::default().fg(crate::theme::current().muted_fg),
         ));
     }
     Line::from(spans)

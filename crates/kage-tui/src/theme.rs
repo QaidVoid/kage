@@ -77,6 +77,10 @@ pub struct Theme {
     pub status_bg: Color,
     /// Status bar dim text (model id, session pill).
     pub status_dim_fg: Color,
+    /// Secondary-but-readable text: fold hints (`zo to expand`),
+    /// byte/timing metadata. A real mid-contrast grey, not `DIM` on
+    /// dim, so affordance hints stay discoverable.
+    pub muted_fg: Color,
     /// Search-match emphasis color (rule + status counter).
     pub match_color: Color,
     /// Visual-selection emphasis color.
@@ -144,6 +148,7 @@ impl Theme {
             custom_fg: Color::Magenta,
             status_bg: Color::DarkGray,
             status_dim_fg: Color::Gray,
+            muted_fg: Color::Rgb(140, 148, 165),
             match_color: Color::Yellow,
             selection_color: Color::Magenta,
             focus_color: Color::White,
@@ -185,6 +190,7 @@ impl Theme {
             custom_fg: Color::Rgb(187, 154, 247),
             status_bg: Color::Rgb(30, 32, 48),
             status_dim_fg: Color::Rgb(86, 95, 137),
+            muted_fg: Color::Rgb(130, 140, 180),
             match_color: Color::Rgb(224, 175, 104),
             selection_color: Color::Rgb(187, 154, 247),
             focus_color: Color::Rgb(192, 202, 245),
@@ -225,6 +231,7 @@ impl Theme {
             custom_fg: Color::Rgb(203, 166, 247),
             status_bg: Color::Rgb(24, 24, 37),
             status_dim_fg: Color::Rgb(108, 112, 134),
+            muted_fg: Color::Rgb(147, 153, 178),
             match_color: Color::Rgb(249, 226, 175),
             selection_color: Color::Rgb(203, 166, 247),
             focus_color: Color::Rgb(205, 214, 244),

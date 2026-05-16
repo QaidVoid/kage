@@ -18,7 +18,7 @@
 //! T4.2 wires only the shell. Real provider-event translation lands in T4.3,
 //! tool dispatch in T4.4.
 
-use kage_core::{CancelFlag, LoopError, LoopEvent};
+use kage_core::{CancelFlag, Content, LoopError, LoopEvent, Message};
 use kage_provider::{Provider, StreamRequest};
 use kage_tools::ToolRegistry;
 
@@ -244,9 +244,52 @@ pub(crate) fn emit_one<F: FnMut(LoopEvent)>(hooks: &mut dyn Hooks, emit: &mut F,
     emit(event);
 }
 
+/// Rewrite persisted `Content::Thinking` blocks into inline
+/// `<thinking>...</thinking>` text before a request is built.
+///
+/// Thinking blocks are not portable across a request boundary. kage
+/// never persists the cryptographic signature Anthropic requires to
+/// replay a native thinking block, so sending one back is rejected by
+/// that API; `OpenAI` and Gemini drop unknown content silently, losing
+/// the reasoning chain outright. Switching models mid-session makes
+/// both failure modes worse. Flattening historical thinking to plain
+/// text keeps the reasoning visible to whatever provider runs the
+/// next turn, regardless of which produced it.
+///
+/// Only persisted history is touched. The in-flight assistant turn is
+/// not appended to `cx.history` until after it has streamed, so live
+/// thinking deltas reach the UI unmodified.
+fn flatten_thinking(history: &[Message]) -> Vec<Message> {
+    history
+        .iter()
+        .map(|msg| {
+            if !msg
+                .content
+                .iter()
+                .any(|c| matches!(c, Content::Thinking { .. }))
+            {
+                return msg.clone();
+            }
+            let mut flattened = msg.clone();
+            flattened.content = msg
+                .content
+                .iter()
+                .filter_map(|c| match c {
+                    Content::Thinking { text } if text.trim().is_empty() => None,
+                    Content::Thinking { text } => Some(Content::Text {
+                        text: format!("<thinking>\n{text}\n</thinking>"),
+                    }),
+                    other => Some(other.clone()),
+                })
+                .collect();
+            flattened
+        })
+        .collect()
+}
+
 /// Construct the next [`StreamRequest`] from the current agent context.
 fn build_request(cx: &AgentContext, tools: &ToolRegistry) -> StreamRequest {
-    let mut req = StreamRequest::new(&cx.model, cx.history.clone());
+    let mut req = StreamRequest::new(&cx.model, flatten_thinking(&cx.history));
     if !cx.system_prompt.is_empty() {
         req.system = Some(cx.system_prompt.clone());
     }
@@ -306,6 +349,86 @@ mod tests {
         let tools = ToolRegistry::new();
         let req = build_request(&cx, &tools);
         assert!(req.max_output_tokens.is_none());
+    }
+
+    fn assistant_msg(content: Vec<Content>) -> Message {
+        Message::new(Role::Assistant, content, None)
+    }
+
+    #[test]
+    fn flatten_thinking_rewrites_thinking_to_tagged_text() {
+        let history = vec![assistant_msg(vec![
+            Content::Thinking {
+                text: "weigh the options".to_owned(),
+            },
+            Content::Text {
+                text: "the answer is 42".to_owned(),
+            },
+        ])];
+        let flat = flatten_thinking(&history);
+        assert_eq!(
+            flat[0].content,
+            vec![
+                Content::Text {
+                    text: "<thinking>\nweigh the options\n</thinking>".to_owned(),
+                },
+                Content::Text {
+                    text: "the answer is 42".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn flatten_thinking_drops_empty_thinking_blocks() {
+        let history = vec![assistant_msg(vec![
+            Content::Thinking {
+                text: "   ".to_owned(),
+            },
+            Content::Text {
+                text: "done".to_owned(),
+            },
+        ])];
+        let flat = flatten_thinking(&history);
+        assert_eq!(
+            flat[0].content,
+            vec![Content::Text {
+                text: "done".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn flatten_thinking_leaves_non_thinking_messages_unchanged() {
+        let history = vec![
+            user_msg("hi"),
+            assistant_msg(vec![Content::Text {
+                text: "hello".to_owned(),
+            }]),
+        ];
+        assert_eq!(flatten_thinking(&history), history);
+    }
+
+    #[test]
+    fn build_request_flattens_history_thinking() {
+        let mut cx = AgentContext::new("m", "");
+        cx.history.push(user_msg("question"));
+        cx.history.push(assistant_msg(vec![Content::Thinking {
+            text: "reason".to_owned(),
+        }]));
+        let tools = ToolRegistry::new();
+        let req = build_request(&cx, &tools);
+        assert!(
+            !req.messages
+                .iter()
+                .flat_map(|m| &m.content)
+                .any(|c| matches!(c, Content::Thinking { .. })),
+            "no native thinking blocks should survive into the request"
+        );
+        assert!(req.messages[1].content.iter().any(|c| matches!(
+            c,
+            Content::Text { text } if text.contains("<thinking>") && text.contains("reason")
+        )));
     }
 
     struct OneFollowup(bool);

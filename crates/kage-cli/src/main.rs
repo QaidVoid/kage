@@ -400,6 +400,7 @@ fn execute_print_run(
         cx,
         cfg,
         &cancel,
+        NoopHooks,
         user_msg,
         writer,
         plugin_runtime,
@@ -421,24 +422,26 @@ fn execute_print_run(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn run_with_hooks<F>(
+pub(crate) fn run_with_hooks<B, F>(
     provider: &dyn kage_provider::Provider,
     tools: &kage_tools::ToolRegistry,
     cx: &mut AgentContext,
     cfg: LoopConfig,
     cancel: &CancelFlag,
+    base_hooks: B,
     user_msg: &Message,
     writer: Option<SessionWriter>,
     plugin_runtime: Option<std::sync::Arc<kage_plugin::PluginRuntime>>,
     mut emit: F,
 ) -> Result<(), kage_core::LoopError>
 where
+    B: Hooks + 'static,
     F: FnMut(LoopEvent),
 {
     let mut session_layer: Box<dyn Hooks> = match writer {
-        None => Box::new(NoopHooks),
+        None => Box::new(base_hooks),
         Some(w) => {
-            let mut hooks = SessionRecordingHooks::new(NoopHooks, w);
+            let mut hooks = SessionRecordingHooks::new(base_hooks, w);
             if let Some(rt) = plugin_runtime.as_ref() {
                 hooks = hooks.with_plugin_runtime(Arc::clone(rt));
             }

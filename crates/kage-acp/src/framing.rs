@@ -41,7 +41,10 @@ pub enum FramingError {
 ///
 /// Returns [`FramingError::Json`] if `value` cannot be serialized, or
 /// [`FramingError::Io`] if the write or flush fails.
-pub fn write_message<W: Write>(out: &mut W, value: &serde_json::Value) -> Result<(), FramingError> {
+pub fn write_message<W: Write + ?Sized>(
+    out: &mut W,
+    value: &serde_json::Value,
+) -> Result<(), FramingError> {
     let body = serde_json::to_vec(value)?;
     write!(out, "Content-Length: {}\r\n\r\n", body.len())?;
     out.write_all(&body)?;

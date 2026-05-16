@@ -15,13 +15,93 @@
 //! with a mock backend.
 
 use std::io::{BufRead, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use crate::framing::{self, FramingError};
 use crate::schema::{self, AcpCall, AcpRequest, PermissionResponse, PromptParams, error_code};
+
+/// Shared output sink: a boxed writer behind a mutex so the reader
+/// thread (control acks) and the dispatcher (responses, events,
+/// permission prompts) can all write framed messages.
+type SharedWriter = Arc<Mutex<dyn Write + Send>>;
+
+/// Slot the dispatcher installs a one-shot response channel into for
+/// the duration of a `permission/request`; the reader thread routes
+/// the client's `permission/respond` here.
+type PermSlot = Arc<Mutex<Option<mpsc::Sender<PermissionResponse>>>>;
+
+/// The client's verdict for a tool call the agent asked about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PermissionOutcome {
+    /// Run the tool call.
+    Allow,
+    /// Block the tool call, with an optional client-supplied reason.
+    Deny {
+        /// Why the call was denied, if the client said.
+        reason: Option<String>,
+    },
+}
+
+/// Handle the host's `before_tool_call` hook uses to ask the client
+/// whether a tool may run. Cloning is cheap (all shared handles); the
+/// agent backend keeps one and calls [`Permission::request`] per tool
+/// call. The call blocks until the client answers, the run is
+/// cancelled, or the client disconnects. The agent never auto-approves.
+#[derive(Clone)]
+pub struct Permission {
+    writer: SharedWriter,
+    slot: PermSlot,
+    cancel: Cancel,
+    next_id: Arc<AtomicU64>,
+}
+
+impl Permission {
+    /// Ask the client to allow or deny a tool call. Emits a
+    /// `permission/request` notification and blocks for the matching
+    /// `permission/respond`. A cancelled run or a disconnected client
+    /// resolves to [`PermissionOutcome::Deny`].
+    #[must_use]
+    pub fn request(&self, name: &str, input: &serde_json::Value) -> PermissionOutcome {
+        let id = format!("perm-{}", self.next_id.fetch_add(1, Ordering::SeqCst));
+        let (tx, rx) = mpsc::channel();
+        *self.slot.lock().expect("acp permission mutex poisoned") = Some(tx);
+        let _ = send(
+            &self.writer,
+            &schema::notification(
+                "permission/request",
+                serde_json::json!({ "id": id, "name": name, "input": input }),
+            ),
+        );
+        loop {
+            if self.cancel.is_cancelled() {
+                return PermissionOutcome::Deny {
+                    reason: Some("cancelled".to_owned()),
+                };
+            }
+            match rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(resp) if resp.id == id => {
+                    return if resp.allow {
+                        PermissionOutcome::Allow
+                    } else {
+                        PermissionOutcome::Deny {
+                            reason: resp.reason,
+                        }
+                    };
+                }
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return PermissionOutcome::Deny {
+                        reason: Some("client disconnected".to_owned()),
+                    };
+                }
+            }
+        }
+    }
+}
 
 /// A cooperative cancellation flag shared between the reader thread
 /// (which flips it on a `cancel` request) and the running prompt
@@ -60,9 +140,11 @@ pub trait AcpBackend {
     fn server_info(&self) -> serde_json::Value;
 
     /// Run one prompt to completion. `cancel` is polled cooperatively;
-    /// `emit` receives each loop event already serialized as a JSON
-    /// value (the same alphabet as `kage -p --json`), which the server
-    /// wraps in an `event` notification.
+    /// `permission` is the human-in-the-loop gate the agent must call
+    /// before any tool runs (it never auto-approves); `emit` receives
+    /// each loop event already serialized as a JSON value (the same
+    /// alphabet as `kage -p --json`), which the server wraps in an
+    /// `event` notification.
     ///
     /// # Errors
     ///
@@ -72,6 +154,7 @@ pub trait AcpBackend {
         &mut self,
         params: &PromptParams,
         cancel: &Cancel,
+        permission: &Permission,
         emit: &mut dyn FnMut(serde_json::Value),
     ) -> Result<serde_json::Value, String>;
 
@@ -91,7 +174,7 @@ pub trait AcpBackend {
     fn load_session(&mut self, id: &str) -> Result<serde_json::Value, String>;
 }
 
-fn send<W: Write>(writer: &Mutex<W>, value: &serde_json::Value) -> Result<(), FramingError> {
+fn send(writer: &Mutex<dyn Write + Send>, value: &serde_json::Value) -> Result<(), FramingError> {
     let mut guard = writer.lock().expect("acp writer mutex poisoned");
     framing::write_message(&mut *guard, value)
 }
@@ -111,10 +194,10 @@ where
     W: Write + Send + 'static,
     B: AcpBackend,
 {
-    let writer = Arc::new(Mutex::new(writer));
+    let writer: SharedWriter = Arc::new(Mutex::new(writer));
     let cancel = Cancel::new();
     let (tx, rx) = mpsc::channel::<AcpRequest>();
-    let perm: Arc<Mutex<Option<mpsc::Sender<PermissionResponse>>>> = Arc::new(Mutex::new(None));
+    let perm: PermSlot = Arc::new(Mutex::new(None));
 
     let reader_handle = {
         let writer = Arc::clone(&writer);
@@ -177,16 +260,17 @@ where
         })
     };
 
-    let result = dispatch(&rx, &writer, &cancel, &mut backend);
+    let result = dispatch(&rx, &writer, &cancel, &perm, &mut backend);
     drop(rx);
     reader_handle.join().ok();
     result
 }
 
-fn dispatch<W: Write, B: AcpBackend>(
+fn dispatch<B: AcpBackend>(
     rx: &mpsc::Receiver<AcpRequest>,
-    writer: &Mutex<W>,
+    writer: &SharedWriter,
     cancel: &Cancel,
+    perm: &PermSlot,
     backend: &mut B,
 ) -> Result<(), FramingError> {
     for req in rx {
@@ -205,10 +289,17 @@ fn dispatch<W: Write, B: AcpBackend>(
             }
             AcpCall::Prompt(p) => {
                 cancel.reset();
+                let permission = Permission {
+                    writer: Arc::clone(writer),
+                    slot: Arc::clone(perm),
+                    cancel: cancel.clone(),
+                    next_id: Arc::new(AtomicU64::new(0)),
+                };
                 let mut emit = |event: serde_json::Value| {
                     let _ = send(writer, &schema::notification("event", event));
                 };
-                let outcome = backend.prompt(&p, cancel, &mut emit);
+                let outcome = backend.prompt(&p, cancel, &permission, &mut emit);
+                *perm.lock().expect("acp permission mutex poisoned") = None;
                 reply(writer, id.as_ref(), outcome)?;
             }
             // Handled out-of-band on the reader thread; reaching here
@@ -226,8 +317,8 @@ fn dispatch<W: Write, B: AcpBackend>(
     Ok(())
 }
 
-fn reply<W: Write>(
-    writer: &Mutex<W>,
+fn reply(
+    writer: &Mutex<dyn Write + Send>,
     id: Option<&schema::RequestId>,
     outcome: Result<serde_json::Value, String>,
 ) -> Result<(), FramingError> {
@@ -259,6 +350,7 @@ mod tests {
             &mut self,
             params: &PromptParams,
             cancel: &Cancel,
+            _permission: &Permission,
             emit: &mut dyn FnMut(serde_json::Value),
         ) -> Result<serde_json::Value, String> {
             self.prompts.push(params.prompt.clone());
@@ -357,5 +449,99 @@ mod tests {
         .expect("serve");
         let out = drain(sink.lock().unwrap().clone());
         assert_eq!(out[0]["error"]["code"], error_code::INVALID_REQUEST);
+    }
+
+    fn make_permission() -> (Permission, PermSlot) {
+        let writer: SharedWriter = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let slot: PermSlot = Arc::new(Mutex::new(None));
+        let perm = Permission {
+            writer,
+            slot: Arc::clone(&slot),
+            cancel: Cancel::new(),
+            next_id: Arc::new(AtomicU64::new(0)),
+        };
+        (perm, slot)
+    }
+
+    fn route_after_install(slot: &PermSlot, resp: PermissionResponse) {
+        let tx = loop {
+            if let Some(s) = slot.lock().unwrap().clone() {
+                break s;
+            }
+            thread::yield_now();
+        };
+        tx.send(resp).unwrap();
+    }
+
+    #[test]
+    fn permission_request_resolves_on_allow() {
+        let (perm, slot) = make_permission();
+        let h = thread::spawn(move || perm.request("bash", &serde_json::json!({"cmd": "ls"})));
+        route_after_install(
+            &slot,
+            PermissionResponse {
+                id: "perm-0".to_owned(),
+                allow: true,
+                reason: None,
+            },
+        );
+        assert_eq!(h.join().unwrap(), PermissionOutcome::Allow);
+    }
+
+    #[test]
+    fn permission_request_resolves_on_deny_with_reason() {
+        let (perm, slot) = make_permission();
+        let h = thread::spawn(move || perm.request("write", &serde_json::json!({})));
+        route_after_install(
+            &slot,
+            PermissionResponse {
+                id: "perm-0".to_owned(),
+                allow: false,
+                reason: Some("not allowed".to_owned()),
+            },
+        );
+        assert_eq!(
+            h.join().unwrap(),
+            PermissionOutcome::Deny {
+                reason: Some("not allowed".to_owned())
+            }
+        );
+    }
+
+    #[test]
+    fn permission_request_denies_when_cancelled() {
+        let (perm, _slot) = make_permission();
+        perm.cancel.cancel();
+        assert_eq!(
+            perm.request("bash", &serde_json::json!({})),
+            PermissionOutcome::Deny {
+                reason: Some("cancelled".to_owned())
+            }
+        );
+    }
+
+    #[test]
+    fn permission_ignores_stale_id_then_accepts_match() {
+        let (perm, slot) = make_permission();
+        let h = thread::spawn(move || perm.request("bash", &serde_json::json!({})));
+        let tx = loop {
+            if let Some(s) = slot.lock().unwrap().clone() {
+                break s;
+            }
+            thread::yield_now();
+        };
+        tx.send(PermissionResponse {
+            id: "perm-99".to_owned(),
+            allow: true,
+            reason: None,
+        })
+        .unwrap();
+        tx.send(PermissionResponse {
+            id: "perm-0".to_owned(),
+            allow: false,
+            reason: None,
+        })
+        .unwrap();
+        assert_eq!(h.join().unwrap(), PermissionOutcome::Deny { reason: None });
     }
 }

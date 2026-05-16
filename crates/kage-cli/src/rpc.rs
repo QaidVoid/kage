@@ -13,9 +13,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use kage_acp::schema::PromptParams;
-use kage_acp::server::{AcpBackend, Cancel};
-use kage_core::{CancelFlag, Content, Message, Role};
-use kage_loop::{AgentContext, LoopConfig};
+use kage_acp::server::{AcpBackend, Cancel, Permission, PermissionOutcome};
+use kage_core::{CancelFlag, Content, Message, Role, ToolOutput};
+use kage_loop::{AgentContext, Hooks, LoopConfig};
 use kage_plugin::PluginRuntime;
 use kage_provider::ProviderRegistry;
 use kage_session::SessionWriter;
@@ -38,6 +38,31 @@ pub(crate) fn run(model_override: Option<&str>, system_role: &str) -> ExitCode {
         Err(e) => {
             eprintln!("kage: rpc: {e}");
             ExitCode::from(1)
+        }
+    }
+}
+
+/// The innermost loop hook for `kage rpc`: every tool call is gated
+/// by the editor. It is the base layer (the session and plugin hooks
+/// wrap it and forward `before_tool_call` down), so it mirrors
+/// `NoopHooks` for every other callback and overrides only the gate.
+struct GateHooks {
+    gate: Permission,
+}
+
+impl Hooks for GateHooks {
+    fn before_tool_call(&mut self, name: &str, input: &serde_json::Value) -> Option<ToolOutput> {
+        match self.gate.request(name, input) {
+            PermissionOutcome::Allow => None,
+            PermissionOutcome::Deny { reason } => {
+                let detail = reason.map_or_else(String::new, |r| format!(": {r}"));
+                Some(ToolOutput {
+                    is_error: true,
+                    text: format!("permission denied by client{detail}"),
+                    structured: None,
+                    terminate: false,
+                })
+            }
         }
     }
 }
@@ -116,14 +141,20 @@ impl CliAcpBackend {
     }
 
     fn loop_config(&self) -> LoopConfig {
+        // Tools run strictly sequentially so the editor sees one
+        // permission prompt at a time (a single outstanding gate).
         match kage_core::config::Config::load_layered(&self.workdir) {
             Ok(c) => LoopConfig {
                 compaction_threshold: c.loop_settings.compaction_threshold,
+                parallel_tools: false,
                 ..LoopConfig::default()
             },
             Err(e) => {
                 eprintln!("kage: rpc: config error: {e}; using defaults");
-                LoopConfig::default()
+                LoopConfig {
+                    parallel_tools: false,
+                    ..LoopConfig::default()
+                }
             }
         }
     }
@@ -167,6 +198,7 @@ impl AcpBackend for CliAcpBackend {
         &mut self,
         params: &PromptParams,
         cancel: &Cancel,
+        permission: &Permission,
         emit: &mut dyn FnMut(serde_json::Value),
     ) -> Result<serde_json::Value, String> {
         let qualified = params.model.clone().unwrap_or_else(|| self.model.clone());
@@ -206,6 +238,9 @@ impl AcpBackend for CliAcpBackend {
             &mut self.cx,
             cfg,
             &cancel_flag,
+            GateHooks {
+                gate: permission.clone(),
+            },
             &user_msg,
             writer,
             self.plugin_runtime.clone(),

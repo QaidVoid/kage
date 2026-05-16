@@ -484,4 +484,72 @@ mod tests {
         ));
         server.join().unwrap().unwrap();
     }
+
+    /// The agent asks for permission; the kage ACP client always
+    /// rejects (never auto-approves). Exercises `session/request_
+    /// permission` flowing agent -> client over the real wire.
+    struct PermissionAgent;
+
+    impl Agent for PermissionAgent {
+        fn initialize(&mut self, _req: InitializeRequest) -> InitializeResponse {
+            InitializeResponse {
+                protocol_version: PROTOCOL_VERSION,
+                agent_capabilities: AgentCapabilities::default(),
+                agent_info: None,
+                auth_methods: vec![],
+            }
+        }
+
+        fn new_session(&mut self, _req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+            Ok(NewSessionResponse {
+                session_id: "s1".to_owned(),
+            })
+        }
+
+        fn prompt(
+            &mut self,
+            _req: PromptRequest,
+            ctx: &PromptContext,
+        ) -> Result<PromptResponse, RpcError> {
+            let decision = ctx
+                .permission()
+                .request("bash", serde_json::json!({"cmd": "ls"}));
+            let verdict = match decision {
+                crate::agent::PermissionDecision::Allow => "allowed",
+                crate::agent::PermissionDecision::Deny(_) => "denied",
+            };
+            ctx.update(SessionUpdate::AgentMessageChunk(MessageChunk {
+                content: ContentBlock::text(verdict),
+            }));
+            Ok(PromptResponse {
+                stop_reason: crate::acp::StopReason::EndTurn,
+            })
+        }
+    }
+
+    #[test]
+    fn client_rejects_upstream_permission_requests() {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let server =
+            thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, PermissionAgent));
+
+        let cancel = CancelFlag::new();
+        let stream = run_turn(
+            BufReader::new(cli_r),
+            cli_w,
+            "do it".to_owned(),
+            "/tmp".to_owned(),
+            &cancel,
+        )
+        .expect("turn starts");
+
+        let events: Vec<_> = stream.take(2).map(Result::unwrap).collect();
+        assert!(
+            matches!(&events[0], ProviderEvent::TextDelta { delta } if delta == "denied"),
+            "kage's ACP client must reject the upstream permission ask"
+        );
+        assert!(matches!(events[1], ProviderEvent::MessageEnd { .. }));
+        server.join().unwrap().unwrap();
+    }
 }

@@ -1,14 +1,12 @@
-//! Agent Client Protocol stdio JSON-RPC server and client.
+//! Spec-conformant Agent Client Protocol over stdio.
 //!
-//! The crate is built bottom-up: [`framing`] is the LSP-style
-//! `Content-Length` transport, [`schema`] is the JSON-RPC 2.0 request
-//! and notification shape, and later modules layer the server that
-//! drives the agent loop on top of them.
+//! Built bottom-up: [`jsonrpc`] is the bidirectional newline-delimited
+//! JSON-RPC 2.0 peer; [`acp`] is the protocol's wire schema (protocol
+//! version 1); [`agent`] serves kage as an ACP agent that editors
+//! drive; [`client`] consumes another ACP agent as a
+//! [`kage_provider::Provider`] for stacking.
 
 pub mod acp;
 pub mod agent;
 pub mod client;
-pub mod framing;
 pub mod jsonrpc;
-pub mod schema;
-pub mod server;

@@ -598,6 +598,24 @@ impl Buffer {
         }
     }
 
+    /// Verbatim source text of block `idx`, for clipboard yank: the
+    /// raw assistant / user / thinking / custom text (the markdown
+    /// *source*, not the syntect-rendered screen cells), a tool
+    /// call's pretty-printed input, or a tool result's output.
+    /// `None` for an out-of-range index.
+    #[must_use]
+    pub fn block_text(&self, idx: usize) -> Option<String> {
+        let block = self.blocks.get(idx)?;
+        Some(match block {
+            Block::User { text }
+            | Block::Assistant { text, .. }
+            | Block::Thinking { text, .. }
+            | Block::Custom { text, .. } => text.clone(),
+            Block::ToolCall { input_pretty, .. } => input_pretty.clone(),
+            Block::ToolResult { output, .. } => output.clone(),
+        })
+    }
+
     /// All block indices whose content contains `needle`, in buffer
     /// order. Skips merged tool-result halves.
     #[must_use]
@@ -1315,6 +1333,20 @@ mod tests {
         assert_eq!(buf.focus(), Some(1));
         buf.set_focus(Some(99));
         assert_eq!(buf.focus(), None);
+    }
+
+    #[test]
+    fn block_text_returns_raw_markdown_source_not_render() {
+        let mut buf = Buffer::new();
+        buf.push_user("hi");
+        buf.append_assistant_delta("# Title\n\n```rust\nfn x() {}\n```");
+        assert_eq!(buf.block_text(0).as_deref(), Some("hi"));
+        assert_eq!(
+            buf.block_text(1).as_deref(),
+            Some("# Title\n\n```rust\nfn x() {}\n```"),
+            "yank gets the verbatim markdown, fences and all"
+        );
+        assert_eq!(buf.block_text(99), None);
     }
 
     #[test]

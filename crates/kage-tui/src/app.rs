@@ -2180,37 +2180,19 @@ impl App {
     /// portion. Auto-scroll on entering visual covers the keyboard
     /// path; for `Y` we just use whatever cells we have right now.
     fn yank_focused_block(&mut self) {
-        // Force a fresh capture by walking the focused block's
-        // screen rows (currently visible) and pulling text from
-        // captured_rows.
+        // Yank the block's raw source text from the model, not the
+        // markdown-rendered screen cells: the user wants the original
+        // assistant text (verbatim ```fences```, list bullets, etc.)
+        // to paste elsewhere, not the syntect-styled reflow.
         let Ok(buf) = self.buffer.lock() else {
             return;
         };
         let Some(idx) = buf.effective_focus() else {
             return;
         };
-        let virtual_top = buf.last_virtual_top();
-        let area_y = buf.last_area_y();
-        let Some((top, bot)) = buf.screen_rows_of(idx) else {
-            return;
-        };
+        let text = buf.block_text(idx).unwrap_or_default();
         drop(buf);
-        let mut text = String::new();
-        for screen_row in top..bot {
-            let vrow = virtual_top.saturating_add(usize::from(screen_row.saturating_sub(area_y)));
-            let Some(cells) = self.captured_rows.get(&vrow) else {
-                continue;
-            };
-            let line: String = cells
-                .iter()
-                .filter(|cell| !cell.decoration)
-                .map(|cell| cell.ch)
-                .collect();
-            if !text.is_empty() {
-                text.push('\n');
-            }
-            text.push_str(line.trim_end());
-        }
+        let text = text.trim_end().to_owned();
         if text.is_empty() {
             return;
         }

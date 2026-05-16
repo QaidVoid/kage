@@ -24,6 +24,7 @@ clap.workspace = true
 clap_complete.workspace = true
 clap_mangen.workspace = true
 dirs.workspace = true
+kage-acp = { version = "0.1.0", path = "../kage-acp" }
 kage-core.workspace = true
 kage-loop.workspace = true
 kage-plugin.workspace = true

@@ -11,6 +11,7 @@ mod history;
 mod init;
 mod oauth;
 mod plugins;
+mod rpc;
 mod runtime_env;
 mod session;
 mod state;
@@ -159,6 +160,19 @@ enum Command {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
+    /// Agent Client Protocol server: speak JSON-RPC over stdio so an
+    /// editor (Zed, Neovim, ...) can drive kage. LSP-style
+    /// `Content-Length` framing; each request is answered and loop
+    /// progress is streamed back as `event` notifications.
+    Rpc {
+        /// Provider-qualified model id (`provider:model`). Defaults
+        /// to the first authed provider's default model.
+        #[arg(short = 'm', long = "model")]
+        model: Option<String>,
+        /// System-prompt role override forwarded to the agent loop.
+        #[arg(long = "system", default_value = "")]
+        system: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -211,6 +225,7 @@ fn run_subcommand(command: Command) -> ExitCode {
         Command::Doctor => doctor::run(),
         Command::GenManpage { out } => run_gen_manpage(&out),
         Command::Completions { shell } => run_completions(shell),
+        Command::Rpc { model, system } => rpc::run(model.as_deref(), &system),
     }
 }
 
@@ -406,7 +421,7 @@ fn execute_print_run(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_with_hooks<F>(
+pub(crate) fn run_with_hooks<F>(
     provider: &dyn kage_provider::Provider,
     tools: &kage_tools::ToolRegistry,
     cx: &mut AgentContext,
@@ -455,7 +470,7 @@ where
 /// Extract the first text block from a user message, joined with newlines
 /// if there are multiple. Returns an empty string when the message carries
 /// no text (image-only, tool-result-only, etc.).
-fn first_user_text(msg: &Message) -> String {
+pub(crate) fn first_user_text(msg: &Message) -> String {
     let mut out = String::new();
     for block in &msg.content {
         if let Content::Text { text } = block {
@@ -803,7 +818,10 @@ pub(crate) fn sessions_dir() -> Result<PathBuf, String> {
 /// names a tool not present after the first pass logs a warning to
 /// stderr (headless mode only - the TUI surfaces the same message
 /// through its plugin error channel).
-fn apply_plugin_tools(tools: &mut kage_tools::ToolRegistry, rt: &kage_plugin::PluginRuntime) {
+pub(crate) fn apply_plugin_tools(
+    tools: &mut kage_tools::ToolRegistry,
+    rt: &kage_plugin::PluginRuntime,
+) {
     for tool in rt.registered_tools() {
         tools.register(tool);
     }
@@ -820,7 +838,7 @@ fn apply_plugin_tools(tools: &mut kage_tools::ToolRegistry, rt: &kage_plugin::Pl
 
 /// Resolve the XDG-style plugin directory:
 /// `$XDG_CONFIG_HOME/kage/plugins` (default `~/.config/kage/plugins`).
-fn plugins_dir() -> Result<PathBuf, String> {
+pub(crate) fn plugins_dir() -> Result<PathBuf, String> {
     Ok(xdg_dir("XDG_CONFIG_HOME", ".config")?
         .join("kage")
         .join("plugins"))
@@ -964,7 +982,7 @@ fn build_session_path(dir: &std::path::Path, session: SessionId) -> PathBuf {
 
 /// Build a registry holding every provider whose API key is reachable
 /// through either an env var (priority) or the saved auth store.
-fn build_provider_registry() -> ProviderRegistry {
+pub(crate) fn build_provider_registry() -> ProviderRegistry {
     let mut store = auth::AuthStore::load().unwrap_or_else(|_| auth::AuthStore::empty());
     let mut store_dirty = false;
     refresh_expiring_oauth(&mut store, &mut store_dirty);
@@ -1094,7 +1112,7 @@ const DEFAULT_MODEL_PRIORITY: &[&str] = &[
 /// [`DEFAULT_MODEL_PRIORITY`], asking the catalog for each registered
 /// provider's preferred model. Returns an empty string when nothing
 /// is wired up; callers are expected to handle that as "no credentials".
-fn default_model(registry: &ProviderRegistry) -> String {
+pub(crate) fn default_model(registry: &ProviderRegistry) -> String {
     if let Some(model) = state::State::load().last_model
         && registry.resolve(&model).is_ok()
     {

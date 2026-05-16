@@ -1266,6 +1266,7 @@ dependencies = [
  "clap_complete",
  "clap_mangen",
  "dirs",
+ "kage-acp",
  "kage-core",
  "kage-loop",
  "kage-plugin",

@@ -484,11 +484,11 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "attach",
         aliases: &["img"],
-        description: "attach an image file to the next prompt",
+        description: "attach an image (a file path, or the clipboard if omitted)",
         category: CommandCategory::Both,
         args: &[ArgSpec::Path {
             name: "path",
-            optional: false,
+            optional: true,
         }],
         subcommands: &[],
     },

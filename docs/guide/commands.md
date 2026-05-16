@@ -42,6 +42,7 @@ Editing clears the error.
 | `:compact`               | Run a compaction pass right now                 |
 | `:settings`              | Open the settings dialog (theme/model/mouse/..) |
 | `:tree`                  | Browse the session fork forest                  |
+| `:attach [path]` / `:img` | Attach an image to the next prompt: a file `path`, or the OS clipboard image when no path is given |
 | `:clear`                 | Clear the conversation buffer                   |
 
 ## plugin commands

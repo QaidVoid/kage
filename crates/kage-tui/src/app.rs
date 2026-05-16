@@ -2420,6 +2420,7 @@ impl App {
     /// paste verbatim. A path that looks like an image but fails to
     /// load surfaces the error rather than silently pasting the path.
     fn handle_paste(&mut self, text: &str) {
+        // A copied/dragged image *file* arrives as its path.
         if let Some(path) = crate::image::path_if_image(text) {
             match crate::image::load_path(&path) {
                 Ok(att) => {
@@ -2431,19 +2432,43 @@ impl App {
             }
             return;
         }
+        // A copied screenshot/image can't ride in the paste text;
+        // terminals deliver an empty bracketed paste for it. Only
+        // then probe the OS clipboard for image bytes, so a normal
+        // text paste neither pays for a subprocess nor risks being
+        // hijacked by whatever is on the clipboard.
+        if text.trim().is_empty()
+            && let Some(bytes) = crate::image::clipboard_image()
+            && let Ok(att) = crate::image::from_bytes(&bytes, "clipboard")
+        {
+            let note = att.placeholder();
+            self.input.attach_image(att);
+            self.notify(format!("attached {note}"));
+            return;
+        }
         self.input.paste(text);
     }
 
-    /// `:attach <path>` - load an image file and queue it for the
-    /// next prompt. Errors (missing usage, unreadable file, bad
-    /// format, too large) surface inline, never silently.
+    /// `:attach [path]` - queue an image for the next prompt. With a
+    /// `path`, load that file; with no argument, pull the image off
+    /// the OS clipboard. Every failure path is explained inline (no
+    /// path + nothing on the clipboard, no clipboard helper, bad
+    /// file, unsupported format, too large) so a non-working setup
+    /// is diagnosable rather than silent.
     fn attach_image_path(&mut self, rest: &str) {
         let path = rest.trim();
-        if path.is_empty() {
-            self.push_error("attach: usage `:attach <image-path>`");
-            return;
-        }
-        match crate::image::load_path(std::path::Path::new(path)) {
+        let result = if path.is_empty() {
+            match crate::image::clipboard_image() {
+                Some(bytes) => crate::image::from_bytes(&bytes, "clipboard"),
+                None => Err("no image on the clipboard, or no clipboard reader \
+                     (install wl-paste / xclip on Linux, pngpaste on macOS); \
+                     or pass a path: `:attach <image-path>`"
+                    .to_owned()),
+            }
+        } else {
+            crate::image::load_path(std::path::Path::new(path))
+        };
+        match result {
             Ok(att) => {
                 let note = att.placeholder();
                 self.input.attach_image(att);

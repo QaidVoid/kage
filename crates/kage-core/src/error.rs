@@ -22,9 +22,9 @@ pub enum Error {
     #[error("config error: {0}")]
     Config(#[from] Box<figment::Error>),
 
-    /// Configuration could not be serialized to TOML for saving.
-    #[error("config serialize error: {0}")]
-    ConfigSerialize(#[from] toml::ser::Error),
+    /// Configuration could not be serialized or written back to TOML.
+    #[error("config write error: {0}")]
+    ConfigWrite(String),
 
     /// A path failed safety validation (traversal, escape, or wrong root).
     #[error("invalid path {path:?}: {reason}")]

@@ -61,6 +61,7 @@ tempfile = "3.27.0"
 thiserror = "2.0.18"
 tiktoken-rs = "0.11.0"
 toml = "1.1.2"
+toml_edit = "0.25.11"
 ulid = { version = "1.2.1", features = ["serde"] }
 ureq = { version = "3.3.0", features = ["json"] }
 url = "2.5.8"

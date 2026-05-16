@@ -90,24 +90,59 @@ impl Config {
         Ok(figment.extract()?)
     }
 
-    /// Serialize this config and write it to `path`, creating the parent
-    /// directory if needed. The write is atomic: the TOML is written to a
-    /// sibling temp file and renamed over `path`, so an interrupted save
-    /// never truncates an existing config.
+    /// Write this config back to `path`, preserving the existing
+    /// file's comments, formatting, key order, and any keys this
+    /// version does not model. Modeled values are merged in over the
+    /// existing document via `toml_edit`; a missing file is created
+    /// from scratch and the parent directory is made as needed.
     ///
-    /// This rewrites the whole file from the struct, so comments and any
-    /// keys this version does not model are dropped. The settings dialog
-    /// is the intended caller; hand-edited files keep working until the
-    /// first dialog save.
+    /// The write is atomic: the TOML is rendered to a sibling temp
+    /// file and renamed over `path`, so an interrupted save never
+    /// truncates an existing config.
     pub fn save(&self, path: &Path) -> Result<()> {
-        let body = toml::to_string_pretty(self)?;
+        use toml_edit::DocumentMut;
+
+        let mut doc = match std::fs::read_to_string(path) {
+            Ok(existing) => existing
+                .parse::<DocumentMut>()
+                .map_err(|e| crate::error::Error::ConfigWrite(e.to_string()))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => DocumentMut::new(),
+            Err(e) => return Err(e.into()),
+        };
+        // Serialize via the `toml` crate so nested structs render as
+        // block tables (`[ui]`), not inline (`ui = { .. }`); merging
+        // block-into-block is what keeps the user's section comments.
+        let fresh = toml::to_string(self)
+            .map_err(|e| crate::error::Error::ConfigWrite(e.to_string()))?
+            .parse::<DocumentMut>()
+            .map_err(|e| crate::error::Error::ConfigWrite(e.to_string()))?;
+        merge_table(doc.as_table_mut(), fresh.as_table());
+
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, body.as_bytes())?;
+        std::fs::write(&tmp, doc.to_string().as_bytes())?;
         std::fs::rename(&tmp, path)?;
         Ok(())
+    }
+}
+
+/// Recursively copy every value from `src` into `dst`: overwrite
+/// leaves and arrays, recurse into sub-tables. Keys present only in
+/// `dst` (comments, blank lines, and any keys this version does not
+/// model) are left untouched, so a hand-edited config keeps its
+/// annotations across a settings-dialog save.
+fn merge_table(dst: &mut toml_edit::Table, src: &toml_edit::Table) {
+    for (key, src_item) in src {
+        match (dst.get_mut(key), src_item) {
+            (Some(toml_edit::Item::Table(dst_sub)), toml_edit::Item::Table(src_sub)) => {
+                merge_table(dst_sub, src_sub);
+            }
+            _ => {
+                dst.insert(key, src_item.clone());
+            }
+        }
     }
 }
 
@@ -321,6 +356,41 @@ mod tests {
         let tmp = path.with_extension("toml.tmp");
         assert!(!tmp.exists(), "temp file should be renamed away");
         assert!(path.exists());
+    }
+
+    #[test]
+    fn save_preserves_comments_and_unknown_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# kage config header\n\
+             \n\
+             [ui]\n\
+             # theme chosen by hand\n\
+             theme = \"old\"\n\
+             \n\
+             [custom.plugin]\n\
+             # a section this version does not model\n\
+             retries = 5\n",
+        )
+        .unwrap();
+        let mut cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.ui.theme, "old");
+        cfg.ui.theme = "tokyo-night".to_owned();
+        cfg.save(&path).unwrap();
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("# kage config header"), "header comment kept");
+        assert!(body.contains("[custom.plugin]"), "unknown section kept");
+        assert!(body.contains("retries = 5"), "unknown key kept");
+        assert!(
+            body.contains("# a section this version does not model"),
+            "comment on unknown section kept"
+        );
+        assert!(body.contains("tokyo-night"), "modeled value updated");
+        let reloaded = Config::load(&path).unwrap();
+        assert_eq!(reloaded.ui.theme, "tokyo-night");
     }
 
     #[test]

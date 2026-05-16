@@ -14,9 +14,10 @@
 //! text and thinking are surfaced (`supports_tool_use` is `false`).
 //! kage advertises **no** `fs`/`terminal` client capabilities, so a
 //! conformant agent will not ask kage to touch the filesystem. An
-//! upstream `session/request_permission` is **rejected** - a provider
-//! has no seam to forward it to kage's own permission hook, and
-//! nothing is ever auto-approved.
+//! upstream `session/request_permission` is routed to the injected
+//! [`PermissionResolver`] (the host backs it with
+//! `kage.on_acp_permission`); with no resolver, or on deny, the call
+//! is rejected. kage never auto-approves an upstream agent's tools.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
@@ -48,6 +49,12 @@ use crate::jsonrpc::{self, Inbound, Peer, RpcError};
 pub type PermissionResolver =
     Arc<dyn Fn(&RequestPermissionRequest) -> PermissionDecision + Send + Sync>;
 
+/// Supplies additional agents not in static config (e.g. ones a
+/// plugin declared via `kage.acp.add_agent`). Consulted at
+/// `stream()` time so it can see runtime-registered agents. The host
+/// injects it; `None` means config is the only source.
+pub type AgentSource = Arc<dyn Fn() -> Vec<(String, kage_core::config::AcpAgent)> + Send + Sync>;
+
 /// A [`Provider`] that multiplexes over user-configured external ACP
 /// agents. The model id selects the agent: `acp:<name>` resolves to
 /// `req.model == "<name>"`, looked up in the configured agents map.
@@ -55,6 +62,7 @@ pub struct AcpProvider {
     agents: std::collections::BTreeMap<String, kage_core::config::AcpAgent>,
     metadata: ProviderMetadata,
     permission: Option<PermissionResolver>,
+    agent_source: Option<AgentSource>,
 }
 
 impl std::fmt::Debug for AcpProvider {
@@ -63,6 +71,7 @@ impl std::fmt::Debug for AcpProvider {
             .field("agents", &self.agents)
             .field("metadata", &self.metadata)
             .field("permission", &self.permission.as_ref().map(|_| "set"))
+            .field("agent_source", &self.agent_source.as_ref().map(|_| "set"))
             .finish()
     }
 }
@@ -81,6 +90,7 @@ impl AcpProvider {
                 supports_tool_use: false,
             },
             permission: None,
+            agent_source: None,
         }
     }
 
@@ -90,6 +100,24 @@ impl AcpProvider {
     pub fn with_permission(mut self, resolver: PermissionResolver) -> Self {
         self.permission = Some(resolver);
         self
+    }
+
+    /// Set a source of additional agents resolved at `stream()` time
+    /// (e.g. plugin-declared agents). Static config still takes
+    /// precedence on a name clash.
+    #[must_use]
+    pub fn with_agent_source(mut self, source: AgentSource) -> Self {
+        self.agent_source = Some(source);
+        self
+    }
+
+    fn resolve_agent(&self, name: &str) -> Option<kage_core::config::AcpAgent> {
+        if let Some(a) = self.agents.get(name) {
+            return Some(a.clone());
+        }
+        self.agent_source
+            .as_ref()
+            .and_then(|src| src().into_iter().find(|(n, _)| n == name).map(|(_, a)| a))
     }
 }
 
@@ -396,8 +424,7 @@ impl Provider for AcpProvider {
         let prompt = last_user_text(&req.messages)
             .ok_or_else(|| ProviderError::Decode("acp: no user message to forward".to_owned()))?;
         let agent = self
-            .agents
-            .get(&req.model)
+            .resolve_agent(&req.model)
             .ok_or_else(|| ProviderError::UnknownModel(format!("acp:{}", req.model)))?;
         let mut child = Command::new(&agent.command)
             .args(&agent.args)

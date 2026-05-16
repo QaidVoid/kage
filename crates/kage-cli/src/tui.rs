@@ -102,6 +102,9 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
             None
         }
     };
+    if let Some(rt) = plugin_runtime.as_ref() {
+        crate::acp_glue::set_runtime(rt);
+    }
     let skills = crate::load_skills(&workdir, plugin_runtime.as_deref());
     let system_prompt = crate::runtime_env::build_system_prompt(system, &workdir, model, &skills);
     let system = system_prompt.as_str();

@@ -5,6 +5,7 @@
 //! a table of recorded sessions stored under
 //! `$XDG_DATA_HOME/kage/sessions/` (default `~/.local/share/kage/sessions/`).
 
+mod acp_glue;
 mod auth;
 mod doctor;
 mod history;
@@ -321,6 +322,9 @@ fn main() -> ExitCode {
             None
         }
     };
+    if let Some(rt) = plugin_runtime.as_ref() {
+        acp_glue::set_runtime(rt);
+    }
     let skills = load_skills(&workdir, plugin_runtime.as_deref());
     let system_prompt = runtime_env::build_system_prompt(&cli.system, &workdir, &model, &skills);
 
@@ -624,6 +628,9 @@ fn run_resume(
         }
     };
 
+    if let Some(rt) = plugin_runtime.as_ref() {
+        acp_glue::set_runtime(rt);
+    }
     let mut tools = builtin_registry();
     if let Some(rt) = plugin_runtime.as_ref() {
         apply_plugin_tools(&mut tools, rt);
@@ -1041,17 +1048,19 @@ pub(crate) fn build_provider_registry() -> ProviderRegistry {
     if let Some(key) = lookup_key("kimi-for-coding", &store) {
         registry.register(Arc::new(compat::kimi_for_coding(key)));
     }
-    // External ACP agents the user configured under `[acp.agents.*]`.
-    // Registered as the `acp` provider so `kage -m acp:<name>` drives
-    // the named upstream agent.
+    // The `acp` provider: `kage -m acp:<name>` drives an external ACP
+    // agent declared in `[acp.agents.*]` or via `kage.acp.add_agent`.
+    // Always registered (plugin-declared agents are resolved lazily);
+    // its permission resolver defers to `kage.on_acp_permission` and
+    // denies otherwise.
     let acp_cfg = kage_core::config::Config::load_default()
         .map(|c| c.acp)
         .unwrap_or_default();
-    if !acp_cfg.agents.is_empty() {
-        registry.register(Arc::new(kage_acp::client::AcpProvider::from_config(
-            &acp_cfg,
-        )));
-    }
+    registry.register(Arc::new(
+        kage_acp::client::AcpProvider::from_config(&acp_cfg)
+            .with_permission(acp_glue::permission_resolver())
+            .with_agent_source(acp_glue::agent_source()),
+    ));
     registry
 }
 

@@ -34,8 +34,7 @@ pub struct AttachedImage {
 
 impl AttachedImage {
     /// `[image: image/png, 42 KB (shot.png)]`-style one-liner shown
-    /// in the input chrome and the conversation so an attachment is
-    /// never silent.
+    /// in the conversation so an attachment is never silent.
     #[must_use]
     pub fn placeholder(&self) -> String {
         format!(
@@ -44,6 +43,14 @@ impl AttachedImage {
             human_bytes(self.bytes),
             self.label
         )
+    }
+
+    /// Compact `label mime size` for the inline prompt marker, e.g.
+    /// `shot.png image/png 42 KB`. No brackets - the caller wraps it
+    /// in the `[image #N ...]` marker.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        format!("{} {} {}", self.label, self.mime, human_bytes(self.bytes))
     }
 }
 
@@ -137,76 +144,37 @@ pub fn path_if_image(text: &str) -> Option<std::path::PathBuf> {
     }
 }
 
-/// One clipboard-image command: program + args, expected to emit the
-/// raw image bytes on stdout.
-struct ClipCmd {
-    program: &'static str,
-    args: &'static [&'static str],
-}
-
-/// Pick the clipboard-image reader for the current platform, given
-/// which Linux display servers look available. Returns `None` when
-/// no probe makes sense (e.g. headless Linux), so a normal text
-/// paste never pays for a doomed subprocess. Split out from
-/// [`clipboard_image`] so the selection logic is unit-testable
-/// without a real clipboard.
-fn clip_cmd(wayland: bool, x11: bool) -> Option<ClipCmd> {
-    if cfg!(target_os = "macos") {
-        // `pngpaste -` writes the clipboard PNG to stdout. Absent ->
-        // spawn fails -> fall through to path/text (documented).
-        Some(ClipCmd {
-            program: "pngpaste",
-            args: &["-"],
-        })
-    } else if cfg!(target_os = "windows") {
-        Some(ClipCmd {
-            program: "powershell",
-            args: &[
-                "-NoProfile",
-                "-Command",
-                "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
-                 $i=[Windows.Forms.Clipboard]::GetImage(); \
-                 if($i){ $o=[Console]::OpenStandardOutput(); \
-                 $i.Save($o,[Drawing.Imaging.ImageFormat]::Png); $o.Close() }",
-            ],
-        })
-    } else if wayland {
-        Some(ClipCmd {
-            program: "wl-paste",
-            args: &["--no-newline", "--type", "image/png"],
-        })
-    } else if x11 {
-        Some(ClipCmd {
-            program: "xclip",
-            args: &["-selection", "clipboard", "-t", "image/png", "-o"],
-        })
-    } else {
-        None
-    }
-}
-
-/// Best-effort read of an image from the OS clipboard via a platform
-/// CLI helper (no extra crates). Returns the raw bytes if a helper
-/// produced any; the caller still runs them through [`from_bytes`],
-/// so a helper that emits non-image data (text clipboard) is
-/// naturally rejected and the caller falls back to path/text. Any
-/// failure - missing tool, error exit, empty output - is `None`,
-/// never a hard error: clipboard image paste is a convenience, not a
-/// guarantee, and must not break a normal text paste.
-#[must_use]
-pub fn clipboard_image() -> Option<Vec<u8>> {
-    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
-    let x11 = std::env::var_os("DISPLAY").is_some();
-    let cmd = clip_cmd(wayland, x11)?;
-    let out = std::process::Command::new(cmd.program)
-        .args(cmd.args)
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !out.status.success() || out.stdout.is_empty() {
-        return None;
-    }
-    Some(out.stdout)
+/// Read an image off the OS clipboard and return it PNG-encoded.
+///
+/// Uses the `arboard` crate (Wayland data-control, X11, macOS,
+/// Windows) - reading the clipboard's native image, not shelling out
+/// to a tool that may be absent. The clipboard yields raw RGBA, which
+/// is re-encoded to PNG so the rest of the pipeline (sniff, base64,
+/// provider) is format-uniform.
+///
+/// # Errors
+///
+/// A precise, user-facing message for the actual cause: clipboard
+/// unavailable (headless / no compositor support), no image on the
+/// clipboard (text was copied, or wl-clipboard's data-control
+/// protocol is unsupported by the compositor), or a PNG-encode
+/// failure. The caller surfaces this so a non-working setup is
+/// diagnosable instead of silent.
+pub fn clipboard_image() -> Result<Vec<u8>, String> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|e| format!("clipboard unavailable: {e}"))?;
+    let img = clipboard
+        .get_image()
+        .map_err(|e| format!("no image on the clipboard ({e})"))?;
+    let width = u32::try_from(img.width).map_err(|_| "clipboard image too wide".to_owned())?;
+    let height = u32::try_from(img.height).map_err(|_| "clipboard image too tall".to_owned())?;
+    let rgba = image::RgbaImage::from_raw(width, height, img.bytes.into_owned())
+        .ok_or_else(|| "clipboard image had a malformed pixel buffer".to_owned())?;
+    let mut png = Vec::new();
+    image::DynamicImage::ImageRgba8(rgba)
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|e| format!("encode clipboard image as png: {e}"))?;
+    Ok(png)
 }
 
 fn human_bytes(n: usize) -> String {
@@ -286,16 +254,11 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    #[test]
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    fn clip_cmd_picks_linux_tool_by_display_and_skips_headless() {
-        assert_eq!(clip_cmd(true, false).map(|c| c.program), Some("wl-paste"));
-        assert_eq!(clip_cmd(false, true).map(|c| c.program), Some("xclip"));
-        // Wayland wins when both are set.
-        assert_eq!(clip_cmd(true, true).map(|c| c.program), Some("wl-paste"));
-        // Headless: no probe, so a text paste pays no subprocess.
-        assert!(clip_cmd(false, false).is_none());
-    }
+    // `clipboard_image()` is intentionally not unit-tested: it reads
+    // the live OS clipboard via `arboard`, which has no deterministic
+    // behavior in a headless/CI process. Its pure inputs/outputs
+    // (`from_bytes`, `path_if_image`) are covered above; failures
+    // surface to the user inline via the `:attach` / Ctrl+V path.
 
     #[test]
     fn path_if_image_rejects_non_images_and_text() {

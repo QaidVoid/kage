@@ -15,8 +15,10 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
+arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 base64.workspace = true
 ignore.workspace = true
+image = { version = "0.25.9", default-features = false, features = ["png"] }
 kage-core.workspace = true
 kage-loop.workspace = true
 kage-plugin.workspace = true

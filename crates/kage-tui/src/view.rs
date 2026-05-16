@@ -1208,16 +1208,11 @@ fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {
         Style::default().fg(theme.muted_fg)
     };
 
-    let mut top_line: Vec<Span<'static>> =
+    // Attachments show inline in the prompt as editable
+    // `[image #N ...]` markers, so the top border stays just the
+    // mode pill.
+    let top_line: Vec<Span<'static>> =
         vec![Span::styled(format!(" {} ", mode_label(mode)), pill_style)];
-    let attached = input.attached();
-    if !attached.is_empty() {
-        let labels: Vec<&str> = attached.iter().map(|a| a.label.as_str()).collect();
-        top_line.push(Span::styled(
-            format!(" + {} image(s): {} ", attached.len(), labels.join(", ")),
-            Style::default().fg(theme.muted_fg),
-        ));
-    }
 
     let block = RtBlock::default()
         .borders(Borders::ALL)
@@ -1260,14 +1255,28 @@ fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {
             frame.render_widget(placeholder, body_area);
         }
     } else if body_width > 0 {
-        let visual_range = if mode == Mode::Visual {
-            input.input_visual_range()
+        // Visual mode paints the selection; otherwise, when the
+        // cursor is parked at the tail of an `[image #N ...]` chip,
+        // paint that whole chip so the user sees the block one
+        // Backspace will delete as a unit.
+        let (range, highlight) = if mode == Mode::Visual {
+            (
+                input.input_visual_range(),
+                Style::default().bg(theme.selection_color),
+            )
+        } else if let Some(r) = input.armed_image_range() {
+            (
+                Some(r),
+                Style::default()
+                    .bg(theme.selection_color)
+                    .add_modifier(Modifier::BOLD),
+            )
         } else {
-            None
+            (None, Style::default())
         };
         // Lines are pre-wrapped at body_width chars to match
         // input_visual_cursor exactly; no Paragraph::wrap needed.
-        let lines = build_input_body_lines(input.text(), visual_range, &theme, body_width);
+        let lines = build_input_body_lines(input.text(), range, highlight, body_width);
         let body = Paragraph::new(lines).scroll((scroll_off, 0));
         frame.render_widget(body, body_area);
     }
@@ -1293,19 +1302,19 @@ fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {
 /// [`wrap_input_rows`], so the cursor lands exactly under the char it
 /// indexes regardless of where the wrap broke.
 ///
-/// When `visual_range` is `Some`, each row range is further split
-/// into pre-selection / selected / post-selection spans so the
-/// highlight paints across wrap boundaries cleanly.
+/// When `highlight_range` is `Some`, each row range is further split
+/// into pre / highlighted / post spans (styled with `highlight`) so
+/// the band paints across wrap boundaries cleanly. Used for the
+/// Visual selection and for the armed image-chip block.
 fn build_input_body_lines(
     text: &str,
-    visual_range: Option<(usize, usize)>,
-    theme: &crate::theme::Theme,
+    highlight_range: Option<(usize, usize)>,
+    highlight: Style,
     body_width: u16,
 ) -> Vec<Line<'static>> {
-    let highlight = Style::default().bg(theme.selection_color);
     let mut out = Vec::new();
     for (start, end) in wrap_input_rows(text, body_width) {
-        push_input_row(&mut out, text, start, end, visual_range, highlight);
+        push_input_row(&mut out, text, start, end, highlight_range, highlight);
     }
     out
 }

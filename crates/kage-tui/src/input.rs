@@ -282,10 +282,13 @@ pub struct InputState {
     /// Monotonic id for the next collapsed paste, so placeholders stay
     /// unique within a draft even after edits.
     next_paste_id: u32,
-    /// Images queued for the next prompt (file/path/clipboard). Drained
-    /// into `Content::Image` blocks on submit; shown in the input
-    /// chrome so the user sees what will be sent.
-    attached: Vec<crate::image::AttachedImage>,
+    /// Images queued for the next prompt (file/path/clipboard), each
+    /// paired with the id embedded in its `[image #N ...]` prompt
+    /// marker. Reconciled against the marker on submit so editing the
+    /// marker out removes the image; survivors become `Content::Image`.
+    attached: Vec<(u32, crate::image::AttachedImage)>,
+    /// Monotonic id for the next image marker, unique within a draft.
+    next_image_id: u32,
 }
 
 impl Default for InputState {
@@ -312,6 +315,7 @@ impl Default for InputState {
             pastes: Vec::new(),
             next_paste_id: 1,
             attached: Vec::new(),
+            next_image_id: 1,
         }
     }
 }
@@ -360,20 +364,33 @@ impl InputState {
         &self.text
     }
 
-    /// Queue an image to send with the next prompt.
+    /// Queue an image and drop an editable `[image #N ...]` marker
+    /// into the prompt at the cursor. The marker is ordinary text:
+    /// deleting it (backspace / edit) removes the image, and the
+    /// reconcile on submit drops any image whose marker is gone.
     pub fn attach_image(&mut self, image: crate::image::AttachedImage) {
-        self.attached.push(image);
+        let id = self.next_image_id;
+        self.next_image_id = self.next_image_id.wrapping_add(1);
+        let marker = format!("[image #{id} {}] ", image.summary());
+        self.text.insert_str(self.cursor, &marker);
+        self.cursor += marker.len();
+        self.attached.push((id, image));
     }
 
-    /// Images queued for the next prompt (for the input chrome hint).
+    /// Queued images still referenced by a marker in the prompt.
     #[must_use]
-    pub fn attached(&self) -> &[crate::image::AttachedImage] {
+    pub fn attached(&self) -> &[(u32, crate::image::AttachedImage)] {
         &self.attached
     }
 
-    /// Take and clear the queued images (called on submit).
+    /// Reconcile against `text`: drop any image whose `[image #N ...]`
+    /// marker the user deleted, take the survivors, and clear the
+    /// queue. Returns the images to send.
     pub fn take_attached(&mut self) -> Vec<crate::image::AttachedImage> {
         std::mem::take(&mut self.attached)
+            .into_iter()
+            .map(|(_, img)| img)
+            .collect()
     }
 
     /// Byte offset of the cursor in the prompt text.
@@ -1303,11 +1320,21 @@ impl InputState {
                     self.insert_char('\n');
                     Vec::new()
                 } else if self.text.is_empty() {
+                    // Nothing to send; an image attached without a
+                    // surviving marker is stale - drop it.
+                    self.attached.clear();
                     Vec::new()
                 } else {
                     let raw = std::mem::take(&mut self.text);
-                    let text = self.resolve_pastes(&raw);
+                    let expanded = self.resolve_pastes(&raw);
                     self.pastes.clear();
+                    // Keep only images whose `[image #N ...]` marker
+                    // still exists; strip the markers from the text
+                    // the model receives (the image rides as a
+                    // `Content::Image` block instead).
+                    let live = image_marker_ids(&expanded);
+                    self.attached.retain(|(id, _)| live.contains(id));
+                    let text = strip_image_markers(&expanded);
                     self.cursor = 0;
                     self.push_history(&text);
                     self.reset_history_navigation();
@@ -1637,12 +1664,50 @@ impl InputState {
         if self.cursor == 0 {
             return;
         }
+        if self.backspace_image_marker() {
+            return;
+        }
         let prev = self.text[..self.cursor]
             .char_indices()
             .next_back()
             .map_or(0, |(idx, _)| idx);
         self.text.drain(prev..self.cursor);
         self.cursor = prev;
+    }
+
+    /// The image chip a Backspace would atomically delete right now:
+    /// `(start, end, id)` of the whole `[image #N ...]` marker (plus
+    /// an optional single trailing space) the cursor is in. The chip
+    /// is one unit - this fires for any cursor position from just
+    /// inside the opening `[` through the trailing space, not only at
+    /// the tail. `None` when the cursor is not within a chip. Used
+    /// both to perform the delete and to highlight the chip.
+    fn armed_image_marker(&self) -> Option<(usize, usize, u32)> {
+        image_marker_spans(&self.text)
+            .into_iter()
+            .find(|&(open, end, _)| open < self.cursor && self.cursor <= end)
+    }
+
+    /// Byte range of the image chip a Backspace would delete at the
+    /// current cursor, for the renderer to highlight as one block.
+    #[must_use]
+    pub fn armed_image_range(&self) -> Option<(usize, usize)> {
+        self.armed_image_marker().map(|(s, e, _)| (s, e))
+    }
+
+    /// When the cursor sits just past a whole `[image #N ...]` marker
+    /// (optionally one trailing space), one Backspace deletes the
+    /// entire marker as an atomic chip and drops image `N`, rather
+    /// than nibbling it character by character. Returns whether it
+    /// handled the keystroke.
+    fn backspace_image_marker(&mut self) -> bool {
+        let Some((open, end, id)) = self.armed_image_marker() else {
+            return false;
+        };
+        self.attached.retain(|(i, _)| *i != id);
+        self.text.drain(open..end);
+        self.cursor = open;
+        true
     }
 
     fn move_cursor(&mut self, delta: i32) {
@@ -1879,6 +1944,85 @@ pub(crate) fn vim_word_end(text: &str, cursor: usize) -> usize {
     last_word_pos
 }
 
+/// Scan `s` for `[image #<digits> ...]` markers and collect the ids.
+/// A marker runs from `[image #` to the next `]`; content between the
+/// digits and `]` is ignored (it is just the human label/size).
+fn image_marker_ids(s: &str) -> std::collections::HashSet<u32> {
+    let mut ids = std::collections::HashSet::new();
+    let mut rest = s;
+    while let Some(start) = rest.find("[image #") {
+        let after = &rest[start + "[image #".len()..];
+        let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+        if let Some(end) = after.find(']')
+            && let Ok(id) = digits.parse::<u32>()
+        {
+            ids.insert(id);
+            rest = &after[end + 1..];
+        } else {
+            rest = after;
+        }
+    }
+    ids
+}
+
+/// Absolute byte spans of every `[image #<digits> ...]` marker in
+/// `s` as `(start, end, id)`, where `end` is just past the closing
+/// `]` plus one trailing space if present - i.e. exactly the slice
+/// [`strip_image_markers`] would remove. Used to treat a chip as one
+/// atomic block for cursor-aware delete and highlight.
+fn image_marker_spans(s: &str) -> Vec<(usize, usize, u32)> {
+    let mut spans = Vec::new();
+    let mut base = 0usize;
+    while let Some(rel) = s[base..].find("[image #") {
+        let open = base + rel;
+        let after_at = open + "[image #".len();
+        let after = &s[after_at..];
+        let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
+        match (after.find(']'), digits.parse::<u32>()) {
+            (Some(close_rel), Ok(id)) => {
+                let mut end = after_at + close_rel + 1;
+                if s[end..].starts_with(' ') {
+                    end += 1;
+                }
+                spans.push((open, end, id));
+                base = end;
+            }
+            _ => base = after_at,
+        }
+    }
+    spans
+}
+
+/// Remove every `[image #<digits> ...]` marker (and one trailing
+/// space if present) from `s`, leaving the user's prose for the
+/// model. Non-marker `[...]` text is left untouched.
+fn strip_image_markers(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    loop {
+        let Some(start) = rest.find("[image #") else {
+            out.push_str(rest);
+            break;
+        };
+        let after = &rest[start + "[image #".len()..];
+        let has_digit = after.starts_with(|c: char| c.is_ascii_digit());
+        match after.find(']') {
+            Some(end) if has_digit => {
+                out.push_str(&rest[..start]);
+                let mut tail = &after[end + 1..];
+                tail = tail.strip_prefix(' ').unwrap_or(tail);
+                rest = tail;
+            }
+            _ => {
+                // Not a real marker; keep the literal `[image #`.
+                out.push_str(&rest[..start + "[image #".len()]);
+                rest = after;
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1897,6 +2041,95 @@ mod tests {
 
     fn alt_enter() -> KeyEvent {
         KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)
+    }
+
+    fn img(label: &str) -> crate::image::AttachedImage {
+        crate::image::AttachedImage {
+            source: kage_core::ImageSource::Base64 {
+                data: "AAAA".into(),
+            },
+            mime: "image/png".into(),
+            label: label.into(),
+            bytes: 3,
+        }
+    }
+
+    #[test]
+    fn marker_scan_and_strip_round_trip() {
+        let s = "see [image #1 a.png image/png 3 B] and [image #2 b.png ...] done";
+        let ids = image_marker_ids(s);
+        assert!(ids.contains(&1) && ids.contains(&2) && ids.len() == 2);
+        assert_eq!(strip_image_markers(s), "see and done");
+        // A non-marker bracket is left alone.
+        assert_eq!(strip_image_markers("keep [this] text"), "keep [this] text");
+        assert!(image_marker_ids("no markers here").is_empty());
+    }
+
+    #[test]
+    fn attach_inserts_marker_and_submit_strips_it_keeping_image() {
+        let mut s = InputState::new();
+        s.attach_image(img("shot.png"));
+        assert!(
+            s.text().contains("[image #1 shot.png"),
+            "marker inserted: {:?}",
+            s.text()
+        );
+        for c in "look at this".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        let acts = s.handle_key(key(KeyCode::Enter));
+        match acts.as_slice() {
+            [InputAction::Submit(t)] => {
+                assert!(!t.contains("[image #"), "marker stripped: {t:?}");
+                assert!(t.contains("look at this"), "prose kept: {t:?}");
+            }
+            other => panic!("expected Submit, got {other:?}"),
+        }
+        let kept = s.take_attached();
+        assert_eq!(kept.len(), 1, "image survives because its marker did");
+    }
+
+    #[test]
+    fn one_backspace_deletes_the_whole_marker_and_drops_the_image() {
+        let mut s = InputState::new();
+        s.attach_image(img("a.png"));
+        // Cursor sits just past `[image #1 ...] `; a single
+        // Backspace removes the entire chip, not one char.
+        assert!(s.text().contains("[image #1"));
+        s.handle_key(key(KeyCode::Backspace));
+        assert_eq!(s.text(), "", "whole marker (and its space) removed");
+        assert!(
+            s.attached().is_empty(),
+            "the image is dropped with its chip immediately"
+        );
+    }
+
+    #[test]
+    fn backspace_after_typed_text_still_deletes_one_char() {
+        let mut s = InputState::new();
+        s.attach_image(img("a.png"));
+        for c in "hi".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        s.handle_key(key(KeyCode::Backspace));
+        assert!(s.text().ends_with('h'), "char-wise delete past the chip");
+        assert_eq!(s.attached().len(), 1, "chip untouched");
+    }
+
+    #[test]
+    fn backspace_with_cursor_inside_the_chip_still_deletes_the_whole_block() {
+        let mut s = InputState::new();
+        s.attach_image(img("a.png"));
+        for _ in 0..10 {
+            s.handle_key(key(KeyCode::Left));
+        }
+        assert!(
+            s.armed_image_range().is_some(),
+            "the chip is armed while the cursor is inside its brackets"
+        );
+        s.handle_key(key(KeyCode::Backspace));
+        assert_eq!(s.text(), "", "the whole chip went, not one char");
+        assert!(s.attached().is_empty(), "image dropped with its chip");
     }
 
     #[test]

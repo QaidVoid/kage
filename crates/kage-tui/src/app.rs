@@ -1650,6 +1650,17 @@ impl App {
             };
         }
 
+        // Ctrl+V: attach an image from the OS clipboard. Terminals
+        // with an image-only clipboard send the literal key (no
+        // bracketed paste / no text), so this is the reliable
+        // trigger; a text clipboard arrives as `Event::Paste`
+        // instead and never reaches here. Honored after `[keybindings]`
+        // so a user can still rebind ctrl+v.
+        if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('v')) {
+            self.attach_clipboard_image();
+            return None;
+        }
+
         // Plugin keybindings win over builtin Normal/Insert handling
         // (last writer wins), but never over an open modal layer
         // above, the global quit hatch, or user config above.
@@ -2414,6 +2425,23 @@ impl App {
         }
     }
 
+    /// Attach the OS clipboard image (Ctrl+V, or `:attach` with no
+    /// path). On failure the real reason is shown inline - clipboard
+    /// unavailable, no image on it, encode failure - so a setup that
+    /// does not work is diagnosable, never a silent no-op.
+    fn attach_clipboard_image(&mut self) {
+        match crate::image::clipboard_image()
+            .and_then(|bytes| crate::image::from_bytes(&bytes, "clipboard"))
+        {
+            Ok(att) => {
+                let note = att.placeholder();
+                self.input.attach_image(att);
+                self.notify(format!("attached {note}"));
+            }
+            Err(e) => self.push_error(format!("paste image: {e}")),
+        }
+    }
+
     /// Handle a bracketed paste. If the pasted text is just a path to
     /// an existing image (a drag-drop, or a copied file), attach it
     /// instead of inserting the raw path as prompt text; otherwise
@@ -2432,13 +2460,12 @@ impl App {
             }
             return;
         }
-        // A copied screenshot/image can't ride in the paste text;
-        // terminals deliver an empty bracketed paste for it. Only
-        // then probe the OS clipboard for image bytes, so a normal
-        // text paste neither pays for a subprocess nor risks being
-        // hijacked by whatever is on the clipboard.
+        // A copied screenshot/image can't ride in the paste text; if
+        // the terminal does deliver an empty bracketed paste for it,
+        // treat that as an image-paste attempt (Ctrl+V is also
+        // intercepted directly for terminals that send no event).
         if text.trim().is_empty()
-            && let Some(bytes) = crate::image::clipboard_image()
+            && let Ok(bytes) = crate::image::clipboard_image()
             && let Ok(att) = crate::image::from_bytes(&bytes, "clipboard")
         {
             let note = att.placeholder();
@@ -2458,13 +2485,8 @@ impl App {
     fn attach_image_path(&mut self, rest: &str) {
         let path = rest.trim();
         let result = if path.is_empty() {
-            match crate::image::clipboard_image() {
-                Some(bytes) => crate::image::from_bytes(&bytes, "clipboard"),
-                None => Err("no image on the clipboard, or no clipboard reader \
-                     (install wl-paste / xclip on Linux, pngpaste on macOS); \
-                     or pass a path: `:attach <image-path>`"
-                    .to_owned()),
-            }
+            crate::image::clipboard_image()
+                .and_then(|bytes| crate::image::from_bytes(&bytes, "clipboard"))
         } else {
             crate::image::load_path(std::path::Path::new(path))
         };
@@ -4419,8 +4441,14 @@ mod tests {
         app.handle_paste(&png.to_string_lossy());
         assert_eq!(app.input.attached().len(), 1, "image path attached");
         assert!(
-            app.input.text().is_empty(),
-            "path was not pasted as prompt text"
+            app.input.text().contains("[image #1 shot.png"),
+            "an editable marker is inserted, not the raw path: {:?}",
+            app.input.text()
+        );
+        assert!(
+            !app.input.text().contains(&*dir.to_string_lossy()),
+            "the path itself was not pasted as text: {:?}",
+            app.input.text()
         );
 
         app.handle_paste("just some text");

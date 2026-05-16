@@ -229,10 +229,9 @@ fn render_status(
     }
 
     let bg_style = Style::default().bg(theme.status_bg);
-    let dim = Style::default()
-        .fg(theme.status_dim_fg)
-        .bg(theme.status_bg)
-        .add_modifier(Modifier::DIM);
+    // The bar blends into the canvas now (no band), so `DIM` grey on
+    // dark would be unreadable. Use the readable muted tier instead.
+    let muted = Style::default().fg(theme.muted_fg).bg(theme.status_bg);
     let mut left_spans = vec![Span::styled(
         " kage".to_owned(),
         bg_style.add_modifier(Modifier::BOLD),
@@ -241,20 +240,20 @@ fn render_status(
         && !model.is_empty()
     {
         left_spans.push(Span::styled("  ".to_owned(), bg_style));
-        left_spans.push(Span::styled(model.to_owned(), dim));
+        left_spans.push(Span::styled(model.to_owned(), muted));
     }
     let mut right_spans: Vec<Span<'static>> = Vec::new();
     for text in status.plugin_widgets {
         if text.is_empty() {
             continue;
         }
-        right_spans.push(Span::styled(format!("{text}  "), dim));
+        right_spans.push(Span::styled(format!("{text}  "), muted));
     }
     for (_key, text) in status.plugin_status {
         if text.is_empty() {
             continue;
         }
-        right_spans.push(Span::styled(format!("{text}  "), dim));
+        right_spans.push(Span::styled(format!("{text}  "), muted));
     }
     if let Some((current, total)) = status.search_match_count {
         let label = if total == 0 {
@@ -275,7 +274,7 @@ fn render_status(
     if let Some(sid) = status.session_id
         && !sid.is_empty()
     {
-        right_spans.push(Span::styled(format!("session {sid} "), dim));
+        right_spans.push(Span::styled(format!("session {sid} "), muted));
     }
     let total = usize::from(regions.status.width);
     let left_width: usize = left_spans.iter().map(|s| s.content.chars().count()).sum();
@@ -1500,7 +1499,9 @@ fn render_modeline(
         frame.render_widget(paragraph, area);
         return;
     }
-    let dim = fg.add_modifier(Modifier::DIM);
+    // Blended into the canvas (no band): a `DIM` separator would
+    // vanish, so use the readable muted tier.
+    let dim = Style::default().fg(theme.muted_fg).bg(theme.modeline_bg);
     let mut spans: Vec<Span<'static>> = Vec::new();
     if let Some(u) = usage
         && (!u.model.is_empty() || u.total_tokens() > 0 || u.current_context > 0 || u.working)

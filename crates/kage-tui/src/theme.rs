@@ -87,9 +87,14 @@ pub struct Theme {
     pub tool_error_fg: Color,
     /// Foreground for `[kage:notify]` and similar custom blocks.
     pub custom_fg: Color,
-    /// Status bar background.
+    /// Status bar background. Bundled palettes set this equal to
+    /// [`Self::bg`] so the top bar blends into the canvas instead of
+    /// rendering as a heavy band; a user theme can give it a distinct
+    /// value to get a banded look back.
     pub status_bg: Color,
-    /// Status bar dim text (model id, session pill).
+    /// Status bar secondary text (session pill). Bundled palettes keep
+    /// this for compatibility; the built-in renderer now uses
+    /// [`Self::muted_fg`] so chrome text stays legible without a band.
     pub status_dim_fg: Color,
     /// Secondary-but-readable text: fold hints (`zo to expand`),
     /// byte/timing metadata. A real mid-contrast grey, not `DIM` on
@@ -128,7 +133,9 @@ pub struct Theme {
     /// Foreground of the contextual hint shown on the right side of
     /// the input card's top border.
     pub input_hint_fg: Color,
-    /// Background of the bottom modeline.
+    /// Background of the bottom modeline. Bundled palettes set this
+    /// equal to [`Self::bg`] so the strip blends into the canvas; a
+    /// user theme can override it for a banded modeline.
     pub modeline_bg: Color,
     /// Foreground of the bottom modeline's text.
     pub modeline_fg: Color,
@@ -163,7 +170,7 @@ impl Theme {
             tool_result_fg: Color::Gray,
             tool_error_fg: Color::Red,
             custom_fg: Color::Magenta,
-            status_bg: Color::DarkGray,
+            status_bg: Color::Rgb(18, 20, 28),
             status_dim_fg: Color::Gray,
             muted_fg: Color::Rgb(140, 148, 165),
             match_color: Color::Yellow,
@@ -181,7 +188,7 @@ impl Theme {
             input_glyph_fg: Color::Cyan,
             input_placeholder_fg: Color::DarkGray,
             input_hint_fg: Color::Gray,
-            modeline_bg: Color::Rgb(24, 28, 38),
+            modeline_bg: Color::Rgb(18, 20, 28),
             modeline_fg: Color::Gray,
         }
     }
@@ -208,7 +215,7 @@ impl Theme {
             tool_result_fg: Color::Rgb(169, 177, 214),
             tool_error_fg: Color::Rgb(247, 118, 142),
             custom_fg: Color::Rgb(187, 154, 247),
-            status_bg: Color::Rgb(30, 32, 48),
+            status_bg: Color::Rgb(22, 23, 34),
             status_dim_fg: Color::Rgb(86, 95, 137),
             muted_fg: Color::Rgb(130, 140, 180),
             match_color: Color::Rgb(224, 175, 104),
@@ -226,7 +233,7 @@ impl Theme {
             input_glyph_fg: Color::Rgb(125, 207, 255),
             input_placeholder_fg: Color::Rgb(86, 95, 137),
             input_hint_fg: Color::Rgb(108, 119, 165),
-            modeline_bg: Color::Rgb(22, 24, 38),
+            modeline_bg: Color::Rgb(22, 23, 34),
             modeline_fg: Color::Rgb(108, 119, 165),
         }
     }
@@ -270,7 +277,7 @@ impl Theme {
             input_glyph_fg: Color::Rgb(137, 220, 235),
             input_placeholder_fg: Color::Rgb(108, 112, 134),
             input_hint_fg: Color::Rgb(127, 132, 156),
-            modeline_bg: Color::Rgb(17, 17, 27),
+            modeline_bg: Color::Rgb(24, 24, 37),
             modeline_fg: Color::Rgb(127, 132, 156),
         }
     }

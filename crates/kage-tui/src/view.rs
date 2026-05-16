@@ -705,7 +705,9 @@ fn render_buffer(
         }
     }
 
-    let registry = registry::BlockRenderer::with_builtins();
+    let registry = registry::global()
+        .read()
+        .expect("block registry rwlock poisoned");
     let focus = buffer.effective_focus();
 
     // Pass 1: gather per-block heights. Cached entries return

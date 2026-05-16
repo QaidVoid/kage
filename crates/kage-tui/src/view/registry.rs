@@ -14,7 +14,7 @@
 //! are picked up automatically.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, RwLock};
 
 use super::widget::BlockWidget;
 use super::{
@@ -132,6 +132,41 @@ impl BlockRenderer {
         let factory = self.tool_pair.as_ref()?;
         factory.make_pair(call, result)
     }
+}
+
+/// Process-wide block-renderer registry.
+///
+/// `render_buffer` reads this once per frame instead of rebuilding
+/// the builtin set every time, so plugin-supplied custom renderers
+/// (`kage.register_block_renderer`, wired via [`register_custom`])
+/// persist across frames. Mirrors the `theme` module's global: a
+/// single shared value the renderer reads and the host mutates.
+static GLOBAL: LazyLock<RwLock<BlockRenderer>> =
+    LazyLock::new(|| RwLock::new(BlockRenderer::with_builtins()));
+
+/// The process-wide registry. The renderer takes a read lock for the
+/// duration of a frame; the host takes a write lock to register or
+/// reset plugin renderers.
+#[must_use]
+pub fn global() -> &'static RwLock<BlockRenderer> {
+    &GLOBAL
+}
+
+/// Register (or replace) a plugin renderer for a custom block kind in
+/// the global registry. Called by the host when a plugin runs
+/// `kage.register_block_renderer`.
+pub fn register_custom(name: impl Into<String>, factory: Arc<dyn BlockFactory>) {
+    global()
+        .write()
+        .expect("block registry rwlock poisoned")
+        .set_custom(name, factory);
+}
+
+/// Drop every plugin-registered custom renderer, restoring the
+/// builtin defaults. Called on plugin hot-reload so a removed
+/// renderer stops taking effect.
+pub fn reset_to_builtins() {
+    *global().write().expect("block registry rwlock poisoned") = BlockRenderer::with_builtins();
 }
 
 /// Identifier for the built-in kinds that have a default factory.
@@ -452,5 +487,39 @@ mod tests {
     fn factory_trait_is_send_and_sync_for_arc_storage() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Arc<dyn BlockFactory>>();
+    }
+
+    #[test]
+    fn global_registry_starts_with_builtins() {
+        let g = global().read().expect("poisoned");
+        assert!(g.widget_for(&user_block()).is_some());
+    }
+
+    #[test]
+    fn register_custom_then_reset_round_trips_on_global() {
+        struct Marker;
+        impl BlockFactory for Marker {
+            fn make(&self, _: &Block) -> Option<Box<dyn BlockWidget>> {
+                Some(Box::new(super::super::widget::EmptyBlockWidget))
+            }
+        }
+        register_custom("pt7:test-kind", Arc::new(Marker));
+        {
+            let g = global().read().expect("poisoned");
+            let w = g
+                .widget_for(&custom_block("pt7:test-kind"))
+                .expect("custom registered");
+            assert_eq!(w.measure(40), 0, "Marker -> EmptyBlockWidget");
+        }
+        reset_to_builtins();
+        let g = global().read().expect("poisoned");
+        // After reset the kind falls back to the default custom
+        // factory, which has a non-zero measure.
+        assert!(
+            g.widget_for(&custom_block("pt7:test-kind"))
+                .expect("default custom factory")
+                .measure(40)
+                > 0
+        );
     }
 }

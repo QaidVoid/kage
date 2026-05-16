@@ -21,6 +21,18 @@ jobs:
       - run: rustup show
       - run: cargo fmt --all --check
 
+  lua-types:
+    name: lua-types
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      # Regenerate the lua-language-server stub and fail if the
+      # committed plugins/types/kage.lua drifts from the in-tree spec
+      # (same shape as the cargo fmt --check gate).
+      - run: cargo run -p xtask -- gen-lua-types --check
+
   clippy:
     name: clippy
     runs-on: ubuntu-latest

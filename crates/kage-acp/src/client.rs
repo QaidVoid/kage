@@ -39,24 +39,21 @@ use crate::acp::{
 };
 use crate::jsonrpc::{self, Inbound, Peer, RpcError};
 
-/// A [`Provider`] backed by an external ACP agent process.
+/// A [`Provider`] that multiplexes over user-configured external ACP
+/// agents. The model id selects the agent: `acp:<name>` resolves to
+/// `req.model == "<name>"`, looked up in the configured agents map.
 #[derive(Debug)]
 pub struct AcpProvider {
-    command: Vec<String>,
+    agents: std::collections::BTreeMap<String, kage_core::config::AcpAgent>,
     metadata: ProviderMetadata,
 }
 
 impl AcpProvider {
-    /// Build an adapter that spawns `command` (argv; first element is
-    /// the executable) for each turn.
+    /// Build the provider from `[acp.agents.*]` config.
     #[must_use]
-    pub fn new<I, S>(command: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
+    pub fn from_config(acp: &kage_core::config::AcpConfig) -> Self {
         Self {
-            command: command.into_iter().map(Into::into).collect(),
+            agents: acp.agents.clone(),
             metadata: ProviderMetadata {
                 id: "acp".to_owned(),
                 display_name: "ACP agent".to_owned(),
@@ -366,17 +363,18 @@ impl Provider for AcpProvider {
     ) -> Result<EventStream, ProviderError> {
         let prompt = last_user_text(&req.messages)
             .ok_or_else(|| ProviderError::Decode("acp: no user message to forward".to_owned()))?;
-        let (cmd, args) = self
-            .command
-            .split_first()
-            .ok_or_else(|| ProviderError::Transport("acp: empty command".to_owned()))?;
-        let mut child = Command::new(cmd)
-            .args(args)
+        let agent = self
+            .agents
+            .get(&req.model)
+            .ok_or_else(|| ProviderError::UnknownModel(format!("acp:{}", req.model)))?;
+        let mut child = Command::new(&agent.command)
+            .args(&agent.args)
+            .envs(&agent.env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .spawn()
-            .map_err(|e| ProviderError::Transport(format!("acp: spawn {cmd}: {e}")))?;
+            .map_err(|e| ProviderError::Transport(format!("acp: spawn {}: {e}", agent.command)))?;
         let stdin = child
             .stdin
             .take()

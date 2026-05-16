@@ -1041,6 +1041,17 @@ pub(crate) fn build_provider_registry() -> ProviderRegistry {
     if let Some(key) = lookup_key("kimi-for-coding", &store) {
         registry.register(Arc::new(compat::kimi_for_coding(key)));
     }
+    // External ACP agents the user configured under `[acp.agents.*]`.
+    // Registered as the `acp` provider so `kage -m acp:<name>` drives
+    // the named upstream agent.
+    let acp_cfg = kage_core::config::Config::load_default()
+        .map(|c| c.acp)
+        .unwrap_or_default();
+    if !acp_cfg.agents.is_empty() {
+        registry.register(Arc::new(kage_acp::client::AcpProvider::from_config(
+            &acp_cfg,
+        )));
+    }
     registry
 }
 

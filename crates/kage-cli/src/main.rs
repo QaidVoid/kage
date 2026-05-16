@@ -10,6 +10,7 @@ mod auth;
 mod doctor;
 mod history;
 mod init;
+mod mcp;
 mod oauth;
 mod plugins;
 mod rpc;
@@ -174,6 +175,20 @@ enum Command {
         #[arg(long = "system", default_value = "")]
         system: String,
     },
+    /// Model Context Protocol server: expose kage's built-in tools to
+    /// another agent over stdio (newline-delimited JSON-RPC). Point an
+    /// MCP client's server command at `kage mcp serve`.
+    Mcp {
+        /// MCP sub-action.
+        #[command(subcommand)]
+        action: McpAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum McpAction {
+    /// Serve kage's built-in tools as an MCP server over stdio.
+    Serve,
 }
 
 #[derive(Subcommand, Debug)]
@@ -227,6 +242,9 @@ fn run_subcommand(command: Command) -> ExitCode {
         Command::GenManpage { out } => run_gen_manpage(&out),
         Command::Completions { shell } => run_completions(shell),
         Command::Rpc { model, system } => rpc::run(model.as_deref(), &system),
+        Command::Mcp { action } => match action {
+            McpAction::Serve => mcp::run_serve(),
+        },
     }
 }
 

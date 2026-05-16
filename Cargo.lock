@@ -1271,6 +1271,7 @@ dependencies = [
  "kage-acp",
  "kage-core",
  "kage-loop",
+ "kage-mcp",
  "kage-plugin",
  "kage-provider",
  "kage-session",

@@ -15,7 +15,7 @@ use ratatui::crossterm::event::KeyEvent;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget};
 
 use crate::cmdline::{CommandLine, CommandLineEvent};
 use crate::cmdparse::EmptyResolver;
@@ -66,7 +66,7 @@ impl OverlayWidget for InputOverlay {
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &OverlayCtx<'_>) {
-        Widget::render(Clear, area, buf);
+        Widget::render(crate::opaque::OpaqueClear, area, buf);
         let block = Block::default()
             .title(format!(" {} ", self.title))
             .borders(Borders::ALL)

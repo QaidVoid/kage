@@ -1444,7 +1444,7 @@ impl App {
             }
             if let Some(overlay) = plugin_overlay {
                 let modal = overlay.measure(frame.area());
-                frame.render_widget(ratatui::widgets::Clear, modal);
+                frame.render_widget(crate::opaque::OpaqueClear, modal);
                 let theme = crate::theme::current();
                 let ctx = crate::overlay::OverlayCtx {
                     theme: &theme,

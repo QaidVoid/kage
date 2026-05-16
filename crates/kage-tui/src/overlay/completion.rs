@@ -16,7 +16,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph};
+use ratatui::widgets::Paragraph;
 
 use crate::layout::Regions;
 
@@ -122,7 +122,7 @@ impl InputCompletion {
         let Some(area) = popup_area(regions, self.items.len(), self.selected) else {
             return;
         };
-        frame.render_widget(Clear, area);
+        frame.render_widget(crate::opaque::OpaqueClear, area);
         let lines = self.rows(usize::from(area.width));
         frame.render_widget(Paragraph::new(lines), area);
     }

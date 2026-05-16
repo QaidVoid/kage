@@ -37,7 +37,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block as RtBlock, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block as RtBlock, Borders, Paragraph, Wrap};
 
 use crate::buffer::{Block, Buffer};
 use crate::cmdline::CommandLine;
@@ -431,7 +431,7 @@ fn render_cmdline_error(frame: &mut Frame, regions: Regions, cmdline: &CommandLi
         Span::styled(marker.to_owned(), style.add_modifier(Modifier::BOLD)),
         Span::styled(format!("{text}{}", " ".repeat(pad)), style),
     ]);
-    frame.render_widget(Clear, area);
+    frame.render_widget(crate::opaque::OpaqueClear, area);
     frame.render_widget(Paragraph::new(line), area);
 }
 
@@ -530,7 +530,7 @@ fn render_cmdline_popup(frame: &mut Frame, regions: Regions, cmdline: &CommandLi
         )));
     }
 
-    frame.render_widget(Clear, area);
+    frame.render_widget(crate::opaque::OpaqueClear, area);
     frame.render_widget(Paragraph::new(lines).style(row_style), area);
 }
 

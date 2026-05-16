@@ -14,7 +14,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget, Wrap};
 
 use crate::overlay::widget::{OverlayAction, OverlayCtx, OverlayWidget};
 
@@ -80,7 +80,7 @@ impl OverlayWidget for ConfirmOverlay {
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &OverlayCtx<'_>) {
-        Widget::render(Clear, area, buf);
+        Widget::render(crate::opaque::OpaqueClear, area, buf);
         let block = Block::default()
             .title(format!(" {} ", self.title))
             .borders(Borders::ALL)

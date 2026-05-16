@@ -31,7 +31,7 @@ use ratatui::crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Clear, Paragraph, Widget};
+use ratatui::widgets::{Paragraph, Widget};
 
 use crate::cmdline::{CommandLine, CommandLineEvent};
 use crate::cmdparse::{Completion, Resolver};
@@ -173,7 +173,7 @@ impl SlashPalette {
             Span::styled("/", prefix_style),
             Span::styled(self.cmdline.text().to_owned(), text_style),
         ]);
-        frame.render_widget(Clear, inner);
+        frame.render_widget(crate::opaque::OpaqueClear, inner);
         frame.render_widget(Paragraph::new(line), inner);
     }
 
@@ -185,7 +185,7 @@ impl SlashPalette {
         ) else {
             return;
         };
-        frame.render_widget(Clear, area);
+        frame.render_widget(crate::opaque::OpaqueClear, area);
         self.paint_popup(area, frame.buffer_mut());
     }
 
@@ -276,7 +276,7 @@ impl SlashPalette {
             Span::styled(marker.to_owned(), style.add_modifier(Modifier::BOLD)),
             Span::styled(format!("{text}{}", " ".repeat(pad)), style),
         ]);
-        frame.render_widget(Clear, area);
+        frame.render_widget(crate::opaque::OpaqueClear, area);
         frame.render_widget(Paragraph::new(line), area);
     }
 }
@@ -300,7 +300,7 @@ impl OverlayWidget for SlashPalette {
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &OverlayCtx<'_>) {
-        Widget::render(Clear, area, buf);
+        Widget::render(crate::opaque::OpaqueClear, area, buf);
         self.paint_popup(area, buf);
     }
 

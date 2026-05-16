@@ -17,7 +17,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Widget};
+use ratatui::widgets::{Block, BorderType, Borders, Widget};
 
 use crate::overlay::widget::{OverlayAction, OverlayCtx, OverlayWidget};
 
@@ -106,7 +106,7 @@ impl SessionTreeOverlay {
     /// App's draw closure can pass a `Frame` directly.
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         let modal = OverlayWidget::measure(self, area);
-        frame.render_widget(Clear, modal);
+        frame.render_widget(crate::opaque::OpaqueClear, modal);
         let theme = crate::theme::current();
         let ctx = OverlayCtx {
             theme: &theme,

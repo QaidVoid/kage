@@ -19,7 +19,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, StatefulWidget, Widget,
+    Block, BorderType, Borders, List, ListItem, ListState, Paragraph, StatefulWidget, Widget,
 };
 
 use crate::overlay::widget::{OverlayAction, OverlayCtx, OverlayWidget};
@@ -56,7 +56,7 @@ impl OverlayPicker {
     /// reaching for `frame.buffer_mut()`.
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
         let modal = OverlayWidget::measure(self, area);
-        frame.render_widget(Clear, modal);
+        frame.render_widget(crate::opaque::OpaqueClear, modal);
         let theme = crate::theme::current();
         let ctx = OverlayCtx {
             theme: &theme,

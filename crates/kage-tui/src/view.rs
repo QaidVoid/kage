@@ -1623,17 +1623,28 @@ fn format_token_count(n: u64) -> String {
 /// modeline ticks while the agent is working without us having to
 /// thread a frame counter through `App::draw`. Cycle period ~= 1
 /// second (10 frames at 100 ms each).
-fn spinner_frame() -> &'static str {
-    const FRAMES: &[&str] = &[
-        "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}", "\u{2834}", "\u{2826}",
-        "\u{2827}", "\u{2807}", "\u{280F}",
-    ];
+const SPINNER_FRAMES: &[&str] = &[
+    "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}", "\u{2834}", "\u{2826}", "\u{2827}",
+    "\u{2807}", "\u{280F}",
+];
+
+/// Index into the spinner frame table for the current wall-clock
+/// instant. The frame advances on a 100ms cadence. The event loop
+/// reads this to repaint only when the glyph actually moves instead of
+/// once per wake, so a static buffer during a long tool call does not
+/// cost a full redraw every poll interval.
+pub(crate) fn spinner_frame_index() -> usize {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis());
     #[allow(clippy::cast_possible_truncation)]
-    let idx = ((now / 100) as usize) % FRAMES.len();
-    FRAMES[idx]
+    {
+        ((now / 100) as usize) % SPINNER_FRAMES.len()
+    }
+}
+
+fn spinner_frame() -> &'static str {
+    SPINNER_FRAMES[spinner_frame_index()]
 }
 
 fn mode_border_color(theme: &crate::theme::Theme, mode: Mode) -> Color {

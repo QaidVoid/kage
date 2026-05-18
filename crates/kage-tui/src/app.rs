@@ -1182,6 +1182,16 @@ impl App {
         if let Some(name) = pending {
             self.apply_theme_by_name(&name);
         }
+    }
+
+    /// Refresh the `kage.theme.*` snapshot: the current theme name plus
+    /// the available-themes list. The latter scans the themes directory
+    /// from disk, so this is far too costly to run on every event-loop
+    /// wake (which fires at the streaming tick rate while the agent
+    /// works). Plugins read this snapshot on human-timescale actions
+    /// (opening a theme picker), so the loop refreshes it on a slow
+    /// fixed cadence instead.
+    fn refresh_plugin_theme_state(&mut self) {
         if let Some(state) = self.plugin_theme_state.as_ref()
             && let Ok(mut s) = state.lock()
         {
@@ -1297,10 +1307,20 @@ impl App {
     /// reason. The caller is expected to drop the [`Tui`] (which
     /// restores the terminal) before printing anything to stdout.
     pub fn run(&mut self, tui: &mut Tui) -> Result<AppExit, TuiError> {
+        // The plugin-read snapshots (theme list, session list) are
+        // rebuilt by scanning the filesystem. Refreshing them on every
+        // wake costs a directory read per loop iteration - 20/s while
+        // the agent streams, which is most of the idle/working CPU when
+        // a plugin registers for them. They feed picker-style APIs
+        // consumed at human timescale, so a coarse cadence is
+        // indistinguishable to the plugin and effectively free.
+        const PLUGIN_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(500);
         // First frame is unconditional - we always paint once before
         // entering the steady-state event loop.
         let mut last_buffer_version = self.buffer_version();
+        let mut last_spinner_idx = crate::view::spinner_frame_index();
         let mut needs_redraw = true;
+        let mut last_plugin_snapshot: Option<Instant> = None;
         loop {
             if let Some(enable) = self.pending_mouse_capture.take() {
                 tui.set_mouse_capture(enable);
@@ -1309,10 +1329,15 @@ impl App {
             self.drain_plugin_fork_request();
             self.drain_plugin_dialog();
             self.drain_plugin_theme();
-            self.refresh_plugin_session_list();
+            if last_plugin_snapshot.is_none_or(|t| t.elapsed() >= PLUGIN_SNAPSHOT_INTERVAL) {
+                self.refresh_plugin_theme_state();
+                self.refresh_plugin_session_list();
+                last_plugin_snapshot = Some(Instant::now());
+            }
             if needs_redraw {
                 self.draw(tui)?;
                 last_buffer_version = self.buffer_version();
+                last_spinner_idx = crate::view::spinner_frame_index();
                 needs_redraw = false;
             }
             // Wake periodically to repaint streaming tool-call
@@ -1322,12 +1347,18 @@ impl App {
             // ~one spinner frame so the modeline tick stays smooth
             // even with no streaming deltas (e.g. waiting on a slow
             // first token from the provider).
-            let tick = if self.is_working() || self.has_running_tool_call() {
-                // 50ms keeps the spinner smooth and shaves the worst-
-                // case redraw lag after `working` flips false (e.g.
-                // after a cancel takes effect) so the user perceives
-                // the spinner stopping as effectively instant rather
-                // than tail-end-of-the-100ms-window.
+            // Computed once and reused for the redraw gate below;
+            // `has_running_tool_call` locks the buffer and scans every
+            // block, so calling it twice per iteration is wasteful.
+            let animating = self.is_working() || self.has_running_tool_call();
+            let tick = if animating {
+                // 50ms keeps the wake latency low so streamed deltas
+                // surface promptly and shaves the worst-case lag after
+                // `working` flips false (e.g. after a cancel takes
+                // effect) so the user perceives the spinner stopping as
+                // effectively instant rather than tail-end-of-the-100ms-
+                // window. The wake is cheap; the redraw it may trigger
+                // is gated on actual visible change below.
                 Duration::from_millis(50)
             } else {
                 Duration::from_secs(1)
@@ -1402,13 +1433,20 @@ impl App {
                     break;
                 }
             }
-            // Periodic-wake fallthrough: if a streaming tool call is
-            // in-flight, repaint anyway so the elapsed-time pill
-            // ticks visibly. Cheap because the renderer's height
-            // cache is hot at this point. Same for the modeline
-            // spinner while the agent is mid-turn.
-            if !needs_redraw && (self.has_running_tool_call() || self.is_working()) {
-                needs_redraw = true;
+            // Periodic-wake fallthrough: while the agent is mid-turn or
+            // a tool is in-flight, the only thing that changes without
+            // a buffer mutation is the modeline spinner, and it only
+            // advances on a 100ms cadence. Repaint solely when its
+            // frame index has actually moved since the last paint, so a
+            // static buffer during a long tool call (build, test run,
+            // sleep) costs ~10 redraws/s rather than one per 50ms wake,
+            // and never repaints a byte-identical frame.
+            if !needs_redraw && animating {
+                let idx = crate::view::spinner_frame_index();
+                if idx != last_spinner_idx {
+                    last_spinner_idx = idx;
+                    needs_redraw = true;
+                }
             }
         }
     }
@@ -4550,7 +4588,7 @@ mod tests {
     }
 
     #[test]
-    fn drain_plugin_theme_refreshes_snapshot_and_applies_request() {
+    fn plugin_theme_drain_applies_request_and_refresh_populates_snapshot() {
         let buffer = shared_buffer();
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(buffer, tx);
@@ -4560,20 +4598,24 @@ mod tests {
             std::sync::Arc::new(std::sync::Mutex::new(None));
         app.set_plugin_theme(state.clone(), request.clone());
 
-        // First drain with no request: snapshot is populated.
-        app.drain_plugin_theme();
+        // The dedicated snapshot refresh populates current + available.
+        app.refresh_plugin_theme_state();
         {
             let s = state.lock().unwrap();
             assert!(!s.current.is_empty());
             assert!(s.available.iter().any(|n| n == "tokyo-night"));
         }
 
-        // Queue a switch; next drain applies it on this thread.
+        // Queue a switch; the drain applies it on this thread but does
+        // not touch the snapshot.
         *request.lock().unwrap() = Some("tokyo-night".to_owned());
         app.drain_plugin_theme();
         assert_eq!(crate::theme::current().name, "tokyo-night");
-        assert_eq!(state.lock().unwrap().current, "tokyo-night");
         assert!(request.lock().unwrap().is_none(), "request was drained");
+
+        // The next refresh reflects the applied theme in the snapshot.
+        app.refresh_plugin_theme_state();
+        assert_eq!(state.lock().unwrap().current, "tokyo-night");
     }
 
     #[test]

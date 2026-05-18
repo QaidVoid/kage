@@ -855,10 +855,19 @@ fn render_buffer(
         // to pick up the rule glyph and accent color. The common
         // case (most blocks unfocused on screen) falls into the
         // cheap branch.
-        let block_lines: Vec<Line<'static>> = if emp == Emphasis::None
+        // Hold whichever owner is live so the borrowed slice outlives
+        // the windowing below. The cache-hit path is the hot one
+        // (every frame, every visible unfocused block): borrow the
+        // Arc and let `slice_lines_for_window` copy only the on-screen
+        // rows, instead of deep-cloning the entire (potentially
+        // hundreds of lines) block every frame.
+        let cached_owner;
+        let built_owner;
+        let block_lines: &[Line<'static>] = if emp == Emphasis::None
             && let Some(cached) = buffer.cached_render_lines(idx, width)
         {
-            cached.as_ref().clone()
+            cached_owner = cached;
+            cached_owner.as_slice()
         } else {
             let built = build_block_lines(buffer, idx, width, &result_by_call, emp, &registry);
             if emp == Emphasis::None {
@@ -869,11 +878,12 @@ fn render_buffer(
                 buffer.set_cached_height(idx, width, stored);
                 buffer.set_cached_render_lines(idx, width, std::sync::Arc::new(built.clone()));
             }
-            built
+            built_owner = built;
+            built_owner.as_slice()
         };
         let take_rows = row_budget.saturating_sub(emitted_rows);
         let (sliced, slice_offset) =
-            slice_lines_for_window(&block_lines, width, intra_block_skip, take_rows);
+            slice_lines_for_window(block_lines, width, intra_block_skip, take_rows);
         // The first emitted block sets the paragraph-level scroll;
         // subsequent blocks always slice from row 0 so no further
         // adjustment is needed.

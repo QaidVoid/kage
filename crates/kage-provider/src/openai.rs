@@ -74,9 +74,28 @@ impl OpenAiProvider {
 /// Construct a [`ureq::Agent`] with status-code-as-error disabled so we can
 /// surface the upstream response body in [`ProviderError::Http`] instead of
 /// throwing it away.
+///
+/// The timeouts here are a backstop for the "provider never even starts
+/// answering" hangs: DNS, connect/TLS, sending the request, and waiting
+/// for the response *headers*. They are deliberately generous so a
+/// slow-but-alive provider is never killed.
+///
+/// `recv_body` and `global` are intentionally left unset: for a
+/// streaming completion the body *is* the whole (possibly multi-minute)
+/// generation, so a total-body cap would abort legitimate long answers.
+/// The case where a provider sends headers, streams part of an answer,
+/// then goes silent forever is a mid-stream *idle* stall - bounding that
+/// without false-positives needs an inactivity watchdog on the event
+/// stream, handled separately, not a blunt total-time cap here.
 pub(crate) fn build_agent() -> ureq::Agent {
+    use std::time::Duration;
     ureq::Agent::config_builder()
         .http_status_as_error(false)
+        .timeout_resolve(Some(Duration::from_secs(15)))
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_send_request(Some(Duration::from_secs(30)))
+        .timeout_send_body(Some(Duration::from_secs(60)))
+        .timeout_recv_response(Some(Duration::from_secs(120)))
         .build()
         .new_agent()
 }

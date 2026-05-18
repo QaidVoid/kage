@@ -7,7 +7,7 @@
 //! observed until the next chunk arrives, which can be many seconds.
 //!
 //! [`make_cancelable`] wraps an inner stream so the foreground iterator
-//! observes the cancel flag within the polling interval (default 100ms)
+//! observes the cancel flag within the polling interval (25ms)
 //! regardless of how long the underlying network read takes. The inner
 //! stream runs on a worker thread and forwards events through a bounded
 //! channel; the outer iterator polls the channel with `recv_timeout` and

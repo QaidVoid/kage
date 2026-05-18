@@ -29,9 +29,9 @@ use crate::events::SharedBuffer;
 use crate::input::{InputAction, InputState, Mode, Pane};
 use crate::layout::{input_height_for, split};
 use crate::overlay::{
-    CompletionAction, InputCompletion, OverlayAction, OverlayPicker, SessionTreeOverlay,
-    SessionTreeSource, SettingsInit, SettingsOverlay, SlashContext, SlashPalette, file_completions,
-    prefix_before_cursor,
+    CompletionAction, ContextAction, ContextMenu, ContextMenuOutcome, InputCompletion,
+    OverlayAction, OverlayPicker, SessionTreeOverlay, SessionTreeSource, SettingsInit,
+    SettingsOverlay, SlashContext, SlashPalette, file_completions, prefix_before_cursor,
 };
 use crate::picker::PickItem;
 use crate::terminal::Tui;
@@ -475,6 +475,10 @@ pub struct App {
     /// Open `:tree` session-forest browser, a modal sibling of the
     /// picker. On resolve it dispatches resume / fork / delete.
     session_tree: Option<SessionTreeOverlay>,
+    /// Open right-click context menu, if any. A light modal layer:
+    /// while present it owns the keyboard and intercepts mouse clicks
+    /// (a click on a row runs its action, a click off it dismisses).
+    context_menu: Option<ContextMenu>,
     /// Produces the session forest for `:tree`. Wired by the host;
     /// `None` disables the command.
     session_tree_source: Option<SessionTreeSource>,
@@ -715,6 +719,7 @@ impl App {
             search_line: None,
             search_pattern: None,
             mouse_drag_anchor: None,
+            context_menu: None,
             pending_mouse_capture: None,
             screen_selection: None,
             captured_rows: std::collections::BTreeMap::new(),
@@ -1370,20 +1375,7 @@ impl App {
                             }
                         }
                         Event::Paste(text) => self.handle_paste(&text),
-                        Event::Mouse(mouse) => match mouse.kind {
-                            MouseEventKind::ScrollUp => self.scroll_by(-MOUSE_SCROLL_LINES),
-                            MouseEventKind::ScrollDown => self.scroll_by(MOUSE_SCROLL_LINES),
-                            MouseEventKind::Down(ratatui::crossterm::event::MouseButton::Left) => {
-                                self.mouse_down(mouse.row, mouse.column);
-                            }
-                            MouseEventKind::Drag(ratatui::crossterm::event::MouseButton::Left) => {
-                                self.mouse_drag(mouse.row, mouse.column);
-                            }
-                            MouseEventKind::Up(ratatui::crossterm::event::MouseButton::Left) => {
-                                self.mouse_up(mouse.row);
-                            }
-                            _ => {}
-                        },
+                        Event::Mouse(mouse) => self.handle_mouse_event(mouse),
                         Event::Resize(_, _) => {
                             // Width changed; every cached height is
                             // measured against the prior width and is
@@ -1490,6 +1482,7 @@ impl App {
         self.last_cursor_style = Some(key);
     }
 
+    #[allow(clippy::too_many_lines)]
     fn draw(&mut self, tui: &mut Tui) -> Result<(), TuiError> {
         self.sync_cursor_style();
         // compute_search_match_count locks self.buffer internally; do
@@ -1544,6 +1537,7 @@ impl App {
         } else {
             None
         };
+        let context_menu = self.context_menu.as_ref();
         let input = &self.input;
         tui.terminal().draw(|frame| {
             // Compute the input region size from the *visual* row
@@ -1584,6 +1578,9 @@ impl App {
             }
             if let Some(completion) = input_completion {
                 completion.render(frame, regions);
+            }
+            if let Some(menu) = context_menu {
+                menu.render(frame, regions.buffer);
             }
             if let Some(overlay) = plugin_overlay {
                 let modal = overlay.measure(frame.area());
@@ -1635,6 +1632,12 @@ impl App {
         // worker is parked waiting for its answer.
         if self.plugin_overlay.is_some() {
             return self.dispatch_plugin_overlay_key(key);
+        }
+
+        // The right-click context menu is a light modal layer above
+        // the pickers: while it is open it owns the keyboard.
+        if self.context_menu.is_some() {
+            return self.dispatch_context_menu_key(key);
         }
 
         // When the picker overlay is open, it owns the keyboard.
@@ -2111,6 +2114,22 @@ impl App {
     /// strips renderer-only decoration glyphs (rule chars), trims
     /// trailing whitespace per row, joins with `\n`, and clears the
     /// selection.
+    /// Push `text` to the system clipboard via the OSC52 escape.
+    /// Returns the number of chars written (0 for empty input, which
+    /// is a no-op). The terminal owns the actual clipboard handoff;
+    /// failures to write stdout are silently dropped because a copy
+    /// is best-effort and never load-bearing.
+    fn copy_to_clipboard(text: &str) -> usize {
+        if text.is_empty() {
+            return 0;
+        }
+        let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+        let mut stdout = std::io::stdout();
+        let _ = write!(stdout, "\x1b]52;c;{encoded}\x07");
+        let _ = stdout.flush();
+        text.chars().count()
+    }
+
     fn yank_screen_selection(&mut self) {
         if self.screen_selection.is_none() {
             // No selection: `y` means "copy the focused response",
@@ -2123,15 +2142,9 @@ impl App {
             self.clear_selection();
             return;
         }
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&text);
-        let mut stdout = std::io::stdout();
-        let _ = write!(stdout, "\x1b]52;c;{encoded}\x07");
-        let _ = stdout.flush();
+        let n = Self::copy_to_clipboard(&text);
         self.clear_selection();
-        self.notify(format!(
-            "yanked {} chars to clipboard",
-            text.chars().count()
-        ));
+        self.notify(format!("yanked {n} chars to clipboard"));
     }
 
     fn clear_selection(&mut self) {
@@ -2240,14 +2253,106 @@ impl App {
         if text.is_empty() {
             return;
         }
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&text);
-        let mut stdout = std::io::stdout();
-        let _ = write!(stdout, "\x1b]52;c;{encoded}\x07");
-        let _ = stdout.flush();
-        self.notify(format!(
-            "yanked {} chars to clipboard",
-            text.chars().count()
-        ));
+        let n = Self::copy_to_clipboard(&text);
+        self.notify(format!("yanked {n} chars to clipboard"));
+    }
+
+    /// Copy block `idx`'s raw source to the clipboard. Backs the
+    /// context menu's Copy row; like `Y` but for an explicit block
+    /// rather than whatever has focus.
+    fn copy_block_raw(&mut self, idx: usize) {
+        let text = {
+            let Ok(buf) = self.buffer.lock() else {
+                return;
+            };
+            buf.block_text(idx).unwrap_or_default()
+        };
+        let text = text.trim_end();
+        let n = Self::copy_to_clipboard(text);
+        if n > 0 {
+            self.notify(format!("copied {n} chars to clipboard"));
+        }
+    }
+
+    /// Run a context-menu action against the block it targeted.
+    fn run_context_action(&mut self, action: ContextAction, block_idx: usize) {
+        match action {
+            ContextAction::Copy => self.copy_block_raw(block_idx),
+        }
+    }
+
+    /// Right mouse press at screen `(col, row)`: open a context menu
+    /// over the block under the cursor. A press over no block (or
+    /// outside the buffer pane) dismisses any open menu instead.
+    fn open_context_menu(&mut self, col: u16, row: u16) {
+        let idx = {
+            let Ok(buf) = self.buffer.lock() else {
+                return;
+            };
+            let area_y = buf.last_area_y();
+            let area_h = buf.last_area_height();
+            if row < area_y || row >= area_y.saturating_add(area_h) {
+                None
+            } else {
+                buf.block_at_screen_row(row)
+            }
+        };
+        self.context_menu = idx.map(|idx| ContextMenu::new(col, row, idx));
+    }
+
+    /// Left click while a context menu is open: a click on a row runs
+    /// its action; a click anywhere else just dismisses. Either way
+    /// the click is consumed here so it never also starts a drag
+    /// selection on the buffer beneath.
+    fn context_menu_click(&mut self, col: u16, row: u16) {
+        if self.context_menu.is_none() {
+            return;
+        }
+        let viewport = {
+            let Ok(buf) = self.buffer.lock() else {
+                self.context_menu = None;
+                return;
+            };
+            ratatui::layout::Rect {
+                x: buf.last_area_x(),
+                y: buf.last_area_y(),
+                width: buf.last_area_width(),
+                height: buf.last_area_height(),
+            }
+        };
+        let (hit, idx) = {
+            let menu = self.context_menu.as_mut().expect("checked above");
+            (menu.handle_click(viewport, col, row), menu.block_idx())
+        };
+        self.context_menu = None;
+        if let Some(action) = hit {
+            self.run_context_action(action, idx);
+        }
+    }
+
+    /// Route a key into the open context menu. Modal while present:
+    /// navigation and Esc are consumed, a stray key is swallowed, and
+    /// activation runs the row's action then closes the menu.
+    fn dispatch_context_menu_key(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+    ) -> Option<AppExit> {
+        let outcome = {
+            let menu = self.context_menu.as_mut()?;
+            menu.handle_key(key)
+        };
+        match outcome {
+            ContextMenuOutcome::Navigated => {}
+            ContextMenuOutcome::Dismissed => self.context_menu = None,
+            ContextMenuOutcome::Activated(action) => {
+                let idx = self.context_menu.as_ref().map(ContextMenu::block_idx);
+                self.context_menu = None;
+                if let Some(idx) = idx {
+                    self.run_context_action(action, idx);
+                }
+            }
+        }
+        None
     }
 
     fn extract_selection_text(&self) -> String {
@@ -2955,6 +3060,39 @@ impl App {
         }
     }
 
+    /// Dispatch one crossterm mouse event. Scroll moves the buffer
+    /// (and closes any context menu so it cannot hang in mid-air); a
+    /// right press opens the context menu; a left press either feeds
+    /// the open menu or starts the normal selection gesture.
+    fn handle_mouse_event(&mut self, mouse: ratatui::crossterm::event::MouseEvent) {
+        use ratatui::crossterm::event::MouseButton;
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                self.context_menu = None;
+                self.scroll_by(-MOUSE_SCROLL_LINES);
+            }
+            MouseEventKind::ScrollDown => {
+                self.context_menu = None;
+                self.scroll_by(MOUSE_SCROLL_LINES);
+            }
+            MouseEventKind::Down(MouseButton::Right) => {
+                self.open_context_menu(mouse.column, mouse.row);
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if self.context_menu.is_some() {
+                    self.context_menu_click(mouse.column, mouse.row);
+                } else {
+                    self.mouse_down(mouse.row, mouse.column);
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                self.mouse_drag(mouse.row, mouse.column);
+            }
+            MouseEventKind::Up(MouseButton::Left) => self.mouse_up(mouse.row),
+            _ => {}
+        }
+    }
+
     /// Mouse left-button press: anchor a virtual-row selection at
     /// the click position. Any prior selection (and its captured
     /// text) is dropped. Focus snaps to whichever block sits under
@@ -3136,6 +3274,7 @@ impl App {
         } else {
             None
         };
+        let context_menu = self.context_menu.as_ref();
         let input = &self.input;
         terminal
             .draw(|frame| {
@@ -3169,6 +3308,9 @@ impl App {
                 }
                 if let Some(completion) = input_completion {
                     completion.render(frame, regions);
+                }
+                if let Some(menu) = context_menu {
+                    menu.render(frame, regions.buffer);
                 }
             })
             .map_err(|err| TuiError::Io(std::io::Error::other(err.to_string())))?;
@@ -3279,6 +3421,51 @@ mod tests {
         // The selection spans one word inside a thinking block; the
         // yank must be exactly that word, not the whole block.
         assert_eq!(app.extract_selection_text(), "gamma");
+    }
+
+    #[test]
+    fn right_click_opens_context_menu_on_the_block_then_esc_and_no_block_close_it() {
+        let buffer = shared_buffer();
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(buffer.clone(), tx);
+        {
+            let mut buf = buffer.lock().unwrap();
+            buf.push_user("hello there");
+        }
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        app.render_into(&mut terminal).unwrap();
+
+        // A screen row and the buffer-pane geometry that block 0
+        // painted into.
+        let (row, area_x, below) = {
+            let buf = buffer.lock().unwrap();
+            let y0 = buf.last_area_y();
+            let y1 = y0.saturating_add(buf.last_area_height());
+            let row = (y0..y1)
+                .find(|&y| buf.block_at_screen_row(y) == Some(0))
+                .expect("block 0 painted");
+            (row, buf.last_area_x(), y1)
+        };
+
+        // Right press over the block opens a menu targeting it.
+        app.open_context_menu(area_x + 1, row);
+        assert_eq!(
+            app.context_menu.as_ref().map(ContextMenu::block_idx),
+            Some(0)
+        );
+
+        // Esc closes it.
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.dispatch_context_menu_key(esc), None);
+        assert!(app.context_menu.is_none());
+
+        // Reopened, a right press below the buffer pane (over no
+        // block) dismisses instead of opening.
+        app.open_context_menu(area_x + 1, row);
+        assert!(app.context_menu.is_some());
+        app.open_context_menu(area_x + 1, below);
+        assert!(app.context_menu.is_none());
     }
 
     #[test]

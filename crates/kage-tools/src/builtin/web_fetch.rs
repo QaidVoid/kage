@@ -94,7 +94,12 @@ impl Tool for WebFetchTool {
         let mut reader = response.into_body().into_reader();
         let mut buf = Vec::new();
         let mut taken = (&mut reader).take(max_bytes + 1);
-        let _ = taken.read_to_end(&mut buf);
+        // A read error here means the body arrived incomplete; surface
+        // it rather than hand the model a silently-truncated page as a
+        // success. (Size-capping is the `take` above, not an error.)
+        taken
+            .read_to_end(&mut buf)
+            .map_err(|e| ToolError::Other(format!("read body from {}: {e}", parsed.as_str())))?;
         let truncated = u64::try_from(buf.len()).unwrap_or(u64::MAX) > max_bytes;
         if truncated {
             buf.truncate(usize::try_from(max_bytes).unwrap_or(buf.len()));

@@ -270,8 +270,11 @@ fn flatten_thinking(history: &[Message]) -> Vec<Message> {
             {
                 return msg.clone();
             }
-            let mut flattened = msg.clone();
-            flattened.content = msg
+            // Build the rewritten content directly instead of
+            // `msg.clone()` then overwriting `.content`: the other
+            // fields are all `Copy`, so `..*msg` copies them and the
+            // original content vec is never cloned just to be dropped.
+            let content = msg
                 .content
                 .iter()
                 .filter_map(|c| match c {
@@ -282,7 +285,7 @@ fn flatten_thinking(history: &[Message]) -> Vec<Message> {
                     other => Some(other.clone()),
                 })
                 .collect();
-            flattened
+            Message { content, ..*msg }
         })
         .collect()
 }

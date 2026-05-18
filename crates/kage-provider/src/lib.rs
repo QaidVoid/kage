@@ -11,6 +11,7 @@ pub mod compat;
 pub mod error;
 pub mod event;
 pub mod gemini;
+pub mod http;
 pub mod metadata;
 pub mod openai;
 pub mod openai_responses;

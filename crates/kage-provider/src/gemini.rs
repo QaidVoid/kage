@@ -48,7 +48,7 @@ impl GeminiProvider {
                 supports_thinking: false,
                 supports_tool_use: true,
             },
-            agent: crate::openai::build_agent(),
+            agent: crate::http::build_agent(),
         }
     }
 }
@@ -77,12 +77,12 @@ impl Provider for GeminiProvider {
                 .post(&url)
                 .header("content-type", "application/json")
                 .send_json(&body)
-                .map_err(map_ureq_error)
+                .map_err(crate::http::map_ureq_error)
         })?;
 
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
-            return Err(crate::openai::read_error_body(status, response));
+            return Err(crate::http::read_error_body(status, response));
         }
 
         let reader: Box<dyn Read + Send> = Box::new(response.into_body().into_reader());
@@ -228,17 +228,6 @@ fn image_part(source: &kage_core::ImageSource, mime: &str) -> Value {
                 "fileUri": url,
             },
         }),
-    }
-}
-
-fn map_ureq_error(err: ureq::Error) -> ProviderError {
-    match err {
-        ureq::Error::StatusCode(code) => ProviderError::Http {
-            status: code,
-            body: String::new(),
-        },
-        ureq::Error::Io(e) => ProviderError::Transport(e.to_string()),
-        other => ProviderError::Transport(other.to_string()),
     }
 }
 

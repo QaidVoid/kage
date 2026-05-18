@@ -309,11 +309,25 @@ fn highlight_matches_in_lines(lines: &mut [Line<'static>], pattern: &str) {
         return;
     }
     for line in lines {
+        // Alloc-free pre-check: most on-screen lines during a search
+        // contain no match, so leave them completely untouched rather
+        // than take + rebuild + reallocate their span vec every frame.
+        if !line
+            .spans
+            .iter()
+            .any(|s| ascii_ifind(&s.content, needle, 0).is_some())
+        {
+            continue;
+        }
         let original = std::mem::take(&mut line.spans);
-        let mut rebuilt: Vec<Span<'static>> = Vec::with_capacity(original.len());
+        let mut rebuilt: Vec<Span<'static>> = Vec::with_capacity(original.len() + 2);
         for span in original {
-            for piece in split_span_for_match(span, needle) {
-                rebuilt.push(piece);
+            if ascii_ifind(&span.content, needle, 0).is_some() {
+                rebuilt.extend(split_span_for_match(span, needle));
+            } else {
+                // No match in this span: move it through untouched
+                // (no per-span `vec![span]` allocation).
+                rebuilt.push(span);
             }
         }
         line.spans = rebuilt;

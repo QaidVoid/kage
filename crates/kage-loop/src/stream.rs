@@ -116,7 +116,17 @@ fn handle_event<F: FnMut(LoopEvent)>(
         } => {
             let acc = assembler.partial_args.entry(call_id.clone()).or_default();
             acc.push_str(&partial);
-            let parsed = serde_json::from_str::<serde_json::Value>(acc.as_str()).ok();
+            // Tool-call arguments are a JSON object/array; the
+            // accumulated buffer can only parse once a closing
+            // delimiter has arrived. Gating on that avoids re-parsing
+            // the whole growing buffer on every delta (quadratic over
+            // the stream). Worst case for a value containing a literal
+            // `}`/`]` is an occasional extra parse, never a missed
+            // final one.
+            let maybe_complete = matches!(acc.trim_end().as_bytes().last(), Some(b'}' | b']'));
+            let parsed = maybe_complete
+                .then(|| serde_json::from_str::<serde_json::Value>(acc.as_str()).ok())
+                .flatten();
             if let Some(value) = parsed
                 && let Some(name) = assembler.pending_tools.get(&call_id)
             {

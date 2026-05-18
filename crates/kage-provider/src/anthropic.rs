@@ -6,7 +6,7 @@
 //! yields [`ProviderEvent`]s as they arrive.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufReader, Read};
 
 use kage_core::{CancelFlag, Content, Message, Role, TokenUsage, ToolCallId};
 use serde::{Deserialize, Serialize};
@@ -625,78 +625,32 @@ impl AnthropicStream {
     }
 }
 
+impl crate::sse::SseStreamCore for AnthropicStream {
+    fn reader(&mut self) -> &mut BufReader<Box<dyn Read + Send>> {
+        &mut self.reader
+    }
+    fn cancel(&self) -> &CancelFlag {
+        &self.cancel
+    }
+    fn pending(&mut self) -> &mut VecDeque<Result<ProviderEvent, ProviderError>> {
+        &mut self.pending
+    }
+    fn is_done(&self) -> bool {
+        self.done
+    }
+    fn set_done(&mut self) {
+        self.done = true;
+    }
+    fn process(&mut self, name: &str, data: &str) {
+        self.process_event(name, data);
+    }
+}
+
 impl Iterator for AnthropicStream {
     type Item = Result<ProviderEvent, ProviderError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(ev) = self.pending.pop_front() {
-                return Some(ev);
-            }
-            if self.done {
-                return None;
-            }
-            if self.cancel.is_cancelled() {
-                self.done = true;
-                return Some(Err(ProviderError::Cancelled));
-            }
-            match read_sse_event(&mut self.reader) {
-                Ok(Some(event)) => self.process_event(&event.name, &event.data),
-                Ok(None) => {
-                    self.done = true;
-                    return None;
-                }
-                Err(e) => {
-                    self.done = true;
-                    return Some(Err(e));
-                }
-            }
-        }
-    }
-}
-
-#[derive(Debug)]
-struct SseEvent {
-    name: String,
-    data: String,
-}
-
-fn read_sse_event<R: BufRead>(reader: &mut R) -> Result<Option<SseEvent>, ProviderError> {
-    let mut name = String::new();
-    let mut data = String::new();
-    let mut have_content = false;
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let n = reader
-            .read_line(&mut line)
-            .map_err(|e| ProviderError::Transport(e.to_string()))?;
-        if n == 0 {
-            if have_content {
-                return Ok(Some(SseEvent { name, data }));
-            }
-            return Ok(None);
-        }
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed.is_empty() {
-            if have_content {
-                return Ok(Some(SseEvent { name, data }));
-            }
-            continue;
-        }
-        if trimmed.starts_with(':') {
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("event:") {
-            rest.trim_start().clone_into(&mut name);
-            have_content = true;
-        } else if let Some(rest) = trimmed.strip_prefix("data:") {
-            if !data.is_empty() {
-                data.push('\n');
-            }
-            data.push_str(rest.trim_start());
-            have_content = true;
-        }
+        crate::sse::sse_next(self)
     }
 }
 
@@ -1007,12 +961,12 @@ mod tests {
     fn sse_parser_extracts_event_and_data() {
         let bytes: &[u8] = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
         let mut reader = std::io::BufReader::new(std::io::Cursor::new(bytes));
-        let first = read_sse_event(&mut reader).unwrap().unwrap();
+        let first = crate::sse::read_sse_event(&mut reader).unwrap().unwrap();
         assert_eq!(first.name, "message_start");
         assert!(first.data.contains("input_tokens"));
-        let second = read_sse_event(&mut reader).unwrap().unwrap();
+        let second = crate::sse::read_sse_event(&mut reader).unwrap().unwrap();
         assert_eq!(second.name, "message_stop");
-        assert!(read_sse_event(&mut reader).unwrap().is_none());
+        assert!(crate::sse::read_sse_event(&mut reader).unwrap().is_none());
     }
 
     #[test]
@@ -1020,9 +974,9 @@ mod tests {
         let bytes: &[u8] =
             b": this is a comment\n\nevent: ping\ndata: {}\n\nevent: ping\ndata: {}\n\n";
         let mut reader = std::io::BufReader::new(std::io::Cursor::new(bytes));
-        let first = read_sse_event(&mut reader).unwrap().unwrap();
+        let first = crate::sse::read_sse_event(&mut reader).unwrap().unwrap();
         assert_eq!(first.name, "ping");
-        let second = read_sse_event(&mut reader).unwrap().unwrap();
+        let second = crate::sse::read_sse_event(&mut reader).unwrap().unwrap();
         assert_eq!(second.name, "ping");
     }
 

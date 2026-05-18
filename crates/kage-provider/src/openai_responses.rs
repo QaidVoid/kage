@@ -12,7 +12,7 @@
 //! with this provider; nothing in the credential store is duplicated.
 
 use std::collections::{BTreeMap, VecDeque};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufReader, Read};
 
 use kage_core::{CancelFlag, Content, Message, Role, ToolCallId};
 use serde_json::Value;
@@ -492,57 +492,35 @@ impl ResponsesStream {
     }
 }
 
+impl crate::sse::SseStreamCore for ResponsesStream {
+    fn reader(&mut self) -> &mut BufReader<Box<dyn Read + Send>> {
+        &mut self.reader
+    }
+    fn cancel(&self) -> &CancelFlag {
+        &self.cancel
+    }
+    fn pending(&mut self) -> &mut VecDeque<Result<ProviderEvent, ProviderError>> {
+        &mut self.pending
+    }
+    fn is_done(&self) -> bool {
+        self.done
+    }
+    fn set_done(&mut self) {
+        self.done = true;
+    }
+    fn process(&mut self, _name: &str, data: &str) {
+        // The Responses wire form is `event: <name>\ndata: <json>`,
+        // but the JSON body carries its own `type` field, so the SSE
+        // event name is intentionally ignored here.
+        self.process_chunk(data);
+    }
+}
+
 impl Iterator for ResponsesStream {
     type Item = Result<ProviderEvent, ProviderError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(ev) = self.pending.pop_front() {
-                return Some(ev);
-            }
-            if self.done {
-                return None;
-            }
-            if self.cancel.is_cancelled() {
-                self.done = true;
-                return Some(Err(ProviderError::Cancelled));
-            }
-            match read_chunk(&mut self.reader) {
-                Ok(Some(data)) => self.process_chunk(&data),
-                Ok(None) => {
-                    self.done = true;
-                    return None;
-                }
-                Err(e) => {
-                    self.done = true;
-                    return Some(Err(e));
-                }
-            }
-        }
-    }
-}
-
-/// Read one `data:` chunk from a Responses API SSE stream. The
-/// upstream uses the standard `event: <name>\ndata: <json>\n\n` form,
-/// but the JSON body carries its own `type` field so we ignore the
-/// `event:` line and parse from `data:` directly.
-fn read_chunk<R: BufRead>(reader: &mut R) -> Result<Option<String>, ProviderError> {
-    let mut line = String::new();
-    loop {
-        line.clear();
-        let n = reader
-            .read_line(&mut line)
-            .map_err(|e| ProviderError::Transport(e.to_string()))?;
-        if n == 0 {
-            return Ok(None);
-        }
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed.is_empty() || trimmed.starts_with(':') || trimmed.starts_with("event:") {
-            continue;
-        }
-        if let Some(rest) = trimmed.strip_prefix("data:") {
-            return Ok(Some(rest.trim_start().to_owned()));
-        }
+        crate::sse::sse_next(self)
     }
 }
 

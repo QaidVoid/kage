@@ -409,34 +409,6 @@ fn help_render_spec(lines: &mut Vec<String>, spec: &CommandSpec, prefix: &str, d
     }
 }
 
-/// Verbatim markdown substring of an assistant block `raw` for the
-/// selected visual rows `[lo, hi]` (block-relative, `hi` inclusive),
-/// painted at buffer `width`. Unions the source ranges of every
-/// selected row and slices `raw` across them, so a partial drag
-/// copies exactly those rows' source and a full selection copies the
-/// whole block. `None` when no selected row carries source (blank /
-/// pad only) or the slice is empty - the caller then yanks whole
-/// raw.
-fn assistant_selected_raw(raw: &str, width: u16, lo: usize, hi: usize) -> Option<String> {
-    let rows = crate::view::assistant_src_rows(raw, width);
-    if rows.is_empty() {
-        return None;
-    }
-    let hi = hi.min(rows.len() - 1);
-    let lo = lo.min(hi);
-    let mut lo_byte = usize::MAX;
-    let mut hi_byte = 0usize;
-    for range in rows[lo..=hi].iter().flatten() {
-        lo_byte = lo_byte.min(range.start);
-        hi_byte = hi_byte.max(range.end);
-    }
-    if lo_byte == usize::MAX || hi_byte <= lo_byte {
-        return None;
-    }
-    let hi_byte = hi_byte.min(raw.len());
-    raw.get(lo_byte..hi_byte).map(str::to_owned)
-}
-
 /// [`Resolver`] backed by the live App state: model choices and
 /// plugin-registered commands the user has imported, plus the bundled
 /// theme list and any session lister the host provided. Paths return
@@ -2287,15 +2259,11 @@ impl App {
         } else {
             (cursor, anchor)
         };
-        // Copy the raw markdown source under the selection - even a
-        // partial drag through a response yields its verbatim source
-        // for exactly the rows selected (via per-row source ranges),
-        // not the syntect-reflowed cells. Only a selection over no
-        // block at all falls back to the captured grid.
-        let raw = self.selected_blocks_raw(start.0, end.0);
-        if !raw.is_empty() {
-            return raw;
-        }
+        // Copy exactly the captured cells under the selection: the
+        // rendered text for the selected rows and columns, decoration
+        // (chrome) cells dropped. Partial drags through any block -
+        // assistant, thinking, tool - yield only what is highlighted,
+        // never the whole block.
         let mut out = String::new();
         for vrow in start.0..=end.0 {
             let Some(grid_row) = self.captured_rows.get(&vrow) else {
@@ -2332,53 +2300,6 @@ impl App {
             out.push_str(slice.trim_end());
         }
         out
-    }
-
-    /// Raw markdown under the row selection `[start_vrow, end_vrow]`.
-    /// For each block the span touches: an assistant block yields the
-    /// exact verbatim substring for the selected rows (a partial drag
-    /// copies only those rows' source, the whole block if fully
-    /// selected); any other block yields its whole raw text. Pieces
-    /// join with a blank line. Empty when the span hits no block, so
-    /// the caller falls back to literal grid-cell extraction.
-    fn selected_blocks_raw(&self, start_vrow: usize, end_vrow: usize) -> String {
-        let Ok(buf) = self.buffer.lock() else {
-            return String::new();
-        };
-        let width = buf.last_area_width();
-        let mut pieces: Vec<String> = Vec::new();
-        for idx in 0..buf.blocks().len() {
-            // Unclamped virtual span in the same coordinate space as
-            // the selection rows, so the row->source mapping holds no
-            // matter how the block is scrolled.
-            let Some((block_start, block_end)) = buf.block_virtual_rows(idx) else {
-                continue;
-            };
-            if block_end <= block_start {
-                continue;
-            }
-            if block_start > end_vrow || block_end <= start_vrow {
-                continue;
-            }
-            let raw = buf.block_text(idx).unwrap_or_default();
-            let is_assistant = matches!(
-                buf.blocks().get(idx),
-                Some(crate::buffer::Block::Assistant { .. })
-            );
-            let piece = if is_assistant {
-                let sel_lo = start_vrow.max(block_start) - block_start;
-                let sel_hi = end_vrow.min(block_end - 1) - block_start;
-                assistant_selected_raw(&raw, width, sel_lo, sel_hi).unwrap_or(raw)
-            } else {
-                raw
-            };
-            let piece = piece.trim_end().to_owned();
-            if piece.is_empty() {
-                continue;
-            }
-            pieces.push(piece);
-        }
-        pieces.join("\n\n")
     }
 
     fn push_help(&mut self) {
@@ -3322,79 +3243,42 @@ mod tests {
     }
 
     #[test]
-    fn assistant_selected_raw_slices_verbatim_source_per_row() {
-        let raw = "# Title\n\n```rust\nfn x() {}\n```";
-        // Rows (width 80): 0 "# Title", 1 blank, 2 "```rust",
-        // 3 "fn x() {}", 4 "```", 5 pad.
-        // Verbatim: pulldown's heading span includes its newline;
-        // the yank path trims trailing whitespace later.
-        assert_eq!(
-            assistant_selected_raw(raw, 80, 0, 0).as_deref(),
-            Some("# Title\n")
-        );
-        // A partial drag on a code row -> the whole fenced block
-        // verbatim (every fence row shares the block's source span).
-        assert_eq!(
-            assistant_selected_raw(raw, 80, 3, 3).as_deref(),
-            Some("```rust\nfn x() {}\n```")
-        );
-        // Selecting everything -> the entire raw markdown.
-        assert_eq!(assistant_selected_raw(raw, 80, 0, 5).as_deref(), Some(raw));
-        // A blank/pad-only selection has no source -> None.
-        assert_eq!(assistant_selected_raw(raw, 80, 1, 1), None);
-    }
-
-    #[test]
-    fn selection_yanks_exact_raw_for_the_rows_dragged() {
+    fn partial_selection_copies_only_highlighted_cells_not_whole_block() {
         let buffer = shared_buffer();
         let (tx, _rx) = mpsc::channel();
-        let app = App::new(buffer.clone(), tx);
+        let mut app = App::new(buffer.clone(), tx);
         {
             let mut buf = buffer.lock().unwrap();
-            buf.push_user("hi");
-            buf.append_assistant_delta("# Title\n\n```rust\nfn x() {}\n```");
-            buf.set_last_area_geometry(0, 0, 80, 40, 0);
-            // block 0 (user) at vrow 0; block 1 (assistant) at vrows
-            // 1..=6 (its 5 rendered rows + 1 pad). Virtual spans are
-            // what yank maps against now (scroll-independent).
-            buf.set_last_block_virtual_rows(vec![(0, 0, 1), (1, 1, 7)]);
+            buf.begin_thinking();
+            buf.append_thinking_delta("alpha beta gamma delta epsilon");
         }
-        // Drag only the heading row -> just that source line.
-        assert_eq!(app.selected_blocks_raw(1, 1), "# Title");
-        // Drag only a code row -> the whole fenced block, verbatim.
-        assert_eq!(app.selected_blocks_raw(3, 3), "```rust\nfn x() {}\n```");
-        // Drag the whole assistant block -> all of its raw markdown.
-        assert_eq!(
-            app.selected_blocks_raw(1, 6),
-            "# Title\n\n```rust\nfn x() {}\n```"
-        );
-        // Spanning both blocks -> each block's raw, joined.
-        assert_eq!(
-            app.selected_blocks_raw(0, 6),
-            "hi\n\n# Title\n\n```rust\nfn x() {}\n```"
-        );
-        // No block under the span -> empty (caller uses grid cells).
-        assert!(app.selected_blocks_raw(20, 25).is_empty());
-    }
+        let backend = TestBackend::new(60, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        app.render_into(&mut terminal).unwrap();
 
-    #[test]
-    fn selection_maps_to_source_even_when_block_is_scrolled() {
-        let buffer = shared_buffer();
-        let (tx, _rx) = mpsc::channel();
-        let app = App::new(buffer.clone(), tx);
-        {
-            let mut buf = buffer.lock().unwrap();
-            buf.push_user("hi");
-            buf.append_assistant_delta("# Title\n\n```rust\nfn x() {}\n```");
-            buf.set_last_area_geometry(0, 0, 80, 40, 0);
-            // The assistant block lives high up the virtual space
-            // (its top scrolled far past the viewport): rows 100..=105.
-            buf.set_last_block_virtual_rows(vec![(0, 99, 100), (1, 100, 106)]);
+        // Locate "gamma" in the captured grid by column (cell) index,
+        // not byte offset, so a multi-byte chrome glyph on the row
+        // cannot skew the mapping.
+        let needle: Vec<char> = "gamma".chars().collect();
+        let mut sel = None;
+        for (&vrow, cells) in &app.captured_rows {
+            let chars: Vec<char> = cells.iter().map(|c| c.ch).collect();
+            if let Some(at) = chars
+                .windows(needle.len())
+                .position(|w| w == needle.as_slice())
+            {
+                let lo = u16::try_from(at).unwrap();
+                let hi = u16::try_from(at + needle.len() - 1).unwrap();
+                sel = Some(((vrow, lo), (vrow, hi)));
+                break;
+            }
         }
-        // Selecting the absolute virtual rows still resolves to the
-        // right source: row 100 -> heading, row 103 -> code block.
-        assert_eq!(app.selected_blocks_raw(100, 100), "# Title");
-        assert_eq!(app.selected_blocks_raw(103, 103), "```rust\nfn x() {}\n```");
+        let (anchor, cursor) = sel.expect("thinking text was never painted");
+        app.screen_selection = Some((anchor, cursor));
+
+        // The selection spans one word inside a thinking block; the
+        // yank must be exactly that word, not the whole block.
+        assert_eq!(app.extract_selection_text(), "gamma");
     }
 
     #[test]

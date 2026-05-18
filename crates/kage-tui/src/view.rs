@@ -1830,37 +1830,6 @@ pub(super) fn mark_emphasis(
     out
 }
 
-/// Per-rendered-row source byte range for an assistant block whose
-/// text is `raw`, painted at buffer `width`. Row `i` of the returned
-/// vec is the source range that produced the block's `i`-th visual
-/// row (`None` for blank separators and the trailing pad). This
-/// reproduces exactly the layout [`mark_emphasis`] paints - markdown
-/// render, then split into rows at `width - FOCUS_RULE_WIDTH`, then
-/// the bottom pad - so a yank can turn a rendered-row selection back
-/// into the verbatim raw markdown substring. The mapping is exact
-/// when the block's first row is the row index used by the caller;
-/// a block scrolled off its own top shifts the index by the hidden
-/// rows (caller falls back to whole-block raw there).
-pub(crate) fn assistant_src_rows(raw: &str, width: u16) -> Vec<Option<std::ops::Range<usize>>> {
-    let body_width = usize::from(width).saturating_sub(FOCUS_RULE_WIDTH).max(1);
-    let mut rows: Vec<Option<std::ops::Range<usize>>> = Vec::new();
-    for (line, range) in crate::markdown::render_with_src(raw, assistant_style()) {
-        let n = split_line_into_rows(line, body_width).len().max(1);
-        let cell = if range.start == usize::MAX {
-            None
-        } else {
-            Some(range)
-        };
-        for _ in 0..n {
-            rows.push(cell.clone());
-        }
-    }
-    for _ in 0..widget::BlockPadding::BOTTOM {
-        rows.push(None);
-    }
-    rows
-}
-
 /// Wrap a vector of content lines in a full-width "bubble": each row
 /// starts with a colored left-edge rule, every cell is given the
 /// background color, and a one-row pad sits above and below.

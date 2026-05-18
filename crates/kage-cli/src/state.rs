@@ -54,11 +54,19 @@ impl State {
         }
     }
 
-    /// Convenience wrapper over [`Self::load_from`] using the default path.
+    /// Convenience wrapper over [`Self::load_from`] using the default
+    /// path. A corrupt or unreadable state file is reported on stderr
+    /// before falling back to empty state, so the user knows their
+    /// saved preferences were lost rather than silently wiped. A
+    /// missing file is not an error ([`Self::load_from`] yields empty).
     pub fn load() -> Self {
-        Self::default_path()
-            .and_then(|p| Self::load_from(&p))
-            .unwrap_or_default()
+        match Self::default_path().and_then(|p| Self::load_from(&p)) {
+            Ok(state) => state,
+            Err(err) => {
+                eprintln!("kage: {err}; starting from empty state");
+                Self::default()
+            }
+        }
     }
 
     /// Persist state to `path`.

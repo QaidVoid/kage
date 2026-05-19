@@ -19,8 +19,15 @@ use crate::ProviderError;
 ///
 /// The timeouts here are a backstop for the "provider never even starts
 /// answering" hangs: DNS, connect/TLS, sending the request, and waiting
-/// for the response *headers*. They are deliberately generous so a
-/// slow-but-alive provider is never killed.
+/// for the response *headers*. They split into two tiers. Resolve (15s)
+/// and connect (30s) stay short: if name lookup or the TCP/TLS
+/// handshake has not finished by then the endpoint is effectively down,
+/// and failing fast lets the caller recycle and retry rather than hang.
+/// The request upload and first-response wait (send headers, send body,
+/// recv response headers) each get 180s, because a large request - a
+/// near-full context is megabytes of JSON - sent to a slow-but-alive
+/// provider can legitimately take minutes before the first byte comes
+/// back, and killing that mid-upload only triggers a wasteful resend.
 ///
 /// `recv_body` and `global` are intentionally left unset: for a
 /// streaming completion the body *is* the whole (possibly multi-minute)
@@ -35,9 +42,9 @@ fn build_agent() -> ureq::Agent {
         .http_status_as_error(false)
         .timeout_resolve(Some(Duration::from_secs(15)))
         .timeout_connect(Some(Duration::from_secs(30)))
-        .timeout_send_request(Some(Duration::from_secs(30)))
-        .timeout_send_body(Some(Duration::from_secs(60)))
-        .timeout_recv_response(Some(Duration::from_secs(120)))
+        .timeout_send_request(Some(Duration::from_secs(180)))
+        .timeout_send_body(Some(Duration::from_secs(180)))
+        .timeout_recv_response(Some(Duration::from_secs(180)))
         .build()
         .new_agent()
 }

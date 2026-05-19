@@ -44,9 +44,17 @@ pub fn setup_runtime_with_sink(
     system_prompt: &str,
     sink: SharedHostLog,
 ) -> Result<Option<Arc<PluginRuntime>>, String> {
+    // Capability grants come from the same layered config the rest of
+    // the host reads. Fail closed: if the config cannot be loaded, no
+    // plugin gets any elevated capability rather than silently
+    // proceeding with an unknown grant set.
+    let capabilities = kage_core::config::Config::load_layered(workdir)
+        .map(|c| c.plugins.capabilities)
+        .unwrap_or_default();
     let runtime = PluginRuntime::builder()
         .sink(sink)
         .workdir(workdir.to_path_buf())
+        .capabilities(capabilities)
         .config(json!({
             "model": model,
             "cwd": workdir.display().to_string(),

@@ -61,16 +61,22 @@ pub fn load_dir(dir: &Path, runtime: &PluginRuntime) -> Result<LoadReport, Plugi
             continue;
         }
         match std::fs::read_to_string(&path) {
-            Ok(source) => match runtime.eval(&source) {
-                Ok(_) => report.loaded.push(path),
-                Err(err) => {
-                    let msg = format!("plugin '{}': {err}", path.display());
-                    if let Ok(mut s) = sink.lock() {
-                        s.log(LogLevel::Error, &msg);
+            Ok(source) => {
+                let name = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("plugin");
+                match runtime.eval_plugin(name, &source) {
+                    Ok(_) => report.loaded.push(path),
+                    Err(err) => {
+                        let msg = format!("plugin '{}': {err}", path.display());
+                        if let Ok(mut s) = sink.lock() {
+                            s.log(LogLevel::Error, &msg);
+                        }
+                        report.failed.push((path, err.to_string()));
                     }
-                    report.failed.push((path, err.to_string()));
                 }
-            },
+            }
             Err(err) => {
                 let msg = format!("plugin '{}': read failed: {err}", path.display());
                 if let Ok(mut s) = sink.lock() {

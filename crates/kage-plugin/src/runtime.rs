@@ -17,14 +17,21 @@
 //!
 //! # Sandbox scope
 //!
-//! The sandbox prevents accidental filesystem and process access from
-//! plugin code; it is not a security boundary against actively malicious
-//! Lua. Only run plugins you trust.
+//! Each plugin is evaluated in its own `_ENV` (see
+//! [`PluginRuntime::eval_plugin`]): the standard library and the base
+//! `kage` API are shared read-only, but a plugin's own globals are
+//! private to it, and the obvious escapes back to the real globals
+//! (`_G`, `load`, `require`, `package`, `debug`) are removed. This is
+//! the substrate the opt-in capability tier builds on: elevated APIs
+//! attach to one plugin's environment, not the shared one. Until that
+//! tier lands the sandbox still guards against accidental, not
+//! adversarial, access - run only plugins you trust.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use mlua::Lua;
+use mlua::{Lua, RegistryKey, Table};
 
 use crate::acp::{self, SharedAcpAgents, shared_acp_agents};
 use crate::api::{self, SharedHostLog, default_host_log};
@@ -99,6 +106,11 @@ pub struct PluginRuntime {
     block_renderers: SharedBlockRenderers,
     autocomplete: RegisteredAutocompleteProviders,
     terminal_hooks: RegisteredTerminalHooks,
+    /// Per-plugin `_ENV` tables, keyed by plugin name, held in the Lua
+    /// registry. Each plugin re-evaluates against its own environment
+    /// so plugins cannot see or clobber one another; from the
+    /// capability tier on, granted APIs are attached here per plugin.
+    plugin_envs: Mutex<HashMap<String, RegistryKey>>,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -145,11 +157,33 @@ impl PluginRuntime {
         Arc::clone(&self.sink)
     }
 
-    /// Execute a chunk of Lua source against this runtime. Returns the
-    /// chunk's return value as a Lua [`mlua::Value`].
+    /// Execute a chunk of Lua source against the shared globals.
+    ///
+    /// Used by the host for one-off evaluation and by tests. Plugin
+    /// files are loaded through [`eval_plugin`](Self::eval_plugin)
+    /// instead, so their top-level definitions stay private.
     pub fn eval(&self, source: &str) -> Result<mlua::Value, PluginError> {
         let lua = self.lock_lua();
         Ok(lua.load(source).eval::<mlua::Value>()?)
+    }
+
+    /// Evaluate a plugin source chunk in its own `_ENV`.
+    ///
+    /// Top-level definitions land in a per-plugin environment instead
+    /// of the shared globals, so two plugins cannot see or overwrite
+    /// each other. Reads fall through to the shared, sandboxed
+    /// standard library and the base `kage` API; `kage` is a per-plugin
+    /// proxy the capability tier later extends. The host loader calls
+    /// this for every `*.lua` file with the file stem as `name`; the
+    /// environment is created once per name and reused.
+    pub fn eval_plugin(&self, name: &str, source: &str) -> Result<mlua::Value, PluginError> {
+        let lua = self.lock_lua();
+        let env = plugin_env(&lua, name, &self.plugin_envs)?;
+        Ok(lua
+            .load(source)
+            .set_name(name)
+            .set_environment(env)
+            .eval::<mlua::Value>()?)
     }
 
     /// Fire every handler subscribed to `event_name` with `payload`.
@@ -921,6 +955,7 @@ impl PluginRuntimeBuilder {
             block_renderers: block_renderer_map,
             autocomplete: autocomplete_registry,
             terminal_hooks: terminal_hook_registry,
+            plugin_envs: Mutex::new(HashMap::new()),
         })
     }
 }
@@ -928,6 +963,12 @@ impl PluginRuntimeBuilder {
 /// Pairs of `(table_path, key)` removed from the standard library on
 /// runtime construction. `table_path` is dot-separated starting from the
 /// globals table; an empty path means "drop the global by `key`".
+///
+/// Besides accidental filesystem/process access, this also closes the
+/// reflective and dynamic-loading escapes that would let a plugin
+/// reach the real globals out from under its per-plugin `_ENV`
+/// (`load`/`require`/`package`/`debug`/`string.dump`), which the
+/// capability tier relies on for isolation.
 pub const SANDBOX_REMOVALS: &[(&str, &str)] = &[
     // Process spawning and shell access.
     ("os", "execute"),
@@ -951,7 +992,64 @@ pub const SANDBOX_REMOVALS: &[(&str, &str)] = &[
     // Bytecode and arbitrary-file loading.
     ("", "dofile"),
     ("", "loadfile"),
+    // Dynamic chunk loading: `load`/`loadstring` default the new
+    // chunk's `_ENV` to the real globals, and `string.dump` plus
+    // bytecode loading sidestep source review.
+    ("", "load"),
+    ("", "loadstring"),
+    ("string", "dump"),
+    // Module loading would execute arbitrary files outside the
+    // workdir; single-file plugins do not need it. A future scoped
+    // capability can re-grant a constrained require.
+    ("", "require"),
+    ("", "package"),
+    // Reflection: debug.getregistry reaches the shared handler
+    // registry and debug.setupvalue can rewrite another function's
+    // `_ENV`, either of which defeats per-plugin isolation.
+    ("", "debug"),
 ];
+
+/// Get or create the dedicated `_ENV` table for plugin `name`.
+///
+/// The table reads through to the shared, sandboxed globals (standard
+/// library plus the base `kage` API) via an `__index` metatable, but
+/// has no `__newindex`, so a plugin's own top-level assignments are
+/// `rawset` into this table and stay private to it. `kage` is a
+/// per-plugin proxy over the shared base table - reads fall through,
+/// and the capability tier attaches granted APIs onto this proxy so
+/// they are visible only to the grantee. `_G` is bound back to this
+/// table so `_G.x = ...` cannot reach the real globals. The table is
+/// kept in the Lua registry and reused for repeat evals of `name`.
+fn plugin_env(
+    lua: &Lua,
+    name: &str,
+    slots: &Mutex<HashMap<String, RegistryKey>>,
+) -> mlua::Result<Table> {
+    let mut slots = slots.lock().expect("plugin env map poisoned");
+    if let Some(key) = slots.get(name) {
+        return lua.registry_value::<Table>(key);
+    }
+    let globals = lua.globals();
+    let env = lua.create_table()?;
+    let env_mt = lua.create_table()?;
+    env_mt.set("__index", globals.clone())?;
+    env.set_metatable(Some(env_mt))?;
+
+    let base_kage: Table = globals.get("kage")?;
+    let pkage = lua.create_table()?;
+    let pkage_mt = lua.create_table()?;
+    pkage_mt.set("__index", base_kage)?;
+    pkage.set_metatable(Some(pkage_mt))?;
+    env.set("kage", pkage)?;
+
+    // `_G` must point at the plugin's own env, not the shared globals,
+    // or it would be a trivial isolation escape.
+    env.set("_G", env.clone())?;
+
+    let key = lua.create_registry_value(env.clone())?;
+    slots.insert(name.to_owned(), key);
+    Ok(env)
+}
 
 fn apply_sandbox(lua: &Lua) -> Result<(), PluginError> {
     let globals = lua.globals();
@@ -1045,5 +1143,82 @@ mod tests {
         let cmds = rt.registered_commands();
         assert_eq!(cmds.len(), 1, "old registration should not survive");
         assert_eq!(cmds[0].name(), "b");
+    }
+
+    #[test]
+    fn eval_plugin_isolates_globals_between_plugins() {
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval_plugin("a", "shared = 'from-a'").unwrap();
+        // A second plugin must not see plugin a's top-level global.
+        let v = rt.eval_plugin("b", "return shared").unwrap();
+        assert!(v.is_nil(), "plugin b saw plugin a's global: {v:?}");
+        // Nor does it leak into the shared globals the host evals on.
+        assert!(rt.eval("return shared").unwrap().is_nil());
+    }
+
+    #[test]
+    fn eval_plugin_reuses_one_env_per_name() {
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval_plugin("p", "counter = 1").unwrap();
+        let v = rt
+            .eval_plugin("p", "counter = counter + 1; return counter")
+            .unwrap();
+        assert_eq!(v.as_integer(), Some(2), "same name must reuse its env");
+        let other = rt.eval_plugin("q", "return counter").unwrap();
+        assert!(other.is_nil(), "a different plugin must get a fresh env");
+    }
+
+    #[test]
+    fn eval_plugin_closes_global_escapes() {
+        let rt = PluginRuntime::new().unwrap();
+        let v = rt
+            .eval_plugin(
+                "esc",
+                "return load == nil and loadstring == nil and require == nil \
+                 and package == nil and debug == nil",
+            )
+            .unwrap();
+        assert_eq!(v.as_boolean(), Some(true), "escape globals still reachable");
+        // `_G` must be the plugin's own env, so writes through it cannot
+        // reach the real globals the host evaluates against.
+        rt.eval_plugin("esc2", "_G.leaked = 42").unwrap();
+        assert!(rt.eval("return leaked").unwrap().is_nil());
+    }
+
+    #[test]
+    fn eval_plugin_still_reaches_base_kage_and_stdlib() {
+        let rt = PluginRuntime::new().unwrap();
+        let len = rt.eval_plugin("std", "return string.len('abcd')").unwrap();
+        assert_eq!(
+            len.as_integer(),
+            Some(4),
+            "stdlib unreachable in plugin env"
+        );
+        rt.eval_plugin(
+            "reg",
+            "kage.register_command({ name='z', description='', handler=function() end })",
+        )
+        .unwrap();
+        let cmds = rt.registered_commands();
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0].name(), "z");
+    }
+
+    #[test]
+    fn eval_plugin_event_handlers_dispatch_with_plugin_env() {
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval_plugin(
+            "ev",
+            "hits = 0; kage.on('agent_start', function() hits = hits + 1 end)",
+        )
+        .unwrap();
+        rt.dispatch_event("agent_start", &serde_json::json!({}))
+            .unwrap();
+        rt.dispatch_event("agent_start", &serde_json::json!({}))
+            .unwrap();
+        // The handler closes over plugin `ev`'s env, so its mutations
+        // land there and survive across dispatches and re-evals.
+        let v = rt.eval_plugin("ev", "return hits").unwrap();
+        assert_eq!(v.as_integer(), Some(2));
     }
 }

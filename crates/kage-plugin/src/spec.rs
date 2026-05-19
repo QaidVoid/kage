@@ -121,6 +121,14 @@ const ALIASES: &[Alias] = &[
         variants: &["text", "choice", "path", "session", "flag"],
     },
     Alias {
+        name: "kage.Capability",
+        doc: &[
+            "An elevated capability a plugin may request. Granted",
+            "per-plugin in `[plugins.capabilities]`.",
+        ],
+        variants: &["session_write", "exec"],
+    },
+    Alias {
         name: "kage.Event",
         doc: &[
             "Every event name `kage.on` accepts. Notification events",
@@ -590,6 +598,23 @@ const FUNCS: &[Func] = &[
         path: "kage.config",
         params: &[],
         ret: Some("table"),
+    },
+    Func {
+        doc: &[
+            "Request elevated capabilities for this plugin. Returns a",
+            "`{ name = granted }` table: a capability is true only if",
+            "the user granted it to this plugin in",
+            "`[plugins.capabilities]`. Granted APIs are attached to",
+            "this plugin alone. Call once at load and degrade when a",
+            "capability is missing. Unknown names raise an error.",
+        ],
+        path: "kage.request_capabilities",
+        params: &[Field {
+            name: "caps",
+            ty: "kage.Capability[]",
+            doc: "",
+        }],
+        ret: Some("table<string, boolean>"),
     },
     Func {
         doc: &["Back-compat alias for `kage.ui.notify`."],

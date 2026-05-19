@@ -247,6 +247,15 @@ pub struct PluginsConfig {
     pub dir: Option<PathBuf>,
     /// If non-empty, only plugins in this allowlist are loaded.
     pub enabled: Vec<String>,
+    /// Per-plugin elevated capability grants, keyed by plugin file
+    /// stem (`[plugins.capabilities] my-plugin = ["session_write"]`).
+    /// Plugins get only the sandboxed base surface by default; a
+    /// capability listed here is exposed solely to the named plugin,
+    /// and only after that plugin requests it via
+    /// `kage.request_capabilities`. Unknown capability names are a
+    /// hard error at startup, not silently ignored.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub capabilities: BTreeMap<String, Vec<String>>,
 }
 
 /// Sandbox backend selection.

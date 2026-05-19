@@ -29,6 +29,10 @@
 --- A declared command argument kind.
 ---@alias kage.ArgKind "text"|"choice"|"path"|"session"|"flag"
 
+--- An elevated capability a plugin may request. Granted
+--- per-plugin in `[plugins.capabilities]`.
+---@alias kage.Capability "session_write"|"exec"
+
 --- Every event name `kage.on` accepts. Notification events
 --- ignore the handler return; transform events chain it;
 --- predicate and session-op events interpret it.
@@ -176,6 +180,16 @@ function kage.log(level, message) end
 --- the returned table does not propagate back to the host.
 ---@return table
 function kage.config() end
+
+--- Request elevated capabilities for this plugin. Returns a
+--- `{ name = granted }` table: a capability is true only if
+--- the user granted it to this plugin in
+--- `[plugins.capabilities]`. Granted APIs are attached to
+--- this plugin alone. Call once at load and degrade when a
+--- capability is missing. Unknown names raise an error.
+---@param caps kage.Capability[]
+---@return table<string, boolean>
+function kage.request_capabilities(caps) end
 
 --- Back-compat alias for `kage.ui.notify`.
 ---@param message string

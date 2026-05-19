@@ -28,4 +28,8 @@ pub enum PluginError {
     /// request, or settled in an unexpected thread state.
     #[error("plugin bridge protocol error: {0}")]
     BridgeProtocol(String),
+    /// Plugin configuration was invalid - e.g. a capability grant
+    /// named a capability that does not exist.
+    #[error("plugin config error: {0}")]
+    Config(String),
 }

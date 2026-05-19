@@ -27,7 +27,7 @@
 //! tier lands the sandbox still guards against accidental, not
 //! adversarial, access - run only plugins you trust.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -43,6 +43,7 @@ use crate::block_renderers::{
     self, LuaBlockRenderer, SharedBlockRenderers, shared_block_renderers,
 };
 use crate::bridge::{self, BridgeStep, SharedBridge, shared_bridge};
+use crate::capabilities::{self, CurrentPlugin};
 use crate::chrome::{self, LuaChrome, SharedChrome, shared_chrome};
 use crate::commands::{self, LuaCommand, RegisteredCommands, registered_commands};
 use crate::error::PluginError;
@@ -108,9 +109,12 @@ pub struct PluginRuntime {
     terminal_hooks: RegisteredTerminalHooks,
     /// Per-plugin `_ENV` tables, keyed by plugin name, held in the Lua
     /// registry. Each plugin re-evaluates against its own environment
-    /// so plugins cannot see or clobber one another; from the
-    /// capability tier on, granted APIs are attached here per plugin.
-    plugin_envs: Mutex<HashMap<String, RegistryKey>>,
+    /// so plugins cannot see or clobber one another; granted
+    /// capabilities are attached onto a plugin's own proxy here.
+    plugin_envs: Arc<Mutex<HashMap<String, RegistryKey>>>,
+    /// Name of the plugin currently being evaluated, so
+    /// `kage.request_capabilities` knows who is asking.
+    current_plugin: CurrentPlugin,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -134,6 +138,7 @@ impl PluginRuntime {
             sink: default_host_log(),
             config: serde_json::Value::Object(serde_json::Map::new()),
             workdir: PathBuf::from("."),
+            capabilities: BTreeMap::new(),
         }
     }
 
@@ -179,11 +184,18 @@ impl PluginRuntime {
     pub fn eval_plugin(&self, name: &str, source: &str) -> Result<mlua::Value, PluginError> {
         let lua = self.lock_lua();
         let env = plugin_env(&lua, name, &self.plugin_envs)?;
-        Ok(lua
+        if let Ok(mut cur) = self.current_plugin.lock() {
+            *cur = Some(name.to_owned());
+        }
+        let result = lua
             .load(source)
             .set_name(name)
             .set_environment(env)
-            .eval::<mlua::Value>()?)
+            .eval::<mlua::Value>();
+        if let Ok(mut cur) = self.current_plugin.lock() {
+            *cur = None;
+        }
+        Ok(result?)
     }
 
     /// Fire every handler subscribed to `event_name` with `payload`.
@@ -748,6 +760,23 @@ impl PluginRuntime {
             .lock()
             .expect("plugin terminal hooks mutex poisoned")
             .clear();
+        // Drop every per-plugin environment so a reload is a clean
+        // slate: stale plugin globals do not survive, and a capability
+        // revoked in config is no longer attached to the old proxy.
+        // Lock lua before plugin_envs to match `eval_plugin`'s order.
+        {
+            let lua = self.lock_lua();
+            let mut envs = self
+                .plugin_envs
+                .lock()
+                .expect("plugin env map mutex poisoned");
+            for (_, key) in envs.drain() {
+                let _ = lua.remove_registry_value(key);
+            }
+        }
+        if let Ok(mut cur) = self.current_plugin.lock() {
+            *cur = None;
+        }
         crate::loader::load_dir(dir, self)
     }
 }
@@ -758,6 +787,7 @@ pub struct PluginRuntimeBuilder {
     sink: SharedHostLog,
     config: serde_json::Value,
     workdir: PathBuf,
+    capabilities: BTreeMap<String, Vec<String>>,
 }
 
 impl std::fmt::Debug for PluginRuntimeBuilder {
@@ -790,6 +820,15 @@ impl PluginRuntimeBuilder {
     #[must_use]
     pub fn workdir(mut self, workdir: PathBuf) -> Self {
         self.workdir = workdir;
+        self
+    }
+
+    /// Set the per-plugin capability grants (from
+    /// `[plugins.capabilities]`), keyed by plugin file stem. Unknown
+    /// capability names are rejected by [`build`](Self::build).
+    #[must_use]
+    pub fn capabilities(mut self, capabilities: BTreeMap<String, Vec<String>>) -> Self {
+        self.capabilities = capabilities;
         self
     }
 
@@ -831,9 +870,21 @@ impl PluginRuntimeBuilder {
         let block_renderer_map = shared_block_renderers();
         let autocomplete_registry = registered_autocomplete_providers();
         let terminal_hook_registry = registered_terminal_hooks();
+        let plugin_envs: Arc<Mutex<HashMap<String, RegistryKey>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let current_plugin: CurrentPlugin = Arc::new(Mutex::new(None));
+        let grants = Arc::new(capabilities::parse_grants(&self.capabilities)?);
+        let cap_registry = capabilities::capability_registry();
         {
             let lua_guard = shared_lua.lock().expect("plugin lua mutex poisoned");
             bridge::install_suspend(&lua_guard)?;
+            capabilities::install_request_capabilities(
+                &lua_guard,
+                Arc::clone(&current_plugin),
+                Arc::clone(&grants),
+                Arc::clone(&plugin_envs),
+                Arc::clone(&cap_registry),
+            )?;
             ui::install_ui(&lua_guard)?;
             keybindings::install_register_keybinding(
                 &lua_guard,
@@ -955,7 +1006,8 @@ impl PluginRuntimeBuilder {
             block_renderers: block_renderer_map,
             autocomplete: autocomplete_registry,
             terminal_hooks: terminal_hook_registry,
-            plugin_envs: Mutex::new(HashMap::new()),
+            plugin_envs,
+            current_plugin,
         })
     }
 }

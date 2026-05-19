@@ -9,6 +9,7 @@ pub mod api;
 pub mod autocomplete;
 pub mod block_renderers;
 pub mod bridge;
+pub(crate) mod capabilities;
 pub mod chrome;
 pub mod commands;
 pub mod error;

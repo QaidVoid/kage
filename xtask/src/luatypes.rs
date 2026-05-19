@@ -112,44 +112,63 @@ pub fn render() -> String {
     // `lua-language-server --check` clean on real plugins.
     s.push_str("\n---@class kage\nkage = {}\n");
 
-    let mut declared: Vec<&str> = Vec::new();
+    // Base functions, then capability-gated ones. Gated functions are
+    // rendered the same way (so editors still offer them when the
+    // plugin has the capability); their doc already states the
+    // requirement. They share the `declared` set so a sub-table is
+    // still declared exactly once.
+    let mut declared: Vec<&'static str> = Vec::new();
     for f in surface.funcs {
-        // Declare any sub-table the function lives on, once, in spec
-        // order, just before its first function.
-        if let Some((table, _)) = f.path.rsplit_once('.')
-            && table != "kage"
-            && !declared.contains(&table)
-        {
-            if let Some(t) = surface.tables.iter().find(|t| t.path == table) {
-                s.push('\n');
-                let _ = writeln!(s, "--- {}", t.class_doc);
-                let _ = writeln!(s, "---@class {table}");
-                let _ = writeln!(s, "{table} = {{}}");
-            }
-            declared.push(table);
-        }
-        s.push('\n');
-        doc_lines(&mut s, f.doc);
-        let mut args: Vec<String> = Vec::new();
-        for p in f.params {
-            let opt = if p.name.ends_with('?') { "?" } else { "" };
-            let tail = if p.doc.is_empty() {
-                String::new()
-            } else {
-                format!(" {}", p.doc)
-            };
-            let _ = writeln!(s, "---@param {}{opt} {}{tail}", bare(p.name), p.ty);
-            args.push(bare(p.name).to_owned());
-        }
-        if let Some(ret) = f.ret {
-            let _ = writeln!(s, "---@return {ret}");
-        }
-        let _ = writeln!(s, "function {}({}) end", f.path, args.join(", "));
+        emit_func(&mut s, &mut declared, surface.tables, f);
+    }
+    for g in surface.gated {
+        emit_func(&mut s, &mut declared, surface.tables, &g.func);
     }
 
     // No trailing `return kage`: this is a global definition file, not
     // a module. (`---@meta` already marks it definitions-only.)
     s
+}
+
+/// Emit one function: its sub-table declaration (once), doc, params,
+/// return, and stub body.
+fn emit_func(
+    s: &mut String,
+    declared: &mut Vec<&'static str>,
+    tables: &'static [spec::Table],
+    f: &'static spec::Func,
+) {
+    // Declare any sub-table the function lives on, once, in spec
+    // order, just before its first function.
+    if let Some((table, _)) = f.path.rsplit_once('.')
+        && table != "kage"
+        && !declared.contains(&table)
+    {
+        if let Some(t) = tables.iter().find(|t| t.path == table) {
+            s.push('\n');
+            let _ = writeln!(s, "--- {}", t.class_doc);
+            let _ = writeln!(s, "---@class {table}");
+            let _ = writeln!(s, "{table} = {{}}");
+        }
+        declared.push(table);
+    }
+    s.push('\n');
+    doc_lines(s, f.doc);
+    let mut args: Vec<String> = Vec::new();
+    for p in f.params {
+        let opt = if p.name.ends_with('?') { "?" } else { "" };
+        let tail = if p.doc.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", p.doc)
+        };
+        let _ = writeln!(s, "---@param {}{opt} {}{tail}", bare(p.name), p.ty);
+        args.push(bare(p.name).to_owned());
+    }
+    if let Some(ret) = f.ret {
+        let _ = writeln!(s, "---@return {ret}");
+    }
+    let _ = writeln!(s, "function {}({}) end", f.path, args.join(", "));
 }
 
 /// `cargo xtask gen-lua-types [--check]`. Writes the stub, or in
@@ -199,12 +218,14 @@ mod tests {
     #[test]
     fn every_func_path_is_emitted() {
         let s = render();
-        for f in spec::surface().funcs {
-            assert!(
-                s.contains(&format!("function {}(", f.path)),
-                "missing {}",
-                f.path
-            );
+        let surface = spec::surface();
+        let paths = surface
+            .funcs
+            .iter()
+            .map(|f| f.path)
+            .chain(surface.gated.iter().map(|g| g.func.path));
+        for path in paths {
+            assert!(s.contains(&format!("function {path}(")), "missing {path}");
         }
     }
 

@@ -434,3 +434,26 @@ function kage.theme.list() end
 --- between turns. Errors on a non-string or empty name.
 ---@param name string
 function kage.theme.set(name) end
+
+--- Metadata for every entry in the current session, in
+--- order, each `{ id, kind, role?, ts }`. Use it to find
+--- a rewind point. Requires the `session_write`
+--- capability.
+---@return { id: string, kind: string, role: string?, ts: string }[]
+function kage.session.entries() end
+
+--- Fork the current session at entry-id prefix `at` (or
+--- the latest entry when omitted) and reseat the live
+--- conversation onto the new fork between turns. This is
+--- the rewind move: base `fork` branches and stays;
+--- `fork_to` branches and goes there. Requires
+--- `session_write`.
+---@param at? string
+function kage.session.fork_to(at) end
+
+--- Reseat the live conversation onto an existing session
+--- (an id or path from `kage.session.list()`). The host
+--- validates and applies it between turns, consulting the
+--- `session_before_switch` veto. Requires `session_write`.
+---@param target string
+function kage.session.switch(target) end

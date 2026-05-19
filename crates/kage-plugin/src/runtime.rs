@@ -59,6 +59,7 @@ use crate::mcp::{
 };
 use crate::messages::{self, PendingMessage, SharedPendingMessages, shared_pending_messages};
 use crate::providers::{self, LuaProvider, RegisteredProviders, registered_providers};
+use crate::session_write::{self, SharedSessionEntries, SharedSwitchRequest, SwitchTarget};
 use crate::sessions::{
     self, PendingSessionOp, SharedForkRequest, SharedSessionList, SharedSessionOps,
     shared_fork_request, shared_session_list, shared_session_ops,
@@ -115,6 +116,12 @@ pub struct PluginRuntime {
     /// Name of the plugin currently being evaluated, so
     /// `kage.request_capabilities` knows who is asking.
     current_plugin: CurrentPlugin,
+    /// Host-maintained snapshot of the current session's entry
+    /// metadata, read by `session_write`'s `kage.session.entries`.
+    session_entries: SharedSessionEntries,
+    /// Pending `session_write` reseat request (`switch`/`fork_to`),
+    /// drained by the host.
+    switch_request: SharedSwitchRequest,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -459,6 +466,34 @@ impl PluginRuntime {
     #[must_use]
     pub fn take_fork_request(&self) -> Option<String> {
         self.fork_request
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+    }
+
+    /// Cloneable handle to the session-entries snapshot the
+    /// `session_write` `kage.session.entries` reads.
+    #[must_use]
+    pub fn shared_session_entries(&self) -> SharedSessionEntries {
+        Arc::clone(&self.session_entries)
+    }
+
+    /// Replace the session-entries snapshot. The host refreshes this
+    /// from the active session file on its redraw / between-turn
+    /// cadence, like [`set_session_list`](Self::set_session_list).
+    pub fn set_session_entries(&self, entries: Vec<serde_json::Value>) {
+        if let Ok(mut slot) = self.session_entries.lock() {
+            *slot = entries;
+        }
+    }
+
+    /// Drain the pending `session_write` reseat request. The host
+    /// applies it between turns - resuming the named session, or
+    /// landing on the fork a `fork_to` just queued - after consulting
+    /// the `session_before_switch` veto.
+    #[must_use]
+    pub fn take_switch_request(&self) -> Option<SwitchTarget> {
+        self.switch_request
             .lock()
             .ok()
             .and_then(|mut slot| slot.take())
@@ -875,6 +910,13 @@ impl PluginRuntimeBuilder {
         let current_plugin: CurrentPlugin = Arc::new(Mutex::new(None));
         let grants = Arc::new(capabilities::parse_grants(&self.capabilities)?);
         let cap_registry = capabilities::capability_registry();
+        let session_entries = session_write::shared_session_entries();
+        let switch_request = session_write::shared_switch_request();
+        session_write::register(
+            &cap_registry,
+            Arc::clone(&session_entries),
+            Arc::clone(&switch_request),
+        );
         {
             let lua_guard = shared_lua.lock().expect("plugin lua mutex poisoned");
             bridge::install_suspend(&lua_guard)?;
@@ -1008,6 +1050,8 @@ impl PluginRuntimeBuilder {
             terminal_hooks: terminal_hook_registry,
             plugin_envs,
             current_plugin,
+            session_entries,
+            switch_request,
         })
     }
 }

@@ -75,6 +75,18 @@ pub struct Table {
     pub class_doc: &'static str,
 }
 
+/// A function that is only present when the plugin has been granted
+/// `cap` (see [`crate::capabilities`]). It is rendered into the stub
+/// like any function but is not on the base surface, so it resolves
+/// only on a granted plugin's `kage` proxy, never the default one.
+#[derive(Clone, Copy, Debug)]
+pub struct GatedFunc {
+    /// Wire name of the capability that unlocks this function.
+    pub cap: &'static str,
+    /// The function binding itself.
+    pub func: Func,
+}
+
 /// The complete declarative description of the `kage` Lua surface.
 #[derive(Clone, Copy, Debug)]
 pub struct Surface {
@@ -84,8 +96,11 @@ pub struct Surface {
     pub classes: &'static [Class],
     /// Sub-tables declared before their first function.
     pub tables: &'static [Table],
-    /// Function bindings.
+    /// Base function bindings, present for every plugin.
     pub funcs: &'static [Func],
+    /// Capability-gated functions, present only on a plugin granted
+    /// the named capability.
+    pub gated: &'static [GatedFunc],
 }
 
 /// The single source of truth: the full `kage` plugin surface.
@@ -96,6 +111,7 @@ pub fn surface() -> Surface {
         classes: CLASSES,
         tables: TABLES,
         funcs: FUNCS,
+        gated: GATED,
     }
 }
 
@@ -1173,6 +1189,61 @@ const FUNCS: &[Func] = &[
     },
 ];
 
+const GATED: &[GatedFunc] = &[
+    GatedFunc {
+        cap: "session_write",
+        func: Func {
+            doc: &[
+                "Metadata for every entry in the current session, in",
+                "order, each `{ id, kind, role?, ts }`. Use it to find",
+                "a rewind point. Requires the `session_write`",
+                "capability.",
+            ],
+            path: "kage.session.entries",
+            params: &[],
+            ret: Some("{ id: string, kind: string, role: string?, ts: string }[]"),
+        },
+    },
+    GatedFunc {
+        cap: "session_write",
+        func: Func {
+            doc: &[
+                "Fork the current session at entry-id prefix `at` (or",
+                "the latest entry when omitted) and reseat the live",
+                "conversation onto the new fork between turns. This is",
+                "the rewind move: base `fork` branches and stays;",
+                "`fork_to` branches and goes there. Requires",
+                "`session_write`.",
+            ],
+            path: "kage.session.fork_to",
+            params: &[Field {
+                name: "at?",
+                ty: "string",
+                doc: "",
+            }],
+            ret: None,
+        },
+    },
+    GatedFunc {
+        cap: "session_write",
+        func: Func {
+            doc: &[
+                "Reseat the live conversation onto an existing session",
+                "(an id or path from `kage.session.list()`). The host",
+                "validates and applies it between turns, consulting the",
+                "`session_before_switch` veto. Requires `session_write`.",
+            ],
+            path: "kage.session.switch",
+            params: &[Field {
+                name: "target",
+                ty: "string",
+                doc: "",
+            }],
+            ret: None,
+        },
+    },
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1212,9 +1283,57 @@ mod tests {
 
     #[test]
     fn surface_has_no_duplicate_func_paths() {
+        let s = surface();
         let mut seen = std::collections::BTreeSet::new();
-        for f in surface().funcs {
-            assert!(seen.insert(f.path), "duplicate function path {}", f.path);
+        for path in s
+            .funcs
+            .iter()
+            .map(|f| f.path)
+            .chain(s.gated.iter().map(|g| g.func.path))
+        {
+            assert!(seen.insert(path), "duplicate function path {path}");
+        }
+    }
+
+    /// The anti-drift guarantee extended to capability-gated funcs:
+    /// granted, they resolve on that plugin's proxy; ungranted, they
+    /// are absent (per-plugin isolation, not a runtime error).
+    #[test]
+    fn gated_funcs_resolve_only_when_capability_granted() {
+        let mut caps = std::collections::BTreeMap::new();
+        caps.insert(
+            "trusted".to_owned(),
+            vec!["session_write".to_owned(), "exec".to_owned()],
+        );
+        let rt = PluginRuntime::builder()
+            .capabilities(caps)
+            .build()
+            .expect("runtime builds");
+
+        for g in surface().gated {
+            let req = format!(
+                "kage.request_capabilities({{'{}'}}); return type({}) == 'function'",
+                g.cap, g.func.path
+            );
+            let granted = rt.eval_plugin("trusted", &req).expect("granted eval");
+            assert_eq!(
+                granted.as_boolean(),
+                Some(true),
+                "{} should resolve when {} is granted",
+                g.func.path,
+                g.cap
+            );
+
+            let ungranted = rt
+                .eval_plugin("other", &format!("return {} == nil", g.func.path))
+                .expect("ungranted eval");
+            assert_eq!(
+                ungranted.as_boolean(),
+                Some(true),
+                "{} must be absent without {}",
+                g.func.path,
+                g.cap
+            );
         }
     }
 }

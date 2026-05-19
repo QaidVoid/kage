@@ -139,6 +139,9 @@ fn apply_event(buf: &mut Buffer, event: &LoopEvent) {
                 false,
             );
         }
+        LoopEvent::Notice { message } => {
+            buf.push_custom("kage:notify", message.clone(), false);
+        }
         LoopEvent::Error { kind } => {
             buf.push_custom("kage:error", format!("[error] {kind}"), false);
         }

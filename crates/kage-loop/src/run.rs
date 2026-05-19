@@ -18,14 +18,16 @@
 //! T4.2 wires only the shell. Real provider-event translation lands in T4.3,
 //! tool dispatch in T4.4.
 
-use kage_core::{CancelFlag, Content, LoopError, LoopEvent, Message};
-use kage_provider::{Provider, StreamRequest};
+use std::time::Duration;
+
+use kage_core::{CancelFlag, Content, LoopError, LoopEvent, Message, MessageId};
+use kage_provider::{Provider, ProviderError, StreamRequest};
 use kage_tools::ToolRegistry;
 
 use crate::compact::maybe_compact;
 use crate::dispatch::{dispatch_tool_calls, dispatch_tool_calls_parallel};
 use crate::doom::DoomTracker;
-use crate::stream::collect_turn;
+use crate::stream::{TurnFailure, TurnResult, collect_turn};
 use crate::{AgentContext, Hooks, LoopConfig, SteeringMode};
 
 /// Drive one agent run to completion.
@@ -106,23 +108,63 @@ where
                 emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
                 return Err(kind);
             }
-            let stream = match provider.stream(req, cancel) {
-                Ok(s) => s,
-                Err(e) => {
-                    let kind = LoopError::Provider {
-                        message: e.to_string(),
-                    };
-                    emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
-                    return Err(kind);
-                }
-            };
-
             let parent = cx.history.last().map(|m| m.id);
-            let turn = match collect_turn(parent, stream, cancel, hooks, &mut emit) {
-                Ok(t) => t,
-                Err(kind) => {
-                    emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
-                    return Err(kind);
+            // Auto-retry a transiently-failed turn. The conversation
+            // context is unchanged across attempts - no assistant
+            // message is appended on failure - so re-issuing the
+            // identical request is a clean re-request, not a resume
+            // (SSE has no resume token). The Notice emitted between
+            // attempts breaks the live-assistant block, so the
+            // retry's text starts a fresh block in the UI instead of
+            // concatenating onto the dropped partial; the recording
+            // hook likewise resets on the retry's MessageStart, so
+            // only the successful turn is persisted.
+            let turn = {
+                let mut attempt: u32 = 0;
+                loop {
+                    if cancel.is_cancelled() {
+                        return finish_cancelled(hooks, &mut emit);
+                    }
+                    match stream_one_attempt(
+                        provider,
+                        req.clone(),
+                        parent,
+                        cancel,
+                        hooks,
+                        &mut emit,
+                    ) {
+                        Ok(t) => break t,
+                        Err(TurnFailure::Fatal(kind)) => {
+                            emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
+                            return Err(kind);
+                        }
+                        Err(TurnFailure::Provider(e)) => {
+                            let exhausted = attempt >= config.max_provider_retries;
+                            if exhausted || !e.is_transient() || cancel.is_cancelled() {
+                                let kind = LoopError::Provider {
+                                    message: e.to_string(),
+                                };
+                                emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
+                                return Err(kind);
+                            }
+                            attempt += 1;
+                            let wait = retry_backoff(attempt, &e);
+                            emit_one(
+                                hooks,
+                                &mut emit,
+                                LoopEvent::Notice {
+                                    message: format!(
+                                        "provider error ({e}); retrying {attempt}/{} in {}s",
+                                        config.max_provider_retries,
+                                        wait.as_secs().max(1)
+                                    ),
+                                },
+                            );
+                            if !sleep_cancelable(cancel, wait) {
+                                return finish_cancelled(hooks, &mut emit);
+                            }
+                        }
+                    }
                 }
             };
 
@@ -314,6 +356,52 @@ fn finish_cancelled<F: FnMut(LoopEvent)>(
         },
     );
     Err(LoopError::Cancelled)
+}
+
+/// Issue one streaming attempt: open the provider stream and drain it
+/// into a finished turn. A pre-stream failure and a mid-stream failure
+/// are unified into the same [`TurnFailure`] so the caller's retry
+/// logic does not care which phase broke.
+fn stream_one_attempt<F: FnMut(LoopEvent)>(
+    provider: &dyn Provider,
+    req: StreamRequest,
+    parent: Option<MessageId>,
+    cancel: &CancelFlag,
+    hooks: &mut dyn Hooks,
+    emit: &mut F,
+) -> Result<TurnResult, TurnFailure> {
+    let stream = provider
+        .stream(req, cancel)
+        .map_err(TurnFailure::Provider)?;
+    collect_turn(parent, stream, cancel, hooks, emit)
+}
+
+/// Backoff before retry `attempt` (1-based). A provider `retry_after`
+/// hint wins (capped at 60s so a hostile header cannot park the loop);
+/// otherwise exponential 1s, 2s, 4s, 8s, 16s capped at 30s.
+fn retry_backoff(attempt: u32, err: &ProviderError) -> Duration {
+    if let Some(hint) = err.retry_after() {
+        return hint.min(Duration::from_secs(60));
+    }
+    let secs = 1u64 << attempt.saturating_sub(1).min(5);
+    Duration::from_secs(secs.min(30))
+}
+
+/// Sleep `dur`, returning `false` if `cancel` tripped during the wait.
+/// Checked in short slices so a cancel aborts the backoff promptly
+/// instead of after the full delay.
+fn sleep_cancelable(cancel: &CancelFlag, dur: Duration) -> bool {
+    let slice = Duration::from_millis(100);
+    let mut left = dur;
+    while !left.is_zero() {
+        if cancel.is_cancelled() {
+            return false;
+        }
+        let step = slice.min(left);
+        std::thread::sleep(step);
+        left -= step;
+    }
+    !cancel.is_cancelled()
 }
 
 #[cfg(test)]
@@ -1678,5 +1766,116 @@ mod tests {
         let req1 = mock.requests().into_iter().next().unwrap();
         assert_eq!(req1.tools.len(), 1);
         assert_eq!(req1.tools[0].name, "static");
+    }
+
+    #[derive(Default)]
+    struct EventLog {
+        events: Vec<LoopEvent>,
+        cancel_on_notice: Option<CancelFlag>,
+    }
+    impl Hooks for EventLog {
+        fn on_event(&mut self, event: &LoopEvent) {
+            if let LoopEvent::Notice { .. } = event
+                && let Some(c) = &self.cancel_on_notice
+            {
+                c.cancel();
+            }
+            self.events.push(event.clone());
+        }
+    }
+    impl EventLog {
+        fn notices(&self) -> usize {
+            self.events
+                .iter()
+                .filter(|e| matches!(e, LoopEvent::Notice { .. }))
+                .count()
+        }
+    }
+
+    fn transient_turn() -> Vec<Result<ProviderEvent, kage_provider::ProviderError>> {
+        vec![Err(kage_provider::ProviderError::Transport("boom".into()))]
+    }
+
+    fn good_turn() -> Vec<Result<ProviderEvent, kage_provider::ProviderError>> {
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::TextDelta { delta: "hi".into() }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        ]
+    }
+
+    #[test]
+    fn transient_provider_failure_is_retried_then_succeeds() {
+        let mock = MockProvider::sequence(vec![transient_turn(), good_turn()]);
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.history.push(user_msg("hello"));
+        let cfg = LoopConfig::default();
+        let mut hooks = EventLog::default();
+        let cancel = CancelFlag::new();
+        let registry = ToolRegistry::new();
+
+        let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {});
+        assert!(res.is_ok(), "run should recover, got {res:?}");
+        assert_eq!(mock.call_count(), 2, "one retry after the transient fail");
+        assert_eq!(hooks.notices(), 1, "exactly one retry notice");
+        assert!(cx.history.iter().any(|m| m.role == Role::Assistant));
+    }
+
+    #[test]
+    fn non_transient_failure_is_not_retried() {
+        let mock = MockProvider::replaying(vec![Err(kage_provider::ProviderError::Auth(
+            "no key".into(),
+        ))]);
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.history.push(user_msg("hello"));
+        let cfg = LoopConfig::default();
+        let mut hooks = EventLog::default();
+        let cancel = CancelFlag::new();
+        let registry = ToolRegistry::new();
+
+        let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {});
+        assert!(matches!(res, Err(LoopError::Provider { .. })));
+        assert_eq!(mock.call_count(), 1, "auth error must not retry");
+        assert_eq!(hooks.notices(), 0);
+    }
+
+    #[test]
+    fn retries_are_bounded_then_surface_the_error() {
+        let mock = MockProvider::sequence(vec![transient_turn(), transient_turn()]);
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.history.push(user_msg("hello"));
+        let cfg = LoopConfig {
+            max_provider_retries: 1,
+            ..LoopConfig::default()
+        };
+        let mut hooks = EventLog::default();
+        let cancel = CancelFlag::new();
+        let registry = ToolRegistry::new();
+
+        let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {});
+        assert!(matches!(res, Err(LoopError::Provider { .. })));
+        assert_eq!(mock.call_count(), 2, "initial attempt + one bounded retry");
+        assert_eq!(hooks.notices(), 1);
+    }
+
+    #[test]
+    fn cancel_during_backoff_aborts_cleanly() {
+        let mock = MockProvider::sequence(vec![transient_turn(), good_turn()]);
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.history.push(user_msg("hello"));
+        let cfg = LoopConfig::default();
+        let cancel = CancelFlag::new();
+        let mut hooks = EventLog {
+            events: Vec::new(),
+            cancel_on_notice: Some(cancel.clone()),
+        };
+        let registry = ToolRegistry::new();
+
+        let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {});
+        assert!(matches!(res, Err(LoopError::Cancelled)));
+        assert_eq!(mock.call_count(), 1, "retry never issued after cancel");
     }
 }

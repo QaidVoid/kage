@@ -245,8 +245,11 @@ impl<H: Hooks> Hooks for SessionRecordingHooks<H> {
             }
             // `ToolCallArgsDelta` is a transient UI hint; the
             // authoritative call is recorded from `ToolCallStart`.
+            // `Notice` is a transient UI line, never part of the
+            // transcript.
             LoopEvent::ToolCallArgsDelta { .. }
             | LoopEvent::ToolUpdate { .. }
+            | LoopEvent::Notice { .. }
             | LoopEvent::Error { .. } => {}
         }
         self.inner.on_event(event);

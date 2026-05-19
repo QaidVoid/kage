@@ -31,19 +31,21 @@ use crate::ProviderError;
 /// `RecvResponse` in its chain.
 ///
 /// `recv_body` is an idle timeout, not a total cap: the *current*
-/// phase is measured from "now" and recomputed every read, so 120s is
+/// phase is measured from "now" and recomputed every read, so 600s is
 /// the max silence between bytes, not a ceiling on a long answer.
-/// Providers emit deltas or pings well inside that. `global` stays
-/// unset so an active generation is never capped by total time.
+/// Providers emit deltas or pings well inside that; the loop's
+/// auto-retry backstops a genuine stall, so the grace is generous on
+/// purpose to avoid killing a slow-but-alive generation. `global`
+/// stays unset so an active generation is never capped by total time.
 fn build_agent() -> ureq::Agent {
     use std::time::Duration;
     ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_resolve(Some(Duration::from_secs(15)))
         .timeout_connect(Some(Duration::from_secs(30)))
-        .timeout_send_request(Some(Duration::from_secs(180)))
-        .timeout_send_body(Some(Duration::from_secs(180)))
-        .timeout_recv_body(Some(Duration::from_secs(120)))
+        .timeout_send_request(Some(Duration::from_secs(600)))
+        .timeout_send_body(Some(Duration::from_secs(600)))
+        .timeout_recv_body(Some(Duration::from_secs(600)))
         .build()
         .new_agent()
 }

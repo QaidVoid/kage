@@ -40,6 +40,20 @@ pub struct LoopConfig {
     /// How the loop drains queued follow-up messages each turn.
     #[serde(default)]
     pub followup_mode: SteeringMode,
+    /// How many times to re-issue a turn whose provider request failed
+    /// transiently (a stalled or dropped stream, a 5xx, rate limiting)
+    /// before giving up. `0` disables auto-retry (the pre-recovery
+    /// behavior: one attempt, then surface the error). The
+    /// conversation is preserved across a retry; only the failed
+    /// partial turn is discarded so the re-request is clean.
+    #[serde(default = "default_max_provider_retries")]
+    pub max_provider_retries: u32,
+}
+
+/// Serde default for [`LoopConfig::max_provider_retries`]: an old
+/// config file without the key still gets auto-retry.
+fn default_max_provider_retries() -> u32 {
+    4
 }
 
 impl Default for LoopConfig {
@@ -49,6 +63,7 @@ impl Default for LoopConfig {
             compaction_threshold: 0.8,
             steering_mode: SteeringMode::OneAtATime,
             followup_mode: SteeringMode::OneAtATime,
+            max_provider_retries: default_max_provider_retries(),
         }
     }
 }
@@ -71,10 +86,14 @@ mod tests {
             compaction_threshold: 0.9,
             steering_mode: SteeringMode::All,
             followup_mode: SteeringMode::OneAtATime,
+            max_provider_retries: 2,
         };
         let s = serde_json::to_string(&cfg).unwrap();
         let back: LoopConfig = serde_json::from_str(&s).unwrap();
         assert_eq!(cfg, back);
+        let legacy: LoopConfig =
+            serde_json::from_str(r#"{"parallel_tools":false,"compaction_threshold":0.8}"#).unwrap();
+        assert_eq!(legacy.max_provider_retries, 4);
     }
 
     #[test]

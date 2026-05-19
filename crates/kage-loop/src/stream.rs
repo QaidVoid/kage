@@ -7,12 +7,13 @@
 //! the message-assembly state machine.
 
 use kage_core::{Content, LoopError, LoopEvent, Message, MessageId, Role, TokenUsage, ToolCallId};
-use kage_provider::{EventStream, ProviderEvent};
+use kage_provider::{EventStream, ProviderError, ProviderEvent};
 
 use crate::Hooks;
 use crate::run::emit_one;
 
 /// Output of consuming one provider stream.
+#[derive(Debug)]
 pub(crate) struct TurnResult {
     /// Fully assembled assistant message ready to append to history.
     pub(crate) message: Message,
@@ -20,6 +21,25 @@ pub(crate) struct TurnResult {
     pub(crate) tool_calls: Vec<PendingToolCall>,
     /// Token usage reported for the turn.
     pub(crate) usage: TokenUsage,
+}
+
+/// Why a single turn's stream did not produce a finished message.
+///
+/// The split is what makes auto-retry possible: a [`Provider`] error
+/// carries the original [`ProviderError`] so the run loop can ask
+/// [`ProviderError::is_transient`] whether re-issuing the identical
+/// request might succeed, while [`Fatal`] errors (cancellation, a
+/// malformed stream the assembler rejected) are never worth retrying.
+///
+/// [`Provider`]: TurnFailure::Provider
+/// [`Fatal`]: TurnFailure::Fatal
+#[derive(Debug)]
+pub(crate) enum TurnFailure {
+    /// Provider/transport-origin failure (pre- or mid-stream),
+    /// including a stream that ended before its terminal frame.
+    Provider(ProviderError),
+    /// Non-retryable: cancellation or an assembler-rejected stream.
+    Fatal(LoopError),
 }
 
 /// One tool invocation requested by the model and not yet executed.
@@ -46,26 +66,29 @@ pub(crate) fn collect_turn<F: FnMut(LoopEvent)>(
     cancel: &kage_core::CancelFlag,
     hooks: &mut dyn Hooks,
     emit: &mut F,
-) -> Result<TurnResult, LoopError> {
+) -> Result<TurnResult, TurnFailure> {
     let mut assembler = Assembler::new(parent);
     let mut started = false;
 
     for event in stream {
         if cancel.is_cancelled() {
-            return Err(LoopError::Cancelled);
+            return Err(TurnFailure::Fatal(LoopError::Cancelled));
         }
-        let event = event.map_err(|e| LoopError::Provider {
-            message: e.to_string(),
-        })?;
+        let event = event.map_err(TurnFailure::Provider)?;
 
-        if let Some(result) = handle_event(event, &mut assembler, &mut started, hooks, emit)? {
+        if let Some(result) = handle_event(event, &mut assembler, &mut started, hooks, emit)
+            .map_err(TurnFailure::Fatal)?
+        {
             return Ok(result);
         }
     }
 
-    Err(LoopError::Provider {
-        message: "stream ended without MessageEnd".into(),
-    })
+    // A clean EOF with no terminal frame is a stream that dropped
+    // before completing - the same recoverable failure class as a
+    // mid-body transport error, so route it through transient retry.
+    Err(TurnFailure::Provider(ProviderError::Transport(
+        "stream ended before completion".into(),
+    )))
 }
 
 fn handle_event<F: FnMut(LoopEvent)>(
@@ -526,7 +549,10 @@ mod tests {
             .unwrap();
         let mut hooks = NoopHooks;
         let res = collect_turn(None, stream, &cancel, &mut hooks, &mut |_| {});
-        assert!(matches!(res, Err(LoopError::Provider { .. })));
+        assert!(matches!(
+            res,
+            Err(TurnFailure::Fatal(LoopError::Provider { .. }))
+        ));
     }
 
     #[test]
@@ -542,11 +568,11 @@ mod tests {
             .unwrap();
         let mut hooks = NoopHooks;
         let res = collect_turn(None, stream, &cancel, &mut hooks, &mut |_| {});
-        assert!(matches!(res, Err(LoopError::Cancelled)));
+        assert!(matches!(res, Err(TurnFailure::Fatal(LoopError::Cancelled))));
     }
 
     #[test]
-    fn provider_error_translates_to_loop_provider_error() {
+    fn provider_error_surfaces_with_its_original_kind() {
         let mock = MockProvider::replaying(vec![Err(kage_provider::ProviderError::Auth(
             "no key".into(),
         ))]);
@@ -556,7 +582,28 @@ mod tests {
             .unwrap();
         let mut hooks = NoopHooks;
         let res = collect_turn(None, stream, &cancel, &mut hooks, &mut |_| {});
-        assert!(matches!(res, Err(LoopError::Provider { .. })));
+        // The original ProviderError is preserved (not stringified) so
+        // the run loop can classify it; Auth is not transient.
+        match res {
+            Err(TurnFailure::Provider(e)) => assert!(!e.is_transient()),
+            other => panic!("expected Provider failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clean_eof_without_message_end_is_a_retryable_provider_failure() {
+        let mock = MockProvider::replaying(vec![Ok(ProviderEvent::TextDelta {
+            delta: "partial".into(),
+        })]);
+        let cancel = CancelFlag::new();
+        let stream = mock
+            .stream(StreamRequest::new("m", vec![]), &cancel)
+            .unwrap();
+        let mut hooks = NoopHooks;
+        match collect_turn(None, stream, &cancel, &mut hooks, &mut |_| {}) {
+            Err(TurnFailure::Provider(e)) => assert!(e.is_transient()),
+            other => panic!("expected a transient Provider failure, got {other:?}"),
+        }
     }
 
     #[test]

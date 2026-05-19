@@ -272,6 +272,14 @@ pub enum LoopEvent {
         /// Text of the synthetic message that replaced the summarized turns.
         summary: String,
     },
+    /// A non-terminal informational message from the loop, surfaced to
+    /// the user but never persisted to the session. Used for things
+    /// the user should see but that are not part of the transcript -
+    /// e.g. "provider stalled; retrying (2/4)".
+    Notice {
+        /// Human-readable line to show.
+        message: String,
+    },
     /// Terminal error.
     Error {
         /// Variant detailing the failure.

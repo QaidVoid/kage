@@ -186,6 +186,13 @@ pub enum RunRequest {
     /// toast rather than orphaning the live writer. Issued by the
     /// `:tree` browser's `d`.
     DeleteSession(std::path::PathBuf),
+    /// Plugin-initiated reseat from the `session_write` capability.
+    /// `Session` resumes an existing session; `PendingFork` forks the
+    /// live session at the carried entry then lands on the new branch
+    /// (the rewind move). The worker consults the
+    /// `session_before_switch` veto, then reseats the runtime onto the
+    /// target so subsequent turns continue there.
+    SwitchSession(kage_plugin::SwitchTarget),
 }
 
 /// Outcome of [`App::run`].
@@ -562,6 +569,10 @@ pub struct App {
     /// Pending fork-request slot populated by `kage.session.fork`.
     /// Drained between event polls; the worker performs the fork.
     plugin_fork_request: Option<kage_plugin::SharedForkRequest>,
+    /// Pending reseat slot populated by the `session_write`
+    /// `kage.session.switch` / `fork_to`. Drained between event polls
+    /// and relayed as [`RunRequest::SwitchSession`] to the worker.
+    plugin_switch_request: Option<kage_plugin::SharedSwitchRequest>,
     /// Theme snapshot `kage.theme.current()` / `list()` read from.
     /// Refreshed each redraw with the active theme + bundled names.
     plugin_theme_state: Option<kage_plugin::SharedThemeState>,
@@ -705,6 +716,7 @@ impl App {
             plugin_compact_request: None,
             plugin_session_list: None,
             plugin_fork_request: None,
+            plugin_switch_request: None,
             plugin_theme_state: None,
             plugin_theme_request: None,
             autocomplete_providers: Vec::new(),
@@ -952,6 +964,13 @@ impl App {
         self.plugin_fork_request = Some(request);
     }
 
+    /// Wire the shared reseat slot populated by the `session_write`
+    /// `kage.session.switch` / `fork_to`. Without this, a granted
+    /// plugin can call the API but the host never reseats.
+    pub fn set_plugin_switch_request(&mut self, request: kage_plugin::SharedSwitchRequest) {
+        self.plugin_switch_request = Some(request);
+    }
+
     /// Wire the theme snapshot and pending-switch slots so
     /// `kage.theme.*` can read the active theme / list and request a
     /// switch. Without these the read APIs see empty values and
@@ -1147,6 +1166,19 @@ impl App {
         }
     }
 
+    /// Drain any pending `session_write` reseat and relay it as
+    /// [`RunRequest::SwitchSession`] so the worker applies it on the
+    /// same path as a user-initiated resume/fork.
+    fn drain_plugin_switch_request(&mut self) {
+        let Some(slot) = self.plugin_switch_request.as_ref() else {
+            return;
+        };
+        let pending = slot.lock().ok().and_then(|mut g| g.take());
+        if let Some(target) = pending {
+            let _ = self.send_request(RunRequest::SwitchSession(target));
+        }
+    }
+
     /// Refresh the theme snapshot `kage.theme.*` reads, then drain a
     /// pending `kage.theme.set` and apply it on this thread (the same
     /// path as `:theme set`, so an unknown name surfaces an inline
@@ -1304,6 +1336,7 @@ impl App {
             }
             self.drain_plugin_compact_request();
             self.drain_plugin_fork_request();
+            self.drain_plugin_switch_request();
             self.drain_plugin_dialog();
             self.drain_plugin_theme();
             if last_plugin_snapshot.is_none_or(|t| t.elapsed() >= PLUGIN_SNAPSHOT_INTERVAL) {

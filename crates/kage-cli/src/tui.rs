@@ -18,7 +18,7 @@ use kage_loop::{AgentContext, LoopConfig, NoopHooks, force_compact, run};
 use kage_mcp::McpManager;
 use kage_plugin::{
     BridgePrep, BridgeStep, CommandOutput, ConfirmRequest, EditorRequest, InputRequest,
-    PluginRuntime, SelectRequest,
+    PluginRuntime, SelectRequest, SwitchTarget,
 };
 use kage_provider::ProviderRegistry;
 use kage_session::{SessionId, SessionReader, SessionSummary, SessionWriter};
@@ -119,6 +119,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     let mut plugin_compact_request: Option<kage_plugin::SharedCompactRequest> = None;
     let mut plugin_session_list: Option<kage_plugin::SharedSessionList> = None;
     let mut plugin_fork_request: Option<kage_plugin::SharedForkRequest> = None;
+    let mut plugin_switch_request: Option<kage_plugin::SharedSwitchRequest> = None;
     let mut plugin_theme: Option<(
         kage_plugin::SharedThemeState,
         kage_plugin::SharedThemeRequest,
@@ -182,6 +183,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         plugin_compact_request = Some(rt.shared_compact_request());
         plugin_session_list = Some(rt.shared_session_list());
         plugin_fork_request = Some(rt.shared_fork_request());
+        plugin_switch_request = Some(rt.shared_switch_request());
         plugin_theme = Some((rt.shared_theme_state(), rt.shared_theme_request()));
         plugin_chrome = Some((rt.shared_header(), rt.shared_footer()));
         plugin_terminal_hooks = Some(rt.shared_terminal_hooks());
@@ -303,6 +305,9 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     }
     if let Some(req) = plugin_fork_request {
         app.set_plugin_fork_request(req);
+    }
+    if let Some(req) = plugin_switch_request {
+        app.set_plugin_switch_request(req);
     }
     if let Some((state, request)) = plugin_theme {
         app.set_plugin_theme(state, request);
@@ -678,7 +683,7 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                     ) else {
                         continue;
                     };
-                    handle_plugin_fork(session_path.as_ref(), &buffer, &toasts, &at);
+                    let _ = handle_plugin_fork(session_path.as_ref(), &buffer, &toasts, &at);
                 }
                 RunRequest::CloneSession => {
                     handle_clone(session_path.as_ref(), &buffer, &toasts);
@@ -847,7 +852,64 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         }
                     }
                 }
+                RunRequest::SwitchSession(target) => match target {
+                    SwitchTarget::Session(s) => {
+                        let path = match resolve_switch_target(&s) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                push_error(&buffer, &format!("switch: {e}"));
+                                continue;
+                            }
+                        };
+                        let Some(dest) = consult_session_op(
+                            plugin_runtime.as_ref(),
+                            "session_before_switch",
+                            &path.display().to_string(),
+                            &buffer,
+                            &toasts,
+                        ) else {
+                            continue;
+                        };
+                        handle_resume(
+                            &registry,
+                            &active_qualified,
+                            &cx,
+                            &buffer,
+                            session_path.as_ref(),
+                            &session_usage,
+                            &toasts,
+                            std::path::Path::new(&dest),
+                        );
+                    }
+                    SwitchTarget::PendingFork(at) => {
+                        let Some(at) = consult_session_op(
+                            plugin_runtime.as_ref(),
+                            "session_before_switch",
+                            &at,
+                            &buffer,
+                            &toasts,
+                        ) else {
+                            continue;
+                        };
+                        let Some(new_path) =
+                            handle_plugin_fork(session_path.as_ref(), &buffer, &toasts, &at)
+                        else {
+                            continue;
+                        };
+                        handle_resume(
+                            &registry,
+                            &active_qualified,
+                            &cx,
+                            &buffer,
+                            session_path.as_ref(),
+                            &session_usage,
+                            &toasts,
+                            &new_path,
+                        );
+                    }
+                },
             }
+            refresh_session_entries(plugin_runtime.as_ref(), session_path.as_ref());
         }
     })
 }
@@ -1425,16 +1487,101 @@ fn find_last_entry(
     Ok(last)
 }
 
-/// Handle a plugin-initiated [`RunRequest::ForkSession`]. Copies the
-/// current session up through entry `at` (or the latest entry when
-/// `at` is empty) into a fresh session file and pushes a toast so the
-/// user can see the new id. Errors surface as `kage:error` blocks.
+/// Resolve a `kage.session.switch` argument to a session file path.
+/// Accepts either a path string (as handed out by
+/// `kage.session.list()`) or a session-id prefix, which is matched
+/// against the sessions directory. A prefix that matches no session,
+/// or more than one, is an error rather than a silent pick.
+fn resolve_switch_target(target: &str) -> Result<PathBuf, String> {
+    let direct = PathBuf::from(target);
+    if direct.is_file() {
+        return Ok(direct);
+    }
+    let dir = crate::sessions_dir().map_err(|e| format!("sessions dir: {e}"))?;
+    let summaries = kage_session::list(&dir).map_err(|e| format!("listing sessions: {e}"))?;
+    let mut hits: Vec<PathBuf> = summaries
+        .into_iter()
+        .filter(|s| s.id.to_string().starts_with(target))
+        .map(|s| s.path)
+        .collect();
+    match hits.len() {
+        1 => Ok(hits.remove(0)),
+        0 => Err(format!("no session matching '{target}'")),
+        _ => Err(format!("ambiguous session id '{target}'")),
+    }
+}
+
+/// Refresh the `session_write` entries snapshot from the active
+/// session file: a trimmed `{ id, kind, ts, role? }` per entry in
+/// file order. Run once per worker request (a between-turn cadence,
+/// never per stream tick) so a granted plugin's
+/// `kage.session.entries()` reflects the latest committed turn. A
+/// missing file (no turn yet) clears the snapshot.
+fn refresh_session_entries(
+    plugin_runtime: Option<&Arc<PluginRuntime>>,
+    session_path: Option<&Arc<Mutex<PathBuf>>>,
+) {
+    let Some(rt) = plugin_runtime else {
+        return;
+    };
+    let Some(sp) = session_path else {
+        return;
+    };
+    let path = sp.lock().expect("session path mutex poisoned").clone();
+    let Ok(reader) = SessionReader::iter(&path) else {
+        rt.set_session_entries(Vec::new());
+        return;
+    };
+    let mut out = Vec::new();
+    for item in reader {
+        let Ok(entry) = item else {
+            break;
+        };
+        let mut obj = serde_json::json!({
+            "id": entry.id().to_string(),
+            "kind": entry_kind(&entry),
+            "ts": entry.ts().to_rfc3339(),
+        });
+        if let kage_session::SessionEntry::Message(m) = &entry
+            && let Ok(role) = serde_json::to_value(m.message.role)
+        {
+            obj["role"] = role;
+        }
+        out.push(obj);
+    }
+    rt.set_session_entries(out);
+}
+
+/// Stable short name for a session entry variant, used as the `kind`
+/// field of the `session_write` entries snapshot. Exhaustive so a new
+/// variant fails to compile here rather than silently going unnamed.
+fn entry_kind(entry: &kage_session::SessionEntry) -> &'static str {
+    use kage_session::SessionEntry as E;
+    match entry {
+        E::Header(_) => "header",
+        E::Message(_) => "message",
+        E::ThinkingLevelChange(_) => "thinking_level_change",
+        E::ModelChange(_) => "model_change",
+        E::Compaction(_) => "compaction",
+        E::Label(_) => "label",
+        E::Title(_) => "title",
+        E::Custom(_) => "custom",
+    }
+}
+
+/// Handle a plugin-initiated fork. Copies the current session up
+/// through entry `at` (or the latest entry when `at` is empty) into a
+/// fresh session file, pushes a toast with the new id, and returns the
+/// new file's path. `RunRequest::ForkSession` ignores the path (a
+/// fork-and-stay snapshot); `SwitchSession(PendingFork)` reseats onto
+/// it. Returns `None` on any error, which is surfaced as a
+/// `kage:error` block.
 fn handle_plugin_fork(
     session_path: Option<&Arc<Mutex<PathBuf>>>,
     buffer: &SharedBuffer,
     toasts: &SharedToasts,
     at: &str,
-) {
+) -> Option<PathBuf> {
     let Some(sp) = session_path else {
         if let Ok(mut buf) = buffer.lock() {
             buf.push_custom(
@@ -1443,7 +1590,7 @@ fn handle_plugin_fork(
                 false,
             );
         }
-        return;
+        return None;
     };
     let src_path = sp.lock().expect("session path mutex poisoned").clone();
     if !src_path.exists() {
@@ -1454,7 +1601,7 @@ fn handle_plugin_fork(
                 false,
             );
         }
-        return;
+        return None;
     }
     let entry = if at.is_empty() {
         match find_last_entry(&src_path) {
@@ -1467,13 +1614,13 @@ fn handle_plugin_fork(
                         false,
                     );
                 }
-                return;
+                return None;
             }
             Err(e) => {
                 if let Ok(mut buf) = buffer.lock() {
                     buf.push_custom("kage:error", format!("fork: {e}"), false);
                 }
-                return;
+                return None;
             }
         }
     } else {
@@ -1483,7 +1630,7 @@ fn handle_plugin_fork(
                 if let Ok(mut buf) = buffer.lock() {
                     buf.push_custom("kage:error", format!("fork: {e}"), false);
                 }
-                return;
+                return None;
             }
         }
     };
@@ -1495,7 +1642,7 @@ fn handle_plugin_fork(
                 false,
             );
         }
-        return;
+        return None;
     };
     let new_session = SessionId::new();
     let dst = dir.join(format!("{new_session}.jsonl"));
@@ -1503,10 +1650,11 @@ fn handle_plugin_fork(
         if let Ok(mut buf) = buffer.lock() {
             buf.push_custom("kage:error", format!("fork failed: {e}"), false);
         }
-        return;
+        return None;
     }
     let short: String = new_session.to_string().chars().take(8).collect();
     push_toast(toasts, Toast::info(format!("forked session: {short}")));
+    Some(dst)
 }
 
 /// Handle [`RunRequest::CloneSession`]. Forks the active session at

@@ -48,7 +48,7 @@ pub use loader::{LoadReport, load_dir};
 pub use messages::{PendingMessage, PendingRole, SharedPendingMessages};
 pub use providers::LuaProvider;
 pub use runtime::{PluginRuntime, PluginRuntimeBuilder, SANDBOX_REMOVALS, SharedLua};
-pub use session_write::SwitchTarget;
+pub use session_write::{SharedSessionEntries, SharedSwitchRequest, SwitchTarget};
 pub use sessions::{PendingSessionOp, SharedForkRequest, SharedSessionList, SharedSessionOps};
 pub use status::SharedStatus;
 pub use terminal_input::{LuaTerminalHook, RegisteredTerminalHooks};

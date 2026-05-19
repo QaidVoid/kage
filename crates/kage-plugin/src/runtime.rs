@@ -487,6 +487,14 @@ impl PluginRuntime {
         }
     }
 
+    /// Cloneable handle to the pending `session_write` reseat slot, so
+    /// the host can drain it on its event-loop cadence the same way it
+    /// drains [`shared_fork_request`](Self::shared_fork_request).
+    #[must_use]
+    pub fn shared_switch_request(&self) -> SharedSwitchRequest {
+        Arc::clone(&self.switch_request)
+    }
+
     /// Drain the pending `session_write` reseat request. The host
     /// applies it between turns - resuming the named session, or
     /// landing on the fork a `fork_to` just queued - after consulting

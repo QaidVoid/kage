@@ -8,20 +8,23 @@
 //! `list`/`fork`/`append_entry`/`set_label` working via an `__index`
 //! to the shared table.
 //!
-//! The split mirrors the Pi coding agent: base `fork` *branches and
-//! stays* (Pi `/fork`); the gated `switch` *moves the live session to
-//! an existing one* (Pi `/tree`); `fork_to` is their composition -
-//! *branch and go there* - which is the rewind move. A rewind plugin
-//! reads [`entries`](kage.session.entries) to choose a point, then
-//! `fork_to`s it. The plugin layer does not own the session file, so
+//! Three verbs, by intent: base `fork` *branches and stays* (snapshot
+//! the live session, keep working on it); the gated `switch` *moves
+//! the live session to an existing one*; `fork_to` is their
+//! composition - *branch and go there* - which is the rewind move. A
+//! rewind plugin reads [`entries`](kage.session.entries) to choose a
+//! point, then `fork_to`s it. The plugin layer does not own the
+//! session file, so
 //! these only *request*: the host drains the queued intent between
 //! turns, consulting the `session_before_switch` veto, and performs
-//! the reseat. `fork_to` reuses the existing base-`fork` plumbing for
-//! the branch half, then asks the host to land on the new fork.
+//! the reseat. `fork_to` records the rewind point only; the host
+//! forks (its one fork code path) and reseats onto the new branch as
+//! a single atomic step, so there is no cross-request ordering to get
+//! wrong.
 
 use std::sync::{Arc, Mutex};
 
-use mlua::{Function, Lua, Table, Value};
+use mlua::{Lua, Table, Value};
 
 use crate::api::json_to_lua;
 use crate::capabilities::{Capability, CapabilityRegistry};
@@ -29,7 +32,7 @@ use crate::capabilities::{Capability, CapabilityRegistry};
 /// Host-maintained snapshot of the current session's entries, each a
 /// JSON object the host defines (at least `{ id, kind, ts }`, plus
 /// `role` for messages). `kage.session.entries()` returns a copy.
-pub(crate) type SharedSessionEntries = Arc<Mutex<Vec<serde_json::Value>>>;
+pub type SharedSessionEntries = Arc<Mutex<Vec<serde_json::Value>>>;
 
 /// Construct an empty session-entries snapshot.
 #[must_use]
@@ -43,14 +46,16 @@ pub enum SwitchTarget {
     /// Reseat onto an existing session id or path (from
     /// `kage.session.list()`), via `kage.session.switch(target)`.
     Session(String),
-    /// Reseat onto the fork that the just-queued `fork_to` creates;
-    /// the host resolves the new session after performing the fork.
-    PendingFork,
+    /// Fork the live session at this entry-id prefix (empty == latest
+    /// entry), then reseat onto the new branch. Queued by
+    /// `kage.session.fork_to(at?)`; the host forks and lands in one
+    /// atomic step.
+    PendingFork(String),
 }
 
 /// Pending reseat request. Drained by the host between turns; `None`
 /// means nothing requested.
-pub(crate) type SharedSwitchRequest = Arc<Mutex<Option<SwitchTarget>>>;
+pub type SharedSwitchRequest = Arc<Mutex<Option<SwitchTarget>>>;
 
 /// Construct an empty switch-request slot.
 #[must_use]
@@ -119,18 +124,22 @@ pub(crate) fn register(
             )?;
 
             let switch_slot = Arc::clone(&switch);
-            let base_fork: Function = base_session.get("fork")?;
             psession.set(
                 "fork_to",
                 lua.create_function(move |_, at: Value| {
-                    // Reuse the existing base-`fork` plumbing for the
-                    // branch half so there is one fork code path...
-                    base_fork.call::<()>(at)?;
-                    // ...then ask the host to land on the new fork.
+                    let at = match at {
+                        Value::String(s) => s.to_str()?.to_owned(),
+                        Value::Nil => String::new(),
+                        _ => {
+                            return Err(mlua::Error::external(
+                                "kage.session.fork_to: target must be an entry-id string or nil",
+                            ));
+                        }
+                    };
                     let mut slot = switch_slot
                         .lock()
                         .map_err(|_| mlua::Error::external("switch request mutex poisoned"))?;
-                    *slot = Some(SwitchTarget::PendingFork);
+                    *slot = Some(SwitchTarget::PendingFork(at));
                     Ok(())
                 })?,
             )?;
@@ -186,17 +195,32 @@ mod tests {
     }
 
     #[test]
-    fn fork_to_queues_fork_and_pending_switch() {
+    fn fork_to_queues_pending_fork_with_target() {
         let rt = rt_with_session_write();
         rt.eval_plugin(
             "p",
             "kage.request_capabilities({'session_write'}); kage.session.fork_to('e1abc')",
         )
         .unwrap();
-        // The branch half reuses base `fork`'s queue...
-        assert_eq!(rt.take_fork_request().as_deref(), Some("e1abc"));
-        // ...and the host is asked to land on the new fork.
-        assert_eq!(rt.take_switch_request(), Some(SwitchTarget::PendingFork));
+        assert_eq!(rt.take_fork_request(), None);
+        assert_eq!(
+            rt.take_switch_request(),
+            Some(SwitchTarget::PendingFork("e1abc".to_owned()))
+        );
+    }
+
+    #[test]
+    fn fork_to_without_argument_targets_the_latest_entry() {
+        let rt = rt_with_session_write();
+        rt.eval_plugin(
+            "p",
+            "kage.request_capabilities({'session_write'}); kage.session.fork_to()",
+        )
+        .unwrap();
+        assert_eq!(
+            rt.take_switch_request(),
+            Some(SwitchTarget::PendingFork(String::new()))
+        );
     }
 
     #[test]

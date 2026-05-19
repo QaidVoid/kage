@@ -610,8 +610,8 @@ pub struct App {
     /// tuple is `(down_row, down_block_idx, dragged)`. `dragged` flips
     /// to true the first time a drag event arrives; on `Up`, a
     /// non-dragged click on the block's header row toggles its fold,
-    /// while a dragged release leaves the screen selection in place
-    /// for the user to yank with `y`.
+    /// while a dragged release copies the highlighted selection
+    /// straight to the clipboard (same path as `y`).
     mouse_drag_anchor: Option<(u16, usize, bool)>,
     /// Active screen selection in `(virtual_row, col)` coordinates,
     /// where `virtual_row` is the index of the row across the whole
@@ -3158,13 +3158,17 @@ impl App {
 
     /// Mouse left-button release: a non-dragged release on a block's
     /// header row toggles fold and clears the just-anchored
-    /// zero-width selection; a dragged release leaves the selection
-    /// in place so the user can `y` to copy it.
+    /// zero-width selection; a dragged release copies the highlighted
+    /// selection straight to the clipboard without waiting for `y`.
     fn mouse_up(&mut self, row: u16) {
         let Some((_down_row, anchor_idx, dragged)) = self.mouse_drag_anchor.take() else {
             return;
         };
         if dragged {
+            // The render after the final drag event already captured
+            // every selected row into `captured_rows`, so this sees
+            // the same state a `y` press would: extract, copy, clear.
+            self.yank_screen_selection();
             return;
         }
         // Plain click: clear the zero-width selection we anchored on

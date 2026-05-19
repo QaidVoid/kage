@@ -23,6 +23,7 @@ pub mod messages;
 pub mod providers;
 pub mod runtime;
 pub mod sessions;
+pub mod spec;
 pub mod status;
 pub mod terminal_input;
 pub mod theme;

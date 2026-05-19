@@ -4213,6 +4213,7 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "kage-plugin",
  "serde",
  "serde_json",
  "ureq",

@@ -15,6 +15,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+kage-plugin = { version = "0.1.0", path = "../crates/kage-plugin" }
 serde.workspace = true
 serde_json.workspace = true
 ureq.workspace = true

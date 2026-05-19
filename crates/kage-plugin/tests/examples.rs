@@ -10,6 +10,7 @@ use std::process::Command;
 
 use kage_plugin::{
     BridgePrep, BridgeStep, CommandOutput, HostLog, LogLevel, PluginRuntime, SharedHostLog,
+    SwitchTarget,
 };
 use serde_json::json;
 
@@ -571,4 +572,86 @@ fn rewind_disables_itself_without_session_write() {
         "expected a disabled notice, got {:?}",
         r.notifies
     );
+}
+
+fn run_plain_command(rt: &PluginRuntime, name: &str) -> String {
+    let cmd = rt
+        .registered_commands()
+        .into_iter()
+        .find(|c| c.name() == name)
+        .unwrap_or_else(|| panic!("{name} registered"));
+    let bargs = match cmd.prepare_bridge("", &json!(null)).unwrap() {
+        BridgePrep::Ready(bargs) => bargs,
+        BridgePrep::ArgError(out) => panic!("unexpected arg error: {}", out.text),
+    };
+    match rt.bridge_call(&bargs.handler, &bargs.args).unwrap() {
+        BridgeStep::Done(v) => CommandOutput::from_json(&v).text,
+        BridgeStep::Suspended(_) => panic!("{name} should not suspend"),
+    }
+}
+
+#[test]
+fn undo_forks_back_before_the_last_user_prompt() {
+    let (rec, sink) = forwarding_sink();
+    let mut caps = BTreeMap::new();
+    // session_write only: /undo exercises the conversation path
+    // without needing a git work tree.
+    caps.insert("rewind".to_owned(), vec!["session_write".to_owned()]);
+    let rt = PluginRuntime::builder()
+        .sink(sink)
+        .capabilities(caps)
+        .build()
+        .unwrap();
+    let source =
+        std::fs::read_to_string(examples_dir().join("rewind.lua")).expect("read rewind.lua");
+    rt.eval_plugin("rewind", &source).expect("rewind.lua loads");
+
+    rt.set_session_entries(vec![
+        json!({ "id": "01H0", "kind": "header", "ts": "2026-05-19T10:00:00+00:00" }),
+        json!({ "id": "01U1", "kind": "message", "role": "user", "ts": "2026-05-19T10:00:01+00:00" }),
+        json!({ "id": "01A1", "kind": "message", "role": "assistant", "ts": "2026-05-19T10:00:02+00:00" }),
+        json!({ "id": "01U2", "kind": "message", "role": "user", "ts": "2026-05-19T10:00:03+00:00" }),
+        json!({ "id": "01A2", "kind": "message", "role": "assistant", "ts": "2026-05-19T10:00:04+00:00" }),
+    ]);
+
+    let out = run_plain_command(&rt, "undo");
+    assert!(out.starts_with("undone to 01A1"), "command said {out:?}");
+    // The last exchange (01U2 + 01A2) is dropped: the fork lands on
+    // the entry just before the most recent user message.
+    assert_eq!(
+        rt.take_switch_request(),
+        Some(SwitchTarget::PendingFork("01A1".to_owned()))
+    );
+    let r = rec.lock().unwrap();
+    assert!(
+        r.notifies
+            .iter()
+            .any(|s| s.contains("undo: reverted last exchange")),
+        "expected an undo notice, got {:?}",
+        r.notifies
+    );
+}
+
+#[test]
+fn undo_with_only_one_exchange_has_nothing_to_undo() {
+    let (_rec, sink) = forwarding_sink();
+    let mut caps = BTreeMap::new();
+    caps.insert("rewind".to_owned(), vec!["session_write".to_owned()]);
+    let rt = PluginRuntime::builder()
+        .sink(sink)
+        .capabilities(caps)
+        .build()
+        .unwrap();
+    let source =
+        std::fs::read_to_string(examples_dir().join("rewind.lua")).expect("read rewind.lua");
+    rt.eval_plugin("rewind", &source).expect("rewind.lua loads");
+
+    rt.set_session_entries(vec![
+        json!({ "id": "01H0", "kind": "header", "ts": "2026-05-19T10:00:00+00:00" }),
+        json!({ "id": "01U1", "kind": "message", "role": "user", "ts": "2026-05-19T10:00:01+00:00" }),
+        json!({ "id": "01A1", "kind": "message", "role": "assistant", "ts": "2026-05-19T10:00:02+00:00" }),
+    ]);
+
+    assert_eq!(run_plain_command(&rt, "undo"), "nothing to undo");
+    assert_eq!(rt.take_switch_request(), None);
 }

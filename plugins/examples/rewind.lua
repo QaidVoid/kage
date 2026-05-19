@@ -13,16 +13,23 @@
 -- skips file restore.
 --
 -- Commands:
---   /rewind        pick an earlier point; fork the conversation there
---                  and restore tracked files to that turn
---   /rewind-redo   re-apply the file changes the last /rewind undid
---   /rewind-status report how many checkpoints / redo entries are held
+--   /undo          drop the last exchange: fork back to just before
+--                  your most recent prompt and restore tracked files
+--                  there. Repeat to walk further back, one exchange
+--                  per call.
+--   /redo          re-apply the file changes the last /undo or
+--                  /rewind undid (alias: /rewind-redo)
+--   /rewind        pick any earlier point and fork the conversation
+--                  there, restoring tracked files to that turn
+--   /rewind-status how many checkpoints / redo entries are held
+--                  (alias: /undo-status)
 --
 -- Scope/limits (v0.1): file snapshots use `git stash create`, so they
 -- cover tracked changes only (not untracked files) and require a git
--- work tree. The conversation fork is one-way: redo restores files,
+-- work tree. The conversation fork is one-way: /redo restores files,
 -- not the un-forked conversation (that would need a host primitive
--- kage does not expose to Lua yet).
+-- kage does not expose to Lua yet). The very first exchange cannot be
+-- undone into an empty session via a fork; start a new session.
 
 local caps = kage.request_capabilities({ 'session_write', 'exec' })
 
@@ -35,7 +42,7 @@ local files = caps.exec
 
 -- Per-turn checkpoints in chronological order: each is
 -- { id = <entry id at turn end>, sha = <git stash sha or false> }.
--- `redo` holds stash shas of states a /rewind moved away from.
+-- `redo` holds stash shas of states a /undo or /rewind moved away from.
 local checkpoints = {}
 local redo = {}
 
@@ -85,6 +92,25 @@ local function checkpoint_for(at)
     return best
 end
 
+-- The fork point that drops the last exchange: the entry right
+-- before the most recent user message. Returns nil when there is no
+-- earlier non-header entry to land on - the first exchange cannot be
+-- undone into an empty session via a fork.
+local function undo_target()
+    local entries = kage.session.entries()
+    local last_user
+    for i = #entries, 1, -1 do
+        if entries[i].kind == 'message' and entries[i].role == 'user' then
+            last_user = i
+            break
+        end
+    end
+    if not last_user or last_user <= 1 then return nil end
+    local prev = entries[last_user - 1]
+    if prev.kind == 'header' then return nil end
+    return prev.id
+end
+
 kage.on('turn_end', function()
     redo = {}
     if not files or not in_git_repo() then return end
@@ -92,6 +118,30 @@ kage.on('turn_end', function()
     if not id then return end
     checkpoints[#checkpoints + 1] = { id = id, sha = snapshot() }
 end)
+
+kage.register_command({
+    name = 'undo',
+    description = 'Undo the last exchange: fork back before your most recent prompt and restore files',
+    handler = function()
+        local at = undo_target()
+        if not at then
+            kage.notify('undo: nothing to undo')
+            return 'nothing to undo'
+        end
+        local restored = 'conversation only'
+        if files and in_git_repo() then
+            local pre = snapshot()
+            if pre then redo[#redo + 1] = pre end
+            local cp = checkpoint_for(at)
+            if cp and restore(cp.sha) then
+                restored = 'files + conversation'
+            end
+        end
+        kage.session.fork_to(at)
+        kage.notify('undo: reverted last exchange (' .. restored .. ')')
+        return 'undone to ' .. at:sub(1, 8)
+    end,
+})
 
 kage.register_command({
     name = 'rewind',
@@ -137,17 +187,18 @@ kage.register_command({
 })
 
 kage.register_command({
-    name = 'rewind-redo',
-    description = 'Re-apply the file changes the last /rewind undid',
+    name = 'redo',
+    aliases = { 'rewind-redo' },
+    description = 'Re-apply the file changes the last /undo or /rewind undid',
     handler = function()
         if not files then return 'redo unavailable (exec not granted)' end
         local sha = table.remove(redo)
         if not sha then
-            kage.notify('rewind-redo: nothing to redo')
+            kage.notify('redo: nothing to redo')
             return 'nothing to redo'
         end
         if restore(sha) then
-            kage.notify('rewind-redo: re-applied file changes')
+            kage.notify('redo: re-applied file changes')
             return 're-applied'
         end
         return 'redo failed'
@@ -156,7 +207,8 @@ kage.register_command({
 
 kage.register_command({
     name = 'rewind-status',
-    description = 'Show how many rewind checkpoints and redo entries are held',
+    aliases = { 'undo-status' },
+    description = 'Show how many undo/rewind checkpoints and redo entries are held',
     handler = function()
         return string.format('rewind: %d checkpoint(s), %d redo, files=%s',
             #checkpoints, #redo, tostring(files and true or false))

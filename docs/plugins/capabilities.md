@@ -80,6 +80,7 @@ returns its captured output, the way `kage.http.get` blocks.
 ## see it in use
 
 `plugins/examples/rewind.lua` combines both capabilities: it
-git-snapshots tracked files every `turn_end`, and `/rewind` forks the
-conversation at a chosen point while restoring files to that turn. See
+git-snapshots tracked files every `turn_end`, then `/undo` drops the
+last exchange (or `/rewind` forks at a chosen point) while restoring
+files to that turn, and `/redo` re-applies. See
 [examples](/plugins/examples#conversation-and-file-rewind).

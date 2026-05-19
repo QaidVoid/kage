@@ -116,23 +116,30 @@ kage.on("turn_end", function()
 end)
 ```
 
-`/rewind` lists the user turns from `kage.session.entries()`, and on a
-pick restores files to that turn's checkpoint and forks the
-conversation there:
+`/undo` is the one-step ergonomic case: it drops the last exchange by
+forking back to the entry just before your most recent prompt and
+restoring files there. Repeat it to walk further back, one exchange
+per call:
 
 ```lua
-local at = kage.ui.select("Rewind to", items)  -- value = entry id
-if kage.ui.confirm("Rewind?", "...") then
-  restore(checkpoint_for(at).sha)               -- kage.exec git checkout
-  kage.session.fork_to(at)                      -- host reseats next turn
+local function undo_target()        -- entry before the last user msg
+  -- ... scan kage.session.entries() backwards for the last user role
 end
+local at = undo_target()
+restore(checkpoint_for(at).sha)     -- kage.exec git checkout
+kage.session.fork_to(at)            -- host reseats next turn
 ```
 
-It degrades honestly: without `session_write` it disables itself;
-without `exec` it still rewinds the conversation but skips file
-restore. `/rewind-redo` re-applies the file changes the last `/rewind`
-undid (the conversation fork is one-way - that is the nature of
-branching an append-only session).
+`/rewind` is the same move with a picker: it lists the user turns from
+`kage.session.entries()` and forks at whichever you choose. `/redo`
+(alias `/rewind-redo`) re-applies the file changes the last `/undo` or
+`/rewind` undid.
+
+It degrades honestly: without `session_write` the plugin disables
+itself; without `exec` it still rewinds the conversation but skips
+file restore. The conversation fork is one-way - `/redo` restores
+files, not the un-forked conversation; that is the nature of branching
+an append-only session.
 
 ## testing without the TUI
 

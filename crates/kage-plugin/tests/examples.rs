@@ -4,7 +4,9 @@
 //! them to `~/.config/kage/plugins/`. These tests load each example into a fresh
 //! [`PluginRuntime`] and exercise the events/handlers each one declares.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::process::Command;
 
 use kage_plugin::{
     BridgePrep, BridgeStep, CommandOutput, HostLog, LogLevel, PluginRuntime, SharedHostLog,
@@ -470,5 +472,103 @@ fn ui_extras_registers_chrome_autocomplete_and_raw_input() {
         rt.registered_commands()
             .iter()
             .any(|c| c.name() == "ui-extras-off")
+    );
+}
+
+/// Initialize a git work tree with one commit so `git stash create`
+/// has a base to diff against, then leave a tracked file dirty.
+fn init_git_repo(dir: &std::path::Path) {
+    let run = |args: &[&str]| {
+        let ok = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .expect("git runs")
+            .success();
+        assert!(ok, "git {args:?} failed");
+    };
+    run(&["init", "-q"]);
+    run(&["config", "user.email", "t@example.com"]);
+    run(&["config", "user.name", "Tester"]);
+    std::fs::write(dir.join("tracked.txt"), "v1\n").unwrap();
+    run(&["add", "-A"]);
+    run(&["commit", "-q", "-m", "init"]);
+    std::fs::write(dir.join("tracked.txt"), "v2\n").unwrap();
+}
+
+fn run_status_command(rt: &PluginRuntime) -> String {
+    let cmd = rt
+        .registered_commands()
+        .into_iter()
+        .find(|c| c.name() == "rewind-status")
+        .expect("rewind-status registered");
+    let bargs = match cmd.prepare_bridge("", &json!(null)).unwrap() {
+        BridgePrep::Ready(bargs) => bargs,
+        BridgePrep::ArgError(out) => panic!("unexpected arg error: {}", out.text),
+    };
+    match rt.bridge_call(&bargs.handler, &bargs.args).unwrap() {
+        BridgeStep::Done(v) => CommandOutput::from_json(&v).text,
+        BridgeStep::Suspended(_) => panic!("rewind-status should not suspend"),
+    }
+}
+
+#[test]
+fn rewind_records_a_checkpoint_per_turn_when_granted() {
+    let dir = tempfile::tempdir().unwrap();
+    init_git_repo(dir.path());
+
+    let (rec, sink) = forwarding_sink();
+    let mut caps = BTreeMap::new();
+    caps.insert(
+        "rewind".to_owned(),
+        vec!["session_write".to_owned(), "exec".to_owned()],
+    );
+    let rt = PluginRuntime::builder()
+        .sink(sink)
+        .workdir(dir.path().to_path_buf())
+        .capabilities(caps)
+        .build()
+        .unwrap();
+    let source =
+        std::fs::read_to_string(examples_dir().join("rewind.lua")).expect("read rewind.lua");
+    rt.eval_plugin("rewind", &source).expect("rewind.lua loads");
+
+    rt.set_session_entries(vec![
+        json!({ "id": "01A", "kind": "message", "role": "user", "ts": "2026-05-19T10:00:00+00:00" }),
+        json!({ "id": "01B", "kind": "message", "role": "assistant", "ts": "2026-05-19T10:00:05+00:00" }),
+    ]);
+    assert!(run_status_command(&rt).contains("0 checkpoint"));
+
+    rt.dispatch_event("turn_end", &json!({})).unwrap();
+
+    let r = rec.lock().unwrap();
+    assert!(r.errors.is_empty(), "no plugin errors: {:?}", r.errors);
+    drop(r);
+    let status = run_status_command(&rt);
+    assert!(
+        status.contains("1 checkpoint") && status.contains("files=true"),
+        "status was {status:?}"
+    );
+}
+
+#[test]
+fn rewind_disables_itself_without_session_write() {
+    let (rec, sink) = forwarding_sink();
+    let rt = PluginRuntime::builder().sink(sink).build().unwrap();
+    let source =
+        std::fs::read_to_string(examples_dir().join("rewind.lua")).expect("read rewind.lua");
+    rt.eval_plugin("rewind", &source).expect("rewind.lua loads");
+
+    assert!(
+        !rt.registered_commands()
+            .iter()
+            .any(|c| c.name() == "rewind"),
+        "rewind must register no commands without session_write"
+    );
+    let r = rec.lock().unwrap();
+    assert!(
+        r.notifies.iter().any(|s| s.contains("rewind: disabled")),
+        "expected a disabled notice, got {:?}",
+        r.notifies
     );
 }

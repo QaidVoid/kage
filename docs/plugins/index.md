@@ -26,17 +26,22 @@ nothing carries over the boundary.
 - trigger compaction, fork sessions, inject messages, write custom
   session entries and labels
 
-## what plugins cannot do
+## what plugins cannot do by default
 
-- spawn subprocesses (use MCP for that, once it lands)
+- spawn subprocesses
 - read or write arbitrary filesystem paths (`kage.fs.*` is workdir-scoped)
 - open network sockets outside `kage.http` (which respects an allow-list)
+- rewrite or reseat the live session
 - load native shared libraries
 - start background threads
 
 The sandbox strips `os.execute`, `io.popen`, `package.loadlib`,
 `dofile`, `loadfile`, and a handful of other escape hatches before
 your code runs. Routine `string`, `math`, `table` functions stay.
+
+Subprocess access and session rewriting are available as opt-in,
+per-plugin [capabilities](/plugins/capabilities) the user grants in
+config - closed by default, loud when granted.
 
 ## minimal example
 
@@ -58,5 +63,7 @@ or `/hello`. You should see a transient toast.
 ## next steps
 
 - [Lua API](/plugins/api) - every function exposed under `kage.*`
+- [Capabilities](/plugins/capabilities) - the opt-in tier for
+  subprocesses and session rewriting
 - [Examples](/plugins/examples) - longer plugins that demonstrate
   the patterns

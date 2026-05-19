@@ -95,6 +95,45 @@ kage.override_tool({
 })
 ```
 
+## conversation and file rewind
+
+`plugins/examples/rewind.lua` is the worked example for the
+[capability tier](/plugins/capabilities). Grant it both capabilities:
+
+```toml
+[plugins.capabilities]
+rewind = ["session_write", "exec"]
+```
+
+It snapshots tracked files with `git stash create` on every
+`turn_end`, keyed by the session's last entry id:
+
+```lua
+kage.on("turn_end", function()
+  if not in_git_repo() then return end
+  local id = last_entry_id()
+  checkpoints[#checkpoints + 1] = { id = id, sha = snapshot() }
+end)
+```
+
+`/rewind` lists the user turns from `kage.session.entries()`, and on a
+pick restores files to that turn's checkpoint and forks the
+conversation there:
+
+```lua
+local at = kage.ui.select("Rewind to", items)  -- value = entry id
+if kage.ui.confirm("Rewind?", "...") then
+  restore(checkpoint_for(at).sha)               -- kage.exec git checkout
+  kage.session.fork_to(at)                      -- host reseats next turn
+end
+```
+
+It degrades honestly: without `session_write` it disables itself;
+without `exec` it still rewinds the conversation but skips file
+restore. `/rewind-redo` re-applies the file changes the last `/rewind`
+undid (the conversation fork is one-way - that is the nature of
+branching an append-only session).
+
 ## testing without the TUI
 
 Drop a plugin under `crates/kage-plugin/tests/fixtures/` and drive it

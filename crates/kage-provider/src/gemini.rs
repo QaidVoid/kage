@@ -25,7 +25,7 @@ pub struct GeminiProvider {
     api_key: String,
     base_url: String,
     metadata: ProviderMetadata,
-    agent: ureq::Agent,
+    client: crate::http::HttpClient,
 }
 
 impl GeminiProvider {
@@ -48,7 +48,7 @@ impl GeminiProvider {
                 supports_thinking: false,
                 supports_tool_use: true,
             },
-            agent: crate::http::build_agent(),
+            client: crate::http::HttpClient::new(),
         }
     }
 }
@@ -71,13 +71,11 @@ impl Provider for GeminiProvider {
             "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
             self.base_url, req.model, self.api_key,
         );
-        let agent = self.agent.clone();
-        let response = crate::cancelable::cancellable_call(cancel, move || {
+        let response = crate::http::send(&self.client, cancel, move |agent| {
             agent
                 .post(&url)
                 .header("content-type", "application/json")
                 .send_json(&body)
-                .map_err(crate::http::map_ureq_error)
         })?;
 
         let status = response.status().as_u16();

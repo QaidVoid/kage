@@ -27,7 +27,7 @@ pub struct AnthropicProvider {
     api_key: String,
     base_url: String,
     metadata: ProviderMetadata,
-    agent: ureq::Agent,
+    client: crate::http::HttpClient,
 }
 
 impl AnthropicProvider {
@@ -50,7 +50,7 @@ impl AnthropicProvider {
                 supports_thinking: true,
                 supports_tool_use: true,
             },
-            agent: crate::http::build_agent(),
+            client: crate::http::HttpClient::new(),
         }
     }
 
@@ -77,14 +77,14 @@ impl AnthropicProvider {
         let body = build_request_body(req, false);
         let url = format!("{}/v1/messages", self.base_url);
 
-        let response = self
-            .agent
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
-            .header("content-type", "application/json")
-            .send_json(&body)
-            .map_err(crate::http::map_ureq_error)?;
+        let response = crate::http::send_blocking(&self.client, |agent| {
+            agent
+                .post(&url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .header("content-type", "application/json")
+                .send_json(&body)
+        })?;
 
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
@@ -386,16 +386,14 @@ impl Provider for AnthropicProvider {
         }
         let body = build_request_body(&req, true);
         let url = format!("{}/v1/messages", self.base_url);
-        let agent = self.agent.clone();
         let api_key = self.api_key.clone();
-        let response = crate::cancelable::cancellable_call(cancel, move || {
+        let response = crate::http::send(&self.client, cancel, move |agent| {
             agent
                 .post(&url)
                 .header("x-api-key", &api_key)
                 .header("anthropic-version", ANTHROPIC_VERSION)
                 .header("content-type", "application/json")
                 .send_json(&body)
-                .map_err(crate::http::map_ureq_error)
         })?;
 
         let status = response.status().as_u16();

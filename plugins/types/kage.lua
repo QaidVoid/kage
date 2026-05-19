@@ -164,6 +164,18 @@
 ---@field supports_tool_use? boolean Defaults to true.
 ---@field stream fun(req: table): table[]|fun(): table? Yields provider event tables; required.
 
+--- Spec passed to `kage.exec`.
+---@class kage.ExecSpec
+---@field cmd string Executable; resolved via PATH. No shell.
+---@field args? string[] Arguments, passed verbatim.
+---@field cwd? string Workdir-relative dir; defaults to the workdir.
+
+--- Result returned by `kage.exec`.
+---@class kage.ExecResult
+---@field code integer Exit code; -1 if killed by a signal.
+---@field stdout string Captured standard output.
+---@field stderr string Captured standard error.
+
 ---@class kage
 kage = {}
 
@@ -457,3 +469,11 @@ function kage.session.fork_to(at) end
 --- `session_before_switch` veto. Requires `session_write`.
 ---@param target string
 function kage.session.switch(target) end
+
+--- Run a subprocess rooted at the workdir, no shell.
+--- Captures stdout/stderr and blocks until the process
+--- exits. `cwd` may not escape the workdir. Requires the
+--- `exec` capability.
+---@param spec kage.ExecSpec
+---@return kage.ExecResult
+function kage.exec(spec) end

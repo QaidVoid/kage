@@ -549,6 +549,48 @@ const CLASSES: &[Class] = &[
             },
         ],
     },
+    Class {
+        name: "kage.ExecSpec",
+        doc: &["Spec passed to `kage.exec`."],
+        fields: &[
+            Field {
+                name: "cmd",
+                ty: "string",
+                doc: "Executable; resolved via PATH. No shell.",
+            },
+            Field {
+                name: "args?",
+                ty: "string[]",
+                doc: "Arguments, passed verbatim.",
+            },
+            Field {
+                name: "cwd?",
+                ty: "string",
+                doc: "Workdir-relative dir; defaults to the workdir.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.ExecResult",
+        doc: &["Result returned by `kage.exec`."],
+        fields: &[
+            Field {
+                name: "code",
+                ty: "integer",
+                doc: "Exit code; -1 if killed by a signal.",
+            },
+            Field {
+                name: "stdout",
+                ty: "string",
+                doc: "Captured standard output.",
+            },
+            Field {
+                name: "stderr",
+                ty: "string",
+                doc: "Captured standard error.",
+            },
+        ],
+    },
 ];
 
 const TABLES: &[Table] = &[
@@ -1240,6 +1282,24 @@ const GATED: &[GatedFunc] = &[
                 doc: "",
             }],
             ret: None,
+        },
+    },
+    GatedFunc {
+        cap: "exec",
+        func: Func {
+            doc: &[
+                "Run a subprocess rooted at the workdir, no shell.",
+                "Captures stdout/stderr and blocks until the process",
+                "exits. `cwd` may not escape the workdir. Requires the",
+                "`exec` capability.",
+            ],
+            path: "kage.exec",
+            params: &[Field {
+                name: "spec",
+                ty: "kage.ExecSpec",
+                doc: "",
+            }],
+            ret: Some("kage.ExecResult"),
         },
     },
 ];

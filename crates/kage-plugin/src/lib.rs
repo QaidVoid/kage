@@ -14,6 +14,7 @@ pub mod chrome;
 pub mod commands;
 pub mod error;
 pub mod events;
+pub(crate) mod exec;
 pub mod fs;
 pub mod http;
 pub mod keybindings;

@@ -183,7 +183,7 @@ const CLASSES: &[Class] = &[
             },
             Field {
                 name: "execute",
-                ty: "fun(input: table): string|kage.ToolResult",
+                ty: "fun(input: table): string|kage.ToolResult|boolean|number|nil",
                 doc: "Tool body.",
             },
         ],
@@ -198,14 +198,24 @@ const CLASSES: &[Class] = &[
                 doc: "Becomes `args.<name>`.",
             },
             Field {
-                name: "kind?",
+                name: "kind",
                 ty: "kage.ArgKind",
-                doc: "Defaults to text.",
+                doc: "Required.",
+            },
+            Field {
+                name: "optional?",
+                ty: "boolean",
+                doc: "Defaults to false.",
             },
             Field {
                 name: "choices?",
                 ty: "string[]",
                 doc: "Required when kind == choice.",
+            },
+            Field {
+                name: "hint?",
+                ty: "string",
+                doc: "Placeholder for kind == text; defaults to value.",
             },
         ],
     },
@@ -239,8 +249,8 @@ const CLASSES: &[Class] = &[
             },
             Field {
                 name: "handler",
-                ty: "fun(args: table): string?",
-                doc: "",
+                ty: "fun(raw: string, ctx: table, args: table): string|kage.CommandResult|nil",
+                doc: "raw text, host ctx, parsed args by name.",
             },
         ],
     },
@@ -309,7 +319,7 @@ const CLASSES: &[Class] = &[
             Field {
                 name: "code",
                 ty: "string",
-                doc: "char|enter|esc|tab|backtab|backspace|arrow/nav|f1..f12|other.",
+                doc: "char|enter|esc|tab|backspace|up|down|left|right|home|end|pageup|pagedown|delete|insert|f1..f12|other.",
             },
             Field {
                 name: "char?",
@@ -351,7 +361,11 @@ const CLASSES: &[Class] = &[
     },
     Class {
         name: "kage.Usage",
-        doc: &["Per-turn token usage from `kage.context_usage`."],
+        doc: &[
+            "Snapshot returned by `kage.context_usage`. The host fills",
+            "this in; the fields below are the conventional keys and",
+            "may vary by host version.",
+        ],
         fields: &[
             Field {
                 name: "model",
@@ -375,6 +389,120 @@ const CLASSES: &[Class] = &[
             },
         ],
     },
+    Class {
+        name: "kage.CommandResult",
+        doc: &["Rich result a command handler may return instead of a string."],
+        fields: &[
+            Field {
+                name: "text?",
+                ty: "string",
+                doc: "Output text shown to the user.",
+            },
+            Field {
+                name: "is_error?",
+                ty: "boolean",
+                doc: "Mark the invocation as failed.",
+            },
+            Field {
+                name: "structured?",
+                ty: "table",
+                doc: "Machine-readable detail.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.AcpAgentSpec",
+        doc: &["Spec passed to `kage.acp.add_agent`."],
+        fields: &[
+            Field {
+                name: "name",
+                ty: "string",
+                doc: "Agent id; required.",
+            },
+            Field {
+                name: "command",
+                ty: "string",
+                doc: "Executable to spawn; required.",
+            },
+            Field {
+                name: "args?",
+                ty: "string[]",
+                doc: "Command arguments.",
+            },
+            Field {
+                name: "env?",
+                ty: "table",
+                doc: "String-to-string environment overrides.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.McpServerSpec",
+        doc: &["Spec passed to `kage.mcp.add_server`."],
+        fields: &[
+            Field {
+                name: "name",
+                ty: "string",
+                doc: "Server id; required.",
+            },
+            Field {
+                name: "command",
+                ty: "string",
+                doc: "Executable to spawn; required.",
+            },
+            Field {
+                name: "args?",
+                ty: "string[]",
+                doc: "Command arguments.",
+            },
+            Field {
+                name: "env?",
+                ty: "table",
+                doc: "String-to-string environment overrides.",
+            },
+            Field {
+                name: "disabled?",
+                ty: "boolean",
+                doc: "Declare but do not spawn; defaults to false.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.ProviderSpec",
+        doc: &["Spec passed to `kage.register_provider`."],
+        fields: &[
+            Field {
+                name: "id",
+                ty: "string",
+                doc: "Provider id; required.",
+            },
+            Field {
+                name: "display_name?",
+                ty: "string",
+                doc: "Defaults to id.",
+            },
+            Field {
+                name: "supports_caching?",
+                ty: "boolean",
+                doc: "Defaults to false.",
+            },
+            Field {
+                name: "supports_thinking?",
+                ty: "boolean",
+                doc: "Defaults to false.",
+            },
+            Field {
+                name: "supports_tool_use?",
+                ty: "boolean",
+                doc: "Defaults to true.",
+            },
+            Field {
+                name: "stream",
+                ty: "fun(req: table): table[]|fun(): table?",
+                doc: "Yields provider event tables; required.",
+            },
+        ],
+    },
 ];
 
 const TABLES: &[Table] = &[
@@ -393,6 +521,18 @@ const TABLES: &[Table] = &[
     Table {
         path: "kage.http",
         class_doc: "Host-gated HTTP.",
+    },
+    Table {
+        path: "kage.acp",
+        class_doc: "Declarative ACP agent config.",
+    },
+    Table {
+        path: "kage.mcp",
+        class_doc: "Declarative MCP server config.",
+    },
+    Table {
+        path: "kage.theme",
+        class_doc: "Theme inspection and switching.",
     },
 ];
 
@@ -755,7 +895,7 @@ const FUNCS: &[Func] = &[
         path: "kage.register_provider",
         params: &[Field {
             name: "spec",
-            ty: "table",
+            ty: "kage.ProviderSpec",
             doc: "",
         }],
         ret: None,
@@ -878,7 +1018,7 @@ const FUNCS: &[Func] = &[
                 doc: "",
             },
             Field {
-                name: "contents",
+                name: "content",
                 ty: "string",
                 doc: "",
             },
@@ -896,7 +1036,93 @@ const FUNCS: &[Func] = &[
             ty: "string",
             doc: "",
         }],
-        ret: Some("{ status: integer, body: string, headers: table }"),
+        ret: Some("{ status: integer, body: string, content_type: string, truncated: boolean }"),
+    },
+    Func {
+        doc: &[
+            "Declare an upstream ACP agent at runtime, mirroring",
+            "`[acp.agents.<name>]` in config.toml. Core spawns it.",
+        ],
+        path: "kage.acp.add_agent",
+        params: &[Field {
+            name: "spec",
+            ty: "kage.AcpAgentSpec",
+            doc: "",
+        }],
+        ret: None,
+    },
+    Func {
+        doc: &[
+            "Register the single policy callback consulted when an",
+            "upstream ACP agent asks to run a tool. It must return a",
+            "boolean and must not open a dialog (no coroutine suspend):",
+            "it is policy, not UI. No handler, or a non-boolean or",
+            "erroring handler, denies.",
+        ],
+        path: "kage.on_acp_permission",
+        params: &[Field {
+            name: "handler",
+            ty: "fun(req: table): boolean",
+            doc: "",
+        }],
+        ret: None,
+    },
+    Func {
+        doc: &[
+            "Declare an MCP server at runtime, mirroring",
+            "`[mcp.servers.<name>]` in config.toml. Core spawns it.",
+        ],
+        path: "kage.mcp.add_server",
+        params: &[Field {
+            name: "spec",
+            ty: "kage.McpServerSpec",
+            doc: "",
+        }],
+        ret: None,
+    },
+    Func {
+        doc: &["Names of the plugin-declared MCP servers, sorted."],
+        path: "kage.mcp.list_servers",
+        params: &[],
+        ret: Some("string[]"),
+    },
+    Func {
+        doc: &[
+            "Ask the host to restart a declared MCP server. Applied",
+            "between turns against the live manager.",
+        ],
+        path: "kage.mcp.restart",
+        params: &[Field {
+            name: "name",
+            ty: "string",
+            doc: "",
+        }],
+        ret: None,
+    },
+    Func {
+        doc: &["The active theme name, or \"\" if none is set yet."],
+        path: "kage.theme.current",
+        params: &[],
+        ret: Some("string"),
+    },
+    Func {
+        doc: &["Theme names that may be passed to `kage.theme.set`."],
+        path: "kage.theme.list",
+        params: &[],
+        ret: Some("string[]"),
+    },
+    Func {
+        doc: &[
+            "Request a theme switch. The host validates and applies it",
+            "between turns. Errors on a non-string or empty name.",
+        ],
+        path: "kage.theme.set",
+        params: &[Field {
+            name: "name",
+            ty: "string",
+            doc: "",
+        }],
+        ret: None,
     },
 ];
 

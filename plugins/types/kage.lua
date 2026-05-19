@@ -71,13 +71,15 @@
 ---@field description string One-line description for the model.
 ---@field schema table JSON schema for the input object.
 ---@field risk? kage.ToolRisk Permission tier; defaults to read.
----@field execute fun(input: table): string|kage.ToolResult Tool body.
+---@field execute fun(input: table): string|kage.ToolResult|boolean|number|nil Tool body.
 
 --- One declared command argument.
 ---@class kage.CommandArg
 ---@field name string Becomes `args.<name>`.
----@field kind? kage.ArgKind Defaults to text.
+---@field kind kage.ArgKind Required.
+---@field optional? boolean Defaults to false.
 ---@field choices? string[] Required when kind == choice.
+---@field hint? string Placeholder for kind == text; defaults to value.
 
 --- Spec passed to `kage.register_command`. The handler runs
 --- through the coroutine bridge, so it may call the blocking
@@ -87,7 +89,7 @@
 ---@field aliases? string[] Alternate names that resolve to this command.
 ---@field description string Shown in the palette and :help.
 ---@field args? kage.CommandArg[]
----@field handler fun(args: table): string?
+---@field handler fun(raw: string, ctx: table, args: table): string|kage.CommandResult|nil raw text, host ctx, parsed args by name.
 
 --- Spec passed to `kage.register_widget`.
 ---@class kage.WidgetSpec
@@ -108,7 +110,7 @@
 
 --- Key descriptor handed to a `kage.on_terminal_input` handler.
 ---@class kage.KeyEvent
----@field code string char|enter|esc|tab|backtab|backspace|arrow/nav|f1..f12|other.
+---@field code string char|enter|esc|tab|backspace|up|down|left|right|home|end|pageup|pagedown|delete|insert|f1..f12|other.
 ---@field char? string Present only when code == char.
 ---@field ctrl boolean
 ---@field alt boolean
@@ -119,12 +121,44 @@
 ---@field trigger_turn? boolean Default true.
 ---@field deliver_as? "user" In v0.1 only user is wired.
 
---- Per-turn token usage from `kage.context_usage`.
+--- Snapshot returned by `kage.context_usage`. The host fills
+--- this in; the fields below are the conventional keys and
+--- may vary by host version.
 ---@class kage.Usage
 ---@field model string
 ---@field input_tokens integer
 ---@field output_tokens integer
 ---@field context_window integer
+
+--- Rich result a command handler may return instead of a string.
+---@class kage.CommandResult
+---@field text? string Output text shown to the user.
+---@field is_error? boolean Mark the invocation as failed.
+---@field structured? table Machine-readable detail.
+
+--- Spec passed to `kage.acp.add_agent`.
+---@class kage.AcpAgentSpec
+---@field name string Agent id; required.
+---@field command string Executable to spawn; required.
+---@field args? string[] Command arguments.
+---@field env? table String-to-string environment overrides.
+
+--- Spec passed to `kage.mcp.add_server`.
+---@class kage.McpServerSpec
+---@field name string Server id; required.
+---@field command string Executable to spawn; required.
+---@field args? string[] Command arguments.
+---@field env? table String-to-string environment overrides.
+---@field disabled? boolean Declare but do not spawn; defaults to false.
+
+--- Spec passed to `kage.register_provider`.
+---@class kage.ProviderSpec
+---@field id string Provider id; required.
+---@field display_name? string Defaults to id.
+---@field supports_caching? boolean Defaults to false.
+---@field supports_thinking? boolean Defaults to false.
+---@field supports_tool_use? boolean Defaults to true.
+---@field stream fun(req: table): table[]|fun(): table? Yields provider event tables; required.
 
 ---@class kage
 kage = {}
@@ -268,7 +302,7 @@ function kage.on(event, handler) end
 
 --- Register a new LLM provider implementation. Advanced; see
 --- the example plugins for a realistic shape.
----@param spec table
+---@param spec kage.ProviderSpec
 function kage.register_provider(spec) end
 
 --- Session inspection and control.
@@ -322,8 +356,8 @@ function kage.fs.read(path) end
 
 --- Write a file under the workdir. Same restriction as read.
 ---@param path string
----@param contents string
-function kage.fs.write(path, contents) end
+---@param content string
+function kage.fs.write(path, content) end
 
 --- Host-gated HTTP.
 ---@class kage.http
@@ -332,5 +366,57 @@ kage.http = {}
 --- HTTP GET. The allow-list is host-controlled; unauthorized
 --- hosts raise an error.
 ---@param url string
----@return { status: integer, body: string, headers: table }
+---@return { status: integer, body: string, content_type: string, truncated: boolean }
 function kage.http.get(url) end
+
+--- Declarative ACP agent config.
+---@class kage.acp
+kage.acp = {}
+
+--- Declare an upstream ACP agent at runtime, mirroring
+--- `[acp.agents.<name>]` in config.toml. Core spawns it.
+---@param spec kage.AcpAgentSpec
+function kage.acp.add_agent(spec) end
+
+--- Register the single policy callback consulted when an
+--- upstream ACP agent asks to run a tool. It must return a
+--- boolean and must not open a dialog (no coroutine suspend):
+--- it is policy, not UI. No handler, or a non-boolean or
+--- erroring handler, denies.
+---@param handler fun(req: table): boolean
+function kage.on_acp_permission(handler) end
+
+--- Declarative MCP server config.
+---@class kage.mcp
+kage.mcp = {}
+
+--- Declare an MCP server at runtime, mirroring
+--- `[mcp.servers.<name>]` in config.toml. Core spawns it.
+---@param spec kage.McpServerSpec
+function kage.mcp.add_server(spec) end
+
+--- Names of the plugin-declared MCP servers, sorted.
+---@return string[]
+function kage.mcp.list_servers() end
+
+--- Ask the host to restart a declared MCP server. Applied
+--- between turns against the live manager.
+---@param name string
+function kage.mcp.restart(name) end
+
+--- Theme inspection and switching.
+---@class kage.theme
+kage.theme = {}
+
+--- The active theme name, or "" if none is set yet.
+---@return string
+function kage.theme.current() end
+
+--- Theme names that may be passed to `kage.theme.set`.
+---@return string[]
+function kage.theme.list() end
+
+--- Request a theme switch. The host validates and applies it
+--- between turns. Errors on a non-string or empty name.
+---@param name string
+function kage.theme.set(name) end

@@ -1705,6 +1705,17 @@ fn refresh_session_entries(
             && let Ok(role) = serde_json::to_value(m.message.role)
         {
             obj["role"] = role;
+            // First text block, if any. Lets plugin labels show what
+            // the message actually said instead of only ts + id (the
+            // rewind picker is the main consumer).
+            for block in &m.message.content {
+                if let kage_core::Content::Text { text } = block
+                    && !text.is_empty()
+                {
+                    obj["text"] = serde_json::Value::String(text.clone());
+                    break;
+                }
+            }
         }
         out.push(obj);
     }

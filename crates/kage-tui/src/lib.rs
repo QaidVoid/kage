@@ -35,7 +35,7 @@ pub use command::{
 };
 pub use error::TuiError;
 pub use events::populate_from_history;
-pub use events::{SharedBuffer, TuiHooks, shared_buffer};
+pub use events::{SharedBuffer, SharedSteering, TuiHooks, shared_buffer, shared_steering};
 pub use hostlog::buffer_host_log;
 pub use input::{HISTORY_MAX, InputAction, InputState, Mode, Pane};
 pub use layout::{

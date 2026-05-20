@@ -232,6 +232,12 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     }
     let cx = Arc::new(Mutex::new(initial_cx));
     let (tx, rx) = mpsc::channel::<RunRequest>();
+    // The worker keeps its own sender so it can re-queue any user
+    // prompts left in the steering queue after a run finishes (e.g.
+    // because the model emitted text without tool calls, exiting the
+    // inner loop before the next steering drain could pick them up).
+    let tx_worker = tx.clone();
+    let steering = kage_tui::shared_steering();
     let (dialog_tx, dialog_rx) = mpsc::channel::<PluginDialog>();
 
     // Plan a session up-front but defer creating the file until the
@@ -284,6 +290,8 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         toasts: toasts.clone(),
         dialog_tx,
         loop_cfg,
+        steering: steering.clone(),
+        tx_self: tx_worker,
     });
 
     let mut tui = match Tui::enter() {
@@ -358,6 +366,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     app.set_cancel_flag(cancel.clone());
     app.set_toasts(toasts.clone());
     app.set_session_usage(session_usage);
+    app.set_steering_queue(steering.clone());
     if let Some(p) = session_path.as_ref() {
         let path = p.lock().expect("session path mutex poisoned").clone();
         if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
@@ -424,6 +433,16 @@ struct WorkerConfig {
     dialog_tx: mpsc::Sender<PluginDialog>,
     /// Loop tuning resolved from user/project config at startup.
     loop_cfg: LoopConfig,
+    /// Shared FIFO of user prompts the App pushes when a `Submit`
+    /// lands mid-run. The worker hands a clone to [`TuiHooks`] so the
+    /// agent loop drains it at every turn boundary, and re-queues any
+    /// leftovers after each run via [`Self::tx_self`].
+    steering: kage_tui::SharedSteering,
+    /// Sender on the worker's own request channel. Used to re-submit
+    /// any prompts left in the steering queue after a run finishes so
+    /// the next iteration of the worker loop picks them up as fresh
+    /// `Submit`s instead of stranding the user's input.
+    tx_self: mpsc::Sender<RunRequest>,
 }
 
 /// Apply pending MCP changes before a turn: plugin-requested
@@ -478,6 +497,8 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
             toasts,
             dialog_tx,
             loop_cfg,
+            steering,
+            tx_self,
         } = cfg;
 
         // A generated title is written at most once per session per
@@ -575,7 +596,27 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         session_usage.clone(),
                         qualified.clone(),
                         context_window,
+                        steering.clone(),
                     );
+                    // Re-submit any prompts the user queued after the
+                    // last turn boundary checked steering: the inner
+                    // loop exits as soon as a turn finishes without
+                    // tool calls, so a late-arriving steering item is
+                    // not picked up. Resending through the channel
+                    // preserves FIFO with any post-run submits and
+                    // reuses the full Submit path (history, session
+                    // title, etc.) without duplicating handler logic.
+                    // Drains before flipping `working = false` so a
+                    // simultaneous user submit cannot race ahead of
+                    // earlier queued items.
+                    if let Ok(mut q) = steering.lock() {
+                        while let Some(text) = q.pop_front() {
+                            let _ = tx_self.send(RunRequest::Submit {
+                                text,
+                                images: Vec::new(),
+                            });
+                        }
+                    }
                     if let Ok(mut snap) = session_usage.lock() {
                         snap.working = false;
                     }
@@ -1277,9 +1318,10 @@ fn run_with_hooks(
     session_usage: SharedSessionUsage,
     qualified_model: String,
     context_window: u64,
+    steering: kage_tui::SharedSteering,
 ) -> bool {
     use crate::usage_hooks::UsageHooks;
-    let tui_hooks = TuiHooks::new(NoopHooks, buffer.clone());
+    let tui_hooks = TuiHooks::new(NoopHooks, buffer.clone()).with_steering(steering);
     match (writer, plugin_runtime) {
         (Some(w), Some(rt)) => {
             let mut recorded =

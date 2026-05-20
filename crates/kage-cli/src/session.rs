@@ -291,6 +291,11 @@ impl<H: Hooks> Hooks for SessionRecordingHooks<H> {
     fn get_followup(&mut self) -> Option<String> {
         self.inner.get_followup()
     }
+
+    fn on_user_message(&mut self, message: &Message) {
+        self.record_user_message(message);
+        self.inner.on_user_message(message);
+    }
 }
 
 #[cfg(test)]
@@ -341,6 +346,43 @@ mod tests {
         assert!(matches!(entries[0], SessionEntry::Header(_)));
         match &entries[1] {
             SessionEntry::Message(m) => assert_eq!(m.message.role, Role::User),
+            other => panic!("expected user message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn on_user_message_persists_loop_pushed_steering_to_session() {
+        // The loop calls `on_user_message` after it appends a steering
+        // (or follow-up, or stall-nudge) message to history. The session
+        // writer must catch it because user messages are not part of
+        // `LoopEvent`.
+        let (_dir, writer, _) = temp_session();
+        let path = writer.path().to_path_buf();
+        let mut hooks = SessionRecordingHooks::new(NoopHooks, writer);
+        let steered = Message::new(
+            Role::User,
+            vec![Content::Text {
+                text: "queued mid-run".into(),
+            }],
+            None,
+        );
+        hooks.on_user_message(&steered);
+        drop(hooks);
+
+        let entries: Vec<_> = SessionReader::iter(&path)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 2); // header + user
+        match &entries[1] {
+            SessionEntry::Message(m) => {
+                assert_eq!(m.message.role, Role::User);
+                let text = m.message.content.iter().find_map(|c| match c {
+                    Content::Text { text } => Some(text.as_str()),
+                    _ => None,
+                });
+                assert_eq!(text, Some("queued mid-run"));
+            }
             other => panic!("expected user message, got {other:?}"),
         }
     }

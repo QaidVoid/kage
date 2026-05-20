@@ -9,6 +9,7 @@
 //! The lock is held only as long as one event takes to apply, never
 //! during `Hooks` re-entry.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use kage_core::{Content, LoopEvent, Message, Role, ToolOutput};
@@ -26,6 +27,20 @@ pub fn shared_buffer() -> SharedBuffer {
     Arc::new(Mutex::new(Buffer::new()))
 }
 
+/// FIFO of user prompts queued while an agent run is in flight.
+///
+/// The TUI pushes from the input thread when the user submits a text
+/// prompt mid-run; the agent loop drains via [`Hooks::get_steering`]
+/// at every turn boundary so the queued message lands as a user turn
+/// before the next provider call instead of after the whole run.
+pub type SharedSteering = Arc<Mutex<VecDeque<String>>>;
+
+/// Construct an empty steering queue.
+#[must_use]
+pub fn shared_steering() -> SharedSteering {
+    Arc::new(Mutex::new(VecDeque::new()))
+}
+
 /// Hooks impl that mirrors [`LoopEvent`]s into the [`SharedBuffer`].
 ///
 /// Wraps another `Hooks` so a host can chain (TUI display + session
@@ -33,12 +48,26 @@ pub fn shared_buffer() -> SharedBuffer {
 pub struct TuiHooks<H: Hooks> {
     inner: H,
     buffer: SharedBuffer,
+    steering: Option<SharedSteering>,
 }
 
 impl<H: Hooks> TuiHooks<H> {
     /// Wrap `inner` so its `on_event` flow also paints into `buffer`.
     pub fn new(inner: H, buffer: SharedBuffer) -> Self {
-        Self { inner, buffer }
+        Self {
+            inner,
+            buffer,
+            steering: None,
+        }
+    }
+
+    /// Attach a steering queue. While set, `get_steering` pops the
+    /// oldest queued prompt and returns it to the loop; without one,
+    /// steering falls through to the inner hook.
+    #[must_use]
+    pub fn with_steering(mut self, queue: SharedSteering) -> Self {
+        self.steering = Some(queue);
+        self
     }
 
     /// Append a user-typed prompt to the buffer. The agent loop never
@@ -90,11 +119,21 @@ impl<H: Hooks> Hooks for TuiHooks<H> {
     }
 
     fn get_steering(&mut self) -> Option<String> {
+        if let Some(q) = &self.steering
+            && let Ok(mut g) = q.lock()
+            && let Some(text) = g.pop_front()
+        {
+            return Some(text);
+        }
         self.inner.get_steering()
     }
 
     fn get_followup(&mut self) -> Option<String> {
         self.inner.get_followup()
+    }
+
+    fn on_user_message(&mut self, message: &Message) {
+        self.inner.on_user_message(message);
     }
 }
 
@@ -327,6 +366,27 @@ mod tests {
     fn fresh() -> (SharedBuffer, TuiHooks<NoopHooks>) {
         let buf = shared_buffer();
         (buf.clone(), TuiHooks::new(NoopHooks, buf))
+    }
+
+    #[test]
+    fn with_steering_pops_queued_text_before_inner() {
+        let buf = shared_buffer();
+        let queue = shared_steering();
+        queue.lock().unwrap().push_back("first".into());
+        queue.lock().unwrap().push_back("second".into());
+        let mut hooks = TuiHooks::new(NoopHooks, buf).with_steering(queue.clone());
+        assert_eq!(hooks.get_steering().as_deref(), Some("first"));
+        assert_eq!(hooks.get_steering().as_deref(), Some("second"));
+        // Empty queue falls through to inner (NoopHooks => None).
+        assert!(hooks.get_steering().is_none());
+    }
+
+    #[test]
+    fn no_steering_queue_falls_through_to_inner() {
+        let (_buf, mut hooks) = fresh();
+        // NoopHooks::get_steering is None; without with_steering the
+        // wrapper must agree.
+        assert!(hooks.get_steering().is_none());
     }
 
     fn id() -> MessageId {

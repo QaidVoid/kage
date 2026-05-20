@@ -233,6 +233,20 @@ pub trait Hooks {
         None
     }
 
+    /// Fired right after the loop appends a user message it produced
+    /// itself: a drained steering message, a follow-up, or a synthetic
+    /// nudge from the loop's stall guard. The first user message of a
+    /// run does not flow through here because the host pushes it onto
+    /// history before calling [`run`](crate::run).
+    ///
+    /// Use this to persist the just-added message: the agent loop does
+    /// not emit user messages as [`LoopEvent`]s, so session writers and
+    /// other recorders that hook [`Self::on_event`] would otherwise
+    /// miss it. The default implementation is a no-op.
+    fn on_user_message(&mut self, message: &Message) {
+        let _ = message;
+    }
+
     /// Polled after the model declares the turn finished.
     ///
     /// A `Some(text)` return value re-enters the inner loop with the text

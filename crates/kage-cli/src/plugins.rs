@@ -360,6 +360,10 @@ impl<H: Hooks> Hooks for PluginEventHooks<H> {
         self.drain_plugin_messages();
         self.pending_steering.pop_front()
     }
+
+    fn on_user_message(&mut self, message: &Message) {
+        self.inner.on_user_message(message);
+    }
 }
 
 impl<H: Hooks> PluginEventHooks<H> {

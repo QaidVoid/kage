@@ -661,6 +661,14 @@ pub struct App {
     /// turn is what we want to cancel, so a queued `RunRequest::Cancel`
     /// would not fire until *after* the turn finishes naturally.
     cancel_flag: Option<CancelFlag>,
+    /// Shared FIFO of user prompts queued while a run is in flight. A
+    /// text-only `Submit` issued mid-run lands here so the agent loop
+    /// picks it up at the next turn boundary via `Hooks::get_steering`,
+    /// instead of buffering behind the next `RunRequest` and only
+    /// firing after the whole run completes. `None` until the host
+    /// registers a queue, in which case mid-run submits fall back to
+    /// the channel path (today's behavior).
+    steering: Option<crate::events::SharedSteering>,
     /// Shared queue of ephemeral toast notifications painted as a
     /// top-right overlay over the conversation buffer. The handle is
     /// cloned to whatever sinks need to push (the App's own
@@ -738,6 +746,7 @@ impl App {
             last_cursor_style: None,
             session_usage: None,
             cancel_flag: None,
+            steering: None,
             toasts: None,
             dialog_rx: None,
             plugin_overlay: None,
@@ -762,6 +771,26 @@ impl App {
     /// agent loop and cannot drain its request channel.
     pub fn set_cancel_flag(&mut self, flag: CancelFlag) {
         self.cancel_flag = Some(flag);
+    }
+
+    /// Register a steering queue. With one set, a text-only `Submit`
+    /// issued while [`Self::is_run_in_flight`] is true pushes into the
+    /// queue and shows a toast; the agent loop's `get_steering` hook
+    /// drains it at the next turn boundary. Without one, every
+    /// `Submit` goes through the normal worker channel.
+    pub fn set_steering_queue(&mut self, queue: crate::events::SharedSteering) {
+        self.steering = Some(queue);
+    }
+
+    /// Whether the host worker is currently inside `run_with_hooks`.
+    /// Reads the shared session-usage `working` flag the worker
+    /// flips on entry and exit. Returns `false` when no usage
+    /// snapshot is registered (the host opted out of the modeline).
+    fn is_run_in_flight(&self) -> bool {
+        self.session_usage
+            .as_ref()
+            .and_then(|u| u.lock().ok().map(|g| g.working))
+            .unwrap_or(false)
     }
 
     /// Register the shared toast queue. While set, App-internal
@@ -2982,21 +3011,41 @@ impl App {
         None
     }
 
+    /// Resolve an `InputAction::Submit`: paint the user block, then
+    /// either push onto the steering queue (text-only mid-run with a
+    /// queue attached) or dispatch as a `RunRequest::Submit` over the
+    /// worker channel. Image-bearing submits always take the channel
+    /// path because the steering hook only carries text.
+    fn handle_submit(&mut self, text: String) {
+        let images = self.input.take_attached();
+        if let Ok(mut buf) = self.buffer.lock() {
+            buf.push_user(text.clone());
+            for img in &images {
+                buf.push_custom("kage:image", img.placeholder(), false);
+            }
+        }
+        let queue_steering =
+            images.is_empty() && self.steering.is_some() && self.is_run_in_flight();
+        if !queue_steering {
+            let _ = self.send_request(RunRequest::Submit { text, images });
+            return;
+        }
+        let pushed = self
+            .steering
+            .as_ref()
+            .and_then(|q| q.lock().ok().map(|mut g| g.push_back(text)))
+            .is_some();
+        if pushed {
+            self.notify("queued for next turn");
+        }
+    }
+
     fn apply(&mut self, action: InputAction) -> Option<AppExit> {
         // Phase 9.10/9.11/9.17 will wire BeginCommand/BeginSearch/Yank;
         // for now they fall through to the silent EnterMode arm so the
         // modal state machine still cycles cleanly.
         match action {
-            InputAction::Submit(text) => {
-                let images = self.input.take_attached();
-                if let Ok(mut buf) = self.buffer.lock() {
-                    buf.push_user(text.clone());
-                    for img in &images {
-                        buf.push_custom("kage:image", img.placeholder(), false);
-                    }
-                }
-                let _ = self.send_request(RunRequest::Submit { text, images });
-            }
+            InputAction::Submit(text) => self.handle_submit(text),
             InputAction::Scroll(delta) => self.scroll_by(delta),
             InputAction::ScrollToTop => self.set_scroll(usize::MAX),
             InputAction::ScrollToBottom => self.set_scroll(0),

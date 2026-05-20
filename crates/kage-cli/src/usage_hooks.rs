@@ -127,4 +127,8 @@ impl<H: Hooks> Hooks for UsageHooks<H> {
     fn get_followup(&mut self) -> Option<String> {
         self.inner.get_followup()
     }
+
+    fn on_user_message(&mut self, message: &kage_core::Message) {
+        self.inner.on_user_message(message);
+    }
 }

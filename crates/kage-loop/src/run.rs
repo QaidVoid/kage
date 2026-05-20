@@ -76,11 +76,13 @@ where
             }
 
             if let Some(text) = drain_messages(config.steering_mode, || hooks.get_steering()) {
-                cx.history.push(kage_core::Message::new(
+                let msg = kage_core::Message::new(
                     kage_core::Role::User,
                     vec![kage_core::Content::Text { text }],
                     cx.history.last().map(|m| m.id),
-                ));
+                );
+                hooks.on_user_message(&msg);
+                cx.history.push(msg);
             }
 
             if let Err(kind) = maybe_compact(cx, config, provider, cancel, hooks, &mut emit) {
@@ -242,22 +244,26 @@ where
             }
             cx.history.extend(results);
             if let Some(text) = steering {
-                cx.history.push(kage_core::Message::new(
+                let msg = kage_core::Message::new(
                     kage_core::Role::User,
                     vec![kage_core::Content::Text { text }],
                     cx.history.last().map(|m| m.id),
-                ));
+                );
+                hooks.on_user_message(&msg);
+                cx.history.push(msg);
             }
         }
 
         let Some(text) = drain_messages(config.followup_mode, || hooks.get_followup()) else {
             return Ok(());
         };
-        cx.history.push(kage_core::Message::new(
+        let followup = kage_core::Message::new(
             kage_core::Role::User,
             vec![kage_core::Content::Text { text }],
             cx.history.last().map(|m| m.id),
-        ));
+        );
+        hooks.on_user_message(&followup);
+        cx.history.push(followup);
     }
 }
 
@@ -1860,6 +1866,65 @@ mod tests {
         assert!(matches!(res, Err(LoopError::Provider { .. })));
         assert_eq!(mock.call_count(), 2, "initial attempt + one bounded retry");
         assert_eq!(hooks.notices(), 1);
+    }
+
+    #[test]
+    fn steering_message_fires_on_user_message_then_lands_in_history() {
+        #[derive(Default)]
+        struct Steerer {
+            queued: Vec<String>,
+            recorded: Vec<String>,
+        }
+        impl Hooks for Steerer {
+            fn get_steering(&mut self) -> Option<String> {
+                if self.queued.is_empty() {
+                    None
+                } else {
+                    Some(self.queued.remove(0))
+                }
+            }
+            fn on_user_message(&mut self, message: &Message) {
+                let text = message
+                    .content
+                    .iter()
+                    .find_map(|c| match c {
+                        Content::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                self.recorded.push(text);
+            }
+        }
+
+        let mock = MockProvider::sequence(vec![good_turn(), good_turn()]);
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.history.push(user_msg("first"));
+        let cfg = LoopConfig::default();
+        let mut hooks = Steerer {
+            queued: vec!["mid-run nudge".into()],
+            recorded: Vec::new(),
+        };
+        let cancel = CancelFlag::new();
+        let registry = ToolRegistry::new();
+
+        run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {}).unwrap();
+
+        assert_eq!(
+            hooks.recorded,
+            vec!["mid-run nudge".to_owned()],
+            "the steering text must be reported via on_user_message",
+        );
+        let last_user = cx
+            .history
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::User)
+            .expect("steering must produce a user message in history");
+        let last_text = last_user.content.iter().find_map(|c| match c {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        });
+        assert_eq!(last_text, Some("mid-run nudge"));
     }
 
     #[test]

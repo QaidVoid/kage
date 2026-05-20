@@ -569,6 +569,10 @@ impl Hooks for BoxedHooks {
     fn get_followup(&mut self) -> Option<String> {
         self.0.get_followup()
     }
+
+    fn on_user_message(&mut self, message: &kage_core::Message) {
+        self.0.on_user_message(message);
+    }
 }
 
 /// Implement `kage resume`: replay an existing session and append a new

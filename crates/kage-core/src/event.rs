@@ -272,13 +272,26 @@ pub enum LoopEvent {
         /// Text of the synthetic message that replaced the summarized turns.
         summary: String,
     },
-    /// A non-terminal informational message from the loop, surfaced to
-    /// the user but never persisted to the session. Used for things
-    /// the user should see but that are not part of the transcript -
-    /// e.g. "provider stalled; retrying (2/4)".
-    Notice {
-        /// Human-readable line to show.
-        message: String,
+    /// A transient provider failure that the loop is about to retry.
+    /// Surfaced to the user as a non-persisted notice so the host can
+    /// show "retrying 2/4 in 8s" (and, when the server asked for a
+    /// longer wait than the loop's cap, "anthropic asked for 5m").
+    ProviderRetry {
+        /// 1-based attempt counter for the next retry.
+        attempt: u32,
+        /// Configured retry ceiling.
+        max_attempts: u32,
+        /// Seconds the loop will actually sleep before retrying. Always
+        /// less than or equal to the loop's internal cap (60s).
+        wait_secs: u64,
+        /// Seconds the server asked for via `Retry-After` when present.
+        /// `Some` whenever the provider returned a hint, even if the
+        /// hint did not exceed the cap; UIs decide whether to surface
+        /// it. `None` for purely client-side backoff.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        requested_secs: Option<u64>,
+        /// Stringified underlying error for human display.
+        error: String,
     },
     /// Terminal error.
     Error {

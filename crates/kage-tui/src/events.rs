@@ -139,8 +139,23 @@ fn apply_event(buf: &mut Buffer, event: &LoopEvent) {
                 false,
             );
         }
-        LoopEvent::Notice { message } => {
-            buf.push_custom("kage:notify", message.clone(), false);
+        LoopEvent::ProviderRetry {
+            attempt,
+            max_attempts,
+            wait_secs,
+            requested_secs,
+            error,
+        } => {
+            let mut msg = format!(
+                "provider error ({error}); retrying {attempt}/{max_attempts} in {wait_secs}s"
+            );
+            if let Some(req) = requested_secs
+                && *req > *wait_secs
+            {
+                use std::fmt::Write as _;
+                let _ = write!(msg, " (server asked for {req}s)");
+            }
+            buf.push_custom("kage:notify", msg, false);
         }
         LoopEvent::Error { kind } => {
             buf.push_custom("kage:error", format!("[error] {kind}"), false);

@@ -148,16 +148,17 @@ where
                                 return Err(kind);
                             }
                             attempt += 1;
+                            let requested = e.retry_after();
                             let wait = retry_backoff(attempt, &e);
                             emit_one(
                                 hooks,
                                 &mut emit,
-                                LoopEvent::Notice {
-                                    message: format!(
-                                        "provider error ({e}); retrying {attempt}/{} in {}s",
-                                        config.max_provider_retries,
-                                        wait.as_secs().max(1)
-                                    ),
+                                LoopEvent::ProviderRetry {
+                                    attempt,
+                                    max_attempts: config.max_provider_retries,
+                                    wait_secs: wait.as_secs().max(1),
+                                    requested_secs: requested.map(|d| d.as_secs()),
+                                    error: e.to_string(),
                                 },
                             );
                             if !sleep_cancelable(cancel, wait) {
@@ -1775,7 +1776,7 @@ mod tests {
     }
     impl Hooks for EventLog {
         fn on_event(&mut self, event: &LoopEvent) {
-            if let LoopEvent::Notice { .. } = event
+            if let LoopEvent::ProviderRetry { .. } = event
                 && let Some(c) = &self.cancel_on_notice
             {
                 c.cancel();
@@ -1787,7 +1788,7 @@ mod tests {
         fn notices(&self) -> usize {
             self.events
                 .iter()
-                .filter(|e| matches!(e, LoopEvent::Notice { .. }))
+                .filter(|e| matches!(e, LoopEvent::ProviderRetry { .. }))
                 .count()
         }
     }
@@ -1859,6 +1860,47 @@ mod tests {
         assert!(matches!(res, Err(LoopError::Provider { .. })));
         assert_eq!(mock.call_count(), 2, "initial attempt + one bounded retry");
         assert_eq!(hooks.notices(), 1);
+    }
+
+    #[test]
+    fn provider_retry_event_surfaces_server_retry_after() {
+        let rate_limited = vec![Err(kage_provider::ProviderError::RateLimited {
+            retry_after: Some(std::time::Duration::from_secs(300)),
+        })];
+        let mock = MockProvider::sequence(vec![rate_limited, good_turn()]);
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.history.push(user_msg("hello"));
+        // Cancel during the (capped) backoff so the test does not actually
+        // sleep 60s while still letting the ProviderRetry event fire.
+        let cancel = CancelFlag::new();
+        let mut hooks = EventLog {
+            events: Vec::new(),
+            cancel_on_notice: Some(cancel.clone()),
+        };
+        let cfg = LoopConfig::default();
+        let registry = ToolRegistry::new();
+
+        let _ = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {});
+
+        let retry = hooks
+            .events
+            .iter()
+            .find_map(|e| match e {
+                LoopEvent::ProviderRetry {
+                    wait_secs,
+                    requested_secs,
+                    ..
+                } => Some((*wait_secs, *requested_secs)),
+                _ => None,
+            })
+            .expect("loop should have emitted ProviderRetry");
+        let (wait, requested) = retry;
+        assert!(wait <= 60, "wait should be capped at 60s, got {wait}");
+        assert_eq!(
+            requested,
+            Some(300),
+            "server-requested delay must survive in requested_secs",
+        );
     }
 
     #[test]

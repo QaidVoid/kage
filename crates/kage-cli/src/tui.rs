@@ -60,6 +60,28 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     let buffer = shared_buffer();
     let toasts = shared_toasts();
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    // First TUI launch after an upgrade gets a one-line scrollback notice.
+    // A read or write failure here is non-fatal: the worst case is missing
+    // the notice on this boot.
+    let current_version = env!("CARGO_PKG_VERSION");
+    match crate::state::record_version_seen(current_version) {
+        Ok(Some(prev)) => {
+            if let Ok(mut buf) = buffer.lock() {
+                buf.push_custom(
+                    "kage:notify",
+                    format!("kage updated: {prev} -> {current_version}"),
+                    false,
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(err) => {
+            if let Ok(mut buf) = buffer.lock() {
+                buf.push_custom("kage:error", format!("state: {err}"), false);
+            }
+        }
+    }
     // Load user/project config and map the loop-tunable subset onto
     // the real LoopConfig. A malformed config is surfaced as an inline
     // error block rather than silently falling back to defaults.

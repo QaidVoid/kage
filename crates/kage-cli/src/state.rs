@@ -22,6 +22,10 @@ pub struct State {
     /// Last `provider:model` the user successfully ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_model: Option<String>,
+    /// Last `kage` binary version (`CARGO_PKG_VERSION`) that opened
+    /// the TUI. Compared on startup to detect upgrades.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_seen_version: Option<String>,
 }
 
 fn default_version() -> u32 {
@@ -35,6 +39,7 @@ impl State {
         Self {
             version: FORMAT_VERSION,
             last_model: None,
+            last_seen_version: None,
         }
     }
 
@@ -99,6 +104,25 @@ pub fn record_last_model(model: &str) -> Result<bool, String> {
     state.save().map(|()| true)
 }
 
+/// Record the running binary version into [`State::last_seen_version`]
+/// and report whether it changed since the last run.
+///
+/// Returns `Ok(Some(previous))` when the saved version differed from
+/// `current` (the caller can surface a "kage updated from X to Y"
+/// notice), `Ok(None)` when this is the first run or the version
+/// matches. The state file is rewritten on a real change; first-run
+/// also writes so subsequent launches do not all look like upgrades.
+pub fn record_version_seen(current: &str) -> Result<Option<String>, String> {
+    let mut state = State::load();
+    let prev = state.last_seen_version.clone();
+    if prev.as_deref() == Some(current) {
+        return Ok(None);
+    }
+    state.last_seen_version = Some(current.to_owned());
+    state.save()?;
+    Ok(prev)
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
@@ -132,5 +156,27 @@ mod tests {
         state.save_to(&path).unwrap();
         let raw = fs::read_to_string(&path).unwrap();
         assert!(!raw.contains("last_model"), "raw was: {raw}");
+        assert!(!raw.contains("last_seen_version"), "raw was: {raw}");
+    }
+
+    #[test]
+    fn last_seen_version_round_trips() {
+        let mut state = State::empty();
+        state.last_seen_version = Some("0.2.0".into());
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        state.save_to(&path).unwrap();
+        let read = State::load_from(&path).unwrap();
+        assert_eq!(read.last_seen_version.as_deref(), Some("0.2.0"));
+    }
+
+    #[test]
+    fn state_files_missing_last_seen_version_load_as_none() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        fs::write(&path, r#"{"version":1,"last_model":"x:y"}"#).unwrap();
+        let state = State::load_from(&path).unwrap();
+        assert!(state.last_seen_version.is_none());
+        assert_eq!(state.last_model.as_deref(), Some("x:y"));
     }
 }

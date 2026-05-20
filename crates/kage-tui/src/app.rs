@@ -193,6 +193,14 @@ pub enum RunRequest {
     /// `session_before_switch` veto, then reseats the runtime onto the
     /// target so subsequent turns continue there.
     SwitchSession(kage_plugin::SwitchTarget),
+    /// A plugin file changed on disk. The worker re-evaluates every
+    /// `.lua` in the plugins directory and toasts the outcome. Chrome
+    /// (`set_header`/`set_footer`), status, autocomplete, terminal
+    /// hooks, and block renderers reattach automatically because they
+    /// live in shared slots the runtime overwrites during load.
+    /// Commands and keybindings the App cached at startup do not pick
+    /// up new/removed entries until the next launch.
+    ReloadPlugins,
 }
 
 /// Outcome of [`App::run`].

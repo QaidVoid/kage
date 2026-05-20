@@ -102,9 +102,20 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     // below once plugins have had a chance to contribute extra dirs via
     // `resources_discover`.
     let bare_prompt = crate::runtime_env::build_system_prompt(system, &workdir, model, &[]);
-    let plugin_runtime = match crate::plugins_dir() {
-        Ok(dir) => match setup_runtime_with_sink(
-            &dir,
+    // Resolve once up-front so the same path is shared by initial load,
+    // the file-system watcher, and the worker's reload handler.
+    let plugins_dir_path = match crate::plugins_dir() {
+        Ok(dir) => Some(dir),
+        Err(e) => {
+            if let Ok(mut buf) = buffer.lock() {
+                buf.push_custom("kage:error", e, false);
+            }
+            None
+        }
+    };
+    let plugin_runtime = match plugins_dir_path.as_ref() {
+        Some(dir) => match setup_runtime_with_sink(
+            dir,
             &workdir,
             model,
             &bare_prompt,
@@ -118,12 +129,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
                 None
             }
         },
-        Err(e) => {
-            if let Ok(mut buf) = buffer.lock() {
-                buf.push_custom("kage:error", e, false);
-            }
-            None
-        }
+        None => None,
     };
     if let Some(rt) = plugin_runtime.as_ref() {
         crate::acp_glue::set_runtime(rt);
@@ -237,6 +243,9 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     // because the model emitted text without tool calls, exiting the
     // inner loop before the next steering drain could pick them up).
     let tx_worker = tx.clone();
+    // The watcher thread (spawned below) holds its own clone so a
+    // plugin file change wakes the worker even when the user is idle.
+    let tx_watcher = tx.clone();
     let steering = kage_tui::shared_steering();
     let (dialog_tx, dialog_rx) = mpsc::channel::<PluginDialog>();
 
@@ -274,6 +283,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         snap.context_window = cx_guard.context_window;
         snap.thinking_level = cx_guard.thinking_level;
     }
+    let has_plugin_runtime = plugin_runtime.is_some();
     let worker = spawn_worker(WorkerConfig {
         registry: Arc::clone(&registry),
         active_qualified: Arc::clone(&active_qualified),
@@ -292,7 +302,39 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         loop_cfg,
         steering: steering.clone(),
         tx_self: tx_worker,
+        plugins_dir: plugins_dir_path.clone(),
     });
+
+    // Hot-reload watcher: a small thread owns the FS watcher, polls it
+    // every 150ms, and fires `ReloadPlugins` through the worker channel
+    // when a `.lua` file under the plugins dir changes. The thread exits
+    // when its `send` fails (channel disconnected at TUI shutdown).
+    if has_plugin_runtime && let Some(dir) = plugins_dir_path.as_ref() {
+        let dir = dir.clone();
+        let tx = tx_watcher;
+        let buf = buffer.clone();
+        thread::spawn(move || {
+            let watcher = match kage_plugin::PluginWatcher::new(dir) {
+                Ok(w) => w,
+                Err(err) => {
+                    if let Ok(mut b) = buf.lock() {
+                        b.push_custom("kage:error", format!("plugin watcher: {err}"), false);
+                    }
+                    return;
+                }
+            };
+            loop {
+                thread::sleep(std::time::Duration::from_millis(150));
+                if watcher.poll() && tx.send(RunRequest::ReloadPlugins).is_err() {
+                    return;
+                }
+            }
+        });
+    } else {
+        // `tx_watcher` is unused when there is no plugin runtime; drop
+        // it explicitly so the channel still closes when the App exits.
+        drop(tx_watcher);
+    }
 
     let mut tui = match Tui::enter() {
         Ok(t) => t,
@@ -443,6 +485,11 @@ struct WorkerConfig {
     /// the next iteration of the worker loop picks them up as fresh
     /// `Submit`s instead of stranding the user's input.
     tx_self: mpsc::Sender<RunRequest>,
+    /// Directory the plugin runtime loaded from at startup. Used by
+    /// the `ReloadPlugins` handler to call `runtime.reload_dir(...)`.
+    /// `None` when no plugin dir resolved (e.g. `$XDG_CONFIG_HOME`
+    /// unset and `$HOME` missing); reloads become no-ops.
+    plugins_dir: Option<PathBuf>,
 }
 
 /// Apply pending MCP changes before a turn: plugin-requested
@@ -499,6 +546,7 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
             loop_cfg,
             steering,
             tx_self,
+            plugins_dir,
         } = cfg;
 
         // A generated title is written at most once per session per
@@ -971,6 +1019,53 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         );
                     }
                 },
+                RunRequest::ReloadPlugins => {
+                    let Some(rt) = plugin_runtime.as_ref() else {
+                        continue;
+                    };
+                    let Some(dir) = plugins_dir.as_ref() else {
+                        continue;
+                    };
+                    match rt.reload_dir(dir) {
+                        Ok(report) => {
+                            let msg = if report.failed.is_empty() {
+                                format!("plugins reloaded ({} loaded)", report.loaded.len())
+                            } else {
+                                format!(
+                                    "plugins reloaded ({} ok, {} failed)",
+                                    report.loaded.len(),
+                                    report.failed.len()
+                                )
+                            };
+                            push_toast(
+                                &toasts,
+                                kage_tui::Toast::with_kind(
+                                    msg,
+                                    kage_tui::ToastKind::Info,
+                                    kage_tui::DEFAULT_TOAST_DURATION,
+                                ),
+                            );
+                            for (path, err) in report.failed {
+                                if let Ok(mut buf) = buffer.lock() {
+                                    buf.push_custom(
+                                        "kage:error",
+                                        format!("plugin {}: {err}", path.display()),
+                                        false,
+                                    );
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            if let Ok(mut buf) = buffer.lock() {
+                                buf.push_custom(
+                                    "kage:error",
+                                    format!("plugin reload: {err}"),
+                                    false,
+                                );
+                            }
+                        }
+                    }
+                }
             }
             refresh_session_entries(plugin_runtime.as_ref(), session_path.as_ref());
         }

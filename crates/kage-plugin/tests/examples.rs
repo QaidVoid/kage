@@ -89,6 +89,87 @@ fn tps_example_emits_summary_on_agent_end() {
 }
 
 #[test]
+fn transform_demo_redacts_secrets_in_user_text() {
+    let (rec, sink) = forwarding_sink();
+    let rt = PluginRuntime::builder().sink(sink).build().unwrap();
+    let source = std::fs::read_to_string(examples_dir().join("transform_demo.lua"))
+        .expect("read transform_demo.lua");
+    rt.eval(&source).expect("transform_demo.lua loads");
+
+    let history = json!([
+        {
+            "role": "user",
+            "id": "01M1",
+            "parent": null,
+            "ts": "2026-05-19T10:00:00+00:00",
+            "content": [{"type": "text", "text": "use sk-test-abc123 and Bearer xyz_456"}]
+        },
+        {
+            "role": "assistant",
+            "id": "01M2",
+            "parent": null,
+            "ts": "2026-05-19T10:00:01+00:00",
+            "content": [{"type": "text", "text": "ignore assistant sk-leak"}]
+        }
+    ]);
+    let out = rt.dispatch_transform("transform_context", history).unwrap();
+    let user_text = out[0]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        user_text.contains("[redacted]") && !user_text.contains("sk-test-abc123"),
+        "user text should be scrubbed, got {user_text:?}"
+    );
+    assert!(
+        !user_text.contains("xyz_456"),
+        "bearer not scrubbed: {user_text:?}"
+    );
+    let assistant_text = out[1]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        assistant_text.contains("sk-leak"),
+        "assistant text must be left alone, got {assistant_text:?}"
+    );
+    let r = rec.lock().unwrap();
+    assert!(r.errors.is_empty(), "no plugin errors: {:?}", r.errors);
+    assert!(
+        r.notifies.iter().any(|s| s.starts_with("redact: scrubbed")),
+        "got {:?}",
+        r.notifies
+    );
+}
+
+#[test]
+fn transform_demo_appends_date_to_system_prompt() {
+    let (_rec, sink) = forwarding_sink();
+    let rt = PluginRuntime::builder().sink(sink).build().unwrap();
+    let source = std::fs::read_to_string(examples_dir().join("transform_demo.lua")).unwrap();
+    rt.eval(&source).unwrap();
+
+    let req = json!({
+        "model": "mock:m",
+        "messages": [],
+        "system": "you are helpful"
+    });
+    let out = rt
+        .dispatch_transform("before_provider_request", req)
+        .unwrap();
+    let system = out["system"].as_str().unwrap();
+    assert!(system.starts_with("you are helpful"), "got {system:?}");
+    assert!(
+        system.contains("Today is "),
+        "missing date stamp in {system:?}"
+    );
+
+    let out2 = rt
+        .dispatch_transform("before_provider_request", out)
+        .unwrap();
+    let system2 = out2["system"].as_str().unwrap();
+    assert_eq!(
+        system2.matches("Today is ").count(),
+        1,
+        "running the hook twice must not append the stamp twice: {system2:?}"
+    );
+}
+
+#[test]
 fn git_status_announces_branch_on_agent_start() {
     let dir = tempfile::tempdir().unwrap();
     let git_dir = dir.path().join(".git");

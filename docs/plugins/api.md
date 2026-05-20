@@ -406,6 +406,10 @@ produced and returns a replacement, or `nil` for "no change".
 - `before_provider_request` - argument is the serialized provider
   request; rewrite it to inject a system header, strip a tool, or
   swap the model.
+
+  See `plugins/examples/transform_demo.lua` for a worked example
+  that scrubs secret tokens via `transform_context` and stamps the
+  current date into the system prompt via `before_provider_request`.
 - `compact_prepare` - fired right before history compaction calls
   the summarizer model. Argument is
   `{ transcript, instruction, prompt, model, summarized, kept }`.

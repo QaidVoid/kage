@@ -1220,14 +1220,16 @@ impl App {
     /// pending `kage.theme.set` and apply it on this thread (the same
     /// path as `:theme set`, so an unknown name surfaces an inline
     /// error rather than failing silently).
-    fn drain_plugin_theme(&mut self) {
+    fn drain_plugin_theme(&mut self) -> bool {
         let pending = self
             .plugin_theme_request
             .as_ref()
             .and_then(|slot| slot.lock().ok().and_then(|mut g| g.take()));
         if let Some(name) = pending {
             self.apply_theme_by_name(&name);
+            return true;
         }
+        false
     }
 
     /// Refresh the `kage.theme.*` snapshot: the current theme name plus
@@ -1253,15 +1255,15 @@ impl App {
     /// single-slot, so at most one is queued). An empty item list
     /// resolves immediately to "cancelled" rather than opening a dead
     /// picker.
-    fn drain_plugin_dialog(&mut self) {
+    fn drain_plugin_dialog(&mut self) -> bool {
         if self.picker.is_some() || self.plugin_overlay.is_some() {
-            return;
+            return false;
         }
         let Some(rx) = self.dialog_rx.as_ref() else {
-            return;
+            return false;
         };
         let Ok(dialog) = rx.try_recv() else {
-            return;
+            return false;
         };
         match dialog {
             PluginDialog::Select {
@@ -1271,7 +1273,7 @@ impl App {
             } => {
                 if items.is_empty() {
                     let _ = reply.send(None);
-                    return;
+                    return false;
                 }
                 let picks = items
                     .iter()
@@ -1322,6 +1324,7 @@ impl App {
                 self.active_dialog = Some(PluginDialogState::Editor { reply });
             }
         }
+        true
     }
 
     /// Refresh the session-list snapshot read by `kage.session.list`.
@@ -1374,8 +1377,18 @@ impl App {
             self.drain_plugin_compact_request();
             self.drain_plugin_fork_request();
             self.drain_plugin_switch_request();
-            self.drain_plugin_dialog();
-            self.drain_plugin_theme();
+            // Dialog + theme drains can mutate the visible screen
+            // (overlay open, theme swap). Without this, the worker
+            // pushes a `kage.ui.select` request from a /command, we
+            // open the overlay, but `needs_redraw` is still false and
+            // the loop blocks on `event::poll` until the user
+            // happens to press a key. Force a paint on the next pass.
+            if self.drain_plugin_dialog() {
+                needs_redraw = true;
+            }
+            if self.drain_plugin_theme() {
+                needs_redraw = true;
+            }
             if last_plugin_snapshot.is_none_or(|t| t.elapsed() >= PLUGIN_SNAPSHOT_INTERVAL) {
                 self.refresh_plugin_theme_state();
                 self.refresh_plugin_session_list();
@@ -1408,7 +1421,15 @@ impl App {
                 // is gated on actual visible change below.
                 Duration::from_millis(50)
             } else {
-                Duration::from_secs(1)
+                // 200ms idle wake (5 Hz) keeps plugin-dialog and other
+                // worker-pushed state visible without the user having
+                // to press a key. A 1s wake felt frozen: after a
+                // /command that opened a `kage.ui.*` dialog, the
+                // overlay would not appear until the next keypress or
+                // the next tick. The CPU cost of 5 idle wakes per
+                // second is negligible; the redraw gate below still
+                // skips repaints when nothing visible changed.
+                Duration::from_millis(200)
             };
             let mut deadline = Instant::now() + tick;
             // Toasts auto-expire on a wall-clock schedule independent

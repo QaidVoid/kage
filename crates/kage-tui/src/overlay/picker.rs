@@ -73,7 +73,50 @@ impl OverlayPicker {
 
 impl OverlayWidget for OverlayPicker {
     fn measure(&self, available: Rect) -> Rect {
-        center(available, 70, 80)
+        // Width: longest label plus a little padding for the
+        // gutter/badge/right-aligned chunk, clamped between a
+        // comfortable minimum and 80% of available so the picker is
+        // big enough to read but small enough that a tiny menu does
+        // not eat the whole screen.
+        let longest = self
+            .items
+            .iter()
+            .map(|i| {
+                let mut len = i.label.chars().count();
+                if let Some(r) = &i.right {
+                    len += r.chars().count() + 2;
+                }
+                if i.badge.is_some() {
+                    len += 3; // " B "
+                }
+                u16::try_from(len).unwrap_or(u16::MAX)
+            })
+            .max()
+            .unwrap_or(20)
+            .saturating_add(6); // borders + selection gutter
+        let max_w = (available.width.saturating_mul(80) / 100).max(30);
+        let want_w = longest.clamp(30, max_w);
+
+        // Height: distinct groups produce a section header + blank
+        // spacer; plus borders (2), search row (1), help row (1),
+        // plus the items themselves. Cap at 80% so a huge list still
+        // leaves the conversation context visible behind the overlay.
+        let groups: std::collections::BTreeSet<&str> = self
+            .items
+            .iter()
+            .filter_map(|i| i.group.as_deref())
+            .collect();
+        let item_rows = u16::try_from(self.items.len()).unwrap_or(u16::MAX);
+        let group_rows = u16::try_from(groups.len()).unwrap_or(0).saturating_mul(2);
+        let chrome = 4u16; // borders (2) + search (1) + help (1)
+        let want_h = item_rows
+            .saturating_add(group_rows)
+            .saturating_add(chrome)
+            .max(6);
+        let max_h = (available.height.saturating_mul(80) / 100).max(6);
+        let want_h = want_h.min(max_h);
+
+        center_absolute(available, want_w, want_h)
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &OverlayCtx<'_>) {
@@ -305,23 +348,17 @@ fn row_line(item: &PickItem, is_sel: bool, width: u16) -> Line<'static> {
     }
 }
 
-fn center(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
-    let h = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage((100 - percent_y) / 2),
-            Constraint::Percentage(percent_y),
-            Constraint::Percentage((100 - percent_y) / 2),
-        ])
-        .split(area)[1];
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage((100 - percent_x) / 2),
-            Constraint::Percentage(percent_x),
-            Constraint::Percentage((100 - percent_x) / 2),
-        ])
-        .split(h)[1]
+/// Center a rectangle of exactly `want_w` x `want_h` cells inside
+/// `area`. Clamped to the available size so over-large requests just
+/// fill the area. Used by [`OverlayPicker::measure`] now that picker
+/// dimensions follow content; the percentage-based [`center`] below
+/// remains for the few callers that still want a fixed-ratio modal.
+fn center_absolute(area: Rect, want_w: u16, want_h: u16) -> Rect {
+    let w = want_w.min(area.width);
+    let h = want_h.min(area.height);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    Rect::new(x, y, w, h)
 }
 
 #[cfg(test)]

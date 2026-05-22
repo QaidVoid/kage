@@ -2126,13 +2126,10 @@ pub(super) fn tool_pair_to_lines(
     // Body: tail-truncated. Folded gets a small preview window;
     // unfolded shows much more. Unfolded with hundreds of huge tool
     // outputs hurts frame time so the cap is intentional in both.
-    // Folded: tight preview cap. Unfolded: no cap. The user
-    // intentionally expanded this block; honor the request. Huge
-    // outputs may cost frame time but that's the trade they chose.
     let (cap_lines, cap_bytes) = if folded {
         (FOLDED_PREVIEW_LINES, FOLDED_PREVIEW_BYTES)
     } else {
-        (usize::MAX, usize::MAX)
+        (UNFOLDED_MAX_LINES, UNFOLDED_MAX_BYTES)
     };
     let body_style = if is_error {
         tool_error_style()
@@ -2183,6 +2180,13 @@ pub(super) fn tool_pair_to_lines(
 const FOLDED_PREVIEW_LINES: usize = 6;
 /// Byte cap that complements [`FOLDED_PREVIEW_LINES`].
 const FOLDED_PREVIEW_BYTES: usize = 2 * 1024;
+/// Max body lines shown for an unfolded tool block. Bounds the
+/// worst-case line construction cost without affecting typical
+/// outputs (most are well under this). The height estimator uses the
+/// same cap so scroll geometry stays consistent.
+const UNFOLDED_MAX_LINES: usize = 500;
+/// Byte cap for unfolded tool output body.
+const UNFOLDED_MAX_BYTES: usize = 256 * 1024;
 
 /// Estimate the wrapped-row height of a tool pair from raw text.
 /// Avoids building styled lines or running syntect. Used by pass 1
@@ -2201,7 +2205,7 @@ pub(crate) fn estimate_tool_pair_rows(
     let (cap_lines, cap_bytes) = if folded {
         (FOLDED_PREVIEW_LINES, FOLDED_PREVIEW_BYTES)
     } else {
-        (usize::MAX, usize::MAX)
+        (UNFOLDED_MAX_LINES, UNFOLDED_MAX_BYTES)
     };
     let raw_lines: Vec<&str> = output.split('\n').collect();
     let mut body_rows = 0usize;

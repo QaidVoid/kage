@@ -3511,6 +3511,11 @@ mod tests {
         }
         let backend = TestBackend::new(60, 12);
         let mut terminal = Terminal::new(backend).unwrap();
+
+        // Render once with a full-buffer selection so capture_and_overlay
+        // populates captured_rows. The selection coords cover the entire
+        // visible area.
+        app.screen_selection = Some(((0, 0), (999, 59)));
         app.render_into(&mut terminal).unwrap();
 
         // Locate "gamma" in the captured grid by column (cell) index,
@@ -3532,9 +3537,8 @@ mod tests {
         }
         let (anchor, cursor) = sel.expect("thinking text was never painted");
         app.screen_selection = Some((anchor, cursor));
+        app.render_into(&mut terminal).unwrap();
 
-        // The selection spans one word inside a thinking block; the
-        // yank must be exactly that word, not the whole block.
         assert_eq!(app.extract_selection_text(), "gamma");
     }
 

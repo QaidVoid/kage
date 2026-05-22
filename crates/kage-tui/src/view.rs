@@ -1016,70 +1016,66 @@ fn capture_and_overlay(
         return;
     }
     let virtual_top = buffer.last_virtual_top();
-    let theme = crate::theme::current();
-    let highlight_bg = theme.selection_color;
-    let on_select_fg = Color::Black;
     let buf = frame.buffer_mut();
-    let last_col = area.x.saturating_add(area.width).saturating_sub(1);
     let (start, end) = match selection {
         Some((a, c)) if a <= c => (Some(a), Some(c)),
         Some((a, c)) => (Some(c), Some(a)),
         None => (None, None),
     };
-    for screen_row in area.y..area.y.saturating_add(area.height) {
-        let vrow = virtual_top.saturating_add(usize::from(screen_row - area.y));
-        let mut row_cells: Vec<CapturedCell> = Vec::with_capacity(usize::from(area.width));
-        for col in area.x..area.x.saturating_add(area.width) {
-            let cell = &mut buf[(col, screen_row)];
-            let ch = cell.symbol().chars().next().unwrap_or(' ');
-            let decoration = cell_is_decoration(cell.modifier);
-            // The renderer hijacks `Modifier::SLOW_BLINK` as the
-            // chrome-marker bit; capture the flag here, then strip
-            // it so the terminal never paints an actual blink.
-            // Most emulators ignore the attribute; some (kitty, a
-            // few VTE forks, Windows Terminal in some modes) do not,
-            // and the user reported a steady visible blink.
-            cell.modifier.remove(DECORATION_MARKER);
-            row_cells.push(CapturedCell { ch, decoration });
-        }
-        if let (Some(s), Some(e)) = (start, end)
-            && vrow >= s.0
-            && vrow <= e.0
-        {
-            // Cap each row's overlay at the last cell that's neither
-            // chrome nor a trailing pad space: whitespace beyond the
-            // last real char looks like a long trailing highlight
-            // strip otherwise. `rposition` walks from the right, so
-            // mid-line spaces (code indentation, prose between
-            // words) still get painted - only the trailing run is
-            // trimmed.
-            let last_real_local = row_cells
-                .iter()
-                .rposition(|cell| !cell.decoration && cell.ch != ' ');
-            if let Some(last_real_idx) = last_real_local {
-                let last_real_col = area
-                    .x
-                    .saturating_add(u16::try_from(last_real_idx).unwrap_or(u16::MAX));
-                let from_col = if vrow == s.0 { s.1 } else { area.x };
-                let to_col = if vrow == e.0 { e.1 } else { last_col };
-                let lo = from_col.max(area.x);
-                let hi = to_col.min(last_col).min(last_real_col);
-                if hi >= lo {
-                    for col in lo..=hi {
-                        let local_idx = usize::from(col - area.x);
-                        if let Some(cell_meta) = row_cells.get(local_idx)
-                            && cell_meta.decoration
-                        {
-                            continue;
+
+    let has_selection = start.is_some() && end.is_some();
+    if has_selection {
+        let theme = crate::theme::current();
+        let highlight_bg = theme.selection_color;
+        let on_select_fg = Color::Black;
+        let last_col = area.x.saturating_add(area.width).saturating_sub(1);
+        let (s, e) = (start.unwrap(), end.unwrap());
+        for screen_row in area.y..area.y.saturating_add(area.height) {
+            let vrow = virtual_top.saturating_add(usize::from(screen_row - area.y));
+            let mut row_cells: Vec<CapturedCell> = Vec::with_capacity(usize::from(area.width));
+            for col in area.x..area.x.saturating_add(area.width) {
+                let cell = &mut buf[(col, screen_row)];
+                let ch = cell.symbol().chars().next().unwrap_or(' ');
+                let decoration = cell_is_decoration(cell.modifier);
+                cell.modifier.remove(DECORATION_MARKER);
+                row_cells.push(CapturedCell { ch, decoration });
+            }
+            if vrow >= s.0 && vrow <= e.0 {
+                let last_real_local = row_cells
+                    .iter()
+                    .rposition(|cell| !cell.decoration && cell.ch != ' ');
+                if let Some(last_real_idx) = last_real_local {
+                    let last_real_col = area
+                        .x
+                        .saturating_add(u16::try_from(last_real_idx).unwrap_or(u16::MAX));
+                    let from_col = if vrow == s.0 { s.1 } else { area.x };
+                    let to_col = if vrow == e.0 { e.1 } else { last_col };
+                    let lo = from_col.max(area.x);
+                    let hi = to_col.min(last_col).min(last_real_col);
+                    if hi >= lo {
+                        for col in lo..=hi {
+                            let local_idx = usize::from(col - area.x);
+                            if let Some(cell_meta) = row_cells.get(local_idx)
+                                && cell_meta.decoration
+                            {
+                                continue;
+                            }
+                            let cell = &mut buf[(col, screen_row)];
+                            cell.set_bg(highlight_bg);
+                            cell.set_fg(on_select_fg);
                         }
-                        let cell = &mut buf[(col, screen_row)];
-                        cell.set_bg(highlight_bg);
-                        cell.set_fg(on_select_fg);
                     }
                 }
             }
+            captured_rows.insert(vrow, row_cells);
         }
-        captured_rows.insert(vrow, row_cells);
+    } else {
+        for screen_row in area.y..area.y.saturating_add(area.height) {
+            for col in area.x..area.x.saturating_add(area.width) {
+                let cell = &mut buf[(col, screen_row)];
+                cell.modifier.remove(DECORATION_MARKER);
+            }
+        }
     }
 }
 

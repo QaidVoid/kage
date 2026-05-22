@@ -1184,7 +1184,7 @@ const INPUT_GLYPH: &str = "|";
 
 /// Default placeholder text shown when the input is empty.
 const INPUT_PLACEHOLDER_INSERT: &str = "Send a message...";
-const INPUT_PLACEHOLDER_NORMAL: &str = "press i to type, or use j/k to scroll";
+const INPUT_PLACEHOLDER_NORMAL: &str = "press i to type, Esc to scroll";
 
 fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {
     let area = regions.input;
@@ -2288,8 +2288,8 @@ fn truncated_body(
     let elided = total - taken.len();
     let dim = Style::default().fg(crate::theme::current().muted_fg);
     let elision = match trim {
-        BodyTrim::Head => format!("... ({elided} more lines, zo to expand)"),
-        BodyTrim::Tail => format!("... ({elided} earlier lines, zo to expand)"),
+        BodyTrim::Head => format!("... ({elided} more lines, Ctrl+O to expand)"),
+        BodyTrim::Tail => format!("... ({elided} earlier lines, Ctrl+O to expand)"),
     };
     let mut out = Vec::new();
     if matches!(trim, BodyTrim::Tail) && elided > 0 {

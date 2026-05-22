@@ -4,11 +4,32 @@ This page covers the keys kage's TUI listens for. It is not the full
 input grammar; refer to `crates/kage-tui/src/input.rs` for the
 authoritative key-to-action map.
 
-The TUI is modal, vim-style: Normal, Insert, and Visual. The default
-mode on launch is Insert so users can start typing immediately. Esc
-returns to Normal from anywhere.
+The TUI supports two editor modes: **vim** (the default) and
+**modeless** (`editor = "modeless"` in config). Both share the same
+buffer navigation keys.
 
-## modes
+## buffer navigation (works in both modes)
+
+These keys scroll and navigate the conversation buffer from inside
+Insert mode (vim) or the always-editing state (modeless). No need to
+switch modes or panes.
+
+| Key              | Effect                                       |
+| ---------------- | -------------------------------------------- |
+| `Ctrl+Down`      | Scroll the buffer down 1 line                |
+| `Ctrl+Up`        | Scroll the buffer up 1 line                  |
+| `Ctrl+Home`      | Snap to the top of the conversation         |
+| `Ctrl+End`       | Snap to the bottom, re-arm auto-follow      |
+| `Ctrl+P`         | Jump to the previous block                  |
+| `Ctrl+N`         | Jump to the next block                      |
+| `Ctrl+O`         | Toggle fold on the focused block            |
+| `PageUp`         | Scroll the buffer up 10 lines               |
+| `PageDown`       | Scroll the buffer down 10 lines             |
+
+`Ctrl+O` also expands a collapsed bracketed paste if one is present
+in the input. When no paste is collapsed, it toggles the fold.
+
+## vim modes
 
 | Key             | From    | Effect                              |
 | --------------- | ------- | ----------------------------------- |
@@ -18,6 +39,17 @@ returns to Normal from anywhere.
 | `Ctrl+W`        | any     | Cycle focused pane (input / buffer) |
 | `Ctrl+Q`        | any     | Quit immediately                    |
 | `Ctrl+C`        | Normal  | Cancel current request              |
+
+## modeless mode
+
+In modeless mode the editor is always in an insert-like state.
+`Esc` cancels the in-flight turn instead of entering Normal. All
+Emacs/readline keys and the buffer navigation keys above work
+without any mode switching.
+
+| Key  | Effect                   |
+| ---- | ------------------------ |
+| `Esc` | Cancel the current turn |
 
 ## command pathways
 
@@ -68,28 +100,32 @@ inline error below the row. Examples:
 
 Editing the line clears the error.
 
-## other normal-mode keys
+## vim normal-mode keys (buffer pane)
+
+These keys work when the buffer pane is focused in vim Normal mode
+(use `Ctrl+W` to switch panes, or press `Esc` from Insert).
 
 | Key       | Effect                                       |
 | --------- | -------------------------------------------- |
-| `j` / `k` | Scroll buffer (when buffer pane is focused)  |
+| `j` / `k` | Scroll buffer 1 line                         |
 | `G`       | Snap to bottom and re-arm auto-follow        |
+| `gg`      | Snap to top                                  |
 | `[` / `]` | Focus previous / next block                  |
+| `zo` / `zc` | Toggle fold on focused block               |
 | `zM`      | Fold all blocks                              |
 | `zR`      | Unfold all blocks                            |
 | `n` / `N` | Jump to next / previous search match         |
-| `Ctrl+P`  | Open model picker (grouped by provider)      |
-| `Ctrl+S`  | Open session picker (this dir; `Ctrl+A` toggles all dirs) |
-| `Shift+Tab` | Cycle thinking level (off -> minimal -> low -> medium -> high -> xhigh) |
 | `y`       | Yank current selection                       |
 | `Y`       | Yank focused block                           |
+| `v`       | Enter visual (cell selection)                |
 
 The active thinking level shows as a `think:<level>` pill in the
 modeline (hidden when off), next to the running token cost.
 
 ## input editing
 
-The prompt input is a readline / Emacs-style line editor.
+The prompt input is a readline / Emacs-style line editor. These keys
+work in both vim Insert mode and modeless mode.
 
 | Key            | Effect                                            |
 | -------------- | ------------------------------------------------- |
@@ -102,13 +138,43 @@ The prompt input is a readline / Emacs-style line editor.
 | `Alt+B` / `Alt+F` | Move backward / forward one word               |
 | `Ctrl+Y`       | Yank (paste) the most recent kill                  |
 | `Ctrl+/`       | Undo the last edit (also `Ctrl+_`)                 |
-| `Ctrl+O`       | Expand a collapsed pasted block in place           |
+| `Ctrl+O`       | Toggle fold (or expand a collapsed paste)          |
+| `Ctrl+S`       | Open session picker                                |
+| `Ctrl+P`       | Open model picker                                  |
 
 `Ctrl+W`, `Ctrl+U`, `Ctrl+K`, `Alt+Backspace`, and `Alt+D` feed a
 kill ring; `Ctrl+Y` yanks the most recent entry. A bracketed paste
 of 10 or more lines collapses to a `[paste #N: M lines]` placeholder
 so it does not flood the input; the full text is still sent on
 submit, and `Ctrl+O` expands it inline if you want to edit it first.
+
+## vim normal-mode keys (input pane)
+
+When the input pane is focused in Normal mode, full vim motions and
+operators are available for editing the prompt text.
+
+| Key           | Effect                                      |
+| ------------- | -------------------------------------------- |
+| `h` / `l`     | Move cursor left / right                    |
+| `j` / `k`     | Move cursor down / up (multi-line input)    |
+| `w` / `b` / `e` | Word motions                              |
+| `0` / `$` / `^` | Line start / end / first non-blank        |
+| `G` / `gg`    | End / start of text                         |
+| `x` / `X`     | Delete char at / before cursor              |
+| `r{ch}`       | Replace char at cursor                      |
+| `D` / `C`     | Delete / change to end of line              |
+| `dd`          | Delete current line                         |
+| `cc`          | Change current line (delete + insert)       |
+| `yy`          | Yank current line                           |
+| `dw` / `cw` / `yw` | Delete / change / yank word           |
+| `p` / `P`     | Paste after / before cursor                 |
+| `u`           | Undo                                        |
+| `Ctrl+R`      | Redo                                        |
+| `v`           | Visual select (char-wise)                   |
+| `i` / `a`     | Insert before / after cursor                |
+| `I` / `A`     | Insert at line start / end                  |
+| `o` / `O`     | Open line below / above                     |
+| `3dw`         | Delete 3 words (count prefix)               |
 
 ## remapping keys (`[keybindings]`)
 

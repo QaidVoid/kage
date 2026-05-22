@@ -1225,6 +1225,18 @@ impl InputState {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
 
+        if ctrl {
+            match key.code {
+                KeyCode::Up => return vec![InputAction::Scroll(-1)],
+                KeyCode::Down => return vec![InputAction::Scroll(1)],
+                KeyCode::Home => return vec![InputAction::ScrollToTop],
+                KeyCode::End => return vec![InputAction::ScrollToBottom],
+                KeyCode::Char('p') => return vec![InputAction::FocusPrev],
+                KeyCode::Char('n') => return vec![InputAction::FocusNext],
+                _ => {}
+            }
+        }
+
         // Readline / Emacs-style word and line edits. Match shells
         // (bash, zsh, fish): Ctrl+W deletes back to whitespace
         // ("unix-word-rubout"), Alt+Backspace deletes back to the
@@ -1233,7 +1245,8 @@ impl InputState {
         // Ctrl+a/e/u/k operate on the current visual line. The kills
         // (Ctrl+W/U/K, Alt+Backspace, Alt+d) feed a kill ring; Ctrl+Y
         // yanks the most recent entry, Ctrl+/ (or Ctrl+_) undoes, and
-        // Ctrl+O expands any collapsed bracketed paste inline.
+        // Ctrl+O toggles the fold on the focused buffer block (or, if
+        // a large paste is collapsed, expands it inline).
         if ctrl && !alt {
             match key.code {
                 KeyCode::Char('s') => {
@@ -1276,6 +1289,9 @@ impl InputState {
                     return Vec::new();
                 }
                 KeyCode::Char('o') => {
+                    if self.pastes.is_empty() {
+                        return vec![InputAction::ToggleFold];
+                    }
                     self.expand_pastes();
                     return Vec::new();
                 }
@@ -2609,7 +2625,7 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
     }
 
-    fn alt_code(code: KeyCode) -> KeyEvent {
+    fn alt_key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::ALT)
     }
 
@@ -2617,10 +2633,10 @@ mod tests {
     fn alt_backspace_kills_word_back_in_insert() {
         let mut state = InputState::new();
         state.paste("hello world");
-        state.handle_key(alt_code(KeyCode::Backspace));
+        state.handle_key(alt_key(KeyCode::Backspace));
         assert_eq!(state.text(), "hello ");
         assert_eq!(state.cursor(), 6);
-        state.handle_key(alt_code(KeyCode::Backspace));
+        state.handle_key(alt_key(KeyCode::Backspace));
         assert_eq!(state.text(), "");
         assert_eq!(state.cursor(), 0);
     }
@@ -3284,5 +3300,143 @@ mod tests {
         assert!(!state.is_modeless());
         state.handle_key(key(KeyCode::Esc));
         assert_eq!(state.mode(), Mode::Normal);
+    }
+
+    // --- Ctrl+arrow buffer scroll tests ---
+
+    fn ctrl_arrow(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_up_down_in_insert_scrolls_buffer() {
+        let mut state = InputState::new();
+        let acts = state.handle_key(ctrl_arrow(KeyCode::Down));
+        assert_eq!(acts, vec![InputAction::Scroll(1)]);
+        let acts = state.handle_key(ctrl_arrow(KeyCode::Up));
+        assert_eq!(acts, vec![InputAction::Scroll(-1)]);
+    }
+
+    #[test]
+    fn ctrl_home_end_in_insert_snaps_to_top_bottom() {
+        let mut state = InputState::new();
+        let acts = state.handle_key(ctrl_arrow(KeyCode::Home));
+        assert_eq!(acts, vec![InputAction::ScrollToTop]);
+        let acts = state.handle_key(ctrl_arrow(KeyCode::End));
+        assert_eq!(acts, vec![InputAction::ScrollToBottom]);
+    }
+
+    #[test]
+    fn ctrl_n_p_in_insert_focuses_blocks() {
+        let mut state = InputState::new();
+        let acts = state.handle_key(ctrl('p'));
+        assert_eq!(acts, vec![InputAction::FocusPrev]);
+        let acts = state.handle_key(ctrl('n'));
+        assert_eq!(acts, vec![InputAction::FocusNext]);
+    }
+
+    #[test]
+    fn ctrl_arrows_do_not_insert_text() {
+        let mut state = InputState::new();
+        state.handle_key(ctrl_arrow(KeyCode::Down));
+        state.handle_key(ctrl_arrow(KeyCode::Up));
+        state.handle_key(ctrl_arrow(KeyCode::Home));
+        state.handle_key(ctrl_arrow(KeyCode::End));
+        assert_eq!(state.text(), "", "ctrl+arrows must not insert characters");
+    }
+
+    #[test]
+    fn modeless_ctrl_up_down_scrolls_buffer() {
+        let mut state = InputState::new();
+        state.set_modeless(true);
+        let acts = state.handle_key(ctrl_arrow(KeyCode::Down));
+        assert_eq!(acts, vec![InputAction::Scroll(1)]);
+        let acts = state.handle_key(ctrl_arrow(KeyCode::Up));
+        assert_eq!(acts, vec![InputAction::Scroll(-1)]);
+    }
+
+    #[test]
+    fn modeless_ctrl_home_end_snaps_to_top_bottom() {
+        let mut state = InputState::new();
+        state.set_modeless(true);
+        let acts = state.handle_key(ctrl_arrow(KeyCode::Home));
+        assert_eq!(acts, vec![InputAction::ScrollToTop]);
+        let acts = state.handle_key(ctrl_arrow(KeyCode::End));
+        assert_eq!(acts, vec![InputAction::ScrollToBottom]);
+    }
+
+    #[test]
+    fn modeless_ctrl_n_p_focuses_blocks() {
+        let mut state = InputState::new();
+        state.set_modeless(true);
+        let acts = state.handle_key(ctrl('p'));
+        assert_eq!(acts, vec![InputAction::FocusPrev]);
+        let acts = state.handle_key(ctrl('n'));
+        assert_eq!(acts, vec![InputAction::FocusNext]);
+    }
+
+    #[test]
+    fn modeless_ctrl_arrows_do_not_insert_text() {
+        let mut state = InputState::new();
+        state.set_modeless(true);
+        state.handle_key(ctrl_arrow(KeyCode::Down));
+        state.handle_key(ctrl_arrow(KeyCode::Up));
+        assert_eq!(state.text(), "");
+    }
+
+    #[test]
+    fn modeless_plain_arrows_still_move_cursor() {
+        let mut state = InputState::new();
+        state.set_modeless(true);
+        state.handle_key(key(KeyCode::Char('a')));
+        state.handle_key(key(KeyCode::Char('b')));
+        state.handle_key(key(KeyCode::Left));
+        assert_eq!(
+            state.cursor(),
+            1,
+            "plain Left should still move the input cursor"
+        );
+    }
+
+    // --- Ctrl+O fold toggle tests ---
+
+    #[test]
+    fn ctrl_o_toggles_fold_when_no_collapsed_paste() {
+        let mut state = InputState::new();
+        assert!(state.pastes.is_empty(), "no collapsed pastes by default");
+        let acts = state.handle_key(ctrl('o'));
+        assert_eq!(acts, vec![InputAction::ToggleFold]);
+        assert_eq!(state.text(), "", "ctrl+o must not insert text");
+    }
+
+    #[test]
+    fn ctrl_o_expands_paste_when_one_is_collapsed() {
+        let mut state = InputState::new();
+        let blob = "row\n".repeat(12);
+        state.paste(&blob);
+        assert_eq!(state.collapsed_paste_count(), 1);
+        let acts = state.handle_key(ctrl('o'));
+        assert!(acts.is_empty(), "expanding a paste emits no InputAction");
+        assert_eq!(state.text(), blob, "paste expanded inline");
+        assert_eq!(state.collapsed_paste_count(), 0);
+    }
+
+    #[test]
+    fn ctrl_o_fold_toggle_in_modeless() {
+        let mut state = InputState::new();
+        state.set_modeless(true);
+        let acts = state.handle_key(ctrl('o'));
+        assert_eq!(acts, vec![InputAction::ToggleFold]);
+    }
+
+    #[test]
+    fn alt_b_f_still_move_words_not_scroll() {
+        let mut state = InputState::new();
+        state.paste("hello world");
+        state.handle_key(key(KeyCode::Home));
+        state.handle_key(alt('f'));
+        assert_eq!(state.cursor(), 5, "alt+f should move forward one word");
+        state.handle_key(alt('b'));
+        assert_eq!(state.cursor(), 0, "alt+b should move backward one word");
     }
 }

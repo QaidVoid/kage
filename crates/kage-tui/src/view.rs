@@ -726,11 +726,6 @@ fn render_buffer(
         .expect("block registry rwlock poisoned");
     let focus = buffer.effective_focus();
 
-    // Pass 1: gather per-block heights. Cached entries return
-    // immediately; misses build the block's lines once, measure with
-    // `line_count`, and store the result. The cache survives across
-    // frames so steady-state cost is O(blocks) for the lookup plus
-    // O(visible) for actual line construction in pass 2.
     let mut heights: Vec<usize> = Vec::with_capacity(n);
     let mut total_rows = 0usize;
     for idx in 0..n {
@@ -738,29 +733,19 @@ fn render_buffer(
             heights.push(0);
             continue;
         }
-        // Every emitted block - live ones included - is measured by
-        // the same build-and-`line_count` path so pass 1 heights and
-        // the pass 2 lines share one coordinate space. Scroll and
-        // auto-follow math subtracts these heights, so a height that
-        // disagrees with what pass 2 actually paints makes the
-        // viewport jump as the disagreement wobbles delta to delta.
-        // A live block's cache is dropped on every streamed delta
-        // (`invalidate_last_block_caches`), so it rebuilds at most
-        // once per delta, not once per frame; that rebuild is only a
-        // markdown-structure pass, since the live path
-        // (`render_streaming`) leaves code fences plain and never
-        // runs syntect mid-stream.
         let h = if let Some(cached) = buffer.cached_height(idx, width) {
             usize::from(cached)
         } else {
-            let block_lines = build_block_lines(
+            let emp = emphasis_for(
                 buffer,
                 idx,
-                width,
-                &result_by_call,
-                Emphasis::None,
-                &registry,
+                focus,
+                search_pattern,
+                &consumed_results,
+                &call_idx_for_result,
             );
+            let block_lines =
+                build_block_lines(buffer, idx, width, &result_by_call, emp, &registry);
             let measured = Paragraph::new(block_lines.clone())
                 .wrap(Wrap { trim: false })
                 .line_count(width);
@@ -770,43 +755,46 @@ fn render_buffer(
             measured
         };
         heights.push(h);
-        // +1 for the blank separator row that always follows a
-        // non-consumed block.
         total_rows = total_rows.saturating_add(h).saturating_add(1);
     }
-    // Drop the trailing separator that has no successor block.
     total_rows = total_rows.saturating_sub(1);
 
     let max_scroll_back = total_rows.saturating_sub(visible);
 
-    if focus != buffer.last_drawn_focus()
-        && let Some(focus_idx) = focus
-    {
-        let display_idx = if consumed_results.contains(&focus_idx) {
-            call_idx_for_result.get(&focus_idx).copied()
-        } else {
-            Some(focus_idx)
-        };
-        if let Some(di) = display_idx {
-            let mut rendered_start = 0usize;
-            for (i, h) in heights.iter().enumerate().take(di) {
-                if !consumed_results.contains(&i) {
-                    rendered_start = rendered_start.saturating_add(*h).saturating_add(1);
+    if focus != buffer.last_drawn_focus() {
+        if let Some(old) = buffer.last_drawn_focus() {
+            buffer.invalidate_height(old);
+        }
+        if let Some(new) = focus {
+            buffer.invalidate_height(new);
+        }
+        if let Some(focus_idx) = focus {
+            let display_idx = if consumed_results.contains(&focus_idx) {
+                call_idx_for_result.get(&focus_idx).copied()
+            } else {
+                Some(focus_idx)
+            };
+            if let Some(di) = display_idx {
+                let mut rendered_start = 0usize;
+                for (i, h) in heights.iter().enumerate().take(di) {
+                    if !consumed_results.contains(&i) {
+                        rendered_start = rendered_start.saturating_add(*h).saturating_add(1);
+                    }
                 }
-            }
-            let rendered_height = heights[di];
-            let rendered_end = rendered_start.saturating_add(rendered_height);
-            let scroll_to_top = total_rows.saturating_sub(rendered_start + visible);
-            let scroll_to_bottom = total_rows.saturating_sub(rendered_end);
-            let current = buffer.scroll().min(max_scroll_back);
-            let in_view = current >= scroll_to_top && current <= scroll_to_bottom;
-            if !in_view {
-                let target = if rendered_height > visible || current < scroll_to_top {
-                    scroll_to_top
-                } else {
-                    scroll_to_bottom
-                };
-                buffer.set_scroll(target.min(max_scroll_back));
+                let rendered_height = heights[di];
+                let rendered_end = rendered_start.saturating_add(rendered_height);
+                let scroll_to_top = total_rows.saturating_sub(rendered_start + visible);
+                let scroll_to_bottom = total_rows.saturating_sub(rendered_end);
+                let current = buffer.scroll().min(max_scroll_back);
+                let in_view = current >= scroll_to_top && current <= scroll_to_bottom;
+                if !in_view {
+                    let target = if rendered_height > visible || current < scroll_to_top {
+                        scroll_to_top
+                    } else {
+                        scroll_to_bottom
+                    };
+                    buffer.set_scroll(target.min(max_scroll_back));
+                }
             }
         }
     }
@@ -863,38 +851,23 @@ fn render_buffer(
             &consumed_results,
             &call_idx_for_result,
         );
-        // Reuse the cached render only when there's no extra
-        // emphasis to bake in - cached lines were built with
-        // `Emphasis::None`, so a focused/match block has to rebuild
-        // to pick up the rule glyph and accent color. The common
-        // case (most blocks unfocused on screen) falls into the
-        // cheap branch.
-        // Hold whichever owner is live so the borrowed slice outlives
-        // the windowing below. The cache-hit path is the hot one
-        // (every frame, every visible unfocused block): borrow the
-        // Arc and let `slice_lines_for_window` copy only the on-screen
-        // rows, instead of deep-cloning the entire (potentially
-        // hundreds of lines) block every frame.
         let cached_owner;
         let built_owner;
-        let block_lines: &[Line<'static>] = if emp == Emphasis::None
-            && let Some(cached) = buffer.cached_render_lines(idx, width)
-        {
-            cached_owner = cached;
-            cached_owner.as_slice()
-        } else {
-            let built = build_block_lines(buffer, idx, width, &result_by_call, emp, &registry);
-            if emp == Emphasis::None {
+        let block_lines: &[Line<'static>] =
+            if let Some(cached) = buffer.cached_render_lines(idx, width) {
+                cached_owner = cached;
+                cached_owner.as_slice()
+            } else {
+                let built = build_block_lines(buffer, idx, width, &result_by_call, emp, &registry);
                 let measured = Paragraph::new(built.clone())
                     .wrap(Wrap { trim: false })
                     .line_count(width);
                 let stored = u16::try_from(measured).unwrap_or(u16::MAX);
                 buffer.set_cached_height(idx, width, stored);
                 buffer.set_cached_render_lines(idx, width, std::sync::Arc::new(built.clone()));
-            }
-            built_owner = built;
-            built_owner.as_slice()
-        };
+                built_owner = built;
+                built_owner.as_slice()
+            };
         let take_rows = row_budget.saturating_sub(emitted_rows);
         let (sliced, slice_offset) =
             slice_lines_for_window(block_lines, width, intra_block_skip, take_rows);

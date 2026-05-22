@@ -544,7 +544,7 @@ impl Buffer {
         self.bump_version();
     }
 
-    fn invalidate_height(&mut self, idx: usize) {
+    pub(crate) fn invalidate_height(&mut self, idx: usize) {
         if let Some(slot) = self.block_heights.get_mut(idx) {
             *slot = None;
         }

@@ -113,6 +113,7 @@ impl BlockWidget for ToolPairBlockWidget {
             &self.synthetic_result(),
             width,
             Emphasis::None,
+            None,
         );
         u16::try_from(lines.len()).unwrap_or(u16::MAX)
     }
@@ -130,6 +131,7 @@ impl BlockWidget for ToolPairBlockWidget {
             &self.synthetic_result(),
             width,
             ctx.emphasis,
+            ctx.row_budget,
         )
     }
 }
@@ -146,6 +148,7 @@ mod tests {
             emphasis: Emphasis::None,
             selection: None,
             search_pattern: None,
+            row_budget: None,
         }
     }
 

@@ -744,6 +744,7 @@ fn render_buffer(
                     &result_by_call,
                     Emphasis::None,
                     &registry,
+                    None,
                 );
                 let measured = Paragraph::new(block_lines.clone())
                     .wrap(Wrap { trim: false })
@@ -853,12 +854,15 @@ fn render_buffer(
         );
         let cached_owner;
         let built_owner;
+        let take_rows = row_budget.saturating_sub(emitted_rows);
         let block_lines: &[Line<'static>] =
             if let Some(cached) = buffer.cached_render_lines(idx, width) {
                 cached_owner = cached;
                 cached_owner.as_slice()
             } else {
-                let built = build_block_lines(buffer, idx, width, &result_by_call, emp, &registry);
+                let budget = Some(intra_block_skip.saturating_add(take_rows));
+                let built =
+                    build_block_lines(buffer, idx, width, &result_by_call, emp, &registry, budget);
                 let measured = Paragraph::new(built.clone())
                     .wrap(Wrap { trim: false })
                     .line_count(width);
@@ -868,7 +872,6 @@ fn render_buffer(
                 built_owner = built;
                 built_owner.as_slice()
             };
-        let take_rows = row_budget.saturating_sub(emitted_rows);
         let (sliced, slice_offset) =
             slice_lines_for_window(block_lines, width, intra_block_skip, take_rows);
         // The first emitted block sets the paragraph-level scroll;
@@ -1166,6 +1169,7 @@ fn build_block_lines(
     result_by_call: &std::collections::HashMap<String, usize>,
     emphasis: Emphasis,
     registry: &registry::BlockRenderer,
+    row_budget: Option<usize>,
 ) -> Vec<Line<'static>> {
     let blocks = buffer.blocks();
     let cur = &blocks[idx];
@@ -1176,6 +1180,7 @@ fn build_block_lines(
         emphasis,
         selection: None,
         search_pattern: None,
+        row_budget,
     };
     if let Block::ToolCall { call_id, .. } = cur
         && let Some(&result_idx) = result_by_call.get(call_id)
@@ -2069,6 +2074,7 @@ pub(super) fn tool_pair_to_lines(
     result: &Block,
     width: u16,
     emphasis: Emphasis,
+    row_budget: Option<usize>,
 ) -> Vec<Line<'static>> {
     let (name, input_summary, input_pretty, folded) = match call {
         Block::ToolCall {
@@ -2145,10 +2151,14 @@ pub(super) fn tool_pair_to_lines(
     );
     if !body.is_empty() {
         content.push(Line::raw(""));
-        // For `read`/`view` results, syntect-highlight the body if we
-        // can infer a syntax from the path's extension. Other tools
-        // (find, grep, bash) keep the plain truncated body.
-        let highlighted = highlight_read_body_if_applicable(name, input_summary, &body, body_style);
+        let highlight_limit = row_budget.map(|b| b.saturating_sub(3));
+        let highlighted = highlight_read_body_if_applicable(
+            name,
+            input_summary,
+            &body,
+            body_style,
+            highlight_limit,
+        );
         for line in highlighted {
             content.push(line);
         }
@@ -2293,6 +2303,7 @@ fn highlight_read_body_if_applicable(
     input_summary: &str,
     body: &[Line<'static>],
     fallback: Style,
+    highlight_limit: Option<usize>,
 ) -> Vec<Line<'static>> {
     if !matches!(tool_name, "read" | "view") {
         return body.to_vec();
@@ -2306,16 +2317,22 @@ fn highlight_read_body_if_applicable(
         return body.to_vec();
     }
     let mut out: Vec<Line<'static>> = Vec::with_capacity(body.len());
+    let mut highlighted_count = 0usize;
     for line in body {
         let original_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        // Skip the truncation marker line (it starts with "...").
         if original_text.trim_start().starts_with("...") {
             out.push(line.clone());
             continue;
         }
-        let highlighted = crate::syntax::highlight_extension(&original_text, ext, fallback);
-        for hl in highlighted {
-            out.push(hl);
+        let over_budget = highlight_limit.is_some_and(|limit| highlighted_count >= limit);
+        if over_budget {
+            out.push(line.clone());
+        } else {
+            let highlighted = crate::syntax::highlight_extension(&original_text, ext, fallback);
+            highlighted_count += highlighted.len();
+            for hl in highlighted {
+                out.push(hl);
+            }
         }
     }
     out

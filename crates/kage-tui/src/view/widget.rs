@@ -45,6 +45,11 @@ pub struct RenderCtx<'a> {
     /// inline (e.g. assistant text). `None` when no `/` search is
     /// open.
     pub search_pattern: Option<&'a str>,
+    /// Hint: max visual rows the caller will actually display.
+    /// Widgets can use this to skip expensive work (syntect
+    /// highlighting) on rows beyond the visible window. `None`
+    /// means unlimited (test / backward compat).
+    pub row_budget: Option<usize>,
 }
 
 /// Anchor / cursor pair describing a screen-level visual selection.
@@ -158,6 +163,7 @@ mod tests {
             emphasis: Emphasis::None,
             selection: None,
             search_pattern: None,
+            row_budget: None,
         }
     }
 

@@ -153,6 +153,7 @@ mod tests {
             emphasis: Emphasis::None,
             selection: None,
             search_pattern: None,
+            row_budget: None,
         }
     }
 

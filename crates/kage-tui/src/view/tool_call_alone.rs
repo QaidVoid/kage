@@ -78,6 +78,7 @@ impl ToolCallAloneBlockWidget {
             theme.tool_pending_bg,
             width,
             emphasis,
+            None,
         )
     }
 }

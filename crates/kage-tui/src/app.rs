@@ -514,6 +514,11 @@ pub struct App {
     /// containing the pattern render with a Match emphasis and `n` /
     /// `N` walk between them.
     search_pattern: Option<String>,
+    /// Cached set of block indices matching `search_pattern`.
+    /// Recomputed when the pattern or buffer version changes.
+    search_match_set: std::collections::HashSet<usize>,
+    /// Buffer version snapshot used to validate `search_match_set`.
+    search_match_version: u64,
     /// Status bar context the host populates: live model id and a
     /// short session-id pill. Held as `Arc<Mutex<...>>` so the worker
     /// thread can update them out from under the renderer (model
@@ -746,6 +751,8 @@ impl App {
             plugin_footer_lines: Vec::new(),
             search_line: None,
             search_pattern: None,
+            search_match_set: std::collections::HashSet::new(),
+            search_match_version: 0,
             mouse_drag_anchor: None,
             context_menu: None,
             pending_mouse_capture: None,
@@ -1523,6 +1530,25 @@ impl App {
         self.buffer.lock().map_or(0, |b| b.version())
     }
 
+    /// Ensure `search_match_set` is up to date. Recomputes when the
+    /// pattern changed or the buffer version moved (new blocks,
+    /// streaming deltas). Returns a reference to the match set and
+    /// the pattern slice for use by `emphasis_for`.
+    fn refresh_search_matches(&mut self) -> Option<(&std::collections::HashSet<usize>, &str)> {
+        let pattern = self.search_pattern.as_deref()?;
+        let version = self.buffer_version();
+        if version != self.search_match_version {
+            self.search_match_set = self
+                .buffer
+                .lock()
+                .ok()
+                .map(|b| b.match_indices(pattern).into_iter().collect())
+                .unwrap_or_default();
+            self.search_match_version = version;
+        }
+        Some((&self.search_match_set, pattern))
+    }
+
     /// True when there's at least one in-flight tool call (a
     /// `ToolCall` block whose matching `ToolResult` hasn't arrived).
     /// The renderer paints "running Xs" for these and we want it to
@@ -1580,6 +1606,10 @@ impl App {
         // it BEFORE we hold the lock or we'll deadlock the moment a
         // search is active.
         let search_match_count = self.compute_search_match_count();
+        let search_match_set = self
+            .refresh_search_matches()
+            .map(|(set, _)| set)
+            .cloned();
         let render_width = tui.terminal().size().map_or(80, |r| r.width);
         self.refresh_plugin_widget_texts(render_width);
         let mut buffer = self.buffer.lock().expect("buffer mutex poisoned");
@@ -1592,6 +1622,7 @@ impl App {
             model: model_snapshot.as_deref(),
             session_id: self.status_session_id.as_deref(),
             search_pattern: self.search_pattern.as_deref(),
+            search_match_set: search_match_set.as_ref(),
             search_line: self.search_line.as_ref(),
             search_match_count,
             plugin_widgets: &self.plugin_widget_texts,
@@ -3364,6 +3395,7 @@ impl App {
             model: model_snapshot.as_deref(),
             session_id: self.status_session_id.as_deref(),
             search_pattern: self.search_pattern.as_deref(),
+            search_match_set: None,
             search_line: self.search_line.as_ref(),
             search_match_count,
             plugin_widgets: &self.plugin_widget_texts,

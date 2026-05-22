@@ -58,6 +58,9 @@ pub struct StatusCtx<'a> {
     /// Currently submitted search pattern, if any. Blocks whose
     /// content contains this pattern get a `Match` emphasis.
     pub search_pattern: Option<&'a str>,
+    /// Cached set of block indices matching `search_pattern`.
+    /// Avoids O(text) substring scan per visible block per frame.
+    pub search_match_set: Option<&'a std::collections::HashSet<usize>>,
     /// Open `/` search line, if the user is mid-typing one.
     pub search_line: Option<&'a CommandLine>,
     /// `(current_1_indexed, total)` for the active search. `current`
@@ -169,7 +172,13 @@ pub fn render(
         );
     }
     render_status(frame, regions, input, cmdline, status);
-    render_buffer(frame, regions, buffer, status.search_pattern);
+    render_buffer(
+        frame,
+        regions,
+        buffer,
+        status.search_pattern,
+        status.search_match_set,
+    );
     render_input(frame, regions, input);
     render_modeline(frame, regions, session_usage, status.plugin_footer);
     if !toasts.is_empty() {
@@ -687,6 +696,7 @@ fn render_buffer(
     regions: Regions,
     buffer: &mut Buffer,
     search_pattern: Option<&str>,
+    search_match_set: Option<&std::collections::HashSet<usize>>,
 ) {
     let width = regions.buffer.width;
     let visible = usize::from(regions.buffer.height);
@@ -736,8 +746,6 @@ fn render_buffer(
         let h = if let Some(cached) = buffer.cached_height(idx, width) {
             usize::from(cached)
         } else {
-            // Pass 1: build without syntect for height only. Pass 2
-            // will rebuild with syntect for visible blocks.
             let block_lines = build_block_lines(
                 buffer,
                 idx,
@@ -842,10 +850,9 @@ fn render_buffer(
             visible_top.saturating_sub(block_top)
         };
         let emp = emphasis_for(
-            buffer,
             idx,
             focus,
-            search_pattern,
+            search_match_set,
             &consumed_results,
             &call_idx_for_result,
         );
@@ -923,17 +930,16 @@ fn render_buffer(
 /// tool pairs pick `max` across both halves so a focused result
 /// lights up the call's bubble too.
 fn emphasis_for(
-    buffer: &Buffer,
     idx: usize,
     focus: Option<usize>,
-    search_pattern: Option<&str>,
+    search_match_set: Option<&std::collections::HashSet<usize>>,
     consumed_results: &std::collections::HashSet<usize>,
     call_idx_for_result: &std::collections::HashMap<usize, usize>,
 ) -> Emphasis {
     let single = |i: usize| -> Emphasis {
         if focus == Some(i) {
             Emphasis::Focused
-        } else if search_pattern.is_some_and(|p| buffer.block_contains(i, p)) {
+        } else if search_match_set.is_some_and(|s| s.contains(&i)) {
             Emphasis::Match
         } else {
             Emphasis::None

@@ -736,6 +736,8 @@ fn render_buffer(
         let h = if let Some(cached) = buffer.cached_height(idx, width) {
             usize::from(cached)
         } else {
+            // Pass 1: build without syntect for height only. Pass 2
+            // will rebuild with syntect for visible blocks.
             let block_lines = build_block_lines(
                 buffer,
                 idx,
@@ -743,14 +745,11 @@ fn render_buffer(
                 &result_by_call,
                 Emphasis::None,
                 &registry,
-                None,
+                Some(0),
             );
-            let measured = Paragraph::new(block_lines.clone())
-                .wrap(Wrap { trim: false })
-                .line_count(width);
+            let measured = block_lines.len();
             let stored = u16::try_from(measured).unwrap_or(u16::MAX);
             buffer.set_cached_height(idx, width, stored);
-            buffer.set_cached_render_lines(idx, width, std::sync::Arc::new(block_lines));
             measured
         };
         heights.push(h);
@@ -861,9 +860,7 @@ fn render_buffer(
                 let budget = Some(intra_block_skip.saturating_add(take_rows));
                 let built =
                     build_block_lines(buffer, idx, width, &result_by_call, emp, &registry, budget);
-                let measured = Paragraph::new(built.clone())
-                    .wrap(Wrap { trim: false })
-                    .line_count(width);
+                let measured = built.len();
                 let stored = u16::try_from(measured).unwrap_or(u16::MAX);
                 buffer.set_cached_height(idx, width, stored);
                 buffer.set_cached_render_lines(idx, width, std::sync::Arc::new(built.clone()));
@@ -878,10 +875,7 @@ fn render_buffer(
         if emitted_lines.is_empty() {
             paragraph_scroll = slice_offset;
         }
-        let sliced_rows: usize = sliced
-            .iter()
-            .map(|l| wrap_rows(l, usize::from(width).max(1)))
-            .sum();
+        let sliced_rows = sliced.len();
         emitted_lines.extend(sliced);
         emitted_rows = emitted_rows.saturating_add(sliced_rows);
         emitted_lines.push(Line::raw(""));

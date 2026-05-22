@@ -736,23 +736,23 @@ fn render_buffer(
         let h = if let Some(cached) = buffer.cached_height(idx, width) {
             usize::from(cached)
         } else {
-            let emp = emphasis_for(
-                buffer,
-                idx,
-                focus,
-                search_pattern,
-                &consumed_results,
-                &call_idx_for_result,
-            );
-            let block_lines =
-                build_block_lines(buffer, idx, width, &result_by_call, emp, &registry);
-            let measured = Paragraph::new(block_lines.clone())
-                .wrap(Wrap { trim: false })
-                .line_count(width);
-            let stored = u16::try_from(measured).unwrap_or(u16::MAX);
-            buffer.set_cached_height(idx, width, stored);
-            buffer.set_cached_render_lines(idx, width, std::sync::Arc::new(block_lines));
-            measured
+            cheap_block_height(buffer, idx, width, &result_by_call).unwrap_or_else(|| {
+                let block_lines = build_block_lines(
+                    buffer,
+                    idx,
+                    width,
+                    &result_by_call,
+                    Emphasis::None,
+                    &registry,
+                );
+                let measured = Paragraph::new(block_lines.clone())
+                    .wrap(Wrap { trim: false })
+                    .line_count(width);
+                let stored = u16::try_from(measured).unwrap_or(u16::MAX);
+                buffer.set_cached_height(idx, width, stored);
+                buffer.set_cached_render_lines(idx, width, std::sync::Arc::new(block_lines));
+                measured
+            })
         };
         heights.push(h);
         total_rows = total_rows.saturating_add(h).saturating_add(1);
@@ -1110,6 +1110,55 @@ fn slice_lines_for_window(
 /// PB.9 routes this through the [`registry::BlockRenderer`] so block
 /// rendering goes through the same widget dispatch plugins hook into
 /// via `set_builtin` / `set_custom`.
+/// Compute block height from raw text without building styled lines.
+/// Returns `None` for block types that need the full render path.
+/// The estimate uses char-based wrapping, consistent with
+/// `wrap_rows`.
+fn cheap_block_height(
+    buffer: &mut Buffer,
+    idx: usize,
+    width: u16,
+    result_by_call: &std::collections::HashMap<String, usize>,
+) -> Option<usize> {
+    let blocks = buffer.blocks();
+    let cur = &blocks[idx];
+    match cur {
+        Block::ToolCall {
+            call_id,
+            name,
+            input_summary,
+            input_pretty,
+            folded,
+            ..
+        } => {
+            let result_idx = result_by_call.get(call_id)?;
+            let result = &blocks[*result_idx];
+            let (output, _is_error) = match result {
+                Block::ToolResult {
+                    output, is_error, ..
+                } => (output.as_str(), *is_error),
+                _ => return None,
+            };
+            if *folded {
+                return None;
+            }
+            let recap = input_recap_worth_showing(name, input_summary, input_pretty);
+            let rows = estimate_tool_pair_rows(output, false, recap, input_pretty, width);
+            let stored = u16::try_from(rows).unwrap_or(u16::MAX);
+            buffer.set_cached_height(idx, width, stored);
+            Some(rows)
+        }
+        Block::ToolResult { call_id, .. } => {
+            if result_by_call.contains_key(call_id) {
+                Some(0)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
 fn build_block_lines(
     buffer: &Buffer,
     idx: usize,
@@ -2134,6 +2183,48 @@ pub(super) fn tool_pair_to_lines(
 const FOLDED_PREVIEW_LINES: usize = 6;
 /// Byte cap that complements [`FOLDED_PREVIEW_LINES`].
 const FOLDED_PREVIEW_BYTES: usize = 2 * 1024;
+
+/// Estimate the wrapped-row height of a tool pair from raw text.
+/// Avoids building styled lines or running syntect. Used by pass 1
+/// of `render_buffer` to compute scroll geometry without paying the
+/// full line-construction cost for large unfolded blocks.
+pub(crate) fn estimate_tool_pair_rows(
+    output: &str,
+    folded: bool,
+    show_recap: bool,
+    recap_text: &str,
+    width: u16,
+) -> usize {
+    let max_content = usize::from(width).saturating_sub(3).max(1);
+    let header_rows = 1;
+    let sep_rows = usize::from(!output.is_empty());
+    let (cap_lines, cap_bytes) = if folded {
+        (FOLDED_PREVIEW_LINES, FOLDED_PREVIEW_BYTES)
+    } else {
+        (usize::MAX, usize::MAX)
+    };
+    let raw_lines: Vec<&str> = output.split('\n').collect();
+    let mut body_rows = 0usize;
+    let mut bytes = 0usize;
+    for (count, line) in raw_lines.iter().enumerate() {
+        if count >= cap_lines || bytes >= cap_bytes {
+            break;
+        }
+        bytes += line.len() + 1;
+        let n = line.chars().count();
+        body_rows += if n == 0 {
+            1
+        } else {
+            n.div_ceil(max_content).max(1)
+        };
+    }
+    let recap_rows = if show_recap {
+        1 + 1 + recap_text.split('\n').count()
+    } else {
+        0
+    };
+    2 + header_rows + sep_rows + body_rows + recap_rows
+}
 
 /// Heuristic: should we show the pretty-printed input above the output
 /// body? Skip it when the header summary already conveys the call (the

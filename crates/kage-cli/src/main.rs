@@ -304,7 +304,38 @@ fn main() -> ExitCode {
         return tui::run_tui(&model, &cli.system);
     };
 
-    let registry = build_provider_registry();
+    let mut registry = build_provider_registry();
+
+    let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // Plugins load before the registry empty-check so a plugin-only
+    // setup (no env credentials, just `kage.register_provider`) still
+    // resolves a model. The bare prompt seeds `kage.config().model`;
+    // skills are merged below after plugins contribute extra dirs via
+    // `resources_discover`.
+    let provisional_model = cli
+        .model
+        .clone()
+        .unwrap_or_else(|| default_model(&registry));
+    let bare_prompt =
+        runtime_env::build_system_prompt(&cli.system, &workdir, &provisional_model, &[]);
+    let plugin_runtime = match plugins_dir() {
+        Ok(dir) => match setup_runtime(&dir, &workdir, &provisional_model, &bare_prompt) {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("kage: {e}");
+                None
+            }
+        },
+        Err(e) => {
+            eprintln!("kage: {e}");
+            None
+        }
+    };
+    if let Some(rt) = plugin_runtime.as_ref() {
+        plugins::merge_plugin_providers(rt, &mut registry);
+        acp_glue::set_runtime(rt);
+    }
+
     if registry.ids().count() == 0 {
         eprintln!(
             "kage: no provider credentials found. Run `kage auth login` to save \
@@ -322,28 +353,6 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-
-    let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    // Plugins load against a placeholder prompt (no skills yet) so they
-    // can contribute skill directories via `resources_discover`. The
-    // real system prompt is rebuilt below once skills are loaded.
-    let bare_prompt = runtime_env::build_system_prompt(&cli.system, &workdir, &model, &[]);
-    let plugin_runtime = match plugins_dir() {
-        Ok(dir) => match setup_runtime(&dir, &workdir, &model, &bare_prompt) {
-            Ok(rt) => rt,
-            Err(e) => {
-                eprintln!("kage: {e}");
-                None
-            }
-        },
-        Err(e) => {
-            eprintln!("kage: {e}");
-            None
-        }
-    };
-    if let Some(rt) = plugin_runtime.as_ref() {
-        acp_glue::set_runtime(rt);
-    }
     let skills = load_skills(&workdir, plugin_runtime.as_deref());
     let system_prompt = runtime_env::build_system_prompt(&cli.system, &workdir, &model, &skills);
 
@@ -612,7 +621,33 @@ fn run_resume(
         }
     };
 
-    let registry = build_provider_registry();
+    let mut registry = build_provider_registry();
+    let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let provisional_model = model_override.unwrap_or(&replay.model).to_owned();
+    let plugin_runtime = match plugins_dir() {
+        Ok(dir) => match setup_runtime(
+            &dir,
+            &workdir,
+            &provisional_model,
+            &replay.header.system_prompt,
+        ) {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("kage: {e}");
+                None
+            }
+        },
+        Err(e) => {
+            eprintln!("kage: {e}");
+            None
+        }
+    };
+
+    if let Some(rt) = plugin_runtime.as_ref() {
+        plugins::merge_plugin_providers(rt, &mut registry);
+        acp_glue::set_runtime(rt);
+    }
+
     if registry.ids().count() == 0 {
         eprintln!(
             "kage: no provider credentials found. Run `kage auth login` to save \
@@ -621,7 +656,7 @@ fn run_resume(
         );
         return ExitCode::from(1);
     }
-    let model = model_override.unwrap_or(&replay.model).to_owned();
+    let model = provisional_model;
     let resolved = match registry.resolve(&model) {
         Ok(r) => r,
         Err(e) => {
@@ -640,25 +675,6 @@ fn run_resume(
             return ExitCode::from(1);
         }
     };
-
-    let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let plugin_runtime = match plugins_dir() {
-        Ok(dir) => match setup_runtime(&dir, &workdir, &model, &replay.header.system_prompt) {
-            Ok(rt) => rt,
-            Err(e) => {
-                eprintln!("kage: {e}");
-                None
-            }
-        },
-        Err(e) => {
-            eprintln!("kage: {e}");
-            None
-        }
-    };
-
-    if let Some(rt) = plugin_runtime.as_ref() {
-        acp_glue::set_runtime(rt);
-    }
     let mut tools = builtin_registry();
     if let Some(rt) = plugin_runtime.as_ref() {
         apply_plugin_tools(&mut tools, rt);

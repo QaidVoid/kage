@@ -12,6 +12,7 @@ use std::sync::Arc;
 use kage_core::{LoopEvent, Message, ToolOutput};
 use kage_loop::{CompactionPrep, Hooks, StreamRequest, TurnSummary};
 use kage_plugin::{LogLevel, PluginRuntime, SharedHostLog, default_host_log};
+use kage_provider::{Provider, ProviderRegistry};
 use serde_json::json;
 
 /// Construct a plugin runtime, load `*.lua` files from `plugins_dir`, and
@@ -77,6 +78,21 @@ pub fn setup_runtime_with_sink(
         plugins_dir.display(),
     );
     Ok(Some(Arc::new(runtime)))
+}
+
+/// Register every provider a plugin contributed via
+/// `kage.register_provider` into `registry`. A plugin can shadow a
+/// built-in id (the registry overwrites prior entries with the same
+/// id); we log that case so the user sees the override deliberately.
+pub fn merge_plugin_providers(runtime: &PluginRuntime, registry: &mut ProviderRegistry) {
+    let existing: std::collections::HashSet<String> = registry.ids().map(str::to_owned).collect();
+    for provider in runtime.registered_providers() {
+        let id = provider.metadata().id.clone();
+        if existing.contains(&id) {
+            eprintln!("kage: plugin provider `{id}` shadows the built-in registration");
+        }
+        registry.register(provider);
+    }
 }
 
 /// Hooks adapter that forwards loop events to plugin event handlers.

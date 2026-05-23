@@ -36,22 +36,7 @@ use crate::session::SessionRecordingHooks;
 /// code once the user quits.
 #[allow(clippy::too_many_lines)]
 pub fn run_tui(model: &str, system: &str) -> ExitCode {
-    let registry = Arc::new(crate::build_provider_registry());
-    if registry.ids().count() == 0 {
-        eprintln!(
-            "kage: no provider credentials found. Run `kage auth login` to save \
-             one, or export an env var (ANTHROPIC_API_KEY, OPENAI_API_KEY, \
-             GEMINI_API_KEY, ZAI_API_KEY, ZAI_CODING_API_KEY)."
-        );
-        return ExitCode::from(1);
-    }
-    let bare_model = match registry.resolve(model) {
-        Ok(r) => r.model.clone(),
-        Err(e) => {
-            eprintln!("kage: cannot resolve model {model}: {e}");
-            return ExitCode::from(1);
-        }
-    };
+    let mut registry = crate::build_provider_registry();
     let qualified_model = model.to_owned();
 
     // The buffer must exist before we build the plugin runtime so we can
@@ -132,8 +117,27 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         None => None,
     };
     if let Some(rt) = plugin_runtime.as_ref() {
+        crate::plugins::merge_plugin_providers(rt, &mut registry);
         crate::acp_glue::set_runtime(rt);
     }
+
+    if registry.ids().count() == 0 {
+        eprintln!(
+            "kage: no provider credentials found. Run `kage auth login` to save \
+             one, or export an env var (ANTHROPIC_API_KEY, OPENAI_API_KEY, \
+             GEMINI_API_KEY, ZAI_API_KEY, ZAI_CODING_API_KEY)."
+        );
+        return ExitCode::from(1);
+    }
+    let bare_model = match registry.resolve(model) {
+        Ok(r) => r.model.clone(),
+        Err(e) => {
+            eprintln!("kage: cannot resolve model {model}: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let registry = Arc::new(registry);
+
     let skills = crate::load_skills(&workdir, plugin_runtime.as_deref());
     let system_prompt = crate::runtime_env::build_system_prompt(system, &workdir, model, &skills);
     let system = system_prompt.as_str();

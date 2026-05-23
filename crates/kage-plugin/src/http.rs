@@ -292,7 +292,21 @@ fn prepare(url: &str) -> Result<(url::Url, ureq::Agent), String> {
         other => return Err(format!("unsupported scheme: {other}")),
     }
     ssrf::check(&parsed).map_err(|e| e.to_string())?;
-    Ok((parsed, ureq::Agent::new_with_defaults()))
+    Ok((parsed, build_agent()))
+}
+
+/// Build a ureq agent tuned for plugin HTTP calls. The default agent
+/// drops the `Authorization` header on any redirect; an apex-to-www
+/// redirect (or any same-host 30x) then arrives unauthenticated and the
+/// upstream rejects it with what surfaces as a "redirect failed"
+/// transport error. Keeping auth on same-host redirects matches what
+/// every real HTTP client does and is the only way an apex-domain POST
+/// against a host that 301s to www can succeed.
+fn build_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .redirect_auth_headers(ureq::config::RedirectAuthHeaders::SameHost)
+        .build()
+        .new_agent()
 }
 
 fn dispatch(

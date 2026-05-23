@@ -939,6 +939,14 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                                 .lock()
                                 .expect("active model mutex poisoned")
                                 .clone_from(&new_model);
+                            // The session-usage snapshot is what plugins
+                            // see via `kage.context_usage().model`; the
+                            // built-in modeline reads `active_qualified`
+                            // instead. Without this both views diverge
+                            // until the next turn rewrites the snapshot.
+                            if let Ok(mut snap) = session_usage.lock() {
+                                snap.model.clone_from(&new_model);
+                            }
                             push_toast(&toasts, Toast::info(format!("switched to {new_model}")));
                             if let Some(rt) = plugin_runtime.as_ref() {
                                 let _ = rt.dispatch_event(

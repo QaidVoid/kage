@@ -146,6 +146,9 @@ pub struct LuaChrome {
     lua: SharedLua,
     sink: SharedHostLog,
     handler_key: Arc<RegistryKey>,
+    /// Last successful render, replayed when the Lua mutex is busy so
+    /// the row does not flicker out during a long-running provider call.
+    cache: Mutex<Vec<ChromeLine>>,
 }
 
 impl std::fmt::Debug for LuaChrome {
@@ -164,28 +167,39 @@ impl LuaChrome {
     }
 
     /// Call into Lua to produce the row's styled lines for a chrome
-    /// area of `width` columns. A Lua error, a poisoned Lua mutex, or a
-    /// non-conforming return logs to the sink and yields no lines; the
-    /// host then paints its built-in chrome.
+    /// area of `width` columns. Uses `try_lock` so the TUI render loop
+    /// is never blocked by an in-flight provider call holding the
+    /// Lua state; on contention or a Lua error, replays the last
+    /// successful render rather than blanking the row.
     #[must_use]
     pub fn render(&self, width: u16) -> Vec<ChromeLine> {
-        let Ok(lua) = self.lua.lock() else {
-            return Vec::new();
+        let Ok(lua) = self.lua.try_lock() else {
+            return self.cached();
         };
         let func: Function = match lua.registry_value(&self.handler_key) {
             Ok(f) => f,
             Err(e) => {
                 self.log_error(&e);
-                return Vec::new();
+                return self.cached();
             }
         };
         match func.call::<Value>(width) {
-            Ok(value) => parse_lines(&value),
+            Ok(value) => {
+                let lines = parse_lines(&value);
+                if let Ok(mut slot) = self.cache.lock() {
+                    slot.clone_from(&lines);
+                }
+                lines
+            }
             Err(e) => {
                 self.log_error(&e);
-                Vec::new()
+                self.cached()
             }
         }
+    }
+
+    fn cached(&self) -> Vec<ChromeLine> {
+        self.cache.lock().map(|c| c.clone()).unwrap_or_default()
     }
 
     fn log_error(&self, e: &dyn std::fmt::Display) {
@@ -348,6 +362,7 @@ fn make_setter(
                     lua: shared_lua.clone(),
                     sink: sink.clone(),
                     handler_key: Arc::new(handler_key),
+                    cache: Mutex::new(Vec::new()),
                 }));
                 Ok(())
             }

@@ -79,7 +79,7 @@ impl LuaTerminalHook {
     /// hook cannot silently eat every keystroke.
     #[must_use]
     pub fn handle(&self, event: &serde_json::Value) -> bool {
-        let Ok(lua) = self.lua.lock() else {
+        let Ok(lua) = self.lua.try_lock() else {
             return false;
         };
         let func: Function = match lua.registry_value(&self.handler_key) {

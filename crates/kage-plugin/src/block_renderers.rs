@@ -67,7 +67,7 @@ impl LuaBlockRenderer {
     /// conversation silently.
     #[must_use]
     pub fn render(&self, payload: &serde_json::Value) -> Vec<ChromeLine> {
-        let Ok(lua) = self.lua.lock() else {
+        let Ok(lua) = self.lua.try_lock() else {
             return Vec::new();
         };
         let func: Function = match lua.registry_value(&self.handler_key) {

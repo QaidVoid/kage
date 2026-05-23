@@ -18,7 +18,7 @@
 //! when room is tight, `branch: main (dirty)` when there's space).
 //! Anything other than a string is coerced to an empty render.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use mlua::{Function, Lua, RegistryKey, Table};
 
@@ -41,6 +41,7 @@ pub struct LuaWidget {
     lua: SharedLua,
     sink: SharedHostLog,
     handler_key: Arc<RegistryKey>,
+    cache: Mutex<String>,
 }
 
 impl std::fmt::Debug for LuaWidget {
@@ -60,12 +61,13 @@ impl LuaWidget {
     }
 
     /// Call into Lua to produce the widget's painted text for a status
-    /// bar of `width` columns. Errors are logged to the sink and the
-    /// widget renders as an empty string.
+    /// bar of `width` columns. `try_lock` keeps the render loop
+    /// non-blocking; on contention or a Lua error, the last successful
+    /// text is replayed.
     #[must_use]
     pub fn render(&self, width: u16) -> String {
-        let Ok(lua) = self.lua.lock() else {
-            return String::new();
+        let Ok(lua) = self.lua.try_lock() else {
+            return self.cached();
         };
         let func: Function = match lua.registry_value(&self.handler_key) {
             Ok(f) => f,
@@ -76,10 +78,10 @@ impl LuaWidget {
                         &format!("plugin widget '{}': {e}", self.key),
                     );
                 }
-                return String::new();
+                return self.cached();
             }
         };
-        match func.call::<mlua::Value>(width) {
+        let text = match func.call::<mlua::Value>(width) {
             Ok(mlua::Value::String(s)) => s.to_str().map(|s| s.to_owned()).unwrap_or_default(),
             Ok(mlua::Value::Nil) => String::new(),
             Ok(other) => format!("{other:?}"),
@@ -90,9 +92,17 @@ impl LuaWidget {
                         &format!("plugin widget '{}': {e}", self.key),
                     );
                 }
-                String::new()
+                return self.cached();
             }
+        };
+        if let Ok(mut slot) = self.cache.lock() {
+            slot.clone_from(&text);
         }
+        text
+    }
+
+    fn cached(&self) -> String {
+        self.cache.lock().map(|c| c.clone()).unwrap_or_default()
     }
 }
 
@@ -117,6 +127,7 @@ pub fn install_register_widget(
                 key: key.clone(),
                 lua: shared_lua.clone(),
                 sink: sink.clone(),
+                cache: Mutex::new(String::new()),
                 handler_key: Arc::new(handler_key),
             });
             let mut list = registered

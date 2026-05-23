@@ -95,7 +95,7 @@ impl LuaAutocompleteProvider {
     /// input.
     #[must_use]
     pub fn complete(&self, prefix: &str, text: &str, cursor: usize) -> Vec<AutocompleteItem> {
-        let Ok(lua) = self.lua.lock() else {
+        let Ok(lua) = self.lua.try_lock() else {
             return Vec::new();
         };
         let func: Function = match lua.registry_value(&self.handler_key) {

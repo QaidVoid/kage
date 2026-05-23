@@ -162,6 +162,7 @@
 ---@field supports_caching? boolean Defaults to false.
 ---@field supports_thinking? boolean Defaults to false.
 ---@field supports_tool_use? boolean Defaults to true.
+---@field preserves_thinking? boolean Skip flatten-thinking when replaying history. Defaults to false.
 ---@field models? kage.ProviderModel[] Models the provider advertises in the picker.
 ---@field stream fun(req: table): table[]|fun(): table? Yields provider event tables; required.
 

@@ -101,7 +101,7 @@ where
                 return Err(kind);
             }
 
-            let mut req = build_request(cx, tools);
+            let mut req = build_request(cx, tools, provider);
             if let Err(message) = hooks.transform_provider_request(&mut req) {
                 let kind = LoopError::HookFailed {
                     hook: "transform_provider_request".to_owned(),
@@ -340,8 +340,17 @@ fn flatten_thinking(history: &[Message]) -> Vec<Message> {
 }
 
 /// Construct the next [`StreamRequest`] from the current agent context.
-fn build_request(cx: &AgentContext, tools: &ToolRegistry) -> StreamRequest {
-    let mut req = StreamRequest::new(&cx.model, flatten_thinking(&cx.history));
+fn build_request(
+    cx: &AgentContext,
+    tools: &ToolRegistry,
+    provider: &dyn Provider,
+) -> StreamRequest {
+    let history = if provider.preserves_thinking() {
+        cx.history.clone()
+    } else {
+        flatten_thinking(&cx.history)
+    };
+    let mut req = StreamRequest::new(&cx.model, history);
     if !cx.system_prompt.is_empty() {
         req.system = Some(cx.system_prompt.clone());
     }
@@ -436,7 +445,8 @@ mod tests {
         cx.history.push(user_msg("hi"));
         cx = cx.with_max_output_tokens(32_000);
         let tools = ToolRegistry::new();
-        let req = build_request(&cx, &tools);
+        let provider = MockProvider::sequence(vec![]);
+        let req = build_request(&cx, &tools, &provider);
         assert_eq!(req.max_output_tokens, Some(32_000));
     }
 
@@ -445,7 +455,8 @@ mod tests {
         let mut cx = AgentContext::new("m", "");
         cx.history.push(user_msg("hi"));
         let tools = ToolRegistry::new();
-        let req = build_request(&cx, &tools);
+        let provider = MockProvider::sequence(vec![]);
+        let req = build_request(&cx, &tools, &provider);
         assert!(req.max_output_tokens.is_none());
     }
 
@@ -515,7 +526,8 @@ mod tests {
             text: "reason".to_owned(),
         }]));
         let tools = ToolRegistry::new();
-        let req = build_request(&cx, &tools);
+        let provider = MockProvider::sequence(vec![]);
+        let req = build_request(&cx, &tools, &provider);
         assert!(
             !req.messages
                 .iter()

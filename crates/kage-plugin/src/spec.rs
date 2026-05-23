@@ -543,6 +543,11 @@ const CLASSES: &[Class] = &[
                 doc: "Defaults to true.",
             },
             Field {
+                name: "preserves_thinking?",
+                ty: "boolean",
+                doc: "Skip flatten-thinking when replaying history. Defaults to false.",
+            },
+            Field {
                 name: "models?",
                 ty: "kage.ProviderModel[]",
                 doc: "Models the provider advertises in the picker.",

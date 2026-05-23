@@ -205,10 +205,7 @@ fn stream_request(
         .to_owned();
 
     let raw_reader: Box<dyn Read + Send> = Box::new(response.into_body().into_reader());
-    let capped = raw_reader.take(max_bytes);
-    let mut reader = BufReader::new(capped);
-
-    let result = run_sse_loop(lua, &mut reader, on_event);
+    let mut capped = raw_reader.take(max_bytes);
 
     let table = lua.create_table().map_err(|e| format!("lua table: {e}"))?;
     table
@@ -217,7 +214,18 @@ fn stream_request(
     table
         .set("content_type", content_type)
         .map_err(|e| format!("lua set content_type: {e}"))?;
-    result?;
+
+    if !(200..300).contains(&status) {
+        let mut buf = Vec::new();
+        let _ = capped.read_to_end(&mut buf);
+        table
+            .set("body", String::from_utf8_lossy(&buf).into_owned())
+            .map_err(|e| format!("lua set body: {e}"))?;
+        return Ok(table);
+    }
+
+    let mut reader = BufReader::new(capped);
+    run_sse_loop(lua, &mut reader, on_event)?;
     Ok(table)
 }
 
@@ -295,16 +303,14 @@ fn prepare(url: &str) -> Result<(url::Url, ureq::Agent), String> {
     Ok((parsed, build_agent()))
 }
 
-/// Build a ureq agent tuned for plugin HTTP calls. The default agent
-/// drops the `Authorization` header on any redirect; an apex-to-www
-/// redirect (or any same-host 30x) then arrives unauthenticated and the
-/// upstream rejects it with what surfaces as a "redirect failed"
-/// transport error. Keeping auth on same-host redirects matches what
-/// every real HTTP client does and is the only way an apex-domain POST
-/// against a host that 301s to www can succeed.
+/// Build a ureq agent for plugin HTTP calls. `SameHost` preserves the
+/// `Authorization` header across apex-to-www redirects, and disabling
+/// `http_status_as_error` lets the plugin read the response body on
+/// non-2xx instead of seeing only a generic transport error.
 fn build_agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .redirect_auth_headers(ureq::config::RedirectAuthHeaders::SameHost)
+        .http_status_as_error(false)
         .build()
         .new_agent()
 }

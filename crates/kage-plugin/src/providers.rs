@@ -36,6 +36,7 @@ use crate::runtime::SharedLua;
 pub struct LuaProvider {
     metadata: ProviderMetadata,
     models: Vec<ProviderModel>,
+    preserves_thinking: bool,
     lua: SharedLua,
     sink: SharedHostLog,
     handler_key: Arc<RegistryKey>,
@@ -68,6 +69,10 @@ impl Provider for LuaProvider {
 
     fn models(&self) -> Vec<ProviderModel> {
         self.models.clone()
+    }
+
+    fn preserves_thinking(&self) -> bool {
+        self.preserves_thinking
     }
 }
 
@@ -191,6 +196,7 @@ pub fn install_register_provider(
             let supports_caching: bool = spec.get("supports_caching").unwrap_or(false);
             let supports_thinking: bool = spec.get("supports_thinking").unwrap_or(false);
             let supports_tool_use: bool = spec.get("supports_tool_use").unwrap_or(true);
+            let preserves_thinking: bool = spec.get("preserves_thinking").unwrap_or(false);
             let stream: Function = spec.get("stream")?;
             let models = parse_models(&spec)?;
             let key = lua.create_registry_value(stream)?;
@@ -204,6 +210,7 @@ pub fn install_register_provider(
             let provider = LuaProvider {
                 metadata,
                 models,
+                preserves_thinking,
                 lua: shared_lua.clone(),
                 sink: sink.clone(),
                 handler_key: Arc::new(key),

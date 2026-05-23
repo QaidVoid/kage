@@ -1,25 +1,26 @@
 //! `kage.register_provider` and the `Provider` adapter that backs into Lua.
 //!
-//! Plugins declare a custom provider:
+//! Plugins declare a custom provider. The handler may take an optional
+//! second `emit` argument and stream events as they happen:
 //! ```lua
 //! kage.register_provider({
 //!     id = "echo",
-//!     stream = function(req)
-//!         local i = 0
-//!         return function()
-//!             i = i + 1
-//!             if i == 1 then return { type = "message_start" } end
-//!             if i == 2 then return { type = "text_delta", delta = "hi" } end
-//!             if i == 3 then return { type = "message_end", stop_reason = "end_turn" } end
-//!             return nil
-//!         end
+//!     stream = function(req, emit)
+//!         emit({ type = "message_start" })
+//!         emit({ type = "text_delta", delta = "hi" })
+//!         emit({ type = "message_end", stop_reason = "end_turn",
+//!                usage = { input = 0, output = 0, cache_read = 0, cache_write = 0 } })
 //!     end,
 //! })
 //! ```
-//! The host registers each [`LuaProvider`] with its `ProviderRegistry` so
-//! the agent loop can route `provider:model` strings into Lua.
+//! Returning a table or an iterator function still works; events are
+//! drained after the handler returns. The host registers each
+//! [`LuaProvider`] with its `ProviderRegistry` so the agent loop can
+//! route `provider:model` strings into Lua.
 
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
+use std::thread;
 
 use kage_core::CancelFlag;
 use kage_provider::{
@@ -62,9 +63,17 @@ impl Provider for LuaProvider {
     ) -> Result<EventStream, ProviderError> {
         let req_value = serde_json::to_value(&req)
             .map_err(|e| ProviderError::Decode(format!("plugin provider: encode request: {e}")))?;
-        let events = collect_events(&self.lua, &self.handler_key, &self.sink, &req_value)
-            .map_err(|e| ProviderError::Decode(format!("plugin provider: {e}")))?;
-        Ok(Box::new(events.into_iter()))
+        let (tx, rx) = mpsc::channel::<Result<ProviderEvent, ProviderError>>();
+        let lua = self.lua.clone();
+        let handler_key = self.handler_key.clone();
+        let sink = self.sink.clone();
+        thread::spawn(move || {
+            let tx_err = tx.clone();
+            if let Err(e) = run_handler(&lua, &handler_key, &sink, &req_value, tx) {
+                let _ = tx_err.send(Err(ProviderError::Decode(format!("plugin provider: {e}"))));
+            }
+        });
+        Ok(Box::new(ChannelStream { rx }))
     }
 
     fn models(&self) -> Vec<ProviderModel> {
@@ -76,30 +85,63 @@ impl Provider for LuaProvider {
     }
 }
 
-fn collect_events(
+/// Channel-backed iterator returned from [`LuaProvider::stream`]. The
+/// receiver blocks on `recv()` until the worker thread either sends an
+/// event or drops the sender (which fuses the iterator).
+struct ChannelStream {
+    rx: mpsc::Receiver<Result<ProviderEvent, ProviderError>>,
+}
+
+impl Iterator for ChannelStream {
+    type Item = Result<ProviderEvent, ProviderError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.rx.recv().ok()
+    }
+}
+
+/// Worker-thread body: lock the Lua state, install an `emit` callback
+/// that forwards each event onto `tx`, then call the registered Lua
+/// handler. A plugin that calls `emit` streams; one that returns a
+/// table or iterator function is drained after the handler returns.
+///
+/// `tx` is wrapped in an `Arc` and the emit closure holds only a
+/// `Weak`, so the channel closes as soon as this function returns even
+/// if the Lua GC has not yet released the closure.
+fn run_handler(
     lua: &SharedLua,
     handler_key: &Arc<RegistryKey>,
     sink: &SharedHostLog,
     req: &serde_json::Value,
-) -> Result<Vec<Result<ProviderEvent, ProviderError>>, PluginError> {
+    tx: mpsc::Sender<Result<ProviderEvent, ProviderError>>,
+) -> Result<(), PluginError> {
     let lua = lua.lock().expect("plugin lua mutex poisoned");
     let handler: Function = lua.registry_value(handler_key)?;
     let lua_req = json_to_lua(&lua, req)?;
 
-    let result: Value = handler.call(lua_req)?;
-    let mut events = Vec::new();
+    let tx = Arc::new(tx);
+    let emit_tx = Arc::downgrade(&tx);
+    let emit_sink = sink.clone();
+    let emit = lua.create_function(move |_, value: Value| {
+        if let Some(tx) = emit_tx.upgrade() {
+            let _ = tx.send(value_to_provider_event(value, &emit_sink));
+        }
+        Ok(())
+    })?;
+
+    let result: Value = handler.call((lua_req, emit))?;
     match result {
         Value::Table(t) => {
             for pair in t.clone().sequence_values::<Value>() {
                 let v = pair?;
-                events.push(value_to_provider_event(v, sink));
+                let _ = tx.send(value_to_provider_event(v, sink));
             }
         }
         Value::Function(f) => loop {
             let next: Value = match f.call::<Value>(()) {
                 Ok(v) => v,
                 Err(err) => {
-                    events.push(Err(ProviderError::Decode(format!(
+                    let _ = tx.send(Err(ProviderError::Decode(format!(
                         "plugin provider iterator raised: {err}"
                     ))));
                     break;
@@ -108,15 +150,17 @@ fn collect_events(
             if matches!(next, Value::Nil) {
                 break;
             }
-            events.push(value_to_provider_event(next, sink));
+            let _ = tx.send(value_to_provider_event(next, sink));
         },
+        Value::Nil => {}
         _ => {
-            events.push(Err(ProviderError::Decode(
-                "plugin provider's stream() returned neither a table nor a function".to_owned(),
+            let _ = tx.send(Err(ProviderError::Decode(
+                "plugin provider's stream() returned neither nil, a table, nor a function"
+                    .to_owned(),
             )));
         }
     }
-    Ok(events)
+    Ok(())
 }
 
 /// Parse the optional `models` array on a `register_provider` spec.
@@ -322,6 +366,46 @@ mod tests {
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(events.len(), 3);
+    }
+
+    #[test]
+    fn lua_provider_streams_via_emit_callback() {
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval(
+            r"
+            kage.register_provider({
+                id = 'emitter',
+                stream = function(req, emit)
+                    emit({ type = 'message_start' })
+                    emit({ type = 'text_delta', delta = 'streaming ' })
+                    emit({ type = 'text_delta', delta = req.model })
+                    emit({ type = 'message_end', stop_reason = 'end_turn',
+                           usage = { input = 0, output = 0, cache_read = 0, cache_write = 0 } })
+                end,
+            })
+            ",
+        )
+        .unwrap();
+        let provider = rt.registered_providers().pop().unwrap();
+        let cancel = CancelFlag::new();
+        let req = kage_provider::StreamRequest::new("model-z", vec![]);
+        let events: Vec<_> = provider
+            .stream(req, &cancel)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(events.len(), 4);
+        assert!(matches!(
+            &events[2],
+            kage_provider::ProviderEvent::TextDelta { delta } if delta == "model-z"
+        ));
+        assert!(matches!(
+            events[3],
+            kage_provider::ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                ..
+            }
+        ));
     }
 
     #[test]

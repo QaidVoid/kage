@@ -14,3 +14,16 @@ pub struct ProviderMetadata {
     /// Whether the provider supports tool/function calling.
     pub supports_tool_use: bool,
 }
+
+/// One model entry a [`Provider`](crate::Provider) advertises for the UI
+/// picker. Plugin providers that have no catalog entry declare their
+/// model list this way; built-in providers can leave the
+/// [`Provider::models`](crate::Provider::models) override empty and rely
+/// on [`crate::catalog`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderModel {
+    /// Provider-scoped model id (the portion after `provider:`).
+    pub id: String,
+    /// Human-friendly display name shown in the picker.
+    pub name: String,
+}

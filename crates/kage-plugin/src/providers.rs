@@ -23,7 +23,8 @@ use std::sync::{Arc, Mutex};
 
 use kage_core::CancelFlag;
 use kage_provider::{
-    EventStream, Provider, ProviderError, ProviderEvent, ProviderMetadata, StreamRequest,
+    EventStream, Provider, ProviderError, ProviderEvent, ProviderMetadata, ProviderModel,
+    StreamRequest,
 };
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 
@@ -34,6 +35,7 @@ use crate::runtime::SharedLua;
 /// `Provider` whose `stream` runs inside the plugin runtime's Lua state.
 pub struct LuaProvider {
     metadata: ProviderMetadata,
+    models: Vec<ProviderModel>,
     lua: SharedLua,
     sink: SharedHostLog,
     handler_key: Arc<RegistryKey>,
@@ -62,6 +64,10 @@ impl Provider for LuaProvider {
         let events = collect_events(&self.lua, &self.handler_key, &self.sink, &req_value)
             .map_err(|e| ProviderError::Decode(format!("plugin provider: {e}")))?;
         Ok(Box::new(events.into_iter()))
+    }
+
+    fn models(&self) -> Vec<ProviderModel> {
+        self.models.clone()
     }
 }
 
@@ -108,6 +114,34 @@ fn collect_events(
     Ok(events)
 }
 
+/// Parse the optional `models` array on a `register_provider` spec.
+/// Each entry must be a `{ id = "...", name = "..." }` table; `name`
+/// defaults to `id` when omitted. Missing or non-table `models` yields
+/// an empty list (built-in catalog drives the picker in that case).
+fn parse_models(spec: &Table) -> mlua::Result<Vec<ProviderModel>> {
+    let Ok(models_tbl) = spec.get::<Table>("models") else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for pair in models_tbl.clone().sequence_values::<Value>() {
+        let value = pair?;
+        let entry = match value {
+            Value::Table(t) => t,
+            other => {
+                return Err(mlua::Error::external(format!(
+                    "register_provider: models entry must be a table, got {other:?}"
+                )));
+            }
+        };
+        let id: String = entry.get("id").map_err(|e| {
+            mlua::Error::external(format!("register_provider: models[].id missing: {e}"))
+        })?;
+        let name: String = entry.get("name").unwrap_or_else(|_| id.clone());
+        out.push(ProviderModel { id, name });
+    }
+    Ok(out)
+}
+
 fn value_to_provider_event(
     value: Value,
     sink: &SharedHostLog,
@@ -151,6 +185,7 @@ pub fn install_register_provider(
             let supports_thinking: bool = spec.get("supports_thinking").unwrap_or(false);
             let supports_tool_use: bool = spec.get("supports_tool_use").unwrap_or(true);
             let stream: Function = spec.get("stream")?;
+            let models = parse_models(&spec)?;
             let key = lua.create_registry_value(stream)?;
             let metadata = ProviderMetadata {
                 id: id.clone(),
@@ -161,6 +196,7 @@ pub fn install_register_provider(
             };
             let provider = LuaProvider {
                 metadata,
+                models,
                 lua: shared_lua.clone(),
                 sink: sink.clone(),
                 handler_key: Arc::new(key),

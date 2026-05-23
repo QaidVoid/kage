@@ -28,7 +28,7 @@ pub use catalog::{ModelInfo, PROVIDERS, ProviderInfo};
 pub use error::ProviderError;
 pub use event::{ProviderEvent, StopReason};
 pub use kage_core::ToolSpec;
-pub use metadata::ProviderMetadata;
+pub use metadata::{ProviderMetadata, ProviderModel};
 pub use registry::{ProviderRegistry, ResolvedProvider};
 pub use request::{StreamRequest, ThinkingConfig, ThinkingLevel};
 
@@ -59,4 +59,12 @@ pub trait Provider: Send + Sync + std::fmt::Debug {
     /// `Err(ProviderError)` items inside the returned iterator.
     fn stream(&self, req: StreamRequest, cancel: &CancelFlag)
     -> Result<EventStream, ProviderError>;
+
+    /// Models this provider advertises for the UI picker. Built-in
+    /// providers leave this empty and let the catalog drive the picker;
+    /// plugin providers without a catalog entry return their declared
+    /// model list so users can browse and pick.
+    fn models(&self) -> Vec<ProviderModel> {
+        Vec::new()
+    }
 }

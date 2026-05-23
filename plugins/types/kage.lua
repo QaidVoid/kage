@@ -162,7 +162,13 @@
 ---@field supports_caching? boolean Defaults to false.
 ---@field supports_thinking? boolean Defaults to false.
 ---@field supports_tool_use? boolean Defaults to true.
+---@field models? kage.ProviderModel[] Models the provider advertises in the picker.
 ---@field stream fun(req: table): table[]|fun(): table? Yields provider event tables; required.
+
+--- One model entry surfaced in the picker.
+---@class kage.ProviderModel
+---@field id string Model id, used as the part after `provider:`.
+---@field name? string Display name; defaults to id.
 
 --- Spec passed to `kage.exec`.
 ---@class kage.ExecSpec

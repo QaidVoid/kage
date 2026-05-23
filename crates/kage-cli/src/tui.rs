@@ -2323,21 +2323,41 @@ fn handle_resume(
 
 /// Build the picker rows the App offers when the user hits `Ctrl+P`.
 /// Iterates registered providers and pulls each one's catalog model
-/// list; the active model is marked with `*`.
+/// list; when the catalog has no entry for a provider (e.g. plugin-
+/// registered providers), falls back to the live `Provider::models()`
+/// list. The active model is marked with `*`.
 fn available_model_items(registry: &ProviderRegistry, active: &str) -> Vec<kage_tui::PickItem> {
     let mut items: Vec<kage_tui::PickItem> = Vec::new();
     let mut provider_ids: Vec<&str> = registry.ids().collect();
     provider_ids.sort_unstable();
     for provider_id in provider_ids {
         let catalog_provider = kage_provider::catalog::provider(provider_id);
-        let display_name = catalog_provider.map_or(provider_id, |p| p.name);
-        let models = catalog_provider.map_or::<&[_], _>(&[], |p| p.models);
-        for model in models {
+        let catalog_models = catalog_provider.map_or::<&[_], _>(&[], |p| p.models);
+        if !catalog_models.is_empty() {
+            let display_name = catalog_provider.map_or(provider_id, |p| p.name);
+            for model in catalog_models {
+                let value = format!("{provider_id}:{}", model.id);
+                let badge = if value == active { '*' } else { ' ' };
+                items.push(
+                    kage_tui::PickItem::simple(value)
+                        .with_label(model.name)
+                        .with_badge(badge)
+                        .with_group(display_name),
+                );
+            }
+            continue;
+        }
+        let Some(provider) = registry.get(provider_id) else {
+            continue;
+        };
+        let metadata = provider.metadata();
+        let display_name = metadata.display_name.as_str();
+        for model in provider.models() {
             let value = format!("{provider_id}:{}", model.id);
             let badge = if value == active { '*' } else { ' ' };
             items.push(
                 kage_tui::PickItem::simple(value)
-                    .with_label(model.name)
+                    .with_label(&model.name)
                     .with_badge(badge)
                     .with_group(display_name),
             );

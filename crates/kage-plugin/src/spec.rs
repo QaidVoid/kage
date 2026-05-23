@@ -543,9 +543,30 @@ const CLASSES: &[Class] = &[
                 doc: "Defaults to true.",
             },
             Field {
+                name: "models?",
+                ty: "kage.ProviderModel[]",
+                doc: "Models the provider advertises in the picker.",
+            },
+            Field {
                 name: "stream",
                 ty: "fun(req: table): table[]|fun(): table?",
                 doc: "Yields provider event tables; required.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.ProviderModel",
+        doc: &["One model entry surfaced in the picker."],
+        fields: &[
+            Field {
+                name: "id",
+                ty: "string",
+                doc: "Model id, used as the part after `provider:`.",
+            },
+            Field {
+                name: "name?",
+                ty: "string",
+                doc: "Display name; defaults to id.",
             },
         ],
     },

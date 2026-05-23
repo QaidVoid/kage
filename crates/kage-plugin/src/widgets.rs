@@ -41,8 +41,10 @@ pub struct LuaWidget {
     lua: SharedLua,
     sink: SharedHostLog,
     handler_key: Arc<RegistryKey>,
-    cache: Mutex<String>,
+    cache: Mutex<(std::time::Instant, String)>,
 }
+
+const CACHE_STALE_AFTER: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl std::fmt::Debug for LuaWidget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -63,11 +65,11 @@ impl LuaWidget {
     /// Call into Lua to produce the widget's painted text for a status
     /// bar of `width` columns. `try_lock` keeps the render loop
     /// non-blocking; on contention or a Lua error, the last successful
-    /// text is replayed.
+    /// text is replayed until it exceeds [`CACHE_STALE_AFTER`].
     #[must_use]
     pub fn render(&self, width: u16) -> String {
         let Ok(lua) = self.lua.try_lock() else {
-            return self.cached();
+            return self.fresh_cached();
         };
         let func: Function = match lua.registry_value(&self.handler_key) {
             Ok(f) => f,
@@ -78,7 +80,7 @@ impl LuaWidget {
                         &format!("plugin widget '{}': {e}", self.key),
                     );
                 }
-                return self.cached();
+                return self.fresh_cached();
             }
         };
         let text = match func.call::<mlua::Value>(width) {
@@ -92,17 +94,24 @@ impl LuaWidget {
                         &format!("plugin widget '{}': {e}", self.key),
                     );
                 }
-                return self.cached();
+                return self.fresh_cached();
             }
         };
         if let Ok(mut slot) = self.cache.lock() {
-            slot.clone_from(&text);
+            *slot = (std::time::Instant::now(), text.clone());
         }
         text
     }
 
-    fn cached(&self) -> String {
-        self.cache.lock().map(|c| c.clone()).unwrap_or_default()
+    fn fresh_cached(&self) -> String {
+        let Ok(slot) = self.cache.lock() else {
+            return String::new();
+        };
+        if slot.0.elapsed() <= CACHE_STALE_AFTER {
+            slot.1.clone()
+        } else {
+            String::new()
+        }
     }
 }
 
@@ -127,7 +136,7 @@ pub fn install_register_widget(
                 key: key.clone(),
                 lua: shared_lua.clone(),
                 sink: sink.clone(),
-                cache: Mutex::new(String::new()),
+                cache: Mutex::new((std::time::Instant::now(), String::new())),
                 handler_key: Arc::new(handler_key),
             });
             let mut list = registered

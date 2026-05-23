@@ -146,10 +146,14 @@ pub struct LuaChrome {
     lua: SharedLua,
     sink: SharedHostLog,
     handler_key: Arc<RegistryKey>,
-    /// Last successful render, replayed when the Lua mutex is busy so
-    /// the row does not flicker out during a long-running provider call.
-    cache: Mutex<Vec<ChromeLine>>,
+    /// Last successful render with a wall-clock timestamp. Replayed
+    /// only for sub-second contention so the host can fall through to
+    /// the built-in modeline (and its working spinner) when a long
+    /// provider call is keeping the Lua state busy.
+    cache: Mutex<(std::time::Instant, Vec<ChromeLine>)>,
 }
+
+const CACHE_STALE_AFTER: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl std::fmt::Debug for LuaChrome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -168,38 +172,46 @@ impl LuaChrome {
 
     /// Call into Lua to produce the row's styled lines for a chrome
     /// area of `width` columns. Uses `try_lock` so the TUI render loop
-    /// is never blocked by an in-flight provider call holding the
-    /// Lua state; on contention or a Lua error, replays the last
-    /// successful render rather than blanking the row.
+    /// is never blocked by an in-flight provider call. Brief contention
+    /// replays the last render; once the cache is older than
+    /// [`CACHE_STALE_AFTER`] the row goes empty so the host can paint
+    /// the built-in modeline (with its working spinner).
     #[must_use]
     pub fn render(&self, width: u16) -> Vec<ChromeLine> {
         let Ok(lua) = self.lua.try_lock() else {
-            return self.cached();
+            return self.fresh_cached();
         };
         let func: Function = match lua.registry_value(&self.handler_key) {
             Ok(f) => f,
             Err(e) => {
                 self.log_error(&e);
-                return self.cached();
+                return self.fresh_cached();
             }
         };
         match func.call::<Value>(width) {
             Ok(value) => {
                 let lines = parse_lines(&value);
                 if let Ok(mut slot) = self.cache.lock() {
-                    slot.clone_from(&lines);
+                    *slot = (std::time::Instant::now(), lines.clone());
                 }
                 lines
             }
             Err(e) => {
                 self.log_error(&e);
-                self.cached()
+                self.fresh_cached()
             }
         }
     }
 
-    fn cached(&self) -> Vec<ChromeLine> {
-        self.cache.lock().map(|c| c.clone()).unwrap_or_default()
+    fn fresh_cached(&self) -> Vec<ChromeLine> {
+        let Ok(slot) = self.cache.lock() else {
+            return Vec::new();
+        };
+        if slot.0.elapsed() <= CACHE_STALE_AFTER {
+            slot.1.clone()
+        } else {
+            Vec::new()
+        }
     }
 
     fn log_error(&self, e: &dyn std::fmt::Display) {
@@ -362,7 +374,7 @@ fn make_setter(
                     lua: shared_lua.clone(),
                     sink: sink.clone(),
                     handler_key: Arc::new(handler_key),
-                    cache: Mutex::new(Vec::new()),
+                    cache: Mutex::new((std::time::Instant::now(), Vec::new())),
                 }));
                 Ok(())
             }

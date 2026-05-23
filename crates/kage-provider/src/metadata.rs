@@ -26,4 +26,12 @@ pub struct ProviderModel {
     pub id: String,
     /// Human-friendly display name shown in the picker.
     pub name: String,
+    /// Total context window in tokens, when known. Surfaces to the
+    /// modeline so the percent-of-context indicator works for
+    /// plugin-registered models without catalog entries.
+    pub context: Option<u64>,
+    /// Maximum output tokens per turn, when known. Forwarded on every
+    /// stream request so the provider does not silently truncate with
+    /// its conservative default.
+    pub max_output: Option<u32>,
 }

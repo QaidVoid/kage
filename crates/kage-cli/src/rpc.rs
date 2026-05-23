@@ -160,10 +160,10 @@ impl CliAcpAgent {
             eprintln!("kage: mcp `{server}`: {err}");
         }
         let mut cx = AgentContext::new(resolved, &system_prompt).with_workdir(&workdir);
-        if let Some(w) = runtime_env::context_window_for(&model) {
+        if let Some(w) = runtime_env::context_window_for(&self.registry, &model) {
             cx = cx.with_context_window(w);
         }
-        if let Some(o) = runtime_env::max_output_tokens_for(&model) {
+        if let Some(o) = runtime_env::max_output_tokens_for(&self.registry, &model) {
             cx = cx.with_max_output_tokens(o);
         }
         Ok(Session {

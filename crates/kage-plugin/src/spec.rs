@@ -568,6 +568,16 @@ const CLASSES: &[Class] = &[
                 ty: "string",
                 doc: "Display name; defaults to id.",
             },
+            Field {
+                name: "context?",
+                ty: "integer",
+                doc: "Context window in tokens, for the modeline percent.",
+            },
+            Field {
+                name: "max_output?",
+                ty: "integer",
+                doc: "Per-turn max output tokens forwarded to the provider.",
+            },
         ],
     },
     Class {

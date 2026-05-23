@@ -169,6 +169,8 @@
 ---@class kage.ProviderModel
 ---@field id string Model id, used as the part after `provider:`.
 ---@field name? string Display name; defaults to id.
+---@field context? integer Context window in tokens, for the modeline percent.
+---@field max_output? integer Per-turn max output tokens forwarded to the provider.
 
 --- Spec passed to `kage.exec`.
 ---@class kage.ExecSpec

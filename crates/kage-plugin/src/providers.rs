@@ -137,7 +137,14 @@ fn parse_models(spec: &Table) -> mlua::Result<Vec<ProviderModel>> {
             mlua::Error::external(format!("register_provider: models[].id missing: {e}"))
         })?;
         let name: String = entry.get("name").unwrap_or_else(|_| id.clone());
-        out.push(ProviderModel { id, name });
+        let context: Option<u64> = entry.get("context").ok();
+        let max_output: Option<u32> = entry.get("max_output").ok();
+        out.push(ProviderModel {
+            id,
+            name,
+            context,
+            max_output,
+        });
     }
     Ok(out)
 }

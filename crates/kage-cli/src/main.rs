@@ -357,10 +357,10 @@ fn main() -> ExitCode {
         eprintln!("kage: mcp `{server}`: {err}");
     }
     let mut cx = AgentContext::new(resolved.model.clone(), &system_prompt).with_workdir(&workdir);
-    if let Some(window) = runtime_env::context_window_for(&model) {
+    if let Some(window) = runtime_env::context_window_for(&registry, &model) {
         cx = cx.with_context_window(window);
     }
-    if let Some(out) = runtime_env::max_output_tokens_for(&model) {
+    if let Some(out) = runtime_env::max_output_tokens_for(&registry, &model) {
         cx = cx.with_max_output_tokens(out);
     }
     let user_msg = Message::new(Role::User, vec![Content::Text { text: prompt }], None);
@@ -677,10 +677,10 @@ fn run_resume(
     }
     let mut cx = AgentContext::new(resolved.model.clone(), &replay.header.system_prompt)
         .with_workdir(&workdir);
-    if let Some(window) = runtime_env::context_window_for(&model) {
+    if let Some(window) = runtime_env::context_window_for(&registry, &model) {
         cx = cx.with_context_window(window);
     }
-    if let Some(out) = runtime_env::max_output_tokens_for(&model) {
+    if let Some(out) = runtime_env::max_output_tokens_for(&registry, &model) {
         cx = cx.with_max_output_tokens(out);
     }
     cx.history = replay.history;

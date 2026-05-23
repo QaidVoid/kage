@@ -242,10 +242,10 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     }
     let cancel = CancelFlag::new();
     let mut initial_cx = AgentContext::new(bare_model, system).with_workdir(&workdir);
-    if let Some(window) = crate::runtime_env::context_window_for(&qualified_model) {
+    if let Some(window) = crate::runtime_env::context_window_for(&registry, &qualified_model) {
         initial_cx = initial_cx.with_context_window(window);
     }
-    if let Some(out) = crate::runtime_env::max_output_tokens_for(&qualified_model) {
+    if let Some(out) = crate::runtime_env::max_output_tokens_for(&registry, &qualified_model) {
         initial_cx = initial_cx.with_max_output_tokens(out);
     }
     let cx = Arc::new(Mutex::new(initial_cx));
@@ -604,11 +604,13 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                     let bare_model = resolved.model.clone();
                     let mut cx_guard = cx.lock().expect("agent context mutex poisoned");
                     cx_guard.model = bare_model;
-                    if let Some(window) = crate::runtime_env::context_window_for(&qualified) {
+                    if let Some(window) =
+                        crate::runtime_env::context_window_for(&registry, &qualified)
+                    {
                         cx_guard.context_window = window;
                     }
                     cx_guard.max_output_tokens =
-                        crate::runtime_env::max_output_tokens_for(&qualified);
+                        crate::runtime_env::max_output_tokens_for(&registry, &qualified);
                     let had_prior_assistant =
                         cx_guard.history.iter().any(|m| m.role == Role::Assistant);
                     let title_user_text = text.clone();
@@ -2286,10 +2288,11 @@ fn handle_resume(
         let mut cx_guard = cx.lock().expect("agent context mutex poisoned");
         cx_guard.history.clone_from(&replay.history);
         cx_guard.model = bare_model;
-        if let Some(window) = crate::runtime_env::context_window_for(&qualified_model) {
+        if let Some(window) = crate::runtime_env::context_window_for(registry, &qualified_model) {
             cx_guard.context_window = window;
         }
-        cx_guard.max_output_tokens = crate::runtime_env::max_output_tokens_for(&qualified_model);
+        cx_guard.max_output_tokens =
+            crate::runtime_env::max_output_tokens_for(registry, &qualified_model);
         cx_guard.thinking_level = resumed_level;
         cx_guard.budget.used_input = replay.usage_total.input;
         cx_guard.budget.used_output = replay.usage_total.output;

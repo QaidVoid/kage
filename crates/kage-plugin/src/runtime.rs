@@ -46,6 +46,7 @@ use crate::bridge::{self, BridgeStep, SharedBridge, shared_bridge};
 use crate::capabilities::{self, CurrentPlugin};
 use crate::chrome::{self, LuaChrome, SharedChrome, shared_chrome};
 use crate::commands::{self, LuaCommand, RegisteredCommands, registered_commands};
+use crate::env;
 use crate::error::PluginError;
 use crate::events;
 use crate::exec;
@@ -927,6 +928,7 @@ impl PluginRuntimeBuilder {
             Arc::clone(&switch_request),
         );
         exec::register(&cap_registry, self.workdir.clone());
+        env::register(&cap_registry);
         {
             let lua_guard = shared_lua.lock().expect("plugin lua mutex poisoned");
             bridge::install_suspend(&lua_guard)?;

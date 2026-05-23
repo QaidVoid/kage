@@ -142,7 +142,7 @@ const ALIASES: &[Alias] = &[
             "An elevated capability a plugin may request. Granted",
             "per-plugin in `[plugins.capabilities]`.",
         ],
-        variants: &["session_write", "exec"],
+        variants: &["session_write", "exec", "env"],
     },
     Alias {
         name: "kage.Event",
@@ -591,9 +591,42 @@ const CLASSES: &[Class] = &[
             },
         ],
     },
+    Class {
+        name: "kage.HttpRequestOpts",
+        doc: &[
+            "Options accepted by `kage.http.post`, `kage.http.delete`,",
+            "and `kage.http.post_stream`.",
+        ],
+        fields: &[
+            Field {
+                name: "headers?",
+                ty: "table<string, string>",
+                doc: "Request headers.",
+            },
+            Field {
+                name: "body?",
+                ty: "string",
+                doc: "Raw request body. Mutually exclusive with `json`.",
+            },
+            Field {
+                name: "json?",
+                ty: "table",
+                doc: "Body encoded as JSON; sets Content-Type to application/json.",
+            },
+            Field {
+                name: "max_bytes?",
+                ty: "integer",
+                doc: "Response body cap. Defaults: 2 MB simple, 32 MB streamed.",
+            },
+        ],
+    },
 ];
 
 const TABLES: &[Table] = &[
+    Table {
+        path: "kage.json",
+        class_doc: "JSON encode and decode helpers.",
+    },
     Table {
         path: "kage.ui",
         class_doc: "Interactive UI surface.",
@@ -630,6 +663,40 @@ const FUNCS: &[Func] = &[
         path: "kage.now_ms",
         params: &[],
         ret: Some("integer"),
+    },
+    Func {
+        doc: &[
+            "Sleep the calling thread for `ms` milliseconds. Capped at",
+            "500 ms per call so a host-side cancel never has to wait a",
+            "multi-second sleep; loop the call to wait longer.",
+        ],
+        path: "kage.sleep_ms",
+        params: &[Field {
+            name: "ms",
+            ty: "integer",
+            doc: "",
+        }],
+        ret: None,
+    },
+    Func {
+        doc: &["Decode a JSON string into the equivalent Lua table or value."],
+        path: "kage.json.decode",
+        params: &[Field {
+            name: "raw",
+            ty: "string",
+            doc: "",
+        }],
+        ret: Some("any"),
+    },
+    Func {
+        doc: &["Encode a Lua value as a JSON string."],
+        path: "kage.json.encode",
+        params: &[Field {
+            name: "value",
+            ty: "any",
+            doc: "",
+        }],
+        ret: Some("string"),
     },
     Func {
         doc: &["Record a structured log line at `level`."],
@@ -1132,16 +1199,93 @@ const FUNCS: &[Func] = &[
     },
     Func {
         doc: &[
-            "HTTP GET. The allow-list is host-controlled; unauthorized",
-            "hosts raise an error.",
+            "HTTP GET. `opts` may carry headers and a body cap. The",
+            "allow-list is host-controlled; unauthorized hosts raise an",
+            "error.",
         ],
         path: "kage.http.get",
-        params: &[Field {
-            name: "url",
-            ty: "string",
-            doc: "",
-        }],
+        params: &[
+            Field {
+                name: "url",
+                ty: "string",
+                doc: "",
+            },
+            Field {
+                name: "opts?",
+                ty: "kage.HttpRequestOpts",
+                doc: "",
+            },
+        ],
         ret: Some("{ status: integer, body: string, content_type: string, truncated: boolean }"),
+    },
+    Func {
+        doc: &[
+            "HTTP POST. `opts` carries headers and either `body` (string)",
+            "or `json` (table; auto-serialized with `Content-Type:",
+            "application/json`). The two are mutually exclusive. Same",
+            "SSRF rules as GET.",
+        ],
+        path: "kage.http.post",
+        params: &[
+            Field {
+                name: "url",
+                ty: "string",
+                doc: "",
+            },
+            Field {
+                name: "opts?",
+                ty: "kage.HttpRequestOpts",
+                doc: "",
+            },
+        ],
+        ret: Some("{ status: integer, body: string, content_type: string, truncated: boolean }"),
+    },
+    Func {
+        doc: &[
+            "HTTP DELETE. `opts` carries headers (and optionally body,",
+            "though most servers ignore it). Same SSRF rules as GET.",
+        ],
+        path: "kage.http.delete",
+        params: &[
+            Field {
+                name: "url",
+                ty: "string",
+                doc: "",
+            },
+            Field {
+                name: "opts?",
+                ty: "kage.HttpRequestOpts",
+                doc: "",
+            },
+        ],
+        ret: Some("{ status: integer, body: string, content_type: string, truncated: boolean }"),
+    },
+    Func {
+        doc: &[
+            "Streaming HTTP POST. The response is read frame-by-frame as",
+            "Server-Sent Events and `on_event({event, data})` is called",
+            "once per blank-line-terminated frame. Multi-line `data:`",
+            "lines join with `\\n`. Returns when the stream ends.",
+        ],
+        path: "kage.http.post_stream",
+        params: &[
+            Field {
+                name: "url",
+                ty: "string",
+                doc: "",
+            },
+            Field {
+                name: "opts?",
+                ty: "kage.HttpRequestOpts",
+                doc: "",
+            },
+            Field {
+                name: "on_event",
+                ty: "fun(ev: { event: string, data: string })",
+                doc: "",
+            },
+        ],
+        ret: Some("{ status: integer, content_type: string }"),
     },
     Func {
         doc: &[
@@ -1302,6 +1446,22 @@ const GATED: &[GatedFunc] = &[
             ret: Some("kage.ExecResult"),
         },
     },
+    GatedFunc {
+        cap: "env",
+        func: Func {
+            doc: &[
+                "Read a process environment variable. Returns the value",
+                "or `nil` when unset. Requires the `env` capability.",
+            ],
+            path: "kage.env",
+            params: &[Field {
+                name: "name",
+                ty: "string",
+                doc: "",
+            }],
+            ret: Some("string?"),
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -1363,7 +1523,11 @@ mod tests {
         let mut caps = std::collections::BTreeMap::new();
         caps.insert(
             "trusted".to_owned(),
-            vec!["session_write".to_owned(), "exec".to_owned()],
+            vec![
+                "session_write".to_owned(),
+                "exec".to_owned(),
+                "env".to_owned(),
+            ],
         );
         let rt = PluginRuntime::builder()
             .capabilities(caps)

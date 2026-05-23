@@ -30,6 +30,8 @@ pub(crate) enum Capability {
     SessionWrite,
     /// Run a subprocess (no shell) rooted at the workdir.
     Exec,
+    /// Read process environment variables.
+    Env,
 }
 
 impl Capability {
@@ -40,8 +42,9 @@ impl Capability {
         match raw {
             "session_write" => Ok(Self::SessionWrite),
             "exec" => Ok(Self::Exec),
+            "env" => Ok(Self::Env),
             other => Err(format!(
-                "unknown capability {other:?} (known: session_write, exec)"
+                "unknown capability {other:?} (known: session_write, exec, env)"
             )),
         }
     }
@@ -185,6 +188,7 @@ mod tests {
             Ok(Capability::SessionWrite)
         );
         assert_eq!(Capability::parse("exec"), Ok(Capability::Exec));
+        assert_eq!(Capability::parse("env"), Ok(Capability::Env));
         assert!(Capability::parse("teleport").is_err());
     }
 

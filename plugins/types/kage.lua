@@ -31,7 +31,7 @@
 
 --- An elevated capability a plugin may request. Granted
 --- per-plugin in `[plugins.capabilities]`.
----@alias kage.Capability "session_write"|"exec"
+---@alias kage.Capability "session_write"|"exec"|"env"
 
 --- Every event name `kage.on` accepts. Notification events
 --- ignore the handler return; transform events chain it;
@@ -176,12 +176,40 @@
 ---@field stdout string Captured standard output.
 ---@field stderr string Captured standard error.
 
+--- Options accepted by `kage.http.post`, `kage.http.delete`,
+--- and `kage.http.post_stream`.
+---@class kage.HttpRequestOpts
+---@field headers? table<string, string> Request headers.
+---@field body? string Raw request body. Mutually exclusive with `json`.
+---@field json? table Body encoded as JSON; sets Content-Type to application/json.
+---@field max_bytes? integer Response body cap. Defaults: 2 MB simple, 32 MB streamed.
+
 ---@class kage
 kage = {}
 
 --- Wall-clock milliseconds since the Unix epoch.
 ---@return integer
 function kage.now_ms() end
+
+--- Sleep the calling thread for `ms` milliseconds. Capped at
+--- 500 ms per call so a host-side cancel never has to wait a
+--- multi-second sleep; loop the call to wait longer.
+---@param ms integer
+function kage.sleep_ms(ms) end
+
+--- JSON encode and decode helpers.
+---@class kage.json
+kage.json = {}
+
+--- Decode a JSON string into the equivalent Lua table or value.
+---@param raw string
+---@return any
+function kage.json.decode(raw) end
+
+--- Encode a Lua value as a JSON string.
+---@param value any
+---@return string
+function kage.json.encode(value) end
 
 --- Record a structured log line at `level`.
 ---@param level kage.LogLevel
@@ -389,11 +417,39 @@ function kage.fs.write(path, content) end
 ---@class kage.http
 kage.http = {}
 
---- HTTP GET. The allow-list is host-controlled; unauthorized
---- hosts raise an error.
+--- HTTP GET. `opts` may carry headers and a body cap. The
+--- allow-list is host-controlled; unauthorized hosts raise an
+--- error.
 ---@param url string
+---@param opts? kage.HttpRequestOpts
 ---@return { status: integer, body: string, content_type: string, truncated: boolean }
-function kage.http.get(url) end
+function kage.http.get(url, opts) end
+
+--- HTTP POST. `opts` carries headers and either `body` (string)
+--- or `json` (table; auto-serialized with `Content-Type:
+--- application/json`). The two are mutually exclusive. Same
+--- SSRF rules as GET.
+---@param url string
+---@param opts? kage.HttpRequestOpts
+---@return { status: integer, body: string, content_type: string, truncated: boolean }
+function kage.http.post(url, opts) end
+
+--- HTTP DELETE. `opts` carries headers (and optionally body,
+--- though most servers ignore it). Same SSRF rules as GET.
+---@param url string
+---@param opts? kage.HttpRequestOpts
+---@return { status: integer, body: string, content_type: string, truncated: boolean }
+function kage.http.delete(url, opts) end
+
+--- Streaming HTTP POST. The response is read frame-by-frame as
+--- Server-Sent Events and `on_event({event, data})` is called
+--- once per blank-line-terminated frame. Multi-line `data:`
+--- lines join with `\n`. Returns when the stream ends.
+---@param url string
+---@param opts? kage.HttpRequestOpts
+---@param on_event fun(ev: { event: string, data: string })
+---@return { status: integer, content_type: string }
+function kage.http.post_stream(url, opts, on_event) end
 
 --- Declarative ACP agent config.
 ---@class kage.acp
@@ -477,3 +533,9 @@ function kage.session.switch(target) end
 ---@param spec kage.ExecSpec
 ---@return kage.ExecResult
 function kage.exec(spec) end
+
+--- Read a process environment variable. Returns the value
+--- or `nil` when unset. Requires the `env` capability.
+---@param name string
+---@return string?
+function kage.env(name) end

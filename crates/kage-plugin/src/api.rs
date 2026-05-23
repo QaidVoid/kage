@@ -94,6 +94,7 @@ pub fn install(
     let kage = lua.create_table()?;
 
     kage.set("now_ms", lua.create_function(now_ms)?)?;
+    kage.set("sleep_ms", lua.create_function(sleep_ms)?)?;
 
     let notify_sink = sink.clone();
     let notify = lua.create_function(move |_, (msg, level): (String, Option<String>)| {
@@ -140,6 +141,25 @@ pub fn install(
         lua.create_function(move |lua, ()| json_to_lua(lua, &config_for_lua))?,
     )?;
 
+    let json = lua.create_table()?;
+    json.set(
+        "decode",
+        lua.create_function(|lua, raw: String| {
+            let value: serde_json::Value = serde_json::from_str(&raw)
+                .map_err(|e| mlua::Error::external(format!("kage.json.decode: {e}")))?;
+            json_to_lua(lua, &value)
+        })?,
+    )?;
+    json.set(
+        "encode",
+        lua.create_function(|_, value: Value| {
+            let v = lua_to_json(value)?;
+            serde_json::to_string(&v)
+                .map_err(|e| mlua::Error::external(format!("kage.json.encode: {e}")))
+        })?,
+    )?;
+    kage.set("json", json)?;
+
     lua.globals().set("kage", kage)?;
     Ok(())
 }
@@ -150,6 +170,30 @@ fn now_ms(_: &Lua, (): ()) -> mlua::Result<i64> {
         .map_err(|e| mlua::Error::external(e.to_string()))?;
     let ms = u128::from(now.as_secs()) * 1000 + u128::from(now.subsec_millis());
     i64::try_from(ms).map_err(|_| mlua::Error::external("timestamp overflows i64"))
+}
+
+/// Cap on one [`sleep_ms`] call. Plugins that need to wait longer loop
+/// the sleep so the agent thread checks its own state between naps and
+/// a host-side cancel never blocks behind a multi-second sleep.
+const SLEEP_MS_MAX: i64 = 500;
+
+fn sleep_ms(_: &Lua, ms: i64) -> mlua::Result<()> {
+    if ms < 0 {
+        return Err(mlua::Error::external(
+            "kage.sleep_ms: duration must be non-negative",
+        ));
+    }
+    if ms > SLEEP_MS_MAX {
+        return Err(mlua::Error::external(format!(
+            "kage.sleep_ms: duration {ms} exceeds cap of {SLEEP_MS_MAX} ms; \
+             loop the sleep instead so cancellation stays responsive"
+        )));
+    }
+    if ms > 0 {
+        let duration = u64::try_from(ms).map_err(|e| mlua::Error::external(e.to_string()))?;
+        std::thread::sleep(std::time::Duration::from_millis(duration));
+    }
+    Ok(())
 }
 
 /// Convert a `serde_json::Value` into the equivalent Lua [`Value`].
@@ -298,6 +342,36 @@ mod tests {
         let ms: i64 = lua.load("return kage.now_ms()").eval().unwrap();
         // After 2020-01-01.
         assert!(ms > 1_577_836_800_000);
+    }
+
+    #[test]
+    fn sleep_ms_waits_at_least_requested_duration() {
+        let lua = Lua::new();
+        install(&lua, default_host_log(), json!({})).unwrap();
+        let start = std::time::Instant::now();
+        lua.load("kage.sleep_ms(10)").exec().unwrap();
+        assert!(start.elapsed() >= std::time::Duration::from_millis(10));
+    }
+
+    #[test]
+    fn sleep_ms_rejects_negative_duration() {
+        let lua = Lua::new();
+        install(&lua, default_host_log(), json!({})).unwrap();
+        assert!(lua.load("kage.sleep_ms(-1)").exec().is_err());
+    }
+
+    #[test]
+    fn sleep_ms_rejects_above_cap() {
+        let lua = Lua::new();
+        install(&lua, default_host_log(), json!({})).unwrap();
+        assert!(lua.load("kage.sleep_ms(10000)").exec().is_err());
+    }
+
+    #[test]
+    fn sleep_ms_zero_is_a_noop() {
+        let lua = Lua::new();
+        install(&lua, default_host_log(), json!({})).unwrap();
+        lua.load("kage.sleep_ms(0)").exec().unwrap();
     }
 
     #[test]

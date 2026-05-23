@@ -297,21 +297,12 @@ fn main() -> ExitCode {
 
     let Some(prompt) = cli.print else {
         // No subcommand and no `-p`: drop into the interactive TUI.
-        let registry_for_default = build_provider_registry();
-        let model = cli
-            .model
-            .unwrap_or_else(|| default_model(&registry_for_default));
-        return tui::run_tui(&model, &cli.system);
+        return tui::run_tui(cli.model.as_deref(), &cli.system);
     };
 
     let mut registry = build_provider_registry();
 
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    // Plugins load before the registry empty-check so a plugin-only
-    // setup (no env credentials, just `kage.register_provider`) still
-    // resolves a model. The bare prompt seeds `kage.config().model`;
-    // skills are merged below after plugins contribute extra dirs via
-    // `resources_discover`.
     let provisional_model = cli
         .model
         .clone()

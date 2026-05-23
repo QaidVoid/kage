@@ -35,9 +35,9 @@ use crate::session::SessionRecordingHooks;
 /// Drop into the interactive TUI. Returns the appropriate process exit
 /// code once the user quits.
 #[allow(clippy::too_many_lines)]
-pub fn run_tui(model: &str, system: &str) -> ExitCode {
+pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     let mut registry = crate::build_provider_registry();
-    let qualified_model = model.to_owned();
+    let provisional_model = model.map_or_else(|| crate::default_model(&registry), str::to_owned);
 
     // The buffer must exist before we build the plugin runtime so we can
     // hand the runtime a sink that routes notify/log into the buffer
@@ -86,7 +86,8 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     // Build the plugin runtime against a bare prompt first; skills land
     // below once plugins have had a chance to contribute extra dirs via
     // `resources_discover`.
-    let bare_prompt = crate::runtime_env::build_system_prompt(system, &workdir, model, &[]);
+    let bare_prompt =
+        crate::runtime_env::build_system_prompt(system, &workdir, &provisional_model, &[]);
     // Resolve once up-front so the same path is shared by initial load,
     // the file-system watcher, and the worker's reload handler.
     let plugins_dir_path = match crate::plugins_dir() {
@@ -102,7 +103,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         Some(dir) => match setup_runtime_with_sink(
             dir,
             &workdir,
-            model,
+            &provisional_model,
             &bare_prompt,
             buffer_host_log(buffer.clone(), toasts.clone()),
         ) {
@@ -129,17 +130,24 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
         );
         return ExitCode::from(1);
     }
-    let bare_model = match registry.resolve(model) {
+    // Recompute the default against the merged registry so a last-used
+    // plugin-provided model resolves on restart.
+    let qualified_model = match model {
+        Some(m) => m.to_owned(),
+        None => crate::default_model(&registry),
+    };
+    let bare_model = match registry.resolve(&qualified_model) {
         Ok(r) => r.model.clone(),
         Err(e) => {
-            eprintln!("kage: cannot resolve model {model}: {e}");
+            eprintln!("kage: cannot resolve model {qualified_model}: {e}");
             return ExitCode::from(1);
         }
     };
     let registry = Arc::new(registry);
 
     let skills = crate::load_skills(&workdir, plugin_runtime.as_deref());
-    let system_prompt = crate::runtime_env::build_system_prompt(system, &workdir, model, &skills);
+    let system_prompt =
+        crate::runtime_env::build_system_prompt(system, &workdir, &qualified_model, &skills);
     let system = system_prompt.as_str();
 
     let mut tools = kage_tools::builtin_registry();
@@ -234,10 +242,10 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     }
     let cancel = CancelFlag::new();
     let mut initial_cx = AgentContext::new(bare_model, system).with_workdir(&workdir);
-    if let Some(window) = crate::runtime_env::context_window_for(model) {
+    if let Some(window) = crate::runtime_env::context_window_for(&qualified_model) {
         initial_cx = initial_cx.with_context_window(window);
     }
-    if let Some(out) = crate::runtime_env::max_output_tokens_for(model) {
+    if let Some(out) = crate::runtime_env::max_output_tokens_for(&qualified_model) {
         initial_cx = initial_cx.with_max_output_tokens(out);
     }
     let cx = Arc::new(Mutex::new(initial_cx));
@@ -256,7 +264,7 @@ pub fn run_tui(model: &str, system: &str) -> ExitCode {
     // Plan a session up-front but defer creating the file until the
     // first prompt actually lands. Otherwise quitting or resuming
     // immediately would leave an empty header-only stub on disk.
-    let (session_path, session_header) = match crate::plan_session(model, system) {
+    let (session_path, session_header) = match crate::plan_session(&qualified_model, system) {
         Ok((path, header)) => (
             Some(Arc::new(Mutex::new(path))),
             Some(Arc::new(Mutex::new(Some(header)))),
@@ -939,11 +947,6 @@ fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                                 .lock()
                                 .expect("active model mutex poisoned")
                                 .clone_from(&new_model);
-                            // The session-usage snapshot is what plugins
-                            // see via `kage.context_usage().model`; the
-                            // built-in modeline reads `active_qualified`
-                            // instead. Without this both views diverge
-                            // until the next turn rewrites the snapshot.
                             if let Ok(mut snap) = session_usage.lock() {
                                 snap.model.clone_from(&new_model);
                             }

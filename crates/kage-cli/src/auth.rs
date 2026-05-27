@@ -261,7 +261,8 @@ impl AuthStore {
 
 /// Provider ids the auth subcommand can target. The list mirrors the
 /// catalog (and our hardcoded `Provider` impls). `zai` and
-/// `zai-coding-plan` are billed separately so each takes its own key.
+/// `zai-coding-plan` are billed separately so each takes its own key;
+/// the four `xiaomi*` ids in contrast all share `XIAOMI_API_KEY`.
 pub const KNOWN_PROVIDERS: &[&str] = &[
     "anthropic",
     "openai",
@@ -277,6 +278,10 @@ pub const KNOWN_PROVIDERS: &[&str] = &[
     "fireworks-ai",
     "moonshotai",
     "kimi-for-coding",
+    "xiaomi",
+    "xiaomi-token-plan-ams",
+    "xiaomi-token-plan-cn",
+    "xiaomi-token-plan-sgp",
 ];
 
 /// Env-var name that, when set, supersedes any saved key for `provider`.
@@ -297,6 +302,9 @@ pub fn env_var_for(provider: &str) -> &'static str {
         "fireworks-ai" => "FIREWORKS_API_KEY",
         "moonshotai" => "MOONSHOT_API_KEY",
         "kimi-for-coding" => "KIMI_API_KEY",
+        "xiaomi" | "xiaomi-token-plan-ams" | "xiaomi-token-plan-cn" | "xiaomi-token-plan-sgp" => {
+            "XIAOMI_API_KEY"
+        }
         _ => "",
     }
 }

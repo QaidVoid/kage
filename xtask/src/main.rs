@@ -46,6 +46,10 @@ const SUPPORTED_PROVIDERS: &[ProviderMap] = &[
     ProviderMap::same("fireworks-ai"),
     ProviderMap::same("moonshotai"),
     ProviderMap::same("kimi-for-coding"),
+    ProviderMap::same("xiaomi"),
+    ProviderMap::same("xiaomi-token-plan-ams"),
+    ProviderMap::same("xiaomi-token-plan-cn"),
+    ProviderMap::same("xiaomi-token-plan-sgp"),
     // models.dev calls Google's API "google" but kage's Provider impl
     // is registered under "gemini".
     ProviderMap {

@@ -198,6 +198,79 @@ pub fn zai_coding_plan(api_key: impl Into<String>) -> OpenAiProvider {
     )
 }
 
+/// Construct a Xiaomi `MiMo` (`api.xiaomimimo.com/v1`) provider.
+///
+/// Registers under the `xiaomi` id; resolve as `xiaomi:<model>` (for
+/// example `xiaomi:mimo-v2.5-pro`).
+#[must_use]
+pub fn xiaomi(api_key: impl Into<String>) -> OpenAiProvider {
+    OpenAiProvider::compatible(
+        api_key,
+        "https://api.xiaomimimo.com/v1",
+        ProviderMetadata {
+            id: "xiaomi".into(),
+            display_name: "Xiaomi".into(),
+            supports_caching: false,
+            supports_thinking: false,
+            supports_tool_use: true,
+        },
+    )
+}
+
+/// Construct a Xiaomi token-plan provider routed through the Europe
+/// region (`token-plan-ams.xiaomimimo.com/v1`).
+///
+/// Shares the same `XIAOMI_API_KEY` credential as the main `xiaomi`
+/// provider but bills under the token-plan tier.
+#[must_use]
+pub fn xiaomi_token_plan_ams(api_key: impl Into<String>) -> OpenAiProvider {
+    OpenAiProvider::compatible(
+        api_key,
+        "https://token-plan-ams.xiaomimimo.com/v1",
+        ProviderMetadata {
+            id: "xiaomi-token-plan-ams".into(),
+            display_name: "Xiaomi Token Plan (Europe)".into(),
+            supports_caching: false,
+            supports_thinking: false,
+            supports_tool_use: true,
+        },
+    )
+}
+
+/// Construct a Xiaomi token-plan provider routed through the China
+/// region (`token-plan-cn.xiaomimimo.com/v1`).
+#[must_use]
+pub fn xiaomi_token_plan_cn(api_key: impl Into<String>) -> OpenAiProvider {
+    OpenAiProvider::compatible(
+        api_key,
+        "https://token-plan-cn.xiaomimimo.com/v1",
+        ProviderMetadata {
+            id: "xiaomi-token-plan-cn".into(),
+            display_name: "Xiaomi Token Plan (China)".into(),
+            supports_caching: false,
+            supports_thinking: false,
+            supports_tool_use: true,
+        },
+    )
+}
+
+/// Construct a Xiaomi token-plan provider routed through the Singapore
+/// region (`token-plan-sgp.xiaomimimo.com/v1`).
+#[must_use]
+pub fn xiaomi_token_plan_sgp(api_key: impl Into<String>) -> OpenAiProvider {
+    OpenAiProvider::compatible(
+        api_key,
+        "https://token-plan-sgp.xiaomimimo.com/v1",
+        ProviderMetadata {
+            id: "xiaomi-token-plan-sgp".into(),
+            display_name: "Xiaomi Token Plan (Singapore)".into(),
+            supports_caching: false,
+            supports_thinking: false,
+            supports_tool_use: true,
+        },
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,6 +287,19 @@ mod tests {
         assert_eq!(fireworks_ai("k").metadata().id, "fireworks-ai");
         assert_eq!(moonshotai("k").metadata().id, "moonshotai");
         assert_eq!(kimi_for_coding("k").metadata().id, "kimi-for-coding");
+        assert_eq!(xiaomi("k").metadata().id, "xiaomi");
+        assert_eq!(
+            xiaomi_token_plan_ams("k").metadata().id,
+            "xiaomi-token-plan-ams"
+        );
+        assert_eq!(
+            xiaomi_token_plan_cn("k").metadata().id,
+            "xiaomi-token-plan-cn"
+        );
+        assert_eq!(
+            xiaomi_token_plan_sgp("k").metadata().id,
+            "xiaomi-token-plan-sgp"
+        );
     }
 
     #[test]
@@ -228,6 +314,10 @@ mod tests {
             fireworks_ai("k"),
             moonshotai("k"),
             kimi_for_coding("k"),
+            xiaomi("k"),
+            xiaomi_token_plan_ams("k"),
+            xiaomi_token_plan_cn("k"),
+            xiaomi_token_plan_sgp("k"),
         ] {
             assert!(p.metadata().supports_tool_use);
         }

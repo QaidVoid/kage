@@ -1097,6 +1097,18 @@ pub(crate) fn build_provider_registry() -> ProviderRegistry {
     if let Some(key) = lookup_key("kimi-for-coding", &store) {
         registry.register(Arc::new(compat::kimi_for_coding(key)));
     }
+    if let Some(key) = lookup_key("xiaomi", &store) {
+        registry.register(Arc::new(compat::xiaomi(key)));
+    }
+    if let Some(key) = lookup_key("xiaomi-token-plan-ams", &store) {
+        registry.register(Arc::new(compat::xiaomi_token_plan_ams(key)));
+    }
+    if let Some(key) = lookup_key("xiaomi-token-plan-cn", &store) {
+        registry.register(Arc::new(compat::xiaomi_token_plan_cn(key)));
+    }
+    if let Some(key) = lookup_key("xiaomi-token-plan-sgp", &store) {
+        registry.register(Arc::new(compat::xiaomi_token_plan_sgp(key)));
+    }
     // The `acp` provider: `kage -m acp:<name>` drives an external ACP
     // agent declared in `[acp.agents.*]` or via `kage.acp.add_agent`.
     // Always registered (plugin-declared agents are resolved lazily);

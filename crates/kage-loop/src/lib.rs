@@ -1,5 +1,7 @@
 //! Pure event-driven agent loop.
 //!
+//! Layering: depends on `kage-core`, `kage-provider`, and `kage-tools`.
+//!
 //! The loop drives a [`kage_core`]-based conversation forward by talking to
 //! a provider and a tool registry. It is fully synchronous: no tokio, no
 //! async traits, no `Pin<Box<dyn Stream>>`. Hosts subscribe to streaming

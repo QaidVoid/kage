@@ -1,4 +1,6 @@
 //! Model Context Protocol client and server adapters.
+//!
+//! Layering: depends on `kage-core`, `kage-jsonrpc`, and `kage-tools`.
 
 mod http;
 pub mod manager;

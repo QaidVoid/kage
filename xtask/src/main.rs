@@ -1,5 +1,8 @@
 //! `cargo xtask` - workspace housekeeping commands.
 //!
+//! Layering: build tooling outside the runtime crate layering; depends
+//! only on `kage-plugin`.
+//!
 //! Currently exposes one subcommand:
 //!
 //! * `refresh-models`: fetch `https://models.dev/api.json`, curate the

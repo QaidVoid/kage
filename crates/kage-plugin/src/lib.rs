@@ -1,5 +1,7 @@
 //! Sandboxed Lua plugin runtime and extension API.
 //!
+//! Layering: depends on `kage-core`, `kage-provider`, and `kage-tools`.
+//!
 //! Plugins extend kage at runtime in Lua. The host loads a [`PluginRuntime`]
 //! per process, evaluates plugin scripts against it, and dispatches loop
 //! events through the runtime so plugins can react.

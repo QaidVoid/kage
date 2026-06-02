@@ -280,6 +280,10 @@ pub struct SandboxConfig {
     /// Suppress the "running unsandboxed" startup warning.
     pub suppress_warning: bool,
     /// Hosts allowed for outbound network access from sandboxed tools.
+    /// Reserved for the sandbox backend (post-0.1) and not yet enforced:
+    /// the `kage-sandbox` crate is still a stub, so no tool consults this
+    /// list today. Plugin `kage.http` egress is governed by the `net`
+    /// capability and SSRF filtering, not by this field.
     pub network_allowlist: Vec<String>,
 }
 

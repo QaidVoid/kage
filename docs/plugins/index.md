@@ -30,7 +30,8 @@ nothing carries over the boundary.
 
 - spawn subprocesses
 - read or write arbitrary filesystem paths (`kage.fs.*` is workdir-scoped)
-- open network sockets outside `kage.http` (which respects an allow-list)
+- make outbound network requests (`kage.http` requires the `net`
+  capability and applies SSRF filtering, not a host allow-list)
 - rewrite or reseat the live session
 - load native shared libraries
 - start background threads

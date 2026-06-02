@@ -518,14 +518,21 @@ Write a file under the workdir. Same path restriction as `read`.
 
 ## http
 
+`kage.http` is gated behind the `net` capability: a plugin must be
+granted `net` in `[plugins.capabilities]` and request it at load time
+before `kage.http` is attached to its environment. Only SSRF filtering
+applies (the scheme must be http(s) and the host must resolve to a
+routable address); there is no host allow-list.
+
 ### `kage.http.get(url: string)`
 
-HTTP GET. Returns `{ status, body, headers }`. The allow-list is
-host-controlled; unauthorized hosts raise an error.
+HTTP GET. Returns `{ status, body, content_type, truncated }`.
 
 ## providers
 
 ### `kage.register_provider(spec)`
 
-Register a new LLM provider implementation. Advanced; see the
-`pi-ai` plugin in the examples folder for a realistic shape.
+Register a new LLM provider implementation. Advanced; a streaming
+provider makes outbound requests via `kage.http.post_stream`, so it
+also needs the `net` capability. See `plugins/types/kage.lua` for the
+full spec shape.

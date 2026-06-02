@@ -4,8 +4,9 @@
 //! [`Vec<Message>`] that the loop's `cx.history` would hold immediately
 //! after the last recorded entry. Compactions are applied exactly as the
 //! loop applied them at write time: the named number of leading messages
-//! is dropped and replaced by a synthetic assistant message carrying the
-//! recorded summary text.
+//! is dropped and replaced by a synthetic user message carrying the
+//! recorded summary text, matching the role and framing the live loop
+//! inserts so a resumed history is byte-identical to a fresh one.
 //!
 //! [`find_by_prefix`] and [`find_last`] resolve a session file path from a
 //! directory either by id prefix or by most-recent header timestamp.
@@ -147,7 +148,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
                 history.insert(
                     0,
                     Message {
-                        role: Role::Assistant,
+                        role: Role::User,
                         content: vec![Content::Text { text: c.summary }],
                         id: MessageId::new(),
                         parent: None,
@@ -330,9 +331,11 @@ mod tests {
         let result = replay(&path).unwrap();
         // 1 synthetic + 2 kept + 1 post-compact
         assert_eq!(result.history.len(), 4);
-        assert_eq!(result.history[0].role, Role::Assistant);
+        assert_eq!(result.history[0].role, Role::User);
         match &result.history[0].content[0] {
-            Content::Text { text } => assert!(text.contains("they did stuff")),
+            Content::Text { text } => {
+                assert_eq!(text, "[summary of 4 earlier turns]\nthey did stuff");
+            }
             other => panic!("expected text, got {other:?}"),
         }
         // Second-to-last kept message comes from the original "kept 1".

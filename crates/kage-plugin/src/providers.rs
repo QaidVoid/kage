@@ -25,7 +25,7 @@ use std::thread;
 use kage_core::CancelFlag;
 use kage_provider::{
     EventStream, Provider, ProviderError, ProviderEvent, ProviderMetadata, ProviderModel,
-    StreamRequest,
+    StreamRequest, make_cancelable,
 };
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 
@@ -59,7 +59,7 @@ impl Provider for LuaProvider {
     fn stream(
         &self,
         req: StreamRequest,
-        _cancel: &CancelFlag,
+        cancel: &CancelFlag,
     ) -> Result<EventStream, ProviderError> {
         let req_value = serde_json::to_value(&req)
             .map_err(|e| ProviderError::Decode(format!("plugin provider: encode request: {e}")))?;
@@ -67,13 +67,17 @@ impl Provider for LuaProvider {
         let lua = self.lua.clone();
         let handler_key = self.handler_key.clone();
         let sink = self.sink.clone();
+        let worker_cancel = cancel.clone();
         thread::spawn(move || {
             let tx_err = tx.clone();
-            if let Err(e) = run_handler(&lua, &handler_key, &sink, &req_value, tx) {
+            if let Err(e) = run_handler(&lua, &handler_key, &sink, &req_value, &worker_cancel, tx) {
                 let _ = tx_err.send(Err(ProviderError::Decode(format!("plugin provider: {e}"))));
             }
         });
-        Ok(Box::new(ChannelStream { rx }))
+        Ok(make_cancelable(
+            Box::new(ChannelStream { rx }),
+            cancel.clone(),
+        ))
     }
 
     fn models(&self) -> Vec<ProviderModel> {
@@ -108,11 +112,18 @@ impl Iterator for ChannelStream {
 /// `tx` is wrapped in an `Arc` and the emit closure holds only a
 /// `Weak`, so the channel closes as soon as this function returns even
 /// if the Lua GC has not yet released the closure.
+///
+/// `cancel` is observed cooperatively: the `emit` callback raises when
+/// the flag is set so a streaming handler unwinds, and the table and
+/// iterator drain loops break. The foreground iterator already returns
+/// `Cancelled` promptly through [`make_cancelable`]; this bounds the
+/// worker so it does not run on after the turn is abandoned.
 fn run_handler(
     lua: &SharedLua,
     handler_key: &Arc<RegistryKey>,
     sink: &SharedHostLog,
     req: &serde_json::Value,
+    cancel: &CancelFlag,
     tx: mpsc::Sender<Result<ProviderEvent, ProviderError>>,
 ) -> Result<(), PluginError> {
     let lua = lua.lock().expect("plugin lua mutex poisoned");
@@ -122,7 +133,11 @@ fn run_handler(
     let tx = Arc::new(tx);
     let emit_tx = Arc::downgrade(&tx);
     let emit_sink = sink.clone();
+    let emit_cancel = cancel.clone();
     let emit = lua.create_function(move |_, value: Value| {
+        if emit_cancel.is_cancelled() {
+            return Err(mlua::Error::external("plugin provider stream cancelled"));
+        }
         if let Some(tx) = emit_tx.upgrade() {
             let _ = tx.send(value_to_provider_event(value, &emit_sink));
         }
@@ -133,11 +148,17 @@ fn run_handler(
     match result {
         Value::Table(t) => {
             for pair in t.clone().sequence_values::<Value>() {
+                if cancel.is_cancelled() {
+                    break;
+                }
                 let v = pair?;
                 let _ = tx.send(value_to_provider_event(v, sink));
             }
         }
         Value::Function(f) => loop {
+            if cancel.is_cancelled() {
+                break;
+            }
             let next: Value = match f.call::<Value>(()) {
                 Ok(v) => v,
                 Err(err) => {
@@ -406,6 +427,50 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn lua_provider_stream_observes_cancel_while_handler_runs() {
+        use std::time::{Duration, Instant};
+
+        use kage_provider::ProviderError;
+
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval(
+            r"
+            kage.register_provider({
+                id = 'hang',
+                stream = function(req, emit)
+                    emit({ type = 'message_start' })
+                    while true do
+                        emit({ type = 'text_delta', delta = 'x' })
+                        kage.sleep_ms(5)
+                    end
+                end,
+            })
+            ",
+        )
+        .unwrap();
+        let provider = rt.registered_providers().pop().unwrap();
+        let cancel = CancelFlag::new();
+        let mut stream = provider
+            .stream(kage_provider::StreamRequest::new("m", vec![]), &cancel)
+            .unwrap();
+        let first = stream.next().expect("first event before cancel");
+        assert!(first.is_ok());
+        cancel.cancel();
+        let start = Instant::now();
+        let after = stream.next().expect("an item after cancel");
+        assert!(
+            matches!(after, Err(ProviderError::Cancelled)),
+            "expected Cancelled, got {after:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "cancel observation took {:?}",
+            start.elapsed()
+        );
+        assert!(stream.next().is_none(), "stream fuses after cancel");
     }
 
     #[test]

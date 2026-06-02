@@ -32,6 +32,9 @@ jobs:
       # committed plugins/types/kage.lua drifts from the in-tree spec
       # (same shape as the cargo fmt --check gate).
       - run: cargo run -p xtask -- gen-lua-types --check
+      # Enforce the ASCII-only source rule (CLAUDE.md). Unicode glyphs
+      # must be written as `\u{..}` escapes, not raw bytes.
+      - run: cargo run -p xtask -- check-ascii
 
   clippy:
     name: clippy

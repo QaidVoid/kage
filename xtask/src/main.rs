@@ -17,6 +17,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 
+mod ascii;
 mod luatypes;
 
 const MODELS_DEV_URL: &str = "https://models.dev/api.json";
@@ -95,6 +96,9 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Fail if any Rust source carries raw non-ASCII bytes (the CI
+    /// ASCII-only gate). Unicode glyphs must use `\u{..}` escapes.
+    CheckAscii,
 }
 
 fn main() -> ExitCode {
@@ -118,6 +122,16 @@ fn main() -> ExitCode {
             }
             Err(e) => {
                 eprintln!("xtask: gen-lua-types failed: {e}");
+                ExitCode::from(1)
+            }
+        },
+        Command::CheckAscii => match ascii::run() {
+            Ok(()) => {
+                eprintln!("xtask: source is ASCII-only");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("xtask: check-ascii failed: {e}");
                 ExitCode::from(1)
             }
         },

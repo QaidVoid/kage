@@ -2046,7 +2046,7 @@ pub(super) fn plain_lines(text: &str, style: Style) -> Vec<Line<'static>> {
 
 /// Render a paired `ToolCall` + `ToolResult` as one composite block.
 ///
-/// Layout (folded → just the header):
+/// Layout (folded -> just the header):
 /// ```text
 /// > read README.md                    <- header
 ///                                     <- blank
@@ -2054,7 +2054,7 @@ pub(super) fn plain_lines(text: &str, style: Style) -> Vec<Line<'static>> {
 ///   matching first visible line       <- body (tail-truncated)
 ///   matching second visible line
 ///                                     <- blank
-///   Took 23ms · 1.2 KB                <- dim footer
+///   Took 23ms | 1.2 KB                <- dim footer
 /// ```
 pub(super) fn tool_pair_to_lines(
     call: &Block,
@@ -2368,7 +2368,7 @@ pub(super) fn tool_result_header_line(
     if folded && let Some(preview) = first_line_preview(output, 60) {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(
-            format!("· {preview}"),
+            format!("\u{b7} {preview}"),
             Style::default().fg(crate::theme::current().muted_fg),
         ));
     }

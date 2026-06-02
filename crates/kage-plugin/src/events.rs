@@ -386,9 +386,9 @@ fn collect_paths(table: &Table, key: &str, out: &mut Vec<PathBuf>) {
 /// host translates between the two when it needs to.
 ///
 /// Lua handlers return one of:
-/// * nothing / `nil` / non-table value → [`SessionOpDecision::Proceed`]
-/// * `{ cancel = "reason" }` → [`SessionOpDecision::Cancel`]
-/// * `{ patch = "new-target" }` → [`SessionOpDecision::Patch`]
+/// * nothing / `nil` / non-table value -> [`SessionOpDecision::Proceed`]
+/// * `{ cancel = "reason" }` -> [`SessionOpDecision::Cancel`]
+/// * `{ patch = "new-target" }` -> [`SessionOpDecision::Patch`]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionOpDecision {
     /// Run the action against the original target.

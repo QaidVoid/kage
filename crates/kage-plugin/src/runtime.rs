@@ -929,6 +929,7 @@ impl PluginRuntimeBuilder {
         );
         exec::register(&cap_registry, self.workdir.clone());
         env::register(&cap_registry);
+        http::register(&cap_registry);
         {
             let lua_guard = shared_lua.lock().expect("plugin lua mutex poisoned");
             bridge::install_suspend(&lua_guard)?;

@@ -26,6 +26,7 @@ use kage_tools::ssrf;
 use mlua::{Function, Lua, Table, Value};
 
 use crate::api::lua_to_json;
+use crate::capabilities::{Capability, CapabilityRegistry};
 use crate::error::PluginError;
 
 /// Default cap on response body bytes for non-streaming requests.
@@ -36,14 +37,45 @@ const DEFAULT_MAX_BYTES: u64 = 2_000_000;
 /// run into the tens of megabytes over many tokens.
 const DEFAULT_STREAM_MAX_BYTES: u64 = 32_000_000;
 
-/// Install `kage.http` on the running Lua state.
+/// Install the base `kage.http` placeholder table.
+///
+/// The request helpers themselves are gated behind the `net` capability
+/// and attached per-plugin by [`register`]. The empty base table keeps
+/// `kage.http` resolvable so an ungranted plugin sees `kage.http.get`
+/// as `nil` rather than indexing a nil value, mirroring how
+/// `kage.session` carries gated functions on top of a base table.
 pub fn install_http(lua: &Lua) -> Result<(), PluginError> {
     let kage: Table = lua.globals().get("kage")?;
+    kage.set("http", lua.create_table()?)?;
+    Ok(())
+}
+
+/// Register the `net` capability installer.
+///
+/// Run (via `request_capabilities`) against a granted plugin's `kage`
+/// proxy, it shadows the empty base `kage.http` with a table carrying
+/// `get` / `post` / `delete` / `post_stream`, so only a plugin the user
+/// granted `net` can make outbound requests.
+pub(crate) fn register(registry: &CapabilityRegistry) {
+    let mut reg = registry.lock().expect("capability registry mutex poisoned");
+    reg.insert(
+        Capability::Net,
+        Box::new(|lua: &Lua, pkage: &Table| {
+            pkage.set("http", build_http_table(lua)?)?;
+            Ok(())
+        }),
+    );
+}
+
+/// Build the populated `kage.http` table. The helpers are stateless
+/// (SSRF guard plus a blocking `ureq` request), so the same table shape
+/// is attached onto each granted plugin's proxy.
+fn build_http_table(lua: &Lua) -> mlua::Result<Table> {
     let http = lua.create_table()?;
 
     http.set(
         "get",
-        lua.create_function(move |lua, (url, opts): (String, Option<Table>)| {
+        lua.create_function(|lua, (url, opts): (String, Option<Table>)| {
             let request = build_request(opts.as_ref())
                 .map_err(|err| mlua::Error::external(format!("http.get {url}: {err}")))?;
             let max_bytes = request.max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
@@ -55,7 +87,7 @@ pub fn install_http(lua: &Lua) -> Result<(), PluginError> {
 
     http.set(
         "post",
-        lua.create_function(move |lua, (url, opts): (String, Option<Table>)| {
+        lua.create_function(|lua, (url, opts): (String, Option<Table>)| {
             let request = build_request(opts.as_ref())
                 .map_err(|err| mlua::Error::external(format!("http.post {url}: {err}")))?;
             let max_bytes = request.max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
@@ -67,7 +99,7 @@ pub fn install_http(lua: &Lua) -> Result<(), PluginError> {
 
     http.set(
         "delete",
-        lua.create_function(move |lua, (url, opts): (String, Option<Table>)| {
+        lua.create_function(|lua, (url, opts): (String, Option<Table>)| {
             let request = build_request(opts.as_ref())
                 .map_err(|err| mlua::Error::external(format!("http.delete {url}: {err}")))?;
             let max_bytes = request.max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
@@ -80,7 +112,7 @@ pub fn install_http(lua: &Lua) -> Result<(), PluginError> {
     http.set(
         "post_stream",
         lua.create_function(
-            move |lua, (url, opts, on_event): (String, Option<Table>, Function)| {
+            |lua, (url, opts, on_event): (String, Option<Table>, Function)| {
                 let request = build_request(opts.as_ref()).map_err(|err| {
                     mlua::Error::external(format!("http.post_stream {url}: {err}"))
                 })?;
@@ -91,8 +123,7 @@ pub fn install_http(lua: &Lua) -> Result<(), PluginError> {
         )?,
     )?;
 
-    kage.set("http", http)?;
-    Ok(())
+    Ok(http)
 }
 
 /// Caller-supplied request details parsed out of the Lua `opts` table.
@@ -368,31 +399,54 @@ fn dispatch_with_body(
 mod tests {
     use crate::PluginRuntime;
 
+    /// A runtime that grants `net` to plugin `p`. `kage.http` is gated,
+    /// so the request helpers only exist on a granted plugin's proxy.
+    fn rt_with_net() -> PluginRuntime {
+        let mut caps = std::collections::BTreeMap::new();
+        caps.insert("p".to_owned(), vec!["net".to_owned()]);
+        PluginRuntime::builder().capabilities(caps).build().unwrap()
+    }
+
+    /// Evaluate `script` as the granted plugin `p` after requesting the
+    /// `net` capability, so `kage.http` is attached on its proxy.
+    fn eval_net(script: &str) -> Result<mlua::Value, crate::error::PluginError> {
+        let rt = rt_with_net();
+        rt.eval_plugin(
+            "p",
+            &format!("kage.request_capabilities({{'net'}}); {script}"),
+        )
+    }
+
+    #[test]
+    fn ungranted_plugin_has_no_http() {
+        let rt = rt_with_net();
+        let v = rt
+            .eval_plugin("other", "return kage.http.get == nil")
+            .unwrap();
+        assert_eq!(v.as_boolean(), Some(true));
+    }
+
     #[test]
     fn rejects_private_url() {
-        let rt = PluginRuntime::new().unwrap();
-        let res = rt.eval("return kage.http.get('http://127.0.0.1:8080/x')");
+        let res = eval_net("return kage.http.get('http://127.0.0.1:8080/x')");
         assert!(res.is_err());
     }
 
     #[test]
     fn rejects_non_http_scheme() {
-        let rt = PluginRuntime::new().unwrap();
-        let res = rt.eval("return kage.http.get('file:///etc/passwd')");
+        let res = eval_net("return kage.http.get('file:///etc/passwd')");
         assert!(res.is_err());
     }
 
     #[test]
     fn rejects_invalid_url() {
-        let rt = PluginRuntime::new().unwrap();
-        let res = rt.eval("return kage.http.get('not a url')");
+        let res = eval_net("return kage.http.get('not a url')");
         assert!(res.is_err());
     }
 
     #[test]
     fn post_rejects_private_url() {
-        let rt = PluginRuntime::new().unwrap();
-        let res = rt.eval(
+        let res = eval_net(
             "return kage.http.post('http://127.0.0.1:8080/x', { json = { hello = 'world' } })",
         );
         assert!(res.is_err());
@@ -400,15 +454,13 @@ mod tests {
 
     #[test]
     fn delete_rejects_private_url() {
-        let rt = PluginRuntime::new().unwrap();
-        let res = rt.eval("return kage.http.delete('http://127.0.0.1:8080/x')");
+        let res = eval_net("return kage.http.delete('http://127.0.0.1:8080/x')");
         assert!(res.is_err());
     }
 
     #[test]
     fn post_stream_rejects_private_url() {
-        let rt = PluginRuntime::new().unwrap();
-        let res = rt.eval(
+        let res = eval_net(
             "return kage.http.post_stream('http://127.0.0.1:8080/x', \
              { json = { stream = true } }, function() end)",
         );
@@ -417,8 +469,7 @@ mod tests {
 
     #[test]
     fn post_rejects_body_and_json_together() {
-        let rt = PluginRuntime::new().unwrap();
-        let res = rt.eval(
+        let res = eval_net(
             "return kage.http.post('https://example.com', \
              { body = 'x', json = { a = 1 } })",
         );

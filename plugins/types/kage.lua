@@ -31,7 +31,7 @@
 
 --- An elevated capability a plugin may request. Granted
 --- per-plugin in `[plugins.capabilities]`.
----@alias kage.Capability "session_write"|"exec"|"env"
+---@alias kage.Capability "session_write"|"exec"|"env"|"net"
 
 --- Every event name `kage.on` accepts. Notification events
 --- ignore the handler return; transform events chain it;
@@ -422,44 +422,6 @@ function kage.fs.read(path) end
 ---@param content string
 function kage.fs.write(path, content) end
 
---- Host-gated HTTP.
----@class kage.http
-kage.http = {}
-
---- HTTP GET. `opts` may carry headers and a body cap. The
---- allow-list is host-controlled; unauthorized hosts raise an
---- error.
----@param url string
----@param opts? kage.HttpRequestOpts
----@return { status: integer, body: string, content_type: string, truncated: boolean }
-function kage.http.get(url, opts) end
-
---- HTTP POST. `opts` carries headers and either `body` (string)
---- or `json` (table; auto-serialized with `Content-Type:
---- application/json`). The two are mutually exclusive. Same
---- SSRF rules as GET.
----@param url string
----@param opts? kage.HttpRequestOpts
----@return { status: integer, body: string, content_type: string, truncated: boolean }
-function kage.http.post(url, opts) end
-
---- HTTP DELETE. `opts` carries headers (and optionally body,
---- though most servers ignore it). Same SSRF rules as GET.
----@param url string
----@param opts? kage.HttpRequestOpts
----@return { status: integer, body: string, content_type: string, truncated: boolean }
-function kage.http.delete(url, opts) end
-
---- Streaming HTTP POST. The response is read frame-by-frame as
---- Server-Sent Events and `on_event({event, data})` is called
---- once per blank-line-terminated frame. Multi-line `data:`
---- lines join with `\n`. Returns when the stream ends.
----@param url string
----@param opts? kage.HttpRequestOpts
----@param on_event fun(ev: { event: string, data: string })
----@return { status: integer, content_type: string }
-function kage.http.post_stream(url, opts, on_event) end
-
 --- Declarative ACP agent config.
 ---@class kage.acp
 kage.acp = {}
@@ -548,3 +510,44 @@ function kage.exec(spec) end
 ---@param name string
 ---@return string?
 function kage.env(name) end
+
+--- Outbound HTTP, gated behind the `net` capability.
+---@class kage.http
+kage.http = {}
+
+--- HTTP GET. `opts` may carry headers and a body cap. Only
+--- SSRF filtering applies: the scheme must be http(s) and
+--- the host must resolve to a routable address; there is no
+--- host allow-list. Requires the `net` capability.
+---@param url string
+---@param opts? kage.HttpRequestOpts
+---@return { status: integer, body: string, content_type: string, truncated: boolean }
+function kage.http.get(url, opts) end
+
+--- HTTP POST. `opts` carries headers and either `body`
+--- (string) or `json` (table; auto-serialized with
+--- `Content-Type: application/json`). The two are mutually
+--- exclusive. Same SSRF rules as GET. Requires `net`.
+---@param url string
+---@param opts? kage.HttpRequestOpts
+---@return { status: integer, body: string, content_type: string, truncated: boolean }
+function kage.http.post(url, opts) end
+
+--- HTTP DELETE. `opts` carries headers (and optionally
+--- body, though most servers ignore it). Same SSRF rules as
+--- GET. Requires `net`.
+---@param url string
+---@param opts? kage.HttpRequestOpts
+---@return { status: integer, body: string, content_type: string, truncated: boolean }
+function kage.http.delete(url, opts) end
+
+--- Streaming HTTP POST. The response is read frame-by-frame
+--- as Server-Sent Events and `on_event({event, data})` is
+--- called once per blank-line-terminated frame. Multi-line
+--- `data:` lines join with `\n`. Returns when the stream
+--- ends. Same SSRF rules as GET. Requires `net`.
+---@param url string
+---@param opts? kage.HttpRequestOpts
+---@param on_event fun(ev: { event: string, data: string })
+---@return { status: integer, content_type: string }
+function kage.http.post_stream(url, opts, on_event) end

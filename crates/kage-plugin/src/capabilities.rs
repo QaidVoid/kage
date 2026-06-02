@@ -32,6 +32,8 @@ pub(crate) enum Capability {
     Exec,
     /// Read process environment variables.
     Env,
+    /// Make outbound HTTP requests via `kage.http`.
+    Net,
 }
 
 impl Capability {
@@ -43,8 +45,9 @@ impl Capability {
             "session_write" => Ok(Self::SessionWrite),
             "exec" => Ok(Self::Exec),
             "env" => Ok(Self::Env),
+            "net" => Ok(Self::Net),
             other => Err(format!(
-                "unknown capability {other:?} (known: session_write, exec, env)"
+                "unknown capability {other:?} (known: session_write, exec, env, net)"
             )),
         }
     }
@@ -189,6 +192,7 @@ mod tests {
         );
         assert_eq!(Capability::parse("exec"), Ok(Capability::Exec));
         assert_eq!(Capability::parse("env"), Ok(Capability::Env));
+        assert_eq!(Capability::parse("net"), Ok(Capability::Net));
         assert!(Capability::parse("teleport").is_err());
     }
 

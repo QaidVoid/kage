@@ -142,7 +142,7 @@ const ALIASES: &[Alias] = &[
             "An elevated capability a plugin may request. Granted",
             "per-plugin in `[plugins.capabilities]`.",
         ],
-        variants: &["session_write", "exec", "env"],
+        variants: &["session_write", "exec", "env", "net"],
     },
     Alias {
         name: "kage.Event",
@@ -677,7 +677,7 @@ const TABLES: &[Table] = &[
     },
     Table {
         path: "kage.http",
-        class_doc: "Host-gated HTTP.",
+        class_doc: "Outbound HTTP, gated behind the `net` capability.",
     },
     Table {
         path: "kage.acp",
@@ -1235,96 +1235,6 @@ const FUNCS: &[Func] = &[
     },
     Func {
         doc: &[
-            "HTTP GET. `opts` may carry headers and a body cap. The",
-            "allow-list is host-controlled; unauthorized hosts raise an",
-            "error.",
-        ],
-        path: "kage.http.get",
-        params: &[
-            Field {
-                name: "url",
-                ty: "string",
-                doc: "",
-            },
-            Field {
-                name: "opts?",
-                ty: "kage.HttpRequestOpts",
-                doc: "",
-            },
-        ],
-        ret: Some("{ status: integer, body: string, content_type: string, truncated: boolean }"),
-    },
-    Func {
-        doc: &[
-            "HTTP POST. `opts` carries headers and either `body` (string)",
-            "or `json` (table; auto-serialized with `Content-Type:",
-            "application/json`). The two are mutually exclusive. Same",
-            "SSRF rules as GET.",
-        ],
-        path: "kage.http.post",
-        params: &[
-            Field {
-                name: "url",
-                ty: "string",
-                doc: "",
-            },
-            Field {
-                name: "opts?",
-                ty: "kage.HttpRequestOpts",
-                doc: "",
-            },
-        ],
-        ret: Some("{ status: integer, body: string, content_type: string, truncated: boolean }"),
-    },
-    Func {
-        doc: &[
-            "HTTP DELETE. `opts` carries headers (and optionally body,",
-            "though most servers ignore it). Same SSRF rules as GET.",
-        ],
-        path: "kage.http.delete",
-        params: &[
-            Field {
-                name: "url",
-                ty: "string",
-                doc: "",
-            },
-            Field {
-                name: "opts?",
-                ty: "kage.HttpRequestOpts",
-                doc: "",
-            },
-        ],
-        ret: Some("{ status: integer, body: string, content_type: string, truncated: boolean }"),
-    },
-    Func {
-        doc: &[
-            "Streaming HTTP POST. The response is read frame-by-frame as",
-            "Server-Sent Events and `on_event({event, data})` is called",
-            "once per blank-line-terminated frame. Multi-line `data:`",
-            "lines join with `\\n`. Returns when the stream ends.",
-        ],
-        path: "kage.http.post_stream",
-        params: &[
-            Field {
-                name: "url",
-                ty: "string",
-                doc: "",
-            },
-            Field {
-                name: "opts?",
-                ty: "kage.HttpRequestOpts",
-                doc: "",
-            },
-            Field {
-                name: "on_event",
-                ty: "fun(ev: { event: string, data: string })",
-                doc: "",
-            },
-        ],
-        ret: Some("{ status: integer, content_type: string }"),
-    },
-    Func {
-        doc: &[
             "Declare an upstream ACP agent at runtime, mirroring",
             "`[acp.agents.<name>]` in config.toml. Core spawns it.",
         ],
@@ -1498,6 +1408,117 @@ const GATED: &[GatedFunc] = &[
             ret: Some("string?"),
         },
     },
+    GatedFunc {
+        cap: "net",
+        func: Func {
+            doc: &[
+                "HTTP GET. `opts` may carry headers and a body cap. Only",
+                "SSRF filtering applies: the scheme must be http(s) and",
+                "the host must resolve to a routable address; there is no",
+                "host allow-list. Requires the `net` capability.",
+            ],
+            path: "kage.http.get",
+            params: &[
+                Field {
+                    name: "url",
+                    ty: "string",
+                    doc: "",
+                },
+                Field {
+                    name: "opts?",
+                    ty: "kage.HttpRequestOpts",
+                    doc: "",
+                },
+            ],
+            ret: Some(
+                "{ status: integer, body: string, content_type: string, truncated: boolean }",
+            ),
+        },
+    },
+    GatedFunc {
+        cap: "net",
+        func: Func {
+            doc: &[
+                "HTTP POST. `opts` carries headers and either `body`",
+                "(string) or `json` (table; auto-serialized with",
+                "`Content-Type: application/json`). The two are mutually",
+                "exclusive. Same SSRF rules as GET. Requires `net`.",
+            ],
+            path: "kage.http.post",
+            params: &[
+                Field {
+                    name: "url",
+                    ty: "string",
+                    doc: "",
+                },
+                Field {
+                    name: "opts?",
+                    ty: "kage.HttpRequestOpts",
+                    doc: "",
+                },
+            ],
+            ret: Some(
+                "{ status: integer, body: string, content_type: string, truncated: boolean }",
+            ),
+        },
+    },
+    GatedFunc {
+        cap: "net",
+        func: Func {
+            doc: &[
+                "HTTP DELETE. `opts` carries headers (and optionally",
+                "body, though most servers ignore it). Same SSRF rules as",
+                "GET. Requires `net`.",
+            ],
+            path: "kage.http.delete",
+            params: &[
+                Field {
+                    name: "url",
+                    ty: "string",
+                    doc: "",
+                },
+                Field {
+                    name: "opts?",
+                    ty: "kage.HttpRequestOpts",
+                    doc: "",
+                },
+            ],
+            ret: Some(
+                "{ status: integer, body: string, content_type: string, truncated: boolean }",
+            ),
+        },
+    },
+    GatedFunc {
+        cap: "net",
+        func: Func {
+            doc: &[
+                "Streaming HTTP POST. The response is read frame-by-frame",
+                "as Server-Sent Events and `on_event({event, data})` is",
+                "called once per blank-line-terminated frame. Multi-line",
+                "`data:` lines join with `\\n`. Returns when the stream",
+                "ends. Same SSRF rules as GET. Requires `net`.",
+            ],
+            path: "kage.http.post_stream",
+            params: &[
+                Field {
+                    name: "url",
+                    ty: "string",
+                    doc: "",
+                },
+                Field {
+                    name: "opts?",
+                    ty: "kage.HttpRequestOpts",
+                    doc: "",
+                },
+                Field {
+                    name: "on_event",
+                    ty: "fun(ev: { event: string, data: string })",
+                    doc: "",
+                },
+            ],
+            ret: Some("{ status: integer, content_type: string }"),
+        },
+    },
 ];
 
 #[cfg(test)]
@@ -1563,6 +1584,7 @@ mod tests {
                 "session_write".to_owned(),
                 "exec".to_owned(),
                 "env".to_owned(),
+                "net".to_owned(),
             ],
         );
         let rt = PluginRuntime::builder()

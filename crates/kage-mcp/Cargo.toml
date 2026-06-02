@@ -20,3 +20,5 @@ kage-jsonrpc.workspace = true
 kage-tools.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+ureq.workspace = true
+url.workspace = true

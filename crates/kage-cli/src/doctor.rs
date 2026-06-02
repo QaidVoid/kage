@@ -177,7 +177,7 @@ fn probe_mcp_server(name: &str, spec: &kage_core::config::McpServer) -> Result<u
     let server_name = name.to_owned();
     let spec = spec.clone();
     std::thread::spawn(move || {
-        let result = kage_mcp::McpServerHandle::spawn(&server_name, &spec, &[])
+        let result = kage_mcp::McpServerHandle::spawn(&server_name, &spec, &[], None)
             .map_err(|e| e.to_string())
             .and_then(|handle| {
                 handle

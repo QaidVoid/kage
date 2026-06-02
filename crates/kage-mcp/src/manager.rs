@@ -36,6 +36,9 @@ pub struct McpManager {
     /// Filesystem roots advertised to every server (the host workdir),
     /// retained so a `restart` re-advertises the same roots.
     roots: Vec<std::path::PathBuf>,
+    /// Host handler for server-initiated requests (sampling, ...),
+    /// retained so a `restart` re-injects it.
+    handler: Option<Arc<dyn crate::ServerRequestHandler>>,
 }
 
 impl McpManager {
@@ -45,11 +48,13 @@ impl McpManager {
     /// `(server_name, error)` and returned alongside the manager so
     /// the caller can surface them without losing the servers that
     /// did come up. `roots` are the filesystem roots advertised to
-    /// every server (typically the host workdir).
+    /// every server (typically the host workdir); `handler` answers
+    /// server-initiated requests such as sampling.
     #[must_use]
     pub fn spawn_all(
         cfg: &McpConfig,
         roots: Vec<std::path::PathBuf>,
+        handler: Option<Arc<dyn crate::ServerRequestHandler>>,
     ) -> (Self, Vec<(String, McpError)>) {
         let mut servers = Vec::new();
         let mut errors = Vec::new();
@@ -57,7 +62,7 @@ impl McpManager {
             if spec.disabled {
                 continue;
             }
-            match McpServerHandle::spawn(name.clone(), spec, &roots) {
+            match McpServerHandle::spawn(name.clone(), spec, &roots, handler.clone()) {
                 Ok(handle) => servers.push((
                     name.clone(),
                     Managed {
@@ -69,7 +74,14 @@ impl McpManager {
                 Err(e) => errors.push((name.clone(), e)),
             }
         }
-        (Self { servers, roots }, errors)
+        (
+            Self {
+                servers,
+                roots,
+                handler,
+            },
+            errors,
+        )
     }
 
     /// Whether no server is live.
@@ -129,13 +141,14 @@ impl McpManager {
     /// / discovery error from bringing the replacement up.
     pub fn restart(&mut self, name: &str, reg: &mut ToolRegistry) -> Result<(), McpError> {
         let roots = self.roots.clone();
+        let handler = self.handler.clone();
         let managed = self
             .servers
             .iter_mut()
             .find(|(n, _)| n == name)
             .map(|(_, m)| m)
             .ok_or_else(|| McpError::Unknown(name.to_owned()))?;
-        let fresh = McpServerHandle::spawn(name.to_owned(), &managed.spec, &roots)?;
+        let fresh = McpServerHandle::spawn(name.to_owned(), &managed.spec, &roots, handler)?;
         for stale in managed.registered.drain(..) {
             reg.unregister(&stale);
         }
@@ -212,7 +225,7 @@ mod tests {
                 let _ = responder.respond(&id, outcome);
             }
         });
-        Arc::new(McpConnection::initialize("x", cli_peer, cli_in, &[]).unwrap())
+        Arc::new(McpConnection::initialize("x", cli_peer, cli_in, &[], None).unwrap())
     }
 
     #[test]
@@ -258,7 +271,7 @@ mod tests {
                 disabled: false,
             },
         );
-        let (mgr, errors) = McpManager::spawn_all(&cfg, vec![]);
+        let (mgr, errors) = McpManager::spawn_all(&cfg, vec![], None);
         assert!(mgr.is_empty(), "disabled skipped, broken failed to spawn");
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].0, "broken");
@@ -266,7 +279,7 @@ mod tests {
 
     #[test]
     fn restart_unknown_server_errors() {
-        let (mut mgr, _e) = McpManager::spawn_all(&McpConfig::default(), vec![]);
+        let (mut mgr, _e) = McpManager::spawn_all(&McpConfig::default(), vec![], None);
         let mut reg = ToolRegistry::new();
         let err = mgr.restart("ghost", &mut reg).unwrap_err();
         assert!(

@@ -330,6 +330,13 @@ pub struct AcpAgent {
 pub struct McpConfig {
     /// Map of server name to its launch spec.
     pub servers: BTreeMap<String, McpServer>,
+    /// Allow MCP servers to drive `sampling/createMessage`: an LLM
+    /// completion run against the host's default model and billed to the
+    /// user. Off by default because it lets a server spend the user's
+    /// token budget; opt in per project with `[mcp] allow_sampling =
+    /// true`.
+    #[serde(default)]
+    pub allow_sampling: bool,
 }
 
 /// How to reach one external MCP server.

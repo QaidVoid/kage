@@ -23,7 +23,7 @@ fn kage_serve_config() -> McpServer {
 fn spawn_kage_mcp_serve_and_round_trip_a_builtin_tool() {
     let cfg = kage_serve_config();
 
-    let handle = McpServerHandle::spawn("kage", &cfg).expect("spawn kage mcp serve");
+    let handle = McpServerHandle::spawn("kage", &cfg, &[]).expect("spawn kage mcp serve");
     let conn = handle.connection();
 
     let defs = conn.list_tools().expect("tools/list");
@@ -51,7 +51,7 @@ fn manager_restart_respawns_and_keeps_tools_registered() {
     let mut cfg = McpConfig::default();
     cfg.servers.insert("kage".to_owned(), kage_serve_config());
 
-    let (mut manager, errors) = McpManager::spawn_all(&cfg);
+    let (mut manager, errors) = McpManager::spawn_all(&cfg, vec![]);
     assert!(errors.is_empty(), "spawn errors: {errors:?}");
     assert_eq!(manager.len(), 1);
 

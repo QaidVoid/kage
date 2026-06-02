@@ -67,7 +67,7 @@ pub(crate) fn spawn_and_register(
     runtime: Option<&PluginRuntime>,
 ) -> (McpManager, Vec<(String, McpError)>) {
     let cfg = merged_config(workdir, runtime);
-    let (mut manager, mut errors) = McpManager::spawn_all(&cfg);
+    let (mut manager, mut errors) = McpManager::spawn_all(&cfg, vec![workdir.to_path_buf()]);
     errors.extend(manager.register_into(tools));
     (manager, errors)
 }

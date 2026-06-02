@@ -76,9 +76,14 @@ impl McpConnection {
     /// Drive the MCP `initialize` / `notifications/initialized`
     /// handshake on an already-connected `peer`, then spawn a thread
     /// that drains server-initiated traffic: `tools/list_changed`
-    /// notifications flip an internal flag, and any other server
-    /// request is answered with `method not found` so a server that
-    /// asks for sampling/elicitation is not left hanging.
+    /// notifications flip an internal flag, `roots/list` requests are
+    /// answered from `roots` (advertised as a client capability), and
+    /// any other server request is answered with `method not found` so
+    /// a server that asks for an unsupported feature (sampling,
+    /// elicitation) is not left hanging.
+    ///
+    /// `roots` are the filesystem roots exposed to the server (the host
+    /// workdir); each is sent as a `file://` URI.
     ///
     /// # Errors
     ///
@@ -89,11 +94,13 @@ impl McpConnection {
         server: impl Into<String>,
         peer: Peer,
         inbound: std::sync::mpsc::Receiver<Inbound>,
+        roots: &[std::path::PathBuf],
     ) -> Result<Self, McpError> {
         let server = server.into();
+        let roots_result = Self::roots_list_result(roots);
         let params = serde_json::json!({
             "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {},
+            "capabilities": { "roots": { "listChanged": false } },
             "clientInfo": { "name": "kage", "version": env!("CARGO_PKG_VERSION") },
         });
         let result = peer
@@ -127,6 +134,9 @@ impl McpConnection {
                             flag.store(true, Ordering::SeqCst);
                         }
                         Inbound::Notification { .. } => {}
+                        Inbound::Request { id, method, .. } if method == "roots/list" => {
+                            let _ = peer.respond(&id, Ok(roots_result.clone()));
+                        }
                         Inbound::Request { id, .. } => {
                             let _ = peer
                                 .respond(&id, Err(RpcError::method_not_found("client capability")));
@@ -148,6 +158,27 @@ impl McpConnection {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.server
+    }
+
+    /// Build the `roots/list` result advertised to the server: one
+    /// entry per host root as a `file://` URI named by its last path
+    /// component.
+    fn roots_list_result(roots: &[std::path::PathBuf]) -> serde_json::Value {
+        let entries: Vec<serde_json::Value> = roots
+            .iter()
+            .map(|path| {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("root")
+                    .to_owned();
+                serde_json::json!({
+                    "uri": format!("file://{}", path.display()),
+                    "name": name,
+                })
+            })
+            .collect();
+        serde_json::json!({ "roots": entries })
     }
 
     /// The underlying peer, for issuing `tools/list` / `tools/call`.
@@ -219,14 +250,20 @@ impl McpServerHandle {
     /// transport, and run the `initialize` handshake.
     ///
     /// `stderr` is inherited so a server's diagnostics reach the
-    /// user's terminal rather than being silently swallowed.
+    /// user's terminal rather than being silently swallowed. `roots`
+    /// are the filesystem roots advertised to the server (the host
+    /// workdir), answered on `roots/list`.
     ///
     /// # Errors
     ///
     /// Returns [`McpError::Spawn`] when the process cannot start,
     /// [`McpError::NoStdio`] when its pipes are missing, and the
     /// handshake errors from [`McpConnection::initialize`].
-    pub fn spawn(name: impl Into<String>, cfg: &McpServer) -> Result<Self, McpError> {
+    pub fn spawn(
+        name: impl Into<String>,
+        cfg: &McpServer,
+        roots: &[std::path::PathBuf],
+    ) -> Result<Self, McpError> {
         let name = name.into();
         let mut command = Command::new(&cfg.command);
         command
@@ -248,7 +285,7 @@ impl McpServerHandle {
             .take()
             .ok_or_else(|| McpError::NoStdio(name.clone()))?;
         let (peer, inbound, _reader) = connect(BufReader::new(stdout), stdin);
-        let conn = Arc::new(McpConnection::initialize(name, peer, inbound)?);
+        let conn = Arc::new(McpConnection::initialize(name, peer, inbound, roots)?);
         Ok(Self { conn, child })
     }
 
@@ -279,6 +316,10 @@ mod tests {
     /// whole test, answering `initialize` and rejecting anything else,
     /// while ignoring notifications (the `initialized` one).
     fn stub_server() -> (McpConnection, Peer) {
+        stub_server_with_roots(&[])
+    }
+
+    fn stub_server_with_roots(roots: &[std::path::PathBuf]) -> (McpConnection, Peer) {
         let (cli_r, srv_w) = std::io::pipe().unwrap();
         let (srv_r, cli_w) = std::io::pipe().unwrap();
         let (cli_peer, cli_in, _c) = connect(BufReader::new(cli_r), cli_w);
@@ -300,7 +341,7 @@ mod tests {
                 }
             }
         });
-        let conn = McpConnection::initialize("stub", cli_peer, cli_in).unwrap();
+        let conn = McpConnection::initialize("stub", cli_peer, cli_in, roots).unwrap();
         (conn, srv_peer)
     }
 
@@ -326,6 +367,18 @@ mod tests {
         }
         assert!(seen, "tools_changed flag should latch");
         assert!(!conn.take_tools_changed(), "flag clears after take");
+    }
+
+    #[test]
+    fn roots_list_returns_configured_roots() {
+        let (_conn, srv) = stub_server_with_roots(&[std::path::PathBuf::from("/work/project")]);
+        let result = srv
+            .request("roots/list", serde_json::json!({}))
+            .expect("roots/list is answered");
+        let roots = result["roots"].as_array().expect("roots array");
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0]["uri"], "file:///work/project");
+        assert_eq!(roots[0]["name"], "project");
     }
 
     #[test]

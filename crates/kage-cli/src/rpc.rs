@@ -22,8 +22,8 @@ use kage_acp::acp::{
     ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 use kage_acp::agent::{AcpPermission, Agent, PermissionDecision, PromptContext, serve_agent};
-use kage_acp::jsonrpc::RpcError;
 use kage_core::{CancelFlag, Content, LoopEvent, Message, Role, ToolOutput};
+use kage_jsonrpc::RpcError;
 use kage_loop::{AgentContext, Hooks, LoopConfig};
 use kage_plugin::PluginRuntime;
 use kage_provider::ProviderRegistry;

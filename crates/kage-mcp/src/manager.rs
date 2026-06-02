@@ -178,7 +178,7 @@ mod tests {
 
     use super::*;
     use crate::server::PROTOCOL_VERSION;
-    use crate::transport::{Inbound, connect};
+    use kage_jsonrpc::{Inbound, connect};
 
     /// A server whose `tools/list` returns `old` on the first call
     /// and `new` on every call after, so a reload must swap them.
@@ -207,7 +207,7 @@ mod tests {
                             "tools": [{ "name": tool, "inputSchema": {} }]
                         }))
                     }
-                    other => Err(crate::transport::RpcError::method_not_found(other)),
+                    other => Err(kage_jsonrpc::RpcError::method_not_found(other)),
                 };
                 let _ = responder.respond(&id, outcome);
             }

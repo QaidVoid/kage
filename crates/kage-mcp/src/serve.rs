@@ -17,11 +17,11 @@ use std::io::{BufRead, Write};
 use std::path::Path;
 
 use kage_core::CancelFlag;
+use kage_jsonrpc::{Inbound, RpcError, connect};
 use kage_tools::ToolRegistry;
 use kage_tools::tool::ToolContext;
 
 use crate::server::PROTOCOL_VERSION;
-use crate::transport::{Inbound, RpcError, connect};
 
 /// Run the MCP server loop until the client closes the connection.
 ///
@@ -130,7 +130,7 @@ mod tests {
     use kage_tools::tool::Tool;
 
     use super::*;
-    use crate::transport::connect;
+    use kage_jsonrpc::connect;
 
     #[derive(Debug)]
     struct Echo;
@@ -172,7 +172,7 @@ mod tests {
 
     /// Spawn `serve` on one end of a pipe pair, returning a client
     /// peer wired to the other end.
-    fn client() -> crate::transport::Peer {
+    fn client() -> kage_jsonrpc::Peer {
         let (srv_r, cli_w) = std::io::pipe().unwrap();
         let (cli_r, srv_w) = std::io::pipe().unwrap();
         thread::spawn(move || {

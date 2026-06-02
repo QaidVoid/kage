@@ -1,20 +1,20 @@
 //! Bidirectional JSON-RPC 2.0 peer over newline-delimited stdio.
 //!
-//! ACP is symmetric: the agent both answers the client's requests and
-//! issues its own (`session/request_permission`, `fs/*`). So the
-//! transport is a *peer*, not a one-way server. Each JSON-RPC message
-//! is a single line of JSON terminated by `\n` (the framing the ACP
-//! ecosystem - Zed, `claude-code-acp`, `gemini-cli` - uses over
-//! stdio; it is deliberately isolated here so a future spec change is
-//! a one-module edit).
+//! Both MCP and ACP speak JSON-RPC over stdio where each message is a
+//! single line of JSON terminated by `\n`, and both are symmetric: a
+//! party answers the other's requests and issues its own. So the
+//! transport is a *peer*, not a one-way server. This crate is the single
+//! shared implementation both `kage-mcp` and `kage-acp` re-export, so a
+//! bugfix to the framing or id-routing lands once rather than drifting
+//! between two near-identical copies.
 //!
 //! Concurrency follows the workspace rule: `std::thread` plus
 //! `std::sync::mpsc`, no async. A reader thread parses each line and
 //! either routes a response to the waiting [`Peer::request`] caller or
 //! forwards a peer-initiated request/notification to the [`Inbound`]
 //! channel the owner drains on its own thread. That split lets a
-//! long-running inbound request (a prompt turn) issue its own
-//! outgoing requests without deadlocking the reader.
+//! long-running inbound request (a prompt turn) issue its own outgoing
+//! requests without deadlocking the reader.
 
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -391,5 +391,12 @@ mod tests {
         drop(b_w);
         drop(b_r);
         assert_eq!(waiter.join().unwrap().unwrap_err().code, -32603);
+    }
+
+    #[test]
+    fn method_not_found_message_includes_method() {
+        let err = RpcError::method_not_found("tools/call");
+        assert_eq!(err.code, -32601);
+        assert!(err.message.contains("tools/call"));
     }
 }

@@ -4,6 +4,7 @@ members = [
   "crates/kage-acp",
   "crates/kage-cli",
   "crates/kage-core",
+  "crates/kage-jsonrpc",
   "crates/kage-loop",
   "crates/kage-mcp",
   "crates/kage-plugin",
@@ -28,6 +29,7 @@ categories = ["command-line-utilities", "development-tools"]
 
 [workspace.dependencies]
 kage-core = { path = "crates/kage-core" }
+kage-jsonrpc = { path = "crates/kage-jsonrpc" }
 kage-loop = { path = "crates/kage-loop" }
 kage-plugin = { path = "crates/kage-plugin" }
 kage-provider = { path = "crates/kage-provider" }

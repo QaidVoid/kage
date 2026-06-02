@@ -219,7 +219,7 @@ mod tests {
 
     use super::*;
     use crate::server::PROTOCOL_VERSION;
-    use crate::transport::{Inbound, Peer, connect};
+    use kage_jsonrpc::{Inbound, Peer, connect};
 
     /// A scripted MCP server: answers `initialize`, serves a two-page
     /// `tools/list`, and echoes `tools/call` arguments back as text.
@@ -270,7 +270,7 @@ mod tests {
                             "isError": false,
                         }))
                     }
-                    other => Err(crate::transport::RpcError::method_not_found(other)),
+                    other => Err(kage_jsonrpc::RpcError::method_not_found(other)),
                 };
                 let _ = responder.respond(&id, outcome);
             }

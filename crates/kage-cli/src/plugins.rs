@@ -58,6 +58,7 @@ pub fn setup_runtime_with_sink(
         .capabilities(plugins_cfg.capabilities)
         .enabled(plugins_cfg.enabled)
         .plugin_config(plugins_cfg.config)
+        .state_dir(crate::state_root().ok().map(|r| r.join("plugin-state")))
         .config(json!({
             "model": model,
             "cwd": workdir.display().to_string(),

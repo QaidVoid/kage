@@ -67,6 +67,7 @@ use crate::sessions::{
     shared_fork_request, shared_session_list, shared_session_ops,
 };
 use crate::status::{self, SharedStatus, shared_status};
+use crate::store;
 use crate::terminal_input::{self, RegisteredTerminalHooks, registered_terminal_hooks};
 use crate::theme::{
     self, SharedThemeRequest, SharedThemeState, shared_theme_request, shared_theme_state,
@@ -131,6 +132,10 @@ pub struct PluginRuntime {
     /// Per-plugin settings by file stem, surfaced to the named plugin
     /// through `kage.plugin_config()`. Each plugin sees only its slice.
     plugin_config: BTreeMap<String, serde_json::Value>,
+    /// Directory backing `kage.store`. When set, each plugin gets a
+    /// private `<state_dir>/<stem>.json` persisted across runs; when
+    /// `None`, `kage.store` raises so misconfiguration is not silent.
+    state_dir: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -157,6 +162,7 @@ impl PluginRuntime {
             capabilities: BTreeMap::new(),
             enabled: Vec::new(),
             plugin_config: BTreeMap::new(),
+            state_dir: None,
         }
     }
 
@@ -210,7 +216,17 @@ impl PluginRuntime {
     /// environment is created once per name and reused.
     pub fn eval_plugin(&self, name: &str, source: &str) -> Result<mlua::Value, PluginError> {
         let lua = self.lock_lua();
-        let env = plugin_env(&lua, name, &self.plugin_envs, self.plugin_config.get(name))?;
+        let store_path = self
+            .state_dir
+            .as_deref()
+            .map(|dir| store::store_path(dir, name));
+        let env = plugin_env(
+            &lua,
+            name,
+            &self.plugin_envs,
+            self.plugin_config.get(name),
+            store_path,
+        )?;
         if let Ok(mut cur) = self.current_plugin.lock() {
             *cur = Some(name.to_owned());
         }
@@ -853,6 +869,7 @@ pub struct PluginRuntimeBuilder {
     capabilities: BTreeMap<String, Vec<String>>,
     enabled: Vec<String>,
     plugin_config: BTreeMap<String, serde_json::Value>,
+    state_dir: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for PluginRuntimeBuilder {
@@ -915,6 +932,15 @@ impl PluginRuntimeBuilder {
         self
     }
 
+    /// Set the directory backing `kage.store`. Each plugin persists to
+    /// `<dir>/<stem>.json`. Unset, `kage.store` raises rather than
+    /// silently dropping writes.
+    #[must_use]
+    pub fn state_dir(mut self, state_dir: Option<PathBuf>) -> Self {
+        self.state_dir = state_dir;
+        self
+    }
+
     /// Finalize the runtime: build the Lua state, apply sandbox removals,
     /// install the `kage` API table, wire `kage.on`,
     /// `kage.register_tool`, `kage.register_command`,
@@ -927,6 +953,7 @@ impl PluginRuntimeBuilder {
         events::install_subscriptions(&lua)?;
         plugin_fs::install_fs(&lua, self.workdir.clone())?;
         http::install_http(&lua)?;
+        store::install_base(&lua)?;
         let shared_lua: SharedLua = Arc::new(Mutex::new(lua));
         let tool_registry = registered_tools();
         let tool_override_registry = registered_tools();
@@ -1105,6 +1132,7 @@ impl PluginRuntimeBuilder {
             switch_request,
             enabled: self.enabled,
             plugin_config: self.plugin_config,
+            state_dir: self.state_dir,
         })
     }
 }
@@ -1174,6 +1202,7 @@ fn plugin_env(
     name: &str,
     slots: &Mutex<HashMap<String, RegistryKey>>,
     config_slice: Option<&serde_json::Value>,
+    store_path: Option<PathBuf>,
 ) -> mlua::Result<Table> {
     let mut slots = slots.lock().expect("plugin env map poisoned");
     if let Some(key) = slots.get(name) {
@@ -1200,6 +1229,11 @@ fn plugin_env(
         "plugin_config",
         lua.create_function(move |lua, ()| crate::api::json_to_lua(lua, &slice))?,
     )?;
+    // Attach a real `kage.store` when the host configured a state dir;
+    // otherwise the base stub (which raises) stays in effect.
+    if let Some(path) = store_path {
+        store::install_for_plugin(lua, &pkage, path)?;
+    }
     env.set("kage", pkage)?;
 
     // `_G` must point at the plugin's own env, not the shared globals,
@@ -1300,6 +1334,46 @@ mod tests {
             .eval_plugin("beta", "return kage.plugin_config().key == nil")
             .unwrap();
         assert_eq!(v.as_boolean(), Some(true));
+    }
+
+    #[test]
+    fn store_persists_per_plugin_and_isolates() {
+        let dir = tempfile::tempdir().unwrap();
+        let rt = PluginRuntime::builder()
+            .state_dir(Some(dir.path().to_path_buf()))
+            .build()
+            .unwrap();
+
+        rt.eval_plugin("alpha", "kage.store.set('n', 41)").unwrap();
+        // A fresh runtime over the same dir reads the persisted value.
+        let rt2 = PluginRuntime::builder()
+            .state_dir(Some(dir.path().to_path_buf()))
+            .build()
+            .unwrap();
+        let v = rt2
+            .eval_plugin("alpha", "return kage.store.get('n') + 1")
+            .unwrap();
+        assert_eq!(v.as_integer(), Some(42));
+
+        // Another plugin sees its own empty store, not alpha's key.
+        let v = rt2
+            .eval_plugin("beta", "return kage.store.get('n') == nil")
+            .unwrap();
+        assert_eq!(v.as_boolean(), Some(true));
+
+        // delete removes the key.
+        rt2.eval_plugin("alpha", "kage.store.delete('n')").unwrap();
+        let v = rt2
+            .eval_plugin("alpha", "return kage.store.get('n') == nil")
+            .unwrap();
+        assert_eq!(v.as_boolean(), Some(true));
+    }
+
+    #[test]
+    fn store_without_state_dir_raises() {
+        let rt = PluginRuntime::new().unwrap();
+        let res = rt.eval_plugin("p", "kage.store.set('k', 1)");
+        assert!(res.is_err());
     }
 
     #[test]

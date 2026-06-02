@@ -254,6 +254,30 @@ function kage.config() end
 ---@return table
 function kage.plugin_config() end
 
+--- Per-plugin persistent key-value state.
+---@class kage.store
+kage.store = {}
+
+--- Read a value previously saved with `kage.store.set`, or
+--- `nil` when the key is unset. State is private to this plugin
+--- and persists across reloads and restarts.
+---@param key string
+---@return any
+function kage.store.get(key) end
+
+--- Persist `value` (any JSON-serializable value) under `key`.
+---@param key string
+---@param value any
+function kage.store.set(key, value) end
+
+--- Remove `key` from this plugin's store. A no-op when unset.
+---@param key string
+function kage.store.delete(key) end
+
+--- List the keys currently held in this plugin's store.
+---@return string[]
+function kage.store.keys() end
+
 --- Request elevated capabilities for this plugin. Returns a
 --- `{ name = granted }` table: a capability is true only if
 --- the user granted it to this plugin in

@@ -29,6 +29,7 @@ pub(crate) mod session_write;
 pub mod sessions;
 pub mod spec;
 pub mod status;
+pub(crate) mod store;
 pub mod terminal_input;
 pub mod theme;
 pub mod tools;

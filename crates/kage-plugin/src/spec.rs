@@ -680,6 +680,10 @@ const TABLES: &[Table] = &[
         class_doc: "Outbound HTTP, gated behind the `net` capability.",
     },
     Table {
+        path: "kage.store",
+        class_doc: "Per-plugin persistent key-value state.",
+    },
+    Table {
         path: "kage.acp",
         class_doc: "Declarative ACP agent config.",
     },
@@ -801,6 +805,53 @@ const FUNCS: &[Func] = &[
         path: "kage.plugin_config",
         params: &[],
         ret: Some("table"),
+    },
+    Func {
+        doc: &[
+            "Read a value previously saved with `kage.store.set`, or",
+            "`nil` when the key is unset. State is private to this plugin",
+            "and persists across reloads and restarts.",
+        ],
+        path: "kage.store.get",
+        params: &[Field {
+            name: "key",
+            ty: "string",
+            doc: "",
+        }],
+        ret: Some("any"),
+    },
+    Func {
+        doc: &["Persist `value` (any JSON-serializable value) under `key`."],
+        path: "kage.store.set",
+        params: &[
+            Field {
+                name: "key",
+                ty: "string",
+                doc: "",
+            },
+            Field {
+                name: "value",
+                ty: "any",
+                doc: "",
+            },
+        ],
+        ret: None,
+    },
+    Func {
+        doc: &["Remove `key` from this plugin's store. A no-op when unset."],
+        path: "kage.store.delete",
+        params: &[Field {
+            name: "key",
+            ty: "string",
+            doc: "",
+        }],
+        ret: None,
+    },
+    Func {
+        doc: &["List the keys currently held in this plugin's store."],
+        path: "kage.store.keys",
+        params: &[],
+        ret: Some("string[]"),
     },
     Func {
         doc: &[

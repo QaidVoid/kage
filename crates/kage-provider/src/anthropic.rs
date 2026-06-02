@@ -54,12 +54,6 @@ impl AnthropicProvider {
         }
     }
 
-    /// Static metadata for this provider.
-    #[must_use]
-    pub fn metadata(&self) -> &ProviderMetadata {
-        &self.metadata
-    }
-
     /// Issue a non-streaming Messages API request.
     ///
     /// Streaming is added in T2.4; this entry point is kept so callers can

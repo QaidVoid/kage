@@ -275,7 +275,7 @@ mod tests {
                 let _ = responder.respond(&id, outcome);
             }
         });
-        let conn = Arc::new(McpConnection::initialize("fs", cli_peer, cli_in, &[]).unwrap());
+        let conn = Arc::new(McpConnection::initialize("fs", cli_peer, cli_in, &[], None).unwrap());
         (conn, handle)
     }
 

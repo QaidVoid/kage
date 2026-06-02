@@ -80,6 +80,31 @@ pub enum McpError {
     },
 }
 
+/// Host-supplied handler for server-initiated MCP requests the client
+/// chooses to support (e.g. `sampling/createMessage`).
+///
+/// `kage-mcp` cannot reach the host's LLM provider on its own, so the
+/// CLI injects this. It runs on the connection's drain thread, so it may
+/// block (a sampling call streams a full completion). Returning `None`
+/// declines the request (the client answers method-not-found); a
+/// `Some(Ok)` / `Some(Err)` is sent back to the server verbatim.
+pub trait ServerRequestHandler: Send + Sync {
+    /// Handle one server request, or return `None` when the method is
+    /// not supported.
+    fn handle(
+        &self,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> Option<Result<serde_json::Value, RpcError>>;
+
+    /// Extra client capabilities to advertise at `initialize`, merged
+    /// into the `capabilities` object (e.g. `{"sampling": {}}`). The
+    /// default advertises nothing.
+    fn capabilities(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+}
+
 /// A live, initialized MCP connection (transport + drained
 /// notifications), independent of how the peer was created.
 pub struct McpConnection {
@@ -112,12 +137,23 @@ impl McpConnection {
         peer: Peer,
         inbound: std::sync::mpsc::Receiver<Inbound>,
         roots: &[std::path::PathBuf],
+        handler: Option<Arc<dyn ServerRequestHandler>>,
     ) -> Result<Self, McpError> {
         let server = server.into();
         let roots_result = Self::roots_list_result(roots);
+        let mut capabilities = serde_json::Map::new();
+        capabilities.insert(
+            "roots".to_owned(),
+            serde_json::json!({ "listChanged": false }),
+        );
+        if let Some(h) = &handler
+            && let serde_json::Value::Object(extra) = h.capabilities()
+        {
+            capabilities.extend(extra);
+        }
         let params = serde_json::json!({
             "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": { "roots": { "listChanged": false } },
+            "capabilities": serde_json::Value::Object(capabilities),
             "clientInfo": { "name": "kage", "version": env!("CARGO_PKG_VERSION") },
         });
         let result = peer
@@ -154,9 +190,17 @@ impl McpConnection {
                         Inbound::Request { id, method, .. } if method == "roots/list" => {
                             let _ = peer.respond(&id, Ok(roots_result.clone()));
                         }
-                        Inbound::Request { id, .. } => {
-                            let _ = peer
-                                .respond(&id, Err(RpcError::method_not_found("client capability")));
+                        Inbound::Request { id, method, params } => {
+                            // Offer the request to the host handler
+                            // (sampling, etc.); fall back to
+                            // method-not-found when unsupported.
+                            let outcome = handler
+                                .as_ref()
+                                .and_then(|h| h.handle(&method, &params))
+                                .unwrap_or_else(|| {
+                                    Err(RpcError::method_not_found("client capability"))
+                                });
+                            let _ = peer.respond(&id, outcome);
                         }
                     }
                 }
@@ -281,11 +325,12 @@ impl McpServerHandle {
         name: impl Into<String>,
         cfg: &McpServer,
         roots: &[std::path::PathBuf],
+        handler: Option<Arc<dyn ServerRequestHandler>>,
     ) -> Result<Self, McpError> {
         let name = name.into();
         match (cfg.command.as_deref(), cfg.url.as_deref()) {
-            (Some(command), None) => Self::spawn_stdio(name, command, cfg, roots),
-            (None, Some(url)) => Self::connect_http(name, url, cfg, roots),
+            (Some(command), None) => Self::spawn_stdio(name, command, cfg, roots, handler),
+            (None, Some(url)) => Self::connect_http(name, url, cfg, roots, handler),
             (Some(_), Some(_)) => Err(McpError::Config {
                 server: name,
                 detail: "set exactly one of `command` (stdio) or `url` (http), not both".to_owned(),
@@ -303,6 +348,7 @@ impl McpServerHandle {
         command: &str,
         cfg: &McpServer,
         roots: &[std::path::PathBuf],
+        handler: Option<Arc<dyn ServerRequestHandler>>,
     ) -> Result<Self, McpError> {
         let mut process = Command::new(command);
         process
@@ -324,7 +370,9 @@ impl McpServerHandle {
             .take()
             .ok_or_else(|| McpError::NoStdio(name.clone()))?;
         let (peer, inbound, _reader) = connect(BufReader::new(stdout), stdin);
-        let conn = Arc::new(McpConnection::initialize(name, peer, inbound, roots)?);
+        let conn = Arc::new(McpConnection::initialize(
+            name, peer, inbound, roots, handler,
+        )?);
         Ok(Self {
             conn,
             child: Some(child),
@@ -337,13 +385,16 @@ impl McpServerHandle {
         url: &str,
         cfg: &McpServer,
         roots: &[std::path::PathBuf],
+        handler: Option<Arc<dyn ServerRequestHandler>>,
     ) -> Result<Self, McpError> {
         let (peer, inbound, _reader) =
             crate::http::connect_http(url, &cfg.headers).map_err(|detail| McpError::Http {
                 server: name.clone(),
                 detail,
             })?;
-        let conn = Arc::new(McpConnection::initialize(name, peer, inbound, roots)?);
+        let conn = Arc::new(McpConnection::initialize(
+            name, peer, inbound, roots, handler,
+        )?);
         Ok(Self { conn, child: None })
     }
 
@@ -367,6 +418,7 @@ impl Drop for McpServerHandle {
 #[cfg(test)]
 mod tests {
     use std::io::BufReader;
+    use std::sync::Mutex;
     use std::thread;
 
     use super::*;
@@ -401,7 +453,7 @@ mod tests {
                 }
             }
         });
-        let conn = McpConnection::initialize("stub", cli_peer, cli_in, roots).unwrap();
+        let conn = McpConnection::initialize("stub", cli_peer, cli_in, roots, None).unwrap();
         (conn, srv_peer)
     }
 
@@ -410,6 +462,76 @@ mod tests {
         let (conn, _srv) = stub_server();
         assert_eq!(conn.name(), "stub");
         assert!(!conn.take_tools_changed());
+    }
+
+    struct EchoHandler;
+    impl ServerRequestHandler for EchoHandler {
+        fn handle(
+            &self,
+            method: &str,
+            params: &serde_json::Value,
+        ) -> Option<Result<serde_json::Value, RpcError>> {
+            (method == "test/echo").then(|| Ok(params.clone()))
+        }
+        fn capabilities(&self) -> serde_json::Value {
+            serde_json::json!({ "sampling": {} })
+        }
+    }
+
+    /// Like `stub_server` but records the `initialize` params and wires
+    /// the given handler into the connection.
+    fn stub_server_with_handler(
+        handler: Option<Arc<dyn ServerRequestHandler>>,
+    ) -> (McpConnection, Peer, Arc<Mutex<Option<serde_json::Value>>>) {
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_peer, cli_in, _c) = connect(BufReader::new(cli_r), cli_w);
+        let (srv_peer, srv_in, _s) = connect(BufReader::new(srv_r), srv_w);
+        let responder = srv_peer.clone();
+        let init_params = Arc::new(Mutex::new(None));
+        let captured = Arc::clone(&init_params);
+        thread::spawn(move || {
+            for msg in srv_in {
+                if let Inbound::Request { id, method, params } = msg {
+                    let outcome = if method == "initialize" {
+                        *captured.lock().unwrap() = Some(params);
+                        Ok(serde_json::json!({
+                            "protocolVersion": PROTOCOL_VERSION,
+                            "capabilities": { "tools": {} },
+                            "serverInfo": { "name": "stub", "version": "0" },
+                        }))
+                    } else {
+                        Err(RpcError::method_not_found(&method))
+                    };
+                    let _ = responder.respond(&id, outcome);
+                }
+            }
+        });
+        let conn = McpConnection::initialize("stub", cli_peer, cli_in, &[], handler).unwrap();
+        (conn, srv_peer, init_params)
+    }
+
+    #[test]
+    fn handler_answers_server_request_and_advertises_capability() {
+        let (_conn, srv, init_params) = stub_server_with_handler(Some(Arc::new(EchoHandler)));
+        // The handler's capabilities are merged into `initialize`.
+        let caps = init_params
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("initialize seen");
+        assert!(caps["capabilities"]["sampling"].is_object());
+        assert!(caps["capabilities"]["roots"].is_object());
+        // A handled request routes to the handler...
+        let echoed = srv
+            .request("test/echo", serde_json::json!({ "n": 7 }))
+            .expect("echo answered");
+        assert_eq!(echoed["n"], 7);
+        // ...and an unhandled one still gets method-not-found.
+        let err = srv
+            .request("test/other", serde_json::Value::Null)
+            .unwrap_err();
+        assert_eq!(err.code, -32601);
     }
 
     fn empty_server() -> McpServer {
@@ -425,7 +547,7 @@ mod tests {
 
     #[test]
     fn spawn_rejects_a_server_with_no_transport() {
-        let err = McpServerHandle::spawn("x", &empty_server(), &[])
+        let err = McpServerHandle::spawn("x", &empty_server(), &[], None)
             .err()
             .expect("no transport must error");
         assert!(matches!(err, McpError::Config { .. }), "got {err:?}");
@@ -438,7 +560,7 @@ mod tests {
             url: Some("https://example.com/sse".to_owned()),
             ..empty_server()
         };
-        let err = McpServerHandle::spawn("x", &cfg, &[])
+        let err = McpServerHandle::spawn("x", &cfg, &[], None)
             .err()
             .expect("both transports must error");
         assert!(matches!(err, McpError::Config { .. }), "got {err:?}");

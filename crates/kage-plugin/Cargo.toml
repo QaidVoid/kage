@@ -14,6 +14,12 @@ categories.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Expose `kage_plugin::testing` (recording sink + runtime helper) so
+# downstream plugin-crate authors can unit-test plugins the way the
+# in-repo tests do. Off by default; enabled as a dev-dependency feature.
+testing = []
+
 [dependencies]
 kage-core.workspace = true
 kage-provider.workspace = true

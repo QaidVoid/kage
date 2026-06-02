@@ -31,6 +31,8 @@ pub mod spec;
 pub mod status;
 pub(crate) mod store;
 pub mod terminal_input;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 pub mod theme;
 pub mod tools;
 pub mod ui;

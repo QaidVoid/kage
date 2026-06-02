@@ -21,21 +21,25 @@ mod title;
 mod tui;
 mod usage_hooks;
 
-use std::io::{self, Write};
-use std::path::PathBuf;
-use std::process::ExitCode;
-use std::sync::Arc;
+pub(crate) use std::io::{self, Write};
+pub(crate) use std::path::PathBuf;
+pub(crate) use std::process::ExitCode;
+pub(crate) use std::sync::Arc;
 
-use chrono::Utc;
-use clap::{Parser, Subcommand};
-use kage_core::{CancelFlag, Content, LoopEvent, Message, Role};
-use kage_loop::{AgentContext, Hooks, LoopConfig, NoopHooks, run};
-use kage_provider::{ProviderRegistry, anthropic, compat, gemini, openai, openai_responses};
-use kage_session::{EntryId, FORMAT_VERSION, Header, SessionId, SessionSummary, SessionWriter};
-use kage_tools::builtin_registry;
+pub(crate) use chrono::Utc;
+pub(crate) use clap::{Parser, Subcommand};
+pub(crate) use kage_core::{CancelFlag, Content, LoopEvent, Message, Role};
+pub(crate) use kage_loop::{AgentContext, Hooks, LoopConfig, NoopHooks, run};
+pub(crate) use kage_provider::{
+    ProviderRegistry, anthropic, compat, gemini, openai, openai_responses,
+};
+pub(crate) use kage_session::{
+    EntryId, FORMAT_VERSION, Header, SessionId, SessionSummary, SessionWriter,
+};
+pub(crate) use kage_tools::builtin_registry;
 
-use crate::plugins::{PluginEventHooks, setup_runtime};
-use crate::session::SessionRecordingHooks;
+pub(crate) use crate::plugins::{PluginEventHooks, setup_runtime};
+pub(crate) use crate::session::SessionRecordingHooks;
 
 /// kage: a minimal, extensible coding agent.
 #[derive(Parser, Debug)]
@@ -79,7 +83,7 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
-enum Command {
+pub(crate) enum Command {
     /// List recorded sessions in `$XDG_DATA_HOME/kage/sessions/`.
     List,
     /// Resume a recorded session, appending new entries to the same file.
@@ -187,13 +191,13 @@ enum Command {
 }
 
 #[derive(Subcommand, Debug)]
-enum McpAction {
+pub(crate) enum McpAction {
     /// Serve kage's built-in tools as an MCP server over stdio.
     Serve,
 }
 
 #[derive(Subcommand, Debug)]
-enum AuthAction {
+pub(crate) enum AuthAction {
     /// Save an API key for a provider, prompting for it without echo.
     Login {
         /// Provider id. Omit to pick from a list.
@@ -212,7 +216,7 @@ enum AuthAction {
 /// doesn't push the entry point past clippy's `too_many_lines`
 /// threshold; the print-mode path below still runs from [`main`]
 /// directly because it needs every local in scope.
-fn run_subcommand(command: Command) -> ExitCode {
+pub(crate) fn run_subcommand(command: Command) -> ExitCode {
     match command {
         Command::List => run_list(),
         Command::Resume {
@@ -253,7 +257,7 @@ fn run_subcommand(command: Command) -> ExitCode {
 /// is generated fresh from the clap definition every invocation, so
 /// adding or renaming a subcommand requires no extra checked-in
 /// artifacts.
-fn run_completions(shell: clap_complete::Shell) -> ExitCode {
+pub(crate) fn run_completions(shell: clap_complete::Shell) -> ExitCode {
     use clap::CommandFactory as _;
     let mut cmd = Cli::command();
     let bin_name = cmd.get_name().to_owned();
@@ -265,7 +269,7 @@ fn run_completions(shell: clap_complete::Shell) -> ExitCode {
 /// Render the manpage via `clap_mangen` and write it to `out`.
 /// Creates the parent directory when missing so a fresh checkout can
 /// run `kage gen-manpage --out man/kage.1` without a prior `mkdir`.
-fn run_gen_manpage(out: &std::path::Path) -> ExitCode {
+pub(crate) fn run_gen_manpage(out: &std::path::Path) -> ExitCode {
     use clap::CommandFactory as _;
     let cmd = Cli::command();
     let mut buffer: Vec<u8> = Vec::new();
@@ -396,457 +400,13 @@ fn main() -> ExitCode {
     exit
 }
 
-/// Drive one print-mode run. Streams loop events to stdout and, when a
-/// writer is supplied, records the conversation. When a plugin runtime is
-/// supplied, plugin event handlers fire at turn boundaries. Returns the
-/// appropriate process exit code.
-fn execute_print_run(
-    provider: &dyn kage_provider::Provider,
-    tools: &kage_tools::ToolRegistry,
-    cx: &mut AgentContext,
-    user_msg: &Message,
-    writer: Option<SessionWriter>,
-    plugin_runtime: Option<std::sync::Arc<kage_plugin::PluginRuntime>>,
-    json_mode: bool,
-) -> ExitCode {
-    let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let cfg = match kage_core::config::Config::load_layered(&workdir) {
-        Ok(c) => LoopConfig {
-            compaction_threshold: c.loop_settings.compaction_threshold,
-            ..LoopConfig::default()
-        },
-        Err(e) => {
-            eprintln!("kage: config error: {e}; using defaults");
-            LoopConfig::default()
-        }
-    };
-    let cancel = CancelFlag::new();
-    let mut stdout = io::stdout().lock();
-    let result = run_with_hooks(
-        provider,
-        tools,
-        cx,
-        cfg,
-        &cancel,
-        NoopHooks,
-        user_msg,
-        writer,
-        plugin_runtime,
-        |event| {
-            if json_mode {
-                print_event_json(&mut stdout, &event);
-            } else {
-                print_event(&mut stdout, &event);
-            }
-        },
-    );
-    if !json_mode {
-        let _ = writeln!(stdout);
-    }
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(_) => ExitCode::from(1),
-    }
-}
+mod cli_loop_run;
+mod cli_printing;
+mod cli_query;
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_with_hooks<B, F>(
-    provider: &dyn kage_provider::Provider,
-    tools: &kage_tools::ToolRegistry,
-    cx: &mut AgentContext,
-    cfg: LoopConfig,
-    cancel: &CancelFlag,
-    base_hooks: B,
-    user_msg: &Message,
-    writer: Option<SessionWriter>,
-    plugin_runtime: Option<std::sync::Arc<kage_plugin::PluginRuntime>>,
-    mut emit: F,
-) -> Result<(), kage_core::LoopError>
-where
-    B: Hooks + 'static,
-    F: FnMut(LoopEvent),
-{
-    let mut session_layer: Box<dyn Hooks> = match writer {
-        None => Box::new(base_hooks),
-        Some(w) => {
-            let mut hooks = SessionRecordingHooks::new(base_hooks, w);
-            if let Some(rt) = plugin_runtime.as_ref() {
-                hooks = hooks.with_plugin_runtime(Arc::clone(rt));
-            }
-            hooks.record_user_message(user_msg);
-            Box::new(hooks)
-        }
-    };
-
-    if let Some(runtime) = plugin_runtime {
-        let mut hooks = PluginEventHooks::new(BoxedHooks(session_layer), runtime.clone());
-        hooks.dispatch_before_agent_start(&cx.system_prompt, &first_user_text(user_msg));
-        hooks.dispatch_agent_start();
-        let res = run(provider, tools, cx, cfg, &mut hooks, cancel, &mut emit);
-        hooks.dispatch_agent_end(res.is_ok());
-        res
-    } else {
-        run(
-            provider,
-            tools,
-            cx,
-            cfg,
-            session_layer.as_mut(),
-            cancel,
-            &mut emit,
-        )
-    }
-}
-
-/// Extract the first text block from a user message, joined with newlines
-/// if there are multiple. Returns an empty string when the message carries
-/// no text (image-only, tool-result-only, etc.).
-pub(crate) fn first_user_text(msg: &Message) -> String {
-    let mut out = String::new();
-    for block in &msg.content {
-        if let Content::Text { text } = block {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(text);
-        }
-    }
-    out
-}
-
-/// Adapter so a `Box<dyn Hooks>` satisfies the static-dispatch `Hooks`
-/// bound on [`PluginEventHooks`].
-struct BoxedHooks(Box<dyn Hooks>);
-
-impl Hooks for BoxedHooks {
-    fn before_tool_call(
-        &mut self,
-        name: &str,
-        input: &serde_json::Value,
-    ) -> Option<kage_core::ToolOutput> {
-        self.0.before_tool_call(name, input)
-    }
-
-    fn after_tool_call(
-        &mut self,
-        name: &str,
-        output: kage_core::ToolOutput,
-    ) -> kage_core::ToolOutput {
-        self.0.after_tool_call(name, output)
-    }
-
-    fn on_event(&mut self, event: &LoopEvent) {
-        self.0.on_event(event);
-    }
-
-    fn transform_context(&mut self, messages: &mut Vec<kage_core::Message>) -> Result<(), String> {
-        self.0.transform_context(messages)
-    }
-
-    fn transform_provider_request(
-        &mut self,
-        req: &mut kage_loop::StreamRequest,
-    ) -> Result<(), String> {
-        self.0.transform_provider_request(req)
-    }
-
-    fn on_turn_start(&mut self, index: u32) {
-        self.0.on_turn_start(index);
-    }
-
-    fn on_turn_end(&mut self, index: u32, had_tool_calls: bool) {
-        self.0.on_turn_end(index, had_tool_calls);
-    }
-
-    fn should_stop_after_turn(&mut self, summary: &kage_loop::TurnSummary) -> bool {
-        self.0.should_stop_after_turn(summary)
-    }
-
-    fn get_steering(&mut self) -> Option<String> {
-        self.0.get_steering()
-    }
-
-    fn get_followup(&mut self) -> Option<String> {
-        self.0.get_followup()
-    }
-
-    fn on_user_message(&mut self, message: &kage_core::Message) {
-        self.0.on_user_message(message);
-    }
-}
-
-/// Implement `kage resume`: replay an existing session and append a new
-/// user prompt before re-running the loop.
-#[allow(clippy::too_many_lines)]
-fn run_resume(
-    id: Option<&str>,
-    last: bool,
-    print: Option<&str>,
-    model_override: Option<&str>,
-    json: bool,
-) -> ExitCode {
-    let Some(prompt) = print else {
-        eprintln!("kage: resume requires -p/--print in this build");
-        return ExitCode::from(2);
-    };
-    let dir = match sessions_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("kage: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    let path = match resolve_resume_target(&dir, id, last) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("kage: {e}");
-            return ExitCode::from(1);
-        }
-    };
-
-    let replay = match kage_session::replay(&path) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("kage: failed to replay session {}: {e}", path.display());
-            return ExitCode::from(1);
-        }
-    };
-
-    let mut registry = build_provider_registry();
-    let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let provisional_model = model_override.unwrap_or(&replay.model).to_owned();
-    let plugin_runtime = match plugins_dir() {
-        Ok(dir) => match setup_runtime(
-            &dir,
-            &workdir,
-            &provisional_model,
-            &replay.header.system_prompt,
-        ) {
-            Ok(rt) => rt,
-            Err(e) => {
-                eprintln!("kage: {e}");
-                None
-            }
-        },
-        Err(e) => {
-            eprintln!("kage: {e}");
-            None
-        }
-    };
-
-    if let Some(rt) = plugin_runtime.as_ref() {
-        plugins::merge_plugin_providers(rt, &mut registry);
-        acp_glue::set_runtime(rt);
-    }
-
-    if registry.ids().count() == 0 {
-        eprintln!(
-            "kage: no provider credentials found. Run `kage auth login` to save \
-             one, or export an env var (ANTHROPIC_API_KEY, OPENAI_API_KEY, \
-             GEMINI_API_KEY, ZAI_API_KEY, ZAI_CODING_API_KEY)."
-        );
-        return ExitCode::from(1);
-    }
-    let model = provisional_model;
-    let resolved = match registry.resolve(&model) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("kage: cannot resolve model {model}: {e}");
-            return ExitCode::from(1);
-        }
-    };
-
-    let writer = match SessionWriter::open(&path) {
-        Ok(w) => {
-            eprintln!("kage: appending to session {}", w.path().display());
-            w
-        }
-        Err(e) => {
-            eprintln!("kage: failed to reopen session file: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    let mut tools = builtin_registry();
-    if let Some(rt) = plugin_runtime.as_ref() {
-        apply_plugin_tools(&mut tools, rt);
-    }
-    let (_mcp_manager, mcp_errors) =
-        mcp::spawn_and_register(&mut tools, &workdir, plugin_runtime.as_deref());
-    for (server, err) in mcp_errors {
-        eprintln!("kage: mcp `{server}`: {err}");
-    }
-    let mut cx = AgentContext::new(resolved.model.clone(), &replay.header.system_prompt)
-        .with_workdir(&workdir);
-    if let Some(window) = runtime_env::context_window_for(&registry, &model) {
-        cx = cx.with_context_window(window);
-    }
-    if let Some(out) = runtime_env::max_output_tokens_for(&registry, &model) {
-        cx = cx.with_max_output_tokens(out);
-    }
-    cx.history = replay.history;
-    cx.budget.used_input = replay.usage_total.input;
-    cx.budget.used_output = replay.usage_total.output;
-    cx.budget.used_cache_read = replay.usage_total.cache_read;
-    cx.budget.used_cache_write = replay.usage_total.cache_write;
-    cx.budget.current_context = replay.usage_total.last_context;
-    let user_msg = Message::new(
-        Role::User,
-        vec![Content::Text {
-            text: prompt.to_owned(),
-        }],
-        cx.history.last().map(|m| m.id),
-    );
-    cx.history.push(user_msg.clone());
-
-    let exit = execute_print_run(
-        resolved.provider.as_ref(),
-        &tools,
-        &mut cx,
-        &user_msg,
-        Some(writer),
-        plugin_runtime,
-        json,
-    );
-    if let Err(err) = state::record_last_model(&model) {
-        eprintln!("kage: {err}");
-    }
-    exit
-}
-
-/// Implement `kage search <query>`: regex-grep across the sessions dir and
-/// render each hit as `<file>:<line>: <text>`.
-fn run_search(query: &str) -> ExitCode {
-    let dir = match sessions_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("kage: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    let hits = match kage_session::search(&dir, query) {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("kage: search failed: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    if hits.is_empty() {
-        eprintln!("kage: no matches in {}", dir.display());
-        return ExitCode::SUCCESS;
-    }
-    let mut stdout = io::stdout().lock();
-    for hit in &hits {
-        let name = hit
-            .path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or_else(|| hit.path.to_str().unwrap_or("?"));
-        let preview = render_hit_preview(hit);
-        let _ = writeln!(stdout, "{name}:{}: {preview}", hit.line_no);
-    }
-    ExitCode::SUCCESS
-}
-
-/// One-line preview text for a search hit. Decodes the matched JSONL into
-/// a `SessionEntry` when possible and surfaces only the human-readable
-/// fragments; raw lines fall through unchanged.
-fn render_hit_preview(hit: &kage_session::SearchHit) -> String {
-    let Some(entry) = hit.entry() else {
-        return hit.line.clone();
-    };
-    match entry {
-        kage_session::SessionEntry::Header(h) => format!("[header] model={}", h.model),
-        kage_session::SessionEntry::Message(m) => {
-            let role = match m.message.role {
-                Role::User => "user",
-                Role::Assistant => "assistant",
-                Role::ToolResult => "tool",
-                Role::System => "system",
-            };
-            let text = first_text_block(&m.message).unwrap_or_else(|| "(no text)".to_owned());
-            format!("[{role}] {}", truncate_one_line(&text, 120))
-        }
-        kage_session::SessionEntry::Compaction(c) => {
-            format!("[compaction] kept={} summarized={}", c.kept, c.summarized)
-        }
-        kage_session::SessionEntry::Label(l) => format!("[label] {}", l.text),
-        kage_session::SessionEntry::Title(t) => format!("[title] {}", t.title),
-        kage_session::SessionEntry::ModelChange(m) => format!("[model_change] {}", m.model),
-        kage_session::SessionEntry::ThinkingLevelChange(t) => {
-            format!("[thinking_level] {}", t.level)
-        }
-        kage_session::SessionEntry::Custom(c) => format!("[custom:{}]", c.kind),
-    }
-}
-
-fn first_text_block(message: &Message) -> Option<String> {
-    for block in &message.content {
-        if let Content::Text { text } = block {
-            return Some(text.clone());
-        }
-        if let Content::ToolResultBlock { output, .. } = block {
-            return Some(output.clone());
-        }
-    }
-    None
-}
-
-/// Implement `kage fork`: copy a session up through a chosen entry into a
-/// fresh file with a new session id, linked back to the source via the
-/// header's `parent_session` and `parent_entry` fields.
-fn run_fork(src_id_prefix: &str, at_prefix: &str) -> ExitCode {
-    let dir = match sessions_dir() {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("kage: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    let src_path = match kage_session::find_by_prefix(&dir, src_id_prefix) {
-        Ok(Some(p)) => p,
-        Ok(None) => {
-            eprintln!("kage: no session matches prefix '{src_id_prefix}'");
-            return ExitCode::from(1);
-        }
-        Err(e) => {
-            eprintln!("kage: failed to resolve session id: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    let at = match kage_session::resolve_entry_prefix(&src_path, at_prefix) {
-        Ok(id) => id,
-        Err(e) => {
-            eprintln!("kage: failed to resolve entry id: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    let new_session = SessionId::new();
-    let dst = dir.join(format!("{new_session}.jsonl"));
-    if let Err(e) = kage_session::fork(&src_path, &dst, new_session, at) {
-        eprintln!("kage: fork failed: {e}");
-        return ExitCode::from(1);
-    }
-    println!("{new_session}");
-    eprintln!("kage: forked {} into {}", src_path.display(), dst.display());
-    ExitCode::SUCCESS
-}
-
-/// Resolve which session file to resume based on cli flags.
-fn resolve_resume_target(
-    dir: &std::path::Path,
-    id: Option<&str>,
-    last: bool,
-) -> Result<PathBuf, String> {
-    if last {
-        return kage_session::find_last(dir)
-            .map_err(|e| format!("failed to scan sessions: {e}"))?
-            .ok_or_else(|| format!("no sessions in {}", dir.display()));
-    }
-    let prefix = id.ok_or_else(|| "resume requires either --last or a session id".to_owned())?;
-    kage_session::find_by_prefix(dir, prefix)
-        .map_err(|e| format!("failed to resolve session id: {e}"))?
-        .ok_or_else(|| format!("no session matches prefix '{prefix}'"))
-}
+pub(crate) use cli_loop_run::{execute_print_run, run_with_hooks};
+pub(crate) use cli_printing::{print_event, print_event_json};
+pub(crate) use cli_query::{run_fork, run_resume, run_search};
 
 /// Resolve `$XDG_DATA_HOME/kage` (default `~/.local/share/kage`).
 pub(crate) fn data_root() -> Result<PathBuf, String> {
@@ -940,7 +500,7 @@ pub(crate) fn load_skills(
 
 /// Resolve an XDG base directory: prefers `$ENV_VAR` if set and non-empty,
 /// otherwise falls back to `$HOME/<fallback_subpath>`.
-fn xdg_dir(env_var: &str, fallback_subpath: &str) -> Result<PathBuf, String> {
+pub(crate) fn xdg_dir(env_var: &str, fallback_subpath: &str) -> Result<PathBuf, String> {
     if let Ok(v) = std::env::var(env_var)
         && !v.is_empty()
     {
@@ -951,7 +511,7 @@ fn xdg_dir(env_var: &str, fallback_subpath: &str) -> Result<PathBuf, String> {
 }
 
 /// Implement `kage list`: print one row per recorded session.
-fn run_list() -> ExitCode {
+pub(crate) fn run_list() -> ExitCode {
     let dir = match sessions_dir() {
         Ok(d) => d,
         Err(e) => {
@@ -974,7 +534,7 @@ fn run_list() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn print_session_table<W: Write>(out: &mut W, summaries: &[SessionSummary]) {
+pub(crate) fn print_session_table<W: Write>(out: &mut W, summaries: &[SessionSummary]) {
     let id_h = "ID";
     let created_h = "CREATED";
     let model_h = "MODEL";
@@ -996,7 +556,7 @@ fn print_session_table<W: Write>(out: &mut W, summaries: &[SessionSummary]) {
     }
 }
 
-fn truncate_one_line(text: &str, max: usize) -> String {
+pub(crate) fn truncate_one_line(text: &str, max: usize) -> String {
     let single_line = text.lines().next().unwrap_or("").trim();
     if single_line.chars().count() <= max {
         return single_line.to_owned();
@@ -1035,7 +595,7 @@ pub(crate) fn plan_session(model: &str, system_prompt: &str) -> Result<(PathBuf,
     Ok((path, header))
 }
 
-fn build_session_path(dir: &std::path::Path, session: SessionId) -> PathBuf {
+pub(crate) fn build_session_path(dir: &std::path::Path, session: SessionId) -> PathBuf {
     dir.join(format!("{session}.jsonl"))
 }
 
@@ -1131,7 +691,7 @@ pub(crate) fn build_provider_registry() -> ProviderRegistry {
 /// entries and the access token for [`auth::Credential::Oauth`]
 /// entries; the refresh path in [`build_provider_registry`] runs
 /// before this is called so the returned token is fresh.
-fn lookup_key(provider: &str, store: &auth::AuthStore) -> Option<String> {
+pub(crate) fn lookup_key(provider: &str, store: &auth::AuthStore) -> Option<String> {
     let env = auth::env_var_for(provider);
     if !env.is_empty() {
         if let Ok(v) = std::env::var(env) {
@@ -1147,7 +707,7 @@ fn lookup_key(provider: &str, store: &auth::AuthStore) -> Option<String> {
 /// expired or due to expire inside the configured slack window. Sets
 /// `*dirty` to `true` when at least one credential was rewritten so
 /// the caller can persist before any provider request goes out.
-fn refresh_expiring_oauth(store: &mut auth::AuthStore, dirty: &mut bool) {
+pub(crate) fn refresh_expiring_oauth(store: &mut auth::AuthStore, dirty: &mut bool) {
     let now = Utc::now();
     let candidates: Vec<(String, auth::OAuthCredential)> = store
         .providers
@@ -1211,105 +771,4 @@ pub(crate) fn default_model(registry: &ProviderRegistry) -> String {
         }
     }
     String::new()
-}
-
-/// Render one streaming event to stdout. Only text-bearing events produce
-/// visible output; tool calls render a single bracketed status line.
-fn print_event<W: Write>(out: &mut W, event: &LoopEvent) {
-    match event {
-        LoopEvent::TextDelta { delta, .. } => {
-            let _ = out.write_all(delta.as_bytes());
-            let _ = out.flush();
-        }
-        LoopEvent::ToolCallStart { name, .. } => {
-            let _ = writeln!(out, "\n[tool: {name}]");
-            let _ = out.flush();
-        }
-        LoopEvent::ToolCallEnd { output, .. } => {
-            if output.is_error {
-                let _ = writeln!(out, "[tool error] {}", output.text);
-            }
-            let _ = out.flush();
-        }
-        LoopEvent::Compaction {
-            kept, summarized, ..
-        } => {
-            let _ = writeln!(out, "\n[compacted: kept {kept}, summarized {summarized}]");
-            let _ = out.flush();
-        }
-        LoopEvent::Error { kind } => {
-            let _ = writeln!(out, "\n[error] {kind}");
-            let _ = out.flush();
-        }
-        _ => {}
-    }
-}
-
-/// Emit `event` as one JSONL row on `out`. Skips the trailing newline
-/// the text-mode path adds because each event already terminates with
-/// `\n`, so consumers can split on `\n` and run `serde_json::from_str`
-/// on each line. Serialization can only fail on cycle errors, which
-/// our event types can't produce; we still flush so streaming
-/// consumers see the row immediately.
-fn print_event_json<W: Write>(out: &mut W, event: &LoopEvent) {
-    match serde_json::to_string(event) {
-        Ok(line) => {
-            let _ = writeln!(out, "{line}");
-            let _ = out.flush();
-        }
-        Err(err) => {
-            let _ = writeln!(
-                out,
-                r#"{{"type":"error","kind":{{"kind":"other","message":"encode: {err}"}}}}"#
-            );
-            let _ = out.flush();
-        }
-    }
-}
-
-#[cfg(test)]
-mod json_print_tests {
-    use kage_core::{MessageId, TokenUsage};
-
-    use super::*;
-
-    #[test]
-    fn text_delta_renders_as_single_jsonl_row() {
-        let mut buf = Vec::new();
-        print_event_json(
-            &mut buf,
-            &LoopEvent::TextDelta {
-                id: MessageId::new(),
-                delta: "hi".into(),
-            },
-        );
-        let line = String::from_utf8(buf).unwrap();
-        assert!(line.ends_with('\n'));
-        let trimmed = line.trim_end();
-        // Body is one JSON value per line.
-        let parsed: serde_json::Value = serde_json::from_str(trimmed).unwrap();
-        assert_eq!(parsed["type"], "text_delta");
-        assert_eq!(parsed["delta"], "hi");
-    }
-
-    #[test]
-    fn message_end_carries_usage_through_jsonl() {
-        let mut buf = Vec::new();
-        print_event_json(
-            &mut buf,
-            &LoopEvent::MessageEnd {
-                id: MessageId::new(),
-                usage: TokenUsage {
-                    input: 12,
-                    output: 7,
-                    ..TokenUsage::default()
-                },
-            },
-        );
-        let line = String::from_utf8(buf).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
-        assert_eq!(parsed["type"], "message_end");
-        assert_eq!(parsed["usage"]["input"], 12);
-        assert_eq!(parsed["usage"]["output"], 7);
-    }
 }

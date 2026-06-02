@@ -1,18 +1,22 @@
 [package]
 name = "kage-tui"
-description = "Modal raw-view ratatui terminal UI for the kage coding agent."
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 rust-version.workspace = true
-repository.workspace = true
-homepage.workspace = true
+description = "Modal raw-view ratatui terminal UI for the kage coding agent."
 readme.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
-[lints]
-workspace = true
+[lib]
+bench = false
+
+[[bench]]
+harness = false
+name = "render"
 
 [dependencies]
 arboard = { version = "3.6.1", features = ["wayland-data-control"] }
@@ -32,4 +36,12 @@ toml.workspace = true
 unicode-width = "0.2.2"
 
 [dev-dependencies]
+criterion = {
+  version = "0.8.2",
+  default-features = false,
+  features = ["cargo_bench_support"]
+}
 tempfile.workspace = true
+
+[lints]
+workspace = true

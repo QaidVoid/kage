@@ -1373,6 +1373,7 @@ name = "kage-acp"
 version = "0.1.0"
 dependencies = [
  "kage-core",
+ "kage-jsonrpc",
  "kage-provider",
  "serde",
  "serde_json",
@@ -1390,6 +1391,7 @@ dependencies = [
  "dirs",
  "kage-acp",
  "kage-core",
+ "kage-jsonrpc",
  "kage-loop",
  "kage-mcp",
  "kage-plugin",
@@ -1421,6 +1423,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kage-jsonrpc"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "kage-loop"
 version = "0.1.0"
 dependencies = [
@@ -1437,6 +1447,7 @@ name = "kage-mcp"
 version = "0.1.0"
 dependencies = [
  "kage-core",
+ "kage-jsonrpc",
  "kage-tools",
  "serde_json",
  "thiserror 2.0.18",

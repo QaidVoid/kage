@@ -2,7 +2,7 @@
 //!
 //! [`McpServerHandle::spawn`] launches the child described by a
 //! `[mcp.servers.<name>]` config block, wires its stdin/stdout into
-//! the [`crate::transport`] peer, performs the MCP `initialize`
+//! the shared [`kage_jsonrpc`] peer, performs the MCP `initialize`
 //! handshake, and then keeps the connection live for tool discovery
 //! and calls. Dropping the handle kills the child so a crashed kage
 //! never leaves orphaned server processes.
@@ -20,7 +20,7 @@ use std::thread::JoinHandle;
 
 use kage_core::config::McpServer;
 
-use crate::transport::{Inbound, Peer, RpcError, connect};
+use kage_jsonrpc::{Inbound, Peer, RpcError, connect};
 
 /// Protocol revision kage advertises in `initialize`. Servers that
 /// speak a different revision still respond with their own; we log

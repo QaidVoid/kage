@@ -28,6 +28,7 @@ use std::thread;
 use std::time::Duration;
 
 use kage_core::{CancelFlag, Content, Message, Role, TokenUsage};
+use kage_jsonrpc::{Inbound, Peer, RpcError, connect};
 use kage_provider::{
     EventStream, Provider, ProviderError, ProviderEvent, ProviderMetadata, StopReason,
     StreamRequest,
@@ -40,7 +41,6 @@ use crate::acp::{
     SelectedOption, SessionNotification, SessionUpdate,
 };
 use crate::agent::PermissionDecision;
-use crate::jsonrpc::{self, Inbound, Peer, RpcError};
 
 /// Decides whether an upstream agent's tool call is permitted. Called
 /// on the client's drain thread (`Send + Sync`); must not block on
@@ -343,7 +343,7 @@ where
     R: BufRead + Send + 'static,
     W: Write + Send + 'static,
 {
-    let (peer, inbound, _rh) = jsonrpc::connect(reader, writer);
+    let (peer, inbound, _rh) = connect(reader, writer);
 
     let init = InitializeRequest {
         protocol_version: PROTOCOL_VERSION,

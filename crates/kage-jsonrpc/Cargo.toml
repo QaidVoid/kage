@@ -1,6 +1,6 @@
 [package]
-name = "kage-acp"
-description = "Agent Client Protocol server adapter for kage."
+name = "kage-jsonrpc"
+description = "Bidirectional JSON-RPC 2.0 peer over newline-delimited stdio for kage."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -15,9 +15,5 @@ categories.workspace = true
 workspace = true
 
 [dependencies]
-kage-core.workspace = true
-kage-jsonrpc.workspace = true
-kage-provider.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

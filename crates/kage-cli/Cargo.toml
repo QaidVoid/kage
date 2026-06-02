@@ -26,6 +26,7 @@ clap_mangen.workspace = true
 dirs.workspace = true
 kage-acp = { version = "0.1.0", path = "../kage-acp" }
 kage-core.workspace = true
+kage-jsonrpc.workspace = true
 kage-loop.workspace = true
 kage-mcp = { version = "0.1.0", path = "../kage-mcp" }
 kage-plugin.workspace = true

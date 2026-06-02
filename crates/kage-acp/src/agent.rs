@@ -1,6 +1,6 @@
 //! ACP agent server.
 //!
-//! Drives an injected [`Agent`] over the [`jsonrpc`] peer, conformant
+//! Drives an injected [`Agent`] over the [`kage_jsonrpc`] peer, conformant
 //! with the published ACP spec: it answers `initialize`,
 //! `session/new`, `session/prompt`, and handles the `session/cancel`
 //! notification, streaming progress back as `session/update`
@@ -19,13 +19,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use kage_jsonrpc::{Inbound, Peer, RpcError, connect};
+
 use crate::acp::{
     InitializeRequest, InitializeResponse, LoadSessionRequest, NewSessionRequest,
     NewSessionResponse, PermissionOption, PermissionOptionKind, PermissionOutcome, PromptRequest,
     PromptResponse, RequestPermissionRequest, RequestPermissionResponse, SessionNotification,
     SessionUpdate, ToolCallStatus, ToolCallUpdate,
 };
-use crate::jsonrpc::{self, Inbound, Peer, RpcError};
 
 /// The verdict the agent's `before_tool_call` hook acts on.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -223,7 +224,7 @@ where
     W: Write + Send + 'static,
     A: Agent,
 {
-    let (peer, inbound, _reader) = jsonrpc::connect(reader, writer);
+    let (peer, inbound, _reader) = connect(reader, writer);
     let agent = Arc::new(Mutex::new(agent));
     let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
 
@@ -356,11 +357,12 @@ mod tests {
     use std::io::BufReader;
 
     use super::*;
+    use kage_jsonrpc::connect;
+
     use crate::acp::{
         AgentCapabilities, ContentBlock, Implementation, MessageChunk, PromptCapabilities,
         StopReason,
     };
-    use crate::jsonrpc::connect;
 
     struct MockAgent;
 

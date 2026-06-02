@@ -793,6 +793,17 @@ const FUNCS: &[Func] = &[
     },
     Func {
         doc: &[
+            "This plugin's own settings from `[plugins.config.<stem>]` in",
+            "config.toml, as a table (empty when none are set). A plugin",
+            "sees only its own slice, never another plugin's. Mutating",
+            "the returned table does not propagate back to the host.",
+        ],
+        path: "kage.plugin_config",
+        params: &[],
+        ret: Some("table"),
+    },
+    Func {
+        doc: &[
             "Request elevated capabilities for this plugin. Returns a",
             "`{ name = granted }` table: a capability is true only if",
             "the user granted it to this plugin in",

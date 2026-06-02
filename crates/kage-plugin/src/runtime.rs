@@ -128,6 +128,9 @@ pub struct PluginRuntime {
     /// evaluates only the listed plugins and skips the rest; empty means
     /// load every discovered plugin.
     enabled: Vec<String>,
+    /// Per-plugin settings by file stem, surfaced to the named plugin
+    /// through `kage.plugin_config()`. Each plugin sees only its slice.
+    plugin_config: BTreeMap<String, serde_json::Value>,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -153,6 +156,7 @@ impl PluginRuntime {
             workdir: PathBuf::from("."),
             capabilities: BTreeMap::new(),
             enabled: Vec::new(),
+            plugin_config: BTreeMap::new(),
         }
     }
 
@@ -206,7 +210,7 @@ impl PluginRuntime {
     /// environment is created once per name and reused.
     pub fn eval_plugin(&self, name: &str, source: &str) -> Result<mlua::Value, PluginError> {
         let lua = self.lock_lua();
-        let env = plugin_env(&lua, name, &self.plugin_envs)?;
+        let env = plugin_env(&lua, name, &self.plugin_envs, self.plugin_config.get(name))?;
         if let Ok(mut cur) = self.current_plugin.lock() {
             *cur = Some(name.to_owned());
         }
@@ -848,6 +852,7 @@ pub struct PluginRuntimeBuilder {
     workdir: PathBuf,
     capabilities: BTreeMap<String, Vec<String>>,
     enabled: Vec<String>,
+    plugin_config: BTreeMap<String, serde_json::Value>,
 }
 
 impl std::fmt::Debug for PluginRuntimeBuilder {
@@ -898,6 +903,15 @@ impl PluginRuntimeBuilder {
     #[must_use]
     pub fn enabled(mut self, enabled: Vec<String>) -> Self {
         self.enabled = enabled;
+        self
+    }
+
+    /// Set per-plugin settings (from `[plugins.config.<stem>]`), keyed
+    /// by plugin file stem. Each plugin reads only its own slice through
+    /// `kage.plugin_config()`.
+    #[must_use]
+    pub fn plugin_config(mut self, plugin_config: BTreeMap<String, serde_json::Value>) -> Self {
+        self.plugin_config = plugin_config;
         self
     }
 
@@ -1090,6 +1104,7 @@ impl PluginRuntimeBuilder {
             session_entries,
             switch_request,
             enabled: self.enabled,
+            plugin_config: self.plugin_config,
         })
     }
 }
@@ -1158,6 +1173,7 @@ fn plugin_env(
     lua: &Lua,
     name: &str,
     slots: &Mutex<HashMap<String, RegistryKey>>,
+    config_slice: Option<&serde_json::Value>,
 ) -> mlua::Result<Table> {
     let mut slots = slots.lock().expect("plugin env map poisoned");
     if let Some(key) = slots.get(name) {
@@ -1174,6 +1190,16 @@ fn plugin_env(
     let pkage_mt = lua.create_table()?;
     pkage_mt.set("__index", base_kage)?;
     pkage.set_metatable(Some(pkage_mt))?;
+    // Override the base `kage.plugin_config()` with one that returns
+    // this plugin's own `[plugins.config.<stem>]` slice. An absent slice
+    // yields an empty table, matching the base surface.
+    let slice = config_slice
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    pkage.set(
+        "plugin_config",
+        lua.create_function(move |lua, ()| crate::api::json_to_lua(lua, &slice))?,
+    )?;
     env.set("kage", pkage)?;
 
     // `_G` must point at the plugin's own env, not the shared globals,
@@ -1252,6 +1278,28 @@ mod tests {
         let rt = PluginRuntime::new().unwrap();
         let v: mlua::Value = rt.eval("return 21 * 2").unwrap();
         assert_eq!(v.as_integer(), Some(42));
+    }
+
+    #[test]
+    fn plugin_config_is_per_plugin_and_isolated() {
+        let mut cfg = BTreeMap::new();
+        cfg.insert(
+            "alpha".to_owned(),
+            serde_json::json!({ "key": "alpha-val" }),
+        );
+        let rt = PluginRuntime::builder().plugin_config(cfg).build().unwrap();
+
+        // The named plugin reads its own slice.
+        let v = rt
+            .eval_plugin("alpha", "return kage.plugin_config().key")
+            .unwrap();
+        assert_eq!(v.as_string().unwrap().to_str().unwrap(), "alpha-val");
+
+        // A plugin with no slice gets an empty table, never alpha's.
+        let v = rt
+            .eval_plugin("beta", "return kage.plugin_config().key == nil")
+            .unwrap();
+        assert_eq!(v.as_boolean(), Some(true));
     }
 
     #[test]

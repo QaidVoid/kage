@@ -256,6 +256,13 @@ pub struct PluginsConfig {
     /// hard error at startup, not silently ignored.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub capabilities: BTreeMap<String, Vec<String>>,
+    /// Per-plugin settings, keyed by plugin file stem
+    /// (`[plugins.config.my-plugin] key = "value"`). The named plugin
+    /// reads its own slice via `kage.plugin_config()`; a plugin sees
+    /// only its own entry, never another's. Arbitrary nested tables are
+    /// allowed.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub config: BTreeMap<String, serde_json::Value>,
 }
 
 /// Sandbox backend selection.
@@ -384,6 +391,29 @@ mod tests {
                 agent.env.get("ANTHROPIC_API_KEY").map(String::as_str),
                 Some("xxx")
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn plugins_config_parses_nested_tables_per_stem() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.toml",
+                r#"
+                [plugins.config.my-plugin]
+                api_url = "https://example.com"
+                retries = 3
+
+                [plugins.config.my-plugin.nested]
+                flag = true
+                "#,
+            )?;
+            let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
+            let slice = cfg.plugins.config.get("my-plugin").expect("slice parsed");
+            assert_eq!(slice["api_url"], serde_json::json!("https://example.com"));
+            assert_eq!(slice["retries"], serde_json::json!(3));
+            assert_eq!(slice["nested"]["flag"], serde_json::json!(true));
             Ok(())
         });
     }

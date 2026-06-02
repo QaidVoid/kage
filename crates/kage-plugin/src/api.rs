@@ -11,7 +11,8 @@
 //! * `kage.log(level, message)` records a structured log line; `level` is
 //!   one of `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`.
 //! * `kage.config()` returns a copy of the host-supplied configuration
-//!   table.
+//!   table; `kage.plugin_config()` returns the calling plugin's own
+//!   `[plugins.config.<stem>]` slice (empty on the base surface).
 //! * `kage.api_version()` returns the integer surface generation and
 //!   `kage.host_version()` the host crate version string;
 //!   `kage.requires{ api = N }` raises at load time when the host is
@@ -173,6 +174,15 @@ pub fn install(
     kage.set(
         "config",
         lua.create_function(move |lua, ()| json_to_lua(lua, &config_for_lua))?,
+    )?;
+
+    // Base `kage.plugin_config()` returns an empty table: only a loaded
+    // plugin has per-plugin settings, attached on its proxy in
+    // `plugin_env`. This base binding keeps the path resolvable for the
+    // host eval surface and the anti-drift spec check.
+    kage.set(
+        "plugin_config",
+        lua.create_function(|lua, ()| lua.create_table())?,
     )?;
 
     let json = lua.create_table()?;

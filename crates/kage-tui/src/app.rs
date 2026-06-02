@@ -1606,10 +1606,7 @@ impl App {
         // it BEFORE we hold the lock or we'll deadlock the moment a
         // search is active.
         let search_match_count = self.compute_search_match_count();
-        let search_match_set = self
-            .refresh_search_matches()
-            .map(|(set, _)| set)
-            .cloned();
+        let search_match_set = self.refresh_search_matches().map(|(set, _)| set).cloned();
         let render_width = tui.terminal().size().map_or(80, |r| r.width);
         self.refresh_plugin_widget_texts(render_width);
         let mut buffer = self.buffer.lock().expect("buffer mutex poisoned");

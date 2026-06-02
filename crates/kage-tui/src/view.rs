@@ -1762,7 +1762,14 @@ pub(super) fn user_block_lines(text: &str, width: u16, emphasis: Emphasis) -> Ve
                 .add_modifier(Modifier::BOLD),
         )));
     }
-    wrap_in_bubble_focused(content, theme.user_rule, theme.user_bg, width, emphasis, None)
+    wrap_in_bubble_focused(
+        content,
+        theme.user_rule,
+        theme.user_bg,
+        width,
+        emphasis,
+        None,
+    )
 }
 
 /// Width in cells of the focus-rule chrome that PB.5 reserves on

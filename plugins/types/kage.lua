@@ -200,6 +200,23 @@ kage = {}
 ---@return integer
 function kage.now_ms() end
 
+--- Integer generation of the `kage` plugin API surface. Bumped
+--- when a binding is added or removed; pair with
+--- `kage.requires` to guard against an incompatible host.
+---@return integer
+function kage.api_version() end
+
+--- Host crate version string (semver), e.g. "0.1.0".
+---@return string
+function kage.host_version() end
+
+--- Assert host compatibility at load time. `spec.api` is the
+--- minimum `kage.api_version` the plugin needs; an older host
+--- raises a clear error so a stale plugin fails loudly instead
+--- of part-way through a missing binding.
+---@param spec { api: integer? }
+function kage.requires(spec) end
+
 --- Sleep the calling thread for `ms` milliseconds. Capped at
 --- 500 ms per call so a host-side cancel never has to wait a
 --- multi-second sleep; loop the call to wait longer.

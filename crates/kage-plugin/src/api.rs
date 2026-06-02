@@ -12,6 +12,10 @@
 //!   one of `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`.
 //! * `kage.config()` returns a copy of the host-supplied configuration
 //!   table.
+//! * `kage.api_version()` returns the integer surface generation and
+//!   `kage.host_version()` the host crate version string;
+//!   `kage.requires{ api = N }` raises at load time when the host is
+//!   older than the generation the plugin needs.
 
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,6 +24,14 @@ use mlua::{Lua, Table, Value};
 use serde_json::json;
 
 use crate::error::PluginError;
+
+/// Generation of the `kage` plugin API surface.
+///
+/// Bumped whenever a binding is added or removed so a plugin can guard
+/// with [`kage.requires`](requires) and fail loudly at load against an
+/// incompatible host instead of erroring deep inside a missing binding.
+/// Exposed to Lua as `kage.api_version()`.
+pub const API_VERSION: i64 = 1;
 
 /// Severity tier for [`HostLog::log`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -95,6 +107,28 @@ pub fn install(
 
     kage.set("now_ms", lua.create_function(now_ms)?)?;
     kage.set("sleep_ms", lua.create_function(sleep_ms)?)?;
+    kage.set("api_version", lua.create_function(|_, ()| Ok(API_VERSION))?)?;
+    kage.set(
+        "host_version",
+        lua.create_function(|_, ()| Ok(env!("CARGO_PKG_VERSION")))?,
+    )?;
+    // `kage.requires{ api = N }` asserts host compatibility at load
+    // time: when the host's API_VERSION is older than the generation the
+    // plugin needs, raise so a stale plugin fails loudly up front.
+    kage.set(
+        "requires",
+        lua.create_function(|_, spec: Table| {
+            if let Some(required) = spec.get::<Option<i64>>("api")?
+                && required > API_VERSION
+            {
+                return Err(mlua::Error::external(format!(
+                    "kage.requires: plugin needs api_version >= {required}, \
+                     host provides {API_VERSION}"
+                )));
+            }
+            Ok(())
+        })?,
+    )?;
 
     let notify_sink = sink.clone();
     let notify = lua.create_function(move |_, (msg, level): (String, Option<String>)| {
@@ -342,6 +376,32 @@ mod tests {
         let ms: i64 = lua.load("return kage.now_ms()").eval().unwrap();
         // After 2020-01-01.
         assert!(ms > 1_577_836_800_000);
+    }
+
+    #[test]
+    fn api_version_is_exposed() {
+        let lua = Lua::new();
+        install(&lua, default_host_log(), json!({})).unwrap();
+        let v: i64 = lua.load("return kage.api_version()").eval().unwrap();
+        assert_eq!(v, API_VERSION);
+        let host: String = lua.load("return kage.host_version()").eval().unwrap();
+        assert!(!host.is_empty());
+    }
+
+    #[test]
+    fn requires_passes_for_current_or_older_api() {
+        let lua = Lua::new();
+        install(&lua, default_host_log(), json!({})).unwrap();
+        lua.load("kage.requires({ api = 1 })").exec().unwrap();
+        lua.load("kage.requires({})").exec().unwrap();
+    }
+
+    #[test]
+    fn requires_raises_for_newer_api() {
+        let lua = Lua::new();
+        install(&lua, default_host_log(), json!({})).unwrap();
+        let res = lua.load("kage.requires({ api = 999 })").exec();
+        assert!(res.is_err());
     }
 
     #[test]

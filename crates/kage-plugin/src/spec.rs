@@ -702,6 +702,37 @@ const FUNCS: &[Func] = &[
     },
     Func {
         doc: &[
+            "Integer generation of the `kage` plugin API surface. Bumped",
+            "when a binding is added or removed; pair with",
+            "`kage.requires` to guard against an incompatible host.",
+        ],
+        path: "kage.api_version",
+        params: &[],
+        ret: Some("integer"),
+    },
+    Func {
+        doc: &["Host crate version string (semver), e.g. \"0.1.0\"."],
+        path: "kage.host_version",
+        params: &[],
+        ret: Some("string"),
+    },
+    Func {
+        doc: &[
+            "Assert host compatibility at load time. `spec.api` is the",
+            "minimum `kage.api_version` the plugin needs; an older host",
+            "raises a clear error so a stale plugin fails loudly instead",
+            "of part-way through a missing binding.",
+        ],
+        path: "kage.requires",
+        params: &[Field {
+            name: "spec",
+            ty: "{ api: integer? }",
+            doc: "",
+        }],
+        ret: None,
+    },
+    Func {
+        doc: &[
             "Sleep the calling thread for `ms` milliseconds. Capped at",
             "500 ms per call so a host-side cancel never has to wait a",
             "multi-second sleep; loop the call to wait longer.",

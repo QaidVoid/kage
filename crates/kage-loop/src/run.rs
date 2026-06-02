@@ -238,7 +238,9 @@ where
                     result.content.first(),
                     Some(kage_core::Content::ToolResultBlock { is_error: true, .. })
                 );
-                if let Some(msg) = doom.observe(&call.name, &call.input, is_error) {
+                if let Some(msg) = doom.observe(&call.name, &call.input, is_error)
+                    && let Some(msg) = hooks.on_doom_loop(&call.name, msg)
+                {
                     steering = Some(msg);
                 }
             }
@@ -1550,6 +1552,70 @@ mod tests {
             }
             other => panic!("expected steering Text, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn on_doom_loop_hook_can_suppress_steering() {
+        struct SuppressDoom;
+        impl Hooks for SuppressDoom {
+            fn on_doom_loop(&mut self, _name: &str, _suggested: String) -> Option<String> {
+                None
+            }
+        }
+
+        let mut counter = 0u32;
+        let mut make_turn = || {
+            counter += 1;
+            let id = kage_core::ToolCallId::new(format!("call_{counter}"));
+            vec![
+                Ok(ProviderEvent::ToolCallStart {
+                    id: id.clone(),
+                    name: "always_fail".into(),
+                }),
+                Ok(ProviderEvent::ToolCallEnd {
+                    id,
+                    input: serde_json::json!({"x": 1}),
+                }),
+                Ok(ProviderEvent::MessageEnd {
+                    stop_reason: StopReason::ToolUse,
+                    usage: TokenUsage::default(),
+                }),
+            ]
+        };
+        let mock = MockProvider::sequence(vec![
+            make_turn(),
+            make_turn(),
+            make_turn(),
+            vec![Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            })],
+        ]);
+
+        let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
+        cx.history.push(user_msg("try the thing"));
+        let mut hooks = SuppressDoom;
+        let cancel = CancelFlag::new();
+        let registry = ToolRegistry::new().with(std::sync::Arc::new(AlwaysFailTool));
+
+        run(
+            &mock,
+            &registry,
+            &mut cx,
+            LoopConfig::default(),
+            &mut hooks,
+            &cancel,
+            |_| {},
+        )
+        .expect("loop runs");
+
+        let req4 = mock.requests().into_iter().nth(3).unwrap();
+        let has_steering = req4.messages.iter().any(|m| {
+            m.content
+                .iter()
+                .any(|c| matches!(c, Content::Text { text } if text.contains("different approach")))
+        });
+        assert!(!has_steering, "hook returning None must suppress the nudge");
     }
 
     #[derive(Debug, Default)]

@@ -226,6 +226,22 @@ pub trait Hooks {
         false
     }
 
+    /// Consulted when the loop detects a tool-call doom loop: the same
+    /// tool called with the same input failing several times in a row.
+    /// `suggested` is the steering message the loop would inject as a
+    /// user turn to break the loop.
+    ///
+    /// Return `Some(text)` to inject `text` (the suggestion unchanged or
+    /// a rewrite), or `None` to suppress the nudge entirely. The default
+    /// returns the suggestion unchanged, preserving the built-in
+    /// behavior. Use this to localize the message, raise the bar, or
+    /// disable doom steering for an autonomous agent that handles its
+    /// own retries.
+    fn on_doom_loop(&mut self, name: &str, suggested: String) -> Option<String> {
+        let _ = name;
+        Some(suggested)
+    }
+
     /// Polled before each model turn.
     ///
     /// A `Some(text)` return value is appended to history as a user message

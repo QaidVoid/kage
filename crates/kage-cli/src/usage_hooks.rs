@@ -124,6 +124,10 @@ impl<H: Hooks> Hooks for UsageHooks<H> {
         self.inner.should_stop_after_turn(summary)
     }
 
+    fn on_doom_loop(&mut self, name: &str, suggested: String) -> Option<String> {
+        self.inner.on_doom_loop(name, suggested)
+    }
+
     fn get_steering(&mut self) -> Option<String> {
         self.inner.get_steering()
     }

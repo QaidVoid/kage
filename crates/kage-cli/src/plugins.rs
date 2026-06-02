@@ -45,17 +45,18 @@ pub fn setup_runtime_with_sink(
     system_prompt: &str,
     sink: SharedHostLog,
 ) -> Result<Option<Arc<PluginRuntime>>, String> {
-    // Capability grants come from the same layered config the rest of
-    // the host reads. Fail closed: if the config cannot be loaded, no
-    // plugin gets any elevated capability rather than silently
-    // proceeding with an unknown grant set.
-    let capabilities = kage_core::config::Config::load_layered(workdir)
-        .map(|c| c.plugins.capabilities)
+    // Capability grants and the load allowlist come from the same
+    // layered config the rest of the host reads. Fail closed: if the
+    // config cannot be loaded, no plugin gets any elevated capability
+    // rather than silently proceeding with an unknown grant set.
+    let plugins_cfg = kage_core::config::Config::load_layered(workdir)
+        .map(|c| c.plugins)
         .unwrap_or_default();
     let runtime = PluginRuntime::builder()
         .sink(sink)
         .workdir(workdir.to_path_buf())
-        .capabilities(capabilities)
+        .capabilities(plugins_cfg.capabilities)
+        .enabled(plugins_cfg.enabled)
         .config(json!({
             "model": model,
             "cwd": workdir.display().to_string(),
@@ -67,6 +68,12 @@ pub fn setup_runtime_with_sink(
         kage_plugin::load_dir(plugins_dir, &runtime).map_err(|e| format!("plugin load: {e}"))?;
     for (path, err) in &report.failed {
         eprintln!("kage: plugin {} failed to load: {err}", path.display());
+    }
+    for path in &report.skipped {
+        eprintln!(
+            "kage: plugin {} skipped (not in [plugins] enabled)",
+            path.display()
+        );
     }
     if report.loaded.is_empty() {
         return Ok(None);

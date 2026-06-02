@@ -318,9 +318,13 @@ fn check_plugins(workdir: &Path) -> Check {
     // Use a no-op sink so plugin errors don't pollute stderr while we
     // diagnose - we surface them in our own line instead.
     let sink: kage_plugin::SharedHostLog = Arc::new(Mutex::new(Box::new(SilentSink)));
+    let enabled = Config::load_layered(workdir)
+        .map(|c| c.plugins.enabled)
+        .unwrap_or_default();
     let runtime = match PluginRuntime::builder()
         .sink(Arc::clone(&sink))
         .workdir(workdir.to_path_buf())
+        .enabled(enabled)
         .config(json!({}))
         .build()
     {
@@ -338,7 +342,16 @@ fn check_plugins(workdir: &Path) -> Check {
         Ok(report) if report.failed.is_empty() => Check {
             name: "plugins",
             status: Status::Ok,
-            body: format!("{} loaded from {}", report.loaded.len(), dir.display()),
+            body: if report.skipped.is_empty() {
+                format!("{} loaded from {}", report.loaded.len(), dir.display())
+            } else {
+                format!(
+                    "{} loaded, {} skipped by [plugins] enabled, from {}",
+                    report.loaded.len(),
+                    report.skipped.len(),
+                    dir.display()
+                )
+            },
             hint: None,
         },
         Ok(report) => {

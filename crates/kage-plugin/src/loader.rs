@@ -19,6 +19,9 @@ pub struct LoadReport {
     pub loaded: Vec<PathBuf>,
     /// Plugin files that failed, paired with the error encountered.
     pub failed: Vec<(PathBuf, String)>,
+    /// Plugin files skipped because a non-empty `[plugins] enabled`
+    /// allowlist did not name them. Reported, never silently dropped.
+    pub skipped: Vec<PathBuf>,
 }
 
 impl LoadReport {
@@ -60,23 +63,31 @@ pub fn load_dir(dir: &Path, runtime: &PluginRuntime) -> Result<LoadReport, Plugi
         if path.extension().and_then(|s| s.to_str()) != Some("lua") {
             continue;
         }
-        match std::fs::read_to_string(&path) {
-            Ok(source) => {
-                let name = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("plugin");
-                match runtime.eval_plugin(name, &source) {
-                    Ok(_) => report.loaded.push(path),
-                    Err(err) => {
-                        let msg = format!("plugin '{}': {err}", path.display());
-                        if let Ok(mut s) = sink.lock() {
-                            s.log(LogLevel::Error, &msg);
-                        }
-                        report.failed.push((path, err.to_string()));
-                    }
-                }
+        let name = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("plugin");
+        if !runtime.is_plugin_enabled(name) {
+            if let Ok(mut s) = sink.lock() {
+                s.log(
+                    LogLevel::Info,
+                    &format!("plugin '{name}' not in [plugins] enabled allowlist; skipped"),
+                );
             }
+            report.skipped.push(path);
+            continue;
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(source) => match runtime.eval_plugin(name, &source) {
+                Ok(_) => report.loaded.push(path),
+                Err(err) => {
+                    let msg = format!("plugin '{}': {err}", path.display());
+                    if let Ok(mut s) = sink.lock() {
+                        s.log(LogLevel::Error, &msg);
+                    }
+                    report.failed.push((path, err.to_string()));
+                }
+            },
             Err(err) => {
                 let msg = format!("plugin '{}': read failed: {err}", path.display());
                 if let Ok(mut s) = sink.lock() {
@@ -117,6 +128,48 @@ mod tests {
         assert_eq!(report.loaded.len(), 2);
         assert!(report.failed.is_empty());
         assert_eq!(rt.registered_commands().len(), 2);
+    }
+
+    #[test]
+    fn enabled_allowlist_skips_unlisted_plugins() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("trusted.lua"),
+            "kage.register_command({ name='t', description='', handler=function() end })",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("other.lua"),
+            "kage.register_command({ name='o', description='', handler=function() end })",
+        )
+        .unwrap();
+
+        let rt = PluginRuntime::builder()
+            .enabled(vec!["trusted".to_owned()])
+            .build()
+            .unwrap();
+        let report = load_dir(dir.path(), &rt).unwrap();
+        assert_eq!(report.loaded.len(), 1);
+        assert_eq!(report.skipped.len(), 1);
+        assert!(report.skipped[0].ends_with("other.lua"));
+        let commands = rt.registered_commands();
+        assert_eq!(commands.len(), 1);
+        assert!(rt.registered_commands().iter().any(|c| c.name() == "t"));
+        assert!(!rt.registered_commands().iter().any(|c| c.name() == "o"));
+    }
+
+    #[test]
+    fn empty_allowlist_loads_everything() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.lua"),
+            "kage.register_command({ name='a', description='', handler=function() end })",
+        )
+        .unwrap();
+        let rt = PluginRuntime::builder().enabled(vec![]).build().unwrap();
+        let report = load_dir(dir.path(), &rt).unwrap();
+        assert_eq!(report.loaded.len(), 1);
+        assert!(report.skipped.is_empty());
     }
 
     #[test]

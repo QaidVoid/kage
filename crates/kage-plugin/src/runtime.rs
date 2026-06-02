@@ -124,6 +124,10 @@ pub struct PluginRuntime {
     /// Pending `session_write` reseat request (`switch`/`fork_to`),
     /// drained by the host.
     switch_request: SharedSwitchRequest,
+    /// Load allowlist by plugin file stem. When non-empty, the loader
+    /// evaluates only the listed plugins and skips the rest; empty means
+    /// load every discovered plugin.
+    enabled: Vec<String>,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -148,6 +152,7 @@ impl PluginRuntime {
             config: serde_json::Value::Object(serde_json::Map::new()),
             workdir: PathBuf::from("."),
             capabilities: BTreeMap::new(),
+            enabled: Vec::new(),
         }
     }
 
@@ -169,6 +174,15 @@ impl PluginRuntime {
     #[must_use]
     pub fn sink(&self) -> SharedHostLog {
         Arc::clone(&self.sink)
+    }
+
+    /// Whether the loader should evaluate the plugin with file stem
+    /// `stem`. An empty allowlist (the default) enables every plugin; a
+    /// non-empty one enables only the plugins it names, so a user who
+    /// lists `[plugins] enabled = ["trusted"]` loads nothing else.
+    #[must_use]
+    pub fn is_plugin_enabled(&self, stem: &str) -> bool {
+        self.enabled.is_empty() || self.enabled.iter().any(|name| name == stem)
     }
 
     /// Execute a chunk of Lua source against the shared globals.
@@ -833,6 +847,7 @@ pub struct PluginRuntimeBuilder {
     config: serde_json::Value,
     workdir: PathBuf,
     capabilities: BTreeMap<String, Vec<String>>,
+    enabled: Vec<String>,
 }
 
 impl std::fmt::Debug for PluginRuntimeBuilder {
@@ -874,6 +889,15 @@ impl PluginRuntimeBuilder {
     #[must_use]
     pub fn capabilities(mut self, capabilities: BTreeMap<String, Vec<String>>) -> Self {
         self.capabilities = capabilities;
+        self
+    }
+
+    /// Set the load allowlist (from `[plugins] enabled`), keyed by
+    /// plugin file stem. Empty (the default) loads every discovered
+    /// plugin; non-empty loads only the named plugins.
+    #[must_use]
+    pub fn enabled(mut self, enabled: Vec<String>) -> Self {
+        self.enabled = enabled;
         self
     }
 
@@ -1065,6 +1089,7 @@ impl PluginRuntimeBuilder {
             current_plugin,
             session_entries,
             switch_request,
+            enabled: self.enabled,
         })
     }
 }

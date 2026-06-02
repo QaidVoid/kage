@@ -98,7 +98,13 @@ fn run_compaction<F: FnMut(LoopEvent)>(
         })?;
     let summary_text = match prep.summary_override {
         Some(text) => text,
-        None => summarize(provider, &cx.model, &prep.prompt, &prep.instruction, cancel)?,
+        None => summarize(
+            provider,
+            &prep.model,
+            &prep.prompt,
+            &prep.instruction,
+            cancel,
+        )?,
     };
     let summary_body =
         format!("{COMPACTION_SUMMARY_PREFIX}{summary_text}{COMPACTION_SUMMARY_SUFFIX}");
@@ -368,6 +374,39 @@ mod tests {
                 if *kept == KEEP_RECENT && *summarized == 10 - KEEP_RECENT)
         ));
         assert_eq!(cx.budget, TokenBudget::default());
+    }
+
+    #[test]
+    fn prepare_compaction_hook_can_redirect_the_summarizer_model() {
+        struct RedirectModel;
+        impl crate::Hooks for RedirectModel {
+            fn prepare_compaction(&mut self, prep: &mut CompactionPrep) -> Result<(), String> {
+                assert_eq!(prep.model, "mock:m");
+                prep.model = "mock:cheap".to_owned();
+                Ok(())
+            }
+        }
+
+        let provider = MockProvider::replaying(vec![
+            Ok(ProviderEvent::TextDelta {
+                delta: "summary".into(),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        ]);
+        let cancel = CancelFlag::new();
+        let mut hooks = RedirectModel;
+        let mut cx = loaded_context(0, 10);
+
+        let ran = force_compact(&mut cx, &provider, &cancel, &mut hooks, &mut |_| {}).unwrap();
+        assert!(ran);
+        assert_eq!(
+            provider.last_request().expect("a summarize request").model,
+            "mock:cheap",
+            "summarize must use the model the hook set on prep.model"
+        );
     }
 
     #[test]

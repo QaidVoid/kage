@@ -98,7 +98,9 @@ pub struct CompactionPrep {
     pub instruction: String,
     /// Full user-role prompt the summarizer receives. Mutable.
     pub prompt: String,
-    /// Model id the summarization call uses.
+    /// Model id the summarization call uses. Defaults to the live
+    /// conversation model; rewrite it to route summarization to a
+    /// cheaper or faster model.
     pub model: String,
     /// Number of messages being summarized away.
     pub summarized: usize,

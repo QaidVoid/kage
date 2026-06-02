@@ -108,6 +108,10 @@ impl<H: Hooks> Hooks for UsageHooks<H> {
         self.inner.transform_provider_request(req)
     }
 
+    fn prepare_compaction(&mut self, prep: &mut kage_loop::CompactionPrep) -> Result<(), String> {
+        self.inner.prepare_compaction(prep)
+    }
+
     fn on_turn_start(&mut self, index: u32) {
         self.inner.on_turn_start(index);
     }
@@ -130,5 +134,51 @@ impl<H: Hooks> Hooks for UsageHooks<H> {
 
     fn on_user_message(&mut self, message: &kage_core::Message) {
         self.inner.on_user_message(message);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use kage_loop::CompactionPrep;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingInner {
+        prepare_calls: u32,
+    }
+
+    impl Hooks for RecordingInner {
+        fn prepare_compaction(&mut self, prep: &mut CompactionPrep) -> Result<(), String> {
+            self.prepare_calls += 1;
+            prep.summary_override = Some("from inner".to_owned());
+            Ok(())
+        }
+    }
+
+    fn prep() -> CompactionPrep {
+        CompactionPrep {
+            transcript: String::new(),
+            instruction: String::new(),
+            prompt: String::new(),
+            model: "p:m".to_owned(),
+            summarized: 0,
+            kept: 0,
+            summary_override: None,
+        }
+    }
+
+    #[test]
+    fn prepare_compaction_delegates_to_inner() {
+        let mut hooks = UsageHooks::new(
+            RecordingInner::default(),
+            kage_tui::shared_session_usage(),
+            "p:m".to_owned(),
+            1000,
+        );
+        let mut p = prep();
+        hooks.prepare_compaction(&mut p).expect("prepare ok");
+        assert_eq!(p.summary_override.as_deref(), Some("from inner"));
+        assert_eq!(hooks.into_inner().prepare_calls, 1);
     }
 }

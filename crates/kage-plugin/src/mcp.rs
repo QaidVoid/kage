@@ -93,9 +93,11 @@ pub fn install_mcp(
                 .insert(
                     name,
                     McpServer {
-                        command,
+                        command: Some(command),
                         args,
                         env,
+                        url: None,
+                        headers: BTreeMap::new(),
                         disabled,
                     },
                 );
@@ -167,7 +169,7 @@ mod tests {
         .unwrap();
         let map = servers.lock().unwrap();
         let s = map.get("fs").expect("server recorded");
-        assert_eq!(s.command, "npx");
+        assert_eq!(s.command.as_deref(), Some("npx"));
         assert_eq!(
             s.args,
             ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]

@@ -239,18 +239,22 @@ mod tests {
         cfg.servers.insert(
             "off".to_owned(),
             McpServer {
-                command: "definitely-not-a-real-binary-xyz".to_owned(),
+                command: Some("definitely-not-a-real-binary-xyz".to_owned()),
                 args: vec![],
                 env: std::collections::BTreeMap::new(),
+                url: None,
+                headers: std::collections::BTreeMap::new(),
                 disabled: true,
             },
         );
         cfg.servers.insert(
             "broken".to_owned(),
             McpServer {
-                command: "definitely-not-a-real-binary-xyz".to_owned(),
+                command: Some("definitely-not-a-real-binary-xyz".to_owned()),
                 args: vec![],
                 env: std::collections::BTreeMap::new(),
+                url: None,
+                headers: std::collections::BTreeMap::new(),
                 disabled: false,
             },
         );

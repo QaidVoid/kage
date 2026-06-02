@@ -61,6 +61,23 @@ pub enum McpError {
     /// An operation named a server the manager does not know.
     #[error("no mcp server named `{0}`")]
     Unknown(String),
+    /// The server's transport could not be established over HTTP.
+    #[error("server `{server}` http transport: {detail}")]
+    Http {
+        /// Server name for context.
+        server: String,
+        /// What went wrong opening or driving the HTTP+SSE transport.
+        detail: String,
+    },
+    /// The server config is invalid (e.g. neither or both of
+    /// `command` / `url` set).
+    #[error("server `{server}` config: {detail}")]
+    Config {
+        /// Server name for context.
+        server: String,
+        /// What is wrong with the configuration.
+        detail: String,
+    },
 }
 
 /// A live, initialized MCP connection (transport + drained
@@ -239,25 +256,26 @@ impl McpConnection {
 }
 
 /// An initialized MCP server connection plus the child process
-/// backing it. Dropping this kills the child.
+/// backing it, if any. Dropping this kills the child; the HTTP
+/// transport owns no child.
 pub struct McpServerHandle {
     conn: Arc<McpConnection>,
-    child: Child,
+    child: Option<Child>,
 }
 
 impl McpServerHandle {
-    /// Spawn the server described by `cfg`, wire stdio into the
-    /// transport, and run the `initialize` handshake.
-    ///
-    /// `stderr` is inherited so a server's diagnostics reach the
-    /// user's terminal rather than being silently swallowed. `roots`
-    /// are the filesystem roots advertised to the server (the host
-    /// workdir), answered on `roots/list`.
+    /// Connect to the server described by `cfg` and run the
+    /// `initialize` handshake. The transport is chosen by the config:
+    /// `command` spawns a child and speaks JSON-RPC over its stdio,
+    /// `url` opens a remote HTTP+SSE connection. `roots` are the
+    /// filesystem roots advertised to the server (the host workdir),
+    /// answered on `roots/list`.
     ///
     /// # Errors
     ///
-    /// Returns [`McpError::Spawn`] when the process cannot start,
-    /// [`McpError::NoStdio`] when its pipes are missing, and the
+    /// Returns [`McpError::Config`] when neither or both transports are
+    /// configured, [`McpError::Spawn`] / [`McpError::NoStdio`] for a
+    /// stdio child, [`McpError::Http`] for an HTTP connection, and the
     /// handshake errors from [`McpConnection::initialize`].
     pub fn spawn(
         name: impl Into<String>,
@@ -265,15 +283,36 @@ impl McpServerHandle {
         roots: &[std::path::PathBuf],
     ) -> Result<Self, McpError> {
         let name = name.into();
-        let mut command = Command::new(&cfg.command);
-        command
+        match (cfg.command.as_deref(), cfg.url.as_deref()) {
+            (Some(command), None) => Self::spawn_stdio(name, command, cfg, roots),
+            (None, Some(url)) => Self::connect_http(name, url, cfg, roots),
+            (Some(_), Some(_)) => Err(McpError::Config {
+                server: name,
+                detail: "set exactly one of `command` (stdio) or `url` (http), not both".to_owned(),
+            }),
+            (None, None) => Err(McpError::Config {
+                server: name,
+                detail: "set `command` (stdio) or `url` (http)".to_owned(),
+            }),
+        }
+    }
+
+    /// Spawn a stdio child and run the handshake over its pipes.
+    fn spawn_stdio(
+        name: String,
+        command: &str,
+        cfg: &McpServer,
+        roots: &[std::path::PathBuf],
+    ) -> Result<Self, McpError> {
+        let mut process = Command::new(command);
+        process
             .args(&cfg.args)
             .envs(&cfg.env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
-        let mut child = command.spawn().map_err(|source| McpError::Spawn {
-            command: cfg.command.clone(),
+        let mut child = process.spawn().map_err(|source| McpError::Spawn {
+            command: command.to_owned(),
             source,
         })?;
         let stdin = child
@@ -286,7 +325,26 @@ impl McpServerHandle {
             .ok_or_else(|| McpError::NoStdio(name.clone()))?;
         let (peer, inbound, _reader) = connect(BufReader::new(stdout), stdin);
         let conn = Arc::new(McpConnection::initialize(name, peer, inbound, roots)?);
-        Ok(Self { conn, child })
+        Ok(Self {
+            conn,
+            child: Some(child),
+        })
+    }
+
+    /// Open a remote HTTP+SSE connection and run the handshake over it.
+    fn connect_http(
+        name: String,
+        url: &str,
+        cfg: &McpServer,
+        roots: &[std::path::PathBuf],
+    ) -> Result<Self, McpError> {
+        let (peer, inbound, _reader) =
+            crate::http::connect_http(url, &cfg.headers).map_err(|detail| McpError::Http {
+                server: name.clone(),
+                detail,
+            })?;
+        let conn = Arc::new(McpConnection::initialize(name, peer, inbound, roots)?);
+        Ok(Self { conn, child: None })
     }
 
     /// The live connection, shareable into tool adapters that must
@@ -299,8 +357,10 @@ impl McpServerHandle {
 
 impl Drop for McpServerHandle {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
@@ -350,6 +410,38 @@ mod tests {
         let (conn, _srv) = stub_server();
         assert_eq!(conn.name(), "stub");
         assert!(!conn.take_tools_changed());
+    }
+
+    fn empty_server() -> McpServer {
+        McpServer {
+            command: None,
+            args: vec![],
+            env: std::collections::BTreeMap::new(),
+            url: None,
+            headers: std::collections::BTreeMap::new(),
+            disabled: false,
+        }
+    }
+
+    #[test]
+    fn spawn_rejects_a_server_with_no_transport() {
+        let err = McpServerHandle::spawn("x", &empty_server(), &[])
+            .err()
+            .expect("no transport must error");
+        assert!(matches!(err, McpError::Config { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn spawn_rejects_both_transports() {
+        let cfg = McpServer {
+            command: Some("npx".to_owned()),
+            url: Some("https://example.com/sse".to_owned()),
+            ..empty_server()
+        };
+        let err = McpServerHandle::spawn("x", &cfg, &[])
+            .err()
+            .expect("both transports must error");
+        assert!(matches!(err, McpError::Config { .. }), "got {err:?}");
     }
 
     #[test]

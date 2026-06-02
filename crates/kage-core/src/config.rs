@@ -332,18 +332,38 @@ pub struct McpConfig {
     pub servers: BTreeMap<String, McpServer>,
 }
 
-/// How to launch one external MCP server over stdio.
+/// How to reach one external MCP server.
+///
+/// Two transports, selected by which field is set (exactly one of
+/// `command` or `url` is required; setting both, or neither, is a
+/// configuration error surfaced when the server is brought up):
+///
+/// * stdio: set `command` (and optionally `args` / `env`). kage spawns
+///   the child and speaks JSON-RPC over its stdio.
+/// * HTTP+SSE: set `url`. kage opens the server's SSE stream and POSTs
+///   JSON-RPC messages to the endpoint it announces; `headers` are sent
+///   on both (use it for `Authorization`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct McpServer {
-    /// Executable to spawn (e.g. `npx`).
-    pub command: String,
+    /// Executable to spawn for a stdio transport (e.g. `npx`). Mutually
+    /// exclusive with `url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
     /// Arguments passed to `command`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
     /// Extra environment variables for the child process.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
-    /// When `true`, the server is configured but not spawned.
+    /// Base URL for a remote HTTP+SSE transport. Mutually exclusive with
+    /// `command`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Extra headers sent on the SSE GET and each POST (HTTP transport
+    /// only), e.g. `Authorization`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    /// When `true`, the server is configured but not spawned/connected.
     #[serde(default)]
     pub disabled: bool,
 }
@@ -390,6 +410,37 @@ mod tests {
             assert_eq!(
                 agent.env.get("ANTHROPIC_API_KEY").map(String::as_str),
                 Some("xxx")
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn mcp_server_parses_stdio_and_http_transports() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.toml",
+                r#"
+                [mcp.servers.local]
+                command = "npx"
+                args = ["-y", "server"]
+
+                [mcp.servers.remote]
+                url = "https://mcp.example.com/sse"
+                [mcp.servers.remote.headers]
+                Authorization = "Bearer x"
+                "#,
+            )?;
+            let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
+            let local = cfg.mcp.servers.get("local").expect("stdio server");
+            assert_eq!(local.command.as_deref(), Some("npx"));
+            assert!(local.url.is_none());
+            let remote = cfg.mcp.servers.get("remote").expect("http server");
+            assert!(remote.command.is_none());
+            assert_eq!(remote.url.as_deref(), Some("https://mcp.example.com/sse"));
+            assert_eq!(
+                remote.headers.get("Authorization").map(String::as_str),
+                Some("Bearer x")
             );
             Ok(())
         });

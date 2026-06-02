@@ -1,5 +1,6 @@
 //! Model Context Protocol client and server adapters.
 
+mod http;
 pub mod manager;
 pub mod serve;
 pub mod server;

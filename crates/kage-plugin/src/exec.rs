@@ -9,6 +9,13 @@
 //! process exits and returns its captured output, the way
 //! `kage.http.get` blocks; a rewind plugin uses it to snapshot files
 //! with `git` between turns.
+//!
+//! The `exec` grant is coarse and all-or-nothing: there is no command
+//! allowlist and no per-command scoping. A granted plugin may run any
+//! executable on the process `PATH` (or any absolute path) with any
+//! arguments; the only checks are that `cmd` is non-empty and that
+//! `cwd` cannot escape the host workdir. Grant it only to plugins you
+//! trust to run arbitrary programs as the kage process.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

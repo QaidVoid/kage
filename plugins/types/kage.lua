@@ -243,14 +243,16 @@ function kage.json.encode(value) end
 function kage.log(level, message) end
 
 --- A copy of the host-supplied configuration table. Mutating
---- the returned table does not propagate back to the host.
+--- the returned table does not propagate back to the host or to
+--- disk; use `kage.store` for state that must persist.
 ---@return table
 function kage.config() end
 
 --- This plugin's own settings from `[plugins.config.<stem>]` in
 --- config.toml, as a table (empty when none are set). A plugin
 --- sees only its own slice, never another plugin's. Mutating
---- the returned table does not propagate back to the host.
+--- the returned table does not propagate back to the host or to
+--- disk; use `kage.store` to persist state.
 ---@return table
 function kage.plugin_config() end
 
@@ -547,14 +549,18 @@ function kage.session.switch(target) end
 
 --- Run a subprocess rooted at the workdir, no shell.
 --- Captures stdout/stderr and blocks until the process
---- exits. `cwd` may not escape the workdir. Requires the
---- `exec` capability.
+--- exits. `cwd` may not escape the workdir. The grant is
+--- coarse: any binary on the `PATH` may run with any args,
+--- with no command allowlist. Requires the `exec`
+--- capability.
 ---@param spec kage.ExecSpec
 ---@return kage.ExecResult
 function kage.exec(spec) end
 
 --- Read a process environment variable. Returns the value
---- or `nil` when unset. Requires the `env` capability.
+--- or `nil` when unset. The grant is coarse: any variable
+--- can be read (including secrets) and there is no setter.
+--- Requires the `env` capability.
 ---@param name string
 ---@return string?
 function kage.env(name) end

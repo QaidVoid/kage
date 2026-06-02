@@ -10,9 +10,12 @@
 //!   the same function (the pre-PE.B name).
 //! * `kage.log(level, message)` records a structured log line; `level` is
 //!   one of `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`.
-//! * `kage.config()` returns a copy of the host-supplied configuration
-//!   table; `kage.plugin_config()` returns the calling plugin's own
-//!   `[plugins.config.<stem>]` slice (empty on the base surface).
+//! * `kage.config()` returns a fresh copy of the host-supplied
+//!   configuration table; `kage.plugin_config()` returns the calling
+//!   plugin's own `[plugins.config.<stem>]` slice (empty on the base
+//!   surface). Both are non-persistent copies: mutating the returned
+//!   table does not write back to the host config or to disk. For state
+//!   that must survive a turn, reload, or restart, use `kage.store`.
 //! * `kage.api_version()` returns the integer surface generation and
 //!   `kage.host_version()` the host crate version string;
 //!   `kage.requires{ api = N }` raises at load time when the host is

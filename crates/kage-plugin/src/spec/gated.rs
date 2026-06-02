@@ -61,8 +61,10 @@ pub(super) const GATED: &[GatedFunc] = &[
             doc: &[
                 "Run a subprocess rooted at the workdir, no shell.",
                 "Captures stdout/stderr and blocks until the process",
-                "exits. `cwd` may not escape the workdir. Requires the",
-                "`exec` capability.",
+                "exits. `cwd` may not escape the workdir. The grant is",
+                "coarse: any binary on the `PATH` may run with any args,",
+                "with no command allowlist. Requires the `exec`",
+                "capability.",
             ],
             path: "kage.exec",
             params: &[Field {
@@ -78,7 +80,9 @@ pub(super) const GATED: &[GatedFunc] = &[
         func: Func {
             doc: &[
                 "Read a process environment variable. Returns the value",
-                "or `nil` when unset. Requires the `env` capability.",
+                "or `nil` when unset. The grant is coarse: any variable",
+                "can be read (including secrets) and there is no setter.",
+                "Requires the `env` capability.",
             ],
             path: "kage.env",
             params: &[Field {

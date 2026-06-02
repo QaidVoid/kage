@@ -483,6 +483,17 @@ mod tests {
     }
 
     #[test]
+    fn every_compat_provider_has_an_env_var() {
+        for entry in kage_provider::compat::COMPAT_PROVIDERS {
+            assert!(
+                !env_var_for(entry.id).is_empty(),
+                "compat provider `{}` has no env var mapping in env_var_for",
+                entry.id
+            );
+        }
+    }
+
+    #[test]
     fn round_trip_through_json() {
         let mut store = AuthStore::empty();
         store.set_api_key("anthropic", "sk-ant-xxx");

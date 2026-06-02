@@ -44,11 +44,11 @@ fn main() {
         "anthropic" => Box::new(AnthropicProvider::new(must_env("ANTHROPIC_API_KEY"))),
         "openai" => Box::new(OpenAiProvider::new(must_env("OPENAI_API_KEY"))),
         "gemini" => Box::new(GeminiProvider::new(must_env("GEMINI_API_KEY"))),
-        "zai" => Box::new(kage_provider::compat::zai(must_env("ZAI_API_KEY"))),
+        "zai" => Box::new(compat_provider("zai").build(must_env("ZAI_API_KEY"))),
         "zai-coding-plan" => {
             let key =
                 std::env::var("ZAI_CODING_API_KEY").unwrap_or_else(|_| must_env("ZAI_API_KEY"));
-            Box::new(kage_provider::compat::zai_coding_plan(key))
+            Box::new(compat_provider("zai-coding-plan").build(key))
         }
         other => {
             eprintln!(
@@ -137,4 +137,11 @@ fn must_env(name: &str) -> String {
         eprintln!("required environment variable `{name}` is not set");
         std::process::exit(2);
     })
+}
+
+fn compat_provider(id: &str) -> &'static kage_provider::compat::CompatProvider {
+    kage_provider::compat::COMPAT_PROVIDERS
+        .iter()
+        .find(|p| p.id == id)
+        .unwrap_or_else(|| panic!("compat provider `{id}` not in table"))
 }

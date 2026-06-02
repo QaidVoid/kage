@@ -624,50 +624,13 @@ pub(crate) fn build_provider_registry() -> ProviderRegistry {
     if let Some(key) = lookup_key("gemini", &store) {
         registry.register(Arc::new(gemini::GeminiProvider::new(key)));
     }
-    if let Some(key) = lookup_key("zai", &store) {
-        registry.register(Arc::new(compat::zai(key)));
-    }
-    if let Some(key) = lookup_key("zai-coding-plan", &store) {
-        registry.register(Arc::new(compat::zai_coding_plan(key)));
-    }
-    if let Some(key) = lookup_key("deepseek", &store) {
-        registry.register(Arc::new(compat::deepseek(key)));
-    }
-    if let Some(key) = lookup_key("groq", &store) {
-        registry.register(Arc::new(compat::groq(key)));
-    }
-    if let Some(key) = lookup_key("mistral", &store) {
-        registry.register(Arc::new(compat::mistral(key)));
-    }
-    if let Some(key) = lookup_key("cerebras", &store) {
-        registry.register(Arc::new(compat::cerebras(key)));
-    }
-    if let Some(key) = lookup_key("xai", &store) {
-        registry.register(Arc::new(compat::xai(key)));
-    }
-    if let Some(key) = lookup_key("openrouter", &store) {
-        registry.register(Arc::new(compat::openrouter(key)));
-    }
-    if let Some(key) = lookup_key("fireworks-ai", &store) {
-        registry.register(Arc::new(compat::fireworks_ai(key)));
-    }
-    if let Some(key) = lookup_key("moonshotai", &store) {
-        registry.register(Arc::new(compat::moonshotai(key)));
-    }
-    if let Some(key) = lookup_key("kimi-for-coding", &store) {
-        registry.register(Arc::new(compat::kimi_for_coding(key)));
-    }
-    if let Some(key) = lookup_key("xiaomi", &store) {
-        registry.register(Arc::new(compat::xiaomi(key)));
-    }
-    if let Some(key) = lookup_key("xiaomi-token-plan-ams", &store) {
-        registry.register(Arc::new(compat::xiaomi_token_plan_ams(key)));
-    }
-    if let Some(key) = lookup_key("xiaomi-token-plan-cn", &store) {
-        registry.register(Arc::new(compat::xiaomi_token_plan_cn(key)));
-    }
-    if let Some(key) = lookup_key("xiaomi-token-plan-sgp", &store) {
-        registry.register(Arc::new(compat::xiaomi_token_plan_sgp(key)));
+    // Every OpenAI-compatible provider is described once in
+    // `compat::COMPAT_PROVIDERS`; register each one the user has a key
+    // for. Adding a provider is a single table entry there.
+    for entry in compat::COMPAT_PROVIDERS {
+        if let Some(key) = lookup_key(entry.id, &store) {
+            registry.register(Arc::new(entry.build(key)));
+        }
     }
     // The `acp` provider: `kage -m acp:<name>` drives an external ACP
     // agent declared in `[acp.agents.*]` or via `kage.acp.add_agent`.

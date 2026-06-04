@@ -1,5 +1,8 @@
 //! kage CLI binary.
 //!
+//! Layering: top of the workspace; depends on every library crate
+//! except `kage-sandbox` (the unused placeholder).
+//!
 //! Print mode (`-p`) runs a single prompt through the agent loop and streams
 //! the assistant's text to stdout, then exits. The `list` subcommand prints
 //! a table of recorded sessions stored under

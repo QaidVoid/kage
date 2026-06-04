@@ -94,7 +94,8 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &[
             "A copy of the host-supplied configuration table. Mutating",
-            "the returned table does not propagate back to the host.",
+            "the returned table does not propagate back to the host or to",
+            "disk; use `kage.store` for state that must persist.",
         ],
         path: "kage.config",
         params: &[],
@@ -105,7 +106,8 @@ pub(super) const FUNCS: &[Func] = &[
             "This plugin's own settings from `[plugins.config.<stem>]` in",
             "config.toml, as a table (empty when none are set). A plugin",
             "sees only its own slice, never another plugin's. Mutating",
-            "the returned table does not propagate back to the host.",
+            "the returned table does not propagate back to the host or to",
+            "disk; use `kage.store` to persist state.",
         ],
         path: "kage.plugin_config",
         params: &[],

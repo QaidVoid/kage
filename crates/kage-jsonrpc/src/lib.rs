@@ -1,5 +1,8 @@
 //! Bidirectional JSON-RPC 2.0 peer over newline-delimited stdio.
 //!
+//! Layering: leaf crate alongside `kage-core`; depends on no other
+//! `kage-*` crate.
+//!
 //! Both MCP and ACP speak JSON-RPC over stdio where each message is a
 //! single line of JSON terminated by `\n`, and both are symmetric: a
 //! party answers the other's requests and issues its own. So the

@@ -1,5 +1,7 @@
 //! LLM provider abstraction and built-in implementations.
 //!
+//! Layering: depends only on `kage-core`.
+//!
 //! Synchronous, iterator-based streaming. Implementations use `ureq` for
 //! HTTP and parse SSE responses by reading the body line by line. There
 //! is no tokio, no async-trait, and no `Pin<Box<dyn Stream>>`.

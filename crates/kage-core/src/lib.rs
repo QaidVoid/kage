@@ -1,4 +1,6 @@
 //! Core types, events, configuration, and errors shared across the workspace.
+//!
+//! Layering: workspace leaf; depends on no other `kage-*` crate.
 
 pub mod cancel;
 pub mod config;

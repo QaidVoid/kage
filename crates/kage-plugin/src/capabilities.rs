@@ -10,6 +10,12 @@
 //! plugin's environment (see [`crate::runtime`] per-plugin `_ENV`),
 //! so an ungranted plugin cannot even see it, let alone call it.
 //!
+//! Each grant is a single coarse token; there is no per-resource
+//! scoping. Granting `exec` permits running any command, `env` permits
+//! reading any environment variable, and `net` permits any outbound
+//! request that passes the host safety check. A grant is the whole
+//! capability or nothing.
+//!
 //! This module owns the capability vocabulary, the grant lookup, and
 //! the `request_capabilities` binding. The capabilities themselves
 //! (their actual APIs) register an installer into the
@@ -28,9 +34,11 @@ use crate::error::PluginError;
 pub(crate) enum Capability {
     /// Inspect session entries and request a reseating rewind.
     SessionWrite,
-    /// Run a subprocess (no shell) rooted at the workdir.
+    /// Run any subprocess (no shell, any binary on the `PATH`, any
+    /// args) rooted at the workdir. Coarse: no command allowlist.
     Exec,
-    /// Read process environment variables.
+    /// Read any process environment variable. Coarse: no per-variable
+    /// allowlist, and read-only (no setter).
     Env,
     /// Make outbound HTTP requests via `kage.http`.
     Net,

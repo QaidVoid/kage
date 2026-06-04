@@ -1,4 +1,6 @@
 //! Tool trait, registry, and built-in tools.
+//!
+//! Layering: depends only on `kage-core`.
 
 pub mod atomic;
 pub mod builtin;

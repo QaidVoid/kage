@@ -1,5 +1,7 @@
 //! Append-only JSONL session storage with branching.
 //!
+//! Layering: depends only on `kage-core`.
+//!
 //! Sessions are stored as line-delimited JSON: a single
 //! [`entry::Header`](entry::Header) on the first line, followed by any number
 //! of [`SessionEntry`] lines appended in order. The format is intentionally

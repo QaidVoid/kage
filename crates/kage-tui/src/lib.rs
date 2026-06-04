@@ -1,4 +1,6 @@
 //! Modal raw-view terminal UI with differential rendering.
+//!
+//! Layering: depends on `kage-core`, `kage-loop`, and `kage-plugin`.
 
 pub mod app;
 pub mod buffer;

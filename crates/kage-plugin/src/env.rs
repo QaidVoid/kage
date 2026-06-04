@@ -5,7 +5,10 @@
 //! it. Returns the value of a process environment variable or `nil`
 //! when it is unset. The capability grant itself is the access
 //! control: there is no allowlist of which variables can be read,
-//! matching the unrestricted-command shape of `exec`.
+//! matching the unrestricted-command shape of `exec`. A granted plugin
+//! can read every variable in the host process environment, including
+//! secrets such as provider API keys, and the access is read-only
+//! (there is no setter). Grant it only to trusted plugins.
 
 use mlua::{Lua, Table};
 

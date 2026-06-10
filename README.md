@@ -1,5 +1,8 @@
 # kage
 
+> [!CAUTION]  
+> It's not worth it.
+
 A minimal, extensible coding agent in your terminal. Written in Rust, scriptable in Lua.
 
 Status: pre-1.0.

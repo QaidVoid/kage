@@ -9,6 +9,7 @@ pub mod event;
 pub mod message;
 pub mod risk;
 pub mod skills;
+pub mod sync;
 pub mod templates;
 pub mod tool_spec;
 

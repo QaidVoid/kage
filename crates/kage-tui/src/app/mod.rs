@@ -513,11 +513,13 @@ pub struct App {
     /// containing the pattern render with a Match emphasis and `n` /
     /// `N` walk between them.
     search_pattern: Option<String>,
-    /// Cached set of block indices matching `search_pattern`.
-    /// Recomputed when the pattern or buffer version changes.
-    search_match_set: std::collections::HashSet<usize>,
+    /// Cached block indices matching `search_pattern`, in buffer
+    /// order. Recomputed when the pattern or buffer version changes.
+    search_match_set: Vec<usize>,
     /// Buffer version snapshot used to validate `search_match_set`.
     search_match_version: u64,
+    /// Pattern the cached indices were computed for.
+    search_match_pattern: String,
     /// Status bar context the host populates: live model id and a
     /// short session-id pill. Held as `Arc<Mutex<...>>` so the worker
     /// thread can update them out from under the renderer (model

@@ -58,9 +58,10 @@ pub struct StatusCtx<'a> {
     /// Currently submitted search pattern, if any. Blocks whose
     /// content contains this pattern get a `Match` emphasis.
     pub search_pattern: Option<&'a str>,
-    /// Cached set of block indices matching `search_pattern`.
-    /// Avoids O(text) substring scan per visible block per frame.
-    pub search_match_set: Option<&'a std::collections::HashSet<usize>>,
+    /// Cached block indices matching `search_pattern`, in buffer
+    /// order. Avoids O(text) substring scan per visible block per
+    /// frame.
+    pub search_match_set: Option<&'a [usize]>,
     /// Open `/` search line, if the user is mid-typing one.
     pub search_line: Option<&'a CommandLine>,
     /// `(current_1_indexed, total)` for the active search. `current`

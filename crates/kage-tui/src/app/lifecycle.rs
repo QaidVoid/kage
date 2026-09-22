@@ -180,23 +180,28 @@ impl App {
         lock(&self.buffer).version()
     }
 
-    /// Ensure `search_match_set` is up to date. Recomputes when the
-    /// pattern changed or the buffer version moved (new blocks,
-    /// streaming deltas). Returns a reference to the match set and
-    /// the pattern slice for use by `emphasis_for`.
-    pub(crate) fn refresh_search_matches(
-        &mut self,
-    ) -> Option<(&std::collections::HashSet<usize>, &str)> {
-        let pattern = self.search_pattern.as_deref()?;
+    /// Recompute `search_match_set` when stale (pattern changed or
+    /// buffer version moved) and clear it when no pattern is active.
+    /// Call before `search_matches`.
+    pub(crate) fn refresh_search_matches(&mut self) {
+        let Some(pattern) = self.search_pattern.as_deref() else {
+            self.search_match_set.clear();
+            self.search_match_pattern.clear();
+            return;
+        };
         let version = self.buffer_version();
-        if version != self.search_match_version {
-            self.search_match_set = lock(&self.buffer)
-                .match_indices(pattern)
-                .into_iter()
-                .collect();
+        if version != self.search_match_version || pattern != self.search_match_pattern {
+            self.search_match_set = lock(&self.buffer).match_indices(pattern);
             self.search_match_version = version;
+            self.search_match_pattern = pattern.to_owned();
         }
-        Some((&self.search_match_set, pattern))
+    }
+
+    /// Cached block indices matching the active pattern, in buffer
+    /// order. Empty when no search is active. Call
+    /// `refresh_search_matches` first.
+    pub(crate) fn search_matches(&self) -> &[usize] {
+        &self.search_match_set
     }
 
     /// True when there's at least one in-flight tool call (a
@@ -254,7 +259,11 @@ impl App {
         // it BEFORE we hold the lock or we'll deadlock the moment a
         // search is active.
         let search_match_count = self.compute_search_match_count();
-        let search_match_set = self.refresh_search_matches().map(|(set, _)| set).cloned();
+        let search_match_set = if self.search_pattern.is_some() {
+            Some(self.search_matches().to_vec())
+        } else {
+            None
+        };
         let render_width = tui.terminal().size().map_or(80, |r| r.width);
         self.refresh_plugin_widget_texts(render_width);
         let mut buffer = lock(&self.buffer).clone();
@@ -264,7 +273,7 @@ impl App {
             model: model_snapshot.as_deref(),
             session_id: self.status_session_id.as_deref(),
             search_pattern: self.search_pattern.as_deref(),
-            search_match_set: search_match_set.as_ref(),
+            search_match_set: search_match_set.as_deref(),
             search_line: self.search_line.as_ref(),
             search_match_count,
             plugin_widgets: &self.plugin_widget_texts,

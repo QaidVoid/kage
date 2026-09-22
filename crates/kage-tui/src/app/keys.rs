@@ -240,32 +240,39 @@ impl App {
 
     /// Build `(current_1_indexed, total)` for the right-edge match
     /// counter, or `None` when no search is active.
-    pub(crate) fn compute_search_match_count(&self) -> Option<(usize, usize)> {
-        let pattern = self.search_pattern.as_deref()?;
-        let buf = lock(&self.buffer);
-        let matches = buf.match_indices(pattern);
-        let focus = buf.effective_focus().unwrap_or(usize::MAX);
-        let current = matches
-            .iter()
-            .position(|i| *i == focus)
-            .map_or(0, |p| p + 1);
+    pub(crate) fn compute_search_match_count(&mut self) -> Option<(usize, usize)> {
+        self.refresh_search_matches();
+        self.search_pattern.as_ref()?;
+        let focus = lock(&self.buffer).effective_focus().unwrap_or(usize::MAX);
+        let matches = self.search_matches();
+        let current = matches.binary_search(&focus).map_or(0, |p| p + 1);
         Some((current, matches.len()))
     }
 
     /// Jump focus to the next or previous block whose content matches
     /// the active search pattern. No-op when no pattern is set.
     pub(crate) fn jump_to_search_match(&mut self, forward: bool) {
-        let Some(pattern) = self.search_pattern.clone() else {
+        self.refresh_search_matches();
+        if self.search_pattern.is_none() {
             return;
-        };
+        }
+        let matches = self.search_matches();
         let mut buf = lock(&self.buffer);
         let from = buf.effective_focus().unwrap_or(0);
-        let next = if forward {
-            buf.next_match(from, &pattern)
+        let pos = if forward {
+            // First match strictly after `from`.
+            matches.partition_point(|&i| i <= from)
         } else {
-            buf.prev_match(from, &pattern)
+            // First match at-or-before `from`; step back one for the
+            // strict predecessor.
+            matches.partition_point(|&i| i < from)
         };
-        if let Some(n) = next {
+        let next = if forward {
+            matches.get(pos)
+        } else {
+            pos.checked_sub(1).and_then(|p| matches.get(p))
+        };
+        if let Some(&n) = next {
             buf.set_focus(Some(n));
         }
     }

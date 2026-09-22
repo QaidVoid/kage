@@ -1431,3 +1431,71 @@ fn session_picker_defaults_to_cwd_and_ctrl_a_toggles_all() {
     assert!(app.dispatch_picker_key(ctrl('a')).is_none());
     assert!(!app.session_scope_all, "Ctrl+A toggles back");
 }
+
+/// Four assistant blocks; "needle" appears in blocks 1 and 3.
+fn search_fixture() -> (App, SharedBuffer) {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let app = App::new(buffer.clone(), tx);
+    {
+        let mut buf = buffer.lock().unwrap();
+        for text in ["alpha", "needle one", "gamma", "needle two"] {
+            buf.append_assistant_delta(text);
+            buf.finish_streaming();
+        }
+        buf.set_focus(Some(0));
+    }
+    (app, buffer)
+}
+
+#[test]
+fn search_jump_walks_matches_without_wrapping() {
+    let (mut app, buffer) = search_fixture();
+    app.search_pattern = Some("needle".into());
+
+    app.jump_to_search_match(true);
+    assert_eq!(buffer.lock().unwrap().focus(), Some(1));
+    app.jump_to_search_match(true);
+    assert_eq!(buffer.lock().unwrap().focus(), Some(3));
+
+    // Forward past the last match is a no-op, not a wrap.
+    app.jump_to_search_match(true);
+    assert_eq!(buffer.lock().unwrap().focus(), Some(3));
+
+    app.jump_to_search_match(false);
+    assert_eq!(buffer.lock().unwrap().focus(), Some(1));
+
+    // Backward past the first match is a no-op too.
+    app.jump_to_search_match(false);
+    assert_eq!(buffer.lock().unwrap().focus(), Some(1));
+}
+
+#[test]
+fn search_cache_refreshes_when_pattern_changes() {
+    let (mut app, _buffer) = search_fixture();
+    app.search_pattern = Some("needle".into());
+    app.refresh_search_matches();
+    assert_eq!(app.search_matches(), &[1, 3]);
+    // Fixture pins focus on block 0, which is not a match.
+    assert_eq!(app.compute_search_match_count(), Some((0, 2)));
+
+    // Same buffer version, different pattern: the cache must not go
+    // stale (the counter is a binary search over these indices).
+    app.search_pattern = Some("gamma".into());
+    app.refresh_search_matches();
+    assert_eq!(app.search_matches(), &[2]);
+    assert_eq!(app.compute_search_match_count(), Some((0, 1)));
+
+    // No match anywhere: empty list, count of zero.
+    app.search_pattern = Some("zzz".into());
+    assert_eq!(app.compute_search_match_count(), Some((0, 0)));
+}
+
+#[test]
+fn search_count_is_none_without_a_pattern() {
+    let (mut app, _buffer) = search_fixture();
+    assert_eq!(app.compute_search_match_count(), None);
+    app.jump_to_search_match(true);
+    // Jump with no pattern is a no-op; the fixture pinned block 0.
+    assert_eq!(app.buffer.lock().unwrap().focus(), Some(0));
+}

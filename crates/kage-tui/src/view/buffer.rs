@@ -11,7 +11,7 @@ pub(super) fn render_buffer(
     regions: Regions,
     buffer: &mut Buffer,
     search_pattern: Option<&str>,
-    search_match_set: Option<&std::collections::HashSet<usize>>,
+    search_match_set: Option<&[usize]>,
 ) {
     let width = regions.buffer.width;
     let visible = usize::from(regions.buffer.height);
@@ -249,14 +249,14 @@ pub(super) fn render_buffer(
 fn emphasis_for(
     idx: usize,
     focus: Option<usize>,
-    search_match_set: Option<&std::collections::HashSet<usize>>,
+    search_match_set: Option<&[usize]>,
     consumed_results: &std::collections::HashSet<usize>,
     call_idx_for_result: &std::collections::HashMap<usize, usize>,
 ) -> Emphasis {
     let single = |i: usize| -> Emphasis {
         if focus == Some(i) {
             Emphasis::Focused
-        } else if search_match_set.is_some_and(|s| s.contains(&i)) {
+        } else if search_match_set.is_some_and(|s| s.binary_search(&i).is_ok()) {
             Emphasis::Match
         } else {
             Emphasis::None

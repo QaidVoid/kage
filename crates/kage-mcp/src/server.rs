@@ -23,10 +23,10 @@ use kage_core::config::McpServer;
 
 use kage_jsonrpc::{Inbound, Peer, RpcError, connect};
 
-/// Protocol revision kage advertises in `initialize`. Servers that
-/// speak a different revision still respond with their own; we log
-/// the negotiated value but do not hard-fail on a mismatch, matching
-/// how the reference clients behave.
+/// Protocol revision kage advertises in `initialize`. The server
+/// replies with the revision it wants to speak; kage records it
+/// (see [`McpConnection::protocol_version`]) and keeps working with
+/// the server's choice rather than hard-failing on a mismatch.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
 /// How long the `initialize` handshake waits before giving up on a
@@ -71,6 +71,14 @@ pub enum McpError {
     /// An operation named a server the manager does not know.
     #[error("no mcp server named `{0}`")]
     Unknown(String),
+    /// The server's process or transport terminated unexpectedly.
+    #[error("server `{server}` crashed: {detail}")]
+    Crashed {
+        /// Server name for context.
+        server: String,
+        /// What was observed (exit status, closed transport, ...).
+        detail: String,
+    },
     /// The server's transport could not be established over HTTP.
     #[error("server `{server}` http transport: {detail}")]
     Http {
@@ -121,7 +129,8 @@ pub struct McpConnection {
     server: String,
     peer: Peer,
     tools_changed: Arc<AtomicBool>,
-    _drain: JoinHandle<()>,
+    drain: JoinHandle<()>,
+    protocol_version: String,
 }
 
 impl McpConnection {
@@ -191,6 +200,15 @@ impl McpConnection {
                 detail: "initialize result was not an object".to_owned(),
             });
         }
+        let protocol_version = match result.get("protocolVersion").and_then(|v| v.as_str()) {
+            Some(v) if !v.is_empty() => v.to_owned(),
+            _ => {
+                return Err(McpError::Protocol {
+                    server: server.clone(),
+                    detail: "initialize result missing `protocolVersion` string".to_owned(),
+                });
+            }
+        };
         peer.notify("notifications/initialized", serde_json::json!({}))
             .map_err(|source| McpError::Rpc {
                 server: server.clone(),
@@ -234,7 +252,8 @@ impl McpConnection {
             server,
             peer,
             tools_changed,
-            _drain: drain,
+            drain,
+            protocol_version,
         })
     }
 
@@ -242,6 +261,22 @@ impl McpConnection {
     #[must_use]
     pub fn name(&self) -> &str {
         &self.server
+    }
+
+    /// The protocol revision the server answered `initialize` with.
+    #[must_use]
+    pub fn protocol_version(&self) -> &str {
+        &self.protocol_version
+    }
+
+    /// Whether the server's side of the transport has closed. The
+    /// drain thread ends exactly when the inbound channel closes
+    /// (reader EOF on stdio or HTTP alike), so this is a cheap,
+    /// transport-independent liveness probe; a `true` here means the
+    /// next request would fail.
+    #[must_use]
+    pub fn is_dead(&self) -> bool {
+        self.drain.is_finished()
     }
 
     /// Build the `roots/list` result advertised to the server: one
@@ -426,6 +461,26 @@ impl McpServerHandle {
     #[must_use]
     pub fn connection(&self) -> &Arc<McpConnection> {
         &self.conn
+    }
+
+    /// The child's exit status once it has terminated, or `None`
+    /// while it is still running and for a transport without a child
+    /// process. Used to detail a server evicted as dead.
+    #[must_use]
+    pub fn exit_status(&mut self) -> Option<String> {
+        self.child
+            .as_mut()?
+            .try_wait()
+            .ok()
+            .flatten()
+            .map(|status| status.to_string())
+    }
+
+    /// Test-only: wrap a bare connection as a childless handle so
+    /// manager tests can inject an in-process transport.
+    #[cfg(test)]
+    pub(crate) fn from_connection(conn: Arc<McpConnection>) -> Self {
+        Self { conn, child: None }
     }
 }
 
@@ -653,5 +708,70 @@ mod tests {
             .request("sampling/createMessage", serde_json::json!({}))
             .unwrap_err();
         assert_eq!(err.code, -32601);
+    }
+
+    /// Wire a client connection to a server thread that answers
+    /// `initialize` with `result` and then blocks on the returned
+    /// channel, holding the transport open until the test drops the
+    /// sender (which closes the server side and EOFs the client).
+    fn server_answering(
+        result: serde_json::Value,
+    ) -> (Result<McpConnection, McpError>, std::sync::mpsc::Sender<()>) {
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_peer, cli_in, _c) = connect(BufReader::new(cli_r), cli_w);
+        let (srv_peer, srv_in, _s) = connect(BufReader::new(srv_r), srv_w);
+        let responder = srv_peer.clone();
+        let (hold_tx, hold_rx) = std::sync::mpsc::channel::<()>();
+        thread::spawn(move || {
+            for msg in srv_in {
+                if let Inbound::Request { id, method, .. } = msg {
+                    if method == "initialize" {
+                        let _ = responder.respond(&id, Ok(result));
+                        let _ = hold_rx.recv();
+                        return;
+                    }
+                }
+            }
+        });
+        let conn = McpConnection::initialize("stub", cli_peer, cli_in, &[], None);
+        (conn, hold_tx)
+    }
+
+    #[test]
+    fn is_dead_flips_when_the_transport_closes() {
+        let (conn, hold) = server_answering(serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": { "tools": {} },
+        }));
+        let conn = conn.unwrap();
+        assert!(!conn.is_dead(), "the server holds the transport open");
+        drop(hold);
+        let mut dead = false;
+        for _ in 0..100 {
+            if conn.is_dead() {
+                dead = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(dead, "connection must report dead once the server exits");
+    }
+
+    #[test]
+    fn initialize_records_the_negotiated_protocol_version() {
+        let (conn, _hold) = server_answering(serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+        }));
+        assert_eq!(conn.unwrap().protocol_version(), "2024-11-05");
+    }
+
+    #[test]
+    fn initialize_rejects_a_result_without_a_protocol_version() {
+        let (conn, _hold) = server_answering(serde_json::json!({}));
+        let err = conn.err().expect("missing protocolVersion must fail");
+        assert!(matches!(err, McpError::Protocol { .. }), "got {err:?}");
+        assert!(err.to_string().contains("protocolVersion"), "got {err}");
     }
 }

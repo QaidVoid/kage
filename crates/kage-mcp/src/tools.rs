@@ -30,19 +30,27 @@ pub struct McpToolDef {
     pub input_schema: serde_json::Value,
 }
 
+/// Upper bound on the `tools/list` pages followed in one discovery
+/// pass. A conforming server eventually stops paginating; one that
+/// keeps handing back a cursor is reported as a protocol error
+/// instead of being followed forever.
+const MAX_TOOL_PAGES: usize = 100;
+
 impl McpConnection {
-    /// List the server's tools, following `nextCursor` pagination to
-    /// the end so the full set is returned in one call.
+    /// List the server's tools, following `nextCursor` pagination up
+    /// to [`MAX_TOOL_PAGES`] pages so a well-behaved server's full
+    /// set is returned in one call.
     ///
     /// # Errors
     ///
     /// Returns [`McpError::Rpc`] on a JSON-RPC error or dropped
     /// connection, and [`McpError::Protocol`] when the result is not
-    /// the expected `{ tools: [...] }` shape.
+    /// the expected `{ tools: [...] }` shape or when pagination
+    /// exceeds [`MAX_TOOL_PAGES`] pages.
     pub fn list_tools(&self) -> Result<Vec<McpToolDef>, McpError> {
         let mut out = Vec::new();
         let mut cursor: Option<String> = None;
-        loop {
+        for _ in 0..MAX_TOOL_PAGES {
             let params = cursor.take().map_or_else(
                 || serde_json::json!({}),
                 |c| serde_json::json!({ "cursor": c }),
@@ -77,10 +85,13 @@ impl McpConnection {
             }
             match result.get("nextCursor").and_then(|c| c.as_str()) {
                 Some(next) if !next.is_empty() => cursor = Some(next.to_owned()),
-                _ => break,
+                _ => return Ok(out),
             }
         }
-        Ok(out)
+        Err(McpError::Protocol {
+            server: self.name().to_owned(),
+            detail: format!("tools/list pagination exceeded {MAX_TOOL_PAGES} pages"),
+        })
     }
 }
 
@@ -328,5 +339,45 @@ mod tests {
         let cx = ToolContext::new(std::path::Path::new("."), &cancel);
         let err = tool.execute(serde_json::Value::Null, &cx).unwrap_err();
         assert!(matches!(err, ToolError::Cancelled));
+    }
+
+    /// A server whose `tools/list` always advertises one more page:
+    /// every response carries a tool plus a fresh `nextCursor`.
+    fn endless() -> (Arc<McpConnection>, thread::JoinHandle<()>) {
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_peer, cli_in, _c) = connect(BufReader::new(cli_r), cli_w);
+        let (srv_peer, srv_in, _s) = connect(BufReader::new(srv_r), srv_w);
+        let responder: Peer = srv_peer.clone();
+        let handle = thread::spawn(move || {
+            for msg in srv_in {
+                let Inbound::Request { id, method, .. } = msg else {
+                    continue;
+                };
+                let outcome = match method.as_str() {
+                    "initialize" => Ok(serde_json::json!({
+                        "protocolVersion": PROTOCOL_VERSION,
+                        "capabilities": { "tools": {} },
+                    })),
+                    "tools/list" => Ok(serde_json::json!({
+                        "tools": [{ "name": "more", "inputSchema": {} }],
+                        "nextCursor": "more",
+                    })),
+                    other => Err(kage_jsonrpc::RpcError::method_not_found(other)),
+                };
+                let _ = responder.respond(&id, outcome);
+            }
+        });
+        let conn =
+            Arc::new(McpConnection::initialize("endless", cli_peer, cli_in, &[], None).unwrap());
+        (conn, handle)
+    }
+
+    #[test]
+    fn list_tools_refuses_endless_pagination() {
+        let (conn, _h) = endless();
+        let err = conn.list_tools().unwrap_err();
+        assert!(matches!(err, McpError::Protocol { .. }), "got {err:?}");
+        assert!(err.to_string().contains("pagination"), "got {err}");
     }
 }

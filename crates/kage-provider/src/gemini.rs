@@ -5,7 +5,7 @@
 //! `data:` chunks. Function calls and text are emitted in the response
 //! `candidates[0].content.parts` array.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufReader, Read};
 
 use kage_core::{CancelFlag, Content, Message, Role, ToolCallId};
@@ -68,13 +68,17 @@ impl Provider for GeminiProvider {
         }
         let body = build_request_body(&req);
         let url = format!(
-            "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
-            self.base_url, req.model, self.api_key,
+            "{}/v1beta/models/{}:streamGenerateContent?alt=sse",
+            self.base_url, req.model
         );
+        let api_key = self.api_key.clone();
         let response = crate::http::send(&self.client, cancel, move |agent| {
             agent
                 .post(&url)
                 .header("content-type", "application/json")
+                // The key travels in a header, never the query string, so
+                // it cannot leak through URL logging or proxy records.
+                .header("x-goog-api-key", api_key)
                 .send_json(&body)
         })?;
 
@@ -91,10 +95,22 @@ impl Provider for GeminiProvider {
 
 /// Build the JSON body for a Gemini streamGenerateContent request.
 pub(crate) fn build_request_body(req: &StreamRequest) -> Value {
+    // Gemini's functionResponse is keyed by function NAME, but our
+    // result blocks only carry the correlation id; recover the name
+    // from the assistant turn that issued each call.
+    let names_by_id: HashMap<String, String> = req
+        .messages
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|c| match c {
+            Content::ToolCall { id, name, .. } => Some((id.0.clone(), name.clone())),
+            _ => None,
+        })
+        .collect();
     let contents: Vec<Value> = req
         .messages
         .iter()
-        .filter_map(internal_message_to_gemini)
+        .filter_map(|msg| internal_message_to_gemini(msg, &names_by_id))
         .collect();
 
     let mut body = serde_json::json!({
@@ -152,11 +168,14 @@ fn tool_spec_to_gemini(spec: &ToolSpec) -> Value {
     })
 }
 
-fn internal_message_to_gemini(msg: &Message) -> Option<Value> {
+fn internal_message_to_gemini(
+    msg: &Message,
+    names_by_id: &HashMap<String, String>,
+) -> Option<Value> {
     let (role, parts) = match msg.role {
         Role::User => ("user", convert_user_parts(&msg.content)),
         Role::Assistant => ("model", convert_assistant_parts(&msg.content)),
-        Role::ToolResult => ("user", convert_tool_result_parts(&msg.content)),
+        Role::ToolResult => ("user", convert_tool_result_parts(&msg.content, names_by_id)),
         Role::System => return None,
     };
     if parts.is_empty() {
@@ -195,21 +214,45 @@ fn convert_assistant_parts(blocks: &[Content]) -> Vec<Value> {
         .collect()
 }
 
-fn convert_tool_result_parts(blocks: &[Content]) -> Vec<Value> {
+fn convert_tool_result_parts(
+    blocks: &[Content],
+    names_by_id: &HashMap<String, String>,
+) -> Vec<Value> {
     blocks
         .iter()
         .filter_map(|c| match c {
             Content::ToolResultBlock {
                 call_id, output, ..
-            } => Some(serde_json::json!({
-                "functionResponse": {
-                    "name": call_id.0,
-                    "response": {"output": output},
-                },
-            })),
+            } => {
+                let name = names_by_id
+                    .get(&call_id.0)
+                    .map_or_else(|| tool_name_from_call_id(call_id), String::as_str);
+                Some(serde_json::json!({
+                    "functionResponse": {
+                        "name": name,
+                        "response": {"output": output},
+                    },
+                }))
+            }
             _ => None,
         })
         .collect()
+}
+
+/// Recover the function name from a synthesized `gemini_{name}_{n}`
+/// correlation id when no matching assistant tool call is in history
+/// (resumed sessions written by older kage versions). Ids without the
+/// trailing counter decode as the whole `gemini_` suffix.
+fn tool_name_from_call_id(id: &ToolCallId) -> &str {
+    let rest = id.0.strip_prefix("gemini_").unwrap_or(&id.0);
+    match rest.rsplit_once('_') {
+        Some((name, counter))
+            if !counter.is_empty() && counter.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            name
+        }
+        _ => rest,
+    }
 }
 
 fn image_part(source: &kage_core::ImageSource, mime: &str) -> Value {
@@ -236,9 +279,11 @@ pub struct GeminiStream {
     pending: VecDeque<Result<ProviderEvent, ProviderError>>,
     done: bool,
     started: bool,
-    /// Stable id assigned to each unique tool name encountered, since
-    /// Gemini does not emit per-call ids and we need correlation ids.
-    tool_call_ids: BTreeMap<String, ToolCallId>,
+    /// Function calls seen in this stream. Gemini emits no per-call ids,
+    /// so each call gets a fresh `gemini_{name}_{n}` correlation id;
+    /// name-keyed reuse would collide when one turn makes parallel
+    /// same-name calls.
+    tool_call_count: usize,
     finish_reason: StopReason,
     usage: kage_core::TokenUsage,
 }
@@ -253,7 +298,7 @@ impl GeminiStream {
             pending: VecDeque::new(),
             done: false,
             started: false,
-            tool_call_ids: BTreeMap::new(),
+            tool_call_count: 0,
             finish_reason: StopReason::Other,
             usage: kage_core::TokenUsage::default(),
         }
@@ -328,11 +373,8 @@ impl GeminiStream {
                 .get("args")
                 .cloned()
                 .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-            let id = self
-                .tool_call_ids
-                .entry(name.clone())
-                .or_insert_with(|| ToolCallId::new(format!("gemini_{name}")))
-                .clone();
+            self.tool_call_count += 1;
+            let id = ToolCallId::new(format!("gemini_{name}_{}", self.tool_call_count));
             self.pending.push_back(Ok(ProviderEvent::ToolCallStart {
                 id: id.clone(),
                 name,
@@ -587,6 +629,72 @@ mod tests {
         if let ProviderEvent::ToolCallEnd { input, .. } = end {
             assert_eq!(input["path"], "/tmp");
         }
+    }
+
+    #[test]
+    fn parallel_same_name_function_calls_get_distinct_ids() {
+        let bytes: &[u8] = b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"read\",\"args\":{\"path\":\"/a\"}}},{\"functionCall\":{\"name\":\"read\",\"args\":{\"path\":\"/b\"}}}],\"role\":\"model\"},\"finishReason\":\"STOP\"}]}\n\n";
+        let events = collect_ok(stream_from_bytes(bytes));
+        let ids: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                ProviderEvent::ToolCallStart { id, .. } => Some(id.0.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids.len(), 2, "both calls must surface");
+        assert_ne!(ids[0], ids[1], "same-name parallel calls need unique ids");
+    }
+
+    #[test]
+    fn tool_result_response_names_the_function_from_its_call() {
+        let assistant = Message::new(
+            Role::Assistant,
+            vec![Content::ToolCall {
+                id: ToolCallId::new("gemini_read_1"),
+                name: "read".into(),
+                input: serde_json::json!({"path": "/a"}),
+            }],
+            None,
+        );
+        let result = Message::new(
+            Role::ToolResult,
+            vec![Content::ToolResultBlock {
+                call_id: ToolCallId::new("gemini_read_1"),
+                output: "ok".into(),
+                is_error: false,
+            }],
+            None,
+        );
+        let req = StreamRequest::new("m", vec![user_msg("go"), assistant, result]);
+        let body = build_request_body(&req);
+        let contents = body["contents"].as_array().unwrap();
+        let fr = &contents[2]["parts"][0]["functionResponse"];
+        assert_eq!(fr["name"], "read");
+    }
+
+    #[test]
+    fn tool_name_from_call_id_parses_new_and_legacy_formats() {
+        assert_eq!(
+            tool_name_from_call_id(&ToolCallId::new("gemini_read_1")),
+            "read"
+        );
+        assert_eq!(
+            tool_name_from_call_id(&ToolCallId::new("gemini_my_tool_12")),
+            "my_tool"
+        );
+        assert_eq!(
+            tool_name_from_call_id(&ToolCallId::new("gemini_read")),
+            "read"
+        );
+        assert_eq!(
+            tool_name_from_call_id(&ToolCallId::new("gemini_my_tool")),
+            "my_tool"
+        );
+        assert_eq!(
+            tool_name_from_call_id(&ToolCallId::new("call_abc")),
+            "call_abc"
+        );
     }
 
     #[test]

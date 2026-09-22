@@ -124,7 +124,7 @@ pub(crate) fn build_request_body(req: &StreamRequest, stream: bool) -> Value {
     let mut body = serde_json::json!({
         "model": req.model,
         "messages": messages,
-        "max_tokens": req.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
+        "max_completion_tokens": req.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
         "stream": stream,
     });
     if stream {
@@ -513,6 +513,10 @@ mod tests {
         let req = StreamRequest::new("gpt-4o", vec![user_msg("hi")]);
         let body = build_request_body(&req, false);
         assert_eq!(body["model"], "gpt-4o");
+        // max_tokens is deprecated on Chat Completions (and rejected for
+        // reasoning models); the replacement must be sent instead.
+        assert_eq!(body["max_completion_tokens"], 4_096);
+        assert!(body.get("max_tokens").is_none());
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["role"], "user");

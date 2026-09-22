@@ -44,7 +44,7 @@ use crate::agent::PermissionDecision;
 
 /// How long the `initialize` / `session/new` handshake waits before
 /// giving up on a silent agent. The turn itself (`session/prompt`) is
-/// unbounded — it is governed by the cancel flag instead.
+/// unbounded; it is governed by the cancel flag instead.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Decides whether an upstream agent's tool call is permitted. Called

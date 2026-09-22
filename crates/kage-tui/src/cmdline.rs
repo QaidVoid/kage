@@ -557,21 +557,21 @@ mod tests {
     #[test]
     fn left_right_move_cursor_by_char_not_byte() {
         let mut cl = CommandLine::new();
-        for c in "éé".chars() {
+        for c in "\u{e9}\u{e9}".chars() {
             send(&mut cl, key(KeyCode::Char(c)));
         }
         // Cursor was after both chars (byte 4). One Left lands on the
-        // start of the second `é` (byte 2), not mid-char (byte 3).
+        // start of the second char (byte 2), not mid-char (byte 3).
         send(&mut cl, key(KeyCode::Left));
         assert_eq!(cl.cursor(), 2);
         // Typing here must not panic on a non-char-boundary insert.
         send(&mut cl, key(KeyCode::Char('X')));
-        assert_eq!(cl.text(), "éXé");
+        assert_eq!(cl.text(), "\u{e9}X\u{e9}");
         // Left again reaches the start; cursor 0, no underflow.
         send(&mut cl, key(KeyCode::Left));
         send(&mut cl, key(KeyCode::Left));
         assert_eq!(cl.cursor(), 0);
-        assert_eq!(cl.text(), "éXé");
+        assert_eq!(cl.text(), "\u{e9}X\u{e9}");
     }
 
     #[test]

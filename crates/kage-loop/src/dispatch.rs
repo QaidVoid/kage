@@ -79,7 +79,7 @@ enum Slot {
 
 /// Result of one batch of tool dispatch.
 ///
-/// `results` is the message list to append to history — one per call, real
+/// `results` is the message list to append to history, one per call, real
 /// or synthesized; `all_terminate` is `true` when every tool in the batch
 /// returned `ToolOutput::terminate` so the loop can stop cleanly after
 /// appending the results. `error` carries the first unrecoverable failure
@@ -126,8 +126,8 @@ fn record_batch_error(slot: &mut Option<LoopError>, kind: &LoopError) {
 /// Returns one tool-result [`Message`] per call, in input order. The caller
 /// appends them to history before continuing the inner loop.
 ///
-/// Cancellation: polled before every call. On cancel — or on a tool error
-/// the loop cannot recover from — the failing call and every remaining call
+/// Cancellation: polled before every call. On cancel, or on a tool error
+/// the loop cannot recover from, the failing call and every remaining call
 /// get synthesized `is_error` results, the completed results are kept, and
 /// the failure is carried in [`DispatchOutcome::error`].
 pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(

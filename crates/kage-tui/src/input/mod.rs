@@ -170,7 +170,7 @@ const PASTE_COLLAPSE_LINES: usize = 10;
 /// hang motion loops or explode paste allocations.
 const MAX_COUNT: usize = 10_000;
 
-/// Upper bound on one `p`/`P` paste payload (register length ×
+/// Upper bound on one `p`/`P` paste payload (register length *
 /// count). A paste beyond this is refused rather than allocated.
 const MAX_PASTE_BYTES: usize = 1 << 20;
 

@@ -216,7 +216,7 @@ mod tests {
         // 12 CJK glyphs occupy 24 cells. Sizing the card by char
         // count (12) made it half as wide as the text and clipped
         // the message; the card must adapt to display width.
-        let msg = "你好世界你好世界你好世界";
+        let msg = "\u{4f60}\u{597d}\u{4e16}\u{754c}\u{4f60}\u{597d}\u{4e16}\u{754c}\u{4f60}\u{597d}\u{4e16}\u{754c}";
         let painted = render_into(60, 6, &[Toast::info(msg)]);
         let rows: Vec<&str> = painted.lines().collect();
         // Wide glyphs carry a reset spacer cell in the test buffer,

@@ -633,7 +633,7 @@ mod tests {
     fn render_row_measures_display_width_not_char_count() {
         let style = Style::default();
         let wide = Completion {
-            value: "中文".to_owned(),
+            value: "\u{4e2d}\u{6587}".to_owned(),
             description: Some("d".to_owned()),
             replace_range: 0..0,
         };

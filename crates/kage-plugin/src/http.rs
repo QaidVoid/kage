@@ -371,8 +371,8 @@ fn prepare(url: &str, timeout: Option<Duration>) -> Result<(url::Url, ureq::Agen
 /// `None` bounds only the connection phases, leaving the response
 /// stream free to run (streaming calls).
 ///
-/// Every DNS lookup ureq performs — the dial itself and each redirect
-/// hop — goes through [`SsrfResolver`], so only vetted addresses can
+/// Every DNS lookup ureq performs (the dial itself and each redirect
+/// hop) goes through [`SsrfResolver`], so only vetted addresses can
 /// ever be dialed.
 fn build_agent_bounded(global: Option<Duration>) -> ureq::Agent {
     let config = ureq::Agent::config_builder()

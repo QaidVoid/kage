@@ -261,7 +261,7 @@ impl InputState {
 }
 
 /// Guard for [`InputState::paste_after`] / [`InputState::paste_before`]:
-/// a payload of register × count beyond [`MAX_PASTE_BYTES`] is
+/// a payload of register * count beyond [`MAX_PASTE_BYTES`] is
 /// refused rather than allocated, which would otherwise hit the
 /// allocation-size-abort handler.
 fn paste_fits(register: &str, count: usize) -> bool {

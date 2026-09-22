@@ -162,7 +162,7 @@ impl App {
     /// True while a modal overlay owns the screen. While one is open,
     /// mouse events must not reach the buffer underneath: scrolling
     /// would move invisible content and clicks would change focus
-    /// under a dialog. The context menu is deliberately excluded — it
+    /// under a dialog. The context menu is deliberately excluded: it
     /// is itself driven by mouse events.
     pub(crate) fn modal_open(&self) -> bool {
         self.plugin_overlay.is_some()

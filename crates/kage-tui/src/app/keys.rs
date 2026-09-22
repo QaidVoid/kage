@@ -4,29 +4,39 @@
 use super::*;
 
 impl App {
+    /// True when the user bound `key` explicitly in `[keybindings]`.
+    /// Config is authoritative over the global hatches and the
+    /// builtin handling alike.
+    fn user_bound(&self, key: &ratatui::crossterm::event::KeyEvent) -> bool {
+        self.config_keybindings
+            .iter()
+            .any(|(matcher, _, _)| matcher.matches(key))
+    }
+
     pub(crate) fn dispatch_key(
         &mut self,
         key: ratatui::crossterm::event::KeyEvent,
     ) -> Option<AppExit> {
-        // Global escape hatch before any modal layer: ctrl+q quits.
-        // It yields only when the user has explicitly bound ctrl+q to
-        // something in `[keybindings]` - then their config wins and
-        // quit is reachable via whatever chord they mapped `quit` to,
-        // so the panic hatch stays for everyone who did not rebind it.
+        // Global escape hatches before any modal layer: ctrl+q quits,
+        // ctrl+c interrupts the in-flight turn from every mode
+        // (insert, modeless, any open overlay). Both yield when the
+        // user explicitly bound the chord in `[keybindings]` - their
+        // config wins, and `quit` / `:cancel` stay reachable via
+        // whatever they mapped instead.
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
-        let ctrl_q =
-            key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('q'));
-        if ctrl_q
-            && !self
-                .config_keybindings
-                .iter()
-                .any(|(m, _, _)| m.matches(&key))
-        {
-            return Some(AppExit::Quit);
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('q') if !self.user_bound(&key) => return Some(AppExit::Quit),
+                KeyCode::Char('c') if !self.user_bound(&key) => {
+                    let _ = self.apply(InputAction::Cancel);
+                    return None;
+                }
+                _ => {}
+            }
         }
 
         // Raw plugin terminal-input hooks see the key before any modal
-        // layer (but never before the ctrl+q hatch above, so a hook
+        // layer (but never before the global hatches above, so a hook
         // cannot wedge the UI). A truthy return consumes it.
         if let Some(hooks) = self.terminal_hooks.as_ref() {
             let snapshot = hooks.lock().map(|h| h.clone()).unwrap_or_default();

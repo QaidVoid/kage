@@ -38,7 +38,7 @@ in the input. When no paste is collapsed, it toggles the fold.
 | `v`             | Normal  | Enter Visual mode                   |
 | `Ctrl+W`        | any     | Cycle focused pane (input / buffer) |
 | `Ctrl+Q`        | any     | Quit immediately                    |
-| `Ctrl+C`        | Normal  | Cancel current request              |
+| `Ctrl+C`        | any     | Cancel current request              |
 
 ## modeless mode
 
@@ -83,7 +83,7 @@ Tab completion matches vim's `wildmode=longest:full,full`:
 | `Backspace`      | Delete previous character; on empty input, cancel   |
 | `Left` / `Right` | Move the cursor                                     |
 | `Home` / `End`   | Jump to start / end                                 |
-| `Ctrl+C`         | Cancel the line                                     |
+| `Ctrl+C`         | Interrupt the running turn; line stays open        |
 
 Completions are recomputed on every edit. The popup appears only after
 the first `Tab` step that does more than insert the LCP, so single-

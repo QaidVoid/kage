@@ -297,6 +297,33 @@ fn ctrl_c_in_normal_emits_cancel_request() {
 }
 
 #[test]
+fn ctrl_c_in_insert_cancels_instead_of_typing_c() {
+    let buffer = shared_buffer();
+    let (tx, rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    app.handle_key(key('x')); // default mode is Insert
+    app.handle_key(ctrl('c'));
+    assert_eq!(rx.try_recv(), Ok(RunRequest::Cancel));
+    assert_eq!(app.input().text(), "x", "ctrl+c must not type 'c'");
+}
+
+#[test]
+fn ctrl_c_interrupts_over_an_open_cmdline() {
+    let buffer = shared_buffer();
+    let (tx, rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    app.handle_key(key(':'));
+    assert!(app.cmdline.is_some(), "cmdline should be open");
+    app.handle_key(ctrl('c'));
+    assert_eq!(rx.try_recv(), Ok(RunRequest::Cancel));
+    assert!(
+        app.cmdline.is_some(),
+        "interrupt must not close the cmdline"
+    );
+}
+
+#[test]
 fn ctrl_c_flips_registered_cancel_flag_synchronously() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();

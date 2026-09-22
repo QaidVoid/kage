@@ -531,10 +531,10 @@ impl App {
         }
 
         lines.push(String::new());
-        lines.push("reserved (handled by the TUI; not rebindable):".to_owned());
+        lines.push("reserved (handled by the TUI):".to_owned());
         for (chord, what) in [
-            ("ctrl+q", "quit (unless you bind ctrl+q in config)"),
-            ("ctrl+c", "interrupt the in-flight turn"),
+            ("ctrl+q", "quit (yields to an explicit ctrl+q binding)"),
+            ("ctrl+c", "interrupt (yields to an explicit ctrl+c binding)"),
             (":", "command line"),
             ("/", "search"),
             ("esc", "leave a mode / close an overlay"),

@@ -417,6 +417,77 @@ impl Theme {
             "unknown theme `{name}` (not bundled and no `{name}.toml`)"
         ))
     }
+
+    /// Whether the canvas background reads as light. Used to pair a
+    /// syntect highlight theme with the palette so code colors keep
+    /// contrast with the background. [`Color::Reset`] counts as dark,
+    /// matching the common terminal default.
+    #[must_use]
+    pub fn bg_is_light(&self) -> bool {
+        color_luminance(self.bg) >= 128
+    }
+}
+
+/// Perceptual luminance of a terminal color on a 0-255 scale
+/// (ITU-R BT.601 weights). Named colors use the xterm default
+/// palette; indexed colors decode the 256-color cube and grayscale
+/// ramp; [`Color::Reset`] maps to black.
+fn color_luminance(c: Color) -> u32 {
+    let (r, g, b) = match c {
+        Color::Reset => (0, 0, 0),
+        Color::Rgb(r, g, b) => (u32::from(r), u32::from(g), u32::from(b)),
+        Color::Black => ansi_rgb(0),
+        Color::Red => ansi_rgb(1),
+        Color::Green => ansi_rgb(2),
+        Color::Yellow => ansi_rgb(3),
+        Color::Blue => ansi_rgb(4),
+        Color::Magenta => ansi_rgb(5),
+        Color::Cyan => ansi_rgb(6),
+        Color::Gray => ansi_rgb(7),
+        Color::DarkGray => ansi_rgb(8),
+        Color::LightRed => ansi_rgb(9),
+        Color::LightGreen => ansi_rgb(10),
+        Color::LightYellow => ansi_rgb(11),
+        Color::LightBlue => ansi_rgb(12),
+        Color::LightMagenta => ansi_rgb(13),
+        Color::LightCyan => ansi_rgb(14),
+        Color::White => ansi_rgb(15),
+        Color::Indexed(i) if i < 16 => ansi_rgb(i),
+        Color::Indexed(i) if i < 232 => {
+            let i = u32::from(i - 16);
+            let level = |n: u32| [0, 95, 135, 175, 215, 255][n as usize];
+            (level(i / 36), level((i % 36) / 6), level(i % 6))
+        }
+        Color::Indexed(i) => {
+            let v = u32::from(8 + 10 * (i - 232));
+            (v, v, v)
+        }
+    };
+    (2126 * r + 7152 * g + 722 * b) / 10_000
+}
+
+/// Approximate RGB of an ANSI base color under the xterm defaults.
+/// The terminal's real palette varies, but only the light/dark
+/// classification of the result matters here.
+fn ansi_rgb(i: u8) -> (u32, u32, u32) {
+    match i {
+        0 => (0, 0, 0),
+        1 => (205, 0, 0),
+        2 => (0, 205, 0),
+        3 => (205, 205, 0),
+        4 => (0, 0, 238),
+        5 => (205, 0, 205),
+        6 => (0, 205, 205),
+        7 => (229, 229, 229),
+        8 => (127, 127, 127),
+        9 => (255, 95, 95),
+        10 => (95, 255, 95),
+        11 => (255, 255, 95),
+        12 => (95, 95, 255),
+        13 => (255, 95, 255),
+        14 => (95, 255, 255),
+        _ => (255, 255, 255),
+    }
 }
 
 /// A user theme file (`~/.config/kage/themes/<name>.toml`).
@@ -556,5 +627,26 @@ mod tests {
     #[test]
     fn available_names_without_dir_is_just_bundled() {
         assert_eq!(Theme::available_names(None), Theme::bundled_names());
+    }
+
+    #[test]
+    fn bg_is_light_classifies_representative_colors() {
+        assert!(!Theme::default_dark().bg_is_light());
+        assert!(!Theme::tokyo_night().bg_is_light());
+        assert!(!Theme::catppuccin_mocha().bg_is_light());
+        let with = |bg| Theme {
+            bg,
+            ..Theme::default_dark()
+        };
+        assert!(with(Color::White).bg_is_light());
+        assert!(with(Color::Gray).bg_is_light());
+        assert!(!with(Color::Reset).bg_is_light());
+        assert!(!with(Color::Black).bg_is_light());
+        // Indexed 196 decodes to #ff0000 (dark); 243/244 straddle the
+        // 128 luminance threshold on the grayscale ramp.
+        assert!(!with(Color::Indexed(196)).bg_is_light());
+        assert!(!with(Color::Indexed(243)).bg_is_light());
+        assert!(with(Color::Indexed(244)).bg_is_light());
+        assert!(with(Color::Indexed(250)).bg_is_light());
     }
 }

@@ -9,7 +9,10 @@
 //! Both share a single global [`SyntaxSet`] / [`ThemeSet`] loaded once
 //! via [`std::sync::OnceLock`] - syntect's default loaders take ~10ms
 //! and bring in ~150 syntaxes, so we deliberately avoid re-init per
-//! call.
+//! call. The syntect highlight theme is paired with the active kage
+//! theme by background luminance, and the per-thread cache keys on
+//! that pairing so a theme switch re-highlights instead of serving
+//! stale colors.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -41,10 +44,10 @@ const HIGHLIGHT_BYTE_LIMIT: usize = 64 * 1024;
 
 thread_local! {
     /// Per-thread cache of highlight results keyed by a 64-bit hash
-    /// of `(text, marker)` where `marker` distinguishes fenced-text
-    /// vs extension-keyed renders. Rendering happens on the main
-    /// thread so a `RefCell` is sufficient; we deliberately avoid a
-    /// Mutex to keep the per-frame cost minimal.
+    /// of `(text, marker, paired syntect theme)` where `marker`
+    /// distinguishes fenced-text vs extension-keyed renders. Rendering
+    /// happens on the main thread so a `RefCell` is sufficient; we
+    /// deliberately avoid a Mutex to keep the per-frame cost minimal.
     static HIGHLIGHT_CACHE: RefCell<HighlightCache> = RefCell::new(HighlightCache::new());
 }
 
@@ -79,10 +82,11 @@ impl HighlightCache {
     }
 }
 
-fn cache_key(text: &str, marker: &str) -> u64 {
+fn cache_key(text: &str, marker: &str, theme_name: &str) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     text.hash(&mut h);
     marker.hash(&mut h);
+    theme_name.hash(&mut h);
     h.finish()
 }
 
@@ -104,10 +108,22 @@ fn syntax_set() -> &'static SyntaxSet {
     SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
 }
 
+/// Name of the syntect theme paired with the active kage theme's
+/// background: light canvases highlight with `base16-ocean.light`,
+/// dark ones with `base16-ocean.dark`.
+fn syntect_theme_name(light: bool) -> &'static str {
+    if light {
+        "base16-ocean.light"
+    } else {
+        "base16-ocean.dark"
+    }
+}
+
 fn theme() -> &'static Theme {
     let ts = THEME_SET.get_or_init(ThemeSet::load_defaults);
+    let light = crate::theme::current().bg_is_light();
     ts.themes
-        .get("base16-ocean.dark")
+        .get(syntect_theme_name(light))
         .unwrap_or_else(|| ts.themes.values().next().expect("syntect ships themes"))
 }
 
@@ -115,15 +131,17 @@ fn theme() -> &'static Theme {
 /// leading dot). Falls back to plain text styled with `fallback` when
 /// the extension is unknown. Each input line becomes one [`Line`].
 ///
-/// Results are cached per-thread on `(code, extension)`; identical
-/// inputs reuse a previous render rather than re-running syntect each
-/// frame. Cache caps at [`CACHE_CAP`] entries with FIFO eviction.
+/// Results are cached per-thread on `(code, extension, paired theme)`;
+/// identical inputs reuse a previous render rather than re-running
+/// syntect each frame. Cache caps at [`CACHE_CAP`] entries with FIFO
+/// eviction.
 #[must_use]
 pub fn highlight_extension(code: &str, extension: &str, fallback: Style) -> Vec<Line<'static>> {
     if code.len() > HIGHLIGHT_BYTE_LIMIT {
         return plain_lines(code, fallback);
     }
-    let key = cache_key(code, extension);
+    let light = crate::theme::current().bg_is_light();
+    let key = cache_key(code, extension, syntect_theme_name(light));
     cached_or(key, || {
         let ss = syntax_set();
         match ss.find_syntax_by_extension(extension) {
@@ -138,15 +156,16 @@ pub fn highlight_extension(code: &str, extension: &str, fallback: Style) -> Vec<
 /// rendered with `fallback` style. Lines are split on `\n`; the fence
 /// markers themselves render as dim borders.
 ///
-/// Cached per-thread on `(text, "fenced")`. Repeated frames with the
-/// same assistant text reuse the previous render instead of re-running
-/// syntect on every fenced block.
+/// Cached per-thread on `(text, "fenced", paired theme)`. Repeated
+/// frames with the same assistant text reuse the previous render
+/// instead of re-running syntect on every fenced block.
 #[must_use]
 pub fn highlight_fenced(text: &str, fallback: Style) -> Vec<Line<'static>> {
     if text.len() > HIGHLIGHT_BYTE_LIMIT {
         return plain_lines(text, fallback);
     }
-    let key = cache_key(text, "fenced");
+    let light = crate::theme::current().bg_is_light();
+    let key = cache_key(text, "fenced", syntect_theme_name(light));
     cached_or(key, || highlight_fenced_uncached(text, fallback))
 }
 
@@ -306,5 +325,27 @@ mod tests {
         assert_eq!(lines.len(), 1);
         // Highlighted spans should split into multiple pieces (kw, name, etc).
         assert!(lines[0].spans.len() > 1, "expected multiple spans");
+    }
+
+    #[test]
+    fn syntect_theme_names_pair_with_background() {
+        assert_eq!(syntect_theme_name(false), "base16-ocean.dark");
+        assert_eq!(syntect_theme_name(true), "base16-ocean.light");
+    }
+
+    #[test]
+    fn paired_themes_exist_in_syntect_defaults() {
+        let ts = THEME_SET.get_or_init(ThemeSet::load_defaults);
+        assert!(ts.themes.contains_key(syntect_theme_name(false)));
+        assert!(ts.themes.contains_key(syntect_theme_name(true)));
+    }
+
+    #[test]
+    fn cache_key_separates_paired_themes() {
+        let text = "fn main() {}";
+        let dark = cache_key(text, "rs", syntect_theme_name(false));
+        let light = cache_key(text, "rs", syntect_theme_name(true));
+        assert_ne!(dark, light);
+        assert_eq!(dark, cache_key(text, "rs", syntect_theme_name(false)));
     }
 }

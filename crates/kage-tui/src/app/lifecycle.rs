@@ -101,15 +101,15 @@ impl App {
                     .checked_duration_since(Instant::now())
                     .unwrap_or_default();
                 if event::poll(remaining)? {
-                    // Any handled event might have altered something
-                    // user-visible (cursor in picker, mode switch,
-                    // input edit, scroll). Tracking each potential
-                    // change site is brittle; mark for redraw and
-                    // let the next iteration paint.
-                    needs_redraw = true;
+                    // Only events that can change the screen set the
+                    // redraw flag. `Moved` mouse events (the terminal
+                    // reports one per pixel of travel while capture is
+                    // on) and focus flips mutate nothing visible, and
+                    // repainting per event would pin a core.
                     match event::read()? {
                         Event::Key(key) if key.kind == KeyEventKind::Press => {
                             log_key_event(&key);
+                            needs_redraw = true;
                             if let Some(exit) = self.dispatch_key(key) {
                                 if let Some(state) = self.active_dialog.take() {
                                     let _ = state.reply().send(None);
@@ -117,12 +117,21 @@ impl App {
                                 return Ok(exit);
                             }
                         }
-                        Event::Paste(text) => self.handle_paste(&text),
-                        Event::Mouse(mouse) => self.handle_mouse_event(mouse),
+                        Event::Paste(text) => {
+                            needs_redraw = true;
+                            self.handle_paste(&text);
+                        }
+                        Event::Mouse(mouse) => {
+                            if !matches!(mouse.kind, MouseEventKind::Moved) {
+                                needs_redraw = true;
+                            }
+                            self.handle_mouse_event(mouse);
+                        }
                         Event::Resize(_, _) => {
                             // Width changed; every cached height is
                             // measured against the prior width and is
                             // now stale.
+                            needs_redraw = true;
                             if let Ok(mut buf) = self.buffer.lock() {
                                 buf.invalidate_all_heights();
                             }

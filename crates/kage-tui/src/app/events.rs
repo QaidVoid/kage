@@ -337,7 +337,7 @@ impl App {
         lock(&self.buffer).trim_scrollback();
         let search_match_count = self.compute_search_match_count();
         let render_width = terminal.size().map_or(80, |r| r.width);
-        self.refresh_plugin_widget_texts(render_width);
+        self.refresh_plugin_widget_texts_if_due(render_width);
         // Snapshot under the lock, then draw from the private copy:
         // the mutex is never held across the draw, so plugin threads
         // appending mid-frame don't stall behind a slow paint, and a

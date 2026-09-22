@@ -280,7 +280,7 @@ impl App {
             None
         };
         let render_width = tui.terminal().size().map_or(80, |r| r.width);
-        self.refresh_plugin_widget_texts(render_width);
+        self.refresh_plugin_widget_texts_if_due(render_width);
         let mut buffer = lock(&self.buffer).clone();
         let cmdline = self.cmdline.as_ref();
         let model_snapshot = self.status_model.as_ref().map(|m| lock(m).clone());

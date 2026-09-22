@@ -553,32 +553,45 @@ pub struct App {
     /// kept for `:keybindings` to echo back.
     config_keybindings: Vec<(Chord, String, String)>,
     /// Status-bar widgets supplied by plugins via
-    /// `kage.register_widget`. Each entry's `render(width)` runs once
-    /// per redraw and the resulting string is painted on the right
-    /// edge of the status bar.
+    /// `kage.register_widget`. Each entry's `render(width)` runs on
+    /// the plugin-refresh cadence and the resulting string is painted
+    /// on the right edge of the status bar.
     plugin_widgets: Vec<Arc<kage_plugin::LuaWidget>>,
-    /// Per-frame cache of [`Self::plugin_widgets`] outputs. Lives on
-    /// the App so [`view::StatusCtx`] can borrow it; rebuilt at the
-    /// top of [`Self::render_into`].
+    /// Cache of [`Self::plugin_widgets`] outputs. Lives on the App so
+    /// [`view::StatusCtx`] can borrow it; refreshed on a coarse
+    /// cadence by [`Self::refresh_plugin_widget_texts_if_due`].
     plugin_widget_texts: Vec<String>,
+    /// Last time the plugin text caches were refreshed. Drives the
+    /// coarse refresh cadence: widget/chrome `render` calls each take
+    /// the runtime's Lua mutex, so refreshing every frame puts plugin
+    /// latency on the render path.
+    plugin_texts_refreshed_at: Option<Instant>,
+    /// Width the plugin text caches were last rendered at. A width
+    /// change forces an immediate refresh so chrome doesn't paint at
+    /// a stale width until the next tick.
+    plugin_texts_width: u16,
+    /// Set when plugin widgets are (re)registered; the next frame
+    /// refreshes immediately instead of waiting for the tick.
+    plugin_texts_dirty: bool,
     /// Transient status entries populated by `kage.set_status` /
-    /// `kage.clear_status`. Each redraw snapshots the map into
-    /// [`Self::plugin_status_cache`].
+    /// `kage.clear_status`. The plugin-refresh tick snapshots the map
+    /// into [`Self::plugin_status_cache`].
     plugin_status: Option<kage_plugin::SharedStatus>,
-    /// Per-frame snapshot of [`Self::plugin_status`]. Owned so the
-    /// view layer can borrow without holding the plugin status mutex.
+    /// Snapshot of [`Self::plugin_status`] at the last refresh tick.
+    /// Owned so the view layer can borrow without holding the plugin
+    /// status mutex.
     plugin_status_cache: Vec<(String, String)>,
     /// JSON view of the live session usage so `kage.context_usage()`
-    /// can return up-to-date numbers. The host updates the inner
-    /// value at the same cadence as the modeline (per-render and
-    /// after every turn).
+    /// can return up-to-date numbers. Refreshed on the same coarse
+    /// tick as the plugin text caches, not per frame.
     plugin_usage: Option<kage_plugin::SharedUsage>,
     /// Pending compact request flag populated by `kage.compact()`.
     /// Drained between event polls; a non-empty `Some` dispatches a
     /// [`RunRequest::CompactNow`] to the worker.
     plugin_compact_request: Option<kage_plugin::SharedCompactRequest>,
     /// Snapshot of resumable sessions exposed to `kage.session.list`.
-    /// Refreshed from [`Self::session_lister`] each redraw.
+    /// Refreshed from [`Self::session_lister`] on the coarse plugin
+    /// snapshot tick.
     plugin_session_list: Option<kage_plugin::SharedSessionList>,
     /// Pending fork-request slot populated by `kage.session.fork`.
     /// Drained between event polls; the worker performs the fork.
@@ -588,7 +601,8 @@ pub struct App {
     /// and relayed as [`RunRequest::SwitchSession`] to the worker.
     plugin_switch_request: Option<kage_plugin::SharedSwitchRequest>,
     /// Theme snapshot `kage.theme.current()` / `list()` read from.
-    /// Refreshed each redraw with the active theme + bundled names.
+    /// Refreshed on the coarse plugin snapshot tick with the active
+    /// theme + bundled names.
     plugin_theme_state: Option<kage_plugin::SharedThemeState>,
     /// Pending `kage.theme.set` slot. Drained between event polls and
     /// applied on this (UI) thread, the same path as `:theme set`.
@@ -620,11 +634,13 @@ pub struct App {
     /// Footer-chrome slot populated by `kage.ui.set_footer`. Replaces
     /// the built-in modeline when a renderer is present.
     plugin_footer: Option<kage_plugin::SharedChrome>,
-    /// Per-frame snapshot of the header renderer's output. Lives on the
-    /// App so [`view::StatusCtx`] can borrow it without holding the
-    /// chrome mutex; rebuilt by [`Self::refresh_plugin_widget_texts`].
+    /// Snapshot of the header renderer's output at the last refresh
+    /// tick. Lives on the App so [`view::StatusCtx`] can borrow it
+    /// without holding the chrome mutex; rebuilt by
+    /// [`Self::refresh_plugin_widget_texts`].
     plugin_header_lines: Vec<kage_plugin::ChromeLine>,
-    /// Per-frame snapshot of the footer renderer's output.
+    /// Snapshot of the footer renderer's output at the last refresh
+    /// tick.
     plugin_footer_lines: Vec<kage_plugin::ChromeLine>,
     /// Pending request to toggle terminal mouse capture, applied by
     /// `run` between iterations. `None` means leave the capture state

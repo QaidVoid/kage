@@ -33,6 +33,9 @@ impl App {
             config_keybindings: Vec::new(),
             plugin_widgets: Vec::new(),
             plugin_widget_texts: Vec::new(),
+            plugin_texts_refreshed_at: None,
+            plugin_texts_width: 0,
+            plugin_texts_dirty: false,
             plugin_status: None,
             plugin_status_cache: Vec::new(),
             plugin_usage: None,
@@ -263,12 +266,12 @@ impl App {
         self.session_tree_source = Some(source);
     }
 
-    /// Replace the list of plugin-supplied status-bar widgets.
-    /// `render(width)` runs once per redraw inside the plugin runtime's
-    /// Lua mutex; widgets that produce a non-empty string are painted
-    /// on the right edge of the status bar in registration order.
+    /// Register the status-bar widgets supplied by plugins. Marks the
+    /// plugin text caches dirty so the next frame renders them at
+    /// once instead of waiting for the refresh tick.
     pub fn set_plugin_widgets(&mut self, widgets: Vec<Arc<kage_plugin::LuaWidget>>) {
         self.plugin_widgets = widgets;
+        self.plugin_texts_dirty = true;
     }
 
     /// Wire the shared status map populated by `kage.set_status` /
@@ -476,6 +479,29 @@ impl App {
                 "working": snap.working,
             });
         }
+    }
+
+    /// Refresh the plugin text caches only when something observable
+    /// can have changed: the coarse tick elapsed, the width moved, or
+    /// a (re)registration marked them dirty. Widget and chrome
+    /// `render` calls each take the runtime's Lua mutex, so refreshing
+    /// every frame makes plugin latency show up as render lag. The
+    /// caches feed status-bar chrome consumed at human timescale, so
+    /// half a second of staleness is invisible.
+    pub(crate) fn refresh_plugin_widget_texts_if_due(&mut self, width: u16) {
+        const PLUGIN_TEXT_INTERVAL: Duration = Duration::from_millis(500);
+        let due = self.plugin_texts_dirty
+            || self.plugin_texts_width != width
+            || self
+                .plugin_texts_refreshed_at
+                .is_none_or(|t| t.elapsed() >= PLUGIN_TEXT_INTERVAL);
+        if !due {
+            return;
+        }
+        self.plugin_texts_dirty = false;
+        self.plugin_texts_width = width;
+        self.plugin_texts_refreshed_at = Some(Instant::now());
+        self.refresh_plugin_widget_texts(width);
     }
 
     /// Drain any pending `kage.compact()` request and forward it as

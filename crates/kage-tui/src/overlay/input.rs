@@ -13,7 +13,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::KeyEvent;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget};
 
@@ -67,11 +67,12 @@ impl OverlayWidget for InputOverlay {
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &OverlayCtx<'_>) {
         Widget::render(crate::opaque::OpaqueClear, area, buf);
+        let t = crate::theme::current();
         let block = Block::default()
             .title(format!(" {} ", self.title))
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Blue));
+            .border_style(Style::default().fg(t.overlay_border));
         let inner = block.inner(area);
         Widget::render(block, area, buf);
 
@@ -84,7 +85,7 @@ impl OverlayWidget for InputOverlay {
             if let Some(hint) = self.placeholder.as_deref() {
                 Line::from(Span::styled(
                     hint.to_owned(),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(t.muted_fg),
                 ))
             } else {
                 Line::from("")
@@ -92,7 +93,7 @@ impl OverlayWidget for InputOverlay {
         } else {
             Line::from(Span::styled(
                 self.cmdline.text().to_owned(),
-                Style::default().fg(Color::White),
+                Style::default().fg(t.overlay_fg),
             ))
         };
         Widget::render(Paragraph::new(line), chunks[0], buf);
@@ -101,7 +102,7 @@ impl OverlayWidget for InputOverlay {
             Paragraph::new(Line::from(Span::styled(
                 "enter confirm  esc cancel",
                 Style::default()
-                    .fg(Color::DarkGray)
+                    .fg(t.muted_fg)
                     .add_modifier(Modifier::ITALIC),
             ))),
             chunks[1],

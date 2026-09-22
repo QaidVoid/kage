@@ -69,10 +69,11 @@ fn split_span_for_match(span: Span<'static>, needle: &str) -> Vec<Span<'static>>
     if ascii_ifind(&span.content, needle, 0).is_none() {
         return vec![span];
     }
+    let theme = crate::theme::current();
     let hit = span.style.patch(
         Style::default()
-            .bg(crate::theme::current().match_color)
-            .fg(Color::Black)
+            .bg(theme.match_color)
+            .fg(theme.selection_fg)
             .add_modifier(Modifier::BOLD)
             .add_modifier(Modifier::REVERSED),
     );
@@ -107,18 +108,18 @@ fn split_span_for_match(span: Span<'static>, needle: &str) -> Vec<Span<'static>>
 /// beyond this is summarized as "+ N more" on the last row.
 const POPUP_MAX_VISIBLE: usize = 8;
 
-/// Reuses the slash palette's blue accent so the popup visually
-/// reads as the same surface; selected rows use white-on-blue.
-/// Background is [`Theme::modeline_bg`] (dark navy) so the popup is
-/// distinct from the status row's [`Theme::status_bg`], rather than
-/// merging into a single dark-gray block.
+/// Selected rows use the overlay selection roles so every popup
+/// reads as the same surface. Background is [`Theme::modeline_bg`]
+/// (dark navy) so the popup is distinct from the status row's
+/// [`Theme::status_bg`], rather than merging into a single
+/// dark-gray block.
 fn popup_styles() -> (Style, Style, Style) {
     let theme = crate::theme::current();
     let bg = theme.modeline_bg;
-    let row = Style::default().fg(Color::White).bg(bg);
+    let row = Style::default().fg(theme.overlay_fg).bg(bg);
     let sel = Style::default()
-        .fg(Color::White)
-        .bg(Color::Blue)
+        .fg(theme.overlay_selected_fg)
+        .bg(theme.overlay_selected_bg)
         .add_modifier(Modifier::BOLD);
     let dim = Style::default().fg(theme.status_dim_fg).bg(bg);
     (row, sel, dim)

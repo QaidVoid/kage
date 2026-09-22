@@ -388,7 +388,7 @@ pub(crate) fn truncated_body_lines(output: &str, style: Style) -> Vec<Line<'stat
         out.push(Line::from(Span::styled(
             format!("... ({remaining} more lines)"),
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(crate::theme::current().muted_fg)
                 .add_modifier(Modifier::DIM),
         )));
     }

@@ -14,7 +14,7 @@ use kage_plugin::AutocompleteItem;
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
@@ -132,11 +132,11 @@ impl InputCompletion {
     fn rows(&self, width: usize) -> Vec<Line<'static>> {
         let theme = crate::theme::current();
         let bg = theme.modeline_bg;
-        let row_style = Style::default().fg(Color::White).bg(bg);
+        let row_style = Style::default().fg(theme.overlay_fg).bg(bg);
         let dim_style = Style::default().fg(theme.status_dim_fg).bg(bg);
         let sel_style = Style::default()
-            .fg(Color::White)
-            .bg(Color::Blue)
+            .fg(theme.overlay_selected_fg)
+            .bg(theme.overlay_selected_bg)
             .add_modifier(Modifier::BOLD);
 
         let total = self.items.len();

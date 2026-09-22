@@ -17,7 +17,7 @@
 //! parser yields so users still see content rather than a silent drop.
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::syntax::{highlight_with_lang, plain_lines_styled};
@@ -215,7 +215,7 @@ impl RenderState {
                 let s = self
                     .current_style()
                     .add_modifier(Modifier::UNDERLINED)
-                    .fg(Color::Cyan);
+                    .fg(crate::theme::current().md_link_fg);
                 self.style_stack.push(s);
                 if !title.is_empty() {
                     self.push_text(format!("{title} ("), self.current_style());
@@ -312,9 +312,10 @@ impl RenderState {
 
 fn heading_style(level: HeadingLevel, fallback: Style) -> Style {
     let base = fallback.add_modifier(Modifier::BOLD);
+    let t = crate::theme::current();
     match level {
-        HeadingLevel::H1 => base.fg(Color::Magenta),
-        HeadingLevel::H2 => base.fg(Color::Cyan),
+        HeadingLevel::H1 => base.fg(t.md_h1_fg),
+        HeadingLevel::H2 => base.fg(t.md_h2_fg),
         _ => base,
     }
 }
@@ -333,13 +334,13 @@ fn heading_prefix(level: HeadingLevel) -> String {
 
 fn dim_style() -> Style {
     Style::default()
-        .fg(Color::DarkGray)
+        .fg(crate::theme::current().muted_fg)
         .add_modifier(Modifier::DIM)
 }
 
 fn inline_code_style() -> Style {
     Style::default()
-        .fg(Color::Yellow)
+        .fg(crate::theme::current().md_code_fg)
         .add_modifier(Modifier::BOLD)
 }
 
@@ -393,10 +394,9 @@ mod tests {
     #[test]
     fn inline_code_uses_code_style() {
         let lines = render("call `foo()` here", Style::default());
-        let has_code = lines[0]
-            .spans
-            .iter()
-            .any(|s| s.content == "foo()" && s.style.fg == Some(Color::Yellow));
+        let has_code = lines[0].spans.iter().any(|s| {
+            s.content == "foo()" && s.style.fg == Some(crate::theme::current().md_code_fg)
+        });
         assert!(has_code);
     }
 
@@ -465,7 +465,7 @@ mod tests {
             !l.spans.is_empty()
                 && l.spans.iter().all(|s| {
                     s.style.add_modifier.contains(Modifier::DIM)
-                        && s.style.fg == Some(Color::DarkGray)
+                        && s.style.fg == Some(crate::theme::current().muted_fg)
                 })
         };
         let body = live

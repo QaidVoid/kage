@@ -351,7 +351,7 @@ pub(crate) fn capture_and_overlay(
     if has_selection {
         let theme = crate::theme::current();
         let highlight_bg = theme.selection_color;
-        let on_select_fg = Color::Black;
+        let on_select_fg = theme.selection_fg;
         let last_col = area.x.saturating_add(area.width).saturating_sub(1);
         let (s, e) = (start.unwrap(), end.unwrap());
         for screen_row in area.y..area.y.saturating_add(area.height) {

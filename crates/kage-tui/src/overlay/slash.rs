@@ -29,7 +29,7 @@ use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
@@ -173,7 +173,7 @@ impl SlashPalette {
         };
         let theme = crate::theme::current();
         let prefix_style = Style::default()
-            .fg(Color::Blue)
+            .fg(theme.input_glyph_fg)
             .add_modifier(Modifier::BOLD);
         let text_style = Style::default().fg(theme.assistant_fg);
         let line = Line::from(vec![
@@ -199,11 +199,11 @@ impl SlashPalette {
     fn paint_popup(&self, area: Rect, buf: &mut Buffer) {
         let theme = crate::theme::current();
         let bg = theme.modeline_bg;
-        let row_style = Style::default().fg(Color::White).bg(bg);
+        let row_style = Style::default().fg(theme.overlay_fg).bg(bg);
         let dim_style = Style::default().fg(theme.status_dim_fg).bg(bg);
         let sel_style = Style::default()
-            .fg(Color::White)
-            .bg(Color::Blue)
+            .fg(theme.overlay_selected_fg)
+            .bg(theme.overlay_selected_bg)
             .add_modifier(Modifier::BOLD);
 
         let completions = self.cmdline.completions();

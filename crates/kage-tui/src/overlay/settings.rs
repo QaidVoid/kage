@@ -14,7 +14,7 @@ use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Widget};
 
@@ -263,7 +263,7 @@ impl OverlayWidget for SettingsOverlay {
             }
             let style = if i == self.tab {
                 Style::default()
-                    .fg(Color::Black)
+                    .fg(ctx.theme.selection_fg)
                     .bg(accent)
                     .add_modifier(Modifier::BOLD)
             } else {
@@ -439,7 +439,7 @@ impl SettingsOverlay {
         for (row, (idx, item)) in items.iter().enumerate().skip(offset).take(rows).enumerate() {
             let style = if idx == selected {
                 Style::default()
-                    .fg(Color::Black)
+                    .fg(ctx.theme.selection_fg)
                     .bg(ctx.theme.focus_color)
                     .add_modifier(Modifier::BOLD)
             } else {

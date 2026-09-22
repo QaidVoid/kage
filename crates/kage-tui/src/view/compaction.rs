@@ -11,7 +11,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
@@ -70,7 +70,7 @@ impl CompactionBlockWidget {
         let mut out: Vec<Line<'static>> = vec![header_line(counts_line)];
         let unwrapped = strip_summary_framing(framed);
         if !unwrapped.is_empty() {
-            let body_style = Style::default().fg(Color::White);
+            let body_style = Style::default().fg(crate::theme::current().assistant_fg);
             for line in crate::markdown::render(&unwrapped, body_style) {
                 out.push(prefix_line("  ", line));
             }
@@ -107,11 +107,12 @@ fn extract_count(text: &str, marker: &str) -> Option<u64> {
 }
 
 fn header_line(counts_source: Option<&str>) -> Line<'static> {
+    let t = crate::theme::current();
     let label_style = Style::default()
-        .fg(Color::Yellow)
+        .fg(t.warning_fg)
         .add_modifier(Modifier::BOLD);
     let dim = Style::default()
-        .fg(Color::DarkGray)
+        .fg(t.muted_fg)
         .add_modifier(Modifier::DIM | Modifier::ITALIC);
     let mut spans = vec![
         Span::styled("\u{2261} ".to_owned(), label_style),

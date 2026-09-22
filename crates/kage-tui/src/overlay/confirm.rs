@@ -12,7 +12,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget, Wrap};
 
@@ -85,7 +85,7 @@ impl OverlayWidget for ConfirmOverlay {
             .title(format!(" {} ", self.title))
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Yellow));
+            .border_style(Style::default().fg(crate::theme::current().warning_fg));
         let inner = block.inner(area);
         Widget::render(block, area, buf);
 
@@ -97,7 +97,7 @@ impl OverlayWidget for ConfirmOverlay {
         Widget::render(
             Paragraph::new(self.message.clone())
                 .wrap(Wrap { trim: false })
-                .style(Style::default().fg(Color::White)),
+                .style(Style::default().fg(crate::theme::current().overlay_fg)),
             chunks[0],
             buf,
         );
@@ -138,13 +138,14 @@ impl OverlayWidget for ConfirmOverlay {
 }
 
 fn button_style(selected: bool) -> Style {
+    let t = crate::theme::current();
     if selected {
         Style::default()
-            .fg(Color::White)
-            .bg(Color::Blue)
+            .fg(t.overlay_selected_fg)
+            .bg(t.overlay_selected_bg)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::DarkGray)
+        Style::default().fg(t.muted_fg)
     }
 }
 

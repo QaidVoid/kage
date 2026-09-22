@@ -15,7 +15,7 @@ use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Widget};
 
@@ -223,7 +223,7 @@ impl OverlayWidget for SessionTreeOverlay {
                 let text = format!("{mark}{indent}{branch}{}", node.label);
                 let style = if selected {
                     Style::default()
-                        .fg(Color::Black)
+                        .fg(ctx.theme.selection_fg)
                         .bg(accent)
                         .add_modifier(Modifier::BOLD)
                 } else if node.is_current {

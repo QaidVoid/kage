@@ -16,7 +16,7 @@ use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, List, ListItem, ListState, Paragraph, StatefulWidget, Widget,
@@ -126,7 +126,7 @@ impl OverlayWidget for OverlayPicker {
             .title(format!(" {} ", self.title))
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Blue));
+            .border_style(Style::default().fg(crate::theme::current().overlay_border));
         let inner = block.inner(area);
         Widget::render(block, area, buf);
 
@@ -214,15 +214,16 @@ impl OverlayWidget for OverlayPicker {
 
 impl OverlayPicker {
     fn render_search(&self, buf: &mut Buffer, area: Rect) {
+        let t = crate::theme::current();
         let search_text = if self.search.is_empty() {
             Line::from(vec![
-                Span::styled("/ ", Style::default().fg(Color::DarkGray)),
-                Span::styled("type to filter", Style::default().fg(Color::DarkGray)),
+                Span::styled("/ ", Style::default().fg(t.muted_fg)),
+                Span::styled("type to filter", Style::default().fg(t.muted_fg)),
             ])
         } else {
             Line::from(vec![
-                Span::styled("/ ", Style::default().fg(Color::DarkGray)),
-                Span::styled(self.search.clone(), Style::default().fg(Color::White)),
+                Span::styled("/ ", Style::default().fg(t.muted_fg)),
+                Span::styled(self.search.clone(), Style::default().fg(t.overlay_fg)),
             ])
         };
         Widget::render(Paragraph::new(search_text), area, buf);
@@ -239,11 +240,13 @@ impl OverlayPicker {
         );
         self.scroll_offset = offset;
 
+        let t = crate::theme::current();
+
         if filtered.is_empty() {
             Widget::render(
                 Paragraph::new(Line::from(Span::styled(
                     "(no matches)",
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(t.muted_fg),
                 ))),
                 area,
                 buf,
@@ -260,7 +263,7 @@ impl OverlayPicker {
         if above > 0 {
             items.push(ListItem::new(Line::from(Span::styled(
                 format!("... {above} more above"),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(t.muted_fg),
             ))));
         }
         // Section headers are non-selectable render-only rows emitted
@@ -280,9 +283,7 @@ impl OverlayPicker {
                 }
                 items.push(ListItem::new(Line::from(Span::styled(
                     group.to_owned(),
-                    Style::default()
-                        .fg(Color::DarkGray)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(t.muted_fg).add_modifier(Modifier::BOLD),
                 ))));
                 prev_group = Some(group.to_owned());
             }
@@ -295,7 +296,7 @@ impl OverlayPicker {
         if below > 0 {
             items.push(ListItem::new(Line::from(Span::styled(
                 format!("... {below} more below"),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(t.muted_fg),
             ))));
         }
 
@@ -312,7 +313,7 @@ impl OverlayPicker {
     fn render_help(buf: &mut Buffer, area: Rect) {
         let line = Line::from(Span::styled(
             "up/down select  enter confirm  type to filter  esc cancel",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(crate::theme::current().muted_fg),
         ));
         Widget::render(Paragraph::new(line), area, buf);
     }
@@ -323,19 +324,20 @@ impl OverlayPicker {
 /// The label is truncated so a >=2 col gap before the right column
 /// always remains, at any terminal width (no fixed label padding).
 fn row_line(item: &PickItem, is_sel: bool, width: u16) -> Line<'static> {
+    let t = crate::theme::current();
     let badge = item.badge.unwrap_or(' ');
     let badge_color = if item.badge == Some('*') {
-        Color::Green
+        t.success_fg
     } else {
-        Color::DarkGray
+        t.muted_fg
     };
     let label_style = if is_sel {
         Style::default()
-            .fg(Color::White)
-            .bg(Color::Blue)
+            .fg(t.overlay_selected_fg)
+            .bg(t.overlay_selected_bg)
             .add_modifier(Modifier::BOLD)
     } else {
-        Style::default().fg(Color::White)
+        Style::default().fg(t.overlay_fg)
     };
     let badge_span = Span::styled(format!(" {badge} "), Style::default().fg(badge_color));
     match item.right.as_deref() {
@@ -354,7 +356,7 @@ fn row_line(item: &PickItem, is_sel: bool, width: u16) -> Line<'static> {
                 badge_span,
                 Span::styled(label, label_style),
                 Span::raw(" ".repeat(pad)),
-                Span::styled(right.to_owned(), Style::default().fg(Color::DarkGray)),
+                Span::styled(right.to_owned(), Style::default().fg(t.muted_fg)),
             ])
         }
     }

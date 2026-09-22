@@ -4,7 +4,7 @@
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget};
 
@@ -47,7 +47,7 @@ impl ToolCallAloneBlockWidget {
 
     fn lines_for(&self, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
         let dim = Style::default()
-            .fg(Color::DarkGray)
+            .fg(crate::theme::current().muted_fg)
             .add_modifier(Modifier::DIM);
         let style = tool_call_style();
         let mut content: Vec<Line<'static>> = Vec::new();

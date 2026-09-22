@@ -651,14 +651,17 @@ fn popup_paints_many_items_and_highlights_selected() {
     assert!(lines.iter().any(|l| l.contains("model")), "{lines:#?}");
     assert!(lines.iter().any(|l| l.contains("mouse")), "{lines:#?}");
     // The selected row (index 1, painted at y=2) should have the
-    // blue selection bg; the unselected row (y=1) should not.
-    let sel_bg = cell_bg_at(&cl, area, 3, 2);
-    let unsel_bg = cell_bg_at(&cl, area, 3, 1);
-    assert_eq!(sel_bg, Color::Blue, "selected row bg should be blue");
+    // overlay selection bg; the unselected row (y=1) should not.
+    let sel = crate::theme::current().overlay_selected_bg;
+    assert_eq!(
+        cell_bg_at(&cl, area, 3, 2),
+        sel,
+        "selected row bg should be the overlay selection color"
+    );
     assert_ne!(
-        unsel_bg,
-        Color::Blue,
-        "unselected row bg should not be blue"
+        cell_bg_at(&cl, area, 3, 1),
+        sel,
+        "unselected row bg should not be the overlay selection color"
     );
 }
 

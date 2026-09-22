@@ -14,7 +14,7 @@
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget};
 
@@ -156,11 +156,12 @@ impl OverlayWidget for EditorOverlay {
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, _ctx: &OverlayCtx<'_>) {
         Widget::render(crate::opaque::OpaqueClear, area, buf);
+        let t = crate::theme::current();
         let block = Block::default()
             .title(format!(" {} ", self.title))
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(Color::Blue));
+            .border_style(Style::default().fg(t.overlay_border));
         let inner = block.inner(area);
         Widget::render(block, area, buf);
 
@@ -179,7 +180,7 @@ impl OverlayWidget for EditorOverlay {
         let lines: Vec<Line<'static>> = self
             .lines
             .iter()
-            .map(|l| Line::from(Span::styled(l.clone(), Style::default().fg(Color::White))))
+            .map(|l| Line::from(Span::styled(l.clone(), Style::default().fg(t.overlay_fg))))
             .collect();
         let scroll = u16::try_from(offset).unwrap_or(u16::MAX);
         Widget::render(Paragraph::new(lines).scroll((scroll, 0)), body_area, buf);
@@ -190,7 +191,7 @@ impl OverlayWidget for EditorOverlay {
             Paragraph::new(Line::from(Span::styled(
                 "ctrl-s save  esc cancel",
                 Style::default()
-                    .fg(Color::DarkGray)
+                    .fg(t.muted_fg)
                     .add_modifier(Modifier::ITALIC),
             ))),
             chunks[1],
@@ -283,10 +284,11 @@ impl EditorOverlay {
             return;
         }
         let cell = &mut buf[(x, y)];
+        let t = crate::theme::current();
         cell.set_style(
             Style::default()
-                .bg(Color::White)
-                .fg(Color::Black)
+                .bg(t.overlay_selected_bg)
+                .fg(t.overlay_selected_fg)
                 .add_modifier(Modifier::REVERSED),
         );
     }

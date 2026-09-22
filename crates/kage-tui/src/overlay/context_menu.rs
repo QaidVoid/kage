@@ -9,7 +9,7 @@
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
@@ -189,7 +189,7 @@ impl ContextMenu {
         let theme = crate::theme::current();
         frame.render_widget(crate::opaque::OpaqueClear, area);
         let border = Style::default().fg(theme.focus_color).bg(theme.bg);
-        let normal = Style::default().fg(Color::White).bg(theme.bg);
+        let normal = Style::default().fg(theme.overlay_fg).bg(theme.bg);
         let sel = Style::default()
             .fg(theme.bg)
             .bg(theme.selection_color)

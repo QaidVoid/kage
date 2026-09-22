@@ -67,7 +67,7 @@ pub(crate) fn mark_emphasis(
         }
     } else {
         let style = Style::default()
-            .fg(emphasis.rule_color(Color::White))
+            .fg(emphasis.rule_color(crate::theme::current().focus_color))
             .add_modifier(Modifier::BOLD)
             .add_modifier(DECORATION_MARKER);
         Span::styled(format!("{} ", emphasis.rule_glyph()), style)

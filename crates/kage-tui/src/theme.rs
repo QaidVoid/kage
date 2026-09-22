@@ -138,6 +138,30 @@ pub struct Theme {
     pub modeline_bg: Color,
     /// Foreground of the bottom modeline's text.
     pub modeline_fg: Color,
+    /// Foreground for normal text inside overlays and command-line
+    /// popups (pickers, confirm dialogs, the external editor).
+    pub overlay_fg: Color,
+    /// Border color of overlay/dialog cards.
+    pub overlay_border: Color,
+    /// Background of the selected row (or cursor cell) in overlays.
+    pub overlay_selected_bg: Color,
+    /// Foreground of the selected row in overlays.
+    pub overlay_selected_fg: Color,
+    /// Foreground painted on `match_color` / `selection_color` /
+    /// `focus_color` backgrounds so highlighted text stays readable.
+    pub selection_fg: Color,
+    /// Warning accent: destructive-confirm borders, summary headers.
+    pub warning_fg: Color,
+    /// Markdown H1 foreground.
+    pub md_h1_fg: Color,
+    /// Markdown H2 foreground.
+    pub md_h2_fg: Color,
+    /// Markdown link foreground.
+    pub md_link_fg: Color,
+    /// Markdown inline-code foreground.
+    pub md_code_fg: Color,
+    /// Affirmative state, e.g. the `*` badge in pickers.
+    pub success_fg: Color,
 }
 
 impl Default for Theme {
@@ -189,6 +213,17 @@ impl Theme {
             input_hint_fg: Color::Gray,
             modeline_bg: Color::Rgb(18, 20, 28),
             modeline_fg: Color::Gray,
+            overlay_fg: Color::White,
+            overlay_border: Color::Blue,
+            overlay_selected_bg: Color::Blue,
+            overlay_selected_fg: Color::White,
+            selection_fg: Color::Black,
+            warning_fg: Color::Yellow,
+            md_h1_fg: Color::Magenta,
+            md_h2_fg: Color::Cyan,
+            md_link_fg: Color::Cyan,
+            md_code_fg: Color::Yellow,
+            success_fg: Color::Green,
         }
     }
 
@@ -234,6 +269,17 @@ impl Theme {
             input_hint_fg: Color::Rgb(108, 119, 165),
             modeline_bg: Color::Rgb(22, 23, 34),
             modeline_fg: Color::Rgb(108, 119, 165),
+            overlay_fg: Color::Rgb(192, 202, 245),
+            overlay_border: Color::Rgb(86, 95, 137),
+            overlay_selected_bg: Color::Rgb(86, 95, 137),
+            overlay_selected_fg: Color::Rgb(192, 202, 245),
+            selection_fg: Color::Rgb(26, 27, 38),
+            warning_fg: Color::Rgb(224, 175, 104),
+            md_h1_fg: Color::Rgb(187, 154, 247),
+            md_h2_fg: Color::Rgb(125, 207, 255),
+            md_link_fg: Color::Rgb(125, 207, 255),
+            md_code_fg: Color::Rgb(224, 175, 104),
+            success_fg: Color::Rgb(158, 206, 106),
         }
     }
 
@@ -278,6 +324,17 @@ impl Theme {
             input_hint_fg: Color::Rgb(127, 132, 156),
             modeline_bg: Color::Rgb(24, 24, 37),
             modeline_fg: Color::Rgb(127, 132, 156),
+            overlay_fg: Color::Rgb(205, 214, 244),
+            overlay_border: Color::Rgb(88, 91, 112),
+            overlay_selected_bg: Color::Rgb(88, 91, 112),
+            overlay_selected_fg: Color::Rgb(205, 214, 244),
+            selection_fg: Color::Rgb(30, 30, 46),
+            warning_fg: Color::Rgb(249, 226, 175),
+            md_h1_fg: Color::Rgb(203, 166, 247),
+            md_h2_fg: Color::Rgb(137, 220, 235),
+            md_link_fg: Color::Rgb(137, 220, 235),
+            md_code_fg: Color::Rgb(249, 226, 175),
+            success_fg: Color::Rgb(166, 227, 161),
         }
     }
 
@@ -365,7 +422,14 @@ impl Theme {
             "input_glyph_fg" => input_glyph_fg,
             "input_placeholder_fg" => input_placeholder_fg,
             "input_hint_fg" => input_hint_fg, "modeline_bg" => modeline_bg,
-            "modeline_fg" => modeline_fg,
+            "modeline_fg" => modeline_fg, "overlay_fg" => overlay_fg,
+            "overlay_border" => overlay_border,
+            "overlay_selected_bg" => overlay_selected_bg,
+            "overlay_selected_fg" => overlay_selected_fg,
+            "selection_fg" => selection_fg, "warning_fg" => warning_fg,
+            "md_h1_fg" => md_h1_fg, "md_h2_fg" => md_h2_fg,
+            "md_link_fg" => md_link_fg, "md_code_fg" => md_code_fg,
+            "success_fg" => success_fg,
         }
         Ok(())
     }

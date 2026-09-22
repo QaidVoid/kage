@@ -231,6 +231,10 @@ impl PluginRuntimeBuilder {
                 self.sink.clone(),
                 Arc::clone(&terminal_hook_registry),
             )?;
+            // Last: lock down the shared tables. Everything above runs
+            // build-time writes through plain `Table::set`, which would
+            // trip the read-only `__newindex` guards.
+            freeze_shared_tables(&lua_guard)?;
         }
         Ok(PluginRuntime {
             lua: shared_lua,

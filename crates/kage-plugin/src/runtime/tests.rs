@@ -277,3 +277,51 @@ fn watchdog_aborts_runaway_eval() {
     let v = rt.eval("return 6 * 7").unwrap();
     assert_eq!(v.as_integer(), Some(42));
 }
+
+#[test]
+fn shared_tables_reject_new_keys_and_mt_swaps() {
+    let rt = PluginRuntime::new().unwrap();
+    assert!(
+        rt.eval("kage.definitely_unused_key = 1").is_err(),
+        "new key on shared table must fail"
+    );
+    assert!(
+        rt.eval("setmetatable(string, {})").is_err(),
+        "metatable swap must fail"
+    );
+    let v = rt.eval("return getmetatable(string) == false").unwrap();
+    assert!(
+        v.as_boolean() == Some(true),
+        "metatable must be protected from inspection: {v:?}"
+    );
+}
+
+#[test]
+fn plugin_stdlib_mutations_stay_private() {
+    let rt = PluginRuntime::new().unwrap();
+    // A plugin assigning into a shared table poisons only its own view.
+    rt.eval_plugin("a", "string.format = function() return 'pwned' end")
+        .unwrap();
+    let v = rt
+        .eval_plugin("a", "return string.format('%d', 7)")
+        .unwrap();
+    assert_eq!(v.as_string().unwrap().to_str().unwrap(), "pwned");
+    // Other plugins and the host still see the real stdlib.
+    let v = rt
+        .eval_plugin("b", "return string.format('%d', 7)")
+        .unwrap();
+    assert_eq!(
+        v.as_string().unwrap().to_str().unwrap(),
+        "7",
+        "mutation leaked to another plugin"
+    );
+    let v = rt.eval("return string.format('%d', 7)").unwrap();
+    assert_eq!(
+        v.as_string().unwrap().to_str().unwrap(),
+        "7",
+        "mutation leaked to host globals"
+    );
+    // Same for the kage surface: a plugin's shadow never reaches base.
+    rt.eval_plugin("a", "kage.shadow_probe = 1").unwrap();
+    assert!(rt.eval("return kage.shadow_probe").unwrap().is_nil());
+}

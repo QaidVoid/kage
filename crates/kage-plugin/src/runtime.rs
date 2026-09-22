@@ -19,12 +19,13 @@
 //!
 //! Each plugin is evaluated in its own `_ENV` (see
 //! [`PluginRuntime::eval_plugin`]): the standard library and the base
-//! `kage` API are shared read-only, but a plugin's own globals are
-//! private to it, and the obvious escapes back to the real globals
-//! (`_G`, `load`, `require`, `package`, `debug`) are removed. This is
-//! the substrate the opt-in capability tier builds on: elevated APIs
-//! attach to one plugin's environment, not the shared one. Until that
-//! tier lands the sandbox still guards against accidental, not
+//! `kage` API surface as a private per-plugin snapshot, so a plugin can
+//! mutate them without poisoning other plugins or the host, and the
+//! obvious escapes back to the real globals
+//! (`_G`, `load`, `require`, `package`, `debug`, `rawset`) are removed.
+//! This is the substrate the opt-in capability tier builds on: elevated
+//! APIs attach to one plugin's environment, not the shared one. Until
+//! that tier lands the sandbox still guards against accidental, not
 //! adversarial, access - run only plugins you trust.
 
 pub(crate) use std::collections::{BTreeMap, HashMap};
@@ -222,6 +223,9 @@ pub const SANDBOX_REMOVALS: &[(&str, &str)] = &[
     // registry and debug.setupvalue can rewrite another function's
     // `_ENV`, either of which defeats per-plugin isolation.
     ("", "debug"),
+    // `rawset` would bypass the `__newindex` guards that make the
+    // shared tables read-only once `build` finishes.
+    ("", "rawset"),
 ];
 
 /// Get or create the dedicated `_ENV` table for plugin `name`.
@@ -248,11 +252,31 @@ fn plugin_env(
     }
     let globals = lua.globals();
     let env = lua.create_table()?;
+    // Per-plugin snapshot of the shared tables: a fresh copy per env,
+    // so a plugin assigning e.g. `string.format` poisons only its own
+    // view, never another plugin or the host. The snapshot falls back
+    // to the shared globals for everything it does not carry (`print`,
+    // `pcall`, ...). Writes never reach the snapshot itself: a plugin's
+    // assignments land in its own env, one level above.
+    let snapshot = lua.create_table()?;
+    for shared in SHARED_TABLES {
+        let src: Table = globals.get(*shared)?;
+        let copy = lua.create_table()?;
+        for entry in src.pairs::<mlua::Value, mlua::Value>() {
+            let (key, value) = entry?;
+            copy.raw_set(key, value)?;
+        }
+        snapshot.raw_set(*shared, copy)?;
+    }
+    let snapshot_mt = lua.create_table()?;
+    snapshot_mt.set("__index", globals.clone())?;
+    snapshot.set_metatable(Some(snapshot_mt))?;
+
     let env_mt = lua.create_table()?;
-    env_mt.set("__index", globals.clone())?;
+    env_mt.set("__index", snapshot.clone())?;
     env.set_metatable(Some(env_mt))?;
 
-    let base_kage: Table = globals.get("kage")?;
+    let base_kage: Table = snapshot.get("kage")?;
     let pkage = lua.create_table()?;
     let pkage_mt = lua.create_table()?;
     pkage_mt.set("__index", base_kage)?;
@@ -294,6 +318,49 @@ fn apply_sandbox(lua: &Lua) -> Result<(), PluginError> {
         if let mlua::Value::Table(t) = table {
             t.set(*key, mlua::Value::Nil)?;
         }
+    }
+    Ok(())
+}
+
+/// Shared tables (standard library plus the base `kage` API) treated as
+/// read-only. Two layers: [`plugin_env`] gives each plugin a private
+/// copy of these, so a mutating plugin poisons only itself, and
+/// [`freeze_shared_tables`] stops further writes into the shared
+/// originals once `build` finishes (new keys raise, metatable
+/// protected).
+const SHARED_TABLES: &[&str] = &[
+    "string",
+    "table",
+    "math",
+    "os",
+    "io",
+    "coroutine",
+    "utf8",
+    "kage",
+];
+
+/// Guard the shared originals after all build-time installs:
+/// assignments of NEW keys raise, and a protected `__metatable` stops
+/// `setmetatable` from swapping the table out. Lua's `__newindex` does
+/// not fire for keys the table already has, so plugin isolation does
+/// not rely on this layer - see [`plugin_env`].
+fn freeze_shared_tables(lua: &Lua) -> Result<(), PluginError> {
+    let globals = lua.globals();
+    for name in SHARED_TABLES {
+        let table: Table = globals.get(*name)?;
+        let mt = lua.create_table()?;
+        mt.set(
+            "__newindex",
+            lua.create_function(
+                move |_, _: (mlua::Value, mlua::Value, mlua::Value)| -> mlua::Result<()> {
+                    Err(mlua::Error::external(format!(
+                        "shared table '{name}' is read-only"
+                    )))
+                },
+            )?,
+        )?;
+        mt.set("__metatable", false)?;
+        table.set_metatable(Some(mt))?;
     }
     Ok(())
 }

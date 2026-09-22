@@ -9,6 +9,13 @@ impl App {
     /// queue attached) or dispatch as a `RunRequest::Submit` over the
     /// worker channel. Image-bearing submits always take the channel
     /// path because the steering hook only carries text.
+    ///
+    /// The queue-vs-channel decision reads the in-flight flag while
+    /// holding the steering lock, the same order the worker's
+    /// end-of-run flush takes (queue, then usage flag). A submit
+    /// racing the end of a run therefore either queues before that
+    /// flush drains it, or sees the run over and takes the channel
+    /// path; it can never strand a prompt between the two.
     pub(crate) fn handle_submit(&mut self, text: String) {
         let images = self.input.take_attached();
         {
@@ -18,22 +25,20 @@ impl App {
                 buf.push_custom("kage:image", img.placeholder(), false);
             }
         }
-        let queue_steering =
-            images.is_empty() && self.steering.is_some() && self.is_run_in_flight();
-        if !queue_steering {
-            let _ = self.send_request(RunRequest::Submit { text, images });
-            return;
+        // Clone the Arc so the guard below cannot borrow `self`
+        // across the `&mut self` calls that follow.
+        if images.is_empty()
+            && let Some(queue) = self.steering.clone()
+        {
+            let mut q = lock(&queue);
+            if self.is_run_in_flight() {
+                q.push_back(text);
+                drop(q);
+                self.notify("queued for next turn");
+                return;
+            }
         }
-        let pushed = self
-            .steering
-            .as_ref()
-            .map(|q| {
-                lock(q).push_back(text);
-            })
-            .is_some();
-        if pushed {
-            self.notify("queued for next turn");
-        }
+        let _ = self.send_request(RunRequest::Submit { text, images });
     }
 
     pub(crate) fn apply(&mut self, action: InputAction) -> Option<AppExit> {

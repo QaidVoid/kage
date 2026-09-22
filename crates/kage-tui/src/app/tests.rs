@@ -286,6 +286,82 @@ fn submitting_a_prompt_pushes_user_block_and_request() {
 }
 
 #[test]
+fn steering_submit_while_run_in_flight_queues_and_holds_channel() {
+    let buffer = shared_buffer();
+    let (tx, rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    let steering = crate::events::shared_steering();
+    let usage = crate::usage::shared_session_usage();
+    usage.lock().unwrap().working = true;
+    app.set_steering_queue(steering.clone());
+    app.set_session_usage(usage);
+
+    app.handle_submit("later".into());
+
+    assert_eq!(
+        steering.lock().unwrap().pop_front().as_deref(),
+        Some("later"),
+        "mid-run text submit must land in the steering queue"
+    );
+    assert!(
+        rx.recv_timeout(Duration::from_millis(100)).is_err(),
+        "nothing may be sent on the worker channel while queued"
+    );
+}
+
+#[test]
+fn steering_submit_when_idle_takes_channel_path() {
+    let buffer = shared_buffer();
+    let (tx, rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    let steering = crate::events::shared_steering();
+    app.set_steering_queue(steering.clone());
+    app.set_session_usage(crate::usage::shared_session_usage());
+
+    app.handle_submit("now".into());
+
+    match rx.recv_timeout(Duration::from_millis(100)).unwrap() {
+        RunRequest::Submit { text, images } => {
+            assert_eq!(text, "now");
+            assert!(images.is_empty());
+        }
+        other => panic!("expected Submit, got {other:?}"),
+    }
+    assert!(steering.lock().unwrap().is_empty());
+}
+
+#[test]
+fn steering_submit_with_images_takes_channel_even_mid_run() {
+    let buffer = shared_buffer();
+    let (tx, rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    let steering = crate::events::shared_steering();
+    let usage = crate::usage::shared_session_usage();
+    usage.lock().unwrap().working = true;
+    app.set_steering_queue(steering.clone());
+    app.set_session_usage(usage);
+    app.input.attach_image(crate::image::AttachedImage {
+        source: kage_core::ImageSource::Base64 {
+            data: "AAAA".into(),
+        },
+        mime: "image/png".into(),
+        label: "shot.png".into(),
+        bytes: 3,
+    });
+
+    app.handle_submit("look".into());
+
+    match rx.recv_timeout(Duration::from_millis(100)).unwrap() {
+        RunRequest::Submit { text, images } => {
+            assert_eq!(text, "look");
+            assert_eq!(images.len(), 1);
+        }
+        other => panic!("expected Submit with images, got {other:?}"),
+    }
+    assert!(steering.lock().unwrap().is_empty());
+}
+
+#[test]
 fn ctrl_c_in_normal_emits_cancel_request() {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();

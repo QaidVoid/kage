@@ -33,6 +33,31 @@ pub(crate) fn drain_mcp_updates(
     }
 }
 
+/// Drain leftover steering prompts into the worker channel and clear
+/// the in-flight flag as one critical section, ending a run span
+/// (`Submit` and `CompactNow` alike). Locks the steering queue before
+/// the usage mutex - the same order `App::handle_submit` uses when it
+/// reads the flag under the queue lock - so a submit racing the end
+/// of a run either queues before this drain and is re-sent FIFO with
+/// any post-run channel submits, or sees `working == false` and takes
+/// the channel path. The agent loop makes no final steering check
+/// when its last turn ends, so a prompt that missed the drain would
+/// otherwise strand in the queue.
+fn end_run_span(
+    steering: &kage_tui::SharedSteering,
+    session_usage: &SharedSessionUsage,
+    tx_self: &mpsc::Sender<RunRequest>,
+) {
+    let mut q = lock(steering);
+    while let Some(text) = q.pop_front() {
+        let _ = tx_self.send(RunRequest::Submit {
+            text,
+            images: Vec::new(),
+        });
+    }
+    lock(session_usage).working = false;
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
     thread::spawn(move || {
@@ -149,27 +174,11 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         context_window,
                         steering.clone(),
                     );
-                    // Re-submit any prompts the user queued after the
-                    // last turn boundary checked steering: the inner
-                    // loop exits as soon as a turn finishes without
-                    // tool calls, so a late-arriving steering item is
-                    // not picked up. Resending through the channel
-                    // preserves FIFO with any post-run submits and
-                    // reuses the full Submit path (history, session
-                    // title, etc.) without duplicating handler logic.
-                    // Drains before flipping `working = false` so a
-                    // simultaneous user submit cannot race ahead of
-                    // earlier queued items.
-                    {
-                        let mut q = lock(&steering);
-                        while let Some(text) = q.pop_front() {
-                            let _ = tx_self.send(RunRequest::Submit {
-                                text,
-                                images: Vec::new(),
-                            });
-                        }
-                    }
-                    lock(&session_usage).working = false;
+                    // Re-submit prompts queued after the last turn
+                    // boundary checked steering (the inner loop exits
+                    // without a final steering check), FIFO with any
+                    // post-run channel submits; also flips `working`.
+                    end_run_span(&steering, &session_usage, &tx_self);
                     if ok && let Err(err) = crate::state::record_last_model(&qualified) {
                         let mut buf = lock(&buffer);
                         buf.push_custom("kage:error", format!("state: {err}"), false);
@@ -347,7 +356,7 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         plugin_runtime.as_ref(),
                         writer_for_turn,
                     );
-                    lock(&session_usage).working = false;
+                    end_run_span(&steering, &session_usage, &tx_self);
                     match ran {
                         Ok(true) => {}
                         Ok(false) => {

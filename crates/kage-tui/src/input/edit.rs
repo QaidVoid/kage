@@ -146,9 +146,15 @@ impl InputState {
                     Vec::new()
                 } else if self.text.is_empty() {
                     // Nothing to send; an image attached without a
-                    // surviving marker is stale - drop it.
+                    // surviving marker is stale - drop it, but say so
+                    // rather than vanishing silently.
+                    let stale = !self.attached.is_empty();
                     self.attached.clear();
-                    Vec::new()
+                    if stale {
+                        vec![InputAction::DroppedStaleAttach]
+                    } else {
+                        Vec::new()
+                    }
                 } else {
                     let raw = std::mem::take(&mut self.text);
                     let expanded = self.resolve_pastes(&raw);

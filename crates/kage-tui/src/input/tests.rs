@@ -65,6 +65,25 @@ fn attach_inserts_marker_and_submit_strips_it_keeping_image() {
 }
 
 #[test]
+fn empty_submit_with_orphaned_attach_warns_and_drops() {
+    let mut s = InputState::new();
+    s.attach_image(img("a.png"));
+    // Simulate an edit that removed the marker text without dropping
+    // the attachment (undo across the attach does this).
+    s.text.clear();
+    let acts = s.handle_key(key(KeyCode::Enter));
+    assert_eq!(acts, vec![InputAction::DroppedStaleAttach]);
+    assert!(s.attached().is_empty(), "the stale image is dropped");
+}
+
+#[test]
+fn empty_submit_without_attachments_stays_silent() {
+    let mut s = InputState::new();
+    let acts = s.handle_key(key(KeyCode::Enter));
+    assert!(acts.is_empty());
+}
+
+#[test]
 fn one_backspace_deletes_the_whole_marker_and_drops_the_image() {
     let mut s = InputState::new();
     s.attach_image(img("a.png"));

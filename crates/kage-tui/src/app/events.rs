@@ -54,6 +54,9 @@ impl App {
         // modal state machine still cycles cleanly.
         match action {
             InputAction::Submit(text) => self.handle_submit(text),
+            InputAction::DroppedStaleAttach => {
+                self.notify("dropped stale image attach (the prompt was empty)");
+            }
             InputAction::Scroll(delta) => self.scroll_by(delta),
             InputAction::ScrollToTop => self.set_scroll(0),
             InputAction::ScrollToBottom => self.follow(),

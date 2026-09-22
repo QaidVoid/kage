@@ -132,8 +132,7 @@ fn tool_updates_are_emitted_before_tool_call_end() {
         parent,
         &mut hooks,
         &mut |ev| emitted.push(ev),
-    )
-    .unwrap();
+    );
     assert_eq!(outcome.results.len(), 1);
 
     let updates: Vec<_> = emitted
@@ -178,8 +177,7 @@ fn parallel_dispatch_emits_tool_updates_per_call() {
         parent,
         &mut hooks,
         &mut |ev| emitted.push(ev),
-    )
-    .unwrap();
+    );
     assert_eq!(outcome.results.len(), 2);
 
     let updates = emitted
@@ -210,7 +208,6 @@ fn dispatches_in_input_order_and_appends_results() {
         &mut hooks,
         &mut |ev| emitted.push(ev),
     )
-    .unwrap()
     .results;
     assert_eq!(results.len(), 2);
     for result in &results {
@@ -245,7 +242,6 @@ fn unknown_tool_yields_error_output_not_loop_failure() {
         &mut hooks,
         &mut |_| {},
     )
-    .unwrap()
     .results;
     assert_eq!(results.len(), 1);
     match &results[0].content[0] {
@@ -275,7 +271,6 @@ fn tool_error_converts_to_error_output() {
         &mut hooks,
         &mut |_| {},
     )
-    .unwrap()
     .results;
     assert_eq!(results.len(), 1);
     if let Content::ToolResultBlock {
@@ -323,7 +318,6 @@ fn before_tool_call_can_short_circuit_execution() {
         &mut hooks,
         &mut |_| {},
     )
-    .unwrap()
     .results;
     assert_eq!(results.len(), 1);
     match &results[0].content[0] {
@@ -361,7 +355,6 @@ fn after_tool_call_can_rewrite_output() {
         &mut hooks,
         &mut |_| {},
     )
-    .unwrap()
     .results;
     match &results[0].content[0] {
         Content::ToolResultBlock { output, .. } => {
@@ -428,7 +421,6 @@ fn parallel_dispatch_preserves_input_order() {
         &mut hooks,
         &mut |_| {},
     )
-    .unwrap()
     .results;
     assert_eq!(results.len(), 3);
     assert!(matches!(
@@ -470,7 +462,6 @@ fn parallel_dispatch_actually_runs_concurrently() {
         &mut hooks,
         &mut |_| {},
     )
-    .unwrap()
     .results;
     let elapsed = start.elapsed();
 
@@ -528,7 +519,6 @@ fn parallel_dispatch_honors_before_tool_call_short_circuit() {
         &mut hooks,
         &mut |_| {},
     )
-    .unwrap()
     .results;
     assert_eq!(results.len(), 3);
     if let Content::ToolResultBlock {
@@ -541,15 +531,161 @@ fn parallel_dispatch_honors_before_tool_call_short_circuit() {
 }
 
 #[test]
-fn cancellation_aborts_dispatch() {
+fn cancelled_batch_synthesizes_error_results() {
     let tools = registry_with_echo();
     let cancel = CancelFlag::new();
     cancel.cancel();
     let parent = MessageId::new();
     let mut hooks = NoopHooks;
+    let mut emitted = Vec::new();
 
-    let res = dispatch_tool_calls(
+    let outcome = dispatch_tool_calls(
         vec![pending("echo", serde_json::json!({}))],
+        &tools,
+        std::path::Path::new("/tmp"),
+        &cancel,
+        parent,
+        &mut hooks,
+        &mut |ev| emitted.push(ev),
+    );
+    assert_eq!(outcome.error, Some(LoopError::Cancelled));
+    assert_eq!(outcome.results.len(), 1);
+    match &outcome.results[0].content[0] {
+        Content::ToolResultBlock {
+            is_error,
+            output,
+            call_id,
+        } => {
+            assert!(*is_error);
+            assert!(output.contains("cancelled"));
+            assert_eq!(*call_id, ToolCallId::new("call_echo"));
+        }
+        other => panic!("unexpected content: {other:?}"),
+    }
+    let ends = emitted
+        .iter()
+        .filter(|e| matches!(e, LoopEvent::ToolCallEnd { .. }))
+        .count();
+    assert_eq!(ends, 1, "ToolCallEnd must still fire for the aborted call");
+}
+
+/// Tool that always reports cancellation, like a host interrupt mid-run.
+#[derive(Debug)]
+struct CancelTool;
+
+impl Tool for CancelTool {
+    fn name(&self) -> &'static str {
+        "cancel"
+    }
+    fn description(&self) -> &'static str {
+        "always reports cancellation"
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn risk(&self) -> Risk {
+        Risk::Read
+    }
+    fn execute(
+        &self,
+        _input: serde_json::Value,
+        _cx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        Err(ToolError::Cancelled)
+    }
+}
+
+#[test]
+fn mid_batch_cancel_synthesizes_remaining_results() {
+    let tools = ToolRegistry::new()
+        .with(Arc::new(EchoTool))
+        .with(Arc::new(CancelTool));
+    let cancel = CancelFlag::new();
+    let parent = MessageId::new();
+    let mut hooks = NoopHooks;
+    let mut emitted = Vec::new();
+
+    let outcome = dispatch_tool_calls(
+        vec![
+            pending("echo", serde_json::json!({"i": 0})),
+            pending("cancel", serde_json::json!({})),
+            pending("echo", serde_json::json!({"i": 2})),
+        ],
+        &tools,
+        std::path::Path::new("/tmp"),
+        &cancel,
+        parent,
+        &mut hooks,
+        &mut |ev| emitted.push(ev),
+    );
+    assert_eq!(outcome.error, Some(LoopError::Cancelled));
+    assert_eq!(outcome.results.len(), 3);
+
+    let as_block = |msg: &Message| match &msg.content[0] {
+        Content::ToolResultBlock {
+            call_id,
+            output,
+            is_error,
+        } => (call_id.clone(), output.clone(), *is_error),
+        other => panic!("unexpected content: {other:?}"),
+    };
+    let (id0, out0, err0) = as_block(&outcome.results[0]);
+    assert!(!err0, "call before the cancel keeps its real output");
+    assert!(out0.contains("\"i\":0"));
+    let (_, out1, err1) = as_block(&outcome.results[1]);
+    assert!(err1 && out1.contains("cancelled"));
+    let (_, out2, err2) = as_block(&outcome.results[2]);
+    assert!(err2 && out2.contains("cancelled"));
+    assert_eq!(id0, ToolCallId::new("call_echo"));
+
+    let ends = emitted
+        .iter()
+        .filter(|e| matches!(e, LoopEvent::ToolCallEnd { .. }))
+        .count();
+    assert_eq!(ends, 3, "every call in the batch gets a ToolCallEnd");
+}
+
+/// Tool that panics, standing in for a tool bug blowing up its thread.
+#[derive(Debug)]
+struct PanicTool;
+
+impl Tool for PanicTool {
+    fn name(&self) -> &'static str {
+        "panic"
+    }
+    fn description(&self) -> &'static str {
+        "always panics"
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn risk(&self) -> Risk {
+        Risk::Read
+    }
+    fn execute(
+        &self,
+        _input: serde_json::Value,
+        _cx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        panic!("boom");
+    }
+}
+
+#[test]
+fn parallel_batch_keeps_successful_outputs_when_one_panics() {
+    let tools = ToolRegistry::new()
+        .with(Arc::new(EchoTool))
+        .with(Arc::new(PanicTool));
+    let cancel = CancelFlag::new();
+    let parent = MessageId::new();
+    let mut hooks = NoopHooks;
+
+    let outcome = dispatch_tool_calls_parallel(
+        vec![
+            pending("echo", serde_json::json!({"i": 0})),
+            pending("panic", serde_json::json!({})),
+            pending("echo", serde_json::json!({"i": 2})),
+        ],
         &tools,
         std::path::Path::new("/tmp"),
         &cancel,
@@ -557,5 +693,56 @@ fn cancellation_aborts_dispatch() {
         &mut hooks,
         &mut |_| {},
     );
-    assert!(matches!(res, Err(LoopError::Cancelled)));
+    assert!(matches!(outcome.error, Some(LoopError::Other { .. })));
+    assert_eq!(outcome.results.len(), 3);
+    let as_block = |msg: &Message| match &msg.content[0] {
+        Content::ToolResultBlock {
+            output, is_error, ..
+        } => (output.clone(), *is_error),
+        other => panic!("unexpected content: {other:?}"),
+    };
+    let (out0, err0) = as_block(&outcome.results[0]);
+    assert!(
+        !err0 && out0.contains("\"i\":0"),
+        "panic must not discard sibling outputs"
+    );
+    let (_, err1) = as_block(&outcome.results[1]);
+    assert!(err1);
+    let (out2, err2) = as_block(&outcome.results[2]);
+    assert!(!err2 && out2.contains("\"i\":2"));
+}
+
+#[test]
+fn parallel_cancelled_call_synthesizes_and_keeps_others() {
+    let tools = ToolRegistry::new()
+        .with(Arc::new(EchoTool))
+        .with(Arc::new(CancelTool));
+    let cancel = CancelFlag::new();
+    let parent = MessageId::new();
+    let mut hooks = NoopHooks;
+
+    let outcome = dispatch_tool_calls_parallel(
+        vec![
+            pending("echo", serde_json::json!({"i": 0})),
+            pending("cancel", serde_json::json!({})),
+        ],
+        &tools,
+        std::path::Path::new("/tmp"),
+        &cancel,
+        parent,
+        &mut hooks,
+        &mut |_| {},
+    );
+    assert_eq!(outcome.error, Some(LoopError::Cancelled));
+    assert_eq!(outcome.results.len(), 2);
+    let as_block = |msg: &Message| match &msg.content[0] {
+        Content::ToolResultBlock {
+            output, is_error, ..
+        } => (output.clone(), *is_error),
+        other => panic!("unexpected content: {other:?}"),
+    };
+    let (out0, err0) = as_block(&outcome.results[0]);
+    assert!(!err0 && out0.contains("\"i\":0"));
+    let (out1, err1) = as_block(&outcome.results[1]);
+    assert!(err1 && out1.contains("cancelled"));
 }

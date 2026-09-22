@@ -129,7 +129,8 @@ pub trait Hooks {
         None
     }
 
-    /// Fired after a tool produces an output (real or short-circuited).
+    /// Fired after a tool produces an output (real, short-circuited, or
+    /// synthesized when the call aborted before producing one).
     ///
     /// Return value replaces the output the loop appends to history. Use
     /// this to redact secrets, truncate output, or attach metadata.

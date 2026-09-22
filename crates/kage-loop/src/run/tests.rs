@@ -1633,3 +1633,93 @@ fn cancel_during_backoff_aborts_cleanly() {
     assert!(matches!(res, Err(LoopError::Cancelled)));
     assert_eq!(mock.call_count(), 1, "retry never issued after cancel");
 }
+
+/// Tool that always reports cancellation, like a host interrupt mid-run.
+#[derive(Debug)]
+struct CancelTool;
+
+impl kage_tools::Tool for CancelTool {
+    fn name(&self) -> &'static str {
+        "cancel"
+    }
+    fn description(&self) -> &'static str {
+        "always reports cancellation"
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn risk(&self) -> kage_core::Risk {
+        kage_core::Risk::Read
+    }
+    fn execute(
+        &self,
+        _input: serde_json::Value,
+        _cx: &kage_tools::ToolContext<'_>,
+    ) -> Result<kage_core::ToolOutput, kage_tools::ToolError> {
+        Err(kage_tools::ToolError::Cancelled)
+    }
+}
+
+#[test]
+fn cancel_mid_dispatch_answers_every_tool_call_in_history() {
+    let call_id = kage_core::ToolCallId::new("call_1");
+    let mock = MockProvider::replaying(vec![
+        Ok(ProviderEvent::MessageStart),
+        Ok(ProviderEvent::ToolCallStart {
+            id: call_id.clone(),
+            name: "cancel".into(),
+        }),
+        Ok(ProviderEvent::ToolCallEnd {
+            id: call_id.clone(),
+            input: serde_json::json!({}),
+        }),
+        Ok(ProviderEvent::MessageEnd {
+            stop_reason: StopReason::ToolUse,
+            usage: TokenUsage::default(),
+        }),
+    ]);
+    let mut cx = AgentContext::new("mock:m", "");
+    cx.history.push(user_msg("go"));
+    let cfg = LoopConfig::default();
+    let mut hooks = NoopHooks;
+    let cancel = CancelFlag::new();
+    let registry = ToolRegistry::new().with(std::sync::Arc::new(CancelTool));
+
+    let mut events = Vec::new();
+    let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |ev| {
+        events.push(ev);
+    });
+    assert!(matches!(res, Err(LoopError::Cancelled)));
+
+    // The assistant message carrying the tool_use must be answered by a
+    // tool_result, or a resumed session would send a dangling tool_use.
+    let tool_uses = cx
+        .history
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter(|c| matches!(c, Content::ToolCall { .. }))
+        .count();
+    let tool_results = cx
+        .history
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter(|c| matches!(c, Content::ToolResultBlock { .. }))
+        .count();
+    assert_eq!(tool_uses, 1);
+    assert_eq!(
+        tool_results, 1,
+        "cancelled tool call must still be answered"
+    );
+
+    let answered_is_error = cx.history.iter().rev().find_map(|m| match &m.content[0] {
+        Content::ToolResultBlock { is_error, .. } => Some(*is_error),
+        _ => None,
+    });
+    assert_eq!(answered_is_error, Some(true));
+    assert!(matches!(
+        events.last(),
+        Some(kage_core::LoopEvent::Error {
+            kind: kage_core::LoopError::Cancelled,
+        })
+    ));
+}

@@ -208,7 +208,7 @@ where
             } else {
                 dispatch_tool_calls
             };
-            let outcome = match dispatch(
+            let outcome = dispatch(
                 pending.clone(),
                 tools,
                 &workdir,
@@ -216,13 +216,15 @@ where
                 assistant_id,
                 hooks,
                 &mut emit,
-            ) {
-                Ok(o) => o,
-                Err(kind) => {
-                    emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
-                    return Err(kind);
-                }
-            };
+            );
+            if let Some(kind) = outcome.error {
+                // Every tool_use in the assistant message now has an answer
+                // in `outcome.results`; append them so in-memory history and
+                // the persisted session never carry a dangling tool_use.
+                cx.history.extend(outcome.results);
+                emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
+                return Err(kind);
+            }
             let results = outcome.results;
             // If every tool in the batch signaled `terminate`, persist the
             // results and exit the run cleanly. The loop never asks the

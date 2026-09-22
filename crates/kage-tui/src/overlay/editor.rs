@@ -170,14 +170,21 @@ impl OverlayWidget for EditorOverlay {
             .split(inner);
 
         let body_area = chunks[0];
+        // Keep the cursor row on screen: when it falls below the
+        // visible window, scroll just far enough to bring it back.
+        // The offset is derived per frame from the cursor, so there
+        // is no scroll state to keep in sync with edits.
+        let visible = usize::from(body_area.height);
+        let offset = (self.cursor.0 + 1).saturating_sub(visible);
         let lines: Vec<Line<'static>> = self
             .lines
             .iter()
             .map(|l| Line::from(Span::styled(l.clone(), Style::default().fg(Color::White))))
             .collect();
-        Widget::render(Paragraph::new(lines), body_area, buf);
+        let scroll = u16::try_from(offset).unwrap_or(u16::MAX);
+        Widget::render(Paragraph::new(lines).scroll((scroll, 0)), body_area, buf);
 
-        self.paint_cursor(body_area, buf);
+        self.paint_cursor(body_area, buf, offset);
 
         Widget::render(
             Paragraph::new(Line::from(Span::styled(
@@ -259,12 +266,16 @@ impl OverlayWidget for EditorOverlay {
 }
 
 impl EditorOverlay {
-    fn paint_cursor(&self, body_area: Rect, buf: &mut Buffer) {
+    /// Paint the cursor cell for logical row `cursor.0`, translated
+    /// into the window `[offset, offset + height)`. Rows outside the
+    /// window (never happens with the render-side offset, but kept as
+    /// a bounds guard) are skipped.
+    fn paint_cursor(&self, body_area: Rect, buf: &mut Buffer, offset: usize) {
         let (row, col) = self.cursor;
-        if row >= usize::from(body_area.height) {
+        if row < offset || row >= offset + usize::from(body_area.height) {
             return;
         }
-        let row_u16 = u16::try_from(row).unwrap_or(u16::MAX);
+        let row_u16 = u16::try_from(row - offset).unwrap_or(u16::MAX);
         let col_u16 = u16::try_from(col).unwrap_or(u16::MAX);
         let x = body_area.x.saturating_add(col_u16);
         let y = body_area.y.saturating_add(row_u16);
@@ -409,6 +420,18 @@ mod tests {
         let lines = snapshot(&mut e, Rect::new(0, 0, 80, 24));
         assert!(lines.iter().any(|l| l.contains("first")));
         assert!(lines.iter().any(|l| l.contains("second")));
+    }
+
+    #[test]
+    fn render_scrolls_to_keep_the_cursor_row_visible() {
+        // 25 lines in a viewport whose modal body shows 17 rows: the
+        // cursor parks on "line24", previously clipped off-screen.
+        let body: Vec<String> = (0..25).map(|i| format!("line{i:02}")).collect();
+        let mut e = EditorOverlay::new("Compose").with_prefill(body.join("\n"));
+        let lines = snapshot(&mut e, Rect::new(0, 0, 80, 24));
+        assert!(lines.iter().any(|l| l.contains("line24")));
+        // The window scrolled down, hiding the first rows.
+        assert!(!lines.iter().any(|l| l.contains("line00")));
     }
 
     #[test]

@@ -271,17 +271,24 @@ impl Buffer {
         }
     }
 
-    /// Drain the buffer's blocks, resetting scroll to zero. Useful for
-    /// `kage resume` and tests.
+    /// Drain the buffer's blocks, resetting scroll and focus to zero.
+    /// Useful for `kage resume` and tests. Focus must go too: a stale
+    /// index past the (now empty) block list would panic the next
+    /// render, and `set_focus`'s range check never sees this path.
     pub fn clear(&mut self) {
         self.blocks.clear();
         self.clear_block_caches();
         self.scroll = 0;
+        self.focus = None;
+        self.last_drawn_focus = None;
     }
 
-    /// Take ownership of the blocks, leaving the buffer empty.
+    /// Take ownership of the blocks, leaving the buffer empty. Focus
+    /// and scroll reset for the same reason as [`Self::clear`].
     pub fn take(&mut self) -> Vec<Block> {
         self.scroll = 0;
+        self.focus = None;
+        self.last_drawn_focus = None;
         self.clear_block_caches();
         mem::take(&mut self.blocks)
     }

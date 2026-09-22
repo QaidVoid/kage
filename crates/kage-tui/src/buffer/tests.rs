@@ -289,6 +289,24 @@ fn set_focus_only_rejects_out_of_range() {
 }
 
 #[test]
+fn clear_and_take_reset_focus_so_render_cannot_index_stale() {
+    let mut buf = Buffer::new();
+    buf.push_user("hi");
+    buf.push_tool_call("c1", "ls", ".", "{}");
+    buf.set_focus(Some(1));
+    buf.clear();
+    assert_eq!(buf.focus(), None);
+    assert_eq!(buf.effective_focus(), None);
+
+    buf.push_user("back");
+    buf.set_focus(Some(0));
+    let blocks = buf.take();
+    assert_eq!(blocks.len(), 1);
+    assert_eq!(buf.focus(), None);
+    assert_eq!(buf.effective_focus(), None);
+}
+
+#[test]
 fn block_text_returns_raw_markdown_source_not_render() {
     let mut buf = Buffer::new();
     buf.push_user("hi");

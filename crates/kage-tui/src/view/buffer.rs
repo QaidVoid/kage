@@ -93,14 +93,18 @@ pub(super) fn render_buffer(
             } else {
                 Some(focus_idx)
             };
-            if let Some(di) = display_idx {
+            if let Some(di) = display_idx
+                && let Some(&rendered_height) = heights.get(di)
+            {
+                // A focus index past `heights` (host reset shrank the
+                // buffer between frames) skips the follow-scroll
+                // instead of panicking the render.
                 let mut rendered_start = 0usize;
                 for (i, h) in heights.iter().enumerate().take(di) {
                     if !consumed_results.contains(&i) {
                         rendered_start = rendered_start.saturating_add(*h).saturating_add(1);
                     }
                 }
-                let rendered_height = heights[di];
                 let rendered_end = rendered_start.saturating_add(rendered_height);
                 let scroll_to_top = total_rows.saturating_sub(rendered_start + visible);
                 let scroll_to_bottom = total_rows.saturating_sub(rendered_end);

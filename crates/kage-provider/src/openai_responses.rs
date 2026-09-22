@@ -64,6 +64,14 @@ impl Provider for OpenAiResponsesProvider {
         &self.metadata
     }
 
+    /// Reasoning summaries stream back as ordinary text, so replaying
+    /// them as `reasoning` items is unsigned and accepted. Required for
+    /// reasoning models, whose `function_call` items must be preceded by
+    /// their `reasoning` item on replay.
+    fn preserves_thinking(&self) -> bool {
+        true
+    }
+
     fn stream(
         &self,
         req: StreamRequest,
@@ -182,7 +190,15 @@ fn convert_assistant_items(blocks: &[Content]) -> Vec<Value> {
             Content::Text { text } => {
                 text_parts.push(serde_json::json!({"type":"output_text","text":text}));
             }
+            Content::Thinking { text } if !text.trim().is_empty() => {
+                flush_assistant_text(&mut items, &mut text_parts);
+                items.push(serde_json::json!({
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": text}],
+                }));
+            }
             Content::ToolCall { id, name, input } => {
+                flush_assistant_text(&mut items, &mut text_parts);
                 items.push(serde_json::json!({
                     "type": "function_call",
                     "call_id": id.0,
@@ -193,17 +209,22 @@ fn convert_assistant_items(blocks: &[Content]) -> Vec<Value> {
             _ => {}
         }
     }
-    if !text_parts.is_empty() {
-        items.insert(
-            0,
-            serde_json::json!({
-                "type": "message",
-                "role": "assistant",
-                "content": text_parts,
-            }),
-        );
-    }
+    flush_assistant_text(&mut items, &mut text_parts);
     items
+}
+
+/// Emit accumulated assistant text as one `message` item, in stream
+/// order. Called at each non-text block so `reasoning` items keep their
+/// position ahead of the `function_call` items they belong to.
+fn flush_assistant_text(items: &mut Vec<Value>, text_parts: &mut Vec<Value>) {
+    if text_parts.is_empty() {
+        return;
+    }
+    items.push(serde_json::json!({
+        "type": "message",
+        "role": "assistant",
+        "content": std::mem::take(text_parts),
+    }));
 }
 
 fn convert_tool_result_items(blocks: &[Content]) -> Vec<Value> {
@@ -652,6 +673,84 @@ mod tests {
         assert_eq!(input[0]["type"], "function_call_output");
         assert_eq!(input[0]["call_id"], "call_1");
         assert_eq!(input[0]["output"], "127.0.0.1");
+    }
+
+    #[test]
+    fn reasoning_precedes_function_call_on_replay() {
+        let assistant = Message::new(
+            Role::Assistant,
+            vec![
+                Content::Thinking {
+                    text: "need the file first".into(),
+                },
+                Content::ToolCall {
+                    id: ToolCallId::new("call_1"),
+                    name: "read".into(),
+                    input: serde_json::json!({"path":"/x"}),
+                },
+            ],
+            None,
+        );
+        let req = StreamRequest::new("gpt-5", vec![user_msg("read"), assistant]);
+        let body = build_request_body(&req, true);
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[1]["type"], "reasoning");
+        assert_eq!(input[1]["summary"][0]["type"], "summary_text");
+        assert_eq!(input[1]["summary"][0]["text"], "need the file first");
+        assert_eq!(input[2]["type"], "function_call");
+    }
+
+    #[test]
+    fn blank_thinking_blocks_do_not_emit_reasoning_items() {
+        let assistant = Message::new(
+            Role::Assistant,
+            vec![
+                Content::Thinking { text: "   ".into() },
+                Content::Text {
+                    text: "done".into(),
+                },
+            ],
+            None,
+        );
+        let req = StreamRequest::new("gpt-5", vec![user_msg("hi"), assistant]);
+        let body = build_request_body(&req, true);
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[1]["type"], "message");
+        assert_eq!(input[1]["content"][0]["text"], "done");
+    }
+
+    #[test]
+    fn thinking_text_and_tool_call_keep_stream_order() {
+        let assistant = Message::new(
+            Role::Assistant,
+            vec![
+                Content::Thinking { text: "why".into() },
+                Content::Text {
+                    text: "checking".into(),
+                },
+                Content::ToolCall {
+                    id: ToolCallId::new("call_1"),
+                    name: "read".into(),
+                    input: serde_json::json!({"path":"/x"}),
+                },
+            ],
+            None,
+        );
+        let req = StreamRequest::new("gpt-5", vec![user_msg("read"), assistant]);
+        let body = build_request_body(&req, true);
+        let input = body["input"].as_array().unwrap();
+        let kinds: Vec<&str> = input[1..]
+            .iter()
+            .filter_map(|i| i["type"].as_str())
+            .collect();
+        assert_eq!(kinds, vec!["reasoning", "message", "function_call"]);
+    }
+
+    #[test]
+    fn provider_preserves_thinking_for_reasoning_replay() {
+        assert!(OpenAiResponsesProvider::new("k").preserves_thinking());
     }
 
     fn stream_from_bytes(bytes: &'static [u8]) -> ResponsesStream {

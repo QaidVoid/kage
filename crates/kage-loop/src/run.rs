@@ -301,11 +301,13 @@ pub(crate) fn emit_one<F: FnMut(LoopEvent)>(hooks: &mut dyn Hooks, emit: &mut F,
 /// Thinking blocks are not portable across a request boundary. kage
 /// never persists the cryptographic signature Anthropic requires to
 /// replay a native thinking block, so sending one back is rejected by
-/// that API; `OpenAI` and Gemini drop unknown content silently, losing
-/// the reasoning chain outright. Switching models mid-session makes
-/// both failure modes worse. Flattening historical thinking to plain
-/// text keeps the reasoning visible to whatever provider runs the
-/// next turn, regardless of which produced it.
+/// that API; the `OpenAI` chat-completions and Gemini providers drop
+/// unknown content silently, losing the reasoning chain outright.
+/// Switching models mid-session makes both failure modes worse.
+/// Flattening historical thinking to plain text keeps the reasoning
+/// visible to whatever provider runs the next turn, regardless of
+/// which produced it. Providers that can accept native blocks opt out
+/// via [`Provider::preserves_thinking`].
 ///
 /// Only persisted history is touched. The in-flight assistant turn is
 /// not appended to `cx.history` until after it has streamed, so live

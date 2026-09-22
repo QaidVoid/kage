@@ -812,6 +812,36 @@ fn count_prefix_with_operator_3dw() {
 }
 
 #[test]
+fn absurd_count_digit_run_caps_the_count() {
+    let mut state = InputState::new();
+    state.handle_key(key(KeyCode::Esc));
+    for _ in 0..30 {
+        state.handle_key(key(KeyCode::Char('9')));
+    }
+    assert_eq!(state.pending_count, Some(MAX_COUNT));
+}
+
+#[test]
+fn paste_beyond_max_payload_is_refused() {
+    let mut state = InputState::new();
+    state.register = "x".repeat(MAX_PASTE_BYTES);
+    state.handle_key(key(KeyCode::Esc));
+    state.handle_key(key(KeyCode::Char('3')));
+    state.handle_key(key(KeyCode::Char('p')));
+    assert_eq!(state.text(), "", "3 MiB payload must not be allocated");
+}
+
+#[test]
+fn paste_within_max_payload_still_pastes() {
+    let mut state = InputState::new();
+    state.register = "ab".to_owned();
+    state.handle_key(key(KeyCode::Esc));
+    state.handle_key(key(KeyCode::Char('3')));
+    state.handle_key(key(KeyCode::Char('p')));
+    assert_eq!(state.text(), "ababab");
+}
+
+#[test]
 fn capital_d_deletes_to_end_of_line() {
     let mut state = InputState::new();
     state.paste("hello world");

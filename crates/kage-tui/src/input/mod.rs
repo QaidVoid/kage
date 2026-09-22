@@ -161,6 +161,15 @@ const KILL_RING_MAX: usize = 60;
 /// text). Keeps a multi-hundred-line paste from flooding the input.
 const PASTE_COLLAPSE_LINES: usize = 10;
 
+/// Upper bound for a vim-style count prefix (`5dw`). Digit runs past
+/// this saturate here instead of building a count large enough to
+/// hang motion loops or explode paste allocations.
+const MAX_COUNT: usize = 10_000;
+
+/// Upper bound on one `p`/`P` paste payload (register length ×
+/// count). A paste beyond this is refused rather than allocated.
+const MAX_PASTE_BYTES: usize = 1 << 20;
+
 /// One step on the undo or redo stack. We snapshot full text +
 /// cursor rather than diff-encode because input bodies are small
 /// (capped to a handful of KB by the host) and snapshot semantics

@@ -5,15 +5,16 @@ use super::*;
 
 impl InputState {
     /// Walk the count digit `c` into [`Self::pending_count`]. Caps
-    /// the accumulator at `usize::MAX / 10` so absurd input can't
-    /// overflow.
+    /// the accumulator at [`MAX_COUNT`] so an absurd digit run can't
+    /// build a count that hangs motion loops or explodes pastes.
     pub(crate) fn accumulate_count(&mut self, c: char) {
         let digit = (c as u32).saturating_sub('0' as u32) as usize;
         let next = self
             .pending_count
             .unwrap_or(0)
             .saturating_mul(10)
-            .saturating_add(digit);
+            .saturating_add(digit)
+            .min(MAX_COUNT);
         self.pending_count = Some(next);
     }
 
@@ -148,6 +149,9 @@ impl InputState {
             return;
         }
         let count = count.max(1);
+        if !paste_fits(&self.register, count) {
+            return;
+        }
         self.snapshot_for_undo();
         let payload = self.register.repeat(count);
         if self.register_linewise {
@@ -183,6 +187,9 @@ impl InputState {
             return;
         }
         let count = count.max(1);
+        if !paste_fits(&self.register, count) {
+            return;
+        }
         self.snapshot_for_undo();
         let payload = self.register.repeat(count);
         if self.register_linewise {
@@ -251,4 +258,12 @@ impl InputState {
             _ => Vec::new(),
         }
     }
+}
+
+/// Guard for [`InputState::paste_after`] / [`InputState::paste_before`]:
+/// a payload of register × count beyond [`MAX_PASTE_BYTES`] is
+/// refused rather than allocated, which would otherwise hit the
+/// allocation-size-abort handler.
+fn paste_fits(register: &str, count: usize) -> bool {
+    register.len().saturating_mul(count) <= MAX_PASTE_BYTES
 }

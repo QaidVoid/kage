@@ -20,7 +20,9 @@ use kage_provider::{Provider, ProviderEvent, StreamRequest};
 use crate::run::emit_one;
 use crate::{AgentContext, CompactionPrep, Hooks, LoopConfig, TokenBudget};
 
-/// Number of recent turns kept verbatim. Older turns are summarized.
+/// Target number of recent turns kept verbatim. Older turns are
+/// summarized. The boundary may extend past this to keep an assistant
+/// tool-call turn together with its results.
 const KEEP_RECENT: usize = 4;
 
 /// Framing wrapper for the synthetic summary message that replaces the
@@ -56,7 +58,8 @@ pub(crate) fn maybe_compact<F: FnMut(LoopEvent)>(
 /// Force a compaction pass right now, ignoring the token-budget
 /// threshold. Used by the `:compact` and `/compact` commands so the
 /// user can shrink history on demand. Returns `false` when there is
-/// not enough history to compact (history at or below `KEEP_RECENT`).
+/// not enough history to compact (history at or below `KEEP_RECENT`,
+/// or nothing summarizable before the keep window).
 pub fn force_compact<F: FnMut(LoopEvent)>(
     cx: &mut AgentContext,
     provider: &dyn Provider,
@@ -78,16 +81,31 @@ fn run_compaction<F: FnMut(LoopEvent)>(
         return Ok(false);
     }
 
-    let split = cx.history.len() - KEEP_RECENT;
-    let to_summarize: Vec<Message> = cx.history.drain(..split).collect();
-    let transcript = serialize_conversation(&to_summarize);
+    // Pick the boundary first. Kept history may not open with a
+    // `ToolResult` whose assistant tool-call turn was summarized away:
+    // strict providers reject the orphaned result. Walk the boundary
+    // backwards until it sits on a non-ToolResult message, pulling the
+    // parent assistant turn into the keep window.
+    let mut split = cx.history.len() - KEEP_RECENT;
+    while split > 0 && cx.history[split].role == Role::ToolResult {
+        split -= 1;
+    }
+    if split == 0 {
+        return Ok(false);
+    }
+    let kept = cx.history.len() - split;
+
+    // Summarize from a borrowed slice and splice only after every
+    // fallible step below has succeeded, so a failed summary or hook
+    // leaves the conversation intact.
+    let transcript = serialize_conversation(&cx.history[..split]);
     let mut prep = CompactionPrep {
         prompt: format!("<conversation>\n{transcript}</conversation>\n\n{SUMMARIZE_INSTRUCTION}"),
         transcript,
         instruction: SUMMARIZE_INSTRUCTION.to_owned(),
         model: cx.model.clone(),
         summarized: split,
-        kept: KEEP_RECENT,
+        kept,
         summary_override: None,
     };
     hooks
@@ -118,14 +136,14 @@ fn run_compaction<F: FnMut(LoopEvent)>(
         parent: None,
         ts: chrono::Utc::now(),
     };
-    cx.history.insert(0, summary_msg);
+    cx.history.splice(..split, std::iter::once(summary_msg));
     cx.budget = TokenBudget::default();
 
     emit_one(
         hooks,
         emit,
         LoopEvent::Compaction {
-            kept: KEEP_RECENT,
+            kept,
             summarized: split,
             summary: summary_body,
         },
@@ -280,6 +298,30 @@ mod tests {
         )
     }
 
+    fn assistant_tool_call(id: &str) -> Message {
+        Message::new(
+            Role::Assistant,
+            vec![Content::ToolCall {
+                id: kage_core::ToolCallId::new(id),
+                name: "bash".into(),
+                input: serde_json::json!({}),
+            }],
+            None,
+        )
+    }
+
+    fn tool_result(id: &str) -> Message {
+        Message::new(
+            Role::ToolResult,
+            vec![Content::ToolResultBlock {
+                call_id: kage_core::ToolCallId::new(id),
+                output: "out".into(),
+                is_error: false,
+            }],
+            None,
+        )
+    }
+
     fn loaded_context(used_input: u64, history_len: usize) -> AgentContext {
         let mut cx = AgentContext::new("mock:m", "");
         cx.budget = TokenBudget {
@@ -377,6 +419,89 @@ mod tests {
     }
 
     #[test]
+    fn boundary_extends_backwards_to_keep_tool_group_intact() {
+        let provider = MockProvider::replaying(vec![
+            Ok(ProviderEvent::TextDelta {
+                delta: "summary".into(),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        ]);
+        let cancel = CancelFlag::new();
+        let mut hooks = NoopHooks;
+        let cfg = LoopConfig {
+            compaction_threshold: 0.5,
+            ..LoopConfig::default()
+        };
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.budget = TokenBudget {
+            used_input: 150_000,
+            current_context: 150_000,
+            ..Default::default()
+        };
+        cx.context_window = 200_000;
+        cx.history.push(user_msg("turn 0"));
+        cx.history.push(assistant_msg("reply 1"));
+        cx.history.push(user_msg("turn 2"));
+        cx.history.push(assistant_tool_call("call_1"));
+        cx.history.push(tool_result("call_1"));
+        cx.history.push(user_msg("turn 5"));
+        cx.history.push(assistant_msg("reply 6"));
+        cx.history.push(user_msg("turn 7"));
+
+        let mut events = Vec::new();
+        let ran = maybe_compact(&mut cx, cfg, &provider, &cancel, &mut hooks, &mut |ev| {
+            events.push(ev);
+        })
+        .unwrap();
+        assert!(ran);
+        // The raw boundary (len 8 - KEEP_RECENT) lands on the tool
+        // result at index 4; it must walk back to the assistant
+        // tool-call turn at index 3, keeping the pair together.
+        assert_eq!(cx.history.len(), 1 + 5);
+        assert!(
+            matches!(&cx.history[1].content[0], Content::ToolCall { .. }),
+            "kept history must open with the parent tool-call turn, not a result"
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            LoopEvent::Compaction {
+                kept: 5,
+                summarized: 3,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn nothing_summarizable_before_keep_window_compacts_nothing() {
+        let provider = MockProvider::replaying(vec![]);
+        let cancel = CancelFlag::new();
+        let mut hooks = NoopHooks;
+        let cfg = LoopConfig {
+            compaction_threshold: 0.5,
+            ..LoopConfig::default()
+        };
+        let mut cx = AgentContext::new("mock:m", "");
+        cx.budget = TokenBudget {
+            used_input: 150_000,
+            current_context: 150_000,
+            ..Default::default()
+        };
+        cx.context_window = 200_000;
+        cx.history.push(assistant_tool_call("call_1"));
+        for _ in 0..4 {
+            cx.history.push(tool_result("call_1"));
+        }
+
+        let ran = maybe_compact(&mut cx, cfg, &provider, &cancel, &mut hooks, &mut |_| {}).unwrap();
+        assert!(!ran);
+        assert_eq!(cx.history.len(), 5, "history must be untouched");
+    }
+
+    #[test]
     fn prepare_compaction_hook_can_redirect_the_summarizer_model() {
         struct RedirectModel;
         impl crate::Hooks for RedirectModel {
@@ -425,6 +550,15 @@ mod tests {
 
         let res = maybe_compact(&mut cx, cfg, &provider, &cancel, &mut hooks, &mut |_| {});
         assert!(matches!(res, Err(LoopError::Provider { .. })));
+        assert_eq!(
+            cx.history.len(),
+            10,
+            "a failed summary must leave the history intact"
+        );
+        assert!(
+            matches!(&cx.history[0].content[0], Content::Text { text } if text == "turn 0"),
+            "a failed summary must not replace the oldest turn"
+        );
     }
 
     #[test]
@@ -480,6 +614,11 @@ mod tests {
             }
             other => panic!("expected HookFailed, got {other:?}"),
         }
+        assert_eq!(
+            cx.history.len(),
+            10,
+            "a failed hook must leave the history intact"
+        );
     }
 
     #[test]

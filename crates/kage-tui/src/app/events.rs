@@ -102,7 +102,7 @@ impl App {
             InputAction::OpenSessionPicker => {
                 // Default to this directory's sessions. If there are
                 // none here but some elsewhere, open in all-dirs
-                // scope so Ctrl+R is never a dead key in a fresh dir.
+                // scope so Ctrl+S is never a dead key in a fresh dir.
                 self.session_scope_all = false;
                 if let Some(lister) = self.session_lister.as_ref()
                     && lister(false).is_empty()

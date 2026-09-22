@@ -414,7 +414,7 @@ pub(crate) fn run_compact_with_hooks(
     }
 }
 
-/// Build the picker rows for the `Ctrl+R` session picker. Listing
+/// Build the picker rows for the `Ctrl+S` session picker. Listing
 /// happens at picker-open time so newly recorded sessions appear
 /// without needing to restart the TUI. Unless `all` is set, only
 /// sessions whose recorded `cwd` is `workdir` are shown (the picker

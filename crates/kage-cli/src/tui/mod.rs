@@ -46,7 +46,7 @@ pub(crate) struct WorkerConfig {
     plugin_runtime: Option<Arc<PluginRuntime>>,
     rx: mpsc::Receiver<RunRequest>,
     /// Path to the session file the worker appends to. Shared with
-    /// the resume handler so `Ctrl+R` can swap the file in place.
+    /// the resume handler so `Ctrl+S` can swap the file in place.
     session_path: Option<Arc<Mutex<PathBuf>>>,
     /// Header to write the first time the planned session file is
     /// created. After creation, this is taken (`Some(_) -> None`) and

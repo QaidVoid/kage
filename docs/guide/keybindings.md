@@ -20,9 +20,13 @@ switch modes or panes.
 | `Ctrl+Up`        | Scroll the buffer up 1 line                  |
 | `Ctrl+Home`      | Snap to the top of the conversation         |
 | `Ctrl+End`       | Snap to the bottom, re-arm auto-follow      |
-| `Ctrl+P`         | Jump to the previous block                  |
+| `Ctrl+P`         | Open the model picker                       |
+| `Ctrl+S`         | Open the session picker                     |
+| `Alt+P` / `Alt+N` | Jump to the previous / next block          |
 | `Ctrl+N`         | Jump to the next block                      |
 | `Ctrl+O`         | Toggle fold on the focused block            |
+| `Shift+Tab`      | Cycle the thinking level                    |
+| `Ctrl+V`         | Attach an image from the clipboard          |
 | `PageUp`         | Scroll the buffer up 10 lines               |
 | `PageDown`       | Scroll the buffer down 10 lines             |
 

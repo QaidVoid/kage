@@ -239,7 +239,7 @@ impl App {
     /// (Re)build the session picker for the current
     /// [`Self::session_scope_all`] scope. `allow_empty` keeps the
     /// modal open with no rows (used by the toggle so the user can
-    /// flip back); the initial open passes `false` so `Ctrl+R` with
+    /// flip back); the initial open passes `false` so `Ctrl+S` with
     /// nothing to resume is a no-op rather than an empty dialog.
     pub(crate) fn open_session_picker(&mut self, allow_empty: bool) {
         let Some(lister) = self.session_lister.as_ref() else {

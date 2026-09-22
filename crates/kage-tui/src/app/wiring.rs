@@ -279,7 +279,7 @@ impl App {
     }
 
     /// Register the closure that produces the session picker's items
-    /// at the moment of opening. Without this, `Ctrl+R` is a no-op.
+    /// at the moment of opening. Without this, `Ctrl+S` is a no-op.
     pub fn set_session_lister(&mut self, lister: SessionLister) {
         self.session_lister = Some(lister);
     }

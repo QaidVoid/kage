@@ -347,7 +347,7 @@ impl PluginDialogState {
 
 /// Closure that returns the current set of resumable sessions on
 /// demand. Listing happens on the main thread when the user presses
-/// `Ctrl+R`, so a fresh scan reflects any sessions written elsewhere
+/// `Ctrl+S`, so a fresh scan reflects any sessions written elsewhere
 /// since the TUI started.
 ///
 /// The `bool` argument is `include_all`: `false` restricts the result
@@ -510,7 +510,7 @@ pub struct App {
     /// `None` disables the command.
     session_tree_source: Option<SessionTreeSource>,
     /// Provider of resumable sessions for the session picker. None
-    /// disables the picker (Ctrl+R is a no-op).
+    /// disables the picker (Ctrl+S is a no-op).
     session_lister: Option<SessionLister>,
     /// Open `:` command line, if any. While present it owns key input
     /// and replaces the status bar's mode pill.

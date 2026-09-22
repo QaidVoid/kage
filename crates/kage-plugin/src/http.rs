@@ -30,6 +30,8 @@ use std::time::Duration;
 use kage_core::sync::lock;
 use kage_tools::ssrf;
 use mlua::{Function, Lua, Table, Value};
+use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
+use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 
 use crate::api::lua_to_json;
 use crate::capabilities::{Capability, CapabilityRegistry};
@@ -368,18 +370,48 @@ fn prepare(url: &str, timeout: Option<Duration>) -> Result<(url::Url, ureq::Agen
 /// `Some(global)` bounds the entire request (non-streaming calls);
 /// `None` bounds only the connection phases, leaving the response
 /// stream free to run (streaming calls).
+///
+/// Every DNS lookup ureq performs — the dial itself and each redirect
+/// hop — goes through [`SsrfResolver`], so only vetted addresses can
+/// ever be dialed.
 fn build_agent_bounded(global: Option<Duration>) -> ureq::Agent {
     let config = ureq::Agent::config_builder()
         .redirect_auth_headers(ureq::config::RedirectAuthHeaders::SameHost)
         .http_status_as_error(false);
-    match global {
-        Some(global) => config.timeout_global(Some(global)).build().new_agent(),
+    let config = match global {
+        Some(global) => config.timeout_global(Some(global)),
         None => config
             .timeout_resolve(Some(STREAM_PHASE_TIMEOUT))
             .timeout_connect(Some(STREAM_PHASE_TIMEOUT))
-            .timeout_send_request(Some(STREAM_PHASE_TIMEOUT))
-            .build()
-            .new_agent(),
+            .timeout_send_request(Some(STREAM_PHASE_TIMEOUT)),
+    }
+    .build();
+    ureq::Agent::with_parts(config, DefaultConnector::new(), SsrfResolver::default())
+}
+
+/// Wraps ureq's [`DefaultResolver`] to enforce the SSRF policy at
+/// resolution time. `prepare()` checks the caller-supplied URL once
+/// for a good error message, but redirects re-enter the resolver for
+/// every hop, and a rebinding DNS answer cannot smuggle a dial to a
+/// disallowed address: the transport only ever sees vetted addresses.
+#[derive(Debug, Default)]
+struct SsrfResolver(DefaultResolver);
+
+impl Resolver for SsrfResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: NextTimeout,
+    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        let addrs = self.0.resolve(uri, config, timeout)?;
+        if addrs.iter().any(|addr| ssrf::is_unsafe(&addr.ip())) {
+            return Err(ureq::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("ssrf guard: {uri} resolves to a disallowed address"),
+            )));
+        }
+        Ok(addrs)
     }
 }
 
@@ -437,7 +469,10 @@ mod tests {
     use std::time::Duration;
 
     use mlua::{Lua, Table};
+    use ureq::unversioned::resolver::Resolver;
+    use ureq::unversioned::transport::NextTimeout;
 
+    use super::SsrfResolver;
     use crate::PluginRuntime;
 
     /// A runtime that grants `net` to plugin `p`. `kage.http` is gated,
@@ -506,6 +541,38 @@ mod tests {
              { json = { stream = true } }, function() end)",
         );
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn ssrf_resolver_refuses_disallowed_addrs() {
+        let resolver = SsrfResolver::default();
+        let config = ureq::config::Config::default();
+        let timeout = NextTimeout {
+            after: ureq::unversioned::transport::time::Duration::from_secs(2),
+            reason: ureq::Timeout::Resolve,
+        };
+        let resolve = |uri: &'static str| {
+            Resolver::resolve(&resolver, &uri.parse().unwrap(), &config, timeout)
+        };
+
+        // A public address resolves; the transport may dial it.
+        let addrs = resolve("http://1.1.1.1/x").unwrap();
+        assert!(
+            addrs
+                .iter()
+                .any(|a| a.ip() == std::net::IpAddr::from([1, 1, 1, 1]))
+        );
+
+        // Loopback, private and link-local ranges are refused, so no
+        // redirect hop can dial them even with a rebinding DNS answer.
+        for uri in [
+            "http://127.0.0.1/x",
+            "http://10.0.0.1/x",
+            "http://169.254.1.1/x",
+        ] {
+            let err = resolve(uri).unwrap_err();
+            assert!(matches!(err, ureq::Error::Io(_)), "{uri}: {err:?}");
+        }
     }
 
     #[test]

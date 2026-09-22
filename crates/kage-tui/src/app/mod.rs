@@ -694,6 +694,13 @@ pub struct App {
     /// onto (`kage.ui.select`). Drained between event polls; while a
     /// dialog is open the worker thread is parked awaiting the answer.
     dialog_rx: Option<std::sync::mpsc::Receiver<PluginDialog>>,
+    /// Results of async OS-clipboard image attaches. The arboard read
+    /// can block for hundreds of ms on some compositors, so it runs
+    /// on a background thread and sends the decoded attachment here;
+    /// the run loop drains via [`App::drain_clipboard_attach`] so the
+    /// input thread never waits on the clipboard.
+    attach_tx: std::sync::mpsc::Sender<Result<crate::image::AttachedImage, String>>,
+    attach_rx: std::sync::mpsc::Receiver<Result<crate::image::AttachedImage, String>>,
     /// The overlay hosting the current plugin dialog, if any. A
     /// trait object so every `kage.ui.*` dialog (picker, confirm,
     /// input, editor) shares one hosting path.

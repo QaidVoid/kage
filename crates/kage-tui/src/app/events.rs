@@ -38,7 +38,14 @@ impl App {
                 return;
             }
         }
-        let _ = self.send_request(RunRequest::Submit { text, images });
+        if self
+            .send_request(RunRequest::Submit { text, images })
+            .is_err()
+        {
+            // The user block above is already painted; a dead worker
+            // must not leave it looking delivered.
+            self.push_error("submit failed: agent worker has stopped");
+        }
     }
 
     pub(crate) fn apply(&mut self, action: InputAction) -> Option<AppExit> {
@@ -134,10 +141,18 @@ impl App {
         None
     }
 
+    /// Send a request to the worker. The channel is unbounded, so the
+    /// only failure is a dropped receiver - the worker thread has
+    /// stopped - which surfaces as a toast here: every caller discards
+    /// the error, and an action that silently vanishes reads as a
+    /// program hang.
     pub(crate) fn send_request(&mut self, req: RunRequest) -> Result<(), TrySendError<RunRequest>> {
         match self.requests.send(req) {
             Ok(()) => Ok(()),
-            Err(err) => Err(TrySendError::Disconnected(err.0)),
+            Err(err) => {
+                self.notify("agent worker stopped - request not delivered");
+                Err(TrySendError::Disconnected(err.0))
+            }
         }
     }
 

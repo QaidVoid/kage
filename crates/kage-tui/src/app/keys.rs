@@ -118,7 +118,7 @@ impl App {
         // instead and never reaches here. Honored after `[keybindings]`
         // so a user can still rebind ctrl+v.
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('v')) {
-            self.attach_clipboard_image();
+            self.request_clipboard_attach();
             return None;
         }
 

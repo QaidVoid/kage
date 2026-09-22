@@ -77,20 +77,33 @@ impl App {
         }
     }
 
-    /// Attach the OS clipboard image (Ctrl+V, or `:attach` with no
-    /// path). On failure the real reason is shown inline - clipboard
-    /// unavailable, no image on it, encode failure - so a setup that
-    /// does not work is diagnosable, never a silent no-op.
-    pub(crate) fn attach_clipboard_image(&mut self) {
-        match crate::image::clipboard_image()
-            .and_then(|bytes| crate::image::from_bytes(&bytes, "clipboard"))
-        {
-            Ok(att) => {
-                let note = att.placeholder();
-                self.input.attach_image(att);
-                self.notify(format!("attached {note}"));
+    /// Queue an async OS-clipboard image read (Ctrl+V, or `:attach`
+    /// with no path). The arboard read can block for hundreds of ms
+    /// on some compositors or a stalled clipboard owner, so it runs
+    /// on a background thread; the result surfaces through
+    /// [`Self::drain_clipboard_attach`] on a later loop pass.
+    pub(crate) fn request_clipboard_attach(&mut self) {
+        let tx = self.attach_tx.clone();
+        std::thread::spawn(move || {
+            let result = crate::image::clipboard_image()
+                .and_then(|bytes| crate::image::from_bytes(&bytes, "clipboard"));
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Drain completed async clipboard attaches. Success attaches the
+    /// image and toasts; failure pushes the real reason inline so a
+    /// setup that does not work is diagnosable, never a silent no-op.
+    pub(crate) fn drain_clipboard_attach(&mut self) {
+        while let Ok(result) = self.attach_rx.try_recv() {
+            match result {
+                Ok(att) => {
+                    let note = att.placeholder();
+                    self.input.attach_image(att);
+                    self.notify(format!("attached {note}"));
+                }
+                Err(e) => self.push_error(format!("paste image: {e}")),
             }
-            Err(e) => self.push_error(format!("paste image: {e}")),
         }
     }
 
@@ -116,13 +129,8 @@ impl App {
         // the terminal does deliver an empty bracketed paste for it,
         // treat that as an image-paste attempt (Ctrl+V is also
         // intercepted directly for terminals that send no event).
-        if text.trim().is_empty()
-            && let Ok(bytes) = crate::image::clipboard_image()
-            && let Ok(att) = crate::image::from_bytes(&bytes, "clipboard")
-        {
-            let note = att.placeholder();
-            self.input.attach_image(att);
-            self.notify(format!("attached {note}"));
+        if text.trim().is_empty() {
+            self.request_clipboard_attach();
             return;
         }
         self.input.paste(text);
@@ -130,19 +138,17 @@ impl App {
 
     /// `:attach [path]` - queue an image for the next prompt. With a
     /// `path`, load that file; with no argument, pull the image off
-    /// the OS clipboard. Every failure path is explained inline (no
-    /// path + nothing on the clipboard, no clipboard helper, bad
-    /// file, unsupported format, too large) so a non-working setup
-    /// is diagnosable rather than silent.
+    /// the OS clipboard (off-thread, like Ctrl+V). Every failure path
+    /// is explained inline (no path + nothing on the clipboard, no
+    /// clipboard helper, bad file, unsupported format, too large) so
+    /// a non-working setup is diagnosable rather than silent.
     pub(crate) fn attach_image_path(&mut self, rest: &str) {
         let path = rest.trim();
-        let result = if path.is_empty() {
-            crate::image::clipboard_image()
-                .and_then(|bytes| crate::image::from_bytes(&bytes, "clipboard"))
-        } else {
-            crate::image::load_path(std::path::Path::new(path))
-        };
-        match result {
+        if path.is_empty() {
+            self.request_clipboard_attach();
+            return;
+        }
+        match crate::image::load_path(std::path::Path::new(path)) {
             Ok(att) => {
                 let note = att.placeholder();
                 self.input.attach_image(att);

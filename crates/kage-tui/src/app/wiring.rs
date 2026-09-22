@@ -8,6 +8,7 @@ impl App {
     /// receiver side is owned by the host's worker driver.
     #[must_use]
     pub fn new(buffer: SharedBuffer, requests: Sender<RunRequest>) -> Self {
+        let (attach_tx, attach_rx) = std::sync::mpsc::channel();
         Self {
             buffer,
             input: InputState::new(),
@@ -66,6 +67,8 @@ impl App {
             steering: None,
             toasts: None,
             dialog_rx: None,
+            attach_tx,
+            attach_rx,
             plugin_overlay: None,
             active_dialog: None,
         }

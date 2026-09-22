@@ -362,6 +362,65 @@ fn steering_submit_with_images_takes_channel_even_mid_run() {
 }
 
 #[test]
+fn drain_clipboard_attach_attaches_completed_result() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    app.attach_tx
+        .send(Ok(crate::image::AttachedImage {
+            source: kage_core::ImageSource::Base64 {
+                data: "AAAA".into(),
+            },
+            mime: "image/png".into(),
+            label: "shot.png".into(),
+            bytes: 3,
+        }))
+        .unwrap();
+
+    app.drain_clipboard_attach();
+
+    let attached = app.input().attached();
+    assert_eq!(attached.len(), 1, "async attach landed on the input");
+    assert_eq!(attached[0].1.label, "shot.png");
+}
+
+#[test]
+fn drain_clipboard_attach_surfaces_errors_inline() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = App::new(buffer.clone(), tx);
+    app.attach_tx
+        .send(Err("no image on the clipboard".into()))
+        .unwrap();
+
+    app.drain_clipboard_attach();
+
+    let buf = buffer.lock().unwrap();
+    let rendered = match buf.blocks().last() {
+        Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
+        other => panic!("expected an error block, got {other:?}"),
+    };
+    assert!(rendered.contains("no image on the clipboard"), "{rendered}");
+}
+
+#[test]
+fn submit_after_worker_drop_paints_error_block() {
+    let buffer = shared_buffer();
+    let (tx, rx) = mpsc::channel::<RunRequest>();
+    let mut app = App::new(buffer.clone(), tx);
+    drop(rx);
+
+    app.handle_submit("lost".into());
+
+    let buf = buffer.lock().unwrap();
+    let rendered = match buf.blocks().last() {
+        Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
+        other => panic!("expected an error block, got {other:?}"),
+    };
+    assert!(rendered.contains("worker has stopped"), "{rendered}");
+}
+
+#[test]
 fn ctrl_c_in_normal_emits_cancel_request() {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();

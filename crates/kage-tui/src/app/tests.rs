@@ -1781,6 +1781,26 @@ fn search_count_is_none_without_a_pattern() {
     assert_eq!(app.buffer.lock().unwrap().focus(), Some(0));
 }
 
+#[test]
+fn noh_command_clears_search_highlighting() {
+    let (mut app, _buffer) = search_fixture();
+    app.search_pattern = Some("needle".into());
+    assert_eq!(app.compute_search_match_count(), Some((0, 2)));
+
+    let registry: Vec<&CommandSpec> = BUILTIN_COMMANDS.iter().collect();
+    let result = app.run_command_validated("noh", &registry);
+    assert!(
+        matches!(result, CommandResult::Done(None)),
+        "expected Done(None), got {result:?}"
+    );
+
+    assert!(app.search_pattern.is_none());
+    assert_eq!(app.compute_search_match_count(), None);
+    // The cached match list empties on the next refresh.
+    app.refresh_search_matches();
+    assert!(app.search_matches().is_empty());
+}
+
 fn mouse_event(
     kind: ratatui::crossterm::event::MouseEventKind,
 ) -> ratatui::crossterm::event::MouseEvent {

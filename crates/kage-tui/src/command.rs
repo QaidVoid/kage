@@ -466,6 +466,14 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         subcommands: &[],
     },
     CommandSpec {
+        name: "noh",
+        aliases: &[],
+        description: "clear search highlighting",
+        category: CommandCategory::Both,
+        args: &[],
+        subcommands: &[],
+    },
+    CommandSpec {
         name: "keybindings",
         aliases: &["keys"],
         description: "list active key bindings (config, plugin, reserved)",
@@ -608,7 +616,14 @@ mod tests {
 
     #[test]
     fn builtin_registry_has_expected_command_count() {
-        assert_eq!(BUILTIN_COMMANDS.len(), 18);
+        assert_eq!(BUILTIN_COMMANDS.len(), 19);
+    }
+
+    #[test]
+    fn builtin_registry_includes_noh() {
+        let spec = find_builtin_command("noh").expect("noh should exist");
+        assert_eq!(spec.name, "noh");
+        assert_eq!(spec.args.len(), 0);
     }
 
     #[test]

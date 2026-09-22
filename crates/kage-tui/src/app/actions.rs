@@ -183,6 +183,10 @@ impl App {
                 buf.clear();
                 None
             }
+            "noh" => {
+                self.search_pattern = None;
+                None
+            }
             _ => None,
         }
     }

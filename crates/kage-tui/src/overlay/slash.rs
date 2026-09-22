@@ -127,6 +127,13 @@ impl SlashPalette {
         self.cmdline.refresh_completions(&self.registry, &resolver);
     }
 
+    /// Insert bracketed-paste text into the wrapped command line and
+    /// re-filter candidates.
+    pub fn paste(&mut self, text: &str) {
+        let resolver = SnapshotResolver { ctx: &self.ctx };
+        self.cmdline.paste_str(text, &self.registry, &resolver);
+    }
+
     /// Paint the palette as two pieces: the completion popup floats
     /// above the input card, and the input card's interior is
     /// overpainted with `/ <text>` so the slash command reads as if

@@ -258,6 +258,21 @@ impl CommandLine {
         let _ = forward;
     }
 
+    /// Insert bracketed-paste text at the cursor and refresh the
+    /// completion set, as if one `Char` keystroke had been sent per
+    /// character. Control characters (tab, newline, CR) are skipped:
+    /// this is a single-line field.
+    pub fn paste_str(&mut self, text: &str, registry: &[&CommandSpec], resolver: &dyn Resolver) {
+        let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+        if clean.is_empty() {
+            return;
+        }
+        self.error = None;
+        self.text.insert_str(self.cursor, &clean);
+        self.cursor += clean.len();
+        self.refresh(registry, resolver);
+    }
+
     fn cycle(&mut self, forward: bool) {
         let n = self.completions.items.len();
         if n == 0 {
@@ -787,5 +802,36 @@ mod tests {
         let reg = registry();
         send_with(&mut cl, key(KeyCode::Tab), &reg, &EmptyResolver);
         assert!(cl.error().is_none(), "tab should clear the error");
+    }
+
+    #[test]
+    fn paste_str_inserts_at_cursor_skipping_control_chars() {
+        let mut cl = CommandLine::new();
+        for c in "ac".chars() {
+            send(&mut cl, key(KeyCode::Char(c)));
+        }
+        send(&mut cl, key(KeyCode::Left));
+        cl.paste_str("Xb\nY", &empty_registry(), &EmptyResolver);
+        assert_eq!(cl.text(), "aXbYc");
+        assert_eq!(cl.cursor, "aXbY".len());
+    }
+
+    #[test]
+    fn paste_str_refreshes_completions_and_closes_popup() {
+        let reg = registry();
+        let mut cl = CommandLine::for_test("mo", Completions::default(), true, Some(0));
+        cl.paste_str("use ", &reg, &EmptyResolver);
+        assert_eq!(cl.text(), "mouse ");
+        assert!(!cl.popup_open);
+        assert!(cl.selected.is_none());
+    }
+
+    #[test]
+    fn paste_str_of_only_control_chars_is_a_noop() {
+        let mut cl = CommandLine::new();
+        send(&mut cl, key(KeyCode::Char('a')));
+        cl.paste_str("\n\r\t", &empty_registry(), &EmptyResolver);
+        assert_eq!(cl.text(), "a");
+        assert_eq!(cl.cursor, 1);
     }
 }

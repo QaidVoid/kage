@@ -88,6 +88,12 @@ pub trait OverlayWidget: Send + Sync {
 
     /// Drive the overlay by one key event.
     fn handle_key(&mut self, key: KeyEvent) -> OverlayAction;
+
+    /// Route a bracketed paste into the overlay. The default swallows
+    /// the paste: a modal that does not accept text must not let it
+    /// fall through to the host's hidden input underneath. Text-entry
+    /// overlays override this to insert at their cursor.
+    fn handle_paste(&mut self, _text: &str) {}
 }
 
 /// No-op overlay used to lock the trait shape and as a safe default

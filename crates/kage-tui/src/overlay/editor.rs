@@ -6,9 +6,10 @@
 //! a JSON string value; Esc and Ctrl+C close without resolving.
 //!
 //! Deliberately small: arrow keys, Backspace, Enter for newlines,
-//! visible cursor cell. PE.B may layer kill-ring, undo, or bracketed
-//! paste on top once it consumes this; the primitive itself stays
-//! lean.
+//! visible cursor cell. Bracketed paste routes through
+//! [`OverlayWidget::handle_paste`] and inserts at the cursor.
+//! PE.B may layer kill-ring or undo on top once it consumes this;
+//! the primitive itself stays lean.
 
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -242,6 +243,19 @@ impl OverlayWidget for EditorOverlay {
             _ => OverlayAction::Stay,
         }
     }
+
+    fn handle_paste(&mut self, text: &str) {
+        for c in text.chars() {
+            match c {
+                '\n' => self.insert_newline(),
+                // Normalize CRLF; other control characters carry no
+                // meaning in a plain text buffer (tab is kept).
+                '\r' => {}
+                c if c.is_control() && c != '\t' => {}
+                c => self.insert_char(c),
+            }
+        }
+    }
 }
 
 impl EditorOverlay {
@@ -343,6 +357,22 @@ mod tests {
     fn with_prefill_initial_text() {
         let e = EditorOverlay::new("Edit").with_prefill("preset");
         assert_eq!(e.text(), "preset");
+    }
+
+    #[test]
+    fn paste_inserts_multiline_at_cursor() {
+        let mut e = EditorOverlay::new("Edit").with_prefill("ab\ncd");
+        // Cursor starts at end of "cd".
+        e.handle_paste("X\nY");
+        assert_eq!(e.text(), "ab\ncdX\nY");
+        assert_eq!(e.cursor, (2, 1));
+    }
+
+    #[test]
+    fn paste_normalizes_crlf_and_keeps_tabs() {
+        let mut e = EditorOverlay::new("Edit");
+        e.handle_paste("x\r\ny\tz");
+        assert_eq!(e.text(), "x\ny\tz");
     }
 
     fn snapshot(e: &mut EditorOverlay, area: Rect) -> Vec<String> {

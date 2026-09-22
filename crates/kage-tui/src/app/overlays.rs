@@ -110,8 +110,13 @@ impl App {
     /// Handle a bracketed paste. If the pasted text is just a path to
     /// an existing image (a drag-drop, or a copied file), attach it
     /// instead of inserting the raw path as prompt text; otherwise
-    /// paste verbatim. A path that looks like an image but fails to
-    /// load surfaces the error rather than silently pasting the path.
+    /// route the text to the active surface: a plugin overlay's
+    /// `handle_paste`, the slash palette, the `:` cmdline, or the
+    /// `/` search line. A modal that does not accept text swallows
+    /// the paste so it cannot land in the hidden main input and
+    /// silently vanish. With no overlay open the main input receives
+    /// it verbatim. A path that looks like an image but fails to load
+    /// surfaces the error rather than silently pasting the path.
     pub(crate) fn handle_paste(&mut self, text: &str) {
         // A copied/dragged image *file* arrives as its path.
         if let Some(path) = crate::image::path_if_image(text) {
@@ -131,6 +136,37 @@ impl App {
         // intercepted directly for terminals that send no event).
         if text.trim().is_empty() {
             self.request_clipboard_attach();
+            return;
+        }
+        if let Some(overlay) = self.plugin_overlay.as_mut() {
+            overlay.handle_paste(text);
+            return;
+        }
+        if self.context_menu.is_some()
+            || self.picker.is_some()
+            || self.settings_overlay.is_some()
+            || self.session_tree.is_some()
+        {
+            return;
+        }
+        if let Some(palette) = self.slash_palette.as_mut() {
+            palette.paste(text);
+            return;
+        }
+        if let Some(cl) = self.cmdline.as_mut() {
+            let registry = cmdline_registry(&self.plugin_command_specs);
+            let resolver = AppResolver {
+                models: &self.model_choices,
+                plugin_commands: &self.plugin_commands,
+                sessions: self.session_lister.as_ref(),
+                themes_dir: self.themes_dir.as_deref(),
+            };
+            cl.paste_str(text, &registry, &resolver);
+            return;
+        }
+        if let Some(line) = self.search_line.as_mut() {
+            let empty: [&CommandSpec; 0] = [];
+            line.paste_str(text, &empty, &EmptyResolver);
             return;
         }
         self.input.paste(text);

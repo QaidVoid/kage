@@ -119,6 +119,11 @@ impl OverlayWidget for InputOverlay {
             }
         }
     }
+
+    fn handle_paste(&mut self, text: &str) {
+        let empty: [&CommandSpec; 0] = [];
+        self.cmdline.paste_str(text, &empty, &EmptyResolver);
+    }
 }
 
 #[cfg(test)]
@@ -142,6 +147,13 @@ mod tests {
             i.handle_key(ch(c));
         }
         assert_eq!(i.text(), "abc");
+    }
+
+    #[test]
+    fn paste_inserts_into_the_field_skipping_newlines() {
+        let mut i = InputOverlay::new("Name");
+        i.handle_paste("hel\nlo");
+        assert_eq!(i.text(), "hello");
     }
 
     #[test]

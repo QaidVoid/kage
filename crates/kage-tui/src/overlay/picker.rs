@@ -198,6 +198,16 @@ impl OverlayWidget for OverlayPicker {
             _ => OverlayAction::Stay,
         }
     }
+
+    fn handle_paste(&mut self, text: &str) {
+        let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+        if clean.is_empty() {
+            return;
+        }
+        self.search.push_str(&clean);
+        self.selected = 0;
+        self.scroll_offset = 0;
+    }
 }
 
 impl OverlayPicker {
@@ -391,6 +401,16 @@ mod tests {
         let mut p = pick(&["a", "b", "c"]);
         let action = p.handle_key(key(KeyCode::Enter));
         assert_eq!(resolved(action), Some("a".into()));
+    }
+
+    #[test]
+    fn paste_extends_the_search_filter() {
+        let mut p = pick(&["apple", "banana"]);
+        p.handle_key(key(KeyCode::Char('b')));
+        p.handle_paste("an\n");
+        assert_eq!(p.search, "ban");
+        assert_eq!(p.selected, 0);
+        assert_eq!(p.scroll_offset, 0);
     }
 
     #[test]

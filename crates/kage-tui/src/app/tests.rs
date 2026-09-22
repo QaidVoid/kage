@@ -1871,3 +1871,40 @@ fn mouse_events_are_swallowed_while_modal_is_open() {
     let expected = 4 + MOUSE_SCROLL_LINES as usize;
     assert_eq!(buffer.lock().unwrap().scroll(), Some(expected));
 }
+
+#[test]
+fn paste_routes_to_the_active_overlay() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+
+    // Cmdline open: the paste lands in the command line.
+    app.cmdline = Some(CommandLine::new());
+    app.handle_paste("theme ");
+    assert_eq!(app.cmdline.as_ref().unwrap().text(), "theme ");
+    app.cmdline = None;
+
+    // Slash palette open: the paste lands in the palette.
+    app.slash_palette = Some(SlashPalette::new(Vec::new(), SlashContext::default()));
+    app.handle_paste("the");
+    assert_eq!(app.slash_palette.as_ref().unwrap().cmdline().text(), "the");
+    app.slash_palette = None;
+
+    // A modal without a text field swallows the paste instead of
+    // letting it fall through to the hidden main input.
+    app.picker = Some(OverlayPicker::new("pick", Vec::new()));
+    app.handle_paste("leak");
+    assert_eq!(app.input().text(), "");
+    app.picker = None;
+
+    // Search line open: the paste lands there.
+    let (tx2, _rx2) = mpsc::channel();
+    let mut app2 = App::new(shared_buffer(), tx2);
+    app2.search_line = Some(CommandLine::new());
+    app2.handle_paste("pat");
+    assert_eq!(app2.search_line.as_ref().unwrap().text(), "pat");
+
+    // Nothing open: the main input receives it verbatim.
+    app.handle_paste("plain");
+    assert_eq!(app.input().text(), "plain");
+}

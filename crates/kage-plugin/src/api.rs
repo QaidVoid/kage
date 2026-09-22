@@ -280,13 +280,23 @@ pub fn json_to_lua(lua: &Lua, value: &serde_json::Value) -> mlua::Result<Value> 
 /// Convert a Lua [`Value`] back into `serde_json::Value`. Functions,
 /// userdata, light userdata, threads, and errors are unsupported and
 /// surface as `serde_json::Value::Null`.
+///
+/// Tables nested deeper than [`ENCODE_DEPTH_MAX`] raise instead of
+/// recursing, so a self-referential table cannot overflow the stack.
 pub fn lua_to_json(value: Value) -> mlua::Result<serde_json::Value> {
+    encode_value(value, 0)
+}
+
+/// Cap on [`lua_to_json`] table nesting.
+const ENCODE_DEPTH_MAX: usize = 128;
+
+fn encode_value(value: Value, depth: usize) -> mlua::Result<serde_json::Value> {
     Ok(match value {
         Value::Boolean(b) => json!(b),
         Value::Integer(i) => json!(i),
         Value::Number(n) => json!(n),
         Value::String(s) => json!(s.to_str()?.to_owned()),
-        Value::Table(t) => table_to_json(&t)?,
+        Value::Table(t) => table_to_json(&t, depth)?,
         Value::Error(err) => json!(err.to_string()),
         Value::Nil
         | Value::Function(_)
@@ -297,26 +307,23 @@ pub fn lua_to_json(value: Value) -> mlua::Result<serde_json::Value> {
     })
 }
 
-fn table_to_json(table: &Table) -> mlua::Result<serde_json::Value> {
-    // A Lua table is "arrayish" when all keys are positive integers from
-    // 1..=N. Otherwise, treat it as an object with stringified keys.
+fn table_to_json(table: &Table, depth: usize) -> mlua::Result<serde_json::Value> {
+    if depth >= ENCODE_DEPTH_MAX {
+        return Err(mlua::Error::external(format!(
+            "kage.json.encode: table nesting exceeds cap of {ENCODE_DEPTH_MAX}"
+        )));
+    }
+    // A Lua table encodes as an array only when its keys are exactly
+    // the dense run 1..=N and nothing else; a table that also carries
+    // hash-part keys encodes as an object so no entry is dropped.
     let len = table.raw_len();
-    if len > 0 {
-        let mut all_dense = true;
+    if len > 0 && is_dense_array(table, len)? {
+        let mut arr = Vec::with_capacity(len);
         for i in 1..=len {
-            let v: Value = table.raw_get(i)?;
-            if matches!(v, Value::Nil) {
-                all_dense = false;
-                break;
-            }
+            let item: Value = table.raw_get(i)?;
+            arr.push(encode_value(item, depth + 1)?);
         }
-        if all_dense {
-            let mut arr = Vec::with_capacity(len);
-            for i in 1..=len {
-                arr.push(lua_to_json(table.raw_get(i)?)?);
-            }
-            return Ok(serde_json::Value::Array(arr));
-        }
+        return Ok(serde_json::Value::Array(arr));
     }
     let mut map = serde_json::Map::new();
     for pair in table.clone().pairs::<Value, Value>() {
@@ -327,9 +334,29 @@ fn table_to_json(table: &Table) -> mlua::Result<serde_json::Value> {
             Value::Number(n) => n.to_string(),
             other => format!("{other:?}"),
         };
-        map.insert(key, lua_to_json(v)?);
+        map.insert(key, encode_value(v, depth + 1)?);
     }
     Ok(serde_json::Value::Object(map))
+}
+
+fn is_dense_array(table: &Table, len: usize) -> mlua::Result<bool> {
+    for i in 1..=len {
+        let v: Value = table.raw_get(i)?;
+        if matches!(v, Value::Nil) {
+            return Ok(false);
+        }
+    }
+    for pair in table.clone().pairs::<Value, Value>() {
+        let (k, _) = pair?;
+        let in_run = match k {
+            Value::Integer(i) => i >= 1 && usize::try_from(i).is_ok_and(|u| u <= len),
+            _ => false,
+        };
+        if !in_run {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 #[cfg(test)]
@@ -556,5 +583,29 @@ mod tests {
         } else {
             panic!("expected table");
         }
+    }
+
+    #[test]
+    fn mixed_array_and_object_table_keeps_all_keys() {
+        let lua = Lua::new();
+        let table: mlua::Table = lua
+            .load("return { [1] = 'a', [2] = 'b', name = 'kage' }")
+            .eval()
+            .unwrap();
+        let json = lua_to_json(mlua::Value::Table(table)).unwrap();
+        assert_eq!(json["1"], "a");
+        assert_eq!(json["2"], "b");
+        assert_eq!(json["name"], "kage");
+    }
+
+    #[test]
+    fn cyclic_table_errors_instead_of_overflowing() {
+        let lua = Lua::new();
+        let table: mlua::Table = lua
+            .load("local t = {} t.inner = t return t")
+            .eval()
+            .unwrap();
+        let err = lua_to_json(mlua::Value::Table(table)).unwrap_err();
+        assert!(err.to_string().contains("nesting"), "{err}");
     }
 }

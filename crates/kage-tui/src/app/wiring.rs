@@ -541,7 +541,7 @@ impl App {
     pub(crate) fn refresh_plugin_theme_state(&mut self) {
         if let Some(state) = self.plugin_theme_state.as_ref() {
             let mut s = lock(state);
-            s.current = crate::theme::current().name;
+            s.current.clone_from(&crate::theme::current().name);
             s.available = crate::theme::Theme::available_names(self.themes_dir.as_deref());
         }
     }

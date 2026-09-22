@@ -14,19 +14,22 @@
 //! frame without restarting the TUI.
 
 use std::path::Path;
-use std::sync::RwLock;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use kage_core::sync::{read, write};
 use ratatui::style::Color;
 
-static CURRENT: RwLock<Option<Theme>> = RwLock::new(None);
+static CURRENT: RwLock<Option<Arc<Theme>>> = RwLock::new(None);
+static DEFAULT: OnceLock<Arc<Theme>> = OnceLock::new();
 
-/// Snapshot of the active theme. Returns the default palette when no
-/// host has called [`set_current`] yet, so leaf style helpers don't
-/// need to special-case startup ordering.
+/// Snapshot of the active theme as a cheap `Arc` clone. Returns the
+/// default palette when no host has called [`set_current`] yet, so
+/// leaf style helpers don't need to special-case startup ordering.
 #[must_use]
-pub fn current() -> Theme {
-    read(&CURRENT).clone().unwrap_or_default()
+pub fn current() -> Arc<Theme> {
+    read(&CURRENT)
+        .clone()
+        .unwrap_or_else(|| DEFAULT.get_or_init(|| Arc::new(Theme::default())).clone())
 }
 
 /// Replace the process-wide theme. Subsequent renders pick up the
@@ -34,7 +37,7 @@ pub fn current() -> Theme {
 /// already captured.
 pub fn set_current(theme: Theme) {
     let mut guard = write(&CURRENT);
-    *guard = Some(theme);
+    *guard = Some(Arc::new(theme));
 }
 
 /// Every color the TUI renderer might paint with. Add entries when a

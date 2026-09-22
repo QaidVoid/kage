@@ -10,11 +10,11 @@ impl App {
         let sub_rest = parts.next().unwrap_or("").trim();
         match sub {
             "" | "current" => {
-                let cur = crate::theme::current().name;
+                let cur = crate::theme::current().name.clone();
                 self.notify(format!("theme: {cur} (try `:theme list`)"));
             }
             "list" => {
-                let cur = crate::theme::current().name;
+                let cur = crate::theme::current().name.clone();
                 let names = crate::theme::Theme::available_names(self.themes_dir.as_deref())
                     .iter()
                     .map(|n| {
@@ -297,7 +297,7 @@ impl App {
             .map_or_else(|| cfg.provider.default_model.clone(), |m| lock(m).clone());
         let init = SettingsInit {
             themes: crate::theme::Theme::available_names(self.themes_dir.as_deref()),
-            theme: crate::theme::current().name,
+            theme: crate::theme::current().name.clone(),
             models: self.model_choices.iter().map(|p| p.value.clone()).collect(),
             model,
             mouse: self.pending_mouse_capture.unwrap_or(cfg.ui.mouse),

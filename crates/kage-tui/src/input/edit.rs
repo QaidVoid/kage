@@ -39,7 +39,9 @@ impl InputState {
                 KeyCode::Down => return vec![InputAction::Scroll(1)],
                 KeyCode::Home => return vec![InputAction::ScrollToTop],
                 KeyCode::End => return vec![InputAction::ScrollToBottom],
-                KeyCode::Char('p') => return vec![InputAction::FocusPrev],
+                // Ctrl+P opens the model picker in every mode, like
+                // normal mode; Ctrl+S below opens the session picker.
+                KeyCode::Char('p') => return vec![InputAction::OpenModelPicker],
                 KeyCode::Char('n') => return vec![InputAction::FocusNext],
                 _ => {}
             }
@@ -128,6 +130,10 @@ impl InputState {
                     self.cursor = forward_word_end(&self.text, self.cursor);
                     return Vec::new();
                 }
+                // Alt+P / Alt+N move conversation-block focus, the
+                // insert-mode counterpart of normal-mode [ and ].
+                KeyCode::Char('p') => return vec![InputAction::FocusPrev],
+                KeyCode::Char('n') => return vec![InputAction::FocusNext],
                 _ => {}
             }
         }

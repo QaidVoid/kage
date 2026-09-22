@@ -1306,11 +1306,15 @@ fn ctrl_home_end_in_insert_snaps_to_top_bottom() {
 }
 
 #[test]
-fn ctrl_n_p_in_insert_focuses_blocks() {
+fn ctrl_p_in_insert_opens_model_picker_alt_p_n_focus() {
     let mut state = InputState::new();
     let acts = state.handle_key(ctrl('p'));
-    assert_eq!(acts, vec![InputAction::FocusPrev]);
+    assert_eq!(acts, vec![InputAction::OpenModelPicker]);
     let acts = state.handle_key(ctrl('n'));
+    assert_eq!(acts, vec![InputAction::FocusNext]);
+    let acts = state.handle_key(alt('p'));
+    assert_eq!(acts, vec![InputAction::FocusPrev]);
+    let acts = state.handle_key(alt('n'));
     assert_eq!(acts, vec![InputAction::FocusNext]);
 }
 
@@ -1345,12 +1349,16 @@ fn modeless_ctrl_home_end_snaps_to_top_bottom() {
 }
 
 #[test]
-fn modeless_ctrl_n_p_focuses_blocks() {
+fn modeless_ctrl_p_opens_model_picker_alt_p_n_focuses() {
     let mut state = InputState::new();
     state.set_modeless(true);
     let acts = state.handle_key(ctrl('p'));
-    assert_eq!(acts, vec![InputAction::FocusPrev]);
+    assert_eq!(acts, vec![InputAction::OpenModelPicker]);
     let acts = state.handle_key(ctrl('n'));
+    assert_eq!(acts, vec![InputAction::FocusNext]);
+    let acts = state.handle_key(alt('p'));
+    assert_eq!(acts, vec![InputAction::FocusPrev]);
+    let acts = state.handle_key(alt('n'));
     assert_eq!(acts, vec![InputAction::FocusNext]);
 }
 

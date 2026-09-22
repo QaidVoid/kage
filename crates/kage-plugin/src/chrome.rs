@@ -29,6 +29,7 @@ use mlua::{Function, Lua, RegistryKey, Table, Value};
 use crate::api::{LogLevel, SharedHostLog};
 use crate::error::PluginError;
 use crate::runtime::SharedLua;
+use crate::watchdog;
 
 /// Which chrome row a [`LuaChrome`] paints. Used only to label render
 /// errors in the host log.
@@ -190,7 +191,7 @@ impl LuaChrome {
                 return self.fresh_cached();
             }
         };
-        match func.call::<Value>(width) {
+        match watchdog::run(&lua, watchdog::BUDGET, || func.call::<Value>(width)) {
             Ok(value) => {
                 let lines = parse_lines(&value);
                 let mut slot = lock(&self.cache);

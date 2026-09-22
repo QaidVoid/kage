@@ -215,3 +215,22 @@ fn eval_plugin_event_handlers_dispatch_with_plugin_env() {
     let v = rt.eval_plugin("ev", "return hits").unwrap();
     assert_eq!(v.as_integer(), Some(2));
 }
+
+#[test]
+fn watchdog_aborts_runaway_eval() {
+    let rt = PluginRuntime::builder()
+        .script_budget(20_000_000)
+        .build()
+        .unwrap();
+    let start = std::time::Instant::now();
+    let err = rt.eval("while true do end").unwrap_err();
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "watchdog took too long: {:?}",
+        start.elapsed()
+    );
+    assert!(matches!(err, PluginError::Lua(_)), "got: {err:?}");
+    // The runtime stays usable after an abort.
+    let v = rt.eval("return 6 * 7").unwrap();
+    assert_eq!(v.as_integer(), Some(42));
+}

@@ -38,6 +38,7 @@ pub mod testing;
 pub mod theme;
 pub mod tools;
 pub mod ui;
+pub mod watchdog;
 pub mod watcher;
 pub mod widgets;
 

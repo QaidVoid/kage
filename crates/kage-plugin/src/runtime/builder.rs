@@ -65,6 +65,15 @@ impl PluginRuntimeBuilder {
         self
     }
 
+    /// Set the VM instruction budget one host-driven plugin entry may
+    /// execute before the watchdog aborts it. Defaults to
+    /// [`crate::watchdog::BUDGET`].
+    #[must_use]
+    pub fn script_budget(mut self, script_budget: u64) -> Self {
+        self.script_budget = script_budget;
+        self
+    }
+
     /// Finalize the runtime: build the Lua state, apply sandbox removals,
     /// install the `kage` API table, wire `kage.on`,
     /// `kage.register_tool`, `kage.register_command`,
@@ -73,6 +82,7 @@ impl PluginRuntimeBuilder {
     pub fn build(self) -> Result<PluginRuntime, PluginError> {
         let lua = Lua::new();
         apply_sandbox(&lua)?;
+        watchdog::install(&lua)?;
         api::install(&lua, self.sink.clone(), self.config)?;
         events::install_subscriptions(&lua)?;
         plugin_fs::install_fs(&lua, self.workdir.clone())?;
@@ -257,6 +267,7 @@ impl PluginRuntimeBuilder {
             enabled: self.enabled,
             plugin_config: self.plugin_config,
             state_dir: self.state_dir,
+            script_budget: self.script_budget,
         })
     }
 }

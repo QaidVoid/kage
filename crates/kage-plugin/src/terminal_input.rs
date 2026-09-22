@@ -38,6 +38,7 @@ use mlua::{Function, Lua, RegistryKey, Table, Value};
 use crate::api::{LogLevel, SharedHostLog, json_to_lua};
 use crate::error::PluginError;
 use crate::runtime::SharedLua;
+use crate::watchdog;
 
 /// Shared list of active terminal-input hooks, in registration order.
 /// The host snapshots it per keystroke so an `off` (or a hook
@@ -98,7 +99,7 @@ impl LuaTerminalHook {
                 return false;
             }
         };
-        match func.call::<Value>(payload) {
+        match watchdog::run(&lua, watchdog::BUDGET, || func.call::<Value>(payload)) {
             Ok(Value::Boolean(b)) => b,
             Ok(_) => false,
             Err(e) => {

@@ -25,6 +25,7 @@ use crate::api::{LogLevel, SharedHostLog, json_to_lua};
 use crate::chrome::{ChromeLine, parse_lines};
 use crate::error::PluginError;
 use crate::runtime::SharedLua;
+use crate::watchdog;
 
 /// Shared map of custom block kind -> its Lua renderer. The host
 /// snapshots this after load and registers each into the TUI's
@@ -86,7 +87,7 @@ impl LuaBlockRenderer {
                 return Vec::new();
             }
         };
-        match func.call::<Value>(block) {
+        match watchdog::run(&lua, watchdog::BUDGET, || func.call::<Value>(block)) {
             Ok(value) => parse_lines(&value),
             Err(e) => {
                 self.log_error(&e);

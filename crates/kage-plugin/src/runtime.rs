@@ -80,6 +80,7 @@ pub(crate) use crate::theme::{
 };
 pub(crate) use crate::tools::{self, RegisteredTools, registered_tools};
 pub(crate) use crate::ui;
+pub(crate) use crate::watchdog;
 pub(crate) use crate::widgets::{self, LuaWidget, RegisteredWidgets, registered_widgets};
 
 /// Shared, mutex-guarded handle to the Lua state. Plugin-defined tools
@@ -142,6 +143,9 @@ pub struct PluginRuntime {
     /// private `<state_dir>/<stem>.json` persisted across runs; when
     /// `None`, `kage.store` raises so misconfiguration is not silent.
     state_dir: Option<PathBuf>,
+    /// VM instructions one host-driven plugin entry may execute before
+    /// the watchdog aborts it. See [`crate::watchdog`].
+    script_budget: u64,
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -160,6 +164,7 @@ pub struct PluginRuntimeBuilder {
     enabled: Vec<String>,
     plugin_config: BTreeMap<String, serde_json::Value>,
     state_dir: Option<PathBuf>,
+    script_budget: u64,
 }
 
 impl std::fmt::Debug for PluginRuntimeBuilder {

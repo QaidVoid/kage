@@ -27,6 +27,7 @@ use mlua::{Function, Lua, RegistryKey, Table};
 use crate::api::{LogLevel, SharedHostLog};
 use crate::error::PluginError;
 use crate::runtime::SharedLua;
+use crate::watchdog;
 
 /// Shared collection of widgets registered by plugins.
 pub type RegisteredWidgets = Arc<std::sync::Mutex<Vec<Arc<LuaWidget>>>>;
@@ -84,7 +85,7 @@ impl LuaWidget {
                 return self.fresh_cached();
             }
         };
-        let text = match func.call::<mlua::Value>(width) {
+        let text = match watchdog::run(&lua, watchdog::BUDGET, || func.call::<mlua::Value>(width)) {
             Ok(mlua::Value::String(s)) => s.to_str().map(|s| s.to_owned()).unwrap_or_default(),
             Ok(mlua::Value::Nil) => String::new(),
             Ok(other) => format!("{other:?}"),

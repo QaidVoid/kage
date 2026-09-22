@@ -24,6 +24,7 @@ impl PluginRuntime {
             enabled: Vec::new(),
             plugin_config: BTreeMap::new(),
             state_dir: None,
+            script_budget: watchdog::BUDGET,
         }
     }
 
@@ -63,7 +64,9 @@ impl PluginRuntime {
     /// instead, so their top-level definitions stay private.
     pub fn eval(&self, source: &str) -> Result<mlua::Value, PluginError> {
         let lua = self.lock_lua();
-        Ok(lua.load(source).eval::<mlua::Value>()?)
+        watchdog::run(&lua, self.script_budget, || {
+            lua.load(source).eval::<mlua::Value>()
+        })
     }
 
     /// Evaluate a plugin source chunk in its own `_ENV`.
@@ -92,16 +95,17 @@ impl PluginRuntime {
             let mut cur = lock(&self.current_plugin);
             *cur = Some(name.to_owned());
         }
-        let result = lua
-            .load(source)
-            .set_name(name)
-            .set_environment(env)
-            .eval::<mlua::Value>();
+        let result = watchdog::run(&lua, self.script_budget, || {
+            lua.load(source)
+                .set_name(name)
+                .set_environment(env)
+                .eval::<mlua::Value>()
+        })?;
         {
             let mut cur = lock(&self.current_plugin);
             *cur = None;
         }
-        Ok(result?)
+        Ok(result)
     }
 
     /// Fire every handler subscribed to `event_name` with `payload`.
@@ -111,7 +115,9 @@ impl PluginRuntime {
         payload: &serde_json::Value,
     ) -> Result<(), PluginError> {
         let lua = self.lock_lua();
-        events::dispatch(&lua, event_name, payload, &self.sink)
+        watchdog::run(&lua, self.script_budget, || {
+            events::dispatch(&lua, event_name, payload, &self.sink)
+        })
     }
 
     /// Chain every handler subscribed to `event_name` and return the
@@ -123,7 +129,9 @@ impl PluginRuntime {
         payload: serde_json::Value,
     ) -> Result<serde_json::Value, PluginError> {
         let lua = self.lock_lua();
-        events::dispatch_transform(&lua, event_name, payload, &self.sink)
+        watchdog::run(&lua, self.script_budget, || {
+            events::dispatch_transform(&lua, event_name, payload, &self.sink)
+        })
     }
 
     /// Poll handlers subscribed to `event_name`; return `true` as soon as
@@ -134,7 +142,9 @@ impl PluginRuntime {
         payload: &serde_json::Value,
     ) -> Result<bool, PluginError> {
         let lua = self.lock_lua();
-        events::dispatch_predicate(&lua, event_name, payload, &self.sink)
+        watchdog::run(&lua, self.script_budget, || {
+            events::dispatch_predicate(&lua, event_name, payload, &self.sink)
+        })
     }
 
     /// Consult handlers subscribed to a session-op event. The first
@@ -146,14 +156,18 @@ impl PluginRuntime {
         target: &str,
     ) -> Result<events::SessionOpDecision, PluginError> {
         let lua = self.lock_lua();
-        events::dispatch_session_op(&lua, event_name, target, &self.sink)
+        watchdog::run(&lua, self.script_budget, || {
+            events::dispatch_session_op(&lua, event_name, target, &self.sink)
+        })
     }
 
     /// Fire every `resources_discover` handler and collect the aggregated
     /// directory paths. See [`events::dispatch_resources_discover`].
     pub fn discover_resources(&self) -> Result<events::DiscoveryEntries, PluginError> {
         let lua = self.lock_lua();
-        events::dispatch_resources_discover(&lua, &self.sink)
+        watchdog::run(&lua, self.script_budget, || {
+            events::dispatch_resources_discover(&lua, &self.sink)
+        })
     }
 
     /// Number of handlers subscribed to `event_name`.
@@ -242,9 +256,14 @@ impl PluginRuntime {
     /// Consult the plugin's `kage.on_acp_permission` handler for an
     /// upstream agent's tool-call ask. `Some(true)` allow,
     /// `Some(false)` explicit deny, `None` no handler (host default).
+    /// A watchdog overrun denies, like any other handler error.
     #[must_use]
     pub fn acp_permission(&self, payload: &serde_json::Value) -> Option<bool> {
-        acp::decide(&self.lock_lua(), payload)
+        let lua = self.lock_lua();
+        watchdog::run(&lua, self.script_budget, || {
+            Ok::<_, PluginError>(acp::decide(&lua, payload))
+        })
+        .unwrap_or(Some(false))
     }
 
     /// Snapshot the status-bar widgets registered by plugins so far.
@@ -508,8 +527,11 @@ impl PluginRuntime {
         }
         let lua = self.lock_lua();
         let thread = lua.create_thread(func.clone())?;
+        watchdog::install_on_thread(&thread)?;
         let resume_args = bridge::args_to_multi(&lua, args)?;
-        bridge::step(thread, resume_args, &mut slot)
+        watchdog::run(&lua, self.script_budget, || {
+            bridge::step(thread, resume_args, &mut slot)
+        })
     }
 
     /// Resume the parked coroutine, delivering `result` as the return
@@ -520,7 +542,9 @@ impl PluginRuntime {
         let thread = slot.take().ok_or(PluginError::BridgeIdle)?;
         let lua = self.lock_lua();
         let resume_args = bridge::args_to_multi(&lua, std::slice::from_ref(result))?;
-        bridge::step(thread, resume_args, &mut slot)
+        watchdog::run(&lua, self.script_budget, || {
+            bridge::step(thread, resume_args, &mut slot)
+        })
     }
 
     /// Resume the parked coroutine signalling the host action was
@@ -529,8 +553,10 @@ impl PluginRuntime {
     pub fn bridge_cancel(&self) -> Result<BridgeStep, PluginError> {
         let mut slot = lock(&self.bridge);
         let thread = slot.take().ok_or(PluginError::BridgeIdle)?;
-        let _lua = self.lock_lua();
-        bridge::step(thread, mlua::MultiValue::new(), &mut slot)
+        let lua = self.lock_lua();
+        watchdog::run(&lua, self.script_budget, || {
+            bridge::step(thread, mlua::MultiValue::new(), &mut slot)
+        })
     }
 
     /// Abandon the parked coroutine without resuming it (hard cancel,

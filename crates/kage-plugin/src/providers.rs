@@ -32,6 +32,7 @@ use mlua::{Function, Lua, RegistryKey, Table, Value};
 use crate::api::{LogLevel, SharedHostLog, json_to_lua, lua_to_json};
 use crate::error::PluginError;
 use crate::runtime::SharedLua;
+use crate::watchdog;
 
 /// `Provider` whose `stream` runs inside the plugin runtime's Lua state.
 pub struct LuaProvider {
@@ -144,43 +145,46 @@ fn run_handler(
         Ok(())
     })?;
 
-    let result: Value = handler.call((lua_req, emit))?;
-    match result {
-        Value::Table(t) => {
-            for pair in t.clone().sequence_values::<Value>() {
+    watchdog::run(&lua, watchdog::BUDGET, || {
+        let result: Value = handler.call((lua_req, emit))?;
+        match result {
+            Value::Table(t) => {
+                for pair in t.clone().sequence_values::<Value>() {
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                    let v = pair?;
+                    let _ = tx.send(value_to_provider_event(v, sink));
+                }
+            }
+            Value::Function(f) => loop {
                 if cancel.is_cancelled() {
                     break;
                 }
-                let v = pair?;
-                let _ = tx.send(value_to_provider_event(v, sink));
-            }
-        }
-        Value::Function(f) => loop {
-            if cancel.is_cancelled() {
-                break;
-            }
-            let next: Value = match f.call::<Value>(()) {
-                Ok(v) => v,
-                Err(err) => {
-                    let _ = tx.send(Err(ProviderError::Decode(format!(
-                        "plugin provider iterator raised: {err}"
-                    ))));
+                let next: Value = match f.call::<Value>(()) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        let _ = tx.send(Err(ProviderError::Decode(format!(
+                            "plugin provider iterator raised: {err}"
+                        ))));
+                        break;
+                    }
+                };
+                if matches!(next, Value::Nil) {
                     break;
                 }
-            };
-            if matches!(next, Value::Nil) {
-                break;
+                let _ = tx.send(value_to_provider_event(next, sink));
+            },
+            Value::Nil => {}
+            _ => {
+                let _ = tx.send(Err(ProviderError::Decode(
+                    "plugin provider's stream() returned neither nil, a table, nor a function"
+                        .to_owned(),
+                )));
             }
-            let _ = tx.send(value_to_provider_event(next, sink));
-        },
-        Value::Nil => {}
-        _ => {
-            let _ = tx.send(Err(ProviderError::Decode(
-                "plugin provider's stream() returned neither nil, a table, nor a function"
-                    .to_owned(),
-            )));
         }
-    }
+        Ok::<(), mlua::Error>(())
+    })?;
     Ok(())
 }
 

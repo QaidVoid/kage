@@ -39,6 +39,7 @@ use mlua::{Function, Lua, RegistryKey, Table, Value};
 use crate::api::{LogLevel, SharedHostLog};
 use crate::error::PluginError;
 use crate::runtime::SharedLua;
+use crate::watchdog;
 
 /// One completion candidate a provider produced.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -121,7 +122,9 @@ impl LuaAutocompleteProvider {
             self.log_error(&e);
             return Vec::new();
         }
-        match func.call::<Value>((prefix.to_owned(), ctx)) {
+        match watchdog::run(&lua, watchdog::BUDGET, || {
+            func.call::<Value>((prefix.to_owned(), ctx))
+        }) {
             Ok(Value::Table(items)) => parse_items(&items),
             Ok(_) => Vec::new(),
             Err(e) => {

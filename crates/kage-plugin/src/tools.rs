@@ -23,6 +23,7 @@ use mlua::{Function, Lua, RegistryKey, Table, Value};
 use crate::api::{LogLevel, SharedHostLog, json_to_lua, lua_to_json};
 use crate::error::PluginError;
 use crate::runtime::SharedLua;
+use crate::watchdog;
 
 /// Shared collection of tools registered by plugins. Cloned into the Lua
 /// callback so registrations made during `dofile` accumulate here.
@@ -88,7 +89,7 @@ impl Tool for LuaTool {
             .map_err(|e| ToolError::Other(format!("plugin tool '{}': {e}", self.name)))?;
         let lua_input =
             json_to_lua(&lua, &input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
-        match func.call::<Value>(lua_input) {
+        match watchdog::run(&lua, watchdog::BUDGET, || func.call::<Value>(lua_input)) {
             Ok(returned) => Ok(value_to_output(returned)),
             Err(err) => {
                 let mut s = lock(&self.sink);

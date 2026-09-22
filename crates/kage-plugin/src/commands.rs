@@ -30,6 +30,7 @@ use mlua::{Function, Lua, RegistryKey, Table};
 use crate::api::{LogLevel, SharedHostLog, json_to_lua, lua_to_json};
 use crate::error::PluginError;
 use crate::runtime::SharedLua;
+use crate::watchdog;
 
 /// Owned argument schema for a plugin-registered slash command. Each
 /// variant mirrors a [`kage_tui::ArgSpec`] kind so the host can
@@ -151,7 +152,9 @@ impl LuaCommand {
                 });
             }
         };
-        match handler.call::<mlua::Value>((args.to_owned(), lua_ctx, parsed_args)) {
+        match watchdog::run(&lua, watchdog::BUDGET, || {
+            handler.call::<mlua::Value>((args.to_owned(), lua_ctx, parsed_args))
+        }) {
             Ok(v) => Ok(CommandOutput::from_value(v)),
             Err(err) => {
                 let mut s = lock(&self.sink);

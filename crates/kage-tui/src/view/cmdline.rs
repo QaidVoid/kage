@@ -154,9 +154,9 @@ pub(super) fn render_cmdline_error(frame: &mut Frame, regions: Regions, cmdline:
     let marker = "! ";
     let marker_chars = marker.len();
     let inner = usize::from(area.width).saturating_sub(marker_chars);
-    let text = truncate_to_width(err, inner);
-    let total_chars = marker_chars + text.chars().count();
-    let pad = usize::from(area.width).saturating_sub(total_chars);
+    let text = truncate_to_width(err, inner, "\u{2026}");
+    let total_width = marker_chars + text.width();
+    let pad = usize::from(area.width).saturating_sub(total_width);
     let line = Line::from(vec![
         Span::styled(marker.to_owned(), style.add_modifier(Modifier::BOLD)),
         Span::styled(format!("{text}{}", " ".repeat(pad)), style),
@@ -338,38 +338,25 @@ fn popup_row(
     if let Some(desc) = description {
         let remaining = inner_width.saturating_sub(after_value).saturating_sub(2);
         if remaining > 0 {
-            let truncated = truncate_to_width(desc, remaining);
+            let truncated = truncate_to_width(desc, remaining, "\u{2026}");
             spans.push(Span::styled("  ".to_owned(), desc_style));
             spans.push(Span::styled(truncated, desc_style));
         }
     }
-    let painted: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let painted: usize = spans.iter().map(|s| s.content.width()).sum();
     if painted < inner_width {
         spans.push(Span::styled(" ".repeat(inner_width - painted), value_style));
     }
     Line::from(spans)
 }
 
-fn truncate_to_width(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max_chars {
-        return s.to_owned();
-    }
-    let mut out: String = chars[..max_chars.saturating_sub(1)].iter().collect();
-    out.push('\u{2026}');
-    out
-}
-
 fn pad_to_width(s: &str, width: usize) -> String {
-    let n = s.chars().count();
-    if n >= width {
+    let w = s.width();
+    if w >= width {
         return s.to_owned();
     }
     let mut out = s.to_owned();
-    out.push_str(&" ".repeat(width - n));
+    out.push_str(&" ".repeat(width - w));
     out
 }
 

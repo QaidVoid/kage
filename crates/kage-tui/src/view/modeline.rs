@@ -165,7 +165,7 @@ pub(super) fn render_modeline(
             ));
         }
     }
-    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let used: usize = spans.iter().map(|s| s.content.width()).sum();
     let pad = usize::from(area.width).saturating_sub(used);
     if pad > 0 {
         spans.push(Span::styled(" ".repeat(pad), bg));
@@ -288,7 +288,7 @@ pub(crate) fn input_visual_cursor(text: &str, cursor: usize, body_width: u16) ->
     for (idx, (start, end)) in rows.iter().enumerate() {
         if cursor <= *end {
             let row_text = text.get(*start..cursor).unwrap_or("");
-            let col = row_text.chars().count();
+            let col = row_text.width();
             return (
                 u16::try_from(idx).unwrap_or(u16::MAX),
                 u16::try_from(col).unwrap_or(u16::MAX),
@@ -296,7 +296,7 @@ pub(crate) fn input_visual_cursor(text: &str, cursor: usize, body_width: u16) ->
         }
     }
     let (last_start, last_end) = rows[rows.len() - 1];
-    let last_chars = text[last_start..last_end].chars().count();
+    let last_chars = text[last_start..last_end].width();
     (
         u16::try_from(rows.len() - 1).unwrap_or(u16::MAX),
         u16::try_from(last_chars).unwrap_or(u16::MAX),

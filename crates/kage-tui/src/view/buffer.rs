@@ -405,16 +405,15 @@ pub(crate) fn capture_and_overlay(
 
 /// Approximate wrapped-row count for one [`Line`] at `width`, used
 /// by [`slice_lines_for_window`] to walk a cached vector of lines and
-/// land on the slice that intersects the visible window. Counts
-/// `char` instances rather than display width, so wide-char content
-/// (CJK, emoji) under-counts; the rendered viewport just shows
-/// slightly fewer rows than expected, no scroll-drift bug.
+/// land on the slice that intersects the visible window. Sums display
+/// width, so the estimate tracks how ratatui actually lays cells out;
+/// only word-wrap break points make it approximate.
 fn wrap_rows(line: &Line<'_>, width: usize) -> usize {
-    let chars: usize = line.spans.iter().map(|s| s.content.chars().count()).sum();
-    if chars == 0 {
+    let cols: usize = line.spans.iter().map(|s| s.content.width()).sum();
+    if cols == 0 {
         1
     } else {
-        chars.div_ceil(width).max(1)
+        cols.div_ceil(width).max(1)
     }
 }
 

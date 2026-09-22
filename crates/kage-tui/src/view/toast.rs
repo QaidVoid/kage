@@ -14,8 +14,10 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::widgets::Block as RtBlock;
+use unicode_width::UnicodeWidthStr;
 
 use super::DECORATION_MARKER;
+use super::truncate_to_width;
 use crate::theme::Theme;
 use crate::toast::{Toast, ToastKind};
 
@@ -88,7 +90,7 @@ pub fn render_toasts(frame: &mut Frame, buffer_area: Rect, toasts: &[Toast], the
 fn compute_toast_width(toasts: &[Toast], max: u16) -> u16 {
     let longest = toasts
         .iter()
-        .map(|t| u16::try_from(t.text.chars().count()).unwrap_or(u16::MAX))
+        .map(|t| u16::try_from(t.text.width()).unwrap_or(u16::MAX))
         .max()
         .unwrap_or(MIN_TOAST_WIDTH);
     let want = longest.saturating_add(LEFT_CHROME + RIGHT_CHROME);
@@ -145,7 +147,7 @@ fn paint_toast(frame: &mut Frame, area: Rect, toast: &Toast, theme: &Theme) {
         .width
         .saturating_sub(LEFT_CHROME)
         .saturating_sub(RIGHT_CHROME);
-    let truncated = truncate_chars(&toast.text, usize::from(body_width));
+    let truncated = truncate_to_width(&toast.text, usize::from(body_width), "\u{2026}");
     buf.set_string(
         x,
         content_row,
@@ -169,22 +171,6 @@ fn icon_for(kind: ToastKind) -> &'static str {
         ToastKind::Warning => "\u{26a0}", // warning sign
         ToastKind::Error => "\u{2717}",   // ballot x
     }
-}
-
-fn truncate_chars(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max_chars {
-        return s.to_owned();
-    }
-    if max_chars <= 1 {
-        return chars[..max_chars].iter().collect();
-    }
-    let mut out: String = chars[..max_chars.saturating_sub(1)].iter().collect();
-    out.push('\u{2026}');
-    out
 }
 
 #[cfg(test)]
@@ -223,6 +209,24 @@ mod tests {
         for line in painted.lines() {
             assert!(line.chars().all(|c| c == ' '), "got {line:?}");
         }
+    }
+
+    #[test]
+    fn wide_char_toast_paints_full_message_inside_card() {
+        // 12 CJK glyphs occupy 24 cells. Sizing the card by char
+        // count (12) made it half as wide as the text and clipped
+        // the message; the card must adapt to display width.
+        let msg = "你好世界你好世界你好世界";
+        let painted = render_into(60, 6, &[Toast::info(msg)]);
+        let rows: Vec<&str> = painted.lines().collect();
+        // Wide glyphs carry a reset spacer cell in the test buffer,
+        // so compare with the spacer cells stripped out.
+        let compact: String = rows[2].chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            compact.contains(msg),
+            "row 2 should contain the full message, got {:?}",
+            rows[2]
+        );
     }
 
     #[test]

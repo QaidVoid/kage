@@ -396,15 +396,11 @@ pub(crate) fn truncated_body_lines(output: &str, style: Style) -> Vec<Line<'stat
 }
 
 /// First non-empty line of `text`, trimmed and truncated to `max`
-/// characters. Returns `None` when there is no non-empty content.
+/// display columns. Returns `None` when there is no non-empty
+/// content.
 pub(crate) fn first_line_preview(text: &str, max: usize) -> Option<String> {
     let line = text.lines().find(|l| !l.trim().is_empty())?;
-    let trimmed = line.trim();
-    if trimmed.chars().count() <= max {
-        return Some(trimmed.to_owned());
-    }
-    let cut: String = trimmed.chars().take(max.saturating_sub(3)).collect();
-    Some(format!("{cut}..."))
+    Some(truncate_to_width(line.trim(), max, "..."))
 }
 
 pub(crate) fn header_line(

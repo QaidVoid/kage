@@ -331,7 +331,7 @@ fn summarize_input(name: &str, input: &serde_json::Value) -> String {
         _ => None,
     };
     let raw = summary.unwrap_or_else(|| input.to_string());
-    truncate(&raw, 60)
+    crate::view::truncate_to_width(&raw, 60, "...")
 }
 
 fn string_field(input: &serde_json::Value, key: &str) -> Option<String> {
@@ -355,14 +355,6 @@ fn grep_summary(input: &serde_json::Value) -> Option<String> {
         Some(path) if path != "." => Some(format!("{pattern} in {path}")),
         _ => Some(pattern),
     }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_owned();
-    }
-    let cut: String = s.chars().take(max.saturating_sub(3)).collect();
-    format!("{cut}...")
 }
 
 #[cfg(test)]

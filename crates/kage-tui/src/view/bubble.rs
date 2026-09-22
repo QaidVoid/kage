@@ -134,14 +134,14 @@ pub(crate) fn wrap_in_bubble_focused(
         ])
     };
     let make_row = |visual_spans: Vec<Span<'static>>| -> Line<'static> {
-        let used_chars: usize = visual_spans.iter().map(|s| s.content.chars().count()).sum();
+        let used_width: usize = visual_spans.iter().map(|s| s.content.width()).sum();
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(visual_spans.len() + 3);
         spans.push(Span::styled(rule_glyph.to_owned(), rule_style));
         spans.push(Span::styled(" ".repeat(LEFT_PAD), bg_only));
         for s in visual_spans {
             spans.push(Span::styled(s.content, s.style.bg(bg)));
         }
-        let used = LEFT_PAD + used_chars;
+        let used = LEFT_PAD + used_width;
         if used < interior {
             spans.push(Span::styled(" ".repeat(interior - used), bg_only));
         }

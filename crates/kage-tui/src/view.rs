@@ -39,7 +39,7 @@ pub(crate) use ratatui::layout::{Alignment, Rect};
 pub(crate) use ratatui::style::{Color, Modifier, Style};
 pub(crate) use ratatui::text::{Line, Span};
 pub(crate) use ratatui::widgets::{Block as RtBlock, Borders, Paragraph, Wrap};
-pub(crate) use unicode_width::UnicodeWidthChar;
+pub(crate) use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(crate) use crate::buffer::{Block, Buffer};
 pub(crate) use crate::cmdline::CommandLine;
@@ -289,8 +289,8 @@ fn render_status(
         right_spans.push(Span::styled(format!("#{sid} "), muted));
     }
     let total = usize::from(regions.status.width);
-    let left_width: usize = left_spans.iter().map(|s| s.content.chars().count()).sum();
-    let right_width: usize = right_spans.iter().map(|s| s.content.chars().count()).sum();
+    let left_width: usize = left_spans.iter().map(|s| s.content.width()).sum();
+    let right_width: usize = right_spans.iter().map(|s| s.content.width()).sum();
     let pad = total.saturating_sub(left_width + right_width);
     let mut spans = left_spans;
     if pad > 0 {
@@ -301,6 +301,31 @@ fn render_status(
         .alignment(Alignment::Left)
         .style(bg_style);
     frame.render_widget(paragraph, regions.status);
+}
+
+/// Clip `s` to at most `max` display columns, appending `suffix`
+/// (counted against `max`) when anything was dropped. Measures cells,
+/// not chars, so wide text (CJK, emoji) never overruns its budget.
+pub(crate) fn truncate_to_width(s: &str, max: usize, suffix: &str) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if s.width() <= max {
+        return s.to_owned();
+    }
+    let budget = max.saturating_sub(suffix.width());
+    let mut out = String::new();
+    let mut used = 0usize;
+    for c in s.chars() {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + cw > budget {
+            break;
+        }
+        out.push(c);
+        used += cw;
+    }
+    out.push_str(suffix);
+    out
 }
 
 mod blocks;

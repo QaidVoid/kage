@@ -106,8 +106,9 @@ pub(super) fn render_input(frame: &mut Frame, regions: Regions, input: &InputSta
         } else {
             (None, Style::default())
         };
-        // Lines are pre-wrapped at body_width chars to match
-        // input_visual_cursor exactly; no Paragraph::wrap needed.
+        // Lines are pre-wrapped at body_width display columns to
+        // match input_visual_cursor exactly; no Paragraph::wrap
+        // needed.
         let lines = build_input_body_lines(input.text(), range, highlight, body_width);
         let body = Paragraph::new(lines).scroll((scroll_off, 0));
         frame.render_widget(body, body_area);
@@ -162,13 +163,13 @@ fn build_input_body_lines(
 /// - Logical lines (split on `\n`) are wrapped independently. An
 ///   empty logical line still produces one zero-length row so a
 ///   trailing newline grows the input.
-/// - Within a logical line, a row is filled greedily by characters.
-///   When the next character would overflow `body_width`, the row is
-///   cut at the most recent ASCII space (the space is consumed and
-///   not painted on either side); if no break point exists in the
+/// - Within a logical line, a row is filled greedily by display
+///   width. When the next character would overflow `body_width`, the
+///   row is cut at the most recent ASCII space (the space is consumed
+///   and not painted on either side); if no break point exists in the
 ///   row, the cut is mid-character.
 /// - A "word" longer than `body_width` is split at `body_width`
-///   character boundaries until it fits.
+///   display-column boundaries until it fits.
 pub(crate) fn wrap_input_rows(text: &str, body_width: u16) -> Vec<(usize, usize)> {
     let bw = usize::from(body_width.max(1));
     let mut rows = Vec::new();
@@ -194,12 +195,13 @@ fn wrap_one_logical_line(
         return;
     }
     let mut row_start_abs = line_start_abs;
-    let mut row_chars = 0usize;
+    let mut row_width = 0usize;
     let mut last_space_abs: Option<usize> = None;
     let mut byte_pos = line_start_abs;
     for c in line.chars() {
         let c_len = c.len_utf8();
-        if row_chars >= bw {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+        if row_width + cw > bw {
             if let Some(sb) = last_space_abs.filter(|&s| s > row_start_abs) {
                 rows.push((row_start_abs, sb));
                 row_start_abs = sb + 1;
@@ -207,16 +209,14 @@ fn wrap_one_logical_line(
                 rows.push((row_start_abs, byte_pos));
                 row_start_abs = byte_pos;
             }
-            row_chars = line[(row_start_abs - line_start_abs)..(byte_pos - line_start_abs)]
-                .chars()
-                .count();
+            row_width = line[(row_start_abs - line_start_abs)..(byte_pos - line_start_abs)].width();
             last_space_abs = None;
         }
         if c == ' ' {
             last_space_abs = Some(byte_pos);
         }
         byte_pos += c_len;
-        row_chars += 1;
+        row_width += cw;
     }
     rows.push((row_start_abs, line_end_abs));
 }

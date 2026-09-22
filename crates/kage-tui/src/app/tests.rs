@@ -1492,6 +1492,23 @@ fn search_cache_refreshes_when_pattern_changes() {
 }
 
 #[test]
+fn search_cache_rebuilds_after_scrollback_compaction() {
+    let (mut app, buffer) = search_fixture();
+    app.search_pattern = Some("needle".into());
+    app.refresh_search_matches();
+    assert_eq!(app.search_matches(), &[1, 3]);
+
+    // Drop block 0: compaction shifts indices and bumps the buffer
+    // version, so the cached match list must rebuild to [0, 2].
+    // Focus pointed at the dropped block and falls back to the
+    // transcript bottom (block 2), which is itself a match.
+    assert_eq!(buffer.lock().unwrap().compact_to(3), 1);
+    app.refresh_search_matches();
+    assert_eq!(app.search_matches(), &[0, 2]);
+    assert_eq!(app.compute_search_match_count(), Some((2, 2)));
+}
+
+#[test]
 fn search_count_is_none_without_a_pattern() {
     let (mut app, _buffer) = search_fixture();
     assert_eq!(app.compute_search_match_count(), None);

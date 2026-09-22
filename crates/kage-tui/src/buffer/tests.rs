@@ -477,3 +477,126 @@ fn merge_render_state_carries_throttle_flag() {
     live.merge_render_state(snap);
     assert!(!live.stream_edits_pending());
 }
+
+#[test]
+fn compact_drops_oldest_and_keeps_pairs_together() {
+    let mut buf = Buffer::new();
+    buf.push_user("1");
+    buf.push_user("2");
+    buf.push_user("3");
+    buf.push_tool_call("A", "bash", "ls", "{}");
+    buf.push_tool_result("A", "out", false);
+    buf.begin_thinking();
+    buf.append_thinking_delta("hmm");
+    buf.push_tool_call("B", "bash", "ls", "{}");
+    buf.push_tool_result("B", "out", false);
+    buf.push_user("4");
+    buf.push_user("5");
+    assert_eq!(buf.blocks().len(), 10);
+
+    assert_eq!(buf.compact_to(4), 6);
+    assert_eq!(buf.blocks().len(), 4);
+    assert!(
+        matches!(&buf.blocks()[0], Block::ToolCall { call_id, .. } if call_id == "B"),
+        "the frontier lands on the surviving call, not its oldest filler"
+    );
+    assert!(matches!(&buf.blocks()[1], Block::ToolResult { call_id, .. } if call_id == "B"));
+}
+
+#[test]
+fn compact_frontier_extends_past_orphaned_results() {
+    let mut buf = Buffer::new();
+    buf.push_user("0");
+    buf.push_tool_call("A", "bash", "ls", "{}");
+    buf.begin_thinking();
+    buf.append_thinking_delta("thinking");
+    buf.push_tool_result("A", "out", false);
+    for i in 0..4 {
+        buf.push_user(format!("filler{i}"));
+    }
+
+    // The naive frontier is 3, which would leave result A rendering
+    // as a composite without its call half (stuck "running"). The
+    // frontier slides past the orphaned result so the pair drops
+    // whole, even though that lands under the cap.
+    assert_eq!(buf.compact_to(5), 4);
+    assert_eq!(buf.blocks().len(), 4);
+    assert!(
+        matches!(&buf.blocks()[0], Block::User { text } if text == "filler0"),
+        "the orphaned call/result pair is gone entirely"
+    );
+}
+
+#[test]
+fn compact_shifts_focus_and_drops_stale_focus() {
+    let mut buf = Buffer::new();
+    for i in 0..5 {
+        buf.push_user(format!("m{i}"));
+    }
+    buf.set_focus(Some(3));
+    assert_eq!(buf.compact_to(3), 2);
+    assert_eq!(
+        buf.focus(),
+        Some(1),
+        "surviving focus shifts by the drop count"
+    );
+
+    buf.set_focus(Some(0));
+    assert_eq!(buf.compact_to(2), 1);
+    assert_eq!(
+        buf.focus(),
+        None,
+        "focus pointing at a dropped block clears"
+    );
+}
+
+#[test]
+fn compact_renumbers_renderer_row_caches() {
+    let mut buf = Buffer::new();
+    for i in 0..4 {
+        buf.push_user(format!("m{i}"));
+    }
+    buf.set_last_block_screen_rows(vec![(0, 5, 8), (1, 8, 12), (2, 12, 20), (3, 20, 24)]);
+    buf.set_last_block_virtual_rows(vec![(0, 0, 4), (1, 4, 9), (2, 9, 15), (3, 15, 21)]);
+
+    assert_eq!(buf.compact_to(2), 2);
+    assert_eq!(buf.block_at_screen_row(12), Some(0));
+    assert_eq!(buf.screen_top_of(1), Some(20));
+    assert_eq!(buf.block_at_screen_row(11), None, "dropped rows are gone");
+    assert_eq!(buf.block_virtual_rows(0), Some((9, 15)));
+    assert_eq!(buf.block_virtual_rows(1), Some((15, 21)));
+    assert_eq!(buf.block_virtual_rows(2), None);
+}
+
+#[test]
+fn trim_scrollback_is_a_noop_under_the_cap() {
+    let mut buf = Buffer::new();
+    buf.push_user("a");
+    buf.push_user("b");
+    let v = buf.version();
+    assert_eq!(buf.trim_scrollback(), 0);
+    assert_eq!(
+        buf.version(),
+        v,
+        "a no-op compaction must not bump the version"
+    );
+}
+
+#[test]
+fn trim_scrollback_enforces_the_block_cap() {
+    let mut buf = Buffer::new();
+    let extra = 8;
+    for i in 0..MAX_BLOCKS + extra {
+        buf.push_user(format!("m{i}"));
+    }
+    assert_eq!(buf.trim_scrollback(), extra);
+    assert_eq!(buf.blocks().len(), MAX_BLOCKS);
+    assert!(
+        matches!(&buf.blocks()[0], Block::User { text } if text == "m8"),
+        "oldest blocks are the ones dropped"
+    );
+    assert!(
+        matches!(&buf.blocks()[MAX_BLOCKS - 1], Block::User { text } if *text == format!("m{}", MAX_BLOCKS + extra - 1)),
+        "newest block survives"
+    );
+}

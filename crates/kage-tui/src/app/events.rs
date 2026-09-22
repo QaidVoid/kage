@@ -302,6 +302,9 @@ impl App {
         B: ratatui::backend::Backend,
         B::Error: std::error::Error + Send + Sync + 'static,
     {
+        // Same ordering as `draw`: compact before search bookkeeping
+        // so indices read this frame are post-compaction.
+        lock(&self.buffer).trim_scrollback();
         let search_match_count = self.compute_search_match_count();
         let render_width = terminal.size().map_or(80, |r| r.width);
         self.refresh_plugin_widget_texts(render_width);

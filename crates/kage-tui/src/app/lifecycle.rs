@@ -265,6 +265,10 @@ impl App {
     #[allow(clippy::too_many_lines)]
     pub(crate) fn draw(&mut self, tui: &mut Tui) -> Result<(), TuiError> {
         self.sync_cursor_style();
+        // Enforce the scrollback cap before anything reads block
+        // indices: compaction shifts them, and its version bump makes
+        // the search-match list below rebuild against the new numbering.
+        lock(&self.buffer).trim_scrollback();
         // compute_search_match_count locks self.buffer internally; do
         // it BEFORE we hold the lock or we'll deadlock the moment a
         // search is active.

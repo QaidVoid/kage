@@ -292,6 +292,7 @@ impl Buffer {
         self.scroll = 0;
         self.focus = None;
         self.last_drawn_focus = None;
+        self.stream_dirty_since = None;
     }
 
     /// Take ownership of the blocks, leaving the buffer empty. Focus
@@ -300,8 +301,69 @@ impl Buffer {
         self.scroll = 0;
         self.focus = None;
         self.last_drawn_focus = None;
+        self.stream_dirty_since = None;
         self.clear_block_caches();
         mem::take(&mut self.blocks)
+    }
+
+    /// Enforce [`MAX_BLOCKS`]. Returns the number of blocks dropped
+    /// (zero when under the cap). UI-thread only: it shifts every
+    /// block index, so it must run before a draw snapshots the
+    /// buffer; the version bump it performs makes index-bearing
+    /// caches elsewhere (the search-match list) rebuild themselves.
+    ///
+    /// Not to be confused with `kage_loop::compact::maybe_compact`:
+    /// that compacts the *session history* against the token budget;
+    /// this only trims *rendered scrollback*.
+    pub(crate) fn trim_scrollback(&mut self) -> usize {
+        if self.blocks.len() <= MAX_BLOCKS {
+            return 0;
+        }
+        self.compact_to(MAX_BLOCKS)
+    }
+
+    /// Drop the oldest blocks so at most `cap` remain, keeping every
+    /// [`Block::ToolResult`] with its call. A result always sits
+    /// after its call (calls are pushed before their results), so
+    /// the only pair a frontier can split is a dropped call whose
+    /// result is still kept; the frontier extends past such results
+    /// until none remain, preventing a merged composite from losing
+    /// its call half (which would render as running forever). This
+    /// can leave fewer than `cap` blocks. Scroll survives untouched:
+    /// it counts rows from the bottom, which compaction doesn't
+    /// move.
+    pub(crate) fn compact_to(&mut self, cap: usize) -> usize {
+        let len = self.blocks.len();
+        if len <= cap {
+            return 0;
+        }
+        let mut k = len - cap;
+        loop {
+            let dropped_calls: std::collections::HashSet<&str> = self.blocks[..k]
+                .iter()
+                .filter_map(|b| match b {
+                    Block::ToolCall { call_id, .. } => Some(call_id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let Some(next) = self.blocks[k..].iter().position(|b| match b {
+                Block::ToolResult { call_id, .. } => dropped_calls.contains(call_id.as_str()),
+                _ => false,
+            }) else {
+                break;
+            };
+            k += next + 1;
+        }
+
+        self.blocks.drain(0..k);
+        self.block_heights.drain(0..k);
+        self.block_render_lines.drain(0..k);
+        self.focus = self.focus.and_then(|f| f.checked_sub(k));
+        self.last_drawn_focus = self.last_drawn_focus.and_then(|f| f.checked_sub(k));
+        renumber_after_compact(&mut self.last_block_screen_rows, k);
+        renumber_after_compact(&mut self.last_block_virtual_rows, k);
+        self.bump_version();
+        k
     }
 
     pub(crate) fn last_is_live_assistant(&self) -> bool {
@@ -313,5 +375,14 @@ impl Buffer {
 
     pub(crate) fn last_is_live_thinking(&self) -> bool {
         matches!(self.blocks.last(), Some(Block::Thinking { live: true, .. }))
+    }
+}
+
+/// Reindex a block-keyed row cache after `k` leading blocks were
+/// dropped: entries for dropped blocks go, surviving indices shift.
+fn renumber_after_compact<T, U>(rows: &mut Vec<(usize, T, U)>, k: usize) {
+    rows.retain(|(i, ..)| *i >= k);
+    for (i, ..) in rows.iter_mut() {
+        *i -= k;
     }
 }

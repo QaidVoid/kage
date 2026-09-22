@@ -279,6 +279,13 @@ pub struct Buffer {
 /// stream length).
 const STREAM_REPARSE_THROTTLE: Duration = Duration::from_millis(50);
 
+/// Maximum blocks kept in the conversation buffer. Beyond this, the
+/// oldest blocks are compacted away at draw time so an all-day
+/// session can't grow memory (blocks, text, and render caches)
+/// without bound. Chosen to stay far above what a focused work
+/// session produces while keeping the per-frame block walk cheap.
+const MAX_BLOCKS: usize = 512;
+
 mod edit;
 mod view;
 

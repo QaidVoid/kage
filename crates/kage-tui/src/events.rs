@@ -12,7 +12,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use kage_core::{Content, LoopEvent, Message, Role, ToolOutput};
+use kage_core::{Content, LoopEvent, Message, Role, StopReason, ToolOutput};
 use kage_loop::Hooks;
 
 use crate::buffer::Buffer;
@@ -165,6 +165,19 @@ fn apply_event(buf: &mut Buffer, event: &LoopEvent) {
         }
         LoopEvent::ToolCallEnd { id, output } => {
             buf.push_tool_result(id.to_string(), output.text.clone(), output.is_error);
+        }
+        LoopEvent::MessageEnd {
+            stop_reason: StopReason::MaxTokens,
+            ..
+        } => {
+            // Finalize the live assistant bubble first: finish_streaming
+            // targets the last block, so the notice must land after it.
+            buf.finish_streaming();
+            buf.push_custom(
+                "kage:truncated",
+                "[truncated: reply hit the max output token limit]",
+                false,
+            );
         }
         LoopEvent::MessageEnd { .. } => buf.finish_streaming(),
         LoopEvent::Compaction {
@@ -356,7 +369,7 @@ fn truncate(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use kage_core::{LoopError, MessageId, TokenUsage, ToolCallId};
+    use kage_core::{LoopError, MessageId, StopReason, TokenUsage, ToolCallId};
     use kage_loop::NoopHooks;
     use serde_json::json;
 
@@ -468,6 +481,7 @@ mod tests {
         hooks.on_event(&LoopEvent::MessageEnd {
             id: id(),
             usage: TokenUsage::default(),
+            stop_reason: StopReason::EndTurn,
         });
         let buf = buf.lock().unwrap();
         let blocks = buf.blocks();
@@ -478,6 +492,37 @@ mod tests {
                 assert!(!*live);
             }
             other => panic!("expected assistant, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn max_tokens_message_end_pushes_truncated_notice() {
+        let (buf, mut hooks) = fresh();
+        hooks.on_event(&LoopEvent::TextDelta {
+            id: id(),
+            delta: "partial ans".into(),
+        });
+        hooks.on_event(&LoopEvent::MessageEnd {
+            id: id(),
+            usage: TokenUsage::default(),
+            stop_reason: StopReason::MaxTokens,
+        });
+        let buf = buf.lock().unwrap();
+        let blocks = buf.blocks();
+        assert_eq!(blocks.len(), 2);
+        match &blocks[0] {
+            Block::Assistant { text, live } => {
+                assert_eq!(text, "partial ans");
+                assert!(!live, "assistant block must be finished");
+            }
+            other => panic!("expected assistant, got {other:?}"),
+        }
+        match &blocks[1] {
+            Block::Custom { kind, folded, .. } => {
+                assert_eq!(kind, "kage:truncated");
+                assert!(!folded);
+            }
+            other => panic!("expected Custom, got {other:?}"),
         }
     }
 

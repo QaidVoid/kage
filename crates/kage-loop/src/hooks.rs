@@ -285,7 +285,7 @@ impl Hooks for NoopHooks {}
 
 #[cfg(test)]
 mod tests {
-    use kage_core::{MessageId, TokenUsage};
+    use kage_core::{MessageId, StopReason, TokenUsage};
 
     use super::*;
 
@@ -349,6 +349,7 @@ mod tests {
         h.on_event(&LoopEvent::MessageEnd {
             id: MessageId::new(),
             usage: TokenUsage::default(),
+            stop_reason: StopReason::EndTurn,
         });
         assert!(h.get_steering().is_none());
         assert!(h.get_followup().is_none());

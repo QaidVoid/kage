@@ -194,7 +194,7 @@ impl<H: Hooks> Hooks for PluginEventHooks<H> {
                     }),
                 );
             }
-            LoopEvent::MessageEnd { id, usage } => {
+            LoopEvent::MessageEnd { id, usage, .. } => {
                 let payload = json!({
                     "id": id.to_string(),
                     "usage": {

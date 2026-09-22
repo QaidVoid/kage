@@ -302,7 +302,7 @@ impl<H: Hooks> Hooks for SessionRecordingHooks<H> {
 mod tests {
     use std::path::PathBuf;
 
-    use kage_core::{TokenUsage, ToolOutput};
+    use kage_core::{StopReason, TokenUsage, ToolOutput};
     use kage_loop::NoopHooks;
     use kage_session::{FORMAT_VERSION, Header, SessionId, SessionReader};
 
@@ -416,6 +416,7 @@ mod tests {
         hooks.on_event(&LoopEvent::MessageEnd {
             id: msg_id,
             usage: TokenUsage::default(),
+            stop_reason: StopReason::ToolUse,
         });
         drop(hooks);
 

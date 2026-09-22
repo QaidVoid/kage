@@ -22,7 +22,9 @@ use kage_acp::acp::{
     ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 use kage_acp::agent::{AcpPermission, Agent, PermissionDecision, PromptContext, serve_agent};
-use kage_core::{CancelFlag, Content, LoopEvent, Message, Role, ToolOutput};
+use kage_core::{
+    CancelFlag, Content, LoopEvent, Message, Role, StopReason as CoreStopReason, ToolOutput,
+};
 use kage_jsonrpc::RpcError;
 use kage_loop::{AgentContext, Hooks, LoopConfig};
 use kage_plugin::PluginRuntime;
@@ -270,6 +272,20 @@ fn to_update(event: &LoopEvent) -> Option<SessionUpdate> {
     }
 }
 
+/// Map the loop's terminal state onto the ACP prompt stop reason.
+/// Cancellation wins over whatever the stream reported; a turn that hit
+/// the output-token cap surfaces as `MaxTokens` so editors can warn the
+/// user the reply was cut off; every other ending is an ordinary turn.
+fn acp_stop_reason(cancelled: bool, last: Option<CoreStopReason>) -> StopReason {
+    if cancelled {
+        return StopReason::Cancelled;
+    }
+    match last {
+        Some(CoreStopReason::MaxTokens) => StopReason::MaxTokens,
+        _ => StopReason::EndTurn,
+    }
+}
+
 impl Agent for CliAcpAgent {
     fn initialize(&mut self, _req: InitializeRequest) -> InitializeResponse {
         InitializeResponse {
@@ -382,6 +398,7 @@ impl Agent for CliAcpAgent {
         let cfg = loop_config(&session.workdir);
         let cancel_flag = CancelFlag::new();
         let emit_cancel = cancel_flag.clone();
+        let mut last_stop: Option<CoreStopReason> = None;
 
         let res = crate::run_with_hooks(
             provider.as_ref(),
@@ -399,6 +416,9 @@ impl Agent for CliAcpAgent {
                 if ctx.is_cancelled() {
                     emit_cancel.cancel();
                 }
+                if let LoopEvent::MessageEnd { stop_reason, .. } = &event {
+                    last_stop = Some(*stop_reason);
+                }
                 if let Some(update) = to_update(&event) {
                     ctx.update(update);
                 }
@@ -407,13 +427,44 @@ impl Agent for CliAcpAgent {
 
         match res {
             Ok(()) => Ok(PromptResponse {
-                stop_reason: if ctx.is_cancelled() {
-                    StopReason::Cancelled
-                } else {
-                    StopReason::EndTurn
-                },
+                stop_reason: acp_stop_reason(ctx.is_cancelled(), last_stop),
             }),
             Err(e) => Err(RpcError::internal(e.to_string())),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancelled_wins_over_stream_stop_reason() {
+        assert_eq!(
+            acp_stop_reason(true, Some(CoreStopReason::MaxTokens)),
+            StopReason::Cancelled
+        );
+        assert_eq!(acp_stop_reason(true, None), StopReason::Cancelled);
+    }
+
+    #[test]
+    fn max_tokens_surfaces_as_max_tokens() {
+        assert_eq!(
+            acp_stop_reason(false, Some(CoreStopReason::MaxTokens)),
+            StopReason::MaxTokens
+        );
+    }
+
+    #[test]
+    fn ordinary_endings_map_to_end_turn() {
+        assert_eq!(acp_stop_reason(false, None), StopReason::EndTurn);
+        assert_eq!(
+            acp_stop_reason(false, Some(CoreStopReason::EndTurn)),
+            StopReason::EndTurn
+        );
+        assert_eq!(
+            acp_stop_reason(false, Some(CoreStopReason::ToolUse)),
+            StopReason::EndTurn
+        );
     }
 }

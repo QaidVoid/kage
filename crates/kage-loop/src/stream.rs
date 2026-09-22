@@ -179,9 +179,17 @@ fn handle_event<F: FnMut(LoopEvent)>(
                 input,
             });
         }
-        ProviderEvent::MessageEnd { usage, .. } => {
+        ProviderEvent::MessageEnd { usage, stop_reason } => {
             ensure_started(hooks, emit);
-            emit_one(hooks, emit, LoopEvent::MessageEnd { id, usage });
+            emit_one(
+                hooks,
+                emit,
+                LoopEvent::MessageEnd {
+                    id,
+                    usage,
+                    stop_reason,
+                },
+            );
             return Ok(Some(assembler.finish(usage)));
         }
     }
@@ -358,6 +366,21 @@ mod tests {
         assert!(matches!(
             emitted.last().unwrap(),
             LoopEvent::MessageEnd { .. }
+        ));
+    }
+
+    #[test]
+    fn message_end_forwards_stop_reason() {
+        let (_, emitted) = run_collect_with_emits(vec![Ok(ProviderEvent::MessageEnd {
+            stop_reason: StopReason::MaxTokens,
+            usage: TokenUsage::default(),
+        })]);
+        assert!(matches!(
+            emitted.last().unwrap(),
+            LoopEvent::MessageEnd {
+                stop_reason: StopReason::MaxTokens,
+                ..
+            }
         ));
     }
 

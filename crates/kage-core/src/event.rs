@@ -8,6 +8,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::message::{MessageId, ToolCallId};
 
+/// Why a provider's stream ended.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    /// Model decided the turn was complete.
+    EndTurn,
+    /// Hit the max output token limit.
+    MaxTokens,
+    /// Matched a stop sequence.
+    StopSequence,
+    /// Stopped because the model emitted tool calls awaiting execution.
+    ToolUse,
+    /// Anything else (refusal, internal stop, unknown).
+    #[default]
+    Other,
+}
+
 /// Token usage reported by a provider for one assistant turn.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TokenUsage {
@@ -262,6 +279,11 @@ pub enum LoopEvent {
         id: MessageId,
         /// Token usage for this turn.
         usage: TokenUsage,
+        /// Why the provider stream ended. `MaxTokens` means the reply
+        /// was cut off mid-generation; hosts surface this so a silent
+        /// truncation is never mistaken for a complete answer.
+        #[serde(default)]
+        stop_reason: StopReason,
     },
     /// Older turns were summarized to fit the context window.
     Compaction {
@@ -334,10 +356,29 @@ mod tests {
                 cache_read: 80,
                 cache_write: 20,
             },
+            stop_reason: StopReason::MaxTokens,
         };
         let s = serde_json::to_string(&ev).unwrap();
         let back: LoopEvent = serde_json::from_str(&s).unwrap();
         assert_eq!(ev, back);
+    }
+
+    #[test]
+    fn message_end_deserializes_without_stop_reason() {
+        let ev = LoopEvent::MessageEnd {
+            id: MessageId::new(),
+            usage: TokenUsage {
+                input: 1,
+                output: 2,
+                cache_read: 0,
+                cache_write: 0,
+            },
+            stop_reason: StopReason::Other,
+        };
+        let mut json = serde_json::to_value(&ev).unwrap();
+        json.as_object_mut().unwrap().remove("stop_reason");
+        let back: LoopEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(back, ev);
     }
 
     #[test]

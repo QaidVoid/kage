@@ -3,7 +3,7 @@
 
 use kage_core::{
     Config, Content, ImageSource, LoopError, LoopEvent, Message, MessageId, Risk, Role,
-    SandboxBackend, TokenUsage, ToolCallId, ToolOutput,
+    SandboxBackend, StopReason, TokenUsage, ToolCallId, ToolOutput,
 };
 
 fn roundtrip<T>(value: &T)
@@ -101,6 +101,7 @@ fn all_loop_events_roundtrip() {
         LoopEvent::MessageEnd {
             id: mid,
             usage: TokenUsage::default(),
+            stop_reason: StopReason::EndTurn,
         },
         LoopEvent::Compaction {
             kept: 5,

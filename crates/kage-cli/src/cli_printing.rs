@@ -59,7 +59,7 @@ pub(crate) fn print_event_json<W: Write>(out: &mut W, event: &LoopEvent) {
 
 #[cfg(test)]
 mod json_print_tests {
-    use kage_core::{MessageId, TokenUsage};
+    use kage_core::{MessageId, StopReason, TokenUsage};
 
     use super::*;
 
@@ -94,6 +94,7 @@ mod json_print_tests {
                     output: 7,
                     ..TokenUsage::default()
                 },
+                stop_reason: StopReason::EndTurn,
             },
         );
         let line = String::from_utf8(buf).unwrap();

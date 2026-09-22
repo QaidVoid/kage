@@ -3,7 +3,7 @@
 //! A modal [`OverlayWidget`] with five sections: Theme, Model, Mouse,
 //! Autocompaction, and a read-only Keybindings list. `Tab`/`BackTab`
 //! cycle sections; within a section the arrow keys change the value;
-//! `Enter` or `Ctrl+S` resolves with the edited settings as JSON and
+//! `Enter` or `Ctrl+S` resolves the values that changed as JSON and
 //! `Esc` cancels. The host applies the result live (theme, mouse,
 //! model) and persists it comment-preserving via `Config::save`.
 //!
@@ -70,6 +70,10 @@ pub struct SettingsOverlay {
     threshold: f32,
     keybindings: Vec<(String, String)>,
     editor_modeless: bool,
+    /// The values the dialog opened with. `result_json` resolves only
+    /// fields that differ from these, so a value inherited from the
+    /// project config layer is never stamped into the user file.
+    seed: SettingsInit,
     list_scroll: usize,
 }
 
@@ -90,6 +94,7 @@ impl SettingsOverlay {
             .unwrap_or(0);
         Self {
             tab: 0,
+            seed: init.clone(),
             themes: init.themes,
             theme_idx,
             models: init.models,
@@ -127,19 +132,43 @@ impl SettingsOverlay {
     }
 
     /// The edited settings as the JSON the host applies on resolve.
+    /// Only values that differ from the seed are included: the host
+    /// persists whatever arrives, so values inherited from the
+    /// project config layer are never copied into the user file.
     #[must_use]
     pub fn result_json(&self) -> serde_json::Value {
         // The threshold moves on a 0.05 grid; round to 2 decimals so
         // neither the JSON nor the persisted config carries an ugly
         // f32->f64 tail (0.800000011...).
         let threshold = (f64::from(self.threshold) * 100.0).round() / 100.0;
-        serde_json::json!({
-            "theme": self.selected_theme(),
-            "model": self.selected_model(),
-            "mouse": self.mouse,
-            "compaction_threshold": threshold,
-            "editor": if self.editor_modeless { "modeless" } else { "vim" },
-        })
+        let seed_threshold = (f64::from(self.seed.threshold) * 100.0).round() / 100.0;
+        let editor = if self.editor_modeless {
+            "modeless"
+        } else {
+            "vim"
+        };
+        let seed_editor = if self.seed.editor_modeless {
+            "modeless"
+        } else {
+            "vim"
+        };
+        let mut out = serde_json::Map::new();
+        if self.selected_theme() != self.seed.theme {
+            out.insert("theme".into(), serde_json::json!(self.selected_theme()));
+        }
+        if self.selected_model() != self.seed.model {
+            out.insert("model".into(), serde_json::json!(self.selected_model()));
+        }
+        if self.mouse != self.seed.mouse {
+            out.insert("mouse".into(), serde_json::json!(self.mouse));
+        }
+        if (threshold - seed_threshold).abs() > f64::EPSILON {
+            out.insert("compaction_threshold".into(), serde_json::json!(threshold));
+        }
+        if editor != seed_editor {
+            out.insert("editor".into(), serde_json::json!(editor));
+        }
+        serde_json::Value::Object(out)
     }
 
     /// Inherent render wrapper, matching `OverlayPicker::render`, so
@@ -551,9 +580,22 @@ mod tests {
     }
 
     #[test]
-    fn editor_defaults_to_vim_in_result() {
+    fn unchanged_fields_are_omitted_from_result() {
+        // Fresh from the seed nothing changed, so nothing resolves:
+        // the host then applies nothing and rewrites no config. This
+        // is what keeps a project-layer value from being stamped
+        // into the user config on an untouched dialog.
         let s = sample();
-        assert_eq!(s.result_json()["editor"], serde_json::json!("vim"));
+        assert!(s.result_json().as_object().unwrap().is_empty());
+        // Change only the theme: exactly that key resolves.
+        let mut s = sample();
+        s.handle_key(key(KeyCode::Down)); // theme -> ayu
+        let v = s.result_json();
+        assert_eq!(v["theme"], serde_json::json!("ayu"));
+        assert!(v.get("model").is_none());
+        assert!(v.get("mouse").is_none());
+        assert!(v.get("compaction_threshold").is_none());
+        assert!(v.get("editor").is_none());
     }
 
     #[test]
@@ -574,15 +616,13 @@ mod tests {
     }
 
     #[test]
-    fn enter_resolves_with_edited_values() {
+    fn enter_resolves_only_edited_values() {
         let mut s = sample();
         s.handle_key(key(KeyCode::Down)); // theme -> ayu
         match s.handle_key(key(KeyCode::Enter)) {
             OverlayAction::Resolve(v) => {
                 assert_eq!(v["theme"], serde_json::json!("ayu"));
-                assert_eq!(v["model"], serde_json::json!("anthropic:sonnet"));
-                assert_eq!(v["mouse"], serde_json::json!(true));
-                assert_eq!(v["compaction_threshold"], serde_json::json!(0.8));
+                assert_eq!(v.as_object().unwrap().len(), 1, "only the edit resolves");
             }
             other => panic!("expected Resolve, got {other:?}"),
         }

@@ -356,10 +356,14 @@ impl App {
     }
 
     /// Apply the settings-dialog result: live-switch theme / mouse /
-    /// model, then persist the four fields to the user config file
-    /// (comment-preserving). A persistence failure is surfaced, not
-    /// swallowed.
+    /// model, then persist the changed fields to the user config
+    /// file (comment-preserving). A persistence failure is surfaced,
+    /// not swallowed. An empty resolve means nothing changed.
     pub(crate) fn apply_settings(&mut self, value: &serde_json::Value) {
+        if value.as_object().is_some_and(serde_json::Map::is_empty) {
+            self.notify("settings: nothing changed");
+            return;
+        }
         let theme = value.get("theme").and_then(|v| v.as_str()).unwrap_or("");
         let model = value.get("model").and_then(|v| v.as_str()).unwrap_or("");
         let mouse = value.get("mouse").and_then(serde_json::Value::as_bool);

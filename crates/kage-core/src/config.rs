@@ -347,9 +347,9 @@ pub struct McpConfig {
 ///
 /// * stdio: set `command` (and optionally `args` / `env`). kage spawns
 ///   the child and speaks JSON-RPC over its stdio.
-/// * HTTP+SSE: set `url`. kage opens the server's SSE stream and POSTs
-///   JSON-RPC messages to the endpoint it announces; `headers` are sent
-///   on both (use it for `Authorization`).
+/// * Streamable HTTP: set `url`. kage POSTs each JSON-RPC message to
+///   that endpoint; `headers` are sent on every request (use it for
+///   `Authorization`).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct McpServer {
     /// Executable to spawn for a stdio transport (e.g. `npx`). Mutually
@@ -362,12 +362,12 @@ pub struct McpServer {
     /// Extra environment variables for the child process.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
-    /// Base URL for a remote HTTP+SSE transport. Mutually exclusive with
-    /// `command`.
+    /// Base URL for a remote Streamable HTTP transport. Mutually
+    /// exclusive with `command`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Extra headers sent on the SSE GET and each POST (HTTP transport
-    /// only), e.g. `Authorization`.
+    /// Extra headers sent on every request (HTTP transport only),
+    /// e.g. `Authorization`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
     /// When `true`, the server is configured but not spawned/connected.

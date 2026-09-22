@@ -1,22 +1,30 @@
-//! Remote MCP transport over HTTP + Server-Sent Events.
+//! Remote MCP transport over Streamable HTTP.
 //!
-//! kage opens the server's SSE stream with a GET, the server announces a
-//! POST endpoint via an `endpoint` event, kage POSTs each JSON-RPC
-//! message to that endpoint, and responses (plus any server-initiated
-//! requests/notifications) arrive back over the SSE stream. That shape
-//! maps onto the byte-stream the shared [`kage_jsonrpc::connect`]
-//! expects, so the HTTP transport reuses the exact same [`Peer`],
-//! request routing, and cancellation as the stdio transport:
+//! Both directions talk to one endpoint. kage POSTs each JSON-RPC
+//! message and the reply rides on that POST's response: a JSON body,
+//! a `text/event-stream` of frames, or a bare `202 Accepted` when the
+//! server answers later. A GET on the same endpoint opens the optional
+//! server-initiated stream; kage opens it once, after the first
+//! successful POST, and forwards any JSON frames it produces into the
+//! same pipe the POST responses feed. The session id the server hands
+//! back is echoed as `mcp-session-id` on later requests.
 //!
-//! * the read half ([`SseToJsonLines`]) strips SSE framing and yields
-//!   one newline-delimited JSON-RPC message per `data` event, capturing
-//!   the announced endpoint out of band;
-//! * the write half ([`HttpPoster`]) buffers each message the peer
-//!   writes and POSTs it to the announced endpoint on flush, blocking
-//!   until the endpoint is known.
+//! This maps onto the byte stream [`kage_jsonrpc::connect`] expects, so
+//! the HTTP transport reuses the exact same [`Peer`], request routing,
+//! and cancellation as the stdio transport.
+//!
+//! Two simplifications over the spec: `MCP-Protocol-Version` carries
+//! the version kage advertises rather than the negotiated one, and a
+//! POST failure closes the transport only when the server could not
+//! have routed the request at all (404, which the spec defines as an
+//! expired session, or an unreachable host); any other HTTP status
+//! fails that one request and leaves the transport open.
 //!
 //! Synchronous throughout: blocking `ureq` calls and `std::thread`, no
-//! async, matching the rest of the workspace.
+//! async, matching the rest of the workspace. The GET pump thread is
+//! detached and may stay parked on an open remote stream until the
+//! server closes it or the process exits; closing the transport only
+//! takes away the pipe writer it forwards into.
 
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -27,199 +35,161 @@ use std::time::Duration;
 
 use kage_jsonrpc::{Inbound, Peer, connect};
 
-/// How long [`HttpPoster::flush`] waits for the server to announce its
-/// POST endpoint before giving up. Generous: the endpoint event is the
-/// first SSE frame, so this only trips on a misbehaving server.
-const ENDPOINT_TIMEOUT: Duration = Duration::from_secs(10);
+use crate::server::PROTOCOL_VERSION;
 
-/// Cap on a single SSE line, so a server cannot exhaust memory with one
-/// unterminated frame.
+/// How long the GET pump waits for the first successful POST before
+/// giving up on the server-initiated stream. Generous: this only
+/// trips on a server that never answers.
+const STREAM_READY_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Cap on a single SSE frame, so a server cannot exhaust memory with
+/// one endless stream of lines.
 const MAX_SSE_LINE: u64 = 8 * 1024 * 1024;
 
-/// Lazily-discovered POST endpoint announced by the server's `endpoint`
-/// SSE event. The reader fills it; the writer blocks on the condvar
-/// until it is set.
-type Endpoint = Arc<(Mutex<Option<String>>, Condvar)>;
+/// Cap on a single non-SSE POST response body.
+const MAX_JSON_BODY: u64 = 8 * 1024 * 1024;
 
-/// Open an HTTP+SSE connection to `url`, sending `headers` on both the
-/// SSE GET and every POST, and hand the adapted byte streams to
+/// Session state shared between the POST writer and the GET pump:
+/// the server-assigned session id and whether any POST has succeeded.
+#[derive(Default)]
+struct Shared {
+    session_id: Option<String>,
+    ready: bool,
+}
+
+/// Session state behind the condvar the GET pump waits on.
+type SharedState = Arc<(Mutex<Shared>, Condvar)>;
+
+/// The transport's write end of the pipe feeding the jsonrpc reader.
+/// Taken away by [`HttpPoster::close`] to end the stream.
+type OutSlot = Arc<Mutex<Option<io::PipeWriter>>>;
+
+/// Open a Streamable HTTP connection to `url`, sending `headers` on
+/// every request, and hand the adapted pipe to
 /// [`kage_jsonrpc::connect`].
 ///
 /// # Errors
 ///
-/// Returns a message when the SSE GET cannot be opened.
+/// Returns a message when the local pipe cannot be created.
 pub(crate) fn connect_http(
     url: &str,
     headers: &BTreeMap<String, String>,
 ) -> Result<(Peer, Receiver<Inbound>, JoinHandle<()>), String> {
-    let agent = ureq::Agent::new_with_defaults();
-    let mut req = agent.get(url).header("accept", "text/event-stream");
-    for (key, value) in headers {
-        req = req.header(key.as_str(), value.as_str());
-    }
-    let response = req.call().map_err(|e| format!("open SSE {url}: {e}"))?;
-    let body: Box<dyn Read + Send> = Box::new(response.into_body().into_reader());
+    open_http(ureq::Agent::new_with_defaults(), url, headers)
+}
 
-    let endpoint: Endpoint = Arc::new((Mutex::new(None), Condvar::new()));
-    let reader = BufReader::new(SseToJsonLines::new(
-        BufReader::new(body),
-        Arc::clone(&endpoint),
+/// [`connect_http`] against an explicit agent, so tests can run the
+/// whole transport against an in-process fake server.
+fn open_http(
+    agent: ureq::Agent,
+    url: &str,
+    headers: &BTreeMap<String, String>,
+) -> Result<(Peer, Receiver<Inbound>, JoinHandle<()>), String> {
+    let (pipe_reader, pipe_writer) = io::pipe().map_err(|e| format!("open mcp pipe: {e}"))?;
+    let out: OutSlot = Arc::new(Mutex::new(Some(pipe_writer)));
+    let shared: SharedState = Arc::new((Mutex::new(Shared::default()), Condvar::new()));
+    spawn_get_pump(
+        agent.clone(),
+        Arc::clone(&shared),
+        Arc::clone(&out),
         url.to_owned(),
-    ));
-    let writer = HttpPoster::new(agent, endpoint, headers.clone());
-    Ok(connect(reader, writer))
+        headers.clone(),
+    );
+    let writer = HttpPoster {
+        agent,
+        url: url.to_owned(),
+        headers: headers.clone(),
+        shared,
+        out,
+        buf: Vec::new(),
+    };
+    Ok(connect(BufReader::new(pipe_reader), writer))
 }
 
-/// One parsed SSE frame: its `event` name (empty when unset) and the
-/// joined `data` payload.
-struct SseFrame {
-    event: String,
-    data: String,
+/// Write one newline-terminated JSON-RPC message into the pipe, or
+/// fail once the transport has been closed.
+fn forward(out: &OutSlot, msg: &[u8]) -> io::Result<()> {
+    let mut guard = kage_core::sync::lock(out);
+    let Some(sink) = guard.as_mut() else {
+        return Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "mcp http connection closed",
+        ));
+    };
+    sink.write_all(msg)?;
+    sink.write_all(b"\n")
 }
 
-/// Read the next SSE frame from `reader`, returning `None` at EOF.
-///
-/// Comment lines (`:` prefix) are ignored, multiple `data:` lines are
-/// joined with `\n`, and a blank line terminates the frame.
-fn read_sse_frame<R: BufRead>(reader: &mut R) -> io::Result<Option<SseFrame>> {
-    let mut event = String::new();
+/// Read the next SSE frame's joined `data` payload from `reader`,
+/// returning `None` at EOF. Comment lines (`:` prefix) and unknown
+/// fields (including `event:`) are ignored, multiple `data:` lines
+/// are joined with `\n`, and a blank line terminates the frame. Both
+/// a single line and the frame as a whole are bounded by `limit`.
+fn read_sse_frame<R: BufRead>(reader: &mut R, limit: u64) -> io::Result<Option<String>> {
     let mut data: Vec<String> = Vec::new();
     let mut saw_any = false;
+    let mut frame_bytes = 0u64;
     loop {
         let mut line = String::new();
-        let n = reader.by_ref().take(MAX_SSE_LINE).read_line(&mut line)?;
+        let n = reader.by_ref().take(limit).read_line(&mut line)?;
+        frame_bytes += u64::try_from(n).unwrap_or(u64::MAX);
+        if frame_bytes > limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "sse frame exceeds size cap",
+            ));
+        }
         if n == 0 {
             if saw_any && !data.is_empty() {
-                return Ok(Some(SseFrame {
-                    event,
-                    data: data.join("\n"),
-                }));
+                return Ok(Some(data.join("\n")));
             }
             return Ok(None);
         }
         let trimmed = line.trim_end_matches(['\r', '\n']);
         if trimmed.is_empty() {
             if saw_any && !data.is_empty() {
-                return Ok(Some(SseFrame {
-                    event,
-                    data: data.join("\n"),
-                }));
+                return Ok(Some(data.join("\n")));
             }
             continue;
         }
         saw_any = true;
-        if let Some(rest) = trimmed.strip_prefix("event:") {
-            rest.trim_start().clone_into(&mut event);
-        } else if let Some(rest) = trimmed.strip_prefix("data:") {
+        if let Some(rest) = trimmed.strip_prefix("data:") {
             data.push(rest.trim_start().to_owned());
         }
         // Comments (':' prefix) and unknown fields are ignored.
     }
 }
 
-/// Resolve an endpoint announced by the server (often a relative path)
-/// against the SSE `base` URL.
-fn resolve_endpoint(base: &str, announced: &str) -> Result<String, String> {
-    let base = url::Url::parse(base).map_err(|e| format!("base url {base}: {e}"))?;
-    let joined = base
-        .join(announced)
-        .map_err(|e| format!("endpoint {announced}: {e}"))?;
-    Ok(joined.to_string())
-}
-
-/// `Read` adapter that turns an SSE byte stream into newline-delimited
-/// JSON-RPC messages, capturing the announced endpoint out of band.
-struct SseToJsonLines<R: BufRead> {
-    inner: R,
-    endpoint: Endpoint,
-    base: String,
-    pending: Vec<u8>,
-    pos: usize,
-}
-
-impl<R: BufRead> SseToJsonLines<R> {
-    fn new(inner: R, endpoint: Endpoint, base: String) -> Self {
-        Self {
-            inner,
-            endpoint,
-            base,
-            pending: Vec::new(),
-            pos: 0,
+/// Pull SSE frames from `body` and forward every JSON payload into
+/// the pipe. Keep-alive comments, empty frames, and non-JSON data
+/// (legacy `endpoint` events, bare strings) are dropped.
+fn pump_sse<R: Read>(body: R, out: &OutSlot) -> io::Result<()> {
+    let mut reader = BufReader::new(body);
+    while let Some(data) = read_sse_frame(&mut reader, MAX_SSE_LINE)? {
+        if data.is_empty() || serde_json::from_str::<serde_json::Value>(&data).is_err() {
+            continue;
         }
+        forward(out, data.as_bytes())?;
     }
-
-    /// Pull SSE frames until a JSON-RPC message is ready in `pending`,
-    /// routing `endpoint` events to the shared slot. Returns `false` at
-    /// stream end.
-    fn refill(&mut self) -> io::Result<bool> {
-        loop {
-            let Some(frame) = read_sse_frame(&mut self.inner)? else {
-                return Ok(false);
-            };
-            if frame.event == "endpoint" {
-                let resolved = resolve_endpoint(&self.base, &frame.data)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                let (lock, cv) = &*self.endpoint;
-                *kage_core::sync::lock(lock) = Some(resolved);
-                cv.notify_all();
-                continue;
-            }
-            if frame.data.is_empty() {
-                continue;
-            }
-            self.pending = frame.data.into_bytes();
-            self.pending.push(b'\n');
-            self.pos = 0;
-            return Ok(true);
-        }
-    }
+    Ok(())
 }
 
-impl<R: BufRead> Read for SseToJsonLines<R> {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.pos >= self.pending.len() && !self.refill()? {
-            return Ok(0);
-        }
-        let n = (&self.pending[self.pos..]).read(buf)?;
-        self.pos += n;
-        Ok(n)
-    }
-}
-
-/// `Write` adapter that POSTs each JSON-RPC message the peer writes to
-/// the server's announced endpoint.
+/// `Write` adapter that POSTs each buffered JSON-RPC message to the
+/// server endpoint on flush and absorbs the response into the pipe.
 struct HttpPoster {
     agent: ureq::Agent,
-    endpoint: Endpoint,
+    url: String,
     headers: BTreeMap<String, String>,
+    shared: SharedState,
+    out: OutSlot,
     buf: Vec<u8>,
 }
 
 impl HttpPoster {
-    fn new(agent: ureq::Agent, endpoint: Endpoint, headers: BTreeMap<String, String>) -> Self {
-        Self {
-            agent,
-            endpoint,
-            headers,
-            buf: Vec::new(),
-        }
-    }
-
-    /// Block until the server has announced its POST endpoint, or time
-    /// out. Returns the resolved endpoint URL.
-    fn wait_endpoint(&self) -> io::Result<String> {
-        let (lock, cv) = &*self.endpoint;
-        let guard = kage_core::sync::lock(lock);
-        let (guard, timeout) = cv
-            .wait_timeout_while(guard, ENDPOINT_TIMEOUT, |e| e.is_none())
-            .expect("mcp endpoint mutex poisoned");
-        if timeout.timed_out() {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "mcp server did not announce an SSE endpoint",
-            ));
-        }
-        Ok(guard.clone().expect("endpoint set once wait returns"))
+    /// Take away the pipe writer: the reader side sees EOF, the
+    /// jsonrpc drain ends, and the connection reports itself dead.
+    fn close(&self) {
+        *kage_core::sync::lock(&self.out) = None;
     }
 }
 
@@ -229,112 +199,616 @@ impl Write for HttpPoster {
         Ok(data.len())
     }
 
+    /// POST the buffered message and absorb the response. A successful
+    /// response records the session id (first one wins) and unblocks
+    /// the GET pump; an SSE response or a JSON body is forwarded into
+    /// the pipe, a 202 or empty body is a bare success.
     fn flush(&mut self) -> io::Result<()> {
         if self.buf.is_empty() {
             return Ok(());
         }
-        let url = self.wait_endpoint()?;
         let body = std::mem::take(&mut self.buf);
         let mut req = self
             .agent
-            .post(&url)
+            .post(&self.url)
+            .header("accept", "application/json, text/event-stream")
             .header("content-type", "application/json");
+        {
+            let guard = kage_core::sync::lock(&self.shared.0);
+            if let Some(session) = &guard.session_id {
+                req = req.header("mcp-session-id", session.as_str());
+            }
+            if guard.ready {
+                req = req.header("MCP-Protocol-Version", PROTOCOL_VERSION);
+            }
+        }
+        // Configured headers go last so they can override the defaults.
         for (key, value) in &self.headers {
             req = req.header(key.as_str(), value.as_str());
         }
-        req.send(&body[..])
-            .map_err(|e| io::Error::other(format!("mcp post {url}: {e}")))?;
-        Ok(())
+        match req.send(&body[..]) {
+            Ok(response) => {
+                {
+                    let mut guard = kage_core::sync::lock(&self.shared.0);
+                    if guard.session_id.is_none()
+                        && let Some(session) = response
+                            .headers()
+                            .get("mcp-session-id")
+                            .and_then(|v| v.to_str().ok())
+                    {
+                        guard.session_id = Some(session.to_owned());
+                    }
+                    guard.ready = true;
+                }
+                self.shared.1.notify_all();
+                let status = response.status().as_u16();
+                let content_type = response
+                    .headers()
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or_default()
+                    .to_owned();
+                let outcome = if content_type.starts_with("text/event-stream") {
+                    pump_sse(response.into_body().into_reader(), &self.out)
+                } else {
+                    let mut payload = Vec::new();
+                    let read = response
+                        .into_body()
+                        .into_reader()
+                        .take(MAX_JSON_BODY + 1)
+                        .read_to_end(&mut payload);
+                    match read {
+                        Err(e) => Err(e),
+                        Ok(_)
+                            if u64::try_from(payload.len()).unwrap_or(u64::MAX) > MAX_JSON_BODY =>
+                        {
+                            Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "mcp http body exceeds size cap",
+                            ))
+                        }
+                        Ok(_) if status == 202 => Ok(()),
+                        Ok(_) if payload.iter().all(u8::is_ascii_whitespace) => Ok(()),
+                        Ok(_) => forward(&self.out, &payload),
+                    }
+                };
+                if let Err(e) = outcome {
+                    // The response stream may be part-consumed, so the
+                    // transport can no longer be trusted.
+                    self.close();
+                    return Err(e);
+                }
+                Ok(())
+            }
+            Err(ureq::Error::StatusCode(404)) => {
+                // The spec defines 404 as a terminated session.
+                self.close();
+                Err(io::Error::other("mcp http session expired (404)"))
+            }
+            Err(ureq::Error::StatusCode(code)) => Err(io::Error::other(format!(
+                "mcp post {}: status {code}",
+                self.url
+            ))),
+            Err(e) => {
+                // Unreachable server: close so the connection reads as
+                // dead and the manager evicts it.
+                self.close();
+                Err(io::Error::other(format!("mcp post {}: {e}", self.url)))
+            }
+        }
     }
+}
+
+/// Spawn the detached GET pump: wait for the first successful POST,
+/// then open the optional server-initiated stream and forward its
+/// JSON frames into the pipe. A refused or non-SSE answer (the spec
+/// allows a plain 405) ends the pump silently.
+fn spawn_get_pump(
+    agent: ureq::Agent,
+    shared: SharedState,
+    out: OutSlot,
+    url: String,
+    headers: BTreeMap<String, String>,
+) {
+    std::thread::spawn(move || {
+        let (lock, cv) = &*shared;
+        let guard = kage_core::sync::lock(lock);
+        let (guard, waited) = cv
+            .wait_timeout_while(guard, STREAM_READY_TIMEOUT, |s| !s.ready)
+            .expect("mcp http state mutex poisoned");
+        if waited.timed_out() {
+            return;
+        }
+        let session = guard.session_id.clone();
+        drop(guard);
+        let mut req = agent.get(&url).header("accept", "text/event-stream");
+        if let Some(session) = &session {
+            req = req.header("mcp-session-id", session.as_str());
+        }
+        req = req.header("MCP-Protocol-Version", PROTOCOL_VERSION);
+        for (key, value) in &headers {
+            req = req.header(key.as_str(), value.as_str());
+        }
+        let Ok(response) = req.call() else {
+            return;
+        };
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        if !content_type.starts_with("text/event-stream") {
+            return;
+        }
+        let _ = pump_sse(response.into_body().into_reader(), &out);
+    });
 }
 
 #[cfg(test)]
 mod tests {
-    use std::io::BufReader;
+    use std::collections::HashMap;
+    use std::fmt;
+    use std::os::unix::net::UnixStream;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use super::*;
-
-    fn sse_reader(bytes: &'static [u8]) -> (SseToJsonLines<BufReader<&'static [u8]>>, Endpoint) {
-        let endpoint: Endpoint = Arc::new((Mutex::new(None), Condvar::new()));
-        let reader = SseToJsonLines::new(
-            BufReader::new(bytes),
-            Arc::clone(&endpoint),
-            "https://example.com/sse".to_owned(),
-        );
-        (reader, endpoint)
-    }
-
-    #[test]
-    fn captures_endpoint_and_emits_message_lines() {
-        let stream: &[u8] = b"event: endpoint\ndata: /messages?session=abc\n\n\
-            event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
-        let (reader, endpoint) = sse_reader(stream);
-        let mut buf = BufReader::new(reader);
-        let mut line = String::new();
-        buf.read_line(&mut line).unwrap();
-        assert_eq!(
-            line.trim_end(),
-            "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}"
-        );
-        assert_eq!(
-            endpoint.0.lock().unwrap().as_deref(),
-            Some("https://example.com/messages?session=abc")
-        );
-    }
+    use crate::server::{McpConnection, McpError};
+    use ureq::config::Config;
+    use ureq::http::Uri;
+    use ureq::unversioned::resolver::{ResolvedSocketAddrs, Resolver};
+    use ureq::unversioned::transport::{
+        Buffers, ConnectionDetails, Connector, LazyBuffers, NextTimeout, Transport,
+    };
 
     #[test]
     fn frame_joins_multi_line_data_and_skips_comments() {
         let mut reader = BufReader::new(&b": keep-alive\nevent: message\ndata: a\ndata: b\n\n"[..]);
-        let frame = read_sse_frame(&mut reader).unwrap().unwrap();
-        assert_eq!(frame.event, "message");
-        assert_eq!(frame.data, "a\nb");
+        let frame = read_sse_frame(&mut reader, MAX_SSE_LINE).unwrap().unwrap();
+        assert_eq!(frame, "a\nb");
     }
 
     #[test]
-    fn skips_comment_then_emits_message_line() {
-        let stream: &[u8] = b": keep-alive\nevent: message\ndata: {\"id\":2}\n\n";
-        let (reader, _ep) = sse_reader(stream);
-        let mut buf = BufReader::new(reader);
-        let mut line = String::new();
-        buf.read_line(&mut line).unwrap();
-        assert_eq!(line, "{\"id\":2}\n");
+    fn sse_frame_size_cap_rejects_an_oversized_frame() {
+        let mut reader = BufReader::new(&b"data: 0123456789abcdef\n\n"[..]);
+        let err = read_sse_frame(&mut reader, 8).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
-    fn stream_end_yields_eof() {
-        let (reader, _ep) = sse_reader(b"");
-        let mut buf = BufReader::new(reader);
-        let mut line = String::new();
-        assert_eq!(buf.read_line(&mut line).unwrap(), 0);
+    fn pump_sse_forwards_json_and_drops_noise() {
+        let (mut pipe_rx, pipe_tx) = io::pipe().unwrap();
+        let out: OutSlot = Arc::new(Mutex::new(Some(pipe_tx)));
+        let stream: &[u8] = b": keep-alive\nevent: endpoint\ndata: /mcp\n\n\
+            event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":7}\n\n\
+            data: not json\n\n";
+        pump_sse(stream, &out).unwrap();
+        *kage_core::sync::lock(&out) = None;
+        let mut got = String::new();
+        BufReader::new(&mut pipe_rx).read_line(&mut got).unwrap();
+        assert_eq!(got.trim_end(), "{\"jsonrpc\":\"2.0\",\"id\":7}");
+        let mut eof = [0u8; 1];
+        assert_eq!(pipe_rx.read(&mut eof).unwrap(), 0);
     }
 
-    #[test]
-    fn resolve_endpoint_handles_relative_and_absolute() {
-        assert_eq!(
-            resolve_endpoint("https://h/sse", "/messages?s=1").unwrap(),
-            "https://h/messages?s=1"
+    /// One request seen by the test server.
+    #[derive(Clone)]
+    struct Recorded {
+        method: String,
+        headers: HashMap<String, String>,
+        body: String,
+    }
+
+    /// The handler each test server call goes through: one recorded
+    /// request in, one full HTTP response out.
+    type Handler = Arc<dyn Fn(&Recorded) -> Vec<u8> + Send + Sync>;
+
+    /// Parse one HTTP/1.1 request off `stream`: request line, headers
+    /// (keys lowercased), and a content-length-delimited body.
+    fn read_request(stream: &mut UnixStream) -> io::Result<Recorded> {
+        let mut reader = BufReader::new(stream);
+        let mut request_line = String::new();
+        reader.read_line(&mut request_line)?;
+        let method = request_line
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        let mut headers = HashMap::new();
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line)? == 0 {
+                break;
+            }
+            let line = line.trim_end_matches(['\r', '\n']);
+            if line.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':') {
+                headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
+            }
+        }
+        let length: usize = headers
+            .get("content-length")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let mut body = vec![0u8; length];
+        reader.read_exact(&mut body)?;
+        Ok(Recorded {
+            method,
+            headers,
+            body: String::from_utf8_lossy(&body).into_owned(),
+        })
+    }
+
+    /// Build a full HTTP/1.1 response with a fixed body.
+    fn response_bytes(
+        status_line: &str,
+        content_type: Option<&str>,
+        extra: &[(&str, &str)],
+        body: &str,
+    ) -> Vec<u8> {
+        let mut head = format!(
+            "{status_line}\r\ncontent-length: {}\r\nconnection: close\r\n",
+            body.len()
         );
-        assert_eq!(
-            resolve_endpoint("https://h/sse", "https://other/post").unwrap(),
-            "https://other/post"
-        );
+        if let Some(ct) = content_type {
+            head.push_str("content-type: ");
+            head.push_str(ct);
+            head.push_str("\r\n");
+        }
+        for (name, value) in extra {
+            head.push_str(name);
+            head.push_str(": ");
+            head.push_str(value);
+            head.push_str("\r\n");
+        }
+        head.push_str("\r\n");
+        let mut out = head.into_bytes();
+        out.extend_from_slice(body.as_bytes());
+        out
     }
 
+    /// Client end of one fake connection: the socket to the in-process
+    /// server thread plus ureq's lazy buffers, mirroring
+    /// ureq's own `TcpTransport`.
+    struct FakeTransport {
+        stream: UnixStream,
+        buffers: LazyBuffers,
+        timeout_read: Option<Duration>,
+        timeout_write: Option<Duration>,
+    }
+
+    impl fmt::Debug for FakeTransport {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("FakeTransport").finish_non_exhaustive()
+        }
+    }
+
+    /// Map a socket error the way ureq's own transports do: an
+    /// elapsed timeout surfaces as EAGAIN (`WouldBlock`) on a
+    /// `UnixStream`, everything else stays an io error.
+    fn transport_error(e: io::Error, timeout: NextTimeout) -> ureq::Error {
+        if e.kind() == io::ErrorKind::WouldBlock {
+            ureq::Error::Timeout(timeout.reason)
+        } else {
+            ureq::Error::Io(e)
+        }
+    }
+
+    /// Apply `timeout` to `stream` only when it changed, like ureq's
+    /// `maybe_update_timeout`.
+    fn apply_timeout(
+        timeout: NextTimeout,
+        previous: &mut Option<Duration>,
+        stream: &UnixStream,
+        set: fn(&UnixStream, Option<Duration>) -> io::Result<()>,
+    ) -> Result<(), ureq::Error> {
+        let wanted = timeout.not_zero().map(|d| *d);
+        if wanted != *previous {
+            set(stream, wanted).map_err(ureq::Error::Io)?;
+            *previous = wanted;
+        }
+        Ok(())
+    }
+
+    impl Transport for FakeTransport {
+        fn buffers(&mut self) -> &mut dyn Buffers {
+            &mut self.buffers
+        }
+
+        fn transmit_output(
+            &mut self,
+            amount: usize,
+            timeout: NextTimeout,
+        ) -> Result<(), ureq::Error> {
+            apply_timeout(
+                timeout,
+                &mut self.timeout_write,
+                &self.stream,
+                UnixStream::set_write_timeout,
+            )?;
+            let output = &self.buffers.output()[..amount];
+            self.stream
+                .write_all(output)
+                .map_err(|e| transport_error(e, timeout))
+        }
+
+        fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, ureq::Error> {
+            apply_timeout(
+                timeout,
+                &mut self.timeout_read,
+                &self.stream,
+                UnixStream::set_read_timeout,
+            )?;
+            let input = self.buffers.input_append_buf();
+            match self.stream.read(input) {
+                Ok(n) => {
+                    self.buffers.input_appended(n);
+                    Ok(n > 0)
+                }
+                Err(e) => Err(transport_error(e, timeout)),
+            }
+        }
+
+        fn is_open(&mut self) -> bool {
+            // Responses are sent with `connection: close`, so the
+            // transport is never pooled.
+            false
+        }
+    }
+
+    /// Connector standing in for the remote endpoint: every connection
+    /// is a `UnixStream::pair`, the server side served by a thread that
+    /// parses one request and answers through the test handler. The
+    /// first `quota` non-GET requests get responses; any later one gets
+    /// a dropped connection (no response), which the client reads as a
+    /// transport failure.
+    struct FakeServerConnector {
+        handler: Handler,
+        served: Arc<AtomicUsize>,
+        quota: usize,
+    }
+
+    impl fmt::Debug for FakeServerConnector {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.debug_struct("FakeServerConnector")
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl Connector<()> for FakeServerConnector {
+        type Out = FakeTransport;
+
+        fn connect(
+            &self,
+            details: &ConnectionDetails,
+            _: Option<()>,
+        ) -> Result<Option<FakeTransport>, ureq::Error> {
+            let (client, mut remote) = UnixStream::pair().map_err(ureq::Error::Io)?;
+            let handler = Arc::clone(&self.handler);
+            let served = Arc::clone(&self.served);
+            let quota = self.quota;
+            std::thread::spawn(move || {
+                let Ok(request) = read_request(&mut remote) else {
+                    return;
+                };
+                if request.method != "GET" && served.fetch_add(1, Ordering::SeqCst) >= quota {
+                    // Over quota: stop answering entirely; the client
+                    // sees EOF and reports a transport failure.
+                    return;
+                }
+                let _ = remote.write_all(&handler(&request));
+                let _ = remote.flush();
+            });
+            let buffers = LazyBuffers::new(
+                details.config.input_buffer_size(),
+                details.config.output_buffer_size(),
+            );
+            Ok(Some(FakeTransport {
+                stream: client,
+                buffers,
+                timeout_read: None,
+                timeout_write: None,
+            }))
+        }
+    }
+
+    /// Resolver that answers every host with a fixed address without
+    /// touching DNS, so the fake agent never reaches the network.
+    #[derive(Debug)]
+    struct NoResolver;
+
+    impl Resolver for NoResolver {
+        fn resolve(
+            &self,
+            _: &Uri,
+            _: &Config,
+            _: NextTimeout,
+        ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+            let mut addrs = self.empty();
+            addrs.push("10.0.0.1:1".parse().unwrap());
+            Ok(addrs)
+        }
+    }
+
+    /// An agent whose HTTP traffic is answered by `handler` in-process.
+    /// The first `quota` POST requests get responses, later ones get a
+    /// dropped connection; GET requests always get through.
+    fn fake_agent(handler: Handler, quota: usize) -> ureq::Agent {
+        ureq::Agent::with_parts(
+            Config::default(),
+            FakeServerConnector {
+                handler,
+                served: Arc::new(AtomicUsize::new(0)),
+                quota,
+            },
+            NoResolver,
+        )
+    }
+
+    /// Poll `cond` for up to 5 s; the caller's assert reports the
+    /// failure with the real values when it never becomes true.
+    fn wait_for(cond: impl Fn() -> bool) {
+        for _ in 0..500 {
+            if cond() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// The URL tests hand to [`open_http`]; never dialed, the fake
+    /// connector ignores it.
+    const TEST_URL: &str = "http://mcp.test/mcp";
+
     #[test]
-    fn poster_waits_for_endpoint_then_returns_it() {
-        let endpoint: Endpoint = Arc::new((Mutex::new(None), Condvar::new()));
-        let poster = HttpPoster::new(
-            ureq::Agent::new_with_defaults(),
-            Arc::clone(&endpoint),
-            BTreeMap::new(),
-        );
-        let setter = Arc::clone(&endpoint);
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(20));
-            let (lock, cv) = &*setter;
-            *lock.lock().unwrap() = Some("https://h/post".to_owned());
-            cv.notify_all();
+    fn http_round_trip_json_with_session_echo() {
+        let log: Arc<Mutex<Vec<Recorded>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&log);
+        let handler = Arc::new(move |request: &Recorded| -> Vec<u8> {
+            recorded.lock().unwrap().push(request.clone());
+            if request.method == "GET" {
+                return response_bytes("HTTP/1.1 405 Method Not Allowed", None, &[], "");
+            }
+            let body: serde_json::Value =
+                serde_json::from_str(&request.body).unwrap_or(serde_json::Value::Null);
+            match body.get("method").and_then(|m| m.as_str()) {
+                Some("initialize") => response_bytes(
+                    "HTTP/1.1 200 OK",
+                    Some("application/json"),
+                    &[("mcp-session-id", "sess-1")],
+                    &serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "protocolVersion": "2025-06-18",
+                            "capabilities": { "tools": {} }
+                        }
+                    })
+                    .to_string(),
+                ),
+                Some("notifications/initialized") => {
+                    response_bytes("HTTP/1.1 202 Accepted", None, &[], "")
+                }
+                Some("tools/list") => response_bytes(
+                    "HTTP/1.1 200 OK",
+                    Some("application/json"),
+                    &[],
+                    &serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "result": { "tools": [ { "name": "t", "inputSchema": {} } ] }
+                    })
+                    .to_string(),
+                ),
+                _ => response_bytes("HTTP/1.1 500 Internal Server Error", None, &[], ""),
+            }
         });
-        assert_eq!(poster.wait_endpoint().unwrap(), "https://h/post");
+        let (peer, inbound, _reader) =
+            open_http(fake_agent(handler, usize::MAX), TEST_URL, &BTreeMap::new()).unwrap();
+        let conn = McpConnection::initialize("srv", peer, inbound, &[], None).unwrap();
+        assert_eq!(conn.protocol_version(), "2025-06-18");
+        let tools = conn.list_tools().unwrap();
+        assert_eq!(
+            tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+            ["t"]
+        );
+        wait_for(|| log.lock().unwrap().iter().any(|r| r.method == "GET"));
+        let log = log.lock().unwrap();
+        assert_eq!(log.iter().filter(|r| r.method == "GET").count(), 1);
+        let init = log
+            .iter()
+            .find(|r| r.method == "POST" && r.body.contains("\"initialize\""))
+            .unwrap();
+        assert!(!init.headers.contains_key("mcp-session-id"));
+        let listed = log
+            .iter()
+            .find(|r| r.method == "POST" && r.body.contains("\"tools/list\""))
+            .unwrap();
+        assert_eq!(
+            listed.headers.get("mcp-session-id").map(String::as_str),
+            Some("sess-1")
+        );
+        assert!(listed.headers.contains_key("mcp-protocol-version"));
+    }
+
+    #[test]
+    fn http_round_trip_sse_response() {
+        let handler = Arc::new(|request: &Recorded| -> Vec<u8> {
+            if request.method == "GET" {
+                return response_bytes("HTTP/1.1 405 Method Not Allowed", None, &[], "");
+            }
+            let body: serde_json::Value =
+                serde_json::from_str(&request.body).unwrap_or(serde_json::Value::Null);
+            match body.get("method").and_then(|m| m.as_str()) {
+                Some("initialize") => response_bytes(
+                    "HTTP/1.1 200 OK",
+                    Some("text/event-stream"),
+                    &[("mcp-session-id", "sess-2")],
+                    &format!(
+                        "event: message\ndata: {}\n\n",
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "result": {
+                                "protocolVersion": "2025-06-18",
+                                "capabilities": {}
+                            }
+                        })
+                    ),
+                ),
+                Some("notifications/initialized") => {
+                    response_bytes("HTTP/1.1 202 Accepted", None, &[], "")
+                }
+                _ => response_bytes("HTTP/1.1 500 Internal Server Error", None, &[], ""),
+            }
+        });
+        let (peer, inbound, _reader) =
+            open_http(fake_agent(handler, usize::MAX), TEST_URL, &BTreeMap::new()).unwrap();
+        let conn = McpConnection::initialize("srv", peer, inbound, &[], None).unwrap();
+        assert_eq!(conn.protocol_version(), "2025-06-18");
+    }
+
+    #[test]
+    fn transport_failure_marks_connection_dead() {
+        let handler = Arc::new(|request: &Recorded| -> Vec<u8> {
+            if request.method == "GET" {
+                return response_bytes("HTTP/1.1 405 Method Not Allowed", None, &[], "");
+            }
+            let body: serde_json::Value =
+                serde_json::from_str(&request.body).unwrap_or(serde_json::Value::Null);
+            match body.get("method").and_then(|m| m.as_str()) {
+                Some("initialize") => response_bytes(
+                    "HTTP/1.1 200 OK",
+                    Some("application/json"),
+                    &[],
+                    &serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "result": {
+                            "protocolVersion": "2025-06-18",
+                            "capabilities": {}
+                        }
+                    })
+                    .to_string(),
+                ),
+                Some("notifications/initialized") => {
+                    response_bytes("HTTP/1.1 202 Accepted", None, &[], "")
+                }
+                _ => response_bytes("HTTP/1.1 500 Internal Server Error", None, &[], ""),
+            }
+        });
+        // Two responses cover the initialize handshake; the tools/list
+        // POST is the dropped third request.
+        let (peer, inbound, _reader) =
+            open_http(fake_agent(handler, 2), TEST_URL, &BTreeMap::new()).unwrap();
+        let conn = McpConnection::initialize("srv", peer, inbound, &[], None).unwrap();
+        assert!(!conn.is_dead());
+        let err = conn.list_tools().unwrap_err();
+        assert!(matches!(err, McpError::Rpc { .. }));
+        wait_for(|| conn.is_dead());
+        assert!(conn.is_dead());
     }
 }

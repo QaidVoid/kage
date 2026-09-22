@@ -84,7 +84,7 @@ pub enum McpError {
     Http {
         /// Server name for context.
         server: String,
-        /// What went wrong opening or driving the HTTP+SSE transport.
+        /// What went wrong opening or driving the HTTP transport.
         detail: String,
     },
     /// The server config is invalid (e.g. neither or both of
@@ -369,7 +369,7 @@ impl McpServerHandle {
     /// Connect to the server described by `cfg` and run the
     /// `initialize` handshake. The transport is chosen by the config:
     /// `command` spawns a child and speaks JSON-RPC over its stdio,
-    /// `url` opens a remote HTTP+SSE connection. `roots` are the
+    /// `url` opens a remote Streamable HTTP connection. `roots` are the
     /// filesystem roots advertised to the server (the host workdir),
     /// answered on `roots/list`.
     ///
@@ -437,7 +437,8 @@ impl McpServerHandle {
         })
     }
 
-    /// Open a remote HTTP+SSE connection and run the handshake over it.
+    /// Open a remote Streamable HTTP connection and run the handshake
+    /// over it.
     fn connect_http(
         name: String,
         url: &str,

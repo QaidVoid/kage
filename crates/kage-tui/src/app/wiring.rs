@@ -76,6 +76,7 @@ impl App {
             attach_rx,
             plugin_overlay: None,
             active_dialog: None,
+            pending_tree_delete: None,
         }
     }
 

@@ -747,6 +747,9 @@ pub struct App {
     /// Bookkeeping for the dialog currently in [`Self::plugin_overlay`]:
     /// where to send the answer and how to map the overlay's outcome.
     active_dialog: Option<PluginDialogState>,
+    /// Session file staged for deletion while the confirm dialog in
+    /// [`Self::plugin_overlay`] asks; cleared when the answer arrives.
+    pending_tree_delete: Option<std::path::PathBuf>,
 }
 
 mod actions;

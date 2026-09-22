@@ -468,7 +468,14 @@ impl App {
                         let _ = self.send_request(RunRequest::ForkSessionFile(path));
                     }
                     "delete" => {
-                        let _ = self.send_request(RunRequest::DeleteSession(path));
+                        // Stage the deletion behind a confirmation;
+                        // the request is only sent once the confirm
+                        // overlay resolves Yes.
+                        self.pending_tree_delete = Some(path);
+                        self.plugin_overlay = Some(Box::new(crate::overlay::ConfirmOverlay::new(
+                            "Delete session",
+                            "Delete this session? This cannot be undone.",
+                        )));
                     }
                     _ => {}
                 }
@@ -477,10 +484,12 @@ impl App {
         None
     }
 
-    /// Drive the active plugin dialog overlay (`kage.ui.*`). The
+    /// Drive the active plugin dialog overlay (`kage.ui.*`), or the
+    /// `:tree` delete confirmation hosted in the same slot. The
     /// overlay owns its keys; on resolve/close the chosen value is
-    /// sent back to the parked worker through [`Self::active_dialog`],
-    /// mapped per the dialog kind, then the overlay is dismissed.
+    /// sent back to the parked worker through [`Self::active_dialog`]
+    /// (plugin dialogs) or completes the staged session deletion,
+    /// then the overlay is dismissed.
     pub(crate) fn dispatch_plugin_overlay_key(
         &mut self,
         key: ratatui::crossterm::event::KeyEvent,
@@ -490,6 +499,7 @@ impl App {
             OverlayAction::Stay | OverlayAction::PropagateKey => {}
             OverlayAction::Close => {
                 self.plugin_overlay = None;
+                self.pending_tree_delete = None;
                 if let Some(state) = self.active_dialog.take() {
                     let answer = state.cancelled();
                     let _ = state.reply().send(answer);
@@ -497,6 +507,13 @@ impl App {
             }
             OverlayAction::Resolve(value) => {
                 self.plugin_overlay = None;
+                if let Some(path) = self.pending_tree_delete.take() {
+                    if value.as_bool() == Some(true) {
+                        let _ = self.send_request(RunRequest::DeleteSession(path));
+                        self.notify("session deleted");
+                    }
+                    return None;
+                }
                 if let Some(state) = self.active_dialog.take() {
                     let answer = state.resolved(&value);
                     let _ = state.reply().send(answer);

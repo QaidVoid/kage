@@ -830,8 +830,9 @@ fn tree_command_opens_and_enter_dispatches_resume() {
     );
 }
 
-#[test]
-fn tree_d_key_dispatches_delete_request() {
+/// Open `:tree` on a one-node fixture and press `d` on it. Returns
+/// the app and the request receiver to assert against.
+fn tree_delete_fixture() -> (App, mpsc::Receiver<RunRequest>) {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();
     let mut app = App::new(buffer, tx);
@@ -846,12 +847,46 @@ fn tree_d_key_dispatches_delete_request() {
     }));
     app.dispatch_builtin("tree", "");
     app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+    (app, rx)
+}
+
+#[test]
+fn tree_d_key_asks_before_deleting_and_n_declines() {
+    let (mut app, rx) = tree_delete_fixture();
+    // The tree closes and a confirmation opens; nothing is deleted yet.
+    assert!(app.session_tree.is_none());
+    assert!(app.plugin_overlay.is_some());
+    assert!(app.pending_tree_delete.is_some());
+    assert!(rx.try_recv().is_err());
+
+    // `n` declines: the dialog closes and still nothing is deleted.
+    app.handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+    assert!(app.plugin_overlay.is_none());
+    assert!(app.pending_tree_delete.is_none());
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn tree_delete_confirm_yes_sends_delete_request() {
+    let (mut app, rx) = tree_delete_fixture();
+    app.handle_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+    assert!(app.plugin_overlay.is_none());
+    assert!(app.pending_tree_delete.is_none());
     assert_eq!(
         rx.try_recv(),
         Ok(RunRequest::DeleteSession(std::path::PathBuf::from(
             "/s/only.jsonl"
         )))
     );
+}
+
+#[test]
+fn tree_delete_confirm_esc_cancels_without_deleting() {
+    let (mut app, rx) = tree_delete_fixture();
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    assert!(app.plugin_overlay.is_none());
+    assert!(app.pending_tree_delete.is_none());
+    assert!(rx.try_recv().is_err());
 }
 
 #[test]

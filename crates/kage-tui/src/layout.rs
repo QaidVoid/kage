@@ -144,8 +144,24 @@ pub fn input_height_for(content_lines: u16) -> u16 {
 mod tests {
     use super::*;
 
+    use std::sync::{Mutex, MutexGuard};
+
+    /// Serializes tests against the process-global `INPUT_BOUNDS`.
+    /// `configured_bounds_resize_the_input_then_restore` mutates it,
+    /// and the `split`/`input_height` tests assert the default bounds;
+    /// run in parallel, the readers observe the mutated values
+    /// (observed as flaky `left: 4, right: 3` failures).
+    static PROCESS_GLOBALS: Mutex<()> = Mutex::new(());
+
+    fn process_globals() -> MutexGuard<'static, ()> {
+        PROCESS_GLOBALS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn split_carves_four_regions_top_to_bottom() {
+        let _globals = process_globals();
         let area = Rect::new(0, 0, 80, 24);
         let regions = split(area, INPUT_MIN_LINES, STATUS_BOTTOM_LINES_DEFAULT);
         assert_eq!(regions.status, Rect::new(0, 0, 80, 1));
@@ -159,6 +175,7 @@ mod tests {
 
     #[test]
     fn split_with_zero_status_bottom_collapses_modeline() {
+        let _globals = process_globals();
         let area = Rect::new(0, 0, 80, 24);
         let regions = split(area, INPUT_MIN_LINES, 0);
         assert_eq!(regions.status_bottom.height, 0);
@@ -168,6 +185,7 @@ mod tests {
 
     #[test]
     fn split_grows_input_up_to_cap() {
+        let _globals = process_globals();
         let area = Rect::new(0, 0, 80, 30);
         let regions = split(area, 30, STATUS_BOTTOM_LINES_DEFAULT);
         assert_eq!(regions.input.height, INPUT_MAX_LINES);
@@ -180,6 +198,7 @@ mod tests {
 
     #[test]
     fn split_clamps_below_minimum() {
+        let _globals = process_globals();
         let area = Rect::new(0, 0, 80, 12);
         let regions = split(area, 0, 0);
         assert_eq!(regions.input.height, INPUT_MIN_LINES);
@@ -187,6 +206,7 @@ mod tests {
 
     #[test]
     fn input_height_for_clamps_both_directions() {
+        let _globals = process_globals();
         assert_eq!(input_height_for(0), INPUT_MIN_LINES);
         assert_eq!(input_height_for(1), INPUT_MIN_LINES);
         assert_eq!(input_height_for(3), 3 + INPUT_CHROME_LINES);
@@ -196,6 +216,7 @@ mod tests {
 
     #[test]
     fn configured_bounds_resize_the_input_then_restore() {
+        let _globals = process_globals();
         // Enlarge the cap, verify the input grows past the old max,
         // then restore the default so other tests are unaffected.
         set_input_bounds(2, 20);

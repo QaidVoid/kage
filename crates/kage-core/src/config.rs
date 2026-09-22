@@ -380,6 +380,23 @@ pub struct McpServer {
 mod tests {
     use super::*;
 
+    use std::sync::{Mutex, MutexGuard};
+
+    /// Serializes tests that touch figment's process-global state.
+    /// `Jail` mutates the process cwd, and `jail.set_env` mutates the
+    /// process environment, which every `Config::load` merge observes.
+    /// Without this, `env_overrides_file`'s `KAGE_UI__THEME` and
+    /// `project_file_overrides_user_file`'s `HOME`/`XDG_CONFIG_HOME`
+    /// race every concurrent load-asserting test (observed as flaky
+    /// `left: "catppuccin-mocha"` failures in the save tests).
+    static PROCESS_GLOBALS: Mutex<()> = Mutex::new(());
+
+    fn process_globals() -> MutexGuard<'static, ()> {
+        PROCESS_GLOBALS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn default_provider_model_is_anthropic_sonnet() {
         let cfg = Config::default();
@@ -388,6 +405,7 @@ mod tests {
 
     #[test]
     fn missing_file_yields_defaults() {
+        let _globals = process_globals();
         figment::Jail::expect_with(|jail| {
             let cfg = Config::load(jail.directory().join("nope.toml").as_path()).unwrap();
             assert_eq!(cfg, Config::default());
@@ -398,6 +416,7 @@ mod tests {
     #[test]
     fn acp_agents_default_empty_and_parse_from_table() {
         assert!(Config::default().acp.agents.is_empty());
+        let _globals = process_globals();
         figment::Jail::expect_with(|jail| {
             jail.create_file(
                 "config.toml",
@@ -424,6 +443,7 @@ mod tests {
 
     #[test]
     fn mcp_server_parses_stdio_and_http_transports() {
+        let _globals = process_globals();
         figment::Jail::expect_with(|jail| {
             jail.create_file(
                 "config.toml",
@@ -455,6 +475,7 @@ mod tests {
 
     #[test]
     fn plugins_config_parses_nested_tables_per_stem() {
+        let _globals = process_globals();
         figment::Jail::expect_with(|jail| {
             jail.create_file(
                 "config.toml",
@@ -478,6 +499,7 @@ mod tests {
 
     #[test]
     fn file_overrides_defaults() {
+        let _globals = process_globals();
         figment::Jail::expect_with(|jail| {
             jail.create_file(
                 "config.toml",
@@ -500,6 +522,7 @@ mod tests {
 
     #[test]
     fn env_overrides_file() {
+        let _globals = process_globals();
         figment::Jail::expect_with(|jail| {
             jail.create_file(
                 "config.toml",
@@ -517,6 +540,7 @@ mod tests {
 
     #[test]
     fn project_file_overrides_user_file() {
+        let _globals = process_globals();
         figment::Jail::expect_with(|jail| {
             // Pin XDG_CONFIG_HOME at the jail so default_path resolves
             // the user config beneath it deterministically, regardless
@@ -560,6 +584,7 @@ mod tests {
     #[test]
     fn editor_mode_defaults_vim_and_parses_modeless() {
         assert_eq!(Config::default().ui.editor, EditorMode::Vim);
+        let _globals = process_globals();
         figment::Jail::expect_with(|jail| {
             jail.create_file(
                 "config.toml",
@@ -586,6 +611,7 @@ mod tests {
     #[test]
     fn loop_section_defaults_and_parses() {
         assert!((Config::default().loop_settings.compaction_threshold - 0.8).abs() < f32::EPSILON);
+        let _globals = process_globals();
         figment::Jail::expect_with(|jail| {
             jail.create_file(
                 "config.toml",
@@ -608,6 +634,7 @@ mod tests {
 
     #[test]
     fn save_then_load_roundtrips() {
+        let _globals = process_globals();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("config.toml");
         let mut cfg = Config::default();
@@ -634,6 +661,7 @@ mod tests {
 
     #[test]
     fn save_preserves_comments_and_unknown_keys() {
+        let _globals = process_globals();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(
@@ -669,6 +697,7 @@ mod tests {
 
     #[test]
     fn save_overwrites_existing_file() {
+        let _globals = process_globals();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         Config::default().save(&path).unwrap();

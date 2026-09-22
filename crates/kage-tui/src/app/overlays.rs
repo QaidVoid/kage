@@ -26,9 +26,8 @@ impl App {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                if let Ok(mut buf) = self.buffer.lock() {
-                    buf.push_custom("kage:theme", format!("themes:\n{names}"), false);
-                }
+                let mut buf = lock(&self.buffer);
+                buf.push_custom("kage:theme", format!("themes:\n{names}"), false);
             }
             "set" => {
                 if sub_rest.is_empty() {
@@ -63,7 +62,8 @@ impl App {
             }
         };
         crate::theme::set_current(theme);
-        if let Ok(mut buf) = self.buffer.lock() {
+        {
+            let mut buf = lock(&self.buffer);
             // Force a fresh layout pass: every block's cached height
             // was measured against the prior theme's bubble
             // background, which doesn't change geometry but
@@ -294,8 +294,7 @@ impl App {
         let model = self
             .status_model
             .as_ref()
-            .and_then(|m| m.lock().ok().map(|g| g.clone()))
-            .unwrap_or_else(|| cfg.provider.default_model.clone());
+            .map_or_else(|| cfg.provider.default_model.clone(), |m| lock(m).clone());
         let init = SettingsInit {
             themes: crate::theme::Theme::available_names(self.themes_dir.as_deref()),
             theme: crate::theme::current().name,
@@ -343,10 +342,7 @@ impl App {
             // Live-apply: the input editor flips immediately.
             self.input.set_modeless(modeless);
         }
-        let current_model = self
-            .status_model
-            .as_ref()
-            .and_then(|m| m.lock().ok().map(|g| g.clone()));
+        let current_model = self.status_model.as_ref().map(|m| lock(m).clone());
         if !model.is_empty() && current_model.as_deref() != Some(model) {
             let _ = self.send_request(RunRequest::SwitchModel(model.to_owned()));
         }

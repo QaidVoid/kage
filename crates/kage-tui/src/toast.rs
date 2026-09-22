@@ -22,6 +22,8 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use kage_core::sync::lock;
+
 /// Default lifetime for a freshly-pushed toast. Long enough to read
 /// a short sentence, short enough not to clutter when actions chain.
 pub const DEFAULT_TOAST_DURATION: Duration = Duration::from_secs(3);
@@ -104,10 +106,10 @@ pub fn shared_toasts() -> SharedToasts {
 }
 
 /// Push a toast onto a shared queue, dropping the oldest if past the
-/// visible cap. Best-effort: a poisoned mutex silently skips - toasts
-/// are decorative, never load-bearing.
+/// visible cap. Recovers from a poisoned mutex instead of skipping -
+/// toasts are decorative, never load-bearing.
 pub fn push_toast(toasts: &SharedToasts, toast: Toast) {
-    let Ok(mut q) = toasts.lock() else { return };
+    let mut q = lock(toasts);
     while q.len() >= MAX_VISIBLE_TOASTS {
         q.pop_front();
     }
@@ -118,10 +120,9 @@ pub fn push_toast(toasts: &SharedToasts, toast: Toast) {
 /// expiration deadline (used by the App's poll-loop to wake up just
 /// in time to remove a toast).
 ///
-/// Best-effort on a poisoned mutex: returns `None` and lets the next
-/// successful frame clean up.
+/// Recovers from a poisoned mutex instead of returning `None` early.
 pub fn prune_expired(toasts: &SharedToasts, now: Instant) -> Option<Instant> {
-    let mut q = toasts.lock().ok()?;
+    let mut q = lock(toasts);
     q.retain(|t| t.is_live(now));
     q.iter().map(|t| t.expires_at).min()
 }

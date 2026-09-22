@@ -1,5 +1,7 @@
 //! `PluginRuntime` inherent methods: eval, dispatch, registration snapshots, reload.
 
+use kage_core::sync::lock;
+
 #[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
 
@@ -29,7 +31,7 @@ impl PluginRuntime {
     /// guard is alive; the Tool dispatch path uses this same lock so
     /// plugin-defined tools serialize against runtime calls.
     pub fn lock_lua(&self) -> MutexGuard<'_, Lua> {
-        self.lua.lock().expect("plugin lua mutex poisoned")
+        lock(&self.lua)
     }
 
     /// Cloneable handle to the shared Lua state, for tool implementations
@@ -86,7 +88,8 @@ impl PluginRuntime {
             self.plugin_config.get(name),
             store_path,
         )?;
-        if let Ok(mut cur) = self.current_plugin.lock() {
+        {
+            let mut cur = lock(&self.current_plugin);
             *cur = Some(name.to_owned());
         }
         let result = lua
@@ -94,7 +97,8 @@ impl PluginRuntime {
             .set_name(name)
             .set_environment(env)
             .eval::<mlua::Value>();
-        if let Ok(mut cur) = self.current_plugin.lock() {
+        {
+            let mut cur = lock(&self.current_plugin);
             *cur = None;
         }
         Ok(result?)
@@ -164,10 +168,7 @@ impl PluginRuntime {
     /// with the runtime's internal registry.
     #[must_use]
     pub fn registered_tools(&self) -> Vec<Arc<dyn kage_tools::Tool>> {
-        self.tools
-            .lock()
-            .expect("plugin tools mutex poisoned")
-            .clone()
+        lock(&self.tools).clone()
     }
 
     /// Snapshot the tool overrides registered by plugins via
@@ -176,19 +177,13 @@ impl PluginRuntime {
     /// present at apply time logs a warning instead of crashing.
     #[must_use]
     pub fn registered_tool_overrides(&self) -> Vec<Arc<dyn kage_tools::Tool>> {
-        self.tool_overrides
-            .lock()
-            .expect("plugin tool overrides mutex poisoned")
-            .clone()
+        lock(&self.tool_overrides).clone()
     }
 
     /// Snapshot the slash commands registered by plugins so far.
     #[must_use]
     pub fn registered_commands(&self) -> Vec<Arc<LuaCommand>> {
-        self.commands
-            .lock()
-            .expect("plugin commands mutex poisoned")
-            .clone()
+        lock(&self.commands).clone()
     }
 
     /// Snapshot the commands plugins registered via
@@ -196,10 +191,7 @@ impl PluginRuntime {
     /// of the same name and dispatches them ahead of it.
     #[must_use]
     pub fn registered_command_overrides(&self) -> Vec<Arc<LuaCommand>> {
-        self.command_overrides
-            .lock()
-            .expect("plugin command overrides mutex poisoned")
-            .clone()
+        lock(&self.command_overrides).clone()
     }
 
     /// Snapshot the keybindings registered by plugins so far. Each
@@ -207,19 +199,13 @@ impl PluginRuntime {
     /// matches chords against terminal key events.
     #[must_use]
     pub fn registered_keybindings(&self) -> Vec<Arc<crate::keybindings::LuaKeybinding>> {
-        self.keybindings
-            .lock()
-            .expect("plugin keybindings mutex poisoned")
-            .clone()
+        lock(&self.keybindings).clone()
     }
 
     /// Snapshot the providers registered by plugins so far.
     #[must_use]
     pub fn registered_providers(&self) -> Vec<Arc<LuaProvider>> {
-        self.providers
-            .lock()
-            .expect("plugin providers mutex poisoned")
-            .clone()
+        lock(&self.providers).clone()
     }
 
     /// Snapshot the ACP agents plugins declared via
@@ -227,9 +213,7 @@ impl PluginRuntime {
     /// `[acp.agents.*]` from config.
     #[must_use]
     pub fn registered_acp_agents(&self) -> Vec<(String, kage_core::config::AcpAgent)> {
-        self.acp_agents
-            .lock()
-            .expect("plugin acp agents mutex poisoned")
+        lock(&self.acp_agents)
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
@@ -240,9 +224,7 @@ impl PluginRuntime {
     /// `[mcp.servers.*]` from config.
     #[must_use]
     pub fn registered_mcp_servers(&self) -> Vec<(String, kage_core::config::McpServer)> {
-        self.mcp_servers
-            .lock()
-            .expect("plugin mcp servers mutex poisoned")
+        lock(&self.mcp_servers)
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
@@ -254,12 +236,7 @@ impl PluginRuntime {
     /// there rather than failing silently.
     #[must_use]
     pub fn take_mcp_restarts(&self) -> Vec<String> {
-        std::mem::take(
-            &mut *self
-                .mcp_restart
-                .lock()
-                .expect("plugin mcp restart mutex poisoned"),
-        )
+        std::mem::take(&mut *lock(&self.mcp_restart))
     }
 
     /// Consult the plugin's `kage.on_acp_permission` handler for an
@@ -275,10 +252,7 @@ impl PluginRuntime {
     /// are reference-counted and share their Lua handler across clones.
     #[must_use]
     pub fn registered_widgets(&self) -> Vec<Arc<LuaWidget>> {
-        self.widgets
-            .lock()
-            .expect("plugin widgets mutex poisoned")
-            .clone()
+        lock(&self.widgets).clone()
     }
 
     /// Snapshot the transient status map populated by
@@ -286,9 +260,7 @@ impl PluginRuntime {
     /// the status bar paints deterministically across redraws.
     #[must_use]
     pub fn status_snapshot(&self) -> Vec<(String, String)> {
-        self.status
-            .lock()
-            .expect("plugin status mutex poisoned")
+        lock(&self.status)
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
@@ -313,9 +285,8 @@ impl PluginRuntime {
     /// Replace the current usage snapshot. Convenience wrapper around
     /// locking [`Self::shared_usage`] and assigning.
     pub fn set_usage(&self, usage: serde_json::Value) {
-        if let Ok(mut slot) = self.usage.lock() {
-            *slot = usage;
-        }
+        let mut slot = lock(&self.usage);
+        *slot = usage;
     }
 
     /// Cloneable handle to the pending-compact slot.
@@ -329,10 +300,7 @@ impl PluginRuntime {
     /// compaction and the host should run one.
     #[must_use]
     pub fn take_compact_request(&self) -> Option<String> {
-        self.compact_request
-            .lock()
-            .ok()
-            .and_then(|mut slot| slot.take())
+        lock(&self.compact_request).take()
     }
 
     /// Cloneable handle to the session-list snapshot.
@@ -344,9 +312,8 @@ impl PluginRuntime {
     /// Replace the current session list. The host typically refreshes
     /// this from its session lister on a redraw cadence.
     pub fn set_session_list(&self, entries: Vec<serde_json::Value>) {
-        if let Ok(mut slot) = self.session_list.lock() {
-            *slot = entries;
-        }
+        let mut slot = lock(&self.session_list);
+        *slot = entries;
     }
 
     /// Cloneable handle to the pending-fork slot.
@@ -360,10 +327,7 @@ impl PluginRuntime {
     /// host should run a fork and create a new session file.
     #[must_use]
     pub fn take_fork_request(&self) -> Option<String> {
-        self.fork_request
-            .lock()
-            .ok()
-            .and_then(|mut slot| slot.take())
+        lock(&self.fork_request).take()
     }
 
     /// Cloneable handle to the session-entries snapshot the
@@ -377,9 +341,8 @@ impl PluginRuntime {
     /// from the active session file on its redraw / between-turn
     /// cadence, like [`set_session_list`](Self::set_session_list).
     pub fn set_session_entries(&self, entries: Vec<serde_json::Value>) {
-        if let Ok(mut slot) = self.session_entries.lock() {
-            *slot = entries;
-        }
+        let mut slot = lock(&self.session_entries);
+        *slot = entries;
     }
 
     /// Cloneable handle to the pending `session_write` reseat slot, so
@@ -396,10 +359,7 @@ impl PluginRuntime {
     /// the `session_before_switch` veto.
     #[must_use]
     pub fn take_switch_request(&self) -> Option<SwitchTarget> {
-        self.switch_request
-            .lock()
-            .ok()
-            .and_then(|mut slot| slot.take())
+        lock(&self.switch_request).take()
     }
 
     /// Cloneable handle to the theme snapshot. The host overwrites
@@ -422,10 +382,7 @@ impl PluginRuntime {
     /// the host should validate `name` and switch to it.
     #[must_use]
     pub fn take_theme_request(&self) -> Option<String> {
-        self.theme_request
-            .lock()
-            .ok()
-            .and_then(|mut slot| slot.take())
+        lock(&self.theme_request).take()
     }
 
     /// Snapshot the renderer a plugin installed via
@@ -434,10 +391,7 @@ impl PluginRuntime {
     /// chrome row; `None` means paint the built-in status bar.
     #[must_use]
     pub fn header_chrome(&self) -> Option<Arc<LuaChrome>> {
-        self.header
-            .lock()
-            .expect("plugin header chrome mutex poisoned")
-            .clone()
+        lock(&self.header).clone()
     }
 
     /// Snapshot the renderer a plugin installed via
@@ -446,10 +400,7 @@ impl PluginRuntime {
     /// chrome row; `None` means paint the built-in modeline.
     #[must_use]
     pub fn footer_chrome(&self) -> Option<Arc<LuaChrome>> {
-        self.footer
-            .lock()
-            .expect("plugin footer chrome mutex poisoned")
-            .clone()
+        lock(&self.footer).clone()
     }
 
     /// Snapshot the custom block renderers plugins installed via
@@ -458,12 +409,7 @@ impl PluginRuntime {
     /// custom block uses the built-in card.
     #[must_use]
     pub fn registered_block_renderers(&self) -> Vec<Arc<LuaBlockRenderer>> {
-        self.block_renderers
-            .lock()
-            .expect("plugin block renderers mutex poisoned")
-            .values()
-            .cloned()
-            .collect()
+        lock(&self.block_renderers).values().cloned().collect()
     }
 
     /// Cloneable handle to the header-chrome slot, for a host that
@@ -489,10 +435,7 @@ impl PluginRuntime {
     /// prompt input changes.
     #[must_use]
     pub fn registered_autocomplete_providers(&self) -> Vec<Arc<LuaAutocompleteProvider>> {
-        self.autocomplete
-            .lock()
-            .expect("plugin autocomplete mutex poisoned")
-            .clone()
+        lock(&self.autocomplete).clone()
     }
 
     /// Cloneable handle to the raw terminal-input hook list from
@@ -507,10 +450,7 @@ impl PluginRuntime {
     /// order.
     #[must_use]
     pub fn registered_terminal_hooks(&self) -> Vec<Arc<crate::terminal_input::LuaTerminalHook>> {
-        self.terminal_hooks
-            .lock()
-            .expect("plugin terminal hooks mutex poisoned")
-            .clone()
+        lock(&self.terminal_hooks).clone()
     }
 
     /// Cloneable handle to the queue of plugin-supplied messages.
@@ -527,10 +467,7 @@ impl PluginRuntime {
     /// chain reads naturally.
     #[must_use]
     pub fn take_pending_messages(&self) -> Vec<PendingMessage> {
-        self.pending_messages
-            .lock()
-            .map(|mut q| std::mem::take(&mut *q))
-            .unwrap_or_default()
+        std::mem::take(&mut *lock(&self.pending_messages))
     }
 
     /// Cloneable handle to the queue of plugin-requested session
@@ -547,10 +484,7 @@ impl PluginRuntime {
     /// the last drain.
     #[must_use]
     pub fn take_pending_session_ops(&self) -> Vec<PendingSessionOp> {
-        self.session_ops
-            .lock()
-            .map(|mut q| std::mem::take(&mut *q))
-            .unwrap_or_default()
+        std::mem::take(&mut *lock(&self.session_ops))
     }
 
     /// Run `func` inside a fresh plugin coroutine with `args` as its
@@ -568,7 +502,7 @@ impl PluginRuntime {
         func: &mlua::Function,
         args: &[serde_json::Value],
     ) -> Result<BridgeStep, PluginError> {
-        let mut slot = self.bridge.lock().expect("plugin bridge mutex poisoned");
+        let mut slot = lock(&self.bridge);
         if slot.is_some() {
             return Err(PluginError::BridgeBusy);
         }
@@ -582,7 +516,7 @@ impl PluginRuntime {
     /// value of the blocking call that suspended it. Returns the next
     /// step (done or suspended again).
     pub fn bridge_resume(&self, result: &serde_json::Value) -> Result<BridgeStep, PluginError> {
-        let mut slot = self.bridge.lock().expect("plugin bridge mutex poisoned");
+        let mut slot = lock(&self.bridge);
         let thread = slot.take().ok_or(PluginError::BridgeIdle)?;
         let lua = self.lock_lua();
         let resume_args = bridge::args_to_multi(&lua, std::slice::from_ref(result))?;
@@ -593,7 +527,7 @@ impl PluginRuntime {
     /// cancelled. The blocking call returns `nil` to the plugin (the
     /// PE.B dialog contract for "user dismissed").
     pub fn bridge_cancel(&self) -> Result<BridgeStep, PluginError> {
-        let mut slot = self.bridge.lock().expect("plugin bridge mutex poisoned");
+        let mut slot = lock(&self.bridge);
         let thread = slot.take().ok_or(PluginError::BridgeIdle)?;
         let _lua = self.lock_lua();
         bridge::step(thread, mlua::MultiValue::new(), &mut slot)
@@ -605,18 +539,14 @@ impl PluginRuntime {
     #[must_use = "the boolean reports whether a coroutine was dropped; \
                   discard with `let _ =` if only the side effect matters"]
     pub fn bridge_abort(&self) -> bool {
-        self.bridge
-            .lock()
-            .expect("plugin bridge mutex poisoned")
-            .take()
-            .is_some()
+        lock(&self.bridge).take().is_some()
     }
 
     /// `true` while a bridged coroutine is parked awaiting a host
     /// action.
     #[must_use]
     pub fn bridge_is_suspended(&self) -> bool {
-        self.bridge.lock().is_ok_and(|slot| slot.is_some())
+        lock(&self.bridge).is_some()
     }
 
     /// Drop every registration that came from plugins (event handlers,
@@ -637,84 +567,50 @@ impl PluginRuntime {
             let handlers: mlua::Table = lua.named_registry_value("kage._handlers")?;
             handlers.clear()?;
         }
-        self.tools
-            .lock()
-            .expect("plugin tools mutex poisoned")
-            .clear();
-        self.tool_overrides
-            .lock()
-            .expect("plugin tool overrides mutex poisoned")
-            .clear();
-        self.widgets
-            .lock()
-            .expect("plugin widgets mutex poisoned")
-            .clear();
-        self.status
-            .lock()
-            .expect("plugin status mutex poisoned")
-            .clear();
-        self.commands
-            .lock()
-            .expect("plugin commands mutex poisoned")
-            .clear();
-        self.command_overrides
-            .lock()
-            .expect("plugin command overrides mutex poisoned")
-            .clear();
-        self.providers
-            .lock()
-            .expect("plugin providers mutex poisoned")
-            .clear();
-        self.keybindings
-            .lock()
-            .expect("plugin keybindings mutex poisoned")
-            .clear();
-        if let Ok(mut q) = self.pending_messages.lock() {
+        lock(&self.tools).clear();
+        lock(&self.tool_overrides).clear();
+        lock(&self.widgets).clear();
+        lock(&self.status).clear();
+        lock(&self.commands).clear();
+        lock(&self.command_overrides).clear();
+        lock(&self.providers).clear();
+        lock(&self.keybindings).clear();
+        {
+            let mut q = lock(&self.pending_messages);
             q.clear();
-        }
-        if let Ok(mut q) = self.session_ops.lock() {
+            let mut q = lock(&self.session_ops);
             q.clear();
-        }
-        if let Ok(mut parked) = self.bridge.lock() {
+            let mut parked = lock(&self.bridge);
             *parked = None;
-        }
-        if let Ok(mut slot) = self.theme_request.lock() {
+            let mut slot = lock(&self.theme_request);
             *slot = None;
-        }
-        if let Ok(mut slot) = self.header.lock() {
+            let mut slot = lock(&self.header);
             *slot = None;
-        }
-        if let Ok(mut slot) = self.footer.lock() {
+            let mut slot = lock(&self.footer);
             *slot = None;
-        }
-        if let Ok(mut map) = self.block_renderers.lock() {
+            let mut map = lock(&self.block_renderers);
             map.clear();
         }
-        self.autocomplete
-            .lock()
-            .expect("plugin autocomplete mutex poisoned")
-            .clear();
-        self.terminal_hooks
-            .lock()
-            .expect("plugin terminal hooks mutex poisoned")
-            .clear();
+        lock(&self.autocomplete).clear();
+        lock(&self.terminal_hooks).clear();
         // Drop every per-plugin environment so a reload is a clean
         // slate: stale plugin globals do not survive, and a capability
         // revoked in config is no longer attached to the old proxy.
         // Lock lua before plugin_envs to match `eval_plugin`'s order.
         {
             let lua = self.lock_lua();
-            let mut envs = self
-                .plugin_envs
-                .lock()
-                .expect("plugin env map mutex poisoned");
+            let mut envs = lock(&self.plugin_envs);
             for (_, key) in envs.drain() {
                 let _ = lua.remove_registry_value(key);
             }
         }
-        if let Ok(mut cur) = self.current_plugin.lock() {
+        {
+            let mut cur = lock(&self.current_plugin);
             *cur = None;
         }
+        // No guard from the clears above may still be held here:
+        // `load_dir` re-enters `eval_plugin`, which re-locks
+        // `current_plugin` and the registration targets.
         crate::loader::load_dir(dir, self)
     }
 }

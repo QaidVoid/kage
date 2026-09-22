@@ -9,7 +9,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use kage_core::{LoopEvent, Message, ToolOutput};
+use kage_core::{LoopEvent, Message, ToolOutput, sync::lock};
 use kage_loop::{CompactionPrep, Hooks, StreamRequest, TurnSummary};
 use kage_plugin::{LogLevel, PluginRuntime, SharedHostLog, default_host_log};
 use kage_provider::{Provider, ProviderRegistry};
@@ -161,9 +161,9 @@ impl<H: Hooks> PluginEventHooks<H> {
     }
 
     fn log_error(&self, args: std::fmt::Arguments<'_>) {
-        if let Ok(mut sink) = self.runtime.sink().lock() {
-            sink.log(LogLevel::Error, &args.to_string());
-        }
+        let sink = self.runtime.sink();
+        let mut sink = lock(&sink);
+        sink.log(LogLevel::Error, &args.to_string());
     }
 }
 

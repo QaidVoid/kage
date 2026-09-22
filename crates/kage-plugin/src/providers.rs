@@ -22,7 +22,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use kage_core::CancelFlag;
+use kage_core::{CancelFlag, sync::lock};
 use kage_provider::{
     EventStream, Provider, ProviderError, ProviderEvent, ProviderMetadata, ProviderModel,
     StreamRequest, make_cancelable,
@@ -126,7 +126,7 @@ fn run_handler(
     cancel: &CancelFlag,
     tx: mpsc::Sender<Result<ProviderEvent, ProviderError>>,
 ) -> Result<(), PluginError> {
-    let lua = lua.lock().expect("plugin lua mutex poisoned");
+    let lua = lock(lua);
     let handler: Function = lua.registry_value(handler_key)?;
     let lua_req = json_to_lua(&lua, req)?;
 
@@ -226,12 +226,11 @@ fn value_to_provider_event(
     let json = lua_to_json(value)
         .map_err(|e| ProviderError::Decode(format!("plugin provider: lua to json: {e}")))?;
     serde_json::from_value::<ProviderEvent>(json).map_err(|err| {
-        if let Ok(mut s) = sink.lock() {
-            s.log(
-                LogLevel::Error,
-                &format!("plugin provider yielded undecodable event: {err}"),
-            );
-        }
+        let mut s = lock(sink);
+        s.log(
+            LogLevel::Error,
+            &format!("plugin provider yielded undecodable event: {err}"),
+        );
         ProviderError::Decode(format!("plugin provider: decode event: {err}"))
     })
 }

@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use kage_core::sync::lock;
 use kage_jsonrpc::{Inbound, Peer, RpcError, connect};
 
 use crate::acp::{
@@ -233,10 +234,7 @@ where
             Inbound::Notification { method, params } => {
                 if method == "session/cancel"
                     && let Ok(c) = parse::<crate::acp::CancelNotification>(params)
-                    && let Some(flag) = sessions
-                        .lock()
-                        .expect("acp sessions mutex poisoned")
-                        .get(&c.session_id)
+                    && let Some(flag) = lock(&sessions).get(&c.session_id)
                 {
                     flag.store(true, Ordering::SeqCst);
                 }
@@ -267,9 +265,7 @@ fn spawn_op<A, F>(
     A: Agent,
     F: FnOnce(&mut A, &PromptContext) -> Result<serde_json::Value, RpcError> + Send + 'static,
 {
-    let flag = sessions
-        .lock()
-        .expect("acp sessions mutex poisoned")
+    let flag = lock(sessions)
         .entry(session_id.clone())
         .or_insert_with(|| Arc::new(AtomicBool::new(false)))
         .clone();
@@ -283,7 +279,7 @@ fn spawn_op<A, F>(
     let agent = Arc::clone(agent);
     let peer = peer.clone();
     thread::spawn(move || {
-        let mut guard = agent.lock().expect("acp agent mutex poisoned");
+        let mut guard = lock(&agent);
         let outcome = op(&mut guard, &ctx);
         let _ = peer.respond(&id, outcome);
     });
@@ -299,28 +295,15 @@ fn handle_request<A: Agent>(
 ) {
     match method {
         "initialize" => {
-            let outcome = parse::<InitializeRequest>(params).map(|req| {
-                jval(
-                    agent
-                        .lock()
-                        .expect("acp agent mutex poisoned")
-                        .initialize(req),
-                )
-            });
+            let outcome =
+                parse::<InitializeRequest>(params).map(|req| jval(lock(agent).initialize(req)));
             let _ = peer.respond(&id, outcome);
         }
         "session/new" => {
-            let result = parse::<NewSessionRequest>(params).and_then(|req| {
-                agent
-                    .lock()
-                    .expect("acp agent mutex poisoned")
-                    .new_session(req)
-            });
+            let result =
+                parse::<NewSessionRequest>(params).and_then(|req| lock(agent).new_session(req));
             if let Ok(resp) = &result {
-                sessions
-                    .lock()
-                    .expect("acp sessions mutex poisoned")
-                    .insert(resp.session_id.clone(), Arc::new(AtomicBool::new(false)));
+                lock(sessions).insert(resp.session_id.clone(), Arc::new(AtomicBool::new(false)));
             }
             let _ = peer.respond(&id, result.map(jval));
         }

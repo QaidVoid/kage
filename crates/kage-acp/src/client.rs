@@ -27,7 +27,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::Duration;
 
-use kage_core::{CancelFlag, Content, Message, Role, TokenUsage};
+use kage_core::{CancelFlag, Content, Message, Role, TokenUsage, sync::lock};
 use kage_jsonrpc::{Inbound, Peer, RpcError, connect};
 use kage_provider::{
     EventStream, Provider, ProviderError, ProviderEvent, ProviderMetadata, StopReason,
@@ -257,9 +257,7 @@ fn spawn_drain(
                         break;
                     }
                     if done.load(Ordering::SeqCst) {
-                        if let Some(item) =
-                            terminal.lock().expect("acp terminal mutex poisoned").take()
-                        {
+                        if let Some(item) = lock(&terminal).take() {
                             let _ = tx.send(item);
                         }
                         break;
@@ -267,8 +265,7 @@ fn spawn_drain(
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    if let Some(item) = terminal.lock().expect("acp terminal mutex poisoned").take()
-                    {
+                    if let Some(item) = lock(&terminal).take() {
                         let _ = tx.send(item);
                     }
                     break;
@@ -322,7 +319,7 @@ fn spawn_prompt(
             }),
             Err(e) => Err(rpc_to_provider(e)),
         };
-        *terminal.lock().expect("acp terminal mutex poisoned") = Some(item);
+        *lock(&terminal) = Some(item);
         done.store(true, Ordering::SeqCst);
     });
 }

@@ -16,6 +16,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, RwLock};
 
+use kage_core::sync::write;
+
 use super::widget::BlockWidget;
 use super::{
     AssistantBlockWidget, CompactionBlockWidget, CustomBlockWidget, ThinkingBlockWidget,
@@ -156,19 +158,13 @@ pub fn global() -> &'static RwLock<BlockRenderer> {
 /// the global registry. Called by the host when a plugin runs
 /// `kage.register_block_renderer`.
 pub fn register_custom(name: impl Into<String>, factory: Arc<dyn BlockFactory>) {
-    global()
-        .write()
-        .expect("block registry rwlock poisoned")
-        .set_custom(name, factory);
+    write(global()).set_custom(name, factory);
 }
 
 /// Override a built-in block kind's renderer in the global registry
 /// (Lua `kage.register_block_renderer` with a reserved kind name).
 pub fn register_builtin(kind: BuiltinKind, factory: Arc<dyn BlockFactory>) {
-    global()
-        .write()
-        .expect("block registry rwlock poisoned")
-        .set_builtin(kind, factory);
+    write(global()).set_builtin(kind, factory);
 }
 
 /// Map a reserved builtin-kind name (as a plugin would pass to
@@ -195,7 +191,7 @@ pub fn builtin_kind_from_name(name: &str) -> Option<BuiltinKind> {
 /// builtin defaults. Called on plugin hot-reload so a removed
 /// renderer stops taking effect.
 pub fn reset_to_builtins() {
-    *global().write().expect("block registry rwlock poisoned") = BlockRenderer::with_builtins();
+    *write(global()) = BlockRenderer::with_builtins();
 }
 
 /// Identifier for the built-in kinds that have a default factory.

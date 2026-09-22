@@ -1,7 +1,7 @@
 //! Bidirectional JSON-RPC 2.0 peer over newline-delimited stdio.
 //!
-//! Layering: leaf crate alongside `kage-core`; depends on no other
-//! `kage-*` crate.
+//! Layering: leaf crate alongside `kage-core`, which it depends on for
+//! the shared lock helpers and nothing else.
 //!
 //! Both MCP and ACP speak JSON-RPC over stdio where each message is a
 //! single line of JSON terminated by `\n`, and both are symmetric: a
@@ -26,6 +26,8 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
+
+use kage_core::sync::lock;
 
 /// A JSON-RPC error object (`code` / `message`).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -108,7 +110,7 @@ pub struct Peer {
 
 impl Peer {
     fn write(&self, value: &serde_json::Value) -> Result<(), RpcError> {
-        let mut guard = self.writer.lock().expect("jsonrpc writer mutex poisoned");
+        let mut guard = lock(&self.writer);
         let mut line =
             serde_json::to_vec(value).map_err(|e| RpcError::internal(format!("encode: {e}")))?;
         line.push(b'\n');
@@ -169,28 +171,19 @@ impl Peer {
     ) -> Result<serde_json::Value, RpcError> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::channel();
-        self.pending
-            .lock()
-            .expect("jsonrpc pending mutex poisoned")
-            .insert(id, tx);
+        lock(&self.pending).insert(id, tx);
         let mut obj = serde_json::Map::with_capacity(4);
         obj.insert("jsonrpc".to_owned(), serde_json::Value::from("2.0"));
         obj.insert("id".to_owned(), serde_json::Value::from(id));
         obj.insert("method".to_owned(), serde_json::Value::from(method));
         obj.insert("params".to_owned(), params);
         if let Err(e) = self.write(&serde_json::Value::Object(obj)) {
-            self.pending
-                .lock()
-                .expect("jsonrpc pending mutex poisoned")
-                .remove(&id);
+            lock(&self.pending).remove(&id);
             return Err(e);
         }
         loop {
             if should_cancel() {
-                self.pending
-                    .lock()
-                    .expect("jsonrpc pending mutex poisoned")
-                    .remove(&id);
+                lock(&self.pending).remove(&id);
                 return Err(RpcError::new(-32800, "request cancelled"));
             }
             match rx.recv_timeout(Duration::from_millis(150)) {
@@ -277,11 +270,7 @@ where
                     break;
                 }
             } else if let Some(id) = value.get("id").and_then(serde_json::Value::as_i64) {
-                if let Some(tx) = pending
-                    .lock()
-                    .expect("jsonrpc pending mutex poisoned")
-                    .remove(&id)
-                {
+                if let Some(tx) = lock(&pending).remove(&id) {
                     let outcome = value.get("error").map_or_else(
                         || {
                             Ok(value
@@ -295,11 +284,7 @@ where
                 }
             }
         }
-        for (_, tx) in pending
-            .lock()
-            .expect("jsonrpc pending mutex poisoned")
-            .drain()
-        {
+        for (_, tx) in lock(&pending).drain() {
             let _ = tx.send(Err(RpcError::internal("connection closed")));
         }
     });

@@ -10,7 +10,10 @@
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use kage_core::CancelFlag;
+use kage_core::{
+    CancelFlag,
+    sync::{read, write},
+};
 
 use crate::ProviderError;
 
@@ -89,20 +92,14 @@ impl HttpClient {
         // value (recycle, the only writer, swaps it in one move and
         // cannot panic mid-update), so recovering the guard is correct
         // here - not a swallowed failure.
-        self.agent
-            .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        read(&self.agent).clone()
     }
 
     /// Drop the pooled connections by swapping in a fresh agent so the
     /// next [`agent`](Self::agent) snapshot dials a new connection.
     fn recycle(&self) {
         let fresh = build_agent();
-        let mut guard = self
-            .agent
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = write(&self.agent);
         *guard = fresh;
     }
 

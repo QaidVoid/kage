@@ -71,6 +71,8 @@
 
 use std::path::PathBuf;
 
+use kage_core::sync::lock;
+
 use mlua::{Function, Lua, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog, json_to_lua, lua_to_json};
@@ -238,12 +240,11 @@ pub fn dispatch(
     for pair in list.clone().sequence_values::<Function>() {
         let func = pair?;
         if let Err(err) = func.call::<()>(lua_payload.clone()) {
-            if let Ok(mut s) = sink.lock() {
-                s.log(
-                    LogLevel::Error,
-                    &format!("plugin handler for '{event_name}' raised: {err}"),
-                );
-            }
+            let mut s = lock(sink);
+            s.log(
+                LogLevel::Error,
+                &format!("plugin handler for '{event_name}' raised: {err}"),
+            );
         }
     }
     Ok(())
@@ -282,24 +283,22 @@ pub fn dispatch_transform(
             Ok(value) => match lua_to_json(value) {
                 Ok(next) => current = next,
                 Err(err) => {
-                    if let Ok(mut s) = sink.lock() {
-                        s.log(
-                            LogLevel::Error,
-                            &format!(
-                                "plugin handler for '{event_name}' \
-                                 returned a non-serializable value: {err}",
-                            ),
-                        );
-                    }
+                    let mut s = lock(sink);
+                    s.log(
+                        LogLevel::Error,
+                        &format!(
+                            "plugin handler for '{event_name}' \
+                             returned a non-serializable value: {err}",
+                        ),
+                    );
                 }
             },
             Err(err) => {
-                if let Ok(mut s) = sink.lock() {
-                    s.log(
-                        LogLevel::Error,
-                        &format!("plugin handler for '{event_name}' raised: {err}"),
-                    );
-                }
+                let mut s = lock(sink);
+                s.log(
+                    LogLevel::Error,
+                    &format!("plugin handler for '{event_name}' raised: {err}"),
+                );
             }
         }
     }
@@ -354,12 +353,11 @@ pub fn dispatch_resources_discover(
             }
             Ok(_) => {}
             Err(err) => {
-                if let Ok(mut s) = sink.lock() {
-                    s.log(
-                        LogLevel::Error,
-                        &format!("plugin handler for 'resources_discover' raised: {err}"),
-                    );
-                }
+                let mut s = lock(sink);
+                s.log(
+                    LogLevel::Error,
+                    &format!("plugin handler for 'resources_discover' raised: {err}"),
+                );
             }
         }
     }
@@ -436,12 +434,11 @@ pub fn dispatch_session_op(
             }
             Ok(_) => {}
             Err(err) => {
-                if let Ok(mut s) = sink.lock() {
-                    s.log(
-                        LogLevel::Error,
-                        &format!("plugin handler for '{event_name}' raised: {err}"),
-                    );
-                }
+                let mut s = lock(sink);
+                s.log(
+                    LogLevel::Error,
+                    &format!("plugin handler for '{event_name}' raised: {err}"),
+                );
             }
         }
     }
@@ -475,12 +472,11 @@ pub fn dispatch_predicate(
             Ok(Value::Boolean(true)) => return Ok(true),
             Ok(_) => {}
             Err(err) => {
-                if let Ok(mut s) = sink.lock() {
-                    s.log(
-                        LogLevel::Error,
-                        &format!("plugin handler for '{event_name}' raised: {err}"),
-                    );
-                }
+                let mut s = lock(sink);
+                s.log(
+                    LogLevel::Error,
+                    &format!("plugin handler for '{event_name}' raised: {err}"),
+                );
             }
         }
     }

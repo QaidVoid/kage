@@ -24,6 +24,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use kage_core::sync::lock;
+
 use mlua::{Lua, Table, Value};
 use serde_json::json;
 
@@ -147,11 +149,10 @@ pub fn install(
                 )));
             }
         };
-        if let Ok(mut s) = notify_sink.lock() {
-            s.notify(&msg);
-            if let Some(level) = escalate {
-                s.log(level, &msg);
-            }
+        let mut s = lock(&notify_sink);
+        s.notify(&msg);
+        if let Some(level) = escalate {
+            s.log(level, &msg);
         }
         Ok(())
     })?;
@@ -166,9 +167,8 @@ pub fn install(
     kage.set(
         "log",
         lua.create_function(move |_, (level, msg): (String, String)| {
-            if let Ok(mut s) = log_sink.lock() {
-                s.log(LogLevel::parse(&level), &msg);
-            }
+            let mut s = lock(&log_sink);
+            s.log(LogLevel::parse(&level), &msg);
             Ok(())
         })?,
     )?;

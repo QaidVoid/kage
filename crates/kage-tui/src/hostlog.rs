@@ -12,6 +12,7 @@
 //! pane. `log` (especially error level) keeps the inline path because
 //! the user wants to scroll back and review.
 
+use kage_core::sync::lock;
 use kage_plugin::{HostLog, LogLevel, SharedHostLog};
 
 use crate::events::SharedBuffer;
@@ -44,13 +45,12 @@ impl HostLog for BufferHostLog {
         );
     }
     fn log(&mut self, level: LogLevel, message: &str) {
-        if let Ok(mut buf) = self.buffer.lock() {
-            buf.push_custom(
-                "kage:log",
-                format!("[{level:?}] {message}"),
-                level != LogLevel::Error,
-            );
-        }
+        let mut buf = lock(&self.buffer);
+        buf.push_custom(
+            "kage:log",
+            format!("[{level:?}] {message}"),
+            level != LogLevel::Error,
+        );
     }
 }
 

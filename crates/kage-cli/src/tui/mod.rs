@@ -13,7 +13,7 @@ pub(crate) use std::sync::mpsc;
 pub(crate) use std::sync::{Arc, Mutex};
 pub(crate) use std::thread;
 
-pub(crate) use kage_core::{CancelFlag, Content, Message, Role};
+pub(crate) use kage_core::{CancelFlag, Content, Message, Role, sync::lock};
 pub(crate) use kage_loop::{AgentContext, LoopConfig, NoopHooks, force_compact, run};
 pub(crate) use kage_mcp::McpManager;
 pub(crate) use kage_plugin::{

@@ -16,7 +16,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use kage_core::{Risk, ToolOutput};
+use kage_core::{Risk, ToolOutput, sync::lock};
 use kage_tools::{Tool, ToolContext, ToolError};
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 
@@ -91,12 +91,11 @@ impl Tool for LuaTool {
         match func.call::<Value>(lua_input) {
             Ok(returned) => Ok(value_to_output(returned)),
             Err(err) => {
-                if let Ok(mut s) = self.sink.lock() {
-                    s.log(
-                        LogLevel::Error,
-                        &format!("plugin tool '{}' raised: {err}", self.name),
-                    );
-                }
+                let mut s = lock(&self.sink);
+                s.log(
+                    LogLevel::Error,
+                    &format!("plugin tool '{}' raised: {err}", self.name),
+                );
                 Ok(ToolOutput {
                     is_error: true,
                     text: err.to_string(),

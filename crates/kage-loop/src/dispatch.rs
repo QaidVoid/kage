@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 
 use kage_core::{
     CancelFlag, Content, LoopError, LoopEvent, Message, MessageId, Role, ToolCallId, ToolOutput,
-    ToolUpdate,
+    ToolUpdate, sync::lock,
 };
 use kage_tools::{ProgressSink, ToolContext, ToolError, ToolRegistry};
 
@@ -40,15 +40,14 @@ impl BufferingSink {
     }
 
     fn drain(&self) -> Vec<ToolUpdate> {
-        std::mem::take(&mut self.updates.lock().expect("buffering sink poisoned"))
+        std::mem::take(&mut lock(&self.updates))
     }
 }
 
 impl ProgressSink for BufferingSink {
     fn emit(&self, update: ToolUpdate) {
-        if let Ok(mut v) = self.updates.lock() {
-            v.push(update);
-        }
+        let mut v = lock(&self.updates);
+        v.push(update);
     }
 }
 

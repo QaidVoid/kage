@@ -160,7 +160,7 @@ impl<R: BufRead> SseToJsonLines<R> {
                 let resolved = resolve_endpoint(&self.base, &frame.data)
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                 let (lock, cv) = &*self.endpoint;
-                *lock.lock().expect("mcp endpoint mutex poisoned") = Some(resolved);
+                *kage_core::sync::lock(lock) = Some(resolved);
                 cv.notify_all();
                 continue;
             }
@@ -209,7 +209,7 @@ impl HttpPoster {
     /// out. Returns the resolved endpoint URL.
     fn wait_endpoint(&self) -> io::Result<String> {
         let (lock, cv) = &*self.endpoint;
-        let guard = lock.lock().expect("mcp endpoint mutex poisoned");
+        let guard = kage_core::sync::lock(lock);
         let (guard, timeout) = cv
             .wait_timeout_while(guard, ENDPOINT_TIMEOUT, |e| e.is_none())
             .expect("mcp endpoint mutex poisoned");

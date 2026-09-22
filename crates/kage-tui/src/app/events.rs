@@ -11,7 +11,8 @@ impl App {
     /// path because the steering hook only carries text.
     pub(crate) fn handle_submit(&mut self, text: String) {
         let images = self.input.take_attached();
-        if let Ok(mut buf) = self.buffer.lock() {
+        {
+            let mut buf = lock(&self.buffer);
             buf.push_user(text.clone());
             for img in &images {
                 buf.push_custom("kage:image", img.placeholder(), false);
@@ -26,7 +27,9 @@ impl App {
         let pushed = self
             .steering
             .as_ref()
-            .and_then(|q| q.lock().ok().map(|mut g| g.push_back(text)))
+            .map(|q| {
+                lock(q).push_back(text);
+            })
             .is_some();
         if pushed {
             self.notify("queued for next turn");
@@ -74,14 +77,12 @@ impl App {
                 self.slash_palette = Some(palette);
             }
             InputAction::FocusPrev => {
-                if let Ok(mut buf) = self.buffer.lock() {
-                    buf.focus_prev_any();
-                }
+                let mut buf = lock(&self.buffer);
+                buf.focus_prev_any();
             }
             InputAction::FocusNext => {
-                if let Ok(mut buf) = self.buffer.lock() {
-                    buf.focus_next_any();
-                }
+                let mut buf = lock(&self.buffer);
+                buf.focus_next_any();
             }
             InputAction::OpenSessionPicker => {
                 // Default to this directory's sessions. If there are
@@ -174,34 +175,33 @@ impl App {
     /// the click so subsequent keyboard gestures act on it.
     pub(crate) fn mouse_down(&mut self, row: u16, col: u16) {
         self.captured_rows.clear();
-        if let Ok(mut buf) = self.buffer.lock() {
-            let area_y = buf.last_area_y();
-            let area_height = buf.last_area_height();
-            if row < area_y || row >= area_y.saturating_add(area_height) {
-                // Click landed outside the buffer rectangle. Anything
-                // below the buffer is the input card or modeline; the
-                // top status row is above. Clicks below the buffer
-                // focus the input pane (vim-style window focus); top
-                // status clicks leave focus alone.
-                self.screen_selection = None;
-                self.mouse_drag_anchor = None;
-                if row >= area_y.saturating_add(area_height) {
-                    self.input.set_focused_pane(Pane::Input);
-                }
-                return;
+        let mut buf = lock(&self.buffer);
+        let area_y = buf.last_area_y();
+        let area_height = buf.last_area_height();
+        if row < area_y || row >= area_y.saturating_add(area_height) {
+            // Click landed outside the buffer rectangle. Anything
+            // below the buffer is the input card or modeline; the
+            // top status row is above. Clicks below the buffer
+            // focus the input pane (vim-style window focus); top
+            // status clicks leave focus alone.
+            self.screen_selection = None;
+            self.mouse_drag_anchor = None;
+            if row >= area_y.saturating_add(area_height) {
+                self.input.set_focused_pane(Pane::Input);
             }
-            // Click inside the buffer area focuses the buffer pane.
-            self.input.set_focused_pane(Pane::Buffer);
-            let vrow = buf
-                .last_virtual_top()
-                .saturating_add(usize::from(row - area_y));
-            self.screen_selection = Some(((vrow, col), (vrow, col)));
-            if let Some(idx) = buf.block_at_screen_row(row) {
-                buf.set_focus(Some(idx));
-                self.mouse_drag_anchor = Some((row, idx, false));
-            } else {
-                self.mouse_drag_anchor = None;
-            }
+            return;
+        }
+        // Click inside the buffer area focuses the buffer pane.
+        self.input.set_focused_pane(Pane::Buffer);
+        let vrow = buf
+            .last_virtual_top()
+            .saturating_add(usize::from(row - area_y));
+        self.screen_selection = Some(((vrow, col), (vrow, col)));
+        if let Some(idx) = buf.block_at_screen_row(row) {
+            buf.set_focus(Some(idx));
+            self.mouse_drag_anchor = Some((row, idx, false));
+        } else {
+            self.mouse_drag_anchor = None;
         }
     }
 
@@ -213,21 +213,20 @@ impl App {
         let Some((anchor, _)) = self.screen_selection else {
             return;
         };
-        if let Ok(buf) = self.buffer.lock() {
-            let area_y = buf.last_area_y();
-            let area_height = buf.last_area_height();
-            if area_height == 0 {
-                return;
-            }
-            let last_visible_row = area_y.saturating_add(area_height).saturating_sub(1);
-            let clamped_row = row.clamp(area_y, last_visible_row);
-            let vrow = buf
-                .last_virtual_top()
-                .saturating_add(usize::from(clamped_row - area_y));
-            self.screen_selection = Some((anchor, (vrow, col)));
-            if let Some((_, _, ref mut dragged)) = self.mouse_drag_anchor {
-                *dragged = true;
-            }
+        let buf = lock(&self.buffer);
+        let area_y = buf.last_area_y();
+        let area_height = buf.last_area_height();
+        if area_height == 0 {
+            return;
+        }
+        let last_visible_row = area_y.saturating_add(area_height).saturating_sub(1);
+        let clamped_row = row.clamp(area_y, last_visible_row);
+        let vrow = buf
+            .last_virtual_top()
+            .saturating_add(usize::from(clamped_row - area_y));
+        self.screen_selection = Some((anchor, (vrow, col)));
+        if let Some((_, _, ref mut dragged)) = self.mouse_drag_anchor {
+            *dragged = true;
         }
     }
 
@@ -249,42 +248,37 @@ impl App {
         // Plain click: clear the zero-width selection we anchored on
         // press, then maybe toggle a fold on the header row.
         self.clear_selection();
-        if let Ok(mut buf) = self.buffer.lock()
-            && buf.screen_top_of(anchor_idx) == Some(row)
-        {
+        let mut buf = lock(&self.buffer);
+        if buf.screen_top_of(anchor_idx) == Some(row) {
             buf.toggle_fold(anchor_idx);
         }
     }
 
     pub(crate) fn scroll_by(&mut self, delta: i32) {
-        if let Ok(mut buf) = self.buffer.lock() {
-            // Positive delta = move toward newest (decrement rows-up);
-            // negative = move toward oldest (increment rows-up).
-            let current = i64::try_from(buf.scroll()).unwrap_or(i64::MAX);
-            let target = (current - i64::from(delta)).max(0);
-            let clamped = usize::try_from(target).unwrap_or(0);
-            buf.set_scroll(clamped);
-        }
+        let mut buf = lock(&self.buffer);
+        // Positive delta = move toward newest (decrement rows-up);
+        // negative = move toward oldest (increment rows-up).
+        let current = i64::try_from(buf.scroll()).unwrap_or(i64::MAX);
+        let target = (current - i64::from(delta)).max(0);
+        let clamped = usize::try_from(target).unwrap_or(0);
+        buf.set_scroll(clamped);
     }
 
     pub(crate) fn set_scroll(&mut self, scroll: usize) {
-        if let Ok(mut buf) = self.buffer.lock() {
-            buf.set_scroll(scroll);
-        }
+        let mut buf = lock(&self.buffer);
+        buf.set_scroll(scroll);
     }
 
     pub(crate) fn toggle_last_fold(&mut self) {
-        if let Ok(mut buf) = self.buffer.lock() {
-            if let Some(idx) = buf.effective_focus() {
-                buf.toggle_fold(idx);
-            }
+        let mut buf = lock(&self.buffer);
+        if let Some(idx) = buf.effective_focus() {
+            buf.toggle_fold(idx);
         }
     }
 
     pub(crate) fn set_all_folds(&mut self, folded: bool) {
-        if let Ok(mut buf) = self.buffer.lock() {
-            buf.set_all_folded(folded);
-        }
+        let mut buf = lock(&self.buffer);
+        buf.set_all_folded(folded);
     }
 
     /// Read-only borrow of the input state. Tests use this to assert
@@ -317,7 +311,7 @@ impl App {
         // panic elsewhere can't poison-crash the render loop. The
         // renderer-owned state (caches, clamped scroll, last-frame
         // geometry) is merged back into the live buffer afterwards.
-        let mut buffer = self.buffer.lock().expect("buffer mutex poisoned").clone();
+        let mut buffer = lock(&self.buffer).clone();
         let session_usage = self.session_usage_snapshot();
         let live_toasts = self.live_toasts();
         let bottom = if self.modeline_visible() {
@@ -325,10 +319,7 @@ impl App {
         } else {
             0
         };
-        let model_snapshot = self
-            .status_model
-            .as_ref()
-            .and_then(|m| m.lock().ok().map(|g| g.clone()));
+        let model_snapshot = self.status_model.as_ref().map(|m| lock(m).clone());
         let cmdline = self.cmdline.as_ref();
         let status = view::StatusCtx {
             model: model_snapshot.as_deref(),
@@ -400,10 +391,7 @@ impl App {
                 }
             })
             .map_err(|err| TuiError::Io(std::io::Error::other(err.to_string())))?;
-        self.buffer
-            .lock()
-            .expect("buffer mutex poisoned")
-            .merge_render_state(buffer);
+        lock(&self.buffer).merge_render_state(buffer);
         self.captured_rows = captured_rows;
         Ok(())
     }

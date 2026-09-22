@@ -19,6 +19,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use kage_core::sync::lock;
+
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog};
@@ -101,7 +103,7 @@ impl LuaKeybinding {
     /// runs it through [`crate::PluginRuntime::bridge_call`] with no
     /// arguments, so it may call blocking `kage.ui.*` dialogs.
     pub fn handler(&self) -> Result<Function, PluginError> {
-        let lua = self.lua.lock().expect("plugin lua mutex poisoned");
+        let lua = lock(&self.lua);
         Ok(lua.registry_value(&self.handler_key)?)
     }
 }
@@ -210,9 +212,8 @@ pub fn install_register_keybinding(
             };
             let chord = normalize_chord(&raw_chord)
                 .map_err(|e| mlua::Error::external(format!("kage.register_keybinding: {e}")))?;
-            if RESERVED_CHORDS.contains(&chord.as_str())
-                && let Ok(mut s) = sink.lock()
-            {
+            if RESERVED_CHORDS.contains(&chord.as_str()) {
+                let mut s = lock(&sink);
                 s.log(
                     LogLevel::Warn,
                     &format!(

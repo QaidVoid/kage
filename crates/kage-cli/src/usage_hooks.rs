@@ -8,7 +8,7 @@
 //! modeline ticks forward as soon as each assistant turn finishes,
 //! mid-flow, mirroring the cumulative `cx.budget` the loop maintains.
 
-use kage_core::{LoopEvent, Message, TokenCost, ToolOutput};
+use kage_core::{LoopEvent, Message, TokenCost, ToolOutput, sync::lock};
 use kage_loop::{Hooks, StreamRequest, TurnSummary};
 use kage_tui::SharedSessionUsage;
 
@@ -66,9 +66,8 @@ impl<H: Hooks> Hooks for UsageHooks<H> {
     }
 
     fn on_event(&mut self, event: &LoopEvent) {
-        if let LoopEvent::MessageEnd { usage, .. } = event
-            && let Ok(mut snap) = self.handle.lock()
-        {
+        if let LoopEvent::MessageEnd { usage, .. } = event {
+            let mut snap = lock(&self.handle);
             snap.model.clone_from(&self.model);
             snap.context_window = self.context_window;
             snap.input_tokens = snap.input_tokens.saturating_add(usage.input);

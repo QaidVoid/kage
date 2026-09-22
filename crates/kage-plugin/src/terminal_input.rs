@@ -31,6 +31,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use kage_core::sync::lock;
+
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog, json_to_lua};
@@ -107,12 +109,11 @@ impl LuaTerminalHook {
     }
 
     fn log_error(&self, e: &dyn std::fmt::Display) {
-        if let Ok(mut s) = self.sink.lock() {
-            s.log(
-                LogLevel::Error,
-                &format!("plugin on_terminal_input #{}: {e}", self.id),
-            );
-        }
+        let mut s = lock(&self.sink);
+        s.log(
+            LogLevel::Error,
+            &format!("plugin on_terminal_input #{}: {e}", self.id),
+        );
     }
 }
 
@@ -144,9 +145,8 @@ pub fn install_on_terminal_input(
                 .push(hook);
             let off_registry = Arc::clone(&registered);
             let off = lua.create_function(move |_, ()| {
-                if let Ok(mut list) = off_registry.lock() {
-                    list.retain(|h| h.id != id);
-                }
+                let mut list = lock(&off_registry);
+                list.retain(|h| h.id != id);
                 Ok(())
             })?;
             Ok(off)

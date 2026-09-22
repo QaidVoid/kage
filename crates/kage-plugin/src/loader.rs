@@ -8,6 +8,8 @@
 
 use std::path::{Path, PathBuf};
 
+use kage_core::sync::lock;
+
 use crate::api::LogLevel;
 use crate::error::PluginError;
 use crate::runtime::PluginRuntime;
@@ -68,12 +70,11 @@ pub fn load_dir(dir: &Path, runtime: &PluginRuntime) -> Result<LoadReport, Plugi
             .and_then(|s| s.to_str())
             .unwrap_or("plugin");
         if !runtime.is_plugin_enabled(name) {
-            if let Ok(mut s) = sink.lock() {
-                s.log(
-                    LogLevel::Info,
-                    &format!("plugin '{name}' not in [plugins] enabled allowlist; skipped"),
-                );
-            }
+            let mut s = lock(&sink);
+            s.log(
+                LogLevel::Info,
+                &format!("plugin '{name}' not in [plugins] enabled allowlist; skipped"),
+            );
             report.skipped.push(path);
             continue;
         }
@@ -82,17 +83,15 @@ pub fn load_dir(dir: &Path, runtime: &PluginRuntime) -> Result<LoadReport, Plugi
                 Ok(_) => report.loaded.push(path),
                 Err(err) => {
                     let msg = format!("plugin '{}': {err}", path.display());
-                    if let Ok(mut s) = sink.lock() {
-                        s.log(LogLevel::Error, &msg);
-                    }
+                    let mut s = lock(&sink);
+                    s.log(LogLevel::Error, &msg);
                     report.failed.push((path, err.to_string()));
                 }
             },
             Err(err) => {
                 let msg = format!("plugin '{}': read failed: {err}", path.display());
-                if let Ok(mut s) = sink.lock() {
-                    s.log(LogLevel::Error, &msg);
-                }
+                let mut s = lock(&sink);
+                s.log(LogLevel::Error, &msg);
                 report.failed.push((path, err.to_string()));
             }
         }

@@ -17,43 +17,39 @@ pub(crate) fn handle_plugin_fork(
     at: &str,
 ) -> Option<PathBuf> {
     let Some(sp) = session_path else {
-        if let Ok(mut buf) = buffer.lock() {
-            buf.push_custom(
-                "kage:error",
-                "fork: no active session to fork".to_owned(),
-                false,
-            );
-        }
+        let mut buf = lock(buffer);
+        buf.push_custom(
+            "kage:error",
+            "fork: no active session to fork".to_owned(),
+            false,
+        );
         return None;
     };
-    let src_path = sp.lock().expect("session path mutex poisoned").clone();
+    let src_path = lock(sp).clone();
     if !src_path.exists() {
-        if let Ok(mut buf) = buffer.lock() {
-            buf.push_custom(
-                "kage:error",
-                "fork: current session has no committed entries yet".to_owned(),
-                false,
-            );
-        }
+        let mut buf = lock(buffer);
+        buf.push_custom(
+            "kage:error",
+            "fork: current session has no committed entries yet".to_owned(),
+            false,
+        );
         return None;
     }
     let entry = if at.is_empty() {
         match find_last_entry(&src_path) {
             Ok(Some(id)) => id,
             Ok(None) => {
-                if let Ok(mut buf) = buffer.lock() {
-                    buf.push_custom(
-                        "kage:error",
-                        "fork: current session has no entries to fork at".to_owned(),
-                        false,
-                    );
-                }
+                let mut buf = lock(buffer);
+                buf.push_custom(
+                    "kage:error",
+                    "fork: current session has no entries to fork at".to_owned(),
+                    false,
+                );
                 return None;
             }
             Err(e) => {
-                if let Ok(mut buf) = buffer.lock() {
-                    buf.push_custom("kage:error", format!("fork: {e}"), false);
-                }
+                let mut buf = lock(buffer);
+                buf.push_custom("kage:error", format!("fork: {e}"), false);
                 return None;
             }
         }
@@ -61,29 +57,26 @@ pub(crate) fn handle_plugin_fork(
         match kage_session::resolve_entry_prefix(&src_path, at) {
             Ok(id) => id,
             Err(e) => {
-                if let Ok(mut buf) = buffer.lock() {
-                    buf.push_custom("kage:error", format!("fork: {e}"), false);
-                }
+                let mut buf = lock(buffer);
+                buf.push_custom("kage:error", format!("fork: {e}"), false);
                 return None;
             }
         }
     };
     let Some(dir) = src_path.parent() else {
-        if let Ok(mut buf) = buffer.lock() {
-            buf.push_custom(
-                "kage:error",
-                "fork: session path has no parent directory".to_owned(),
-                false,
-            );
-        }
+        let mut buf = lock(buffer);
+        buf.push_custom(
+            "kage:error",
+            "fork: session path has no parent directory".to_owned(),
+            false,
+        );
         return None;
     };
     let new_session = SessionId::new();
     let dst = dir.join(format!("{new_session}.jsonl"));
     if let Err(e) = kage_session::fork(&src_path, &dst, new_session, entry) {
-        if let Ok(mut buf) = buffer.lock() {
-            buf.push_custom("kage:error", format!("fork failed: {e}"), false);
-        }
+        let mut buf = lock(buffer);
+        buf.push_custom("kage:error", format!("fork failed: {e}"), false);
         return None;
     }
     let short: String = new_session.to_string().chars().take(8).collect();
@@ -104,66 +97,58 @@ pub(crate) fn handle_clone(
     toasts: &SharedToasts,
 ) {
     let Some(sp) = session_path else {
-        if let Ok(mut buf) = buffer.lock() {
-            buf.push_custom(
-                "kage:error",
-                "clone: no active session to clone".to_owned(),
-                false,
-            );
-        }
+        let mut buf = lock(buffer);
+        buf.push_custom(
+            "kage:error",
+            "clone: no active session to clone".to_owned(),
+            false,
+        );
         return;
     };
-    let src_path = sp.lock().expect("session path mutex poisoned").clone();
+    let src_path = lock(sp).clone();
     if !src_path.exists() {
-        if let Ok(mut buf) = buffer.lock() {
-            buf.push_custom(
-                "kage:error",
-                "clone: current session has no committed entries yet".to_owned(),
-                false,
-            );
-        }
+        let mut buf = lock(buffer);
+        buf.push_custom(
+            "kage:error",
+            "clone: current session has no committed entries yet".to_owned(),
+            false,
+        );
         return;
     }
     let entry = match find_last_entry(&src_path) {
         Ok(Some(id)) => id,
         Ok(None) => {
-            if let Ok(mut buf) = buffer.lock() {
-                buf.push_custom(
-                    "kage:error",
-                    "clone: current session has no entries to clone".to_owned(),
-                    false,
-                );
-            }
+            let mut buf = lock(buffer);
+            buf.push_custom(
+                "kage:error",
+                "clone: current session has no entries to clone".to_owned(),
+                false,
+            );
             return;
         }
         Err(e) => {
-            if let Ok(mut buf) = buffer.lock() {
-                buf.push_custom("kage:error", format!("clone: {e}"), false);
-            }
+            let mut buf = lock(buffer);
+            buf.push_custom("kage:error", format!("clone: {e}"), false);
             return;
         }
     };
     let Some(dir) = src_path.parent() else {
-        if let Ok(mut buf) = buffer.lock() {
-            buf.push_custom(
-                "kage:error",
-                "clone: session path has no parent directory".to_owned(),
-                false,
-            );
-        }
+        let mut buf = lock(buffer);
+        buf.push_custom(
+            "kage:error",
+            "clone: session path has no parent directory".to_owned(),
+            false,
+        );
         return;
     };
     let new_session = SessionId::new();
     let dst = dir.join(format!("{new_session}.jsonl"));
     if let Err(e) = kage_session::fork(&src_path, &dst, new_session, entry) {
-        if let Ok(mut buf) = buffer.lock() {
-            buf.push_custom("kage:error", format!("clone failed: {e}"), false);
-        }
+        let mut buf = lock(buffer);
+        buf.push_custom("kage:error", format!("clone failed: {e}"), false);
         return;
     }
-    sp.lock()
-        .expect("session path mutex poisoned")
-        .clone_from(&dst);
+    lock(sp).clone_from(&dst);
     let short: String = new_session.to_string().chars().take(8).collect();
     push_toast(
         toasts,
@@ -187,36 +172,27 @@ pub(crate) fn handle_new(
     toasts: &SharedToasts,
 ) {
     let (Some(sp), Some(sh)) = (session_path, session_header) else {
-        if let Ok(mut buf) = buffer.lock() {
-            buf.push_custom(
-                "kage:error",
-                "new: session storage unavailable".to_owned(),
-                false,
-            );
-        }
+        let mut buf = lock(buffer);
+        buf.push_custom(
+            "kage:error",
+            "new: session storage unavailable".to_owned(),
+            false,
+        );
         return;
     };
-    let qualified = active_qualified
-        .lock()
-        .expect("active model mutex poisoned")
-        .clone();
-    let system_prompt = cx
-        .lock()
-        .expect("agent context mutex poisoned")
-        .system_prompt
-        .clone();
+    let qualified = lock(active_qualified).clone();
+    let system_prompt = lock(cx).system_prompt.clone();
     let (path, header) = match crate::plan_session(&qualified, &system_prompt) {
         Ok(pair) => pair,
         Err(e) => {
-            if let Ok(mut buf) = buffer.lock() {
-                buf.push_custom("kage:error", format!("new: {e}"), false);
-            }
+            let mut buf = lock(buffer);
+            buf.push_custom("kage:error", format!("new: {e}"), false);
             return;
         }
     };
     let short: String = header.session.to_string().chars().take(8).collect();
     {
-        let mut cx_guard = cx.lock().expect("agent context mutex poisoned");
+        let mut cx_guard = lock(cx);
         cx_guard.history.clear();
         cx_guard.budget.used_input = 0;
         cx_guard.budget.used_output = 0;
@@ -224,13 +200,10 @@ pub(crate) fn handle_new(
         cx_guard.budget.used_cache_write = 0;
         cx_guard.budget.current_context = 0;
     }
-    sh.lock()
-        .expect("session header mutex poisoned")
-        .replace(header);
-    sp.lock()
-        .expect("session path mutex poisoned")
-        .clone_from(&path);
-    if let Ok(mut snap) = session_usage.lock() {
+    lock(sh).replace(header);
+    lock(sp).clone_from(&path);
+    {
+        let mut snap = lock(session_usage);
         snap.input_tokens = 0;
         snap.output_tokens = 0;
         snap.cache_read_tokens = 0;
@@ -238,7 +211,8 @@ pub(crate) fn handle_new(
         snap.current_context = 0;
         snap.total_cost = 0.0;
     }
-    if let Ok(mut buf) = buffer.lock() {
+    {
+        let mut buf = lock(buffer);
         buf.clear();
     }
     push_toast(toasts, Toast::info(format!("new session: {short}")));
@@ -256,28 +230,25 @@ pub(crate) fn handle_export(
     toasts: &SharedToasts,
 ) {
     let Some(sp) = session_path else {
-        if let Ok(mut buf) = buffer.lock() {
-            buf.push_custom("kage:error", "export: no active session".to_owned(), false);
-        }
+        let mut buf = lock(buffer);
+        buf.push_custom("kage:error", "export: no active session".to_owned(), false);
         return;
     };
-    let src = sp.lock().expect("session path mutex poisoned").clone();
+    let src = lock(sp).clone();
     if !src.exists() {
-        if let Ok(mut buf) = buffer.lock() {
-            buf.push_custom(
-                "kage:error",
-                "export: current session has no committed entries yet".to_owned(),
-                false,
-            );
-        }
+        let mut buf = lock(buffer);
+        buf.push_custom(
+            "kage:error",
+            "export: current session has no committed entries yet".to_owned(),
+            false,
+        );
         return;
     }
     let replay = match kage_session::replay(&src) {
         Ok(r) => r,
         Err(e) => {
-            if let Ok(mut buf) = buffer.lock() {
-                buf.push_custom("kage:error", format!("export: {e}"), false);
-            }
+            let mut buf = lock(buffer);
+            buf.push_custom("kage:error", format!("export: {e}"), false);
             return;
         }
     };
@@ -289,13 +260,12 @@ pub(crate) fn handle_export(
     });
     let markdown = render_session_markdown(&replay);
     if let Err(e) = std::fs::write(&out, markdown) {
-        if let Ok(mut buf) = buffer.lock() {
-            buf.push_custom(
-                "kage:error",
-                format!("export: write {}: {e}", out.display()),
-                false,
-            );
-        }
+        let mut buf = lock(buffer);
+        buf.push_custom(
+            "kage:error",
+            format!("export: write {}: {e}", out.display()),
+            false,
+        );
         return;
     }
     push_toast(
@@ -393,50 +363,45 @@ pub(crate) fn handle_fork_file(
     toasts: &SharedToasts,
 ) {
     if !path.exists() {
-        if let Ok(mut buf) = buffer.lock() {
-            buf.push_custom(
-                "kage:error",
-                "fork: session file not found".to_owned(),
-                false,
-            );
-        }
+        let mut buf = lock(buffer);
+        buf.push_custom(
+            "kage:error",
+            "fork: session file not found".to_owned(),
+            false,
+        );
         return;
     }
     let entry = match find_last_entry(path) {
         Ok(Some(id)) => id,
         Ok(None) => {
-            if let Ok(mut buf) = buffer.lock() {
-                buf.push_custom(
-                    "kage:error",
-                    "fork: session has no entries to fork at".to_owned(),
-                    false,
-                );
-            }
+            let mut buf = lock(buffer);
+            buf.push_custom(
+                "kage:error",
+                "fork: session has no entries to fork at".to_owned(),
+                false,
+            );
             return;
         }
         Err(e) => {
-            if let Ok(mut buf) = buffer.lock() {
-                buf.push_custom("kage:error", format!("fork: {e}"), false);
-            }
+            let mut buf = lock(buffer);
+            buf.push_custom("kage:error", format!("fork: {e}"), false);
             return;
         }
     };
     let Some(dir) = path.parent() else {
-        if let Ok(mut buf) = buffer.lock() {
-            buf.push_custom(
-                "kage:error",
-                "fork: session path has no parent directory".to_owned(),
-                false,
-            );
-        }
+        let mut buf = lock(buffer);
+        buf.push_custom(
+            "kage:error",
+            "fork: session path has no parent directory".to_owned(),
+            false,
+        );
         return;
     };
     let new_session = SessionId::new();
     let dst = dir.join(format!("{new_session}.jsonl"));
     if let Err(e) = kage_session::fork(path, &dst, new_session, entry) {
-        if let Ok(mut buf) = buffer.lock() {
-            buf.push_custom("kage:error", format!("fork failed: {e}"), false);
-        }
+        let mut buf = lock(buffer);
+        buf.push_custom("kage:error", format!("fork failed: {e}"), false);
         return;
     }
     let short: String = new_session.to_string().chars().take(8).collect();
@@ -453,7 +418,7 @@ pub(crate) fn handle_delete_session(
     toasts: &SharedToasts,
 ) {
     if let Some(sp) = session_path {
-        let active = sp.lock().expect("session path mutex poisoned").clone();
+        let active = lock(sp).clone();
         if active.as_path() == path {
             push_toast(
                 toasts,
@@ -472,9 +437,8 @@ pub(crate) fn handle_delete_session(
             push_toast(toasts, Toast::info(format!("deleted session: {short}")));
         }
         Err(e) => {
-            if let Ok(mut buf) = buffer.lock() {
-                buf.push_custom("kage:error", format!("delete failed: {e}"), false);
-            }
+            let mut buf = lock(buffer);
+            buf.push_custom("kage:error", format!("delete failed: {e}"), false);
         }
     }
 }
@@ -493,20 +457,16 @@ pub(crate) fn handle_resume(
     let replay = match kage_session::replay(path) {
         Ok(r) => r,
         Err(e) => {
-            if let Ok(mut buf) = buffer.lock() {
-                buf.push_custom(
-                    "kage:error",
-                    format!("resume {}: {e}", path.display()),
-                    false,
-                );
-            }
+            let mut buf = lock(buffer);
+            buf.push_custom(
+                "kage:error",
+                format!("resume {}: {e}", path.display()),
+                false,
+            );
             return;
         }
     };
-    let active_now = active_qualified
-        .lock()
-        .expect("active model mutex poisoned")
-        .clone();
+    let active_now = lock(active_qualified).clone();
     let (qualified_model, bare_model, fallback_note) = match registry.resolve(&replay.model) {
         Ok(r) => (replay.model.clone(), r.model.clone(), None),
         Err(_) => match registry.resolve(&active_now) {
@@ -519,13 +479,12 @@ pub(crate) fn handle_resume(
                 )),
             ),
             Err(e) => {
-                if let Ok(mut buf) = buffer.lock() {
-                    buf.push_custom(
-                        "kage:error",
-                        format!("resume: no resolvable model ({e})"),
-                        false,
-                    );
-                }
+                let mut buf = lock(buffer);
+                buf.push_custom(
+                    "kage:error",
+                    format!("resume: no resolvable model ({e})"),
+                    false,
+                );
                 return;
             }
         },
@@ -536,7 +495,7 @@ pub(crate) fn handle_resume(
         .as_deref()
         .and_then(kage_loop::ThinkingLevel::parse);
     {
-        let mut cx_guard = cx.lock().expect("agent context mutex poisoned");
+        let mut cx_guard = lock(cx);
         cx_guard.history.clone_from(&replay.history);
         cx_guard.model = bare_model;
         if let Some(window) = crate::runtime_env::context_window_for(registry, &qualified_model) {
@@ -552,7 +511,8 @@ pub(crate) fn handle_resume(
         cx_guard.budget.current_context = replay.usage_total.last_context;
         context_window = cx_guard.context_window;
     }
-    if let Ok(mut snap) = session_usage.lock() {
+    {
+        let mut snap = lock(session_usage);
         snap.model.clone_from(&qualified_model);
         snap.context_window = context_window;
         snap.input_tokens = replay.usage_total.input;
@@ -562,18 +522,14 @@ pub(crate) fn handle_resume(
         snap.current_context = replay.usage_total.last_context;
         snap.thinking_level = resumed_level;
     }
-    active_qualified
-        .lock()
-        .expect("active model mutex poisoned")
-        .clone_from(&qualified_model);
+    lock(active_qualified).clone_from(&qualified_model);
     if let Some(sp) = session_path {
-        sp.lock()
-            .expect("session path mutex poisoned")
-            .clone_from(&path.to_path_buf());
+        lock(sp).clone_from(&path.to_path_buf());
     }
     let id = replay.header.session.to_string();
     let short: String = id.chars().take(8).collect();
-    if let Ok(mut buf) = buffer.lock() {
+    {
+        let mut buf = lock(buffer);
         buf.clear();
         populate_from_history(&mut buf, &replay.history, &replay.tool_durations);
     }

@@ -39,7 +39,7 @@ impl App {
         // layer (but never before the global hatches above, so a hook
         // cannot wedge the UI). A truthy return consumes it.
         if let Some(hooks) = self.terminal_hooks.as_ref() {
-            let snapshot = hooks.lock().map(|h| h.clone()).unwrap_or_default();
+            let snapshot = lock(hooks).clone();
             if !snapshot.is_empty() {
                 let descriptor = key_event_to_json(key);
                 if snapshot.iter().any(|hook| hook.handle(&descriptor)) {
@@ -242,7 +242,7 @@ impl App {
     /// counter, or `None` when no search is active.
     pub(crate) fn compute_search_match_count(&self) -> Option<(usize, usize)> {
         let pattern = self.search_pattern.as_deref()?;
-        let buf = self.buffer.lock().ok()?;
+        let buf = lock(&self.buffer);
         let matches = buf.match_indices(pattern);
         let focus = buf.effective_focus().unwrap_or(usize::MAX);
         let current = matches
@@ -258,16 +258,15 @@ impl App {
         let Some(pattern) = self.search_pattern.clone() else {
             return;
         };
-        if let Ok(mut buf) = self.buffer.lock() {
-            let from = buf.effective_focus().unwrap_or(0);
-            let next = if forward {
-                buf.next_match(from, &pattern)
-            } else {
-                buf.prev_match(from, &pattern)
-            };
-            if let Some(n) = next {
-                buf.set_focus(Some(n));
-            }
+        let mut buf = lock(&self.buffer);
+        let from = buf.effective_focus().unwrap_or(0);
+        let next = if forward {
+            buf.next_match(from, &pattern)
+        } else {
+            buf.prev_match(from, &pattern)
+        };
+        if let Some(n) = next {
+            buf.set_focus(Some(n));
         }
     }
 

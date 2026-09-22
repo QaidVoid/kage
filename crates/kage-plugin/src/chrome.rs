@@ -22,6 +22,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use kage_core::sync::lock;
+
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog};
@@ -191,9 +193,8 @@ impl LuaChrome {
         match func.call::<Value>(width) {
             Ok(value) => {
                 let lines = parse_lines(&value);
-                if let Ok(mut slot) = self.cache.lock() {
-                    *slot = (std::time::Instant::now(), lines.clone());
-                }
+                let mut slot = lock(&self.cache);
+                *slot = (std::time::Instant::now(), lines.clone());
                 lines
             }
             Err(e) => {
@@ -204,9 +205,7 @@ impl LuaChrome {
     }
 
     fn fresh_cached(&self) -> Vec<ChromeLine> {
-        let Ok(slot) = self.cache.lock() else {
-            return Vec::new();
-        };
+        let slot = lock(&self.cache);
         if slot.0.elapsed() <= CACHE_STALE_AFTER {
             slot.1.clone()
         } else {
@@ -215,12 +214,11 @@ impl LuaChrome {
     }
 
     fn log_error(&self, e: &dyn std::fmt::Display) {
-        if let Ok(mut s) = self.sink.lock() {
-            s.log(
-                LogLevel::Error,
-                &format!("plugin {}: {e}", self.slot.label()),
-            );
-        }
+        let mut s = lock(&self.sink);
+        s.log(
+            LogLevel::Error,
+            &format!("plugin {}: {e}", self.slot.label()),
+        );
     }
 }
 

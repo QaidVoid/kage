@@ -20,6 +20,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use kage_core::sync::lock;
+
 use mlua::{Function, Lua, RegistryKey, Table};
 
 use crate::api::{LogLevel, SharedHostLog};
@@ -74,12 +76,11 @@ impl LuaWidget {
         let func: Function = match lua.registry_value(&self.handler_key) {
             Ok(f) => f,
             Err(e) => {
-                if let Ok(mut s) = self.sink.lock() {
-                    s.log(
-                        LogLevel::Error,
-                        &format!("plugin widget '{}': {e}", self.key),
-                    );
-                }
+                let mut s = lock(&self.sink);
+                s.log(
+                    LogLevel::Error,
+                    &format!("plugin widget '{}': {e}", self.key),
+                );
                 return self.fresh_cached();
             }
         };
@@ -88,25 +89,21 @@ impl LuaWidget {
             Ok(mlua::Value::Nil) => String::new(),
             Ok(other) => format!("{other:?}"),
             Err(e) => {
-                if let Ok(mut s) = self.sink.lock() {
-                    s.log(
-                        LogLevel::Error,
-                        &format!("plugin widget '{}': {e}", self.key),
-                    );
-                }
+                let mut s = lock(&self.sink);
+                s.log(
+                    LogLevel::Error,
+                    &format!("plugin widget '{}': {e}", self.key),
+                );
                 return self.fresh_cached();
             }
         };
-        if let Ok(mut slot) = self.cache.lock() {
-            *slot = (std::time::Instant::now(), text.clone());
-        }
+        let mut slot = lock(&self.cache);
+        *slot = (std::time::Instant::now(), text.clone());
         text
     }
 
     fn fresh_cached(&self) -> String {
-        let Ok(slot) = self.cache.lock() else {
-            return String::new();
-        };
+        let slot = lock(&self.cache);
         if slot.0.elapsed() <= CACHE_STALE_AFTER {
             slot.1.clone()
         } else {

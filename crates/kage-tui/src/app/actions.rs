@@ -179,9 +179,8 @@ impl App {
                 None
             }
             "clear" => {
-                if let Ok(mut buf) = self.buffer.lock() {
-                    buf.clear();
-                }
+                let mut buf = lock(&self.buffer);
+                buf.clear();
                 None
             }
             _ => None,
@@ -189,9 +188,8 @@ impl App {
     }
 
     pub(crate) fn push_error(&mut self, msg: impl Into<String>) {
-        if let Ok(mut buf) = self.buffer.lock() {
-            buf.push_custom("kage:error", msg, false);
-        }
+        let mut buf = lock(&self.buffer);
+        buf.push_custom("kage:error", msg, false);
     }
 
     /// Copy the active screen selection to the system clipboard via
@@ -242,7 +240,8 @@ impl App {
     /// switch the mode to [`Mode::Visual`]. Subsequent
     /// [`InputAction::Visual*`] events move the cursor end.
     pub(crate) fn enter_visual_mode(&mut self) {
-        let anchor = if let Ok(buf) = self.buffer.lock() {
+        let anchor = {
+            let buf = lock(&self.buffer);
             let area_x = buf.last_area_x();
             let area_y = buf.last_area_y();
             let virtual_top = buf.last_virtual_top();
@@ -252,8 +251,6 @@ impl App {
                 .unwrap_or(area_y);
             let vrow = virtual_top.saturating_add(usize::from(row.saturating_sub(area_y)));
             (vrow, area_x)
-        } else {
-            (0, 0)
         };
         self.captured_rows.clear();
         self.screen_selection = Some((anchor, anchor));
@@ -284,10 +281,9 @@ impl App {
         let (vrow, _) = cursor;
         let col = if target_col <= 0 {
             0
-        } else if let Ok(buf) = self.buffer.lock() {
-            buf.last_area_width().saturating_sub(1)
         } else {
-            0
+            let buf = lock(&self.buffer);
+            buf.last_area_width().saturating_sub(1)
         };
         self.screen_selection = Some((anchor, (vrow, col)));
     }
@@ -296,21 +292,20 @@ impl App {
     /// Cursor above the viewport top scrolls up; below the bottom
     /// scrolls down. Otherwise no-op.
     pub(crate) fn scroll_visual_cursor_into_view(&mut self, cursor_vrow: usize) {
-        if let Ok(mut buf) = self.buffer.lock() {
-            let area_height = usize::from(buf.last_area_height());
-            if area_height == 0 {
-                return;
-            }
-            let visible_top = buf.last_virtual_top();
-            let visible_bot = visible_top.saturating_add(area_height);
-            let current_scroll = buf.scroll();
-            if cursor_vrow < visible_top {
-                let delta = visible_top - cursor_vrow;
-                buf.set_scroll(current_scroll.saturating_add(delta));
-            } else if cursor_vrow >= visible_bot {
-                let delta = cursor_vrow + 1 - visible_bot;
-                buf.set_scroll(current_scroll.saturating_sub(delta));
-            }
+        let mut buf = lock(&self.buffer);
+        let area_height = usize::from(buf.last_area_height());
+        if area_height == 0 {
+            return;
+        }
+        let visible_top = buf.last_virtual_top();
+        let visible_bot = visible_top.saturating_add(area_height);
+        let current_scroll = buf.scroll();
+        if cursor_vrow < visible_top {
+            let delta = visible_top - cursor_vrow;
+            buf.set_scroll(current_scroll.saturating_add(delta));
+        } else if cursor_vrow >= visible_bot {
+            let delta = cursor_vrow + 1 - visible_bot;
+            buf.set_scroll(current_scroll.saturating_sub(delta));
         }
     }
 
@@ -326,9 +321,7 @@ impl App {
         // markdown-rendered screen cells: the user wants the original
         // assistant text (verbatim ```fences```, list bullets, etc.)
         // to paste elsewhere, not the syntect-styled reflow.
-        let Ok(buf) = self.buffer.lock() else {
-            return;
-        };
+        let buf = lock(&self.buffer);
         let Some(idx) = buf.effective_focus() else {
             return;
         };
@@ -347,9 +340,7 @@ impl App {
     /// rather than whatever has focus.
     pub(crate) fn copy_block_raw(&mut self, idx: usize) {
         let text = {
-            let Ok(buf) = self.buffer.lock() else {
-                return;
-            };
+            let buf = lock(&self.buffer);
             buf.block_text(idx).unwrap_or_default()
         };
         let text = text.trim_end();
@@ -371,9 +362,7 @@ impl App {
     /// outside the buffer pane) dismisses any open menu instead.
     pub(crate) fn open_context_menu(&mut self, col: u16, row: u16) {
         let idx = {
-            let Ok(buf) = self.buffer.lock() else {
-                return;
-            };
+            let buf = lock(&self.buffer);
             let area_y = buf.last_area_y();
             let area_h = buf.last_area_height();
             if row < area_y || row >= area_y.saturating_add(area_h) {
@@ -394,10 +383,7 @@ impl App {
             return;
         }
         let viewport = {
-            let Ok(buf) = self.buffer.lock() else {
-                self.context_menu = None;
-                return;
-            };
+            let buf = lock(&self.buffer);
             ratatui::layout::Rect {
                 x: buf.last_area_x(),
                 y: buf.last_area_y(),
@@ -498,9 +484,8 @@ impl App {
             help_render_spec(&mut lines, spec, ":", 0);
         }
         let body = lines.join("\n");
-        if let Ok(mut buf) = self.buffer.lock() {
-            buf.push_custom("kage:help", body, false);
-        }
+        let mut buf = lock(&self.buffer);
+        buf.push_custom("kage:help", body, false);
     }
 
     /// Render the active key bindings: user `[keybindings]` config
@@ -543,9 +528,8 @@ impl App {
         }
 
         let body = lines.join("\n");
-        if let Ok(mut buf) = self.buffer.lock() {
-            buf.push_custom("kage:help", body, false);
-        }
+        let mut buf = lock(&self.buffer);
+        buf.push_custom("kage:help", body, false);
     }
 
     /// Render every event a plugin can hook with `kage.on`, grouped
@@ -568,8 +552,7 @@ impl App {
             }
         }
         let body = lines.join("\n");
-        if let Ok(mut buf) = self.buffer.lock() {
-            buf.push_custom("kage:help", body, false);
-        }
+        let mut buf = lock(&self.buffer);
+        buf.push_custom("kage:help", body, false);
     }
 }

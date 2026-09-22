@@ -33,16 +33,14 @@ pub(crate) fn write_session_title(
     });
     match SessionWriter::open(path) {
         Ok(mut w) => {
-            if let Err(e) = w.append(&entry)
-                && let Ok(mut buf) = buffer.lock()
-            {
+            if let Err(e) = w.append(&entry) {
+                let mut buf = lock(buffer);
                 buf.push_custom("kage:error", format!("session title: {e}"), false);
             }
         }
         Err(e) => {
-            if let Ok(mut buf) = buffer.lock() {
-                buf.push_custom("kage:error", format!("session title: {e}"), false);
-            }
+            let mut buf = lock(buffer);
+            buf.push_custom("kage:error", format!("session title: {e}"), false);
         }
     }
 }
@@ -61,23 +59,18 @@ pub(crate) fn open_writer_for_turn(
     buffer: &SharedBuffer,
 ) -> Option<SessionWriter> {
     let path_arc = session_path?;
-    let path = path_arc
-        .lock()
-        .expect("session path mutex poisoned")
-        .clone();
+    let path = lock(path_arc).clone();
     if !path.exists() {
-        let header =
-            session_header.and_then(|h| h.lock().expect("session header mutex poisoned").take())?;
+        let header = session_header.and_then(|h| lock(h).take())?;
         return match SessionWriter::create(path.clone(), header) {
             Ok(w) => Some(w),
             Err(e) => {
-                if let Ok(mut buf) = buffer.lock() {
-                    buf.push_custom(
-                        "kage:error",
-                        format!("session: create {}: {e}", path.display()),
-                        false,
-                    );
-                }
+                let mut buf = lock(buffer);
+                buf.push_custom(
+                    "kage:error",
+                    format!("session: create {}: {e}", path.display()),
+                    false,
+                );
                 None
             }
         };
@@ -85,13 +78,12 @@ pub(crate) fn open_writer_for_turn(
     match SessionWriter::open(&path) {
         Ok(w) => Some(w),
         Err(e) => {
-            if let Ok(mut buf) = buffer.lock() {
-                buf.push_custom(
-                    "kage:error",
-                    format!("session: open {}: {e}", path.display()),
-                    false,
-                );
-            }
+            let mut buf = lock(buffer);
+            buf.push_custom(
+                "kage:error",
+                format!("session: open {}: {e}", path.display()),
+                false,
+            );
             None
         }
     }
@@ -257,9 +249,8 @@ pub(crate) fn error_output(label: &str, msg: &str) -> CommandOutput {
 
 /// Push a `kage:error` block into the conversation buffer.
 pub(crate) fn push_error(buffer: &SharedBuffer, msg: &str) {
-    if let Ok(mut buf) = buffer.lock() {
-        buf.push_custom("kage:error", msg.to_owned(), false);
-    }
+    let mut buf = lock(buffer);
+    buf.push_custom("kage:error", msg.to_owned(), false);
 }
 
 /// Consult plugin handlers for a session-op event before running an
@@ -286,7 +277,8 @@ pub(crate) fn consult_session_op(
         Ok(kage_plugin::SessionOpDecision::Proceed) => Some(target.to_owned()),
         Ok(kage_plugin::SessionOpDecision::Patch(next)) => Some(next),
         Ok(kage_plugin::SessionOpDecision::Cancel { reason }) => {
-            if let Ok(mut buf) = buffer.lock() {
+            {
+                let mut buf = lock(buffer);
                 buf.push_custom("kage:error", format!("{event}: {reason}"), false);
             }
             push_toast(
@@ -296,13 +288,12 @@ pub(crate) fn consult_session_op(
             None
         }
         Err(err) => {
-            if let Ok(mut buf) = buffer.lock() {
-                buf.push_custom(
-                    "kage:error",
-                    format!("{event}: plugin dispatch failed: {err}"),
-                    false,
-                );
-            }
+            let mut buf = lock(buffer);
+            buf.push_custom(
+                "kage:error",
+                format!("{event}: plugin dispatch failed: {err}"),
+                false,
+            );
             Some(target.to_owned())
         }
     }
@@ -464,7 +455,7 @@ pub(crate) fn list_session_nodes(
     dir: &std::path::Path,
     session_path: Option<&Arc<Mutex<PathBuf>>>,
 ) -> Vec<kage_tui::SessionNode> {
-    let current = session_path.and_then(|sp| sp.lock().ok().map(|g| g.clone()));
+    let current = session_path.map(|sp| lock(sp).clone());
     let Ok(summaries) = kage_session::list(dir) else {
         return Vec::new();
     };
@@ -619,7 +610,7 @@ pub(crate) fn refresh_session_entries(
     let Some(sp) = session_path else {
         return;
     };
-    let path = sp.lock().expect("session path mutex poisoned").clone();
+    let path = lock(sp).clone();
     let Ok(reader) = SessionReader::iter(&path) else {
         rt.set_session_entries(Vec::new());
         return;

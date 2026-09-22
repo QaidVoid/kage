@@ -10,6 +10,8 @@
 //! secrets such as provider API keys, and the access is read-only
 //! (there is no setter). Grant it only to trusted plugins.
 
+use kage_core::sync::lock;
+
 use mlua::{Lua, Table};
 
 use crate::capabilities::{Capability, CapabilityRegistry};
@@ -20,7 +22,7 @@ use crate::capabilities::{Capability, CapabilityRegistry};
 /// plugin's `kage` proxy and sets `env` on it. A missing variable
 /// returns `nil`; an empty value returns the empty string.
 pub(crate) fn register(registry: &CapabilityRegistry) {
-    let mut reg = registry.lock().expect("capability registry mutex poisoned");
+    let mut reg = lock(registry);
     reg.insert(
         Capability::Env,
         Box::new(|lua: &Lua, pkage: &Table| {

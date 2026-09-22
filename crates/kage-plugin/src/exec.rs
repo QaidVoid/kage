@@ -20,6 +20,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use kage_core::sync::lock;
 use kage_tools::resolve_under;
 use mlua::{Lua, Table};
 
@@ -31,7 +32,7 @@ use crate::capabilities::{Capability, CapabilityRegistry};
 /// plugin's `kage` proxy and sets `exec` on it. `workdir` is the host
 /// workdir; a spec `cwd` is resolved under it and may not escape.
 pub(crate) fn register(registry: &CapabilityRegistry, workdir: PathBuf) {
-    let mut reg = registry.lock().expect("capability registry mutex poisoned");
+    let mut reg = lock(registry);
     reg.insert(
         Capability::Exec,
         Box::new(move |lua: &Lua, pkage: &Table| {

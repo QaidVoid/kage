@@ -132,9 +132,8 @@ impl App {
                             // measured against the prior width and is
                             // now stale.
                             needs_redraw = true;
-                            if let Ok(mut buf) = self.buffer.lock() {
-                                buf.invalidate_all_heights();
-                            }
+                            let mut buf = lock(&self.buffer);
+                            buf.invalidate_all_heights();
                         }
                         _ => {}
                     }
@@ -172,16 +171,13 @@ impl App {
     /// modeline spinner; the event loop uses it to force periodic
     /// redraws so the spinner animates.
     pub(crate) fn is_working(&self) -> bool {
-        self.session_usage
-            .as_ref()
-            .and_then(|h| h.lock().ok().map(|g| g.working))
-            .unwrap_or(false)
+        self.session_usage.as_ref().is_some_and(|h| lock(h).working)
     }
 
     /// Read the buffer's current mutation counter without holding
     /// the lock across the rest of the loop.
     pub(crate) fn buffer_version(&self) -> u64 {
-        self.buffer.lock().map_or(0, |b| b.version())
+        lock(&self.buffer).version()
     }
 
     /// Ensure `search_match_set` is up to date. Recomputes when the
@@ -194,12 +190,10 @@ impl App {
         let pattern = self.search_pattern.as_deref()?;
         let version = self.buffer_version();
         if version != self.search_match_version {
-            self.search_match_set = self
-                .buffer
-                .lock()
-                .ok()
-                .map(|b| b.match_indices(pattern).into_iter().collect())
-                .unwrap_or_default();
+            self.search_match_set = lock(&self.buffer)
+                .match_indices(pattern)
+                .into_iter()
+                .collect();
             self.search_match_version = version;
         }
         Some((&self.search_match_set, pattern))
@@ -210,9 +204,7 @@ impl App {
     /// The renderer paints "running Xs" for these and we want it to
     /// tick even on an otherwise idle event loop.
     pub(crate) fn has_running_tool_call(&self) -> bool {
-        let Ok(buf) = self.buffer.lock() else {
-            return false;
-        };
+        let buf = lock(&self.buffer);
         let blocks = buf.blocks();
         let mut pending: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for b in blocks {
@@ -265,12 +257,9 @@ impl App {
         let search_match_set = self.refresh_search_matches().map(|(set, _)| set).cloned();
         let render_width = tui.terminal().size().map_or(80, |r| r.width);
         self.refresh_plugin_widget_texts(render_width);
-        let mut buffer = self.buffer.lock().expect("buffer mutex poisoned");
+        let mut buffer = lock(&self.buffer);
         let cmdline = self.cmdline.as_ref();
-        let model_snapshot = self
-            .status_model
-            .as_ref()
-            .and_then(|m| m.lock().ok().map(|g| g.clone()));
+        let model_snapshot = self.status_model.as_ref().map(|m| lock(m).clone());
         let status = view::StatusCtx {
             model: model_snapshot.as_deref(),
             session_id: self.status_session_id.as_deref(),

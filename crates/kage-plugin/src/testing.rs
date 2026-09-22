@@ -16,6 +16,8 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use kage_core::sync::lock;
+
 use crate::api::{HostLog, LogLevel, SharedHostLog};
 use crate::runtime::PluginRuntime;
 
@@ -39,25 +41,17 @@ impl RecordingSink {
     /// Snapshot what the plugin has emitted so far.
     #[must_use]
     pub fn snapshot(&self) -> RecordedOutput {
-        self.0.lock().expect("recording sink poisoned").clone()
+        lock(&self.0).clone()
     }
 }
 
 impl HostLog for RecordingSink {
     fn notify(&mut self, message: &str) {
-        self.0
-            .lock()
-            .expect("recording sink poisoned")
-            .notifications
-            .push(message.to_owned());
+        lock(&self.0).notifications.push(message.to_owned());
     }
 
     fn log(&mut self, level: LogLevel, message: &str) {
-        self.0
-            .lock()
-            .expect("recording sink poisoned")
-            .logs
-            .push((level, message.to_owned()));
+        lock(&self.0).logs.push((level, message.to_owned()));
     }
 }
 

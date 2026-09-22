@@ -22,6 +22,7 @@
 
 use std::io::{BufRead, BufReader, Read};
 
+use kage_core::sync::lock;
 use kage_tools::ssrf;
 use mlua::{Function, Lua, Table, Value};
 
@@ -57,7 +58,7 @@ pub fn install_http(lua: &Lua) -> Result<(), PluginError> {
 /// `get` / `post` / `delete` / `post_stream`, so only a plugin the user
 /// granted `net` can make outbound requests.
 pub(crate) fn register(registry: &CapabilityRegistry) {
-    let mut reg = registry.lock().expect("capability registry mutex poisoned");
+    let mut reg = lock(registry);
     reg.insert(
         Capability::Net,
         Box::new(|lua: &Lua, pkage: &Table| {

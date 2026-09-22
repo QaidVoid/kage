@@ -32,6 +32,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use kage_core::sync::lock;
+
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog};
@@ -130,12 +132,11 @@ impl LuaAutocompleteProvider {
     }
 
     fn log_error(&self, e: &dyn std::fmt::Display) {
-        if let Ok(mut s) = self.sink.lock() {
-            s.log(
-                LogLevel::Error,
-                &format!("plugin autocomplete '{}': {e}", self.name),
-            );
-        }
+        let mut s = lock(&self.sink);
+        s.log(
+            LogLevel::Error,
+            &format!("plugin autocomplete '{}': {e}", self.name),
+        );
     }
 }
 

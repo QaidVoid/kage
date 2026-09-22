@@ -17,22 +17,19 @@ pub(crate) fn drain_mcp_updates(
         for name in rt.take_mcp_restarts() {
             match manager.restart(&name, tools) {
                 Ok(()) => {
-                    if let Ok(mut buf) = buffer.lock() {
-                        buf.push_custom("kage:mcp", format!("restarted `{name}`"), false);
-                    }
+                    let mut buf = lock(buffer);
+                    buf.push_custom("kage:mcp", format!("restarted `{name}`"), false);
                 }
                 Err(e) => {
-                    if let Ok(mut buf) = buffer.lock() {
-                        buf.push_custom("kage:error", format!("mcp restart `{name}`: {e}"), false);
-                    }
+                    let mut buf = lock(buffer);
+                    buf.push_custom("kage:error", format!("mcp restart `{name}`: {e}"), false);
                 }
             }
         }
     }
     for (server, err) in manager.refresh_into(tools) {
-        if let Ok(mut buf) = buffer.lock() {
-            buf.push_custom("kage:error", format!("mcp `{server}`: {err}"), false);
-        }
+        let mut buf = lock(buffer);
+        buf.push_custom("kage:error", format!("mcp `{server}`: {err}"), false);
     }
 }
 
@@ -75,33 +72,28 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
             match req {
                 RunRequest::Submit { text, images } => {
                     cancel.reset();
-                    if let Err(err) = crate::history::append(&text)
-                        && let Ok(mut buf) = buffer.lock()
-                    {
+                    if let Err(err) = crate::history::append(&text) {
+                        let mut buf = lock(&buffer);
                         buf.push_custom("kage:error", format!("history: {err}"), false);
                     }
                     // Re-resolve the model on every turn so a switch
                     // request between turns takes effect immediately.
-                    let qualified = active_qualified
-                        .lock()
-                        .expect("active model mutex poisoned")
-                        .clone();
+                    let qualified = lock(&active_qualified).clone();
                     let resolved = match registry.resolve(&qualified) {
                         Ok(r) => r,
                         Err(e) => {
-                            if let Ok(mut buf) = buffer.lock() {
-                                buf.push_custom(
-                                    "kage:error",
-                                    format!("model {qualified} unavailable: {e}"),
-                                    false,
-                                );
-                            }
+                            let mut buf = lock(&buffer);
+                            buf.push_custom(
+                                "kage:error",
+                                format!("model {qualified} unavailable: {e}"),
+                                false,
+                            );
                             continue;
                         }
                     };
                     let provider = Arc::clone(resolved.provider);
                     let bare_model = resolved.model.clone();
-                    let mut cx_guard = cx.lock().expect("agent context mutex poisoned");
+                    let mut cx_guard = lock(&cx);
                     cx_guard.model = bare_model;
                     if let Some(window) =
                         crate::runtime_env::context_window_for(&registry, &qualified)
@@ -141,9 +133,7 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         &buffer,
                     );
                     let context_window = cx_guard.context_window;
-                    if let Ok(mut snap) = session_usage.lock() {
-                        snap.working = true;
-                    }
+                    lock(&session_usage).working = true;
                     let ok = run_with_hooks(
                         provider.as_ref(),
                         &tools,
@@ -170,7 +160,8 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                     // Drains before flipping `working = false` so a
                     // simultaneous user submit cannot race ahead of
                     // earlier queued items.
-                    if let Ok(mut q) = steering.lock() {
+                    {
+                        let mut q = lock(&steering);
                         while let Some(text) = q.pop_front() {
                             let _ = tx_self.send(RunRequest::Submit {
                                 text,
@@ -178,13 +169,10 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                             });
                         }
                     }
-                    if let Ok(mut snap) = session_usage.lock() {
-                        snap.working = false;
-                    }
+                    lock(&session_usage).working = false;
                     if ok && let Err(err) = crate::state::record_last_model(&qualified) {
-                        if let Ok(mut buf) = buffer.lock() {
-                            buf.push_custom("kage:error", format!("state: {err}"), false);
-                        }
+                        let mut buf = lock(&buffer);
+                        buf.push_custom("kage:error", format!("state: {err}"), false);
                     }
                     if ok
                         && !title_attempted
@@ -200,7 +188,7 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                             .and_then(first_text_of)
                             .unwrap_or_default();
                         let title_model = cx_guard.model.clone();
-                        let path = sp.lock().expect("session path mutex poisoned").clone();
+                        let path = lock(sp).clone();
                         drop(cx_guard);
                         write_session_title(
                             provider.as_ref(),
@@ -240,38 +228,34 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         // Overrides are searched first so an
                         // `override_command` shadowing a built-in
                         // wins; then regular registrations.
-                        match rt
+                        if let Some(cmd) = rt
                             .registered_command_overrides()
                             .into_iter()
                             .chain(rt.registered_commands())
                             .find(|c| c.name() == name)
                         {
-                            Some(cmd) => {
-                                if let Some(out) =
-                                    run_bridged_command(rt, &cmd, &args, &dialog_tx, &buffer)
-                                    && !out.text.is_empty()
-                                    && let Ok(mut buf) = buffer.lock()
-                                {
-                                    buf.push_custom(
-                                        if out.is_error {
-                                            "kage:error"
-                                        } else {
-                                            "kage:plugin"
-                                        },
-                                        out.text,
-                                        false,
-                                    );
-                                }
+                            if let Some(out) =
+                                run_bridged_command(rt, &cmd, &args, &dialog_tx, &buffer)
+                                && !out.text.is_empty()
+                            {
+                                let mut buf = lock(&buffer);
+                                buf.push_custom(
+                                    if out.is_error {
+                                        "kage:error"
+                                    } else {
+                                        "kage:plugin"
+                                    },
+                                    out.text,
+                                    false,
+                                );
                             }
-                            None => {
-                                if let Ok(mut buf) = buffer.lock() {
-                                    buf.push_custom(
-                                        "kage:error",
-                                        format!("no plugin command: {name}"),
-                                        false,
-                                    );
-                                }
-                            }
+                        } else {
+                            let mut buf = lock(&buffer);
+                            buf.push_custom(
+                                "kage:error",
+                                format!("no plugin command: {name}"),
+                                false,
+                            );
                         }
                     }
                 }
@@ -283,8 +267,8 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                             .find(|kb| kb.chord() == chord)
                         && let Some(out) = run_bridged_keybinding(rt, &kb, &dialog_tx, &buffer)
                         && !out.text.is_empty()
-                        && let Ok(mut buf) = buffer.lock()
                     {
+                        let mut buf = lock(&buffer);
                         buf.push_custom(
                             if out.is_error {
                                 "kage:error"
@@ -334,33 +318,27 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                 }
                 RunRequest::CompactNow => {
                     cancel.reset();
-                    let qualified = active_qualified
-                        .lock()
-                        .expect("active model mutex poisoned")
-                        .clone();
+                    let qualified = lock(&active_qualified).clone();
                     let resolved = match registry.resolve(&qualified) {
                         Ok(r) => r,
                         Err(e) => {
-                            if let Ok(mut buf) = buffer.lock() {
-                                buf.push_custom(
-                                    "kage:error",
-                                    format!("compact: model {qualified} unavailable: {e}"),
-                                    false,
-                                );
-                            }
+                            let mut buf = lock(&buffer);
+                            buf.push_custom(
+                                "kage:error",
+                                format!("compact: model {qualified} unavailable: {e}"),
+                                false,
+                            );
                             continue;
                         }
                     };
                     let provider = Arc::clone(resolved.provider);
-                    let mut cx_guard = cx.lock().expect("agent context mutex poisoned");
+                    let mut cx_guard = lock(&cx);
                     let writer_for_turn = open_writer_for_turn(
                         session_path.as_ref(),
                         session_header.as_ref(),
                         &buffer,
                     );
-                    if let Ok(mut snap) = session_usage.lock() {
-                        snap.working = true;
-                    }
+                    lock(&session_usage).working = true;
                     let ran = run_compact_with_hooks(
                         provider.as_ref(),
                         &mut cx_guard,
@@ -369,9 +347,7 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         plugin_runtime.as_ref(),
                         writer_for_turn,
                     );
-                    if let Ok(mut snap) = session_usage.lock() {
-                        snap.working = false;
-                    }
+                    lock(&session_usage).working = false;
                     match ran {
                         Ok(true) => {}
                         Ok(false) => {
@@ -381,25 +357,18 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                             );
                         }
                         Err(e) => {
-                            if let Ok(mut buf) = buffer.lock() {
-                                buf.push_custom(
-                                    "kage:error",
-                                    format!("compact failed: {e}"),
-                                    false,
-                                );
-                            }
+                            let mut buf = lock(&buffer);
+                            buf.push_custom("kage:error", format!("compact failed: {e}"), false);
                         }
                     }
                 }
                 RunRequest::CycleThinkingLevel => {
-                    let mut cx_guard = cx.lock().expect("agent context mutex poisoned");
+                    let mut cx_guard = lock(&cx);
                     let prev = cx_guard.thinking_level.unwrap_or_default();
                     let next = prev.cycle();
                     cx_guard.thinking_level = Some(next);
                     drop(cx_guard);
-                    if let Ok(mut snap) = session_usage.lock() {
-                        snap.thinking_level = Some(next);
-                    }
+                    lock(&session_usage).thinking_level = Some(next);
                     push_toast(
                         &toasts,
                         Toast::info(format!("thinking level: {}", next.label())),
@@ -426,8 +395,8 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                                 level: next.as_str().to_owned(),
                             },
                         ))
-                        && let Ok(mut buf) = buffer.lock()
                     {
+                        let mut buf = lock(&buffer);
                         buf.push_custom(
                             "kage:error",
                             format!("session: append thinking_level: {err}"),
@@ -440,17 +409,9 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                     // the next turn silently.
                     match registry.resolve(&new_model) {
                         Ok(_) => {
-                            let prev = active_qualified
-                                .lock()
-                                .expect("active model mutex poisoned")
-                                .clone();
-                            active_qualified
-                                .lock()
-                                .expect("active model mutex poisoned")
-                                .clone_from(&new_model);
-                            if let Ok(mut snap) = session_usage.lock() {
-                                snap.model.clone_from(&new_model);
-                            }
+                            let prev = lock(&active_qualified).clone();
+                            lock(&active_qualified).clone_from(&new_model);
+                            lock(&session_usage).model.clone_from(&new_model);
                             push_toast(&toasts, Toast::info(format!("switched to {new_model}")));
                             if let Some(rt) = plugin_runtime.as_ref() {
                                 let _ = rt.dispatch_event(
@@ -462,20 +423,18 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                                     }),
                                 );
                             }
-                            if let Err(err) = crate::state::record_last_model(&new_model)
-                                && let Ok(mut buf) = buffer.lock()
-                            {
+                            if let Err(err) = crate::state::record_last_model(&new_model) {
+                                let mut buf = lock(&buffer);
                                 buf.push_custom("kage:error", format!("state: {err}"), false);
                             }
                         }
                         Err(e) => {
-                            if let Ok(mut buf) = buffer.lock() {
-                                buf.push_custom(
-                                    "kage:error",
-                                    format!("cannot switch to {new_model}: {e}"),
-                                    false,
-                                );
-                            }
+                            let mut buf = lock(&buffer);
+                            buf.push_custom(
+                                "kage:error",
+                                format!("cannot switch to {new_model}: {e}"),
+                                false,
+                            );
                         }
                     }
                 }
@@ -562,23 +521,17 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                                 ),
                             );
                             for (path, err) in report.failed {
-                                if let Ok(mut buf) = buffer.lock() {
-                                    buf.push_custom(
-                                        "kage:error",
-                                        format!("plugin {}: {err}", path.display()),
-                                        false,
-                                    );
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            if let Ok(mut buf) = buffer.lock() {
+                                let mut buf = lock(&buffer);
                                 buf.push_custom(
                                     "kage:error",
-                                    format!("plugin reload: {err}"),
+                                    format!("plugin {}: {err}", path.display()),
                                     false,
                                 );
                             }
+                        }
+                        Err(err) => {
+                            let mut buf = lock(&buffer);
+                            buf.push_custom("kage:error", format!("plugin reload: {err}"), false);
                         }
                     }
                 }

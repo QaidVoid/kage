@@ -23,6 +23,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use kage_core::sync::lock;
+
 use mlua::{Function, Lua, RegistryKey, Table};
 
 use crate::api::{LogLevel, SharedHostLog, json_to_lua, lua_to_json};
@@ -136,7 +138,7 @@ impl LuaCommand {
         args: &str,
         ctx: &serde_json::Value,
     ) -> Result<CommandOutput, PluginError> {
-        let lua = self.lua.lock().expect("plugin lua mutex poisoned");
+        let lua = lock(&self.lua);
         let handler: Function = lua.registry_value(&self.handler_key)?;
         let lua_ctx = json_to_lua(&lua, ctx)?;
         let parsed_args = match build_parsed_args(&lua, args, &self.args) {
@@ -152,12 +154,11 @@ impl LuaCommand {
         match handler.call::<mlua::Value>((args.to_owned(), lua_ctx, parsed_args)) {
             Ok(v) => Ok(CommandOutput::from_value(v)),
             Err(err) => {
-                if let Ok(mut s) = self.sink.lock() {
-                    s.log(
-                        LogLevel::Error,
-                        &format!("plugin command '{}' raised: {err}", self.name),
-                    );
-                }
+                let mut s = lock(&self.sink);
+                s.log(
+                    LogLevel::Error,
+                    &format!("plugin command '{}' raised: {err}", self.name),
+                );
                 Ok(CommandOutput {
                     text: err.to_string(),
                     is_error: true,
@@ -181,7 +182,7 @@ impl LuaCommand {
         raw: &str,
         ctx: &serde_json::Value,
     ) -> Result<BridgePrep, PluginError> {
-        let lua = self.lua.lock().expect("plugin lua mutex poisoned");
+        let lua = lock(&self.lua);
         let parsed = match build_parsed_args(&lua, raw, &self.args) {
             Ok(table) => table,
             Err(err) => {

@@ -1,5 +1,7 @@
 //! Conversation buffer rendering and cell capture.
 
+use kage_core::sync::read;
+
 #[allow(clippy::wildcard_imports)] // free-fn split: shares the parent view module scope
 use super::*;
 
@@ -44,9 +46,7 @@ pub(super) fn render_buffer(
         }
     }
 
-    let registry = registry::global()
-        .read()
-        .expect("block registry rwlock poisoned");
+    let registry = read(registry::global());
     let focus = buffer.effective_focus();
 
     let mut heights: Vec<usize> = Vec::with_capacity(n);

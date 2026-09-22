@@ -35,6 +35,7 @@
 
 use std::sync::RwLock;
 
+use kage_core::sync::{read, write};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 /// Default minimum number of *content* rows the input card holds.
@@ -59,7 +60,7 @@ static INPUT_BOUNDS: RwLock<(u16, u16)> =
 /// Read the live `(content_min, content_max)` bounds.
 #[must_use]
 fn input_bounds() -> (u16, u16) {
-    *INPUT_BOUNDS.read().expect("input bounds rwlock poisoned")
+    *read(&INPUT_BOUNDS)
 }
 
 /// Set the input card's content-row bounds from config. `min` is
@@ -68,7 +69,7 @@ fn input_bounds() -> (u16, u16) {
 pub fn set_input_bounds(min: u16, max: u16) {
     let min = min.max(1);
     let max = max.clamp(min, INPUT_CONTENT_MAX_CEILING);
-    *INPUT_BOUNDS.write().expect("input bounds rwlock poisoned") = (min, max);
+    *write(&INPUT_BOUNDS) = (min, max);
 }
 /// Rows the bordered chrome around the input content claims (top
 /// border + bottom border).

@@ -24,6 +24,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use kage_core::sync::lock;
+
 use mlua::{Lua, Table, Value};
 
 use crate::api::json_to_lua;
@@ -74,7 +76,7 @@ pub(crate) fn register(
     entries: SharedSessionEntries,
     switch: SharedSwitchRequest,
 ) {
-    let mut reg = registry.lock().expect("capability registry mutex poisoned");
+    let mut reg = lock(registry);
     reg.insert(
         Capability::SessionWrite,
         Box::new(move |lua: &Lua, pkage: &Table| {

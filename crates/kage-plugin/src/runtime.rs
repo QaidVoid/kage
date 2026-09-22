@@ -31,6 +31,8 @@ pub(crate) use std::collections::{BTreeMap, HashMap};
 pub(crate) use std::path::PathBuf;
 pub(crate) use std::sync::{Arc, Mutex, MutexGuard};
 
+use kage_core::sync::lock;
+
 pub(crate) use mlua::{Lua, RegistryKey, Table};
 
 pub(crate) use crate::acp::{self, SharedAcpAgents, shared_acp_agents};
@@ -235,7 +237,7 @@ fn plugin_env(
     config_slice: Option<&serde_json::Value>,
     store_path: Option<PathBuf>,
 ) -> mlua::Result<Table> {
-    let mut slots = slots.lock().expect("plugin env map poisoned");
+    let mut slots = lock(slots);
     if let Some(key) = slots.get(name) {
         return lua.registry_value::<Table>(key);
     }

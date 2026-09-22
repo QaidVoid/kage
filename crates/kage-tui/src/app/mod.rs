@@ -12,7 +12,7 @@ pub(crate) use std::sync::mpsc::{Sender, TrySendError};
 pub(crate) use std::sync::{Arc, Mutex};
 pub(crate) use std::time::{Duration, Instant};
 
-pub(crate) use kage_core::CancelFlag;
+pub(crate) use kage_core::{CancelFlag, sync::lock};
 pub(crate) use ratatui::crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
 
 pub(crate) use crate::toast::{self, SharedToasts, Toast, ToastKind};

@@ -12,7 +12,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use kage_core::{Content, LoopEvent, Message, Role, StopReason, ToolOutput};
+use kage_core::{Content, LoopEvent, Message, Role, StopReason, ToolOutput, sync::lock};
 use kage_loop::Hooks;
 
 use crate::buffer::Buffer;
@@ -73,9 +73,8 @@ impl<H: Hooks> TuiHooks<H> {
     /// Append a user-typed prompt to the buffer. The agent loop never
     /// emits user messages as events, so the host calls this directly.
     pub fn record_user_input(&self, text: impl Into<String>) {
-        if let Ok(mut buf) = self.buffer.lock() {
-            buf.push_user(text);
-        }
+        let mut buf = lock(&self.buffer);
+        buf.push_user(text);
     }
 }
 
@@ -89,9 +88,8 @@ impl<H: Hooks> Hooks for TuiHooks<H> {
     }
 
     fn on_event(&mut self, event: &LoopEvent) {
-        if let Ok(mut buf) = self.buffer.lock() {
-            apply_event(&mut buf, event);
-        }
+        let mut buf = lock(&self.buffer);
+        apply_event(&mut buf, event);
         self.inner.on_event(event);
     }
 
@@ -119,11 +117,11 @@ impl<H: Hooks> Hooks for TuiHooks<H> {
     }
 
     fn get_steering(&mut self) -> Option<String> {
-        if let Some(q) = &self.steering
-            && let Ok(mut g) = q.lock()
-            && let Some(text) = g.pop_front()
-        {
-            return Some(text);
+        if let Some(q) = &self.steering {
+            let mut g = lock(q);
+            if let Some(text) = g.pop_front() {
+                return Some(text);
+            }
         }
         self.inner.get_steering()
     }

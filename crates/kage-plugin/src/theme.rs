@@ -11,6 +11,8 @@
 
 use std::sync::{Arc, Mutex};
 
+use kage_core::sync::lock;
+
 use mlua::{Lua, Table, Value};
 
 use crate::error::PluginError;
@@ -58,22 +60,14 @@ pub fn install_theme(
     let current_state = state.clone();
     theme.set(
         "current",
-        lua.create_function(move |_, ()| {
-            Ok(current_state
-                .lock()
-                .map(|s| s.current.clone())
-                .unwrap_or_default())
-        })?,
+        lua.create_function(move |_, ()| Ok(lock(&current_state).current.clone()))?,
     )?;
 
     let list_state = state;
     theme.set(
         "list",
         lua.create_function(move |lua, ()| {
-            let names = list_state
-                .lock()
-                .map(|s| s.available.clone())
-                .unwrap_or_default();
+            let names = lock(&list_state).available.clone();
             let arr = lua.create_table()?;
             for (idx, name) in names.into_iter().enumerate() {
                 arr.set(idx + 1, name)?;

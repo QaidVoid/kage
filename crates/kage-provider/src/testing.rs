@@ -5,7 +5,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use kage_core::CancelFlag;
+use kage_core::{CancelFlag, sync::lock};
 
 use crate::{EventStream, Provider, ProviderError, ProviderEvent, ProviderMetadata, StreamRequest};
 
@@ -65,19 +65,19 @@ impl MockProvider {
     /// Number of times [`Provider::stream`] has been invoked.
     #[must_use]
     pub fn call_count(&self) -> usize {
-        self.requests.lock().expect("not poisoned").len()
+        lock(&self.requests).len()
     }
 
     /// Snapshot of all requests received, in order.
     #[must_use]
     pub fn requests(&self) -> Vec<StreamRequest> {
-        self.requests.lock().expect("not poisoned").clone()
+        lock(&self.requests).clone()
     }
 
     /// Most recent request, if any.
     #[must_use]
     pub fn last_request(&self) -> Option<StreamRequest> {
-        self.requests.lock().expect("not poisoned").last().cloned()
+        lock(&self.requests).last().cloned()
     }
 }
 
@@ -91,9 +91,9 @@ impl Provider for MockProvider {
         req: StreamRequest,
         _cancel: &CancelFlag,
     ) -> Result<EventStream, ProviderError> {
-        self.requests.lock().expect("not poisoned").push(req);
+        lock(&self.requests).push(req);
         let events: Vec<Result<ProviderEvent, ProviderError>> = {
-            let mut mode = self.mode.lock().expect("not poisoned");
+            let mut mode = lock(&self.mode);
             match &mut *mode {
                 ReplayMode::Constant(events) => events.clone(),
                 ReplayMode::Sequence(scripts) => {

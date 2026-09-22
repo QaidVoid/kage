@@ -103,10 +103,7 @@ impl App {
     /// flips on entry and exit. Returns `false` when no usage
     /// snapshot is registered (the host opted out of the modeline).
     pub(crate) fn is_run_in_flight(&self) -> bool {
-        self.session_usage
-            .as_ref()
-            .and_then(|u| u.lock().ok().map(|g| g.working))
-            .unwrap_or(false)
+        self.session_usage.as_ref().is_some_and(|u| lock(u).working)
     }
 
     /// Register the shared toast queue. While set, App-internal
@@ -119,18 +116,15 @@ impl App {
     }
 
     /// Snapshot live (non-expired) toasts for one frame, dropping
-    /// expired entries in the process. Returns `None` when no toast
-    /// queue is registered or the lock is poisoned.
+    /// expired entries in the process. Returns an empty vector when
+    /// no toast queue is registered.
     pub(crate) fn live_toasts(&self) -> Vec<Toast> {
         let Some(handle) = &self.toasts else {
             return Vec::new();
         };
         let now = Instant::now();
         let _ = toast::prune_expired(handle, now);
-        handle
-            .lock()
-            .map(|q| q.iter().cloned().collect())
-            .unwrap_or_default()
+        lock(handle).iter().cloned().collect()
     }
 
     /// Earliest deadline at which a live toast will expire, used by
@@ -138,7 +132,7 @@ impl App {
     /// waiting for an unrelated key event.
     pub(crate) fn next_toast_deadline(&self) -> Option<Instant> {
         let handle = self.toasts.as_ref()?;
-        let q = handle.lock().ok()?;
+        let q = lock(handle);
         q.iter().map(|t| t.expires_at).min()
     }
 
@@ -162,11 +156,9 @@ impl App {
     }
 
     /// Snapshot the session-usage handle, returning `None` when the
-    /// host has not registered one or the lock is poisoned.
+    /// host has not registered one.
     pub(crate) fn session_usage_snapshot(&self) -> Option<crate::usage::SessionUsage> {
-        self.session_usage
-            .as_ref()
-            .and_then(|h| h.lock().ok().map(|g| g.clone()))
+        self.session_usage.as_ref().map(|h| lock(h).clone())
     }
 
     /// Register the plugin commands the host wants exposed in the
@@ -450,26 +442,25 @@ impl App {
         self.plugin_header_lines = self
             .plugin_header
             .as_ref()
-            .and_then(|slot| slot.lock().ok().and_then(|g| g.clone()))
+            .and_then(|slot| lock(slot).clone())
             .map(|c| c.render(width))
             .unwrap_or_default();
         self.plugin_footer_lines = self
             .plugin_footer
             .as_ref()
-            .and_then(|slot| slot.lock().ok().and_then(|g| g.clone()))
+            .and_then(|slot| lock(slot).clone())
             .map(|c| c.render(width))
             .unwrap_or_default();
         self.plugin_status_cache.clear();
-        if let Some(status) = self.plugin_status.as_ref()
-            && let Ok(map) = status.lock()
-        {
+        if let Some(status) = self.plugin_status.as_ref() {
+            let map = lock(status);
             self.plugin_status_cache
                 .extend(map.iter().map(|(k, v)| (k.clone(), v.clone())));
         }
         if let Some(usage_slot) = self.plugin_usage.as_ref()
             && let Some(snap) = self.session_usage_snapshot()
-            && let Ok(mut slot) = usage_slot.lock()
         {
+            let mut slot = lock(usage_slot);
             *slot = serde_json::json!({
                 "model": snap.model,
                 "input_tokens": snap.input_tokens,
@@ -491,7 +482,7 @@ impl App {
         let Some(slot) = self.plugin_compact_request.as_ref() else {
             return;
         };
-        let pending = slot.lock().ok().and_then(|mut g| g.take());
+        let pending = lock(slot).take();
         if pending.is_some() {
             let _ = self.send_request(RunRequest::CompactNow);
         }
@@ -505,7 +496,7 @@ impl App {
         let Some(slot) = self.plugin_fork_request.as_ref() else {
             return;
         };
-        let pending = slot.lock().ok().and_then(|mut g| g.take());
+        let pending = lock(slot).take();
         if let Some(at) = pending {
             let _ = self.send_request(RunRequest::ForkSession { at });
         }
@@ -518,7 +509,7 @@ impl App {
         let Some(slot) = self.plugin_switch_request.as_ref() else {
             return;
         };
-        let pending = slot.lock().ok().and_then(|mut g| g.take());
+        let pending = lock(slot).take();
         if let Some(target) = pending {
             let _ = self.send_request(RunRequest::SwitchSession(target));
         }
@@ -532,7 +523,7 @@ impl App {
         let pending = self
             .plugin_theme_request
             .as_ref()
-            .and_then(|slot| slot.lock().ok().and_then(|mut g| g.take()));
+            .and_then(|slot| lock(slot).take());
         if let Some(name) = pending {
             self.apply_theme_by_name(&name);
             return true;
@@ -548,9 +539,8 @@ impl App {
     /// (opening a theme picker), so the loop refreshes it on a slow
     /// fixed cadence instead.
     pub(crate) fn refresh_plugin_theme_state(&mut self) {
-        if let Some(state) = self.plugin_theme_state.as_ref()
-            && let Ok(mut s) = state.lock()
-        {
+        if let Some(state) = self.plugin_theme_state.as_ref() {
+            let mut s = lock(state);
             s.current = crate::theme::current().name;
             s.available = crate::theme::Theme::available_names(self.themes_dir.as_deref());
         }
@@ -655,8 +645,7 @@ impl App {
                 })
             })
             .collect();
-        if let Ok(mut s) = slot.lock() {
-            *s = entries;
-        }
+        let mut s = lock(slot);
+        *s = entries;
     }
 }

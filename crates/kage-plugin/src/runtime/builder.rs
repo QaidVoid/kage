@@ -1,5 +1,7 @@
 //! `PluginRuntimeBuilder`: configuration setters and `build`.
 
+use kage_core::sync::lock;
+
 #[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
 
@@ -118,7 +120,7 @@ impl PluginRuntimeBuilder {
         env::register(&cap_registry);
         http::register(&cap_registry);
         {
-            let lua_guard = shared_lua.lock().expect("plugin lua mutex poisoned");
+            let lua_guard = lock(&shared_lua);
             bridge::install_suspend(&lua_guard)?;
             capabilities::install_request_capabilities(
                 &lua_guard,

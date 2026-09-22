@@ -23,19 +23,17 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     let current_version = env!("CARGO_PKG_VERSION");
     match crate::state::record_version_seen(current_version) {
         Ok(Some(prev)) => {
-            if let Ok(mut buf) = buffer.lock() {
-                buf.push_custom(
-                    "kage:notify",
-                    format!("kage updated: {prev} -> {current_version}"),
-                    false,
-                );
-            }
+            let mut buf = lock(&buffer);
+            buf.push_custom(
+                "kage:notify",
+                format!("kage updated: {prev} -> {current_version}"),
+                false,
+            );
         }
         Ok(None) => {}
         Err(err) => {
-            if let Ok(mut buf) = buffer.lock() {
-                buf.push_custom("kage:error", format!("state: {err}"), false);
-            }
+            let mut buf = lock(&buffer);
+            buf.push_custom("kage:error", format!("state: {err}"), false);
         }
     }
     // Load user/project config and map the loop-tunable subset onto
@@ -44,9 +42,8 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     let app_config = match kage_core::config::Config::load_layered(&workdir) {
         Ok(c) => c,
         Err(e) => {
-            if let Ok(mut buf) = buffer.lock() {
-                buf.push_custom("kage:error", format!("config: {e}"), false);
-            }
+            let mut buf = lock(&buffer);
+            buf.push_custom("kage:error", format!("config: {e}"), false);
             kage_core::config::Config::default()
         }
     };
@@ -64,9 +61,8 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     let plugins_dir_path = match crate::plugins_dir() {
         Ok(dir) => Some(dir),
         Err(e) => {
-            if let Ok(mut buf) = buffer.lock() {
-                buf.push_custom("kage:error", e, false);
-            }
+            let mut buf = lock(&buffer);
+            buf.push_custom("kage:error", e, false);
             None
         }
     };
@@ -80,9 +76,8 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         ) {
             Ok(rt) => rt,
             Err(e) => {
-                if let Ok(mut buf) = buffer.lock() {
-                    buf.push_custom("kage:error", e, false);
-                }
+                let mut buf = lock(&buffer);
+                buf.push_custom("kage:error", e, false);
                 None
             }
         },
@@ -143,9 +138,8 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
             tools.register(tool);
         }
         for tool in rt.registered_tool_overrides() {
-            if tools.get(tool.name()).is_none()
-                && let Ok(mut buf) = buffer.lock()
-            {
+            if tools.get(tool.name()).is_none() {
+                let mut buf = lock(&buffer);
                 buf.push_custom(
                     "kage:error",
                     format!(
@@ -207,9 +201,8 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     let (mcp_manager, mcp_errors) =
         crate::mcp::spawn_and_register(&mut tools, &workdir, plugin_runtime.as_deref());
     for (server, err) in mcp_errors {
-        if let Ok(mut buf) = buffer.lock() {
-            buf.push_custom("kage:error", format!("mcp `{server}`: {err}"), false);
-        }
+        let mut buf = lock(&buffer);
+        buf.push_custom("kage:error", format!("mcp `{server}`: {err}"), false);
     }
     let cancel = CancelFlag::new();
     let mut initial_cx = AgentContext::new(bare_model, system).with_workdir(&workdir);
@@ -241,9 +234,8 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
             Some(Arc::new(Mutex::new(Some(header)))),
         ),
         Err(e) => {
-            if let Ok(mut buf) = buffer.lock() {
-                buf.push_custom("kage:error", format!("session: {e}"), false);
-            }
+            let mut buf = lock(&buffer);
+            buf.push_custom("kage:error", format!("session: {e}"), false);
             (None, None)
         }
     };
@@ -251,17 +243,16 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     let active_qualified = Arc::new(Mutex::new(qualified_model.clone()));
     let model_choices = available_model_items(&registry, &qualified_model);
     if let Err(err) = crate::state::record_last_model(&qualified_model) {
-        if let Ok(mut buf) = buffer.lock() {
-            buf.push_custom("kage:error", format!("state: {err}"), false);
-        }
+        let mut buf = lock(&buffer);
+        buf.push_custom("kage:error", format!("state: {err}"), false);
     }
 
     let session_usage = shared_session_usage();
     // Seed initial usage snapshot so the modeline shows the model
     // and the catalog-reported context window before any turn runs.
-    if let Ok(mut snap) = session_usage.lock()
-        && let Ok(cx_guard) = cx.lock()
     {
+        let mut snap = lock(&session_usage);
+        let cx_guard = lock(&cx);
         snap.model.clone_from(&qualified_model);
         snap.context_window = cx_guard.context_window;
         snap.thinking_level = cx_guard.thinking_level;
@@ -300,9 +291,8 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
             let watcher = match kage_plugin::PluginWatcher::new(dir) {
                 Ok(w) => w,
                 Err(err) => {
-                    if let Ok(mut b) = buf.lock() {
-                        b.push_custom("kage:error", format!("plugin watcher: {err}"), false);
-                    }
+                    let mut b = lock(&buf);
+                    b.push_custom("kage:error", format!("plugin watcher: {err}"), false);
                     return;
                 }
             };
@@ -384,16 +374,15 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
             .collect(),
     );
     for err in keybinding_errors {
-        if let Ok(mut buf) = buffer.lock() {
-            buf.push_custom("kage:error", err, false);
-        }
+        let mut buf = lock(&buffer);
+        buf.push_custom("kage:error", err, false);
     }
     app.set_cancel_flag(cancel.clone());
     app.set_toasts(toasts.clone());
     app.set_session_usage(session_usage);
     app.set_steering_queue(steering.clone());
     if let Some(p) = session_path.as_ref() {
-        let path = p.lock().expect("session path mutex poisoned").clone();
+        let path = lock(p).clone();
         if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
             app.set_status_session_id(stem.chars().take(8).collect());
         }

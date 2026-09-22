@@ -16,6 +16,7 @@
 use std::path::Path;
 use std::sync::RwLock;
 
+use kage_core::sync::{read, write};
 use ratatui::style::Color;
 
 static CURRENT: RwLock<Option<Theme>> = RwLock::new(None);
@@ -25,20 +26,15 @@ static CURRENT: RwLock<Option<Theme>> = RwLock::new(None);
 /// need to special-case startup ordering.
 #[must_use]
 pub fn current() -> Theme {
-    CURRENT
-        .read()
-        .ok()
-        .and_then(|guard| guard.clone())
-        .unwrap_or_default()
+    read(&CURRENT).clone().unwrap_or_default()
 }
 
 /// Replace the process-wide theme. Subsequent renders pick up the
 /// new palette; in-flight frames continue with the snapshot they
 /// already captured.
 pub fn set_current(theme: Theme) {
-    if let Ok(mut guard) = CURRENT.write() {
-        *guard = Some(theme);
-    }
+    let mut guard = write(&CURRENT);
+    *guard = Some(theme);
 }
 
 /// Every color the TUI renderer might paint with. Add entries when a

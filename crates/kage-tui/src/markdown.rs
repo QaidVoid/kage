@@ -59,6 +59,8 @@ struct RenderState {
     list_stack: Vec<ListFrame>,
     in_code_block: Option<String>,
     code_body: String,
+    link_dest: Option<String>,
+    link_text: String,
     pending_blank: bool,
     has_block_content: bool,
     highlight_code: bool,
@@ -79,6 +81,8 @@ impl RenderState {
             list_stack: Vec::new(),
             in_code_block: None,
             code_body: String::new(),
+            link_dest: None,
+            link_text: String::new(),
             pending_blank: false,
             has_block_content: false,
             highlight_code: true,
@@ -211,15 +215,14 @@ impl RenderState {
                 self.in_code_block = Some(lang);
                 self.code_body.clear();
             }
-            Tag::Link { title, .. } => {
+            Tag::Link { dest_url, .. } => {
                 let s = self
                     .current_style()
                     .add_modifier(Modifier::UNDERLINED)
                     .fg(crate::theme::current().md_link_fg);
                 self.style_stack.push(s);
-                if !title.is_empty() {
-                    self.push_text(format!("{title} ("), self.current_style());
-                }
+                self.link_dest = Some(dest_url.into_string());
+                self.link_text.clear();
             }
             _ => {}
         }
@@ -238,7 +241,17 @@ impl RenderState {
                 self.has_block_content = true;
                 self.emit_paragraph_break();
             }
-            TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough | TagEnd::Link => {
+            TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough => {
+                self.style_stack.pop();
+            }
+            TagEnd::Link => {
+                if let Some(dest) = self.link_dest.take() {
+                    if self.link_text.trim() != dest {
+                        let shown = dest.strip_prefix("mailto:").unwrap_or(&dest);
+                        self.push_text(format!(" ({shown})"), dim_style());
+                    }
+                }
+                self.link_text.clear();
                 self.style_stack.pop();
             }
             TagEnd::List(_) => {
@@ -283,6 +296,9 @@ impl RenderState {
         } else {
             let s = self.current_style();
             self.push_text(text.to_owned(), s);
+            if self.link_dest.is_some() {
+                self.link_text.push_str(text);
+            }
         }
     }
 
@@ -389,6 +405,25 @@ mod tests {
             .iter()
             .any(|s| s.content == "fancy" && s.style.add_modifier.contains(Modifier::ITALIC));
         assert!(has_italic);
+    }
+
+    #[test]
+    fn link_renders_text_followed_by_url() {
+        let lines = render("[kage](https://example.com/kage)", Style::default());
+        let text = spans_text(&lines[0]);
+        assert_eq!(text, "kage (https://example.com/kage)");
+        let url_dim = lines[0]
+            .spans
+            .iter()
+            .any(|s| s.content.contains("https://example.com/kage") && s.style == dim_style());
+        assert!(url_dim, "url suffix should be dimmed, got {text:?}");
+    }
+
+    #[test]
+    fn autolink_does_not_duplicate_the_url() {
+        let lines = render("see <https://example.com/docs>", Style::default());
+        let text = spans_text(&lines[0]);
+        assert_eq!(text, "see https://example.com/docs");
     }
 
     #[test]

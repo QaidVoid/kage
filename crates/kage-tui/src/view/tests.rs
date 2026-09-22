@@ -61,25 +61,25 @@ fn visual_cursor_at_end_of_first_row_after_word_break() {
 fn wrap_packs_rows_by_display_width_not_char_count() {
     // Four CJK glyphs are 8 display columns; a 4-col budget must
     // yield two rows of two glyphs, not one row of four (8 cols).
-    let text = "你好世界";
+    let text = "\u{4f60}\u{597d}\u{4e16}\u{754c}";
     let rows = wrap_input_rows(text, 4);
     let rendered: Vec<&str> = rows.iter().map(|(s, e)| &text[*s..*e]).collect();
-    assert_eq!(rendered, vec!["你好", "世界"]);
+    assert_eq!(rendered, vec!["\u{4f60}\u{597d}", "\u{4e16}\u{754c}"]);
 }
 
 #[test]
 fn visual_cursor_col_counts_display_width() {
-    // Cursor after 你 sits at column 2 (its display width), not
-    // column 1 (its char count), so the terminal cursor lands
-    // beside the glyph instead of inside it.
-    let (row, col) = input_visual_cursor("你好", 3, 10);
+    // Cursor after the first glyph sits at column 2 (its display
+    // width), not column 1 (its char count), so the terminal cursor
+    // lands beside the glyph instead of inside it.
+    let (row, col) = input_visual_cursor("\u{4f60}\u{597d}", 3, 10);
     assert_eq!((row, col), (0, 2));
 }
 
 #[test]
 fn truncate_to_width_never_exceeds_cell_budget() {
-    let out = truncate_to_width("你好世界", 5, "\u{2026}");
-    assert_eq!(out, "你好\u{2026}");
+    let out = truncate_to_width("\u{4f60}\u{597d}\u{4e16}\u{754c}", 5, "\u{2026}");
+    assert_eq!(out, "\u{4f60}\u{597d}\u{2026}");
     assert!(out.width() <= 5, "got {out:?} at {} cols", out.width());
 }
 
@@ -89,7 +89,7 @@ fn bubble_row_pad_fills_exact_card_width_for_wide_chars() {
     // that counted chars would leave the card two cells short and
     // shift the rule/pad chrome; every row must sum to exactly the
     // card width.
-    let lines = user_block_lines("你好", 20, Emphasis::None);
+    let lines = user_block_lines("\u{4f60}\u{597d}", 20, Emphasis::None);
     for line in &lines {
         let cells: usize = line.spans.iter().map(|s| s.content.width()).sum();
         assert_eq!(cells, 20, "row {line:?} is {cells} cols, card is 20");

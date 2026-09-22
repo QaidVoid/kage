@@ -409,6 +409,7 @@ mod tests {
 
     #[test]
     fn link_renders_text_followed_by_url() {
+        let _guard = crate::theme::theme_test_lock();
         let lines = render("[kage](https://example.com/kage)", Style::default());
         let text = spans_text(&lines[0]);
         assert_eq!(text, "kage (https://example.com/kage)");
@@ -428,6 +429,7 @@ mod tests {
 
     #[test]
     fn inline_code_uses_code_style() {
+        let _guard = crate::theme::theme_test_lock();
         let lines = render("call `foo()` here", Style::default());
         let has_code = lines[0].spans.iter().any(|s| {
             s.content == "foo()" && s.style.fg == Some(crate::theme::current().md_code_fg)
@@ -480,6 +482,7 @@ mod tests {
 
     #[test]
     fn render_streaming_keeps_structure_but_leaves_code_plain() {
+        let _guard = crate::theme::theme_test_lock();
         let md = "# Title\n\n```rust\nfn main() {}\n```";
         let live = render_streaming(md, Style::default());
 

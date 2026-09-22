@@ -40,6 +40,27 @@ pub fn set_current(theme: Theme) {
     *guard = Some(Arc::new(theme));
 }
 
+/// Serialize tests that touch the process-global theme. Tests that
+/// `set_current` and tests that assert against [`current`] must hold
+/// this lock, or parallel test threads read each other's palette.
+#[cfg(test)]
+pub(crate) static THEME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Block until the theme global is free for the duration of the test.
+/// Poison-safe: a panicking holder must not wedge every later test.
+#[cfg(test)]
+pub(crate) fn theme_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    THEME_TEST_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Drop any host-installed theme so later tests see the default again.
+#[cfg(test)]
+pub(crate) fn reset_current_for_tests() {
+    *write(&CURRENT) = None;
+}
+
 /// Every color the TUI renderer might paint with. Add entries when a
 /// new visual element shows up; never reach for a hardcoded `Color`
 /// inside `view.rs`.

@@ -1623,6 +1623,7 @@ fn open_overlay_suppresses_plugin_keybinding() {
 
 #[test]
 fn plugin_theme_drain_applies_request_and_refresh_populates_snapshot() {
+    let _guard = crate::theme::theme_test_lock();
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
     let mut app = App::new(buffer, tx);
@@ -1649,6 +1650,7 @@ fn plugin_theme_drain_applies_request_and_refresh_populates_snapshot() {
     // The next refresh reflects the applied theme in the snapshot.
     app.refresh_plugin_theme_state();
     assert_eq!(state.lock().unwrap().current, "tokyo-night");
+    crate::theme::reset_current_for_tests();
 }
 
 #[test]

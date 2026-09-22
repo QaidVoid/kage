@@ -638,6 +638,7 @@ fn popup_paints_single_item_text() {
 
 #[test]
 fn popup_paints_many_items_and_highlights_selected() {
+    let _guard = crate::theme::theme_test_lock();
     let completions = crate::cmdparse::Completions {
         items: vec![
             completion("model", Some("switch model")),

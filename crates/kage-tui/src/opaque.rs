@@ -39,6 +39,7 @@ mod tests {
 
     #[test]
     fn fills_the_area_with_the_base_bg_and_blanks_symbols() {
+        let _guard = crate::theme::theme_test_lock();
         crate::theme::set_current(crate::theme::Theme::default_dark());
         let area = Rect::new(0, 0, 3, 2);
         let mut buf = Buffer::empty(area);
@@ -56,5 +57,6 @@ mod tests {
             }
         }
         assert_ne!(crate::theme::Theme::default_dark().bg, Color::Reset);
+        crate::theme::reset_current_for_tests();
     }
 }

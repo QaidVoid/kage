@@ -145,7 +145,7 @@ pub enum OwnedArgSpec {
 /// hands them to [`crate::App::set_plugin_commands`], which leaks the
 /// owned fields into a `&'static CommandSpec` so they slot into the
 /// same registry the builtins use.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PluginCommand {
     /// Command name without any leading `/` or `:`.
     pub name: String,

@@ -29,6 +29,7 @@ impl App {
             plugin_command_aliases: Vec::new(),
             plugin_command_overrides: Vec::new(),
             plugin_command_specs: Vec::new(),
+            plugin_commands_leaked: Vec::new(),
             plugin_keybindings: Vec::new(),
             config_keybindings: Vec::new(),
             plugin_widgets: Vec::new(),
@@ -176,8 +177,11 @@ impl App {
     /// Builds one [`CommandSpec`] per plugin command, leaking the
     /// owned name, description, and per-arg schema into `&'static`
     /// storage so plugin commands participate in the same completion
-    /// engine the builtins use. The leaked storage is bounded by the
-    /// number of plugin commands the user installs.
+    /// engine the builtins use. A command equal (by name, aliases,
+    /// override flag, description, and arg schema) to one registered
+    /// in a previous call reuses that call's leaked spec, so repeated
+    /// hot reloads of an unchanged plugin set do not grow the leak;
+    /// it grows only when a reload actually changes the command set.
     pub fn set_plugin_commands(&mut self, mut commands: Vec<PluginCommand>) {
         // A regular plugin command (or any of its aliases) may not
         // shadow a builtin; an `override_command` is allowed to and
@@ -193,26 +197,7 @@ impl App {
         self.plugin_command_aliases.clear();
         self.plugin_command_overrides.clear();
         for cmd in &commands {
-            let name_static: &'static str = Box::leak(cmd.name.clone().into_boxed_str());
-            let desc_static: &'static str =
-                Box::leak(format!("{}  [plugin]", cmd.description).into_boxed_str());
-            let args_owned: Vec<ArgSpec> = cmd.args.iter().map(leak_argspec).collect();
-            let args_static: &'static [ArgSpec] = Box::leak(args_owned.into_boxed_slice());
-            let aliases_static: &'static [&'static str] = Box::leak(
-                cmd.aliases
-                    .iter()
-                    .map(|a| &*Box::leak(a.clone().into_boxed_str()))
-                    .collect::<Vec<_>>()
-                    .into_boxed_slice(),
-            );
-            let spec: &'static CommandSpec = Box::leak(Box::new(CommandSpec {
-                name: name_static,
-                aliases: aliases_static,
-                description: desc_static,
-                category: CommandCategory::Both,
-                args: args_static,
-                subcommands: &[],
-            }));
+            let spec = self.leaked_plugin_spec(cmd);
             self.plugin_command_specs.push(spec);
             for alias in &cmd.aliases {
                 self.plugin_command_aliases
@@ -226,6 +211,43 @@ impl App {
             .into_iter()
             .map(|c| (c.name, c.description))
             .collect();
+    }
+
+    /// Return the previously-leaked spec for `cmd` when an equal
+    /// command was registered in an earlier call, so a hot reload of
+    /// unchanged plugins reuses the old `&'static` storage. Otherwise
+    /// leak a fresh spec and remember it.
+    fn leaked_plugin_spec(&mut self, cmd: &PluginCommand) -> &'static CommandSpec {
+        let reused = self
+            .plugin_commands_leaked
+            .iter()
+            .find(|(known, _)| known == cmd)
+            .map(|(_, spec)| *spec);
+        if let Some(spec) = reused {
+            return spec;
+        }
+        let name_static: &'static str = Box::leak(cmd.name.clone().into_boxed_str());
+        let desc_static: &'static str =
+            Box::leak(format!("{}  [plugin]", cmd.description).into_boxed_str());
+        let args_owned: Vec<ArgSpec> = cmd.args.iter().map(leak_argspec).collect();
+        let args_static: &'static [ArgSpec] = Box::leak(args_owned.into_boxed_slice());
+        let aliases_static: &'static [&'static str] = Box::leak(
+            cmd.aliases
+                .iter()
+                .map(|a| &*Box::leak(a.clone().into_boxed_str()))
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let spec: &'static CommandSpec = Box::leak(Box::new(CommandSpec {
+            name: name_static,
+            aliases: aliases_static,
+            description: desc_static,
+            category: CommandCategory::Both,
+            args: args_static,
+            subcommands: &[],
+        }));
+        self.plugin_commands_leaked.push((cmd.clone(), spec));
+        spec
     }
 
     /// Hand the App a shared handle on the active `provider:model`

@@ -541,6 +541,12 @@ pub struct App {
     /// the completion engine can mix them with the static builtin
     /// registry. Cleared and re-built on every `set_plugin_commands`.
     plugin_command_specs: Vec<&'static CommandSpec>,
+    /// Every `&'static CommandSpec` ever leaked for plugin commands,
+    /// paired with the owned [`PluginCommand`] it was built from.
+    /// `set_plugin_commands` reuses a pair's spec when the incoming
+    /// command is equal, so repeated hot reloads of an unchanged
+    /// plugin set do not grow the leak.
+    plugin_commands_leaked: Vec<(PluginCommand, &'static CommandSpec)>,
     /// Parsed plugin keybindings: `(matcher, canonical chord)`. A key
     /// matching one dispatches [`RunRequest::InvokePluginKeybinding`].
     /// Checked after modal layers but before builtin key handling so a

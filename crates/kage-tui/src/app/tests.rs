@@ -215,6 +215,54 @@ fn plugin_command_alias_shadowing_builtin_is_dropped() {
 }
 
 #[test]
+fn set_plugin_commands_reuses_leaked_specs_on_unchanged_reload() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    let cmd = || PluginCommand {
+        name: "greet".into(),
+        aliases: vec!["hi".into()],
+        is_override: false,
+        description: "say hello".into(),
+        args: vec![crate::command::OwnedArgSpec::Text {
+            name: "who".into(),
+            optional: false,
+            hint: "<who>".into(),
+        }],
+    };
+    app.set_plugin_commands(vec![cmd()]);
+    let first = app.plugin_command_specs[0];
+    assert_eq!(app.plugin_commands_leaked.len(), 1);
+
+    // Re-registering an identical set (the hot-reload case) reuses
+    // the leaked spec instead of leaking a second copy.
+    app.set_plugin_commands(vec![cmd()]);
+    assert!(
+        std::ptr::eq(app.plugin_command_specs[0], first),
+        "equal reload reuses the leaked spec"
+    );
+    assert_eq!(app.plugin_commands_leaked.len(), 1);
+
+    // A changed command leaks one fresh spec, which the next
+    // unchanged reload then reuses.
+    let mut changed = cmd();
+    changed.description = "say hello loudly".into();
+    app.set_plugin_commands(vec![changed.clone()]);
+    assert_eq!(
+        app.plugin_commands_leaked.len(),
+        2,
+        "changed command leaks a fresh spec"
+    );
+    assert!(!std::ptr::eq(app.plugin_command_specs[0], first));
+    app.set_plugin_commands(vec![changed]);
+    assert_eq!(
+        app.plugin_commands_leaked.len(),
+        2,
+        "changed reload reuses too"
+    );
+}
+
+#[test]
 fn override_command_shadows_builtin_and_dispatches_first() {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();

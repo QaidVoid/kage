@@ -186,6 +186,47 @@ impl Buffer {
         self.last_virtual_top = virtual_top;
     }
 
+    /// Merge the renderer-owned state of a snapshot back into this
+    /// buffer after an out-of-lock render: per-block height and line
+    /// caches, the clamped scroll, the last-drawn focus, and the
+    /// last-frame geometry tables mouse handlers read.
+    ///
+    /// Block content is never merged: blocks appended while the
+    /// snapshot was being drawn stay in place with their (empty)
+    /// cache entries intact. The merge is skipped entirely when the
+    /// live buffer has fewer blocks than the snapshot - stale cache
+    /// indices would mislabel. (Shrinking mutations are UI-thread
+    /// only, so they cannot overlap a draw on that same thread; the
+    /// guard is defensive.)
+    pub fn merge_render_state(&mut self, snapshot: Self) {
+        if snapshot.blocks.len() > self.blocks.len() {
+            return;
+        }
+        for (slot, entry) in self
+            .block_heights
+            .iter_mut()
+            .zip(snapshot.block_heights.iter())
+        {
+            *slot = *entry;
+        }
+        for (slot, entry) in self
+            .block_render_lines
+            .iter_mut()
+            .zip(snapshot.block_render_lines.iter())
+        {
+            slot.clone_from(entry);
+        }
+        self.scroll = snapshot.scroll;
+        self.last_drawn_focus = snapshot.last_drawn_focus;
+        self.last_block_screen_rows = snapshot.last_block_screen_rows;
+        self.last_block_virtual_rows = snapshot.last_block_virtual_rows;
+        self.last_area_x = snapshot.last_area_x;
+        self.last_area_y = snapshot.last_area_y;
+        self.last_area_width = snapshot.last_area_width;
+        self.last_area_height = snapshot.last_area_height;
+        self.last_virtual_top = snapshot.last_virtual_top;
+    }
+
     /// Width of the last-painted buffer area, in cells.
     #[must_use]
     pub fn last_area_width(&self) -> u16 {

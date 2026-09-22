@@ -357,3 +357,36 @@ fn take_returns_blocks_and_resets_scroll() {
     assert_eq!(buf.scroll(), 0);
     assert!(buf.blocks().is_empty());
 }
+
+#[test]
+fn merge_render_state_copies_renderer_state_and_keeps_appends() {
+    let mut live = Buffer::new();
+    live.push_user("hello");
+    let mut snap = live.clone();
+    snap.set_scroll(7);
+    snap.set_cached_height(0, 80, 3);
+    snap.set_cached_render_lines(0, 80, Arc::new(Vec::new()));
+    snap.set_last_drawn_focus(Some(0));
+    snap.set_last_block_screen_rows(vec![(0, 1, 4)]);
+    live.push_user("world");
+    live.merge_render_state(snap);
+    assert_eq!(live.scroll(), 7);
+    assert_eq!(live.cached_height(0, 80), Some(3));
+    assert_eq!(live.cached_height(1, 80), None);
+    assert_eq!(live.last_drawn_focus(), Some(0));
+    assert_eq!(live.block_at_screen_row(2), Some(0));
+    assert_eq!(live.blocks().len(), 2);
+}
+
+#[test]
+fn merge_render_state_skips_when_live_has_fewer_blocks() {
+    let mut live = Buffer::new();
+    live.push_user("a");
+    let mut snap = Buffer::new();
+    snap.push_user("a");
+    snap.push_user("b");
+    snap.set_scroll(4);
+    live.merge_render_state(snap);
+    assert_eq!(live.scroll(), 0);
+    assert_eq!(live.blocks().len(), 1);
+}

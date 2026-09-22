@@ -197,7 +197,7 @@ fn count_lines(text: &str) -> usize {
 /// the user is scrolled back leaves their position alone, so the
 /// "follow while idle, freeze while reading" behavior emerges from the
 /// scroll model rather than a separate flag.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Buffer {
     blocks: Vec<Block>,
     scroll: usize,

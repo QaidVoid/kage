@@ -311,7 +311,13 @@ impl App {
         let search_match_count = self.compute_search_match_count();
         let render_width = terminal.size().map_or(80, |r| r.width);
         self.refresh_plugin_widget_texts(render_width);
-        let mut buffer = self.buffer.lock().expect("buffer mutex poisoned");
+        // Snapshot under the lock, then draw from the private copy:
+        // the mutex is never held across the draw, so plugin threads
+        // appending mid-frame don't stall behind a slow paint, and a
+        // panic elsewhere can't poison-crash the render loop. The
+        // renderer-owned state (caches, clamped scroll, last-frame
+        // geometry) is merged back into the live buffer afterwards.
+        let mut buffer = self.buffer.lock().expect("buffer mutex poisoned").clone();
         let session_usage = self.session_usage_snapshot();
         let live_toasts = self.live_toasts();
         let bottom = if self.modeline_visible() {
@@ -394,6 +400,10 @@ impl App {
                 }
             })
             .map_err(|err| TuiError::Io(std::io::Error::other(err.to_string())))?;
+        self.buffer
+            .lock()
+            .expect("buffer mutex poisoned")
+            .merge_render_state(buffer);
         self.captured_rows = captured_rows;
         Ok(())
     }

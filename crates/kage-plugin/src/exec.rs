@@ -6,7 +6,8 @@
 //! no quoting or injection surface - with its working directory
 //! pinned under the host workdir via [`kage_tools::resolve_under`]
 //! (the same escape check `kage.fs` uses). The call blocks until the
-//! process exits and returns its captured output, the way
+//! process exits or `timeout_secs` elapses (default 30) and returns
+//! its captured output plus a `timed_out` flag, the way
 //! `kage.http.get` blocks; a rewind plugin uses it to snapshot files
 //! with `git` between turns.
 //!
@@ -17,14 +18,24 @@
 //! `cwd` cannot escape the host workdir. Grant it only to plugins you
 //! trust to run arbitrary programs as the kage process.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use kage_core::sync::lock;
 use kage_tools::resolve_under;
 use mlua::{Lua, Table};
 
 use crate::capabilities::{Capability, CapabilityRegistry};
+
+/// How long a spawned process may run when the spec sets no
+/// `timeout_secs`.
+const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often the waiter polls the child while it runs.
+const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Register the `exec` installer into `registry`.
 ///
@@ -53,17 +64,81 @@ pub(crate) fn register(registry: &CapabilityRegistry, workdir: PathBuf) {
                         })?,
                         None => root.clone(),
                     };
-                    let output = Command::new(&cmd)
+                    let timeout_secs: Option<u64> = spec.get("timeout_secs")?;
+                    if timeout_secs == Some(0) {
+                        return Err(mlua::Error::external(
+                            "kage.exec: `timeout_secs` must be at least 1",
+                        ));
+                    }
+                    let timeout = timeout_secs.map_or(DEFAULT_EXEC_TIMEOUT, |s| {
+                        Duration::from_secs(s).max(Duration::from_secs(1))
+                    });
+
+                    let mut child = Command::new(&cmd)
                         .args(&args)
                         .current_dir(&dir)
-                        .output()
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .spawn()
                         .map_err(|e| {
                             mlua::Error::external(format!("kage.exec: spawn {cmd}: {e}"))
                         })?;
+                    // Drain each pipe on its own thread so a child that
+                    // outgrows the OS pipe buffer never stalls on a
+                    // full pipe while we are waiting for it to exit.
+                    let stdout_pipe = child.stdout.take();
+                    let stderr_pipe = child.stderr.take();
+                    let stdout_thread = stdout_pipe.map(|mut pipe| {
+                        thread::spawn(move || {
+                            let mut buf = Vec::new();
+                            let _ = pipe.read_to_end(&mut buf);
+                            buf
+                        })
+                    });
+                    let stderr_thread = stderr_pipe.map(|mut pipe| {
+                        thread::spawn(move || {
+                            let mut buf = Vec::new();
+                            let _ = pipe.read_to_end(&mut buf);
+                            buf
+                        })
+                    });
+
+                    let deadline = Instant::now() + timeout;
+                    let mut timed_out = false;
+                    let status = loop {
+                        match child.try_wait() {
+                            Ok(Some(status)) => break status,
+                            Ok(None) => {
+                                if Instant::now() >= deadline {
+                                    let _ = child.kill();
+                                    let status = child.wait().map_err(|e| {
+                                        mlua::Error::external(format!("kage.exec: wait {cmd}: {e}"))
+                                    })?;
+                                    timed_out = true;
+                                    break status;
+                                }
+                                thread::sleep(POLL_INTERVAL);
+                            }
+                            Err(e) => {
+                                return Err(mlua::Error::external(format!(
+                                    "kage.exec: wait {cmd}: {e}"
+                                )));
+                            }
+                        }
+                    };
+
+                    let stdout = stdout_thread
+                        .map(|h| h.join().unwrap_or_default())
+                        .unwrap_or_default();
+                    let stderr = stderr_thread
+                        .map(|h| h.join().unwrap_or_default())
+                        .unwrap_or_default();
                     let out = lua.create_table()?;
-                    out.set("code", output.status.code().unwrap_or(-1))?;
-                    out.set("stdout", lua.create_string(&output.stdout)?)?;
-                    out.set("stderr", lua.create_string(&output.stderr)?)?;
+                    out.set("code", status.code().unwrap_or(-1))?;
+                    out.set("timed_out", timed_out)?;
+                    out.set("stdout", lua.create_string(&stdout)?)?;
+                    out.set("stderr", lua.create_string(&stderr)?)?;
                     Ok(out)
                 })?,
             )?;
@@ -126,6 +201,39 @@ mod tests {
         let rt = rt_with_exec();
         let res = rt.eval_plugin("p", "kage.request_capabilities({'exec'}); kage.exec({})");
         assert!(res.is_err(), "missing cmd must raise, got {res:?}");
+    }
+
+    #[test]
+    fn exec_kills_a_runaway_process_at_the_deadline() {
+        let rt = rt_with_exec();
+        let start = std::time::Instant::now();
+        let v = rt
+            .eval_plugin(
+                "p",
+                "kage.request_capabilities({'exec'}); \
+                 local r = kage.exec({ cmd = 'sleep', args = { '30' }, timeout_secs = 1 }); \
+                 return r.timed_out and r.code ~= 0 and r.stdout == ''",
+            )
+            .unwrap();
+        assert_eq!(v.as_boolean(), Some(true), "timed_out must be set");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(8),
+            "deadline must kill the child promptly, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn exec_reports_no_timeout_for_a_fast_exit() {
+        let rt = rt_with_exec();
+        let v = rt
+            .eval_plugin(
+                "p",
+                "kage.request_capabilities({'exec'}); \
+                 return kage.exec({ cmd = 'true' }).timed_out == false",
+            )
+            .unwrap();
+        assert_eq!(v.as_boolean(), Some(true));
     }
 
     #[test]

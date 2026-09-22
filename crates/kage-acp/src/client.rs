@@ -42,6 +42,11 @@ use crate::acp::{
 };
 use crate::agent::PermissionDecision;
 
+/// How long the `initialize` / `session/new` handshake waits before
+/// giving up on a silent agent. The turn itself (`session/prompt`) is
+/// unbounded — it is governed by the cancel flag instead.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Decides whether an upstream agent's tool call is permitted. Called
 /// on the client's drain thread (`Send + Sync`); must not block on
 /// the agent loop. The default (no resolver) denies - kage never
@@ -335,6 +340,7 @@ fn run_turn<R, W>(
     cwd: String,
     cancel: &CancelFlag,
     resolver: Option<PermissionResolver>,
+    handshake_timeout: Duration,
 ) -> Result<AcpClientStream, ProviderError>
 where
     R: BufRead + Send + 'static,
@@ -351,9 +357,10 @@ where
             version: Some(env!("CARGO_PKG_VERSION").to_owned()),
         }),
     };
-    peer.request(
+    peer.request_timeout(
         "initialize",
         serde_json::to_value(&init).map_err(|e| ProviderError::Decode(e.to_string()))?,
+        handshake_timeout,
     )
     .map_err(rpc_to_provider)?;
 
@@ -362,9 +369,10 @@ where
         mcp_servers: vec![],
     };
     let session: NewSessionResponse = serde_json::from_value(
-        peer.request(
+        peer.request_timeout(
             "session/new",
             serde_json::to_value(&new_session).map_err(|e| ProviderError::Decode(e.to_string()))?,
+            handshake_timeout,
         )
         .map_err(rpc_to_provider)?,
     )
@@ -450,6 +458,7 @@ impl Provider for AcpProvider {
             cwd,
             cancel,
             self.permission.clone(),
+            HANDSHAKE_TIMEOUT,
         )
         .inspect_err(|_| {
             let _ = child.kill();
@@ -525,6 +534,7 @@ mod tests {
             "/tmp".to_owned(),
             &cancel,
             None,
+            Duration::from_secs(10),
         )
         .expect("turn starts");
 
@@ -604,6 +614,7 @@ mod tests {
             "/tmp".to_owned(),
             &cancel,
             None,
+            Duration::from_secs(10),
         )
         .expect("turn starts");
 
@@ -632,6 +643,7 @@ mod tests {
             "/tmp".to_owned(),
             &cancel,
             Some(resolver),
+            Duration::from_secs(10),
         )
         .expect("turn starts");
 
@@ -642,5 +654,35 @@ mod tests {
         );
         assert!(matches!(events[1], ProviderEvent::MessageEnd { .. }));
         server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn handshake_gives_up_on_a_silent_agent() {
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        // Nobody ever answers on the server side of either pipe.
+        let (_srv_reader_end, _srv_writer_end) = (srv_r, srv_w);
+        let cancel = CancelFlag::new();
+        let start = std::time::Instant::now();
+        let err = run_turn(
+            BufReader::new(cli_r),
+            cli_w,
+            "hi".to_owned(),
+            "/tmp".to_owned(),
+            &cancel,
+            None,
+            Duration::from_millis(100),
+        )
+        .err()
+        .expect("silent agent must fail the handshake");
+        assert!(
+            matches!(&err, ProviderError::Transport(m) if m.contains("timed out")),
+            "got {err:?}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "deadline must bound the handshake, took {:?}",
+            start.elapsed()
+        );
     }
 }

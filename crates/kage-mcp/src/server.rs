@@ -17,6 +17,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use kage_core::config::McpServer;
 
@@ -27,6 +28,15 @@ use kage_jsonrpc::{Inbound, Peer, RpcError, connect};
 /// the negotiated value but do not hard-fail on a mismatch, matching
 /// how the reference clients behave.
 pub const PROTOCOL_VERSION: &str = "2025-06-18";
+
+/// How long the `initialize` handshake waits before giving up on a
+/// silent server.
+const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a client-issued request (e.g. `tools/list`) waits before
+/// giving up on a silent server. Long-running `tools/call` is exempt:
+/// it goes through [`Self::request_cancellable`] instead.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// A failure spawning or talking to an MCP server.
 #[derive(Debug, thiserror::Error)]
@@ -139,6 +149,19 @@ impl McpConnection {
         roots: &[std::path::PathBuf],
         handler: Option<Arc<dyn ServerRequestHandler>>,
     ) -> Result<Self, McpError> {
+        Self::initialize_with_timeout(server, peer, inbound, roots, handler, INITIALIZE_TIMEOUT)
+    }
+
+    /// [`Self::initialize`] with an explicit handshake deadline; tests
+    /// use a short one against a silent server.
+    pub fn initialize_with_timeout(
+        server: impl Into<String>,
+        peer: Peer,
+        inbound: std::sync::mpsc::Receiver<Inbound>,
+        roots: &[std::path::PathBuf],
+        handler: Option<Arc<dyn ServerRequestHandler>>,
+        timeout: Duration,
+    ) -> Result<Self, McpError> {
         let server = server.into();
         let roots_result = Self::roots_list_result(roots);
         let mut capabilities = serde_json::Map::new();
@@ -157,7 +180,7 @@ impl McpConnection {
             "clientInfo": { "name": "kage", "version": env!("CARGO_PKG_VERSION") },
         });
         let result = peer
-            .request("initialize", params)
+            .request_timeout("initialize", params, timeout)
             .map_err(|source| McpError::Rpc {
                 server: server.clone(),
                 source,
@@ -269,7 +292,7 @@ impl McpConnection {
         params: serde_json::Value,
     ) -> Result<serde_json::Value, McpError> {
         self.peer
-            .request(method, params)
+            .request_timeout(method, params, REQUEST_TIMEOUT)
             .map_err(|source| McpError::Rpc {
                 server: self.server.clone(),
                 source,
@@ -462,6 +485,34 @@ mod tests {
         let (conn, _srv) = stub_server();
         assert_eq!(conn.name(), "stub");
         assert!(!conn.take_tools_changed());
+    }
+
+    #[test]
+    fn initialize_gives_up_on_a_silent_server() {
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_peer, cli_in, _c) = connect(BufReader::new(cli_r), cli_w);
+        // Nobody ever drains `srv_in` or answers: the server side of
+        // the pipe stays mute.
+        let (_srv_peer, _srv_in, _s) = connect(BufReader::new(srv_r), srv_w);
+        let start = std::time::Instant::now();
+        let err = McpConnection::initialize_with_timeout(
+            "silent",
+            cli_peer,
+            cli_in,
+            &[],
+            None,
+            Duration::from_millis(100),
+        )
+        .err()
+        .expect("silent server must fail the handshake");
+        assert!(matches!(err, McpError::Rpc { .. }), "got {err:?}");
+        assert!(err.to_string().contains("timed out"), "got {err}");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "deadline must bound the handshake, took {:?}",
+            start.elapsed()
+        );
     }
 
     struct EchoHandler;

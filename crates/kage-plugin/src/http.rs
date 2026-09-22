@@ -9,10 +9,14 @@
 //!
 //! ```lua
 //! local res = kage.http.get(url)
-//! local res = kage.http.post(url, { headers = {...}, body = "...", json = {...}, max_bytes = N })
+//! local res = kage.http.post(url, { headers = {...}, body = "...", json = {...}, max_bytes = N, timeout_secs = S })
 //! local res = kage.http.delete(url, { headers = {...} })
 //! local res = kage.http.post_stream(url, opts, function(ev) ... end)
 //! ```
+//!
+//! `get` / `post` / `delete` give up after `timeout_secs` seconds
+//! (default 30); `post_stream` bounds only the connection phases so
+//! the stream itself can run long.
 //!
 //! `get` / `post` / `delete` return `{ status, body, content_type, truncated }`.
 //! `post_stream` returns `{ status, content_type }` and dispatches each
@@ -21,6 +25,7 @@
 //! invoked once per blank-line-terminated frame.
 
 use std::io::{BufRead, BufReader, Read};
+use std::time::Duration;
 
 use kage_core::sync::lock;
 use kage_tools::ssrf;
@@ -37,6 +42,15 @@ const DEFAULT_MAX_BYTES: u64 = 2_000_000;
 /// non-streaming cap since a streaming chat response can legitimately
 /// run into the tens of megabytes over many tokens.
 const DEFAULT_STREAM_MAX_BYTES: u64 = 32_000_000;
+
+/// Default whole-request budget for non-streaming requests without an
+/// explicit `timeout_secs`.
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Connection-phase budget for streaming requests: resolve, connect,
+/// and sending the request each get this long, but the response stream
+/// itself stays unbounded so a long SSE chat is never cut off.
+const STREAM_PHASE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Install the base `kage.http` placeholder table.
 ///
@@ -134,6 +148,7 @@ struct RequestSpec {
     body: Option<Vec<u8>>,
     content_type: Option<String>,
     max_bytes: Option<u64>,
+    timeout: Option<Duration>,
 }
 
 fn build_request(opts: Option<&Table>) -> Result<RequestSpec, String> {
@@ -169,6 +184,13 @@ fn build_request(opts: Option<&Table>) -> Result<RequestSpec, String> {
         spec.max_bytes = Some(cap);
     }
 
+    if let Ok(secs) = opts.get::<u64>("timeout_secs") {
+        if secs == 0 {
+            return Err("opts.timeout_secs must be at least 1".to_owned());
+        }
+        spec.timeout = Some(Duration::from_secs(secs));
+    }
+
     Ok(spec)
 }
 
@@ -194,7 +216,8 @@ fn simple_request(
     spec: Option<&RequestSpec>,
     max_bytes: u64,
 ) -> Result<SimpleResult, String> {
-    let (parsed, agent) = prepare(url)?;
+    let timeout = spec.and_then(|s| s.timeout).unwrap_or(DEFAULT_TIMEOUT);
+    let (parsed, agent) = prepare(url, Some(timeout))?;
     let response = dispatch(method, &agent, parsed.as_str(), spec)?;
     let status = response.status().as_u16();
     let content_type = response
@@ -226,7 +249,9 @@ fn stream_request(
     max_bytes: u64,
     on_event: &Function,
 ) -> Result<Table, String> {
-    let (parsed, agent) = prepare(url)?;
+    // `None` = no global deadline: only the connection phases are
+    // bounded so a long-lived SSE stream survives.
+    let (parsed, agent) = prepare(url, None)?;
     let response = dispatch("POST", &agent, parsed.as_str(), Some(spec))?;
     let status = response.status().as_u16();
     let content_type = response
@@ -325,26 +350,37 @@ fn read_sse_frame<R: BufRead>(reader: &mut R) -> Result<Option<SseFrame>, String
     }
 }
 
-fn prepare(url: &str) -> Result<(url::Url, ureq::Agent), String> {
+fn prepare(url: &str, timeout: Option<Duration>) -> Result<(url::Url, ureq::Agent), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
     match parsed.scheme() {
         "http" | "https" => {}
         other => return Err(format!("unsupported scheme: {other}")),
     }
     ssrf::check(&parsed).map_err(|e| e.to_string())?;
-    Ok((parsed, build_agent()))
+    Ok((parsed, build_agent_bounded(timeout)))
 }
 
 /// Build a ureq agent for plugin HTTP calls. `SameHost` preserves the
 /// `Authorization` header across apex-to-www redirects, and disabling
 /// `http_status_as_error` lets the plugin read the response body on
 /// non-2xx instead of seeing only a generic transport error.
-fn build_agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
+///
+/// `Some(global)` bounds the entire request (non-streaming calls);
+/// `None` bounds only the connection phases, leaving the response
+/// stream free to run (streaming calls).
+fn build_agent_bounded(global: Option<Duration>) -> ureq::Agent {
+    let config = ureq::Agent::config_builder()
         .redirect_auth_headers(ureq::config::RedirectAuthHeaders::SameHost)
-        .http_status_as_error(false)
-        .build()
-        .new_agent()
+        .http_status_as_error(false);
+    match global {
+        Some(global) => config.timeout_global(Some(global)).build().new_agent(),
+        None => config
+            .timeout_resolve(Some(STREAM_PHASE_TIMEOUT))
+            .timeout_connect(Some(STREAM_PHASE_TIMEOUT))
+            .timeout_send_request(Some(STREAM_PHASE_TIMEOUT))
+            .build()
+            .new_agent(),
+    }
 }
 
 fn dispatch(
@@ -398,6 +434,10 @@ fn dispatch_with_body(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use mlua::{Lua, Table};
+
     use crate::PluginRuntime;
 
     /// A runtime that grants `net` to plugin `p`. `kage.http` is gated,
@@ -506,5 +546,20 @@ mod tests {
         let frame = super::read_sse_frame(&mut reader).unwrap().unwrap();
         assert_eq!(frame.data, "trailing");
         assert!(super::read_sse_frame(&mut reader).unwrap().is_none());
+    }
+
+    #[test]
+    fn build_request_parses_timeout_secs() {
+        let lua = Lua::new();
+        let opts: Table = lua.load("{ timeout_secs = 5 }").eval().unwrap();
+        let spec = super::build_request(Some(&opts)).unwrap();
+        assert_eq!(spec.timeout, Some(Duration::from_secs(5)));
+
+        let none: Table = lua.load("{}").eval().unwrap();
+        let spec = super::build_request(Some(&none)).unwrap();
+        assert_eq!(spec.timeout, None);
+
+        let opts: Table = lua.load("{ timeout_secs = 0 }").eval().unwrap();
+        assert!(super::build_request(Some(&opts)).is_err());
     }
 }

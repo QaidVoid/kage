@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kage_core::sync::lock;
 
@@ -59,6 +59,12 @@ impl RpcError {
     #[must_use]
     pub fn method_not_found(method: &str) -> Self {
         Self::new(-32601, format!("method not found: {method}"))
+    }
+
+    /// `-32000` request exceeded its deadline without an answer.
+    #[must_use]
+    pub fn timed_out(method: &str) -> Self {
+        Self::new(-32000, format!("request timed out: {method}"))
     }
 
     fn from_value(value: &serde_json::Value) -> Self {
@@ -209,6 +215,37 @@ impl Peer {
         params: serde_json::Value,
     ) -> Result<serde_json::Value, RpcError> {
         self.request_cancellable(method, params, &|| false)
+    }
+
+    /// Send a request and give up after `timeout` without an answer.
+    ///
+    /// Unlike [`Self::request_cancellable`] the poll closure is a
+    /// deadline, so a silent peer surfaces as [`RpcError::timed_out`]
+    /// instead of blocking the caller forever. Late replies arriving
+    /// after the deadline are dropped: the pending entry is gone.
+    ///
+    /// # Errors
+    ///
+    /// Returns the peer's [`RpcError`], [`RpcError::timed_out`] when
+    /// the deadline passes, or a synthetic one when the connection
+    /// closed.
+    pub fn request_timeout(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<serde_json::Value, RpcError> {
+        let deadline = Instant::now() + timeout;
+        self.request_cancellable(method, params, &|| Instant::now() >= deadline)
+            .map_err(|e| {
+                // -32800 here can only mean the deadline tripped: this
+                // closure is the only cancel source in this call.
+                if e.code == -32800 {
+                    RpcError::timed_out(method)
+                } else {
+                    e
+                }
+            })
     }
 }
 
@@ -365,6 +402,40 @@ mod tests {
             .request_cancellable("x", serde_json::Value::Null, &|| true)
             .unwrap_err();
         assert_eq!(err.code, -32800);
+    }
+
+    #[test]
+    fn request_timeout_gives_up_when_the_peer_never_answers() {
+        let ((a_peer, _a_in), (_b_peer, _b_in)) = pair();
+        let start = std::time::Instant::now();
+        let err = a_peer
+            .request_timeout(
+                "initialize",
+                serde_json::Value::Null,
+                Duration::from_millis(100),
+            )
+            .unwrap_err();
+        assert_eq!(err.code, -32000);
+        assert!(err.message.contains("initialize"), "{err}");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "deadline must bound the wait, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn request_timeout_still_accepts_a_timely_reply() {
+        let ((a_peer, _a_in), (b_peer, b_in)) = pair();
+        thread::spawn(move || {
+            if let Inbound::Request { id, .. } = b_in.recv().unwrap() {
+                let _ = b_peer.respond(&id, Ok(serde_json::json!({"ok": true})));
+            }
+        });
+        let res = a_peer
+            .request_timeout("ping", serde_json::Value::Null, Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(res["ok"], true);
     }
 
     #[test]

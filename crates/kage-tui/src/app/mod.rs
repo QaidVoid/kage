@@ -269,6 +269,19 @@ pub enum PluginDialog {
     },
 }
 
+/// A fresh plugin snapshot the worker pushes to the App after a hot
+/// reload, so the `:` command palette and status-bar widgets track the
+/// reloaded runtime instead of serving the pre-reload registration
+/// until restart. Delivered over the channel wired by
+/// [`App::set_plugin_refresh`].
+pub struct PluginRefresh {
+    /// Plugin commands (regulars then overrides) registered in the
+    /// reloaded runtime.
+    pub commands: Vec<crate::command::PluginCommand>,
+    /// Status-bar widgets registered in the reloaded runtime.
+    pub widgets: Vec<Arc<kage_plugin::LuaWidget>>,
+}
+
 /// In-flight dialog bookkeeping: the reply channel plus how to turn an
 /// [`OverlayAction`] outcome into the value the parked coroutine is
 /// resumed with. One variant per `kage.ui.*` dialog kind.
@@ -716,6 +729,10 @@ pub struct App {
     /// onto (`kage.ui.select`). Drained between event polls; while a
     /// dialog is open the worker thread is parked awaiting the answer.
     dialog_rx: Option<std::sync::mpsc::Receiver<PluginDialog>>,
+    /// Channel the worker pushes a fresh [`PluginRefresh`] snapshot
+    /// onto after a plugin hot reload. Drained between event polls;
+    /// the newest snapshot re-seeds commands and status widgets.
+    plugin_refresh_rx: Option<std::sync::mpsc::Receiver<PluginRefresh>>,
     /// Results of async OS-clipboard image attaches. The arboard read
     /// can block for hundreds of ms on some compositors, so it runs
     /// on a background thread and sends the decoded attachment here;

@@ -544,6 +544,35 @@ pub(crate) fn translate_plugin_arg(
     }
 }
 
+/// Snapshot the plugin commands (regulars then overrides) the runtime
+/// currently holds, translated into the App's [`PluginCommand`] shape.
+/// Shared by startup seeding and the post-reload republish so both
+/// paths stay in sync.
+pub(crate) fn snapshot_plugin_commands(
+    rt: &PluginRuntime,
+) -> Vec<kage_tui::command::PluginCommand> {
+    let mut listing = Vec::new();
+    for cmd in rt.registered_commands() {
+        listing.push(kage_tui::command::PluginCommand {
+            name: cmd.name().to_owned(),
+            aliases: cmd.aliases().to_vec(),
+            is_override: false,
+            description: cmd.description().to_owned(),
+            args: cmd.args().iter().map(translate_plugin_arg).collect(),
+        });
+    }
+    for cmd in rt.registered_command_overrides() {
+        listing.push(kage_tui::command::PluginCommand {
+            name: cmd.name().to_owned(),
+            aliases: cmd.aliases().to_vec(),
+            is_override: true,
+            description: cmd.description().to_owned(),
+            args: cmd.args().iter().map(translate_plugin_arg).collect(),
+        });
+    }
+    listing
+}
+
 /// Replay `path` into the live TUI: clear the buffer, replace
 /// `cx.history` with the recorded one, point the worker at this file
 /// for future appends, and repopulate the buffer so the user sees the

@@ -30,6 +30,9 @@ impl App {
             self.drain_plugin_fork_request();
             self.drain_plugin_switch_request();
             self.drain_clipboard_attach();
+            if self.drain_plugin_refresh() {
+                needs_redraw = true;
+            }
             // Dialog + theme drains can mutate the visible screen
             // (overlay open, theme swap). Without this, the worker
             // pushes a `kage.ui.select` request from a /command, we

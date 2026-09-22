@@ -24,9 +24,9 @@ pub(crate) use kage_provider::ProviderRegistry;
 pub(crate) use kage_session::{SessionId, SessionReader, SessionSummary, SessionWriter};
 pub(crate) use kage_tools::ToolRegistry;
 pub(crate) use kage_tui::{
-    App, PickItem, PluginDialog, RunRequest, SharedBuffer, SharedSessionUsage, SharedToasts, Toast,
-    Tui, TuiHooks, buffer_host_log, populate_from_history, push_toast, shared_buffer,
-    shared_session_usage, shared_toasts,
+    App, PickItem, PluginDialog, PluginRefresh, RunRequest, SharedBuffer, SharedSessionUsage,
+    SharedToasts, Toast, Tui, TuiHooks, buffer_host_log, populate_from_history, push_toast,
+    shared_buffer, shared_session_usage, shared_toasts,
 };
 
 pub(crate) use crate::plugins::{PluginEventHooks, setup_runtime_with_sink};
@@ -65,6 +65,11 @@ pub(crate) struct WorkerConfig {
     /// worker forwards a suspended coroutine's dialog request here and
     /// parks on a per-request reply channel until the App answers.
     dialog_tx: mpsc::Sender<PluginDialog>,
+    /// Sender for post-reload plugin snapshots. After
+    /// `reload_dir` clears the runtime's registrations the worker
+    /// republishes the fresh commands + widgets through here so the
+    /// App's `:` palette and status widgets track the reload.
+    plugin_refresh_tx: mpsc::Sender<PluginRefresh>,
     /// Loop tuning resolved from user/project config at startup.
     loop_cfg: LoopConfig,
     /// Shared FIFO of user prompts the App pushes when a `Submit`
@@ -99,7 +104,7 @@ pub(crate) use support::{
     consult_session_op, find_last_entry, first_text_of, list_session_choices, list_session_nodes,
     open_writer_for_turn, push_error, refresh_session_entries, resolve_switch_target,
     run_bridged_command, run_bridged_keybinding, run_compact_with_hooks, run_with_hooks,
-    translate_plugin_arg, write_session_title,
+    snapshot_plugin_commands, write_session_title,
 };
 pub(crate) use worker::spawn_worker;
 

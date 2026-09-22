@@ -263,6 +263,48 @@ fn set_plugin_commands_reuses_leaked_specs_on_unchanged_reload() {
 }
 
 #[test]
+fn drain_plugin_refresh_reseeds_commands_and_widgets() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    let (rtx, rrx) = mpsc::channel();
+    app.set_plugin_refresh(rrx);
+
+    app.set_plugin_commands(vec![PluginCommand {
+        name: "old".into(),
+        aliases: Vec::new(),
+        is_override: false,
+        description: "pre-reload".into(),
+        args: Vec::new(),
+    }]);
+    let pre = app.plugin_command_specs[0];
+
+    rtx.send(PluginRefresh {
+        commands: vec![PluginCommand {
+            name: "zznew".into(),
+            aliases: vec!["zzn".into()],
+            is_override: false,
+            description: "post-reload".into(),
+            args: Vec::new(),
+        }],
+        widgets: Vec::new(),
+    })
+    .unwrap();
+    assert!(app.drain_plugin_refresh(), "a queued snapshot applies");
+    assert!(
+        !std::ptr::eq(app.plugin_command_specs[0], pre),
+        "commands re-seeded from the snapshot"
+    );
+    assert_eq!(app.plugin_commands.len(), 1);
+    assert_eq!(app.plugin_commands[0].0, "zznew");
+    assert!(
+        app.plugin_texts_dirty,
+        "widget reseed marks the text cache dirty"
+    );
+    assert!(!app.drain_plugin_refresh(), "drained channel is a no-op");
+}
+
+#[test]
 fn override_command_shadows_builtin_and_dispatches_first() {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();

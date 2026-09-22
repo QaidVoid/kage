@@ -71,6 +71,7 @@ impl App {
             steering: None,
             toasts: None,
             dialog_rx: None,
+            plugin_refresh_rx: None,
             attach_tx,
             attach_rx,
             plugin_overlay: None,
@@ -462,6 +463,14 @@ impl App {
         self.dialog_rx = Some(rx);
     }
 
+    /// Wire the channel the worker pushes a fresh [`PluginRefresh`]
+    /// snapshot onto after a plugin hot reload. Without it, a reload
+    /// leaves the `:` palette and status widgets serving the
+    /// pre-reload registration until the app restarts.
+    pub fn set_plugin_refresh(&mut self, rx: std::sync::mpsc::Receiver<PluginRefresh>) {
+        self.plugin_refresh_rx = Some(rx);
+    }
+
     pub(crate) fn refresh_plugin_widget_texts(&mut self, width: u16) {
         self.plugin_widget_texts = self
             .plugin_widgets
@@ -674,6 +683,26 @@ impl App {
                 self.active_dialog = Some(PluginDialogState::Editor { reply });
             }
         }
+        true
+    }
+
+    /// Apply the newest pending [`PluginRefresh`] snapshot, if any.
+    /// Drained between event polls; if the worker pushed more than one
+    /// between ticks only the latest is applied. Returns `true` when a
+    /// snapshot was applied so the caller can force a repaint.
+    pub(crate) fn drain_plugin_refresh(&mut self) -> bool {
+        let Some(rx) = self.plugin_refresh_rx.as_ref() else {
+            return false;
+        };
+        let mut latest = None;
+        while let Ok(snapshot) = rx.try_recv() {
+            latest = Some(snapshot);
+        }
+        let Some(snapshot) = latest else {
+            return false;
+        };
+        self.set_plugin_commands(snapshot.commands);
+        self.set_plugin_widgets(snapshot.widgets);
         true
     }
 

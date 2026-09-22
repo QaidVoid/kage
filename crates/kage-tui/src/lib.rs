@@ -25,7 +25,7 @@ pub mod toast;
 pub mod usage;
 pub mod view;
 
-pub use app::{App, AppExit, PluginDialog, RunRequest, SessionLister};
+pub use app::{App, AppExit, PluginDialog, PluginRefresh, RunRequest, SessionLister};
 pub use buffer::{Block, Buffer};
 pub use chord::Chord;
 pub use cmdline::{CommandLine, CommandLineEvent};

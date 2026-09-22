@@ -76,6 +76,7 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
             session_usage,
             toasts,
             dialog_tx,
+            plugin_refresh_tx,
             loop_cfg,
             steering,
             tx_self,
@@ -510,7 +511,17 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                     let Some(dir) = plugins_dir.as_ref() else {
                         continue;
                     };
-                    match rt.reload_dir(dir) {
+                    let reload = rt.reload_dir(dir);
+                    // `reload_dir` cleared the runtime's registrations
+                    // before replaying; republish whatever the fresh
+                    // snapshot holds (also on error, which leaves a
+                    // partially-replayed runtime) so the `:` palette
+                    // and status widgets track the reload.
+                    let _ = plugin_refresh_tx.send(PluginRefresh {
+                        commands: snapshot_plugin_commands(rt),
+                        widgets: rt.registered_widgets(),
+                    });
+                    match reload {
                         Ok(report) => {
                             let msg = if report.failed.is_empty() {
                                 format!("plugins reloaded ({} loaded)", report.loaded.len())

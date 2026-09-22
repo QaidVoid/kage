@@ -151,24 +151,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
             }
             tools.register(tool);
         }
-        for cmd in rt.registered_commands() {
-            plugin_command_listing.push(kage_tui::command::PluginCommand {
-                name: cmd.name().to_owned(),
-                aliases: cmd.aliases().to_vec(),
-                is_override: false,
-                description: cmd.description().to_owned(),
-                args: cmd.args().iter().map(translate_plugin_arg).collect(),
-            });
-        }
-        for cmd in rt.registered_command_overrides() {
-            plugin_command_listing.push(kage_tui::command::PluginCommand {
-                name: cmd.name().to_owned(),
-                aliases: cmd.aliases().to_vec(),
-                is_override: true,
-                description: cmd.description().to_owned(),
-                args: cmd.args().iter().map(translate_plugin_arg).collect(),
-            });
-        }
+        plugin_command_listing = support::snapshot_plugin_commands(rt);
         for renderer in rt.registered_block_renderers() {
             let kind = renderer.kind().to_owned();
             let factory = std::sync::Arc::new(
@@ -224,6 +207,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     let tx_watcher = tx.clone();
     let steering = kage_tui::shared_steering();
     let (dialog_tx, dialog_rx) = mpsc::channel::<PluginDialog>();
+    let (plugin_refresh_tx, plugin_refresh_rx) = mpsc::channel::<PluginRefresh>();
 
     // Plan a session up-front but defer creating the file until the
     // first prompt actually lands. Otherwise quitting or resuming
@@ -273,6 +257,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         session_usage: session_usage.clone(),
         toasts: toasts.clone(),
         dialog_tx,
+        plugin_refresh_tx,
         loop_cfg,
         steering: steering.clone(),
         tx_self: tx_worker,
@@ -364,6 +349,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         app.set_plugin_terminal_hooks(hooks);
     }
     app.set_plugin_dialog(dialog_rx);
+    app.set_plugin_refresh(plugin_refresh_rx);
     app.set_plugin_keybindings(plugin_keybinding_chords);
     let keybinding_errors = app.set_config_keybindings(
         app_config

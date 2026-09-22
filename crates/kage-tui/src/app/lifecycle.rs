@@ -257,7 +257,7 @@ impl App {
         let search_match_set = self.refresh_search_matches().map(|(set, _)| set).cloned();
         let render_width = tui.terminal().size().map_or(80, |r| r.width);
         self.refresh_plugin_widget_texts(render_width);
-        let mut buffer = lock(&self.buffer);
+        let mut buffer = lock(&self.buffer).clone();
         let cmdline = self.cmdline.as_ref();
         let model_snapshot = self.status_model.as_ref().map(|m| lock(m).clone());
         let status = view::StatusCtx {
@@ -357,6 +357,10 @@ impl App {
                 overlay.render(modal, frame.buffer_mut(), &ctx);
             }
         })?;
+        // Merge renderer-owned state (caches, clamped scroll, last-frame
+        // geometry) from the snapshot back into the live buffer. The
+        // mutex is never held across the paint itself.
+        lock(&self.buffer).merge_render_state(buffer);
         self.captured_rows = captured_rows;
         Ok(())
     }

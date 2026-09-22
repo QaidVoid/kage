@@ -13,6 +13,30 @@ fn user_msg(text: &str) -> Message {
     )
 }
 
+fn assistant_tool_call(id: &str, name: &str) -> Message {
+    Message::new(
+        Role::Assistant,
+        vec![Content::ToolCall {
+            id: ToolCallId::new(id),
+            name: name.to_owned(),
+            input: serde_json::json!({}),
+        }],
+        None,
+    )
+}
+
+fn tool_result(id: &str, output: &str) -> Message {
+    Message::new(
+        Role::ToolResult,
+        vec![Content::ToolResultBlock {
+            call_id: ToolCallId::new(id),
+            output: output.to_owned(),
+            is_error: false,
+        }],
+        None,
+    )
+}
+
 #[test]
 fn body_sets_model_and_messages() {
     let req = StreamRequest::new("claude-sonnet-4-6", vec![user_msg("hi")]);
@@ -139,6 +163,66 @@ fn explicit_thinking_config_wins_over_level() {
     req.level = Some(crate::ThinkingLevel::XHigh);
     let body = build_request_body(&req, false);
     assert_eq!(body["thinking"]["budget_tokens"], 999);
+}
+
+#[test]
+fn continuation_request_drops_thinking() {
+    let mut req = StreamRequest::new(
+        "m",
+        vec![
+            user_msg("run it"),
+            assistant_tool_call("call_1", "bash"),
+            tool_result("call_1", "file.rs"),
+        ],
+    );
+    req.thinking = Some(crate::ThinkingConfig {
+        budget_tokens: 12_000,
+    });
+    let body = build_request_body(&req, true);
+    assert!(body.get("thinking").is_none());
+}
+
+#[test]
+fn completed_tool_turn_keeps_thinking_on_next_request() {
+    let mut req = StreamRequest::new(
+        "m",
+        vec![
+            user_msg("run it"),
+            assistant_tool_call("call_1", "bash"),
+            tool_result("call_1", "file.rs"),
+            Message::new(
+                Role::Assistant,
+                vec![Content::Text {
+                    text: "done".into(),
+                }],
+                None,
+            ),
+            user_msg("thanks"),
+        ],
+    );
+    req.thinking = Some(crate::ThinkingConfig {
+        budget_tokens: 12_000,
+    });
+    let body = build_request_body(&req, false);
+    assert_eq!(body["thinking"]["type"], "enabled");
+}
+
+#[test]
+fn steering_after_tool_results_drops_thinking() {
+    let mut req = StreamRequest::new(
+        "m",
+        vec![
+            user_msg("run it"),
+            assistant_tool_call("call_1", "bash"),
+            tool_result("call_1", "file.rs"),
+            user_msg("also check the logs"),
+        ],
+    );
+    req.thinking = Some(crate::ThinkingConfig {
+        budget_tokens: 12_000,
+    });
+    let body = build_request_body(&req, true);
+    assert!(body.get("thinking").is_none());
 }
 
 #[test]

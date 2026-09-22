@@ -136,7 +136,9 @@ pub(crate) fn build_request_body(req: &StreamRequest, stream: bool) -> Value {
     if let Some(temp) = req.temperature {
         body["temperature"] = serde_json::json!(temp);
     }
-    if let Some(budget) = resolve_thinking_budget(req) {
+    if let Some(budget) = resolve_thinking_budget(req)
+        && !continues_assistant_turn(req)
+    {
         body["thinking"] = serde_json::json!({
             "type": "enabled",
             "budget_tokens": budget,
@@ -162,6 +164,21 @@ fn resolve_thinking_budget(req: &StreamRequest) -> Option<u32> {
     crate::catalog::model("anthropic", &req.model)
         .and_then(|m| m.thinking_budget(level))
         .or_else(|| level.default_budget_tokens())
+}
+
+/// Whether this request continues the final assistant turn: a tool
+/// result follows the last assistant message, so that turn is still
+/// open. With thinking enabled, the API requires an open assistant
+/// turn to lead with its signed thinking block. kage never persists
+/// signatures, so continuation requests drop thinking instead of
+/// sending a body the API rejects.
+fn continues_assistant_turn(req: &StreamRequest) -> bool {
+    let Some(idx) = req.messages.iter().rposition(|m| m.role == Role::Assistant) else {
+        return false;
+    };
+    req.messages[idx + 1..]
+        .iter()
+        .any(|m| m.role == Role::ToolResult)
 }
 
 fn mark_last_block_for_caching(message: &mut Value) {

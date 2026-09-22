@@ -22,9 +22,10 @@ impl Buffer {
         self.blocks.iter().map(Block::line_count).sum()
     }
 
-    /// Rows scrolled up from the bottom. Zero means "follow newest".
+    /// Absolute virtual row of the viewport's first visible row while
+    /// scrolled up; `None` means pinned to the bottom (follow newest).
     #[must_use]
-    pub fn scroll(&self) -> usize {
+    pub fn scroll(&self) -> Option<usize> {
         self.scroll
     }
 
@@ -32,17 +33,27 @@ impl Buffer {
     /// streaming content.
     #[must_use]
     pub fn is_following(&self) -> bool {
-        self.scroll == 0
+        self.scroll.is_none()
     }
 
-    /// Set the scroll offset (rows up from the bottom). No model-layer
-    /// cap is applied here because the model doesn't know about line
-    /// wrapping: a logical line may render as multiple visual rows
-    /// once Paragraph wraps it. The renderer holds the authoritative
-    /// max each frame and clamps there.
+    /// Pin the viewport so its first visible row is virtual row
+    /// `scroll`, detaching from the bottom. No model-layer cap is
+    /// applied because the model doesn't know about line wrapping: a
+    /// logical line may render as multiple visual rows once Paragraph
+    /// wraps it. The renderer holds the authoritative max each frame
+    /// and clamps there.
     pub fn set_scroll(&mut self, scroll: usize) {
-        if self.scroll != scroll {
-            self.scroll = scroll;
+        if self.scroll != Some(scroll) {
+            self.scroll = Some(scroll);
+            self.bump_version();
+        }
+    }
+
+    /// Re-arm bottom-following: the viewport tracks the newest row as
+    /// content streams in.
+    pub fn follow(&mut self) {
+        if self.scroll.is_some() {
+            self.scroll = None;
             self.bump_version();
         }
     }
@@ -65,8 +76,9 @@ impl Buffer {
     }
 
     /// What focus value the renderer painted last frame. The renderer
-    /// uses this to detect focus changes and auto-scroll the newly
-    /// focused block into view.
+    /// compares this to the current effective focus each frame; when
+    /// they differ, it invalidates the moved blocks' caches so
+    /// emphasis repaints.
     #[must_use]
     pub fn last_drawn_focus(&self) -> Option<usize> {
         self.last_drawn_focus
@@ -76,6 +88,20 @@ impl Buffer {
     /// frame so the next frame can compare and react.
     pub fn set_last_drawn_focus(&mut self, value: Option<usize>) {
         self.last_drawn_focus = value;
+    }
+
+    /// The explicit focus the renderer last observed. Scroll-into-view
+    /// keys on changes to this value, so streaming appends (which move
+    /// the effective-focus fallback) never yank a pinned viewport.
+    #[must_use]
+    pub fn last_user_focus(&self) -> Option<usize> {
+        self.last_user_focus
+    }
+
+    /// Renderer hook: record the explicit focus value seen this frame
+    /// so the next frame can tell a user move from fallback drift.
+    pub fn set_last_user_focus(&mut self, value: Option<usize>) {
+        self.last_user_focus = value;
     }
 
     /// Whether the cached height/lines for block `idx` may be served
@@ -221,8 +247,8 @@ impl Buffer {
 
     /// Merge the renderer-owned state of a snapshot back into this
     /// buffer after an out-of-lock render: per-block height and line
-    /// caches, the clamped scroll, the last-drawn focus, and the
-    /// last-frame geometry tables mouse handlers read.
+    /// caches, the clamped scroll, the last-drawn and last-seen focus
+    /// echoes, and the last-frame geometry tables mouse handlers read.
     ///
     /// Block content is never merged: blocks appended while the
     /// snapshot was being drawn stay in place with their (empty)
@@ -251,6 +277,7 @@ impl Buffer {
         }
         self.scroll = snapshot.scroll;
         self.last_drawn_focus = snapshot.last_drawn_focus;
+        self.last_user_focus = snapshot.last_user_focus;
         self.last_block_screen_rows = snapshot.last_block_screen_rows;
         self.last_block_virtual_rows = snapshot.last_block_virtual_rows;
         self.last_area_x = snapshot.last_area_x;

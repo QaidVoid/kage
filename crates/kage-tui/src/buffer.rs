@@ -190,25 +190,34 @@ fn count_lines(text: &str) -> usize {
     text.split('\n').count()
 }
 
-/// Append-only conversation history with a scroll offset measured as
-/// "rows scrolled up from the bottom". `scroll == 0` means the viewport
-/// is pinned to the latest content (auto-follow on streaming); larger
-/// values walk backwards through history. New content arriving while
-/// the user is scrolled back leaves their position alone, so the
-/// "follow while idle, freeze while reading" behavior emerges from the
-/// scroll model rather than a separate flag.
+/// Append-only conversation history with a viewport anchor in
+/// absolute virtual-row space. `scroll == None` means the viewport is
+/// pinned to the latest content (auto-follow on streaming);
+/// `Some(top)` means the viewport's first row is virtual row `top`,
+/// so content arriving below never moves what the user is reading.
+/// The model layer does not cap the anchor: only the renderer knows
+/// how many visual rows the wrapped blocks occupy, so it clamps
+/// against the real total each frame (and re-arms follow when the
+/// clamp lands the viewport on the bottom row).
 #[derive(Clone, Debug, Default)]
 pub struct Buffer {
     blocks: Vec<Block>,
-    scroll: usize,
+    scroll: Option<usize>,
     /// Index of the user-selected foldable block, if any. `None` means
     /// "no explicit selection"; the renderer falls back to the last
     /// foldable block in the buffer for fold-toggle gestures.
     focus: Option<usize>,
     /// The focus value the renderer last painted. The renderer
     /// compares this to the current effective focus each frame; when
-    /// they differ, it scrolls so the newly focused block is in view.
+    /// they differ, it invalidates the moved blocks' caches so
+    /// emphasis repaints.
     last_drawn_focus: Option<usize>,
+    /// The explicit focus the renderer last saw. Auto-scrolling a
+    /// moved focus into view keys on this, not the effective focus:
+    /// appended blocks change the effective fallback every time one
+    /// lands, and a streaming append must never yank a pinned
+    /// viewport back to the bottom.
+    last_user_focus: Option<usize>,
     /// Per-block rendered-height cache, indexed parallel to
     /// [`Self::blocks`]. Each entry stores `(width, height_in_rows)`
     /// captured by the renderer's last successful layout pass for

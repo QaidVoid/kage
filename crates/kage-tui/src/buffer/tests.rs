@@ -234,7 +234,7 @@ fn set_scroll_does_not_cap_at_logical_total_lines() {
     // The model does not clamp; the renderer will, since only it
     // knows how many visual rows the wrapped paragraph occupies.
     buf.set_scroll(99);
-    assert_eq!(buf.scroll(), 99);
+    assert_eq!(buf.scroll(), Some(99));
 }
 
 #[test]
@@ -338,7 +338,7 @@ fn block_text_returns_raw_markdown_source_not_render() {
 fn fresh_buffer_is_following() {
     let buf = Buffer::new();
     assert!(buf.is_following());
-    assert_eq!(buf.scroll(), 0);
+    assert_eq!(buf.scroll(), None);
 }
 
 #[test]
@@ -348,17 +348,23 @@ fn append_does_not_disturb_user_scroll_position() {
     buf.set_scroll(2);
     assert!(!buf.is_following());
     buf.append_assistant_delta("hi\nthere\nyou");
-    assert_eq!(buf.scroll(), 2);
+    assert_eq!(buf.scroll(), Some(2));
     assert!(!buf.is_following());
 }
 
 #[test]
-fn returning_to_zero_scroll_re_enables_follow() {
+fn follow_re_arms_and_pin_at_top_is_not_following() {
     let mut buf = Buffer::new();
     buf.push_user("aa\nbb\ncc");
     buf.set_scroll(2);
-    buf.set_scroll(0);
+    buf.follow();
     assert!(buf.is_following());
+    // Pinning at row 0 is a genuine top pin on a buffer taller than
+    // the viewport; only the renderer's clamp turns a bottom pin
+    // back into follow.
+    buf.set_scroll(0);
+    assert_eq!(buf.scroll(), Some(0));
+    assert!(!buf.is_following());
 }
 
 #[test]
@@ -368,7 +374,8 @@ fn take_returns_blocks_and_resets_scroll() {
     buf.set_scroll(1);
     let taken = buf.take();
     assert_eq!(taken.len(), 1);
-    assert_eq!(buf.scroll(), 0);
+    assert_eq!(buf.scroll(), None);
+    assert!(buf.is_following());
     assert!(buf.blocks().is_empty());
 }
 
@@ -384,7 +391,7 @@ fn merge_render_state_copies_renderer_state_and_keeps_appends() {
     snap.set_last_block_screen_rows(vec![(0, 1, 4)]);
     live.push_user("world");
     live.merge_render_state(snap);
-    assert_eq!(live.scroll(), 7);
+    assert_eq!(live.scroll(), Some(7));
     assert_eq!(live.cached_height(0, 80), Some(3));
     assert_eq!(live.cached_height(1, 80), None);
     assert_eq!(live.last_drawn_focus(), Some(0));
@@ -401,7 +408,7 @@ fn merge_render_state_skips_when_live_has_fewer_blocks() {
     snap.push_user("b");
     snap.set_scroll(4);
     live.merge_render_state(snap);
-    assert_eq!(live.scroll(), 0);
+    assert_eq!(live.scroll(), None);
     assert_eq!(live.blocks().len(), 1);
 }
 
@@ -566,6 +573,35 @@ fn compact_renumbers_renderer_row_caches() {
     assert_eq!(buf.block_virtual_rows(0), Some((9, 15)));
     assert_eq!(buf.block_virtual_rows(1), Some((15, 21)));
     assert_eq!(buf.block_virtual_rows(2), None);
+}
+
+#[test]
+fn compact_shifts_a_pinned_scroll_anchor() {
+    let mut buf = Buffer::new();
+    for i in 0..4 {
+        buf.push_user(format!("m{i}"));
+    }
+    for idx in 0..4 {
+        buf.set_cached_height(idx, 80, 1);
+    }
+    // Pin at m2's top: m0 and m1 occupy two virtual rows each (one
+    // wrapped row + one separator), so m2 starts at row 4.
+    buf.set_scroll(4);
+
+    assert_eq!(buf.compact_to(2), 2);
+    assert_eq!(
+        buf.scroll(),
+        Some(0),
+        "the anchor tracks m2 as it slides to the top"
+    );
+
+    // A following viewport is untouched by compaction.
+    let mut buf = Buffer::new();
+    for i in 0..4 {
+        buf.push_user(format!("m{i}"));
+    }
+    assert_eq!(buf.compact_to(2), 2);
+    assert!(buf.is_following());
 }
 
 #[test]

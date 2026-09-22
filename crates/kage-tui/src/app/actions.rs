@@ -289,8 +289,8 @@ impl App {
     }
 
     /// Keep the visual cursor on screen by adjusting buffer scroll.
-    /// Cursor above the viewport top scrolls up; below the bottom
-    /// scrolls down. Otherwise no-op.
+    /// Cursor above the viewport top pins the viewport at the cursor
+    /// row; below the bottom scrolls just past it. Otherwise no-op.
     pub(crate) fn scroll_visual_cursor_into_view(&mut self, cursor_vrow: usize) {
         let mut buf = lock(&self.buffer);
         let area_height = usize::from(buf.last_area_height());
@@ -299,13 +299,10 @@ impl App {
         }
         let visible_top = buf.last_virtual_top();
         let visible_bot = visible_top.saturating_add(area_height);
-        let current_scroll = buf.scroll();
         if cursor_vrow < visible_top {
-            let delta = visible_top - cursor_vrow;
-            buf.set_scroll(current_scroll.saturating_add(delta));
+            buf.set_scroll(cursor_vrow);
         } else if cursor_vrow >= visible_bot {
-            let delta = cursor_vrow + 1 - visible_bot;
-            buf.set_scroll(current_scroll.saturating_sub(delta));
+            buf.set_scroll(visible_top + (cursor_vrow + 1 - visible_bot));
         }
     }
 

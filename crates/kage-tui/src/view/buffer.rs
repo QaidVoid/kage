@@ -48,6 +48,9 @@ pub(super) fn render_buffer(
 
     let registry = read(registry::global());
     let focus = buffer.effective_focus();
+    let explicit = buffer.focus();
+    let user_moved = explicit != buffer.last_user_focus();
+    buffer.set_last_user_focus(explicit);
 
     let mut heights: Vec<usize> = Vec::with_capacity(n);
     let mut total_rows = 0usize;
@@ -87,46 +90,76 @@ pub(super) fn render_buffer(
         if let Some(new) = focus {
             buffer.invalidate_height(new);
         }
-        if let Some(focus_idx) = focus {
-            let display_idx = if consumed_results.contains(&focus_idx) {
-                call_idx_for_result.get(&focus_idx).copied()
-            } else {
-                Some(focus_idx)
-            };
-            if let Some(di) = display_idx
-                && let Some(&rendered_height) = heights.get(di)
-            {
-                // A focus index past `heights` (host reset shrank the
-                // buffer between frames) skips the follow-scroll
-                // instead of panicking the render.
-                let mut rendered_start = 0usize;
-                for (i, h) in heights.iter().enumerate().take(di) {
-                    if !consumed_results.contains(&i) {
-                        rendered_start = rendered_start.saturating_add(*h).saturating_add(1);
-                    }
+    }
+
+    // Scroll a just-moved focus into view. Keyed on the *explicit*
+    // focus: the effective fallback changes every time a block lands,
+    // and following that drift would yank a pinned viewport on each
+    // streaming append. `user_moved` makes the scroll one-shot instead
+    // of re-firing every frame while focus rests on a block the user
+    // deliberately scrolled away.
+    if user_moved && let Some(focus_idx) = explicit {
+        let display_idx = if consumed_results.contains(&focus_idx) {
+            call_idx_for_result.get(&focus_idx).copied()
+        } else {
+            Some(focus_idx)
+        };
+        if let Some(di) = display_idx
+            && let Some(&rendered_height) = heights.get(di)
+        {
+            // A focus index past `heights` (host reset shrank the
+            // buffer between frames) skips the follow-scroll
+            // instead of panicking the render.
+            let mut rendered_start = 0usize;
+            for (i, h) in heights.iter().enumerate().take(di) {
+                if !consumed_results.contains(&i) {
+                    rendered_start = rendered_start.saturating_add(*h).saturating_add(1);
                 }
-                let rendered_end = rendered_start.saturating_add(rendered_height);
-                let scroll_to_top = total_rows.saturating_sub(rendered_start + visible);
-                let scroll_to_bottom = total_rows.saturating_sub(rendered_end);
-                let current = buffer.scroll().min(max_scroll_back);
-                let in_view = current >= scroll_to_top && current <= scroll_to_bottom;
-                if !in_view {
-                    let target = if rendered_height > visible || current < scroll_to_top {
-                        scroll_to_top
-                    } else {
-                        scroll_to_bottom
-                    };
-                    buffer.set_scroll(target.min(max_scroll_back));
-                }
+            }
+            let rendered_end = rendered_start.saturating_add(rendered_height);
+            // Absolute anchors: the viewport can show the block's top
+            // row at the viewport top (`rendered_start`) or its bottom
+            // row at the viewport bottom (`end - visible`); anything
+            // between keeps the whole block on screen.
+            let top_align = rendered_start;
+            let bottom_align = rendered_end.saturating_sub(visible);
+            let current = buffer
+                .scroll()
+                .map_or(max_scroll_back, |top| top.min(max_scroll_back));
+            let in_view = current >= bottom_align && current <= top_align;
+            if !in_view {
+                // Tall blocks always align their top; otherwise bring
+                // the nearest edge into view.
+                let target = if rendered_height > visible || current < bottom_align {
+                    top_align
+                } else {
+                    bottom_align
+                };
+                buffer.set_scroll(target.min(max_scroll_back));
             }
         }
     }
 
-    let scroll_back = buffer.scroll().min(max_scroll_back);
-    if scroll_back != buffer.scroll() {
-        buffer.set_scroll(scroll_back);
-    }
-    let visible_top = total_rows.saturating_sub(visible.saturating_add(scroll_back));
+    // Apply the scroll anchor. `None` follows the bottom; `Some(top)`
+    // pins the viewport at absolute virtual row `top`, clamped to the
+    // real total (only the renderer knows wrapped row counts). A pin
+    // that clamps to the bottom row re-arms follow, so scrolling down
+    // to the bottom resumes tracking new content.
+    let visible_top = match buffer.scroll() {
+        None => total_rows.saturating_sub(visible),
+        Some(top) => {
+            let clamped = top.min(max_scroll_back);
+            if clamped < top {
+                buffer.set_scroll(clamped);
+            }
+            if clamped == max_scroll_back {
+                buffer.follow();
+                total_rows.saturating_sub(visible)
+            } else {
+                clamped
+            }
+        }
+    };
     let visible_bot = visible_top.saturating_add(visible);
 
     let mut emitted_lines: Vec<Line<'static>> = Vec::new();

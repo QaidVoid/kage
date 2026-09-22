@@ -289,18 +289,20 @@ impl Buffer {
     pub fn clear(&mut self) {
         self.blocks.clear();
         self.clear_block_caches();
-        self.scroll = 0;
+        self.scroll = None;
         self.focus = None;
         self.last_drawn_focus = None;
+        self.last_user_focus = None;
         self.stream_dirty_since = None;
     }
 
     /// Take ownership of the blocks, leaving the buffer empty. Focus
     /// and scroll reset for the same reason as [`Self::clear`].
     pub fn take(&mut self) -> Vec<Block> {
-        self.scroll = 0;
+        self.scroll = None;
         self.focus = None;
         self.last_drawn_focus = None;
+        self.last_user_focus = None;
         self.stream_dirty_since = None;
         self.clear_block_caches();
         mem::take(&mut self.blocks)
@@ -329,9 +331,10 @@ impl Buffer {
     /// result is still kept; the frontier extends past such results
     /// until none remain, preventing a merged composite from losing
     /// its call half (which would render as running forever). This
-    /// can leave fewer than `cap` blocks. Scroll survives untouched:
-    /// it counts rows from the bottom, which compaction doesn't
-    /// move.
+    /// can leave fewer than `cap` blocks. A pinned scroll anchor
+    /// shifts up by the virtual rows the dropped blocks occupied so
+    /// the viewport keeps showing the same content; uncached heights
+    /// count one row (never measured). Following state is untouched.
     pub(crate) fn compact_to(&mut self, cap: usize) -> usize {
         let len = self.blocks.len();
         if len <= cap {
@@ -355,15 +358,34 @@ impl Buffer {
             k += next + 1;
         }
 
+        // Shift a pinned viewport anchor up by the virtual rows the
+        // dropped blocks occupied so it keeps pointing at the same
+        // content. Reads the height cache, so must precede the drain.
+        if let Some(top) = self.scroll {
+            let dropped_rows = self.dropped_block_rows(k);
+            self.scroll = Some(top.saturating_sub(dropped_rows));
+        }
+
         self.blocks.drain(0..k);
         self.block_heights.drain(0..k);
         self.block_render_lines.drain(0..k);
         self.focus = self.focus.and_then(|f| f.checked_sub(k));
         self.last_drawn_focus = self.last_drawn_focus.and_then(|f| f.checked_sub(k));
+        self.last_user_focus = self.last_user_focus.and_then(|f| f.checked_sub(k));
         renumber_after_compact(&mut self.last_block_screen_rows, k);
         renumber_after_compact(&mut self.last_block_virtual_rows, k);
         self.bump_version();
         k
+    }
+
+    /// Sum of the virtual rows (height + separator) the `k` blocks
+    /// dropped by [`Self::compact_to`] occupied, best effort from the
+    /// renderer's height cache. Must run before the cache drain.
+    fn dropped_block_rows(&self, k: usize) -> usize {
+        self.block_heights[..k]
+            .iter()
+            .map(|slot| slot.map_or(1, |(_, h)| usize::from(h) + 1))
+            .sum()
     }
 
     pub(crate) fn last_is_live_assistant(&self) -> bool {

@@ -55,8 +55,8 @@ impl App {
         match action {
             InputAction::Submit(text) => self.handle_submit(text),
             InputAction::Scroll(delta) => self.scroll_by(delta),
-            InputAction::ScrollToTop => self.set_scroll(usize::MAX),
-            InputAction::ScrollToBottom => self.set_scroll(0),
+            InputAction::ScrollToTop => self.set_scroll(0),
+            InputAction::ScrollToBottom => self.follow(),
             InputAction::ToggleFold => self.toggle_last_fold(),
             InputAction::UnfoldAll => self.set_all_folds(false),
             InputAction::FoldAll => self.set_all_folds(true),
@@ -276,10 +276,15 @@ impl App {
 
     pub(crate) fn scroll_by(&mut self, delta: i32) {
         let mut buf = lock(&self.buffer);
-        // Positive delta = move toward newest (decrement rows-up);
-        // negative = move toward oldest (increment rows-up).
-        let current = i64::try_from(buf.scroll()).unwrap_or(i64::MAX);
-        let target = (current - i64::from(delta)).max(0);
+        // Positive delta = move toward newest (increment the absolute
+        // anchor); negative = toward oldest (decrement). Anchor on the
+        // last painted viewport top so a pinned viewport stays exactly
+        // where the user is reading while content streams in below;
+        // while following, the anchor is the previous frame's top
+        // (bottom row), so a scroll wheel tick detaches from there.
+        let anchor = buf.scroll().unwrap_or_else(|| buf.last_virtual_top());
+        let current = i64::try_from(anchor).unwrap_or(i64::MAX);
+        let target = (current + i64::from(delta)).max(0);
         let clamped = usize::try_from(target).unwrap_or(0);
         buf.set_scroll(clamped);
     }
@@ -287,6 +292,11 @@ impl App {
     pub(crate) fn set_scroll(&mut self, scroll: usize) {
         let mut buf = lock(&self.buffer);
         buf.set_scroll(scroll);
+    }
+
+    pub(crate) fn follow(&mut self) {
+        let mut buf = lock(&self.buffer);
+        buf.follow();
     }
 
     pub(crate) fn toggle_last_fold(&mut self) {

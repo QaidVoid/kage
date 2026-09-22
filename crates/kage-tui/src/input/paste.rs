@@ -154,12 +154,7 @@ impl InputState {
     }
 
     pub(crate) fn move_cursor(&mut self, delta: i32) {
-        let target = i64::try_from(self.cursor).unwrap_or(0) + i64::from(delta);
-        if target < 0 {
-            self.cursor = 0;
-        } else if let Ok(pos) = usize::try_from(target) {
-            self.cursor = pos.min(self.text.len());
-        }
+        self.cursor = self.cursor_after_char_move(delta);
     }
 
     /// Move the cursor up one row inside the current text. Returns true

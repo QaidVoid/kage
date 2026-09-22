@@ -313,11 +313,19 @@ impl CommandLine {
     }
 
     fn move_cursor(&mut self, delta: i32) {
-        let target = i64::try_from(self.cursor).unwrap_or(0) + i64::from(delta);
-        if target < 0 {
-            self.cursor = 0;
-        } else if let Ok(pos) = usize::try_from(target) {
-            self.cursor = pos.min(self.text.len());
+        if delta >= 0 {
+            let start = self.cursor;
+            let forward = usize::try_from(delta).unwrap_or(0);
+            self.cursor = self.text[start..]
+                .char_indices()
+                .nth(forward)
+                .map_or(self.text.len(), |(idx, _)| start + idx);
+        } else {
+            let back = delta.unsigned_abs() as usize - 1;
+            self.cursor = self.text[..self.cursor]
+                .char_indices()
+                .nth_back(back)
+                .map_or(0, |(idx, _)| idx);
         }
     }
 }
@@ -529,6 +537,26 @@ mod tests {
         assert_eq!(cl.cursor(), 1);
         send(&mut cl, key(KeyCode::Char('X')));
         assert_eq!(cl.text(), "aXbc");
+    }
+
+    #[test]
+    fn left_right_move_cursor_by_char_not_byte() {
+        let mut cl = CommandLine::new();
+        for c in "éé".chars() {
+            send(&mut cl, key(KeyCode::Char(c)));
+        }
+        // Cursor was after both chars (byte 4). One Left lands on the
+        // start of the second `é` (byte 2), not mid-char (byte 3).
+        send(&mut cl, key(KeyCode::Left));
+        assert_eq!(cl.cursor(), 2);
+        // Typing here must not panic on a non-char-boundary insert.
+        send(&mut cl, key(KeyCode::Char('X')));
+        assert_eq!(cl.text(), "éXé");
+        // Left again reaches the start; cursor 0, no underflow.
+        send(&mut cl, key(KeyCode::Left));
+        send(&mut cl, key(KeyCode::Left));
+        assert_eq!(cl.cursor(), 0);
+        assert_eq!(cl.text(), "éXé");
     }
 
     #[test]

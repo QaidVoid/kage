@@ -359,6 +359,24 @@ fn left_right_move_cursor_in_insert() {
 }
 
 #[test]
+fn left_right_move_cursor_by_char_not_byte() {
+    let mut state = InputState::new();
+    for c in "éé".chars() {
+        state.handle_key(key(KeyCode::Char(c)));
+    }
+    // One Left lands on the start of the second `é` (byte 2), not
+    // mid-char (byte 3); typing must not panic on a torn boundary.
+    state.handle_key(key(KeyCode::Left));
+    assert_eq!(state.cursor(), 2);
+    state.handle_key(key(KeyCode::Char('X')));
+    assert_eq!(state.text(), "éXé");
+    // Two more Lefts reach the start; no underflow, cursor 0.
+    state.handle_key(key(KeyCode::Left));
+    state.handle_key(key(KeyCode::Left));
+    assert_eq!(state.cursor(), 0);
+}
+
+#[test]
 fn paste_in_insert_inserts_verbatim_with_newlines() {
     let mut state = InputState::new();
     state.handle_key(key(KeyCode::Char('a')));

@@ -106,6 +106,17 @@ pub fn decide(lua: &Lua, payload: &serde_json::Value) -> Option<bool> {
     }
 }
 
+/// Drop the registered `on_acp_permission` handler so a stale
+/// plugin's policy callback cannot survive a hot reload.
+///
+/// # Errors
+///
+/// Returns [`PluginError`] if the registry value cannot be written.
+pub(crate) fn clear_permission_handler(lua: &Lua) -> Result<(), PluginError> {
+    lua.set_named_registry_value(PERMISSION_KEY, Value::Nil)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,5 +191,17 @@ mod tests {
             .exec()
             .unwrap();
         assert_eq!(decide(&lua, &payload), Some(false), "error => deny");
+    }
+
+    #[test]
+    fn clear_permission_handler_removes_decision() {
+        let lua = lua_with_kage();
+        install_acp(&lua, shared_acp_agents()).unwrap();
+        lua.load("kage.on_acp_permission(function() return true end)")
+            .exec()
+            .unwrap();
+        assert_eq!(decide(&lua, &serde_json::json!({})), Some(true));
+        clear_permission_handler(&lua).unwrap();
+        assert_eq!(decide(&lua, &serde_json::json!({})), None);
     }
 }

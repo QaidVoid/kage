@@ -576,9 +576,10 @@ impl PluginRuntime {
     }
 
     /// Drop every registration that came from plugins (event handlers,
-    /// tools, commands, providers) and replay every `*.lua` file in
-    /// `dir`. Designed for hot reload between turns: a stale plugin
-    /// snapshot does not survive after this call.
+    /// tools, commands, providers, ACP/MCP declarations) and replay
+    /// every `*.lua` file in `dir`. Designed for hot reload between
+    /// turns: a stale plugin snapshot does not survive after this
+    /// call.
     ///
     /// Tools, commands, and providers that the host has already handed
     /// to other registries via [`Self::registered_tools`] etc. continue
@@ -592,6 +593,7 @@ impl PluginRuntime {
             let lua = self.lock_lua();
             let handlers: mlua::Table = lua.named_registry_value("kage._handlers")?;
             handlers.clear()?;
+            acp::clear_permission_handler(&lua)?;
         }
         lock(&self.tools).clear();
         lock(&self.tool_overrides).clear();
@@ -601,6 +603,9 @@ impl PluginRuntime {
         lock(&self.command_overrides).clear();
         lock(&self.providers).clear();
         lock(&self.keybindings).clear();
+        lock(&self.acp_agents).clear();
+        lock(&self.mcp_servers).clear();
+        lock(&self.mcp_restart).clear();
         {
             let mut q = lock(&self.pending_messages);
             q.clear();

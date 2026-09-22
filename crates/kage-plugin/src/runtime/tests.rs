@@ -140,6 +140,49 @@ fn reload_dir_clears_prior_registrations() {
 }
 
 #[test]
+fn reload_dir_clears_acp_and_mcp_registrations() {
+    use std::fs;
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("a.lua"),
+        "kage.acp.add_agent({ name='a', command='a' }) \
+         kage.on_acp_permission(function() return true end) \
+         kage.mcp.add_server({ name='m', command='m' }) \
+         kage.mcp.restart('m')",
+    )
+    .unwrap();
+    let rt = PluginRuntime::new().unwrap();
+    rt.reload_dir(dir.path()).unwrap();
+    assert_eq!(rt.registered_acp_agents().len(), 1);
+    assert_eq!(rt.registered_mcp_servers().len(), 1);
+    assert_eq!(rt.take_mcp_restarts(), ["m"]);
+    // Re-queue so the reload below must drop it.
+    rt.eval_plugin("a", "kage.mcp.restart('m')").unwrap();
+    assert_eq!(rt.acp_permission(&serde_json::json!({})), Some(true));
+
+    // Reload with the plugins gone: nothing may survive.
+    let empty = tempfile::tempdir().unwrap();
+    rt.reload_dir(empty.path()).unwrap();
+    assert!(
+        rt.registered_acp_agents().is_empty(),
+        "stale acp agents survived reload"
+    );
+    assert!(
+        rt.registered_mcp_servers().is_empty(),
+        "stale mcp servers survived reload"
+    );
+    assert!(
+        rt.take_mcp_restarts().is_empty(),
+        "stale mcp restart queue survived reload"
+    );
+    assert_eq!(
+        rt.acp_permission(&serde_json::json!({})),
+        None,
+        "stale acp permission handler survived reload"
+    );
+}
+
+#[test]
 fn eval_plugin_isolates_globals_between_plugins() {
     let rt = PluginRuntime::new().unwrap();
     rt.eval_plugin("a", "shared = 'from-a'").unwrap();

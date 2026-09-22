@@ -18,16 +18,26 @@
 //! channel the owner drains on its own thread. That split lets a
 //! long-running inbound request (a prompt turn) issue its own outgoing
 //! requests without deadlocking the reader.
+//!
+//! Malformed inbound lines get spec error replies (`-32700` for
+//! unparseable or oversized input, `-32600` for a structurally invalid
+//! request) instead of being dropped silently, and a single line may
+//! not exceed `MAX_LINE` bytes.
 
 use std::collections::HashMap;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use kage_core::sync::lock;
+
+/// Cap on a single inbound line, mirroring the HTTP transport's body
+/// cap: one newline-delimited message cannot exhaust memory. A longer
+/// line is answered with a -32700 error and the connection closes.
+const MAX_LINE: u64 = 8 * 1024 * 1024;
 
 /// A JSON-RPC error object (`code` / `message`).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -151,15 +161,7 @@ impl Peer {
         id: &serde_json::Value,
         outcome: Result<serde_json::Value, RpcError>,
     ) -> Result<(), RpcError> {
-        let msg = match outcome {
-            Ok(result) => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}),
-            Err(e) => serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "error": {"code": e.code, "message": e.message},
-            }),
-        };
-        self.write(&msg)
+        self.write(&response_message(id, outcome))
     }
 
     /// Send a request and block until the peer responds, the
@@ -249,6 +251,53 @@ impl Peer {
     }
 }
 
+/// A JSON-RPC response message shared by both reply paths.
+fn response_message(
+    id: &serde_json::Value,
+    outcome: Result<serde_json::Value, RpcError>,
+) -> serde_json::Value {
+    match outcome {
+        Ok(result) => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}),
+        Err(e) => serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": e.code, "message": e.message},
+        }),
+    }
+}
+
+/// The reader thread's weakened view of the connection.
+///
+/// It must not hold the write half open: peers notice shutdown through
+/// the writer closing, so a reader-held [`Peer`] would pin the stream
+/// and deadlock every teardown that waits for a serve loop to end.
+/// Error replies for malformed lines are therefore best-effort: they
+/// work only while the owner's [`Peer`] is alive.
+struct ReaderPeer {
+    writer: Weak<Mutex<dyn Write + Send>>,
+}
+
+impl ReaderPeer {
+    fn respond(
+        &self,
+        id: &serde_json::Value,
+        outcome: Result<serde_json::Value, RpcError>,
+    ) -> Result<(), RpcError> {
+        let writer = self
+            .writer
+            .upgrade()
+            .ok_or_else(|| RpcError::internal("connection closed"))?;
+        let mut line = serde_json::to_vec(&response_message(id, outcome))
+            .map_err(|e| RpcError::internal(format!("encode: {e}")))?;
+        line.push(b'\n');
+        let mut guard = lock(&writer);
+        guard
+            .write_all(&line)
+            .and_then(|()| guard.flush())
+            .map_err(|e| RpcError::internal(format!("write: {e}")))
+    }
+}
+
 /// Start a JSON-RPC connection over `reader`/`writer`.
 ///
 /// Spawns the reader thread and returns the cloneable [`Peer`], an
@@ -265,60 +314,39 @@ where
     let writer: Arc<Mutex<dyn Write + Send>> = Arc::new(Mutex::new(writer));
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
     let peer = Peer {
-        writer,
+        writer: Arc::clone(&writer),
         pending: Arc::clone(&pending),
         next_id: Arc::new(AtomicI64::new(1)),
     };
     let (in_tx, in_rx) = mpsc::channel();
+    let reader_peer = ReaderPeer {
+        writer: Arc::downgrade(&writer),
+    };
     let handle = thread::spawn(move || {
         let mut reader = reader;
         loop {
             let mut line = String::new();
-            match reader.read_line(&mut line) {
+            let n = match reader.by_ref().take(MAX_LINE + 1).read_line(&mut line) {
                 Ok(0) | Err(_) => break,
-                Ok(_) => {}
+                Ok(n) => n,
+            };
+            if u64::try_from(n).unwrap_or(u64::MAX) > MAX_LINE {
+                // Same policy as the HTTP transport on an over-cap
+                // body: report once, then drop the connection.
+                let _ = reply_error(
+                    &reader_peer,
+                    &serde_json::Value::Null,
+                    -32700,
+                    "line exceeds size cap",
+                );
+                break;
             }
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) else {
-                continue;
-            };
-            if value.get("method").is_some() {
-                let method = value
-                    .get("method")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default()
-                    .to_owned();
-                let params = value
-                    .get("params")
-                    .cloned()
-                    .unwrap_or(serde_json::Value::Null);
-                let inbound = match value.get("id") {
-                    Some(id) if !id.is_null() => Inbound::Request {
-                        id: id.clone(),
-                        method,
-                        params,
-                    },
-                    _ => Inbound::Notification { method, params },
-                };
-                if in_tx.send(inbound).is_err() {
-                    break;
-                }
-            } else if let Some(id) = value.get("id").and_then(serde_json::Value::as_i64) {
-                if let Some(tx) = lock(&pending).remove(&id) {
-                    let outcome = value.get("error").map_or_else(
-                        || {
-                            Ok(value
-                                .get("result")
-                                .cloned()
-                                .unwrap_or(serde_json::Value::Null))
-                        },
-                        |err| Err(RpcError::from_value(err)),
-                    );
-                    let _ = tx.send(outcome);
-                }
+            if !route_line(&reader_peer, &pending, &in_tx, trimmed) {
+                break;
             }
         }
         for (_, tx) in lock(&pending).drain() {
@@ -326,6 +354,108 @@ where
         }
     });
     (peer, in_rx, handle)
+}
+
+/// Best-effort error reply for a malformed inbound line.
+fn reply_error(
+    peer: &ReaderPeer,
+    id: &serde_json::Value,
+    code: i64,
+    message: impl Into<String>,
+) -> Result<(), RpcError> {
+    peer.respond(id, Err(RpcError::new(code, message)))
+}
+
+/// Parse one already-capped inbound line and route it: a response to
+/// the pending table, a request/notification to the owner, or a spec
+/// error reply. Returns false when the reader loop must stop because
+/// the writer or the owner is gone.
+fn route_line(
+    peer: &ReaderPeer,
+    pending: &Pending,
+    in_tx: &mpsc::Sender<Inbound>,
+    line: &str,
+) -> bool {
+    let value = match serde_json::from_str::<serde_json::Value>(line) {
+        Ok(value) => value,
+        Err(e) => {
+            return reply_error(
+                peer,
+                &serde_json::Value::Null,
+                -32700,
+                format!("parse error: {e}"),
+            )
+            .is_ok();
+        }
+    };
+    let Some(obj) = value.as_object() else {
+        return reply_error(
+            peer,
+            &serde_json::Value::Null,
+            -32600,
+            "invalid request: expected one JSON-RPC message object",
+        )
+        .is_ok();
+    };
+    let id = obj.get("id").cloned().unwrap_or(serde_json::Value::Null);
+    match obj.get("method") {
+        Some(serde_json::Value::String(method)) => {
+            let params = obj
+                .get("params")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+            let inbound = if id.is_null() {
+                Inbound::Notification {
+                    method: method.clone(),
+                    params,
+                }
+            } else {
+                Inbound::Request {
+                    id,
+                    method: method.clone(),
+                    params,
+                }
+            };
+            in_tx.send(inbound).is_ok()
+        }
+        Some(_) => reply_error(
+            peer,
+            &id,
+            -32600,
+            "invalid request: method must be a string",
+        )
+        .is_ok(),
+        None => match obj.get("id").and_then(serde_json::Value::as_i64) {
+            Some(id) => {
+                route_response(pending, id, obj);
+                true
+            }
+            None => reply_error(
+                peer,
+                &id,
+                -32600,
+                "invalid request: missing method or response id",
+            )
+            .is_ok(),
+        },
+    }
+}
+
+/// Route a response-shaped object by i64 id. Unknown or late ids are
+/// dropped: the spec forbids replying to a response.
+fn route_response(pending: &Pending, id: i64, obj: &serde_json::Map<String, serde_json::Value>) {
+    if let Some(tx) = lock(pending).remove(&id) {
+        let outcome = obj.get("error").map_or_else(
+            || {
+                Ok(obj
+                    .get("result")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null))
+            },
+            |err| Err(RpcError::from_value(err)),
+        );
+        let _ = tx.send(outcome);
+    }
 }
 
 #[cfg(test)]
@@ -457,5 +587,107 @@ mod tests {
         let err = RpcError::method_not_found("tools/call");
         assert_eq!(err.code, -32601);
         assert!(err.message.contains("tools/call"));
+    }
+
+    #[test]
+    fn parse_error_gets_a_32700_reply() {
+        let (in_r, mut in_w) = std::io::pipe().unwrap();
+        let (out_r, out_w) = std::io::pipe().unwrap();
+        let (_peer, _inbound, _h) = connect(BufReader::new(in_r), out_w);
+        in_w.write_all(b"not json\n").unwrap();
+        let mut reply = String::new();
+        BufReader::new(out_r).read_line(&mut reply).unwrap();
+        assert!(reply.contains("-32700"), "{reply}");
+        assert!(reply.contains("parse error"), "{reply}");
+    }
+
+    #[test]
+    fn oversized_line_replies_32700_and_ends_the_stream() {
+        let (in_r, mut in_w) = std::io::pipe().unwrap();
+        let (out_r, out_w) = std::io::pipe().unwrap();
+        let (_peer, inbound, _h) = connect(BufReader::new(in_r), out_w);
+        let len = usize::try_from(MAX_LINE + 16).unwrap();
+        // The peer stops reading at the cap, so the tail of this write
+        // surfaces as EPIPE; that failure is the signal, not a bug.
+        let _ = in_w.write_all(&vec![b'x'; len]);
+        let _ = in_w.write_all(b"\n");
+        let mut reply = String::new();
+        BufReader::new(out_r).read_line(&mut reply).unwrap();
+        assert!(reply.contains("-32700"), "{reply}");
+        assert!(reply.contains("size cap"), "{reply}");
+        match inbound.recv_timeout(Duration::from_secs(1)) {
+            Err(RecvTimeoutError::Disconnected) => {}
+            other => panic!("expected disconnect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn batch_and_scalar_get_32600() {
+        let (in_r, mut in_w) = std::io::pipe().unwrap();
+        let (out_r, out_w) = std::io::pipe().unwrap();
+        let (_peer, _inbound, _h) = connect(BufReader::new(in_r), out_w);
+        for raw in ["[1, 2]\n", "42\n", "{\"method\":42,\"id\":7}\n"] {
+            in_w.write_all(raw.as_bytes()).unwrap();
+        }
+        let mut reader = BufReader::new(out_r);
+        let mut reply = String::new();
+        reader.read_line(&mut reply).unwrap();
+        assert!(
+            reply.contains("-32600") && reply.contains("expected one JSON-RPC message object"),
+            "{reply}"
+        );
+        reply.clear();
+        reader.read_line(&mut reply).unwrap();
+        assert!(reply.contains("-32600"), "{reply}");
+        reply.clear();
+        reader.read_line(&mut reply).unwrap();
+        assert!(
+            reply.contains("-32600")
+                && reply.contains("\"id\":7")
+                && reply.contains("method must be a string"),
+            "{reply}"
+        );
+    }
+
+    /// Regression: the reader thread must not hold the write half
+    /// open. A serve loop ends only when the client's writer closes,
+    /// and that close happens on the last owner [`Peer`] drop; a
+    /// reader-held Peer clone pinned the stream and deadlocked every
+    /// serve-then-join teardown.
+    #[test]
+    fn dropping_the_client_peer_ends_the_server_loop() {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let server = thread::spawn(move || {
+            let (peer, inbound, _h) = connect(BufReader::new(srv_r), srv_w);
+            for message in inbound {
+                if let Inbound::Request { id, .. } = message {
+                    let _ = peer.respond(&id, Err(RpcError::method_not_found("bogus/method")));
+                }
+            }
+        });
+        let (client, inbox, _h) = connect(BufReader::new(cli_r), cli_w);
+        let err = client
+            .request("bogus/method", serde_json::Value::Null)
+            .unwrap_err();
+        assert_eq!(err.code, -32601);
+        drop(client);
+        drop(inbox);
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn response_shaped_unknown_id_stays_silent() {
+        let (in_r, mut in_w) = std::io::pipe().unwrap();
+        let (out_r, out_w) = std::io::pipe().unwrap();
+        let (_peer, _inbound, _h) = connect(BufReader::new(in_r), out_w);
+        in_w.write_all(b"{\"id\":999,\"result\":1}\n").unwrap();
+        in_w.write_all(b"boom\n").unwrap();
+        let mut reply = String::new();
+        BufReader::new(out_r).read_line(&mut reply).unwrap();
+        // The first reply must belong to `boom`: the response-shaped
+        // line was dropped, not answered with -32600.
+        assert!(reply.contains("-32700"), "{reply}");
+        assert!(reply.contains("parse error"), "{reply}");
     }
 }

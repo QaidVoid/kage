@@ -1780,3 +1780,94 @@ fn search_count_is_none_without_a_pattern() {
     // Jump with no pattern is a no-op; the fixture pinned block 0.
     assert_eq!(app.buffer.lock().unwrap().focus(), Some(0));
 }
+
+fn mouse_event(
+    kind: ratatui::crossterm::event::MouseEventKind,
+) -> ratatui::crossterm::event::MouseEvent {
+    ratatui::crossterm::event::MouseEvent {
+        kind,
+        column: 5,
+        row: 5,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+#[test]
+fn modal_open_reflects_every_modal_field() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    assert!(!app.modal_open());
+
+    app.cmdline = Some(CommandLine::new());
+    assert!(app.modal_open());
+    app.cmdline = None;
+
+    app.search_line = Some(CommandLine::new());
+    assert!(app.modal_open());
+    app.search_line = None;
+
+    app.picker = Some(OverlayPicker::new("pick", Vec::new()));
+    assert!(app.modal_open());
+    app.picker = None;
+
+    app.session_tree = Some(SessionTreeOverlay::new(Vec::new()));
+    assert!(app.modal_open());
+    app.session_tree = None;
+
+    app.settings_overlay = Some(SettingsOverlay::new(SettingsInit {
+        themes: Vec::new(),
+        theme: String::new(),
+        models: Vec::new(),
+        model: String::new(),
+        mouse: false,
+        threshold: 0.8,
+        keybindings: Vec::new(),
+        editor_modeless: false,
+    }));
+    assert!(app.modal_open());
+    app.settings_overlay = None;
+
+    app.slash_palette = Some(SlashPalette::new(Vec::new(), SlashContext::default()));
+    assert!(app.modal_open());
+    app.slash_palette = None;
+
+    app.plugin_overlay = Some(Box::new(crate::overlay::widget::EmptyOverlayWidget));
+    assert!(app.modal_open());
+    app.plugin_overlay = None;
+
+    assert!(!app.modal_open());
+}
+
+#[test]
+fn mouse_events_are_swallowed_while_modal_is_open() {
+    use ratatui::crossterm::event::MouseButton;
+    use ratatui::crossterm::event::MouseEventKind;
+
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = App::new(buffer.clone(), tx);
+    app.set_scroll(4);
+    assert_eq!(buffer.lock().unwrap().scroll(), Some(4));
+
+    // Picker open: the wheel must not move the hidden buffer.
+    app.picker = Some(OverlayPicker::new("pick", Vec::new()));
+    app.handle_mouse_event(mouse_event(MouseEventKind::ScrollDown));
+    assert_eq!(buffer.lock().unwrap().scroll(), Some(4));
+
+    // Same while the `:` cmdline is open, and a right-click must not
+    // stack a context menu on top of the modal.
+    app.picker = None;
+    app.cmdline = Some(CommandLine::new());
+    app.handle_mouse_event(mouse_event(MouseEventKind::ScrollDown));
+    assert_eq!(buffer.lock().unwrap().scroll(), Some(4));
+    app.handle_mouse_event(mouse_event(MouseEventKind::Down(MouseButton::Right)));
+    assert!(app.context_menu.is_none());
+
+    // No modal: the same wheel event scrolls the buffer again.
+    app.cmdline = None;
+    app.handle_mouse_event(mouse_event(MouseEventKind::ScrollDown));
+    #[allow(clippy::cast_sign_loss)]
+    let expected = 4 + MOUSE_SCROLL_LINES as usize;
+    assert_eq!(buffer.lock().unwrap().scroll(), Some(expected));
+}

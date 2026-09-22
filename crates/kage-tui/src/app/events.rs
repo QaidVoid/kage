@@ -156,12 +156,34 @@ impl App {
         }
     }
 
-    /// Dispatch one crossterm mouse event. Scroll moves the buffer
-    /// (and closes any context menu so it cannot hang in mid-air); a
-    /// right press opens the context menu; a left press either feeds
-    /// the open menu or starts the normal selection gesture.
+    /// True while a modal overlay owns the screen. While one is open,
+    /// mouse events must not reach the buffer underneath: scrolling
+    /// would move invisible content and clicks would change focus
+    /// under a dialog. The context menu is deliberately excluded — it
+    /// is itself driven by mouse events.
+    pub(crate) fn modal_open(&self) -> bool {
+        self.plugin_overlay.is_some()
+            || self.picker.is_some()
+            || self.settings_overlay.is_some()
+            || self.session_tree.is_some()
+            || self.slash_palette.is_some()
+            || self.cmdline.is_some()
+            || self.search_line.is_some()
+    }
+
+    /// Dispatch one crossterm mouse event. While a modal overlay is
+    /// open every event is swallowed so scrolling or clicking cannot
+    /// act on the hidden buffer (the context menu is the exception:
+    /// it is mouse-driven and stays live). Otherwise scroll moves the
+    /// buffer (and closes any context menu so it cannot hang in
+    /// mid-air); a right press opens the context menu; a left press
+    /// either feeds the open menu or starts the normal selection
+    /// gesture.
     pub(crate) fn handle_mouse_event(&mut self, mouse: ratatui::crossterm::event::MouseEvent) {
         use ratatui::crossterm::event::MouseButton;
+        if self.context_menu.is_none() && self.modal_open() {
+            return;
+        }
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 self.context_menu = None;

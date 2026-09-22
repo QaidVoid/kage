@@ -497,14 +497,26 @@ fn stream_yields_cancelled_when_flag_set() {
 }
 
 #[test]
-fn stream_propagates_error_event() {
+fn stream_propagates_error_event_as_transient() {
     let bytes: &[u8] = b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"servers are overloaded\"}}\n\n";
     let mut events = stream_from_bytes(bytes);
     let first = events.next().unwrap();
     match first {
-        Err(ProviderError::Decode(msg)) => {
-            assert!(msg.contains("overloaded"), "got {msg}");
+        Err(err) => {
+            assert!(err.is_transient(), "overloaded errors retry: got {err:?}");
+            assert!(err.to_string().contains("overloaded"), "got {err}");
         }
-        other => panic!("expected Decode error, got {other:?}"),
+        other => panic!("expected an error event, got {other:?}"),
     }
+}
+
+#[test]
+fn stream_error_event_rate_limit_classifies_as_rate_limited() {
+    let bytes: &[u8] = b"event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"Number of requests too high\"}}\n\n";
+    let mut events = stream_from_bytes(bytes);
+    let first = events.next().unwrap();
+    assert!(
+        matches!(first, Err(ProviderError::RateLimited { retry_after: None })),
+        "rate_limit_error should surface as RateLimited, got {first:?}"
+    );
 }

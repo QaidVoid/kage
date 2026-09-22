@@ -309,6 +309,23 @@ impl OpenAiStream {
                 return;
             }
         };
+        if let Some(err) = value.get("error").filter(|e| !e.is_null()) {
+            let kind = err
+                .get("code")
+                .filter(|v| !v.is_null())
+                .or_else(|| err.get("type"))
+                .filter(|v| !v.is_null())
+                .and_then(Value::as_str)
+                .unwrap_or("error");
+            let msg = err
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("provider stream failed");
+            self.pending
+                .push_back(Err(ProviderError::from_stream_error(kind, msg)));
+            self.done = true;
+            return;
+        }
         if !self.started {
             self.pending.push_back(Ok(ProviderEvent::MessageStart));
             self.started = true;
@@ -610,6 +627,44 @@ mod tests {
 
     fn collect_ok(stream: OpenAiStream) -> Vec<ProviderEvent> {
         stream.map(|r| r.expect("stream item is Ok")).collect()
+    }
+
+    #[test]
+    fn stream_error_chunk_surfaces_instead_of_silent_drop() {
+        let bytes: &[u8] = b"data: {\"error\":{\"message\":\"The server had an error while processing your request.\",\"type\":\"server_error\",\"param\":null,\"code\":null}}\n\n";
+        let mut events = stream_from_bytes(bytes);
+        let first = events.next().unwrap();
+        match first {
+            Err(err) => {
+                assert!(err.is_transient(), "server_error should retry: {err:?}");
+                assert!(err.to_string().contains("server_error"));
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
+        assert!(events.next().is_none(), "stream ends after the error chunk");
+    }
+
+    #[test]
+    fn stream_error_chunk_rate_limit_classifies_as_rate_limited() {
+        let bytes: &[u8] = b"data: {\"error\":{\"message\":\"Rate limit reached\",\"type\":\"requests\",\"param\":null,\"code\":\"rate_limit_exceeded\"}}\n\n";
+        let mut events = stream_from_bytes(bytes);
+        let first = events.next().unwrap();
+        assert!(
+            matches!(first, Err(ProviderError::RateLimited { retry_after: None })),
+            "got {first:?}"
+        );
+    }
+
+    #[test]
+    fn stream_null_error_chunk_is_ignored() {
+        let bytes: &[u8] = b"data: {\"error\":null,\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
+        let events = collect_ok(stream_from_bytes(bytes));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ProviderEvent::TextDelta { delta } if delta == "hi")),
+            "a null error key must not break the stream"
+        );
     }
 
     #[test]

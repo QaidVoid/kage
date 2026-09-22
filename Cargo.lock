@@ -1566,6 +1566,7 @@ dependencies = [
 name = "kage-provider"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "kage-core",
  "serde",
  "serde_json",

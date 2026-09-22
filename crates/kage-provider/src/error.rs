@@ -74,6 +74,28 @@ impl ProviderError {
             _ => None,
         }
     }
+
+    /// Classify an in-band provider error event (kind + message) so a
+    /// mid-stream failure gets the same retryability treatment as the
+    /// equivalent HTTP status: rate limits and 5xx-class kinds are
+    /// transient, everything else stays a permanent decode failure.
+    pub(crate) fn from_stream_error(kind: &str, message: &str) -> Self {
+        let kind = kind.trim().to_ascii_lowercase();
+        if kind.contains("rate_limit") || kind.contains("resource_exhausted") || kind == "429" {
+            return Self::RateLimited { retry_after: None };
+        }
+        if kind.contains("overloaded")
+            || kind.contains("server_error")
+            || kind.contains("unavailable")
+            || kind == "api_error"
+            || kind
+                .parse::<u16>()
+                .is_ok_and(|status| (500..=599).contains(&status))
+        {
+            return Self::Transport(format!("provider stream error ({kind}): {message}"));
+        }
+        Self::Decode(format!("provider stream error ({kind}): {message}"))
+    }
 }
 
 #[cfg(test)]
@@ -142,5 +164,59 @@ mod tests {
             Some(Duration::from_secs(7))
         );
         assert_eq!(ProviderError::Transport("x".into()).retry_after(), None);
+    }
+
+    #[test]
+    fn stream_error_classifier_maps_rate_limit_kinds() {
+        for kind in [
+            "rate_limit_error",
+            "rate_limit_exceeded",
+            "RESOURCE_EXHAUSTED",
+            "429",
+        ] {
+            assert!(
+                matches!(
+                    ProviderError::from_stream_error(kind, "slow down"),
+                    ProviderError::RateLimited { retry_after: None }
+                ),
+                "{kind} should classify as RateLimited"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_error_classifier_maps_transient_kinds_to_transport() {
+        for kind in [
+            "overloaded_error",
+            "server_error",
+            "api_error",
+            "UNAVAILABLE",
+            "500",
+            "503",
+        ] {
+            let err = ProviderError::from_stream_error(kind, "upstream trouble");
+            assert!(err.is_transient(), "{kind} should be transient");
+            assert!(
+                err.to_string().contains("upstream trouble"),
+                "{kind} should keep the provider message"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_error_classifier_keeps_other_kinds_permanent() {
+        for kind in [
+            "invalid_request_error",
+            "authentication_error",
+            "permission_error",
+            "not_found",
+        ] {
+            let err = ProviderError::from_stream_error(kind, "the request is bad");
+            assert!(!err.is_transient(), "{kind} must not be transient");
+            assert!(
+                matches!(err, ProviderError::Decode(_)),
+                "{kind} stays Decode"
+            );
+        }
     }
 }

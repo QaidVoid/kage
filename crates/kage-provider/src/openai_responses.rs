@@ -334,14 +334,28 @@ impl ResponsesStream {
                 self.emit_message_end();
             }
             "response.failed" | "error" => {
+                let kind = value
+                    .pointer("/error/code")
+                    .or_else(|| value.pointer("/response/error/code"))
+                    .or_else(|| value.get("code"))
+                    .map_or_else(
+                        || "error".to_owned(),
+                        |code| {
+                            if let Value::String(s) = code {
+                                s.clone()
+                            } else {
+                                code.to_string()
+                            }
+                        },
+                    );
                 let msg = value
                     .pointer("/error/message")
+                    .or_else(|| value.pointer("/response/error/message"))
                     .or_else(|| value.get("message"))
                     .and_then(Value::as_str)
-                    .unwrap_or("openai responses stream failed")
-                    .to_owned();
+                    .unwrap_or("openai responses stream failed");
                 self.pending
-                    .push_back(Err(ProviderError::Decode(format!("responses: {msg}"))));
+                    .push_back(Err(ProviderError::from_stream_error(&kind, msg)));
                 self.done = true;
             }
             _ => {}
@@ -759,6 +773,29 @@ mod tests {
 
     fn collect_ok(stream: ResponsesStream) -> Vec<ProviderEvent> {
         stream.map(|r| r.expect("stream item is Ok")).collect()
+    }
+
+    #[test]
+    fn stream_response_failed_rate_limit_classifies_as_rate_limited() {
+        let bytes: &[u8] = b"event: response.failed\ndata: {\"type\":\"response.failed\",\"sequence_number\":8,\"response\":{\"id\":\"resp_1\",\"error\":{\"code\":\"rate_limit_exceeded\",\"message\":\"Rate limit reached for responses\"}}}\n\n";
+        let mut events = stream_from_bytes(bytes);
+        let first = events.next().unwrap();
+        assert!(
+            matches!(first, Err(ProviderError::RateLimited { retry_after: None })),
+            "got {first:?}"
+        );
+        assert!(events.next().is_none(), "stream ends after response.failed");
+    }
+
+    #[test]
+    fn stream_error_event_server_error_is_transient() {
+        let bytes: &[u8] = b"event: error\ndata: {\"type\":\"error\",\"code\":\"server_error\",\"message\":\"The server had an error\"}\n\n";
+        let mut events = stream_from_bytes(bytes);
+        let first = events.next().unwrap();
+        match first {
+            Err(err) => assert!(err.is_transient(), "server_error should retry: {err:?}"),
+            other => panic!("expected Err, got {other:?}"),
+        }
     }
 
     #[test]

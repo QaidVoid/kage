@@ -8,6 +8,7 @@
 //! sibling.
 
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use kage_core::CancelFlag;
 
@@ -179,16 +180,23 @@ where
     build(&agent).map_err(|e| client.on_transport_error(e))
 }
 
-/// Read the body of a non-2xx response into [`ProviderError::Http`].
+/// Read the body of a non-2xx response into a [`ProviderError`].
 ///
-/// Caps the body at 8 KiB so a misbehaving upstream cannot blow up our
-/// error strings; what we keep is enough to surface the JSON error
-/// payload that every major provider returns for 4xx/5xx.
+/// A 429 becomes [`ProviderError::RateLimited`], carrying the
+/// provider's `Retry-After` hint (delta-seconds or HTTP-date) when one
+/// is present; every other status stays [`ProviderError::Http`] with
+/// the body capped at 8 KiB so a misbehaving upstream cannot blow up
+/// our error strings.
 pub(crate) fn read_error_body(
     status: u16,
     response: ureq::http::Response<ureq::Body>,
 ) -> ProviderError {
     use std::io::Read as _;
+    let retry_after = response
+        .headers()
+        .get("retry-after")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
     let mut buf = Vec::new();
     let _ = response
         .into_body()
@@ -196,7 +204,36 @@ pub(crate) fn read_error_body(
         .take(8 * 1024)
         .read_to_end(&mut buf);
     let body = String::from_utf8_lossy(&buf).into_owned();
+    classify_http_error(
+        status,
+        parse_retry_after(retry_after.as_deref(), chrono::Utc::now()),
+        body,
+    )
+}
+
+/// Pure status-to-error mapping, split out of [`read_error_body`] so
+/// tests can pin it without a live response.
+fn classify_http_error(status: u16, retry_after: Option<Duration>, body: String) -> ProviderError {
+    if status == 429 {
+        return ProviderError::RateLimited { retry_after };
+    }
     ProviderError::Http { status, body }
+}
+
+/// Parse an HTTP `Retry-After` value: a delta in seconds, or an
+/// HTTP-date (IMF-fixdate). A date in the past, or anything
+/// unparseable, yields `None` so the caller falls back to its own
+/// backoff.
+fn parse_retry_after(value: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> Option<Duration> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Ok(secs) = value.parse::<u64>() {
+        return Some(Duration::from_secs(secs));
+    }
+    let date = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    (date.to_utc() - now).to_std().ok()
 }
 
 /// Map a transport-time [`ureq::Error`] (from sending the request or
@@ -260,5 +297,97 @@ mod tests {
         ));
         // The client is still usable after a recycle.
         let _ = client.agent();
+    }
+
+    #[test]
+    fn retry_after_delta_seconds_parses() {
+        let now = chrono::Utc::now();
+        assert_eq!(
+            parse_retry_after(Some("12"), now),
+            Some(Duration::from_secs(12))
+        );
+        assert_eq!(
+            parse_retry_after(Some(" 3 "), now),
+            Some(Duration::from_secs(3))
+        );
+    }
+
+    #[test]
+    fn retry_after_http_date_parses() {
+        let now = chrono::DateTime::parse_from_rfc2822("Sun, 06 Nov 1994 08:49:37 GMT")
+            .expect("fixed date")
+            .to_utc();
+        let minute_later = parse_retry_after(Some("Sun, 06 Nov 1994 08:50:37 GMT"), now);
+        assert_eq!(minute_later, Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn retry_after_past_date_and_garbage_are_none() {
+        let now = chrono::Utc::now();
+        assert_eq!(parse_retry_after(None, now), None);
+        assert_eq!(parse_retry_after(Some(""), now), None);
+        assert_eq!(parse_retry_after(Some("   "), now), None);
+        assert_eq!(
+            parse_retry_after(Some("Sun, 06 Nov 1994 08:49:37 GMT"), now),
+            None,
+            "a date in the past must not produce a wait"
+        );
+        assert_eq!(parse_retry_after(Some("soon"), now), None);
+    }
+
+    #[test]
+    fn classify_maps_429_to_rate_limited_and_keeps_other_statuses_http() {
+        assert!(matches!(
+            classify_http_error(429, Some(Duration::from_secs(9)), String::new()),
+            ProviderError::RateLimited {
+                retry_after: Some(d)
+            } if d == Duration::from_secs(9)
+        ));
+        assert!(matches!(
+            classify_http_error(429, None, String::new()),
+            ProviderError::RateLimited { retry_after: None }
+        ));
+        assert!(matches!(
+            classify_http_error(500, None, "boom".into()),
+            ProviderError::Http {
+                status: 500,
+                body
+            } if body == "boom"
+        ));
+    }
+
+    #[test]
+    fn read_error_body_carries_retry_after_header_into_rate_limit() {
+        let response = ureq::http::Response::builder()
+            .status(429)
+            .header("retry-after", "7")
+            .body(ureq::Body::builder().data("slow down"))
+            .expect("static response");
+        let err = read_error_body(429, response);
+        assert!(
+            matches!(
+                &err,
+                ProviderError::RateLimited {
+                    retry_after: Some(d)
+                } if *d == Duration::from_secs(7)
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn read_error_body_keeps_non_429_as_http() {
+        let response = ureq::http::Response::builder()
+            .status(503)
+            .body(ureq::Body::builder().data("unavailable"))
+            .expect("static response");
+        let err = read_error_body(503, response);
+        assert!(
+            matches!(
+                &err,
+                ProviderError::Http { status: 503, body } if body == "unavailable"
+            ),
+            "got {err:?}"
+        );
     }
 }

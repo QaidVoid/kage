@@ -268,6 +268,22 @@ impl GeminiStream {
                 return;
             }
         };
+        if let Some(err) = value.get("error").filter(|e| !e.is_null()) {
+            let kind = err
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| err.get("code").map(Value::to_string))
+                .unwrap_or_else(|| "error".to_owned());
+            let msg = err
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("provider stream failed");
+            self.pending
+                .push_back(Err(ProviderError::from_stream_error(&kind, msg)));
+            self.done = true;
+            return;
+        }
         if !self.started {
             self.pending.push_back(Ok(ProviderEvent::MessageStart));
             self.started = true;
@@ -506,6 +522,29 @@ mod tests {
 
     fn collect_ok(stream: GeminiStream) -> Vec<ProviderEvent> {
         stream.map(|r| r.expect("stream item is Ok")).collect()
+    }
+
+    #[test]
+    fn stream_error_chunk_resource_exhausted_classifies_as_rate_limited() {
+        let bytes: &[u8] = b"data: {\"error\":{\"code\":429,\"message\":\"Resource has been exhausted\",\"status\":\"RESOURCE_EXHAUSTED\"}}\n\n";
+        let mut events = stream_from_bytes(bytes);
+        let first = events.next().unwrap();
+        assert!(
+            matches!(first, Err(ProviderError::RateLimited { retry_after: None })),
+            "got {first:?}"
+        );
+        assert!(events.next().is_none(), "stream ends after the error chunk");
+    }
+
+    #[test]
+    fn stream_error_chunk_unavailable_is_transient() {
+        let bytes: &[u8] = b"data: {\"error\":{\"code\":503,\"message\":\"The service is currently unavailable\",\"status\":\"UNAVAILABLE\"}}\n\n";
+        let mut events = stream_from_bytes(bytes);
+        let first = events.next().unwrap();
+        match first {
+            Err(err) => assert!(err.is_transient(), "503 should retry: {err:?}"),
+            other => panic!("expected Err, got {other:?}"),
+        }
     }
 
     #[test]

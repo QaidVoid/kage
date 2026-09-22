@@ -18,6 +18,7 @@ workspace = true
 testing = []
 
 [dependencies]
+chrono.workspace = true
 kage-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true

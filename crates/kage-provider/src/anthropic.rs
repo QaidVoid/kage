@@ -496,12 +496,16 @@ impl AnthropicStream {
                 self.done = true;
             }
             "error" => {
+                let kind = value
+                    .pointer("/error/type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("error");
                 let msg = value
                     .pointer("/error/message")
                     .and_then(Value::as_str)
-                    .unwrap_or("provider error")
-                    .to_owned();
-                self.pending.push_back(Err(ProviderError::Decode(msg)));
+                    .unwrap_or("provider error");
+                self.pending
+                    .push_back(Err(ProviderError::from_stream_error(kind, msg)));
                 self.done = true;
             }
             _ => {}

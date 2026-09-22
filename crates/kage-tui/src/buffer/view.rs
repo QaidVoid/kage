@@ -78,6 +78,27 @@ impl Buffer {
         self.last_drawn_focus = value;
     }
 
+    /// Whether the cached height/lines for block `idx` may be served
+    /// even though the live last block has unparsed streaming edits.
+    /// False in exactly one case: `idx` is the last block and a
+    /// re-parse has been pending longer than
+    /// [`STREAM_REPARSE_THROTTLE`], which forces the renderer to
+    /// rebuild.
+    fn stream_cache_usable(&self, idx: usize) -> bool {
+        if idx + 1 != self.blocks.len() {
+            return true;
+        }
+        self.stream_dirty_since
+            .is_none_or(|t| t.elapsed() < STREAM_REPARSE_THROTTLE)
+    }
+
+    /// True while the live last block has edits whose render is still
+    /// pending (inside the throttle window). The search-match cache
+    /// uses this to skip its full-text rescan on streaming deltas.
+    pub(crate) fn stream_edits_pending(&self) -> bool {
+        self.stream_dirty_since.is_some()
+    }
+
     /// Cached rendered height (in wrapped rows) for the block at
     /// `idx`, but only if the cache entry was captured at the given
     /// `width`. Width-mismatched entries return `None` so the caller
@@ -85,6 +106,9 @@ impl Buffer {
     /// uncached blocks also return `None`.
     #[must_use]
     pub fn cached_height(&self, idx: usize, width: u16) -> Option<u16> {
+        if !self.stream_cache_usable(idx) {
+            return None;
+        }
         self.block_heights
             .get(idx)
             .copied()
@@ -98,6 +122,9 @@ impl Buffer {
     pub fn set_cached_height(&mut self, idx: usize, width: u16, height: u16) {
         if let Some(slot) = self.block_heights.get_mut(idx) {
             *slot = Some((width, height));
+            if idx + 1 == self.blocks.len() {
+                self.stream_dirty_since = None;
+            }
         }
     }
 
@@ -118,6 +145,9 @@ impl Buffer {
     /// selection-emphasised render must rebuild.
     #[must_use]
     pub fn cached_render_lines(&self, idx: usize, width: u16) -> Option<Arc<Vec<Line<'static>>>> {
+        if !self.stream_cache_usable(idx) {
+            return None;
+        }
         self.block_render_lines
             .get(idx)
             .and_then(Clone::clone)
@@ -136,6 +166,9 @@ impl Buffer {
     ) {
         if let Some(slot) = self.block_render_lines.get_mut(idx) {
             *slot = Some((width, lines));
+            if idx + 1 == self.blocks.len() {
+                self.stream_dirty_since = None;
+            }
         }
     }
 
@@ -225,6 +258,12 @@ impl Buffer {
         self.last_area_width = snapshot.last_area_width;
         self.last_area_height = snapshot.last_area_height;
         self.last_virtual_top = snapshot.last_virtual_top;
+        // The dirty flag is consumed by the rebuild that produced the
+        // snapshot's fresh caches; copying it back keeps the live
+        // buffer from re-serving a window that already rebuilt. A
+        // delta landing mid-draw re-arms on the next frame at the
+        // cost of one extra window of staleness, at worst.
+        self.stream_dirty_since = snapshot.stream_dirty_since;
     }
 
     /// Width of the last-painted buffer area, in cells.

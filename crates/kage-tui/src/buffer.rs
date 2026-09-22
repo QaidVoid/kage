@@ -11,7 +11,7 @@
 
 pub(crate) use std::mem;
 pub(crate) use std::sync::Arc;
-pub(crate) use std::time::Instant;
+pub(crate) use std::time::{Duration, Instant};
 
 pub(crate) use ratatui::text::Line;
 
@@ -263,7 +263,21 @@ pub struct Buffer {
     last_virtual_top: usize,
     last_area_y: u16,
     last_area_height: u16,
+    /// When the live last block received a delta but its render caches
+    /// were deliberately left stale. `Some(t)` means "a re-parse has
+    /// been due since `t`"; the cache readers serve the stale lines
+    /// until `t` ages past [`STREAM_REPARSE_THROTTLE`], then force a
+    /// miss so the renderer rebuilds. Cleared when a rebuild stores
+    /// fresh lines and when the stream finishes.
+    stream_dirty_since: Option<Instant>,
 }
+
+/// Minimum spacing between full markdown re-parses of a streaming
+/// block. Deltas inside the window update `text` but keep serving the
+/// previous render from cache, bounding re-parse cost to one build
+/// per window instead of one per delta (which was quadratic over the
+/// stream length).
+const STREAM_REPARSE_THROTTLE: Duration = Duration::from_millis(50);
 
 mod edit;
 mod view;

@@ -182,15 +182,25 @@ impl App {
 
     /// Recompute `search_match_set` when stale (pattern changed or
     /// buffer version moved) and clear it when no pattern is active.
-    /// Call before `search_matches`.
+    /// Call before `search_matches`. Streaming deltas inside the
+    /// re-parse throttle window skip the rescan: the match list may
+    /// lag the live text by one window, which the counter and jump
+    /// already tolerate.
     pub(crate) fn refresh_search_matches(&mut self) {
         let Some(pattern) = self.search_pattern.as_deref() else {
             self.search_match_set.clear();
             self.search_match_pattern.clear();
             return;
         };
+        let pattern_changed = pattern != self.search_match_pattern;
         let version = self.buffer_version();
-        if version != self.search_match_version || pattern != self.search_match_pattern {
+        if !pattern_changed
+            && version != self.search_match_version
+            && lock(&self.buffer).stream_edits_pending()
+        {
+            return;
+        }
+        if pattern_changed || version != self.search_match_version {
             self.search_match_set = lock(&self.buffer).match_indices(pattern);
             self.search_match_version = version;
             self.search_match_pattern = pattern.to_owned();

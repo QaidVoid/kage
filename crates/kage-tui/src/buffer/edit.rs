@@ -29,7 +29,7 @@ impl Buffer {
         if let Some(Block::Assistant { text, .. }) = self.blocks.last_mut() {
             text.push_str(delta);
         }
-        self.invalidate_last_block_caches();
+        self.mark_stream_dirty();
     }
 
     /// Begin a streaming thinking block.
@@ -50,7 +50,17 @@ impl Buffer {
         if let Some(Block::Thinking { text, .. }) = self.blocks.last_mut() {
             text.push_str(delta);
         }
-        self.invalidate_last_block_caches();
+        self.mark_stream_dirty();
+    }
+
+    /// Record that the live last block grew without dropping its
+    /// render caches: the stale lines keep serving until
+    /// [`STREAM_REPARSE_THROTTLE`] elapses, then the cache readers
+    /// force one rebuild. Version still bumps so the render loop
+    /// wakes and repaints from the (possibly stale) cache.
+    pub(crate) fn mark_stream_dirty(&mut self) {
+        self.stream_dirty_since.get_or_insert_with(Instant::now);
+        self.bump_version();
     }
 
     /// Add a tool-call block to the buffer.
@@ -201,6 +211,7 @@ impl Buffer {
         // but invalidate anyway so a future renderer change that
         // styles "stream done" differently picks up cleanly.
         self.invalidate_last_block_caches();
+        self.stream_dirty_since = None;
     }
 
     /// Toggle the fold state of the block at `index`. Returns whether

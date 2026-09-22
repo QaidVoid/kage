@@ -35,7 +35,7 @@ fn cached_height_misses_when_width_differs() {
 }
 
 #[test]
-fn append_invalidates_only_the_growing_block() {
+fn append_keeps_growing_block_cache_until_window_expires() {
     let mut buf = Buffer::new();
     buf.push_user("first");
     buf.begin_assistant();
@@ -49,8 +49,22 @@ fn append_invalidates_only_the_growing_block() {
     );
     assert_eq!(
         buf.cached_height(1, 80),
+        Some(2),
+        "inside the throttle window the stale height is served"
+    );
+
+    // Once the window lapses the same query misses and the renderer
+    // rebuilds just the growing block.
+    buf.stream_dirty_since = Some(Instant::now().checked_sub(STREAM_REPARSE_THROTTLE).unwrap());
+    assert_eq!(
+        buf.cached_height(0, 80),
+        Some(1),
+        "only the growing block is forced to rebuild"
+    );
+    assert_eq!(
+        buf.cached_height(1, 80),
         None,
-        "the assistant block that just grew must invalidate its cached height"
+        "the assistant block that just grew must rebuild after the window"
     );
 }
 
@@ -389,4 +403,77 @@ fn merge_render_state_skips_when_live_has_fewer_blocks() {
     live.merge_render_state(snap);
     assert_eq!(live.scroll(), 0);
     assert_eq!(live.blocks().len(), 1);
+}
+
+/// Live assistant block with renderer caches primed for the stale
+/// reuse tests.
+fn throttled_stream_fixture() -> Buffer {
+    let mut buf = Buffer::new();
+    buf.append_assistant_delta("hello world");
+    buf.set_cached_height(0, 80, 3);
+    buf.set_cached_render_lines(0, 80, Arc::new(vec![Line::from("hello world")]));
+    buf
+}
+
+#[test]
+fn streaming_delta_keeps_caches_inside_throttle_window() {
+    let mut buf = throttled_stream_fixture();
+    let v0 = buf.version();
+    buf.append_assistant_delta(" and more");
+
+    // Stale lines are served instead of forcing a re-parse, and the
+    // version still moves so the render loop wakes up.
+    assert_eq!(buf.cached_height(0, 80), Some(3));
+    assert!(buf.cached_render_lines(0, 80).is_some());
+    assert!(buf.stream_edits_pending());
+    assert_ne!(buf.version(), v0);
+
+    // Non-last blocks are never throttled.
+    buf.push_user("done");
+    assert_eq!(buf.cached_height(0, 80), Some(3));
+}
+
+#[test]
+fn streaming_reparse_forces_rebuild_after_window_expires() {
+    let mut buf = throttled_stream_fixture();
+    buf.append_assistant_delta(" and more");
+    buf.stream_dirty_since = Some(Instant::now().checked_sub(STREAM_REPARSE_THROTTLE).unwrap());
+
+    assert_eq!(buf.cached_height(0, 80), None);
+    assert!(buf.cached_render_lines(0, 80).is_none());
+
+    // Storing a fresh rebuild consumes the pending flag.
+    buf.set_cached_render_lines(0, 80, Arc::new(vec![Line::from("rebuilt")]));
+    assert!(!buf.stream_edits_pending());
+    assert!(buf.cached_render_lines(0, 80).is_some());
+}
+
+#[test]
+fn finish_streaming_invalidates_and_clears_throttle() {
+    let mut buf = throttled_stream_fixture();
+    buf.append_assistant_delta(" tail");
+    buf.finish_streaming();
+
+    assert!(!buf.stream_edits_pending());
+    assert_eq!(buf.cached_height(0, 80), None);
+
+    // After finish, a new delta still throttles (a fresh live block).
+    buf.append_assistant_delta("reopened");
+    assert!(buf.stream_edits_pending());
+    assert_eq!(buf.cached_height(0, 80), None);
+}
+
+#[test]
+fn merge_render_state_carries_throttle_flag() {
+    let mut live = Buffer::new();
+    live.append_assistant_delta("hello");
+    let mut snap = live.clone();
+    snap.set_cached_height(0, 80, 2);
+    snap.set_cached_render_lines(0, 80, Arc::new(vec![Line::from("hello")]));
+    assert!(!snap.stream_edits_pending());
+
+    live.append_assistant_delta(" world");
+    assert!(live.stream_edits_pending());
+    live.merge_render_state(snap);
+    assert!(!live.stream_edits_pending());
 }

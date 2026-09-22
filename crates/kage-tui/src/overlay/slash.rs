@@ -39,6 +39,8 @@ use crate::command::{ArgSource, CommandSpec};
 use crate::layout::Regions;
 use crate::overlay::widget::{OverlayAction, OverlayCtx, OverlayWidget};
 use crate::picker::PickItem;
+use crate::view::UnicodeWidthStr as _;
+use crate::view::truncate_to_width;
 
 /// Maximum visible command rows in the palette body before
 /// `... N more` indicators kick in.
@@ -155,13 +157,12 @@ impl SlashPalette {
             return;
         };
         let prefix: u16 = 1;
-        let chars: u16 =
-            u16::try_from(self.cmdline.text()[..self.cmdline.cursor()].chars().count())
-                .unwrap_or(u16::MAX);
+        let cols: u16 =
+            u16::try_from(self.cmdline.text()[..self.cmdline.cursor()].width()).unwrap_or(u16::MAX);
         let cx = inner
             .x
             .saturating_add(prefix)
-            .saturating_add(chars)
+            .saturating_add(cols)
             .min(inner.x + inner.width.saturating_sub(1));
         frame.set_cursor_position((cx, inner.y));
     }
@@ -216,12 +217,12 @@ impl SlashPalette {
         let above = offset;
         let below = total.saturating_sub(offset + window);
 
-        let max_value_chars = completions
+        let max_value_width = completions
             .items
             .iter()
             .skip(offset)
             .take(window)
-            .map(|c| c.value.chars().count())
+            .map(|c| c.value.width())
             .max()
             .unwrap_or(0);
 
@@ -244,7 +245,7 @@ impl SlashPalette {
             let desc_style = if selected { sel_style } else { dim_style };
             lines.push(render_row(
                 item,
-                max_value_chars,
+                max_value_width,
                 inner_width,
                 value_style,
                 desc_style,
@@ -275,9 +276,9 @@ impl SlashPalette {
         let marker = "! ";
         let marker_chars = marker.len();
         let inner = usize::from(area.width).saturating_sub(marker_chars);
-        let text = truncate(err, inner);
-        let total_chars = marker_chars + text.chars().count();
-        let pad = usize::from(area.width).saturating_sub(total_chars);
+        let text = truncate_to_width(err, inner, "\u{2026}");
+        let total_width = marker_chars + text.width();
+        let pad = usize::from(area.width).saturating_sub(total_width);
         let line = Line::from(vec![
             Span::styled(marker.to_owned(), style.add_modifier(Modifier::BOLD)),
             Span::styled(format!("{text}{}", " ".repeat(pad)), style),
@@ -383,15 +384,15 @@ fn input_inner(regions: Regions) -> Option<Rect> {
 
 fn render_row(
     item: &Completion,
-    value_col_chars: usize,
+    value_col_width: usize,
     inner_width: usize,
     value_style: Style,
     desc_style: Style,
 ) -> Line<'static> {
     let leading = "  ";
-    let value_chars = item.value.chars().count();
-    let pad = value_col_chars.saturating_sub(value_chars);
-    let after_value = leading.chars().count() + value_chars + pad;
+    let value_width = item.value.width();
+    let pad = value_col_width.saturating_sub(value_width);
+    let after_value = leading.width() + value_width + pad;
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(4);
     spans.push(Span::styled(leading.to_owned(), value_style));
     spans.push(Span::styled(item.value.clone(), value_style));
@@ -402,10 +403,13 @@ fn render_row(
         let remaining = inner_width.saturating_sub(after_value).saturating_sub(2);
         if remaining > 0 {
             spans.push(Span::styled("  ".to_owned(), desc_style));
-            spans.push(Span::styled(truncate(desc, remaining), desc_style));
+            spans.push(Span::styled(
+                truncate_to_width(desc, remaining, "\u{2026}"),
+                desc_style,
+            ));
         }
     }
-    let painted: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let painted: usize = spans.iter().map(|s| s.content.width()).sum();
     if painted < inner_width {
         spans.push(Span::styled(" ".repeat(inner_width - painted), value_style));
     }
@@ -427,21 +431,8 @@ fn scroll_window(selected: Option<usize>, total: usize, max_visible: usize) -> (
     (offset, max_visible)
 }
 
-fn truncate(s: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= max_chars {
-        return s.to_owned();
-    }
-    let mut out: String = chars[..max_chars.saturating_sub(1)].iter().collect();
-    out.push('\u{2026}');
-    out
-}
-
 fn pad_to_width(s: &str, width: usize) -> String {
-    let n = s.chars().count();
+    let n = s.width();
     if n >= width {
         return s.to_owned();
     }
@@ -636,5 +627,28 @@ mod tests {
             }
         }
         assert!(found_in_popup_band, "expected popup to paint above input");
+    }
+
+    #[test]
+    fn render_row_measures_display_width_not_char_count() {
+        let style = Style::default();
+        let wide = Completion {
+            value: "中文".to_owned(),
+            description: Some("d".to_owned()),
+            replace_range: 0..0,
+        };
+        let plain = Completion {
+            value: "ab".to_owned(),
+            description: Some("d".to_owned()),
+            replace_range: 0..0,
+        };
+        // Both values are 2 chars, but the CJK one paints 4 cells wide.
+        // Char-count padding under-measures it and the row's tail pad
+        // then overruns the popup: painted cells must equal the inner
+        // width exactly, for ASCII and wide values alike.
+        let painted =
+            |row: &Line<'static>| -> usize { row.spans.iter().map(|s| s.content.width()).sum() };
+        assert_eq!(painted(&render_row(&wide, 6, 40, style, style)), 40);
+        assert_eq!(painted(&render_row(&plain, 6, 40, style, style)), 40);
     }
 }

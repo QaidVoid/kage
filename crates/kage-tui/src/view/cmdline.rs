@@ -214,12 +214,12 @@ pub(super) fn render_cmdline_popup(frame: &mut Frame, regions: Regions, cmdline:
     }
 
     let (row_style, sel_style, dim_style) = popup_styles();
-    let max_value_chars = completions
+    let max_value_width = completions
         .items
         .iter()
         .skip(offset)
         .take(window)
-        .map(|c| c.value.chars().count())
+        .map(|c| c.value.width())
         .max()
         .unwrap_or(0);
     let inner_width = usize::from(area.width);
@@ -246,7 +246,7 @@ pub(super) fn render_cmdline_popup(frame: &mut Frame, regions: Regions, cmdline:
         lines.push(popup_row(
             item.value.as_str(),
             item.description.as_deref(),
-            max_value_chars,
+            max_value_width,
             inner_width,
             value_style,
             desc_style,
@@ -292,13 +292,13 @@ fn popup_width(regions: Regions, completions: &crate::cmdparse::Completions) -> 
     let max_value = completions
         .items
         .iter()
-        .map(|c| c.value.chars().count())
+        .map(|c| c.value.width())
         .max()
         .unwrap_or(0);
     let max_desc = completions
         .items
         .iter()
-        .filter_map(|c| c.description.as_deref().map(|d| d.chars().count()))
+        .filter_map(|c| c.description.as_deref().map(UnicodeWidthStr::width))
         .max()
         .unwrap_or(0);
     let separator = if max_desc > 0 { 2 } else { 0 };
@@ -319,16 +319,16 @@ fn popup_width(regions: Regions, completions: &crate::cmdparse::Completions) -> 
 fn popup_row(
     value: &str,
     description: Option<&str>,
-    value_col_chars: usize,
+    value_col_width: usize,
     inner_width: usize,
     value_style: Style,
     desc_style: Style,
 ) -> Line<'static> {
     let leading = "  ";
-    let leading_chars = leading.chars().count();
-    let value_chars = value.chars().count();
-    let value_pad = value_col_chars.saturating_sub(value_chars);
-    let after_value = leading_chars + value_chars + value_pad;
+    let leading_width = leading.width();
+    let value_width = value.width();
+    let value_pad = value_col_width.saturating_sub(value_width);
+    let after_value = leading_width + value_width + value_pad;
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(4);
     spans.push(Span::styled(leading.to_owned(), value_style));
     spans.push(Span::styled(value.to_owned(), value_style));
@@ -369,7 +369,7 @@ pub(super) fn place_cmdline_cursor(frame: &mut Frame, regions: Regions, cmdline:
         return;
     }
     let prefix_width = 1u16;
-    let col = u16::try_from(cmdline.text()[..cmdline.cursor()].chars().count()).unwrap_or(u16::MAX);
+    let col = u16::try_from(cmdline.text()[..cmdline.cursor()].width()).unwrap_or(u16::MAX);
     let cx = row
         .x
         .saturating_add(prefix_width)

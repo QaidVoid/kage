@@ -13,6 +13,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use crate::view::UnicodeWidthStr as _;
+
 /// What a context-menu row does. The host interprets it against the
 /// block the menu was opened over.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,7 +152,7 @@ impl ContextMenu {
         let label_w = self
             .items
             .iter()
-            .map(|i| i.label.chars().count())
+            .map(|i| i.label.width())
             .max()
             .unwrap_or(0);
         // borders (2) + a space of padding on each side (2).
@@ -197,7 +199,7 @@ impl ContextMenu {
         for (idx, item) in self.items.iter().enumerate() {
             let style = if idx == self.selected { sel } else { normal };
             let mut text = format!(" {}", item.label);
-            let pad = inner_w.saturating_sub(text.chars().count());
+            let pad = inner_w.saturating_sub(text.width());
             text.push_str(&" ".repeat(pad));
             lines.push(Line::from(Span::styled(text, style)));
         }

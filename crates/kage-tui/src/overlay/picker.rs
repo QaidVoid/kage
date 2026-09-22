@@ -24,6 +24,8 @@ use ratatui::widgets::{
 
 use crate::overlay::widget::{OverlayAction, OverlayCtx, OverlayWidget};
 use crate::picker::{PickItem, compute_window, filter};
+use crate::view::UnicodeWidthStr as _;
+use crate::view::truncate_to_width;
 
 /// Stateful picker rendered as a modal overlay.
 #[derive(Debug)]
@@ -82,9 +84,9 @@ impl OverlayWidget for OverlayPicker {
             .items
             .iter()
             .map(|i| {
-                let mut len = i.label.chars().count();
+                let mut len = i.label.width();
                 if let Some(r) = &i.right {
-                    len += r.chars().count() + 2;
+                    len += r.width() + 2;
                 }
                 if i.badge.is_some() {
                     len += 3; // " B "
@@ -343,10 +345,10 @@ fn row_line(item: &PickItem, is_sel: bool, width: u16) -> Line<'static> {
         ]),
         Some(right) => {
             let total = usize::from(width);
-            let rlen = right.chars().count();
+            let rlen = right.width();
             let avail = total.saturating_sub(3 + rlen + 2);
-            let label: String = item.label.chars().take(avail).collect();
-            let lw = label.chars().count();
+            let label: String = truncate_to_width(&item.label, avail, "");
+            let lw = label.width();
             let pad = total.saturating_sub(3 + lw + rlen);
             Line::from(vec![
                 badge_span,

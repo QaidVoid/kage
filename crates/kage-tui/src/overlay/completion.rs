@@ -19,6 +19,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::layout::Regions;
+use crate::view::UnicodeWidthStr as _;
+use crate::view::truncate_to_width;
 
 /// Most visible rows before `... N more` indicators kick in.
 const MAX_VISIBLE: usize = 8;
@@ -148,7 +150,7 @@ impl InputCompletion {
             .iter()
             .skip(offset)
             .take(window)
-            .map(|i| i.label.chars().count())
+            .map(|i| i.label.width())
             .max()
             .unwrap_or(0);
 
@@ -183,8 +185,8 @@ fn row(
     aside: Style,
 ) -> Line<'static> {
     let leading = "  ";
-    let label_chars = item.label.chars().count();
-    let gap = label_col.saturating_sub(label_chars);
+    let label_width = item.label.width();
+    let gap = label_col.saturating_sub(label_width);
     let mut spans: Vec<Span<'static>> = vec![
         Span::styled(leading.to_owned(), main),
         Span::styled(item.label.clone(), main),
@@ -193,14 +195,17 @@ fn row(
         spans.push(Span::styled(" ".repeat(gap), main));
     }
     if let Some(detail) = item.detail.as_deref() {
-        let used = leading.chars().count() + label_chars + gap;
+        let used = leading.width() + label_width + gap;
         let room = width.saturating_sub(used).saturating_sub(2);
         if room > 0 {
             spans.push(Span::styled("  ".to_owned(), aside));
-            spans.push(Span::styled(truncate(detail, room), aside));
+            spans.push(Span::styled(
+                truncate_to_width(detail, room, "\u{2026}"),
+                aside,
+            ));
         }
     }
-    let painted: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let painted: usize = spans.iter().map(|s| s.content.width()).sum();
     if painted < width {
         spans.push(Span::styled(" ".repeat(width - painted), main));
     }
@@ -246,26 +251,13 @@ fn scroll_window(selected: usize, total: usize, max_visible: usize) -> (usize, u
     (offset, max_visible)
 }
 
-fn truncate(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        return s.to_owned();
-    }
-    if max_chars == 0 {
-        return String::new();
-    }
-    let keep = max_chars.saturating_sub(1);
-    let mut out: String = s.chars().take(keep).collect();
-    out.push('\u{2026}');
-    out
-}
-
 fn pad(s: &str, width: usize) -> String {
-    let n = s.chars().count();
-    if n >= width {
-        s.chars().take(width).collect()
-    } else {
-        format!("{s}{}", " ".repeat(width - n))
+    let mut out = truncate_to_width(s, width, "");
+    let w = out.width();
+    if w < width {
+        out.push_str(&" ".repeat(width - w));
     }
+    out
 }
 
 /// The completion prefix: the run of non-whitespace characters

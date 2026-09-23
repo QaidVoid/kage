@@ -28,6 +28,9 @@ pub(crate) fn execute_print_run(
         }
     };
     let cancel = CancelFlag::new();
+    if let Err(err) = crate::sigint::install() {
+        eprintln!("kage: {err}; Ctrl-C will kill the process");
+    }
     let mut stdout = io::stdout().lock();
     let result = run_with_hooks(
         provider,
@@ -40,6 +43,9 @@ pub(crate) fn execute_print_run(
         writer,
         plugin_runtime,
         |event| {
+            if crate::sigint::requested() {
+                cancel.cancel();
+            }
             if json_mode {
                 print_event_json(&mut stdout, &event);
             } else {
@@ -49,6 +55,9 @@ pub(crate) fn execute_print_run(
     );
     if !json_mode {
         let _ = writeln!(stdout);
+    }
+    if crate::sigint::requested() {
+        return ExitCode::from(130);
     }
     match result {
         Ok(()) => ExitCode::SUCCESS,

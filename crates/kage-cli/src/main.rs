@@ -296,8 +296,24 @@ pub(crate) fn run_gen_manpage(out: &std::path::Path) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// `-p/--print` belongs to print mode, which only runs without a
+/// subcommand; a `-p` before a subcommand is always a usage error.
+fn subcommand_print_conflict(cli: &Cli) -> Option<ExitCode> {
+    (cli.command.is_some() && cli.print.is_some()).then(|| {
+        eprintln!(
+            "kage: -p/--print cannot be combined with a subcommand; \
+             pass it after the subcommand (e.g. `kage resume -p ...`) or drop it"
+        );
+        ExitCode::from(2)
+    })
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
+
+    if let Some(code) = subcommand_print_conflict(&cli) {
+        return code;
+    }
 
     if let Some(command) = cli.command {
         return run_subcommand(command);
@@ -407,6 +423,7 @@ fn main() -> ExitCode {
 mod cli_loop_run;
 mod cli_printing;
 mod cli_query;
+mod sigint;
 
 pub(crate) use cli_loop_run::{execute_print_run, run_with_hooks};
 pub(crate) use cli_printing::{print_event, print_event_json};

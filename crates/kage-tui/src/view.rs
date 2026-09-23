@@ -345,7 +345,7 @@ use modeline::render_modeline;
 
 // Helpers shared across the split submodules, re-routed through the
 // parent so each submodule's `use super::*` keeps resolving them.
-pub(crate) use blocks::mode_label;
+pub(crate) use blocks::mode_glyph;
 pub(crate) use cmdline::highlight_matches_in_lines;
 pub(crate) use input::{INPUT_PLACEHOLDER_INSERT, INPUT_PLACEHOLDER_NORMAL, wrap_input_rows};
 pub(crate) use modeline::{

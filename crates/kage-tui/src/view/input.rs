@@ -44,7 +44,7 @@ pub(super) fn render_input(frame: &mut Frame, regions: Regions, input: &InputSta
     // `[image #N ...]` markers, so the top border stays just the
     // mode pill.
     let top_line: Vec<Span<'static>> =
-        vec![Span::styled(format!(" {} ", mode_label(mode)), pill_style)];
+        vec![Span::styled(format!(" {} ", mode_glyph(mode)), pill_style)];
 
     let block = RtBlock::default()
         .borders(Borders::ALL)

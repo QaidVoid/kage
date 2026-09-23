@@ -431,7 +431,10 @@ pub(crate) fn fold_indicator(folded: bool) -> char {
     if folded { '>' } else { 'v' }
 }
 
-pub(crate) fn mode_label(mode: Mode) -> &'static str {
+/// Single-char input-pill indicator for a mode. Distinct from
+/// [`crate::app::mode_label`], which returns the spoken word hosts
+/// show in a status bar.
+pub(crate) fn mode_glyph(mode: Mode) -> &'static str {
     match mode {
         Mode::Normal => "-",
         Mode::Insert => "*",

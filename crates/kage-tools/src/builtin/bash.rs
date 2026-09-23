@@ -81,14 +81,21 @@ fn run_command(
     timeout: Duration,
     cx: &ToolContext<'_>,
 ) -> Result<ToolOutput, ToolError> {
-    let mut child = Command::new("bash")
-        .arg("-c")
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c")
         .arg(command)
         .current_dir(cwd)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .spawn()?;
+        .stdin(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Own process group, so the kill below reaches grandchildren
+        // that inherited our pipes.
+        cmd.process_group(0);
+    }
+    let mut child = cmd.spawn()?;
 
     let mut stdout = child.stdout.take().expect("piped stdout");
     let mut stderr = child.stderr.take().expect("piped stderr");
@@ -99,7 +106,7 @@ fn run_command(
     let start = Instant::now();
     let status = loop {
         if cx.is_cancelled() {
-            let _ = child.kill();
+            kill_process_group(&mut child);
             let _ = child.wait();
             return Err(ToolError::Cancelled);
         }
@@ -107,7 +114,7 @@ fn run_command(
             break s;
         }
         if start.elapsed() > timeout {
-            let _ = child.kill();
+            kill_process_group(&mut child);
             let _ = child.wait();
             return Err(ToolError::Timeout {
                 name: "bash".into(),
@@ -117,6 +124,12 @@ fn run_command(
         thread::sleep(POLL_INTERVAL);
     };
 
+    // Bash is done, but backgrounded grandchildren may still hold our
+    // pipes; they would block the joins below on EOF forever. Once the
+    // shell has exited, anything left in its process group is a
+    // straggler: release the group before reading.
+    kill_process_group(&mut child);
+    let _ = child.wait();
     let (stdout_bytes, stdout_truncated) = stdout_handle.join().unwrap_or_default();
     let (stderr_bytes, stderr_truncated) = stderr_handle.join().unwrap_or_default();
 
@@ -166,6 +179,22 @@ fn run_command(
 
 fn cwd_display(p: &Path) -> String {
     p.to_string_lossy().into_owned()
+}
+
+/// Kill the spawned shell and everything it left running. The child runs
+/// in its own process group (`pgid == pid`), so a group kill reaches
+/// grandchildren that inherited our pipes; killing only the shell can
+/// leave those alive, and the reader threads then block on EOF forever.
+fn kill_process_group(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let pgid = nix::unistd::Pid::from_raw(child.id().cast_signed());
+        if nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL).is_err() {
+            let _ = child.kill();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = child.kill();
 }
 
 fn read_capped<R: Read>(reader: &mut R) -> (Vec<u8>, bool) {
@@ -228,6 +257,46 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ToolError::Timeout { .. }));
+    }
+
+    #[test]
+    fn timeout_reaps_pipe_holding_grandchildren() {
+        // `sleep` inherits our pipes; killing only the shell leaves it
+        // alive and the reader threads blocked on EOF until it exits,
+        // so this call would take the full sleep duration.
+        let dir = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let err = run(
+            dir.path(),
+            serde_json::json!({"command":"sleep 5; echo done","timeout_ms":150}),
+        )
+        .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(matches!(err, ToolError::Timeout { .. }));
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "kill took {elapsed:?}; process group was not killed"
+        );
+    }
+
+    #[test]
+    fn backgrounded_grandchild_does_not_block_success_path() {
+        // Bash exits immediately; the backgrounded sleep keeps the pipe
+        // write end open. Without releasing the process group before the
+        // joins, this call blocks until the sleep finishes.
+        let dir = tempfile::tempdir().unwrap();
+        let started = Instant::now();
+        let out = run(
+            dir.path(),
+            serde_json::json!({"command":"sleep 30 & echo started"}),
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+        assert!(out.text.contains("started"));
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "blocked on orphaned pipe holder for {elapsed:?}"
+        );
     }
 
     #[test]

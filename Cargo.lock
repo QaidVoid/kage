@@ -1602,6 +1602,7 @@ dependencies = [
  "html2text",
  "ignore",
  "kage-core",
+ "nix",
  "schemars",
  "serde",
  "serde_json",

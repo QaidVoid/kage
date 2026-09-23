@@ -1,5 +1,6 @@
 //! `find` tool: locate files by glob, honoring ignore files.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use globset::Glob;
@@ -9,6 +10,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::{Tool, ToolContext, ToolError, resolve, schema_for};
+
+/// Upper bound on returned paths; keeps a huge tree from flooding the
+/// model's context.
+const MAX_ENTRIES: usize = 5_000;
 
 /// Input shape for the `find` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -34,7 +39,8 @@ impl Tool for FindTool {
 
     fn description(&self) -> &'static str {
         "Find paths in the workspace matching a glob pattern. Honors `.gitignore` \
-         and `.kageignore`. Optional `type` filters by `f` (files) or `d` (directories)."
+         and `.kageignore`. Optional `type` filters by `f` (files) or `d` \
+         (directories). Output is capped at 5000 entries."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -73,6 +79,7 @@ impl Tool for FindTool {
             .build();
 
         let mut matches: Vec<String> = Vec::new();
+        let mut truncated = false;
         for entry in walker {
             if cx.is_cancelled() {
                 return Err(ToolError::Cancelled);
@@ -97,14 +104,25 @@ impl Tool for FindTool {
             }
             if glob.is_match(rel) {
                 matches.push(rel.to_string_lossy().into_owned());
+                if matches.len() > MAX_ENTRIES {
+                    truncated = true;
+                    break;
+                }
             }
+        }
+        if truncated {
+            matches.truncate(MAX_ENTRIES);
         }
         matches.sort();
 
         let text = if matches.is_empty() {
             "(no matches)".to_owned()
         } else {
-            matches.join("\n")
+            let mut text = matches.join("\n");
+            if truncated {
+                let _ = write!(text, "\n[... truncated at {MAX_ENTRIES} entries ...]");
+            }
+            text
         };
         let count = matches.len();
         Ok(ToolOutput {
@@ -113,6 +131,7 @@ impl Tool for FindTool {
             structured: Some(serde_json::json!({
                 "pattern": input.pattern,
                 "matches": count,
+                "truncated": truncated,
                 "paths": matches,
             })),
             terminate: false,
@@ -173,5 +192,19 @@ mod tests {
         populate(dir.path());
         let out = run(dir.path(), serde_json::json!({"pattern":"**/*.zzz"})).unwrap();
         assert_eq!(out.text, "(no matches)");
+    }
+
+    #[test]
+    fn output_caps_at_max_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..(MAX_ENTRIES + 10) {
+            fs::write(dir.path().join(format!("f{i}.txt")), "x").unwrap();
+        }
+        let out = run(dir.path(), serde_json::json!({"pattern":"*.txt"})).unwrap();
+        assert!(out.text.contains("[... truncated at 5000 entries ...]"));
+        let structured = out.structured.unwrap();
+        assert_eq!(structured["truncated"], true);
+        assert_eq!(structured["matches"], MAX_ENTRIES);
+        assert_eq!(structured["paths"].as_array().unwrap().len(), MAX_ENTRIES);
     }
 }

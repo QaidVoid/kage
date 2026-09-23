@@ -1,5 +1,6 @@
 //! `ls` tool: list directory contents, optionally recursive.
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use ignore::WalkBuilder;
@@ -8,6 +9,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::{Tool, ToolContext, ToolError, resolve, schema_for};
+
+/// Upper bound on returned entries; keeps a huge tree from flooding the
+/// model's context.
+const MAX_ENTRIES: usize = 5_000;
 
 /// Input shape for the `ls` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -32,7 +37,8 @@ impl Tool for LsTool {
     fn description(&self) -> &'static str {
         "List directory contents. With `recursive: true`, walks subdirectories \
          honoring `.gitignore` and `.kageignore`. Entries are prefixed with \
-         `f` (file), `d` (directory), or `l` (symlink)."
+         `f` (file), `d` (directory), or `l` (symlink). Output is capped at \
+         5000 entries."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -55,6 +61,7 @@ impl Tool for LsTool {
         };
 
         let mut entries: Vec<String> = Vec::new();
+        let mut truncated = false;
         if input.recursive {
             let walker = WalkBuilder::new(&target)
                 .add_custom_ignore_filename(".kageignore")
@@ -70,6 +77,10 @@ impl Tool for LsTool {
                 }
                 let prefix = entry_prefix(entry.file_type());
                 entries.push(format!("{prefix} {}", rel.to_string_lossy()));
+                if entries.len() > MAX_ENTRIES {
+                    truncated = true;
+                    break;
+                }
             }
         } else {
             for entry in std::fs::read_dir(&target)? {
@@ -81,14 +92,25 @@ impl Tool for LsTool {
                 let prefix = entry_prefix(file_type);
                 let name = entry.file_name();
                 entries.push(format!("{prefix} {}", name.to_string_lossy()));
+                if entries.len() > MAX_ENTRIES {
+                    truncated = true;
+                    break;
+                }
             }
+        }
+        if truncated {
+            entries.truncate(MAX_ENTRIES);
         }
         entries.sort();
 
         let text = if entries.is_empty() {
             "(empty)".to_owned()
         } else {
-            entries.join("\n")
+            let mut text = entries.join("\n");
+            if truncated {
+                let _ = write!(text, "\n[... truncated at {MAX_ENTRIES} entries ...]");
+            }
+            text
         };
         let count = entries.len();
         Ok(ToolOutput {
@@ -96,6 +118,7 @@ impl Tool for LsTool {
             text,
             structured: Some(serde_json::json!({
                 "count": count,
+                "truncated": truncated,
                 "entries": entries,
             })),
             terminate: false,
@@ -171,5 +194,19 @@ mod tests {
         let out = run(dir.path(), serde_json::json!({"recursive":true})).unwrap();
         assert!(out.text.contains("a.txt"));
         assert!(!out.text.contains("b.txt"));
+    }
+
+    #[test]
+    fn output_caps_at_max_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..(MAX_ENTRIES + 10) {
+            fs::write(dir.path().join(format!("f{i}.txt")), "x").unwrap();
+        }
+        let out = run(dir.path(), serde_json::json!({})).unwrap();
+        assert!(out.text.contains("[... truncated at 5000 entries ...]"));
+        let structured = out.structured.unwrap();
+        assert_eq!(structured["truncated"], true);
+        assert_eq!(structured["count"], MAX_ENTRIES);
+        assert_eq!(structured["entries"].as_array().unwrap().len(), MAX_ENTRIES);
     }
 }

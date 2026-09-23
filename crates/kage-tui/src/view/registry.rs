@@ -351,8 +351,8 @@ impl BlockFactory for BuiltinCompactionFactory {
 mod tests {
     use std::time::Instant;
 
+    use super::super::{Emphasis, widget::RenderCtx};
     use super::*;
-    use super::super::{widget::RenderCtx, Emphasis};
     use crate::theme::Theme;
 
     fn lines_ctx(theme: &Theme) -> RenderCtx<'_> {

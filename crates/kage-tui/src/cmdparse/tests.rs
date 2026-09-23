@@ -506,13 +506,20 @@ fn complete_flag_arg_lists_bool_literals() {
 }
 
 #[test]
-fn complete_unterminated_quote_returns_empty() {
+fn complete_unterminated_quote_still_suggests_matching_values() {
     let r = TestResolver;
-    let c = complete(&registry(), r#"model "anth"#, 11, &EmptyResolver);
-    let _ = r;
-    let _ = c;
-    let c2 = complete(&registry(), r#"compact "broken"#, 15, &EmptyResolver);
-    assert!(c2.items.is_empty());
+    // `tokenize_lenient` keeps the unterminated token and the
+    // leading quote is stripped from the prefix, so completion
+    // behaves as if the closing quote were present.
+    let c = complete(&registry(), r#"model "anth"#, 11, &r);
+    let names: Vec<String> = c.items.iter().map(|i| i.value.clone()).collect();
+    assert_eq!(
+        names,
+        vec![
+            "anthropic:claude-sonnet-4-6".to_owned(),
+            "anthropic:claude-opus-4-7".to_owned()
+        ]
+    );
 }
 
 #[test]

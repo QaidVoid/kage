@@ -10,8 +10,8 @@ use std::time::Instant;
 
 use ratatui::text::Line;
 
-use super::widget::{BlockWidget, RenderCtx};
 use super::tool_pair_to_lines;
+use super::widget::{BlockWidget, RenderCtx};
 use crate::buffer::Block;
 
 /// Renders one [`Block::ToolCall`] paired with its matching
@@ -118,8 +118,8 @@ impl BlockWidget for ToolPairBlockWidget {
 mod tests {
     use std::time::Instant;
 
-    use super::*;
     use super::super::Emphasis;
+    use super::*;
     use crate::theme::Theme;
 
     fn ctx(theme: &Theme) -> RenderCtx<'_> {

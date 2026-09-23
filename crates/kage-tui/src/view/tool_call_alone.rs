@@ -2,11 +2,8 @@
 //! "running..." pending bubble before its [`crate::buffer::Block::ToolResult`]
 //! arrives).
 
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget};
 
 use super::widget::{BlockWidget, RenderCtx};
 use super::{Emphasis, fold_indicator, plain_lines, tool_call_style, wrap_in_bubble_focused};
@@ -84,17 +81,6 @@ impl ToolCallAloneBlockWidget {
 }
 
 impl BlockWidget for ToolCallAloneBlockWidget {
-    fn measure(&self, width: u16) -> u16 {
-        u16::try_from(self.lines_for(width, Emphasis::None).len()).unwrap_or(u16::MAX)
-    }
-
-    fn render(&self, area: Rect, buf: &mut Buffer, ctx: &RenderCtx<'_>) {
-        if area.width == 0 || area.height == 0 {
-            return;
-        }
-        Paragraph::new(self.lines(area.width, ctx)).render(area, buf);
-    }
-
     fn lines(&self, width: u16, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         self.lines_for(width, ctx.emphasis)
     }
@@ -118,6 +104,19 @@ mod tests {
         }
     }
 
+    fn painted(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn pending_block() -> Block {
         Block::ToolCall {
             call_id: "c1".into(),
@@ -136,20 +135,11 @@ mod tests {
     }
 
     #[test]
-    fn render_paints_running_marker_and_tool_name() {
+    fn lines_paint_running_marker_and_tool_name() {
         let w = ToolCallAloneBlockWidget::from_block(&pending_block()).unwrap();
         let theme = Theme::default();
-        let area = Rect::new(0, 0, 60, w.measure(60));
-        let mut buf = Buffer::empty(area);
-        w.render(area, &mut buf, &ctx(&theme));
-        let mut painted = String::new();
-        for y in area.top()..area.bottom() {
-            for x in area.left()..area.right() {
-                painted.push_str(buf[(x, y)].symbol());
-            }
-            painted.push('\n');
-        }
-        assert!(painted.contains("bash"));
-        assert!(painted.contains("running"));
+        let text = painted(&w.lines(60, &ctx(&theme)));
+        assert!(text.contains("bash"), "got {text:?}");
+        assert!(text.contains("running"), "got {text:?}");
     }
 }

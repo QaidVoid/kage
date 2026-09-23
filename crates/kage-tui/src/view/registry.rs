@@ -7,11 +7,11 @@
 //! startup; plugins call [`BlockRenderer::set_custom`] to add a
 //! widget for a `Block::Custom { kind: ... }` variant they own.
 //!
-//! PB.9 wires this into `render_buffer`: every block goes through
+//! `render_buffer` routes every block through
 //! [`BlockRenderer::widget_for`] (or [`BlockRenderer::pair_widget_for`]
-//! for merged tool blocks) before its lines are composed into the
-//! Paragraph. Plugin overrides via `set_builtin` / `set_custom`
-//! are picked up automatically.
+//! for merged tool blocks) and paints the resulting widget's `lines`.
+//! Plugin overrides via `set_builtin` / `set_custom` are picked up
+//! automatically.
 
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, RwLock};
@@ -352,6 +352,19 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+    use super::super::{widget::RenderCtx, Emphasis};
+    use crate::theme::Theme;
+
+    fn lines_ctx(theme: &Theme) -> RenderCtx<'_> {
+        RenderCtx {
+            theme,
+            focused: false,
+            emphasis: Emphasis::None,
+            selection: None,
+            search_pattern: None,
+            row_budget: None,
+        }
+    }
 
     fn user_block() -> Block {
         Block::User {
@@ -476,21 +489,21 @@ mod tests {
 
         let mut r = BlockRenderer::with_builtins();
         r.set_custom("kage:notify", Arc::new(CustomFactory));
+        let theme = Theme::default();
         // Registered kind hits the override.
         let registered = r
             .widget_for(&custom_block("kage:notify"))
             .expect("override matches");
-        assert_eq!(
-            registered.measure(40),
-            0,
+        assert!(
+            registered.lines(40, &lines_ctx(&theme)).is_empty(),
             "override returns EmptyBlockWidget"
         );
         // Unregistered kind falls back to the default custom
-        // factory (CustomBlockWidget), which has a non-zero measure.
+        // factory (CustomBlockWidget), which emits content lines.
         let fallback = r
             .widget_for(&custom_block("other"))
             .expect("default factory matches");
-        assert!(fallback.measure(40) > 0);
+        assert!(!fallback.lines(40, &lines_ctx(&theme)).is_empty());
     }
 
     #[test]
@@ -504,8 +517,12 @@ mod tests {
 
         let mut r = BlockRenderer::with_builtins();
         r.set_builtin(BuiltinKind::User, Arc::new(OverrideFactory));
+        let theme = Theme::default();
         let widget = r.widget_for(&user_block()).expect("override should match");
-        assert_eq!(widget.measure(40), 0, "EmptyBlockWidget reports zero rows");
+        assert!(
+            widget.lines(40, &lines_ctx(&theme)).is_empty(),
+            "EmptyBlockWidget reports zero rows"
+        );
     }
 
     #[test]
@@ -541,22 +558,26 @@ mod tests {
             }
         }
         register_custom("pt7:test-kind", Arc::new(Marker));
+        let theme = Theme::default();
         {
             let g = global().read().expect("poisoned");
             let w = g
                 .widget_for(&custom_block("pt7:test-kind"))
                 .expect("custom registered");
-            assert_eq!(w.measure(40), 0, "Marker -> EmptyBlockWidget");
+            assert!(
+                w.lines(40, &lines_ctx(&theme)).is_empty(),
+                "Marker -> EmptyBlockWidget"
+            );
         }
         reset_to_builtins();
         let g = global().read().expect("poisoned");
         // After reset the kind falls back to the default custom
-        // factory, which has a non-zero measure.
+        // factory, which emits content lines.
         assert!(
-            g.widget_for(&custom_block("pt7:test-kind"))
+            !g.widget_for(&custom_block("pt7:test-kind"))
                 .expect("default custom factory")
-                .measure(40)
-                > 0
+                .lines(40, &lines_ctx(&theme))
+                .is_empty()
         );
     }
 }

@@ -11,11 +11,8 @@
 //! the renderer's scroll math and a focused / search-matching block
 //! still picks up the standard accent like every other block.
 
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget};
 
 use super::widget::{BlockWidget, RenderCtx};
 use super::{Emphasis, mark_emphasis, thinking_style};
@@ -62,17 +59,6 @@ impl ThinkingBlockWidget {
 }
 
 impl BlockWidget for ThinkingBlockWidget {
-    fn measure(&self, width: u16) -> u16 {
-        u16::try_from(self.lines_for(width, Emphasis::None).len()).unwrap_or(u16::MAX)
-    }
-
-    fn render(&self, area: Rect, buf: &mut Buffer, ctx: &RenderCtx<'_>) {
-        if area.width == 0 || area.height == 0 {
-            return;
-        }
-        Paragraph::new(self.lines(area.width, ctx)).render(area, buf);
-    }
-
     fn lines(&self, width: u16, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         self.lines_for(width, ctx.emphasis)
     }
@@ -94,13 +80,27 @@ mod tests {
         }
     }
 
+    fn painted(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn folded_widget_measures_header_plus_bottom_pad() {
         // PB.7: every non-bubble block gets a trailing pad row, so
-        // a folded thinking block (1 header line) measures 2 rows.
+        // a folded thinking block (1 header line) is 2 rows.
         let w = ThinkingBlockWidget::new("a\nb\nc", true, false);
+        let theme = Theme::default();
         assert_eq!(
-            usize::from(w.measure(40)),
+            w.lines(40, &ctx(&theme)).len(),
             1 + super::super::widget::BlockPadding::BOTTOM
         );
     }
@@ -108,65 +108,39 @@ mod tests {
     #[test]
     fn unfolded_widget_measures_more_than_one_row() {
         let w = ThinkingBlockWidget::new("body line", false, false);
-        assert!(w.measure(40) >= 2);
+        let theme = Theme::default();
+        assert!(w.lines(40, &ctx(&theme)).len() >= 2);
     }
 
     #[test]
-    fn unfolded_render_paints_body_text() {
+    fn unfolded_lines_paint_body_text() {
         let w = ThinkingBlockWidget::new("hidden reason", false, false);
         let theme = Theme::default();
-        let area = Rect::new(0, 0, 40, w.measure(40));
-        let mut buf = Buffer::empty(area);
-        w.render(area, &mut buf, &ctx(&theme));
-        let mut found = false;
-        for y in area.top()..area.bottom() {
-            let mut row = String::new();
-            for x in area.left()..area.right() {
-                row.push_str(buf[(x, y)].symbol());
-            }
-            if row.contains("hidden reason") {
-                found = true;
-                break;
-            }
-        }
-        assert!(found, "expected thinking body text in painted buffer");
+        let text = painted(&w.lines(40, &ctx(&theme)));
+        assert!(text.contains("hidden reason"), "got {text:?}");
     }
 
     #[test]
-    fn unfocused_render_keeps_gutter_blank_but_reserved() {
+    fn unfocused_lines_keep_gutter_blank_but_reserved() {
         let w = ThinkingBlockWidget::new("body", false, false);
         let theme = Theme::default();
-        let area = Rect::new(0, 0, 30, w.measure(30));
-        let mut buf = Buffer::empty(area);
-        w.render(area, &mut buf, &ctx(&theme));
         // PB.5: column 0 is the reserved gutter so toggling focus
         // does not shift the body. Thinking has no visible rule
         // glyph, so unfocused it is always a plain space.
-        for y in area.top()..area.bottom() {
-            let cell = buf[(area.left(), y)].symbol();
-            assert_eq!(
-                cell, " ",
-                "row {y} col 0 should be the blank reserved gutter, got {cell:?}"
+        for row in w.lines(30, &ctx(&theme)) {
+            let text: String = row.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(
+                text.starts_with(' '),
+                "row should start with the blank reserved gutter, got {text:?}"
             );
         }
     }
 
     #[test]
-    fn folded_render_omits_body() {
+    fn folded_lines_omit_body() {
         let w = ThinkingBlockWidget::new("hidden reason", true, false);
         let theme = Theme::default();
-        let area = Rect::new(0, 0, 40, w.measure(40));
-        let mut buf = Buffer::empty(area);
-        w.render(area, &mut buf, &ctx(&theme));
-        for y in area.top()..area.bottom() {
-            let mut row = String::new();
-            for x in area.left()..area.right() {
-                row.push_str(buf[(x, y)].symbol());
-            }
-            assert!(
-                !row.contains("hidden reason"),
-                "folded thinking should hide body, found {row:?}"
-            );
-        }
+        let text = painted(&w.lines(40, &ctx(&theme)));
+        assert!(!text.contains("hidden reason"), "got {text:?}");
     }
 }

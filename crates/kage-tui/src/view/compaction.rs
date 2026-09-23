@@ -9,11 +9,8 @@
 //! with the kept/summarized counts, then the summary body rendered
 //! through the same markdown renderer assistant text uses.
 
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget};
 
 use super::widget::{BlockWidget, RenderCtx};
 use super::{Emphasis, mark_emphasis, prefix_line};
@@ -81,17 +78,6 @@ impl CompactionBlockWidget {
 }
 
 impl BlockWidget for CompactionBlockWidget {
-    fn measure(&self, width: u16) -> u16 {
-        u16::try_from(self.lines_for(width, Emphasis::None).len()).unwrap_or(u16::MAX)
-    }
-
-    fn render(&self, area: Rect, buf: &mut Buffer, ctx: &RenderCtx<'_>) {
-        if area.width == 0 || area.height == 0 {
-            return;
-        }
-        Paragraph::new(self.lines(area.width, ctx)).render(area, buf);
-    }
-
     fn lines(&self, width: u16, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         self.lines_for(width, ctx.emphasis)
     }
@@ -214,9 +200,10 @@ mod tests {
             "[compacted: kept 1, summarized 2]\nbody",
         ))
         .unwrap();
+        let theme = Theme::default();
         assert_eq!(
-            folded_w.measure(60),
-            unfolded_w.measure(60),
+            folded_w.lines(60, &ctx(&theme)).len(),
+            unfolded_w.lines(60, &ctx(&theme)).len(),
             "compaction summary should not honour the folded flag"
         );
     }
@@ -237,21 +224,22 @@ mod tests {
     }
 
     #[test]
-    fn render_paints_summary_chip_into_buffer() {
+    fn lines_paint_summary_chip_and_body() {
         let block = compaction_block("[compacted: kept 1, summarized 2]\nthe summary");
         let w = CompactionBlockWidget::from_block(&block).unwrap();
         let theme = Theme::default();
-        let area = Rect::new(0, 0, 80, w.measure(80));
-        let mut buf = Buffer::empty(area);
-        w.render(area, &mut buf, &ctx(&theme));
-        let mut painted = String::new();
-        for y in area.top()..area.bottom() {
-            for x in area.left()..area.right() {
-                painted.push_str(buf[(x, y)].symbol());
-            }
-            painted.push('\n');
-        }
-        assert!(painted.contains("summary"));
-        assert!(painted.contains("the summary"));
+        let painted: String = w
+            .lines(80, &ctx(&theme))
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(painted.contains("summary"), "got {painted:?}");
+        assert!(painted.contains("the summary"), "got {painted:?}");
     }
 }

@@ -15,11 +15,8 @@
 
 use std::sync::Arc;
 
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Line;
-use ratatui::widgets::{Paragraph, Widget};
 
 use super::registry::BlockFactory;
 use super::widget::{BlockWidget, RenderCtx};
@@ -125,17 +122,6 @@ impl PluginBlockWidget {
 }
 
 impl BlockWidget for PluginBlockWidget {
-    fn measure(&self, width: u16) -> u16 {
-        u16::try_from(self.lines_for(width, Emphasis::None).len()).unwrap_or(u16::MAX)
-    }
-
-    fn render(&self, area: Rect, buf: &mut Buffer, ctx: &RenderCtx<'_>) {
-        if area.width == 0 || area.height == 0 {
-            return;
-        }
-        Paragraph::new(self.lines(area.width, ctx)).render(area, buf);
-    }
-
     fn lines(&self, width: u16, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         self.lines_for(width, ctx.emphasis)
     }

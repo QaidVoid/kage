@@ -457,13 +457,9 @@ fn slice_lines_for_window(
 /// Callers pass the `result_by_call` map (so lookups stay cheap inside
 /// the render loop) and the emphasis state for this idx.
 ///
-/// PB.9 routes this through the [`registry::BlockRenderer`] so block
-/// rendering goes through the same widget dispatch plugins hook into
-/// via `set_builtin` / `set_custom`.
-/// Compute block height from raw text without building styled lines.
-/// Returns `None` for block types that need the full render path.
-/// The estimate uses char-based wrapping, consistent with
-/// `wrap_rows`.
+/// Routes through the [`registry::BlockRenderer`] so block rendering
+/// goes through the same widget dispatch plugins hook into via
+/// `set_builtin` / `set_custom`.
 fn build_block_lines(
     buffer: &Buffer,
     idx: usize,

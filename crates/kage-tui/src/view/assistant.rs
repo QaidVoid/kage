@@ -9,10 +9,7 @@
 //! code fences. Emphasis adds the left-edge marker via
 //! `mark_emphasis`.
 
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
 use ratatui::text::Line;
-use ratatui::widgets::{Paragraph, Widget};
 
 use super::widget::{BlockWidget, RenderCtx};
 use super::{Emphasis, assistant_style, mark_emphasis};
@@ -57,17 +54,6 @@ impl AssistantBlockWidget {
 }
 
 impl BlockWidget for AssistantBlockWidget {
-    fn measure(&self, width: u16) -> u16 {
-        u16::try_from(self.lines_for(width, Emphasis::None).len()).unwrap_or(u16::MAX)
-    }
-
-    fn render(&self, area: Rect, buf: &mut Buffer, ctx: &RenderCtx<'_>) {
-        if area.width == 0 || area.height == 0 {
-            return;
-        }
-        Paragraph::new(self.lines(area.width, ctx)).render(area, buf);
-    }
-
     fn lines(&self, width: u16, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         self.lines_for(width, ctx.emphasis)
     }
@@ -89,89 +75,79 @@ mod tests {
         }
     }
 
-    #[test]
-    fn measure_counts_at_least_one_row_for_one_line_of_text() {
-        let w = AssistantBlockWidget::new("hello", false);
-        assert!(w.measure(40) >= 1);
+    fn painted(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
-    fn render_paints_assistant_text_into_buffer() {
+    fn lines_yield_at_least_one_row_for_one_line_of_text() {
+        let w = AssistantBlockWidget::new("hello", false);
+        let theme = Theme::default();
+        assert!(!w.lines(40, &ctx(&theme)).is_empty());
+    }
+
+    #[test]
+    fn lines_include_assistant_text() {
         let w = AssistantBlockWidget::new("hello world", false);
         let theme = Theme::default();
-        let area = Rect::new(0, 0, 40, w.measure(40));
-        let mut buf = Buffer::empty(area);
-        w.render(area, &mut buf, &ctx(&theme));
-        let mut found = false;
-        for y in area.top()..area.bottom() {
-            let mut row = String::new();
-            for x in area.left()..area.right() {
-                row.push_str(buf[(x, y)].symbol());
-            }
-            if row.contains("hello world") {
-                found = true;
-                break;
-            }
-        }
-        assert!(found, "expected assistant text in painted buffer");
-    }
-
-    #[test]
-    fn focused_render_includes_emphasis_marker() {
-        let w = AssistantBlockWidget::new("hi", false);
-        let theme = Theme::default();
-        let mut focused = ctx(&theme);
-        focused.emphasis = Emphasis::Focused;
-        let area = Rect::new(0, 0, 40, w.measure(40));
-        let mut buf = Buffer::empty(area);
-        w.render(area, &mut buf, &focused);
-        let mut row = String::new();
-        for x in area.left()..area.right() {
-            row.push_str(buf[(x, area.top())].symbol());
-        }
         assert!(
-            row.starts_with(Emphasis::Focused.rule_glyph()),
-            "expected focus rule prefix, got {row:?}"
+            painted(&w.lines(40, &ctx(&theme))).contains("hello world"),
+            "expected assistant text in rendered lines"
         );
     }
 
     #[test]
-    fn focused_render_paints_rule_on_every_wrapped_row() {
+    fn focused_lines_start_with_emphasis_marker() {
+        let w = AssistantBlockWidget::new("hi", false);
+        let theme = Theme::default();
+        let mut focused = ctx(&theme);
+        focused.emphasis = Emphasis::Focused;
+        let rows = w.lines(40, &focused);
+        let first = painted(&rows[..1]);
+        assert!(
+            first.starts_with(Emphasis::Focused.rule_glyph()),
+            "expected focus rule prefix, got {first:?}"
+        );
+    }
+
+    #[test]
+    fn focused_lines_paint_rule_on_every_body_row() {
         let long = "a".repeat(120);
         let w = AssistantBlockWidget::new(&long, false);
         let theme = Theme::default();
         let mut focused = ctx(&theme);
         focused.emphasis = Emphasis::Focused;
-        let area = Rect::new(0, 0, 20, w.measure(20));
-        assert!(area.height >= 6, "expected the long line to wrap");
-        let mut buf = Buffer::empty(area);
-        w.render(area, &mut buf, &focused);
-        // PB.6: every visual row of body content (everything before
-        // the trailing pad row) carries the focus rule glyph.
-        let body_rows = area.height.saturating_sub(1);
-        for y in area.top()..(area.top() + body_rows) {
-            assert_eq!(
-                buf[(area.left(), y)].symbol(),
-                Emphasis::Focused.rule_glyph(),
-                "expected focus rule at row {y} col 0"
+        let rows = w.lines(20, &focused);
+        assert!(rows.len() >= 6, "expected the long line to wrap");
+        // Every visual row of body content (everything before the
+        // trailing pad row) carries the focus rule glyph.
+        let body_rows = rows.len().saturating_sub(1);
+        for (y, row) in rows.iter().take(body_rows).enumerate() {
+            let text = painted(std::slice::from_ref(row));
+            assert!(
+                text.starts_with(Emphasis::Focused.rule_glyph()),
+                "expected focus rule on body row {y}, got {text:?}"
             );
         }
     }
 
     #[test]
-    fn live_and_settled_widgets_paint_the_same_visible_text() {
+    fn live_and_settled_lines_are_identical() {
         let live = AssistantBlockWidget::new("plain text", true);
         let settled = AssistantBlockWidget::new("plain text", false);
         let theme = Theme::default();
-        let area = Rect::new(0, 0, 40, live.measure(40).max(settled.measure(40)));
-        let mut a = Buffer::empty(area);
-        let mut b = Buffer::empty(area);
-        live.render(area, &mut a, &ctx(&theme));
-        settled.render(area, &mut b, &ctx(&theme));
-        for y in area.top()..area.bottom() {
-            for x in area.left()..area.right() {
-                assert_eq!(a[(x, y)].symbol(), b[(x, y)].symbol());
-            }
-        }
+        assert_eq!(
+            painted(&live.lines(40, &ctx(&theme))),
+            painted(&settled.lines(40, &ctx(&theme)))
+        );
     }
 }

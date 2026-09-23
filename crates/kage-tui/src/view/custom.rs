@@ -2,10 +2,7 @@
 //! whose `kind` the core does not interpret. Renders as a header
 //! line plus an indented body (folded blocks show only the header).
 
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
 use ratatui::text::Line;
-use ratatui::widgets::{Paragraph, Widget};
 
 use super::widget::{BlockWidget, RenderCtx};
 use super::{
@@ -56,17 +53,6 @@ impl CustomBlockWidget {
 }
 
 impl BlockWidget for CustomBlockWidget {
-    fn measure(&self, width: u16) -> u16 {
-        u16::try_from(self.lines_for(width, Emphasis::None).len()).unwrap_or(u16::MAX)
-    }
-
-    fn render(&self, area: Rect, buf: &mut Buffer, ctx: &RenderCtx<'_>) {
-        if area.width == 0 || area.height == 0 {
-            return;
-        }
-        Paragraph::new(self.lines(area.width, ctx)).render(area, buf);
-    }
-
     fn lines(&self, width: u16, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         self.lines_for(width, ctx.emphasis)
     }
@@ -88,6 +74,19 @@ mod tests {
         }
     }
 
+    fn painted(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     fn custom_block() -> Block {
         Block::Custom {
             kind: "kage:log".into(),
@@ -103,20 +102,11 @@ mod tests {
     }
 
     #[test]
-    fn render_paints_kind_and_body() {
+    fn lines_paint_kind_and_body() {
         let w = CustomBlockWidget::from_block(&custom_block()).unwrap();
         let theme = Theme::default();
-        let area = Rect::new(0, 0, 60, w.measure(60));
-        let mut buf = Buffer::empty(area);
-        w.render(area, &mut buf, &ctx(&theme));
-        let mut painted = String::new();
-        for y in area.top()..area.bottom() {
-            for x in area.left()..area.right() {
-                painted.push_str(buf[(x, y)].symbol());
-            }
-            painted.push('\n');
-        }
-        assert!(painted.contains("kage:log"));
-        assert!(painted.contains("log payload"));
+        let text = painted(&w.lines(60, &ctx(&theme)));
+        assert!(text.contains("kage:log"), "got {text:?}");
+        assert!(text.contains("log payload"), "got {text:?}");
     }
 }

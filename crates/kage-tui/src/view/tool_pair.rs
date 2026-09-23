@@ -8,13 +8,10 @@
 
 use std::time::Instant;
 
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
 use ratatui::text::Line;
-use ratatui::widgets::{Paragraph, Widget};
 
 use super::widget::{BlockWidget, RenderCtx};
-use super::{Emphasis, tool_pair_to_lines};
+use super::tool_pair_to_lines;
 use crate::buffer::Block;
 
 /// Renders one [`Block::ToolCall`] paired with its matching
@@ -24,8 +21,7 @@ use crate::buffer::Block;
 /// The widget owns enough data from both sides of the pair to
 /// reconstruct the synthetic blocks the existing `tool_pair_to_lines`
 /// helper expects. Unpaired tool calls (still running) and unpaired
-/// tool results stay on the existing `block_to_lines` path until
-/// PB.9 retires it.
+/// tool results stay on the standalone `block_to_lines` path.
 #[derive(Clone, Debug)]
 pub struct ToolPairBlockWidget {
     call_id: String,
@@ -107,24 +103,6 @@ impl ToolPairBlockWidget {
 }
 
 impl BlockWidget for ToolPairBlockWidget {
-    fn measure(&self, width: u16) -> u16 {
-        let lines = tool_pair_to_lines(
-            &self.synthetic_call(),
-            &self.synthetic_result(),
-            width,
-            Emphasis::None,
-            None,
-        );
-        u16::try_from(lines.len()).unwrap_or(u16::MAX)
-    }
-
-    fn render(&self, area: Rect, buf: &mut Buffer, ctx: &RenderCtx<'_>) {
-        if area.width == 0 || area.height == 0 {
-            return;
-        }
-        Paragraph::new(self.lines(area.width, ctx)).render(area, buf);
-    }
-
     fn lines(&self, width: u16, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         tool_pair_to_lines(
             &self.synthetic_call(),
@@ -138,7 +116,10 @@ impl BlockWidget for ToolPairBlockWidget {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::*;
+    use super::super::Emphasis;
     use crate::theme::Theme;
 
     fn ctx(theme: &Theme) -> RenderCtx<'_> {
@@ -150,6 +131,19 @@ mod tests {
             search_pattern: None,
             row_budget: None,
         }
+    }
+
+    fn painted(lines: &[Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     fn pair(folded: bool, is_error: bool) -> (Block, Block) {
@@ -187,83 +181,60 @@ mod tests {
     }
 
     #[test]
-    fn measure_paired_block_returns_at_least_header_row() {
+    fn lines_paired_block_returns_at_least_header_row() {
         let (call, result) = pair(true, false);
         let w = ToolPairBlockWidget::from_pair(&call, &result).unwrap();
-        assert!(w.measure(60) >= 1);
+        let theme = Theme::default();
+        assert!(!w.lines(60, &ctx(&theme)).is_empty());
     }
 
     #[test]
-    fn folded_pair_measures_smaller_than_unfolded() {
+    fn folded_pair_lines_never_exceed_unfolded() {
         let (cf, rf) = pair(true, false);
         let (cu, ru) = pair(false, false);
         let folded = ToolPairBlockWidget::from_pair(&cf, &rf).unwrap();
         let unfolded = ToolPairBlockWidget::from_pair(&cu, &ru).unwrap();
-        assert!(unfolded.measure(60) >= folded.measure(60));
+        let theme = Theme::default();
+        assert!(
+            unfolded.lines(60, &ctx(&theme)).len() >= folded.lines(60, &ctx(&theme)).len(),
+            "folding should not add rows"
+        );
     }
 
     #[test]
-    fn render_unfolded_pair_paints_body_lines() {
+    fn lines_unfolded_pair_include_body_lines() {
         let (call, result) = pair(false, false);
         let w = ToolPairBlockWidget::from_pair(&call, &result).unwrap();
         let theme = Theme::default();
-        let area = Rect::new(0, 0, 60, w.measure(60));
-        let mut buf = Buffer::empty(area);
-        w.render(area, &mut buf, &ctx(&theme));
-        let mut painted = String::new();
-        for y in area.top()..area.bottom() {
-            for x in area.left()..area.right() {
-                painted.push_str(buf[(x, y)].symbol());
-            }
-            painted.push('\n');
-        }
+        let text = painted(&w.lines(60, &ctx(&theme)));
         assert!(
-            painted.contains("read"),
-            "expected tool name in painted output"
+            text.contains("read"),
+            "expected tool name in rendered lines: {text:?}"
         );
         assert!(
-            painted.contains("line one"),
-            "expected body text in painted output: {painted:?}"
+            text.contains("line one"),
+            "expected body text in rendered lines: {text:?}"
         );
     }
 
     #[test]
-    fn render_folded_pair_omits_full_body() {
+    fn lines_folded_pair_keep_tool_name() {
         let (call, result) = pair(true, false);
         let w = ToolPairBlockWidget::from_pair(&call, &result).unwrap();
         let theme = Theme::default();
-        let area = Rect::new(0, 0, 60, w.measure(60));
-        let mut buf = Buffer::empty(area);
-        w.render(area, &mut buf, &ctx(&theme));
-        let mut painted = String::new();
-        for y in area.top()..area.bottom() {
-            for x in area.left()..area.right() {
-                painted.push_str(buf[(x, y)].symbol());
-            }
-        }
-        assert!(
-            painted.contains("read"),
-            "expected tool name even when folded"
-        );
+        let text = painted(&w.lines(60, &ctx(&theme)));
+        assert!(text.contains("read"), "expected tool name even when folded");
     }
 
     #[test]
-    fn render_error_pair_includes_error_marker() {
+    fn lines_error_pair_include_error_marker() {
         let (call, result) = pair(false, true);
         let w = ToolPairBlockWidget::from_pair(&call, &result).unwrap();
         let theme = Theme::default();
-        let area = Rect::new(0, 0, 60, w.measure(60));
-        let mut buf = Buffer::empty(area);
-        w.render(area, &mut buf, &ctx(&theme));
-        let mut painted = String::new();
-        for y in area.top()..area.bottom() {
-            for x in area.left()..area.right() {
-                painted.push_str(buf[(x, y)].symbol());
-            }
-        }
+        let text = painted(&w.lines(60, &ctx(&theme)));
         assert!(
-            painted.contains("ERROR"),
-            "error pair should display ERROR marker, got: {painted:?}"
+            text.contains("ERROR"),
+            "error pair should display ERROR marker, got: {text:?}"
         );
     }
 }

@@ -59,7 +59,7 @@ Every session is recorded to `~/.local/share/kage/sessions/<id>.jsonl`
 unless you pass `--no-session`. Resume the most recent session with:
 
 ```bash
-kage resume --last
+kage resume --last -p "continue where we left off"
 ```
 
 List recorded sessions:
@@ -81,7 +81,7 @@ For scripted use, run a single prompt and stream the response to
 stdout:
 
 ```bash
-kage -p "summarize this Cargo.toml" --model anthropic:claude-sonnet-4-6 < Cargo.toml
+kage -p "summarize this Cargo.toml" --model anthropic:claude-sonnet-4-6
 ```
 
 ## next steps

@@ -6,11 +6,16 @@ For exhaustive detail, the code is the source of truth.
 ## crate graph
 
 ```
-kage-core                                              (leaf)
-kage-provider  kage-tools  kage-session  kage-sandbox  (depend on core)
-kage-loop                                              (depends on provider + tools)
-kage-mcp  kage-acp  kage-plugin  kage-tui              (depend on loop)
-kage-cli   (binary)                                    (depends on everything it uses)
+kage-core                                             (leaf)
+kage-jsonrpc                                          (depends on core)
+kage-provider  kage-session  kage-tools               (depend on core)
+kage-mcp        (core + jsonrpc + tools)
+kage-acp        (core + jsonrpc + provider)
+kage-plugin     (core + provider + tools)
+kage-loop       (core + provider + tools)
+kage-tui        (core + loop + plugin)
+kage-sandbox                                          (empty placeholder)
+kage-cli        (binary)            (depends on everything it uses)
 ```
 
 Layering is strict: depend only downward. The `kage-cli` binary is
@@ -21,15 +26,16 @@ the only crate that wires the whole graph together.
 | Crate            | Responsibility                                      |
 | ---------------- | --------------------------------------------------- |
 | `kage-core`      | Message types, content blocks, errors, cancel flag  |
+| `kage-jsonrpc`   | Shared bidirectional JSON-RPC peer over stdio       |
 | `kage-provider`  | LLM provider clients, registry, model catalog       |
 | `kage-tools`     | Tool trait, built-in tools, tool registry           |
 | `kage-session`   | Append-only JSONL writer, replay, fork, search      |
-| `kage-sandbox`   | Path resolution and workdir guards                  |
 | `kage-loop`      | The agent loop, compaction, hooks                   |
-| `kage-mcp`       | MCP client (deferred to post-0.1)                   |
-| `kage-acp`       | ACP server mode (deferred to post-0.1)              |
+| `kage-mcp`       | MCP client (external tool servers) and MCP server (kage's built-in tools over stdio) |
+| `kage-acp`       | ACP agent (editors drive kage) and ACP client (kage drives another agent as a provider) |
 | `kage-plugin`    | Lua runtime, sandbox, host API surface              |
 | `kage-tui`       | The interactive TUI, modal input, block renderer    |
+| `kage-sandbox`   | Reserved slot for OS-level command isolation; ships empty in 0.1 |
 | `kage-cli`       | The binary, CLI flags, main wiring                  |
 
 ## data flow per turn
@@ -59,19 +65,25 @@ The loop is fully synchronous. There is no async runtime in core.
 
 ## sessions on disk
 
-A session file is a single JSONL stream:
+A session file is a single JSONL stream. The first line is a
+`header`; every entry carries its own `id` and `ts` so forks can
+branch from any point:
 
 ```jsonl
-{"v":1,"kind":"header","ts":"...","session":"...","model":"...","system":"..."}
-{"kind":"message","ts":"...","id":"...","message":{"role":"User","content":[...]}}
-{"kind":"message","ts":"...","id":"...","message":{"role":"Assistant","content":[...]}}
-{"kind":"tool-call","ts":"...","id":"...","call_id":"...","name":"read","input":{...}}
-{"kind":"tool-result","ts":"...","id":"...","call_id":"...","output":"...","is_error":false}
-{"kind":"compaction","ts":"...","id":"...","kept":4,"summarized":12,"summary":"..."}
+{"type":"header","version":1,"session":"...","id":"...","ts":"...","cwd":"...","model":"...","system_prompt":"..."}
+{"type":"message","id":"...","ts":"...","message":{"role":"user","content":[...]}}
+{"type":"message","id":"...","ts":"...","message":{"role":"assistant","content":[...]}}
+{"type":"compaction","id":"...","ts":"...","kept":4,"summarized":12,"summary":"..."}
 ```
 
-Files are append-only. Editing one in place after the session ends
-is supported but not the intended workflow; fork instead.
+Tool calls and results are not separate entries: they ride inside
+`message` content blocks. The remaining entry kinds are
+`thinking_level_change`, `model_change`, `label`, `title`, and the
+plugin-defined `custom`.
+
+Files are append-only: the writer never rewrites prior lines, and an
+advisory lock rejects a second concurrent writer. To branch from an
+existing session, fork instead.
 
 ## plugins, briefly
 

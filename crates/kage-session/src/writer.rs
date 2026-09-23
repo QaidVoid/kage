@@ -11,7 +11,7 @@
 //! reader detects by failed JSON parse and skips.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write};
+use std::io::{BufRead, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use crate::entry::{Header, SessionEntry};
@@ -62,18 +62,26 @@ impl SessionWriter {
     /// Reopen an existing session file for further appends.
     ///
     /// The file is opened in append mode so writes always land at the end
-    /// regardless of what other process may have written in between. No
+    /// regardless of what other process may have written in between. A torn
+    /// trailing line left by a crashed appender is truncated away first:
+    /// appending after it would glue the next entry onto the fragment and
+    /// turn a skippable partial write into a permanent decode error. No
     /// validation of the header is performed here; readers detect malformed
     /// files.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, SessionError> {
         let path = path.into();
         let file = OpenOptions::new()
+            .read(true)
             .append(true)
             .open(&path)
             .map_err(|err| SessionError::Io {
                 path: path.clone(),
                 source: err,
             })?;
+        repair_torn_tail(&file).map_err(|err| SessionError::Io {
+            path: path.clone(),
+            source: err,
+        })?;
         Ok(Self {
             path,
             inner: BufWriter::new(file),
@@ -112,6 +120,40 @@ impl SessionWriter {
             source,
         }
     }
+}
+
+/// Drop an unterminated trailing line from `file`.
+///
+/// Scans for the final `\n`; if the file does not end with one, the bytes
+/// after it are a torn write from a crashed appender and are truncated
+/// away. The reader would have skipped those bytes anyway, so truncation
+/// changes nothing it could see — it only keeps the next append from being
+/// glued onto the fragment.
+fn repair_torn_tail(file: &File) -> std::io::Result<()> {
+    let len = file.metadata()?.len();
+    if len == 0 {
+        return Ok(());
+    }
+    let mut last_newline: Option<u64> = None;
+    let mut offset = 0u64;
+    let mut reader = std::io::BufReader::new(file);
+    loop {
+        let mut chunk = Vec::new();
+        let n = reader.read_until(b'\n', &mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        if chunk.last() == Some(&b'\n') {
+            last_newline = Some(offset + u64::try_from(n).unwrap_or(u64::MAX) - 1);
+        }
+        offset += u64::try_from(n).unwrap_or(u64::MAX);
+    }
+    let ends_with_newline = last_newline.is_some_and(|pos| pos + 1 == offset);
+    if ends_with_newline {
+        return Ok(());
+    }
+    file.set_len(last_newline.map_or(0, |pos| pos + 1))?;
+    file.sync_all()
 }
 
 #[cfg(test)]
@@ -221,6 +263,49 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o077, 0, "group/other must have no access");
         assert_ne!(mode & 0o200, 0, "owner must be able to write");
+    }
+
+    #[test]
+    fn open_repairs_torn_tail_before_appending() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess.jsonl");
+        let mut w = SessionWriter::create(&path, fresh_header()).unwrap();
+        w.append(&SessionEntry::Label(Label {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            text: "kept".into(),
+            anchor: EntryId::new(),
+        }))
+        .unwrap();
+        drop(w);
+        // Simulate a crashed appender: a partial line with no terminator.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        f.write_all(b"{\"type\":\"label\",\"id\":\"01").unwrap();
+        drop(f);
+
+        let mut w = SessionWriter::open(&path).unwrap();
+        w.append(&SessionEntry::Label(Label {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            text: "after".into(),
+            anchor: EntryId::new(),
+        }))
+        .unwrap();
+        drop(w);
+
+        // Without repair the new entry glues onto the fragment and the
+        // merged line fails to parse as an interior line.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("01{"), "torn fragment was not truncated");
+        let entries: Vec<_> = crate::reader::SessionReader::iter(&path)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 3);
+        assert!(matches!(entries[2], SessionEntry::Label(_)));
     }
 
     #[test]

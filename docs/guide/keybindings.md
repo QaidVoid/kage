@@ -1,7 +1,7 @@
 # keybindings
 
 This page covers the keys kage's TUI listens for. It is not the full
-input grammar; refer to `crates/kage-tui/src/input.rs` for the
+input grammar; refer to `crates/kage-tui/src/input/mod.rs` for the
 authoritative key-to-action map.
 
 The TUI supports two editor modes: **vim** (the default) and
@@ -27,8 +27,6 @@ switch modes or panes.
 | `Ctrl+O`         | Toggle fold on the focused block            |
 | `Shift+Tab`      | Cycle the thinking level                    |
 | `Ctrl+V`         | Attach an image from the clipboard          |
-| `PageUp`         | Scroll the buffer up 10 lines               |
-| `PageDown`       | Scroll the buffer down 10 lines             |
 
 `Ctrl+O` also expands a collapsed bracketed paste if one is present
 in the input. When no paste is collapsed, it toggles the fold.
@@ -51,9 +49,10 @@ In modeless mode the editor is always in an insert-like state.
 Emacs/readline keys and the buffer navigation keys above work
 without any mode switching.
 
-| Key  | Effect                   |
-| ---- | ------------------------ |
+| Key  | Effect                          |
+| ---- | ------------------------------- |
 | `Esc` | Cancel the current turn |
+| `PageUp` / `PageDown` | Scroll the conversation buffer 10 lines |
 
 ## command pathways
 
@@ -122,6 +121,7 @@ These keys work when the buffer pane is focused in vim Normal mode
 | `y`       | Yank current selection                       |
 | `Y`       | Yank focused block                           |
 | `v`       | Enter visual (cell selection)                |
+| `PageUp` / `PageDown` | Scroll buffer up / down 10 lines |
 
 The active thinking level shows as a `think:<level>` pill in the
 modeline (hidden when off), next to the running token cost.

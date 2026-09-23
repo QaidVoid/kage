@@ -16,11 +16,7 @@ use std::collections::HashMap;
 /// Where a command is exposed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CommandCategory {
-    /// `/` palette only (insert mode).
-    Slash,
-    /// `:` ex-line only (normal mode).
-    Colon,
-    /// Both `:` and `/`.
+    /// Both the `:` ex-line and the `/` palette.
     Both,
 }
 

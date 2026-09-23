@@ -6,11 +6,9 @@
 //! used outside the TUI; we share [`crate::picker::PickItem`],
 //! [`crate::picker::filter`], and [`crate::picker::compute_window`].
 //!
-//! Implements [`OverlayWidget`] so the upcoming
-//! [`crate::overlay::OverlayRegistry`] can dispatch through the trait.
-//! A thin Frame-based [`OverlayPicker::render`] wrapper preserves the
-//! call shape App still uses today; both paths end in the same
-//! Buffer-level paint.
+//! Implements [`OverlayWidget`]. A thin Frame-based
+//! [`OverlayPicker::render`] wrapper preserves the call shape App
+//! still uses today; both paths end in the same Buffer-level paint.
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;

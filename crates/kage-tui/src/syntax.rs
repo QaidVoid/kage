@@ -1,12 +1,13 @@
-//! Syntect-backed syntax highlighting for fenced code blocks.
+//! Syntect-backed syntax highlighting for the TUI.
 //!
-//! Two entry points: [`highlight_fenced`] walks a piece of assistant
-//! text looking for ```` ```lang ... ``` ```` fences and yields
-//! styled lines mixing plain text with syntect-highlighted code, and
 //! [`highlight_extension`] renders an entire blob (typically a `read`
-//! tool result) using a syntax inferred from the file extension.
+//! tool result) using a syntax inferred from the file extension, and
+//! [`highlight_with_lang`] renders a fenced body whose info string
+//! names the language; [`crate::markdown::render`] uses it for
+//! ```` ```lang ... ``` ```` fences. [`plain_lines_styled`] is the
+//! shared plain fallback.
 //!
-//! Both share a single global [`SyntaxSet`] / [`ThemeSet`] loaded once
+//! They share a single global [`SyntaxSet`] / [`ThemeSet`] loaded once
 //! via [`std::sync::OnceLock`] - syntect's default loaders take ~10ms
 //! and bring in ~150 syntaxes, so we deliberately avoid re-init per
 //! call. The syntect highlight theme is paired with the active kage
@@ -151,74 +152,6 @@ pub fn highlight_extension(code: &str, extension: &str, fallback: Style) -> Vec<
     })
 }
 
-/// Walk `text` looking for fenced code blocks (```` ```lang ... ``` ````).
-/// Inside each fence the body is highlighted; outside, the text is
-/// rendered with `fallback` style. Lines are split on `\n`; the fence
-/// markers themselves render as dim borders.
-///
-/// Cached per-thread on `(text, "fenced", paired theme)`. Repeated
-/// frames with the same assistant text reuse the previous render
-/// instead of re-running syntect on every fenced block.
-#[must_use]
-pub fn highlight_fenced(text: &str, fallback: Style) -> Vec<Line<'static>> {
-    if text.len() > HIGHLIGHT_BYTE_LIMIT {
-        return plain_lines(text, fallback);
-    }
-    let light = crate::theme::current().bg_is_light();
-    let key = cache_key(text, "fenced", syntect_theme_name(light));
-    cached_or(key, || highlight_fenced_uncached(text, fallback))
-}
-
-fn highlight_fenced_uncached(text: &str, fallback: Style) -> Vec<Line<'static>> {
-    let ss = syntax_set();
-    let dim = Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::DIM);
-    let mut out: Vec<Line<'static>> = Vec::new();
-    let mut iter = text.split('\n').peekable();
-    while let Some(line) = iter.next() {
-        if let Some(rest) = line.strip_prefix("```") {
-            let lang = rest.trim();
-            // Capture fence content until closing ``` (or end of input).
-            let mut body = String::new();
-            let mut closed = false;
-            for inner in iter.by_ref() {
-                if inner.trim_start().starts_with("```") {
-                    closed = true;
-                    break;
-                }
-                body.push_str(inner);
-                body.push('\n');
-            }
-            // Emit opening fence as a dim marker line.
-            out.push(Line::from(Span::styled(
-                if lang.is_empty() {
-                    "```".to_owned()
-                } else {
-                    format!("```{lang}")
-                },
-                dim,
-            )));
-            let syntax_ref = ss
-                .find_syntax_by_token(lang)
-                .or_else(|| ss.find_syntax_by_name(lang));
-            let body_lines = match syntax_ref {
-                Some(syntax) => highlight_with_syntax(&body, syntax, fallback),
-                None => plain_lines(&body, fallback),
-            };
-            for body_line in body_lines {
-                out.push(body_line);
-            }
-            if closed {
-                out.push(Line::from(Span::styled("```".to_owned(), dim)));
-            }
-            continue;
-        }
-        out.push(Line::from(Span::styled(line.to_owned(), fallback)));
-    }
-    out
-}
-
 /// Highlight `code` using the syntect grammar matching `lang`
 /// (by token, then by name; e.g. `"rust"` or `"Rust"`). Falls back to
 /// `plain_lines_styled` when the language is unknown or the input
@@ -292,26 +225,6 @@ fn to_ratatui_style(s: SynStyle) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fenced_text_yields_marker_then_highlighted_body() {
-        let text = "before\n```rust\nfn main() {}\n```\nafter";
-        let lines = highlight_fenced(text, Style::default());
-        // before, ```rust, fn main() {} (highlighted), ```, after
-        assert!(lines.len() >= 5);
-        let strs: Vec<String> = lines
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect();
-        assert!(strs.iter().any(|s| s == "before"));
-        assert!(strs.iter().any(|s| s == "```rust"));
-        assert!(strs.iter().any(|s| s.contains("fn main()")));
-    }
 
     #[test]
     fn highlight_extension_falls_back_for_unknown_ext() {

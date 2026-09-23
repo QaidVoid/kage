@@ -59,9 +59,8 @@ pub enum OverlayAction {
 
 /// One overlay surface.
 ///
-/// `dyn`-compatible by design so the upcoming [`crate::overlay::OverlayRegistry`]
-/// can hold `Arc<dyn OverlayWidget>` and plugin adapters can return
-/// `Box<dyn OverlayWidget>` from factories.
+/// `dyn`-compatible so overlays stay swappable behind trait objects
+/// without enum dispatch at the call sites.
 ///
 /// Implementations own their own input state (cursor, selection,
 /// search text). The host calls [`Self::measure`] to learn the

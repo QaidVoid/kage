@@ -244,6 +244,8 @@ pub enum EditorMode {
 #[serde(default)]
 pub struct PluginsConfig {
     /// Override the default plugin directory `~/.config/kage/plugins/`.
+    /// `~` expands to the home directory; relative paths resolve
+    /// against the kage config directory.
     pub dir: Option<PathBuf>,
     /// If non-empty, only plugins in this allowlist are loaded.
     pub enabled: Vec<String>,

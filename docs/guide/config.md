@@ -8,7 +8,9 @@ Keys are grouped into tables:
 
 ```toml
 [provider]
-# active default model, provider:model qualified.
+# model used when -m/--model is absent. beats the last-used model
+# memory; must name a provider whose credentials are available, or
+# the saved last model / built-in order is used instead.
 default_model = "anthropic:claude-sonnet-4-6"
 
 [ui]
@@ -25,6 +27,7 @@ input_max_lines = 8
 
 [plugins]
 # override the plugin directory (default ~/.config/kage/plugins/).
+# `~` expands to home; relative paths resolve against ~/.config/kage.
 # dir = "/path/to/plugins"
 # if non-empty, only these plugin file stems load.
 enabled = []
@@ -75,7 +78,7 @@ API keys are read from environment variables:
 | `ZAI_CODING_API_KEY`    | Z.AI Coding                                   |
 
 If multiple keys are present, the model id you pass with `-m` or
-configure as `model` picks the provider.
+configure as `provider.default_model` picks the provider.
 
 ## directories
 

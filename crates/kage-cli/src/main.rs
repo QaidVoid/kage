@@ -451,12 +451,37 @@ pub(crate) fn apply_plugin_tools(
     }
 }
 
-/// Resolve the XDG-style plugin directory:
-/// `$XDG_CONFIG_HOME/kage/plugins` (default `~/.config/kage/plugins`).
+/// Resolve the plugin directory: `[plugins] dir` from the user config
+/// when set (path semantics in [`resolve_plugin_dir`]), else the XDG
+/// default `$XDG_CONFIG_HOME/kage/plugins` (default `~/.config/kage/plugins`).
 pub(crate) fn plugins_dir() -> Result<PathBuf, String> {
+    if let Ok(cfg) = kage_core::config::Config::load_default()
+        && let Some(dir) = cfg.plugins.dir
+    {
+        return Ok(resolve_plugin_dir(dir));
+    }
     Ok(xdg_dir("XDG_CONFIG_HOME", ".config")?
         .join("kage")
         .join("plugins"))
+}
+
+/// Apply `[plugins] dir` path semantics: absolute paths as-is, `~`
+/// expanded to the home directory, relative paths resolved against the
+/// kage config directory (`~/.config/kage`). Pure so tests need no
+/// environment isolation.
+fn resolve_plugin_dir(dir: PathBuf) -> PathBuf {
+    if dir.is_absolute() {
+        return dir;
+    }
+    if let Ok(rest) = dir.strip_prefix("~")
+        && let Some(home) = dirs::home_dir()
+    {
+        return home.join(rest);
+    }
+    match xdg_dir("XDG_CONFIG_HOME", ".config") {
+        Ok(base) => base.join("kage").join(dir),
+        Err(_) => dir,
+    }
 }
 
 /// Resolve the XDG-style user theme directory:
@@ -723,12 +748,18 @@ const DEFAULT_MODEL_PRIORITY: &[&str] = &[
     "kimi-for-coding",
 ];
 
-/// Pick a sensible default model. Prefers the last model the user
-/// successfully ran (when it still resolves), then walks
+/// Pick a sensible default model. A configured `[provider] default_model`
+/// that still resolves (its provider has credentials) wins; otherwise the
+/// last model the user successfully ran (when it still resolves), then
 /// [`DEFAULT_MODEL_PRIORITY`], asking the catalog for each registered
 /// provider's preferred model. Returns an empty string when nothing
 /// is wired up; callers are expected to handle that as "no credentials".
 pub(crate) fn default_model(registry: &ProviderRegistry) -> String {
+    if let Ok(cfg) = kage_core::config::Config::load_default()
+        && registry.resolve(&cfg.provider.default_model).is_ok()
+    {
+        return cfg.provider.default_model;
+    }
     if let Some(model) = state::State::load().last_model
         && registry.resolve(&model).is_ok()
     {
@@ -743,4 +774,29 @@ pub(crate) fn default_model(registry: &ProviderRegistry) -> String {
         }
     }
     String::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_dir_override_absolute_asis() {
+        let p = resolve_plugin_dir(PathBuf::from("/opt/kage-plugins"));
+        assert_eq!(p, PathBuf::from("/opt/kage-plugins"));
+    }
+
+    #[test]
+    fn plugin_dir_override_tilde_expands_home() {
+        let p = resolve_plugin_dir(PathBuf::from("~/my-plugins"));
+        let home = dirs::home_dir().expect("test needs a home directory");
+        assert_eq!(p, home.join("my-plugins"));
+    }
+
+    #[test]
+    fn plugin_dir_override_relative_resolves_against_config_dir() {
+        let p = resolve_plugin_dir(PathBuf::from("extra-plugins"));
+        let base = xdg_dir("XDG_CONFIG_HOME", ".config").expect("test needs a home directory");
+        assert_eq!(p, base.join("kage").join("extra-plugins"));
+    }
 }

@@ -40,7 +40,7 @@ use crate::layout::Regions;
 use crate::overlay::widget::{OverlayAction, OverlayCtx, OverlayWidget};
 use crate::picker::PickItem;
 use crate::view::UnicodeWidthStr as _;
-use crate::view::truncate_to_width;
+use crate::view::{pad_to_width, popup_scroll_window, truncate_to_width};
 
 /// Maximum visible command rows in the palette body before
 /// `... N more` indicators kick in.
@@ -213,7 +213,7 @@ impl SlashPalette {
         }
         let inner_width = usize::from(area.width);
         let max_visible = PALETTE_MAX_VISIBLE.min(total);
-        let (offset, window) = scroll_window(self.cmdline.selected(), total, max_visible);
+        let (offset, window) = popup_scroll_window(self.cmdline.selected(), total, max_visible);
         let above = offset;
         let below = total.saturating_sub(offset + window);
 
@@ -295,7 +295,7 @@ impl OverlayWidget for SlashPalette {
             return Rect::new(available.x, available.bottom().saturating_sub(1), 0, 0);
         }
         let max_visible = PALETTE_MAX_VISIBLE.min(total);
-        let (offset, window) = scroll_window(self.cmdline.selected(), total, max_visible);
+        let (offset, window) = popup_scroll_window(self.cmdline.selected(), total, max_visible);
         let above = offset;
         let below = total.saturating_sub(offset + window);
         let rows = window + usize::from(above > 0) + usize::from(below > 0);
@@ -332,7 +332,7 @@ fn popup_area(regions: Regions, total: usize, selected: Option<usize>) -> Option
         return None;
     }
     let max_visible = PALETTE_MAX_VISIBLE.min(total);
-    let (offset, window) = scroll_window(selected, total, max_visible);
+    let (offset, window) = popup_scroll_window(selected, total, max_visible);
     let above = offset;
     let below = total.saturating_sub(offset + window);
     let rows = window + usize::from(above > 0) + usize::from(below > 0);
@@ -414,31 +414,6 @@ fn render_row(
         spans.push(Span::styled(" ".repeat(inner_width - painted), value_style));
     }
     Line::from(spans)
-}
-
-fn scroll_window(selected: Option<usize>, total: usize, max_visible: usize) -> (usize, usize) {
-    if total <= max_visible {
-        return (0, total);
-    }
-    let sel = selected.unwrap_or(0);
-    let offset = if sel < max_visible {
-        0
-    } else {
-        (sel + 1)
-            .saturating_sub(max_visible)
-            .min(total - max_visible)
-    };
-    (offset, max_visible)
-}
-
-fn pad_to_width(s: &str, width: usize) -> String {
-    let n = s.width();
-    if n >= width {
-        return s.to_owned();
-    }
-    let mut out = s.to_owned();
-    out.push_str(&" ".repeat(width - n));
-    out
 }
 
 #[cfg(test)]

@@ -19,6 +19,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Widget};
 
 use crate::overlay::widget::{OverlayAction, OverlayCtx, OverlayWidget};
+use crate::view::scroll_offset_centered;
 
 /// Smallest / largest / step for the autocompaction threshold. The
 /// loop clamps to `(0.0, 1.0]`; the dialog keeps it in a sane band.
@@ -435,7 +436,7 @@ impl SettingsOverlay {
             return;
         }
         let rows = usize::from(area.height);
-        let offset = scroll_offset(selected, items.len(), rows);
+        let offset = scroll_offset_centered(selected, items.len(), rows);
         for (row, (idx, item)) in items.iter().enumerate().skip(offset).take(rows).enumerate() {
             let style = if idx == selected {
                 Style::default()
@@ -469,7 +470,7 @@ impl SettingsOverlay {
             return;
         }
         let rows = usize::from(area.height);
-        let offset = scroll_offset(self.list_scroll, self.keybindings.len(), rows);
+        let offset = scroll_offset_centered(self.list_scroll, self.keybindings.len(), rows);
         for (row, (chord, action)) in self.keybindings.iter().skip(offset).take(rows).enumerate() {
             buf.set_line(
                 area.x,
@@ -487,16 +488,6 @@ impl SettingsOverlay {
             );
         }
     }
-}
-
-/// Keep `selected` visible within a window of `rows` over `total`.
-fn scroll_offset(selected: usize, total: usize, rows: usize) -> usize {
-    if rows == 0 || total <= rows {
-        return 0;
-    }
-    selected
-        .saturating_sub(rows / 2)
-        .min(total.saturating_sub(rows))
 }
 
 #[cfg(test)]

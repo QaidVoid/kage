@@ -20,7 +20,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::layout::Regions;
 use crate::view::UnicodeWidthStr as _;
-use crate::view::truncate_to_width;
+use crate::view::{pad_to_width, scroll_offset_centered, truncate_to_width};
 
 /// Most visible rows before `... N more` indicators kick in.
 const MAX_VISIBLE: usize = 8;
@@ -141,7 +141,8 @@ impl InputCompletion {
 
         let total = self.items.len();
         let max_visible = MAX_VISIBLE.min(total);
-        let (offset, window) = scroll_window(self.selected, total, max_visible);
+        let offset = scroll_offset_centered(self.selected, total, max_visible);
+        let window = total.min(max_visible);
         let above = offset;
         let below = total.saturating_sub(offset + window);
 
@@ -220,7 +221,8 @@ fn popup_area(regions: Regions, total: usize, selected: usize) -> Option<Rect> {
         return None;
     }
     let max_visible = MAX_VISIBLE.min(total);
-    let (offset, window) = scroll_window(selected, total, max_visible);
+    let offset = scroll_offset_centered(selected, total, max_visible);
+    let window = total.min(max_visible);
     let above = offset;
     let below = total.saturating_sub(offset + window);
     let rows = window + usize::from(above > 0) + usize::from(below > 0);
@@ -238,26 +240,10 @@ fn popup_area(regions: Regions, total: usize, selected: usize) -> Option<Rect> {
     })
 }
 
-/// `(offset, window)` such that `selected` is visible within at most
-/// `max_visible` rows.
-fn scroll_window(selected: usize, total: usize, max_visible: usize) -> (usize, usize) {
-    if total <= max_visible {
-        return (0, total);
-    }
-    let half = max_visible / 2;
-    let offset = selected
-        .saturating_sub(half)
-        .min(total.saturating_sub(max_visible));
-    (offset, max_visible)
-}
-
+/// Truncate to `width`, then right-pad to exactly `width` — indicator
+/// rows must fill the full card width or the bubble edge tears.
 fn pad(s: &str, width: usize) -> String {
-    let mut out = truncate_to_width(s, width, "");
-    let w = out.width();
-    if w < width {
-        out.push_str(&" ".repeat(width - w));
-    }
-    out
+    pad_to_width(&truncate_to_width(s, width, ""), width)
 }
 
 /// The completion prefix: the run of non-whitespace characters

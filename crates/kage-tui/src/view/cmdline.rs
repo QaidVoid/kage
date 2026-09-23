@@ -265,30 +265,6 @@ pub(super) fn render_cmdline_popup(frame: &mut Frame, regions: Regions, cmdline:
     frame.render_widget(Paragraph::new(lines).style(row_style), area);
 }
 
-/// Compute the visible-items window for the completion popup so the
-/// selected row stays in view as the user cycles past the bottom or
-/// scrolls back above the top. Returns `(offset, window_len)` where
-/// `offset` is the index of the first item to render and `window_len`
-/// is how many to render (clamped to `max_visible`).
-fn popup_scroll_window(
-    selected: Option<usize>,
-    total: usize,
-    max_visible: usize,
-) -> (usize, usize) {
-    if total <= max_visible {
-        return (0, total);
-    }
-    let sel = selected.unwrap_or(0);
-    let offset = if sel < max_visible {
-        0
-    } else {
-        (sel + 1)
-            .saturating_sub(max_visible)
-            .min(total - max_visible)
-    };
-    (offset, max_visible)
-}
-
 fn popup_width(regions: Regions, completions: &crate::cmdparse::Completions) -> u16 {
     let max_value = completions
         .items
@@ -349,16 +325,6 @@ fn popup_row(
         spans.push(Span::styled(" ".repeat(inner_width - painted), value_style));
     }
     Line::from(spans)
-}
-
-fn pad_to_width(s: &str, width: usize) -> String {
-    let w = s.width();
-    if w >= width {
-        return s.to_owned();
-    }
-    let mut out = s.to_owned();
-    out.push_str(&" ".repeat(width - w));
-    out
 }
 
 /// Position the terminal cursor on the status row at the cmdline's

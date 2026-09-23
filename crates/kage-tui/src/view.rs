@@ -328,6 +328,56 @@ pub(crate) fn truncate_to_width(s: &str, max: usize, suffix: &str) -> String {
     out
 }
 
+/// Right-pad `s` with spaces to exactly `width` display columns;
+/// never truncates (pair with [`truncate_to_width`] when a budget
+/// applies). Measures cells, not chars.
+pub(crate) fn pad_to_width(s: &str, width: usize) -> String {
+    let w = s.width();
+    if w >= width {
+        return s.to_owned();
+    }
+    let mut out = s.to_owned();
+    out.push_str(&" ".repeat(width - w));
+    out
+}
+
+/// First-item offset for a popup list of `total` entries with at most
+/// `max_visible` rows, keeping `selected` in view. Anchors to the top
+/// while the selection fits, then scrolls only once it passes the
+/// bottom — the early rows of a list stay put while cycling through
+/// them. Returns `(offset, window)` with `window <= max_visible`.
+pub(crate) fn popup_scroll_window(
+    selected: Option<usize>,
+    total: usize,
+    max_visible: usize,
+) -> (usize, usize) {
+    if total <= max_visible {
+        return (0, total);
+    }
+    let sel = selected.unwrap_or(0);
+    let offset = if sel < max_visible {
+        0
+    } else {
+        (sel + 1)
+            .saturating_sub(max_visible)
+            .min(total - max_visible)
+    };
+    (offset, max_visible)
+}
+
+/// First-item offset keeping `selected` roughly centered in a window
+/// of `rows` over `total`, clamped so no blank rows render past the
+/// end. Centering keeps mid-list selections visually stable instead
+/// of hugging the bottom edge.
+pub(crate) fn scroll_offset_centered(selected: usize, total: usize, rows: usize) -> usize {
+    if rows == 0 || total <= rows {
+        return 0;
+    }
+    selected
+        .saturating_sub(rows / 2)
+        .min(total.saturating_sub(rows))
+}
+
 mod blocks;
 mod bubble;
 mod buffer;

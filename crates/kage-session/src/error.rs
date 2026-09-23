@@ -50,4 +50,12 @@ pub enum SessionError {
         /// Highest version this build understands.
         supported: u32,
     },
+    /// Another process holds the advisory lock on this session file.
+    /// Appending from two processes would interleave two JSONL streams
+    /// into one file.
+    #[error("session {path} is locked by another kage process")]
+    Locked {
+        /// Path of the locked file.
+        path: PathBuf,
+    },
 }

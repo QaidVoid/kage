@@ -6,9 +6,14 @@
 //! before returning, so a successful return implies the entry has reached
 //! disk.
 //!
+//! Writers hold an advisory exclusive lock (`flock`) on the file for their
+//! lifetime, so a second appender — say, a `kage -r` in another terminal —
+//! fails instead of interleaving two JSONL streams into one file. On
+//! filesystems where `flock` is unsupported the lock is skipped.
+//!
 //! Crash safety is "newline-only": entries are always terminated by a single
-//! `\n`. A process killed mid-append leaves a partial trailing line which the
-//! reader detects by failed JSON parse and skips.
+//! `\n`. A process killed mid-append leaves a partial trailing line which
+//! [`SessionWriter::open`] truncates away before its first append.
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufWriter, Seek, Write};
@@ -22,6 +27,12 @@ use crate::error::SessionError;
 pub struct SessionWriter {
     path: PathBuf,
     inner: BufWriter<File>,
+    /// Held for the writer's lifetime; released when the writer drops.
+    /// The lock lives on a duplicated fd, so it persists independently of
+    /// the `BufWriter`'s handle.
+    #[cfg(unix)]
+    #[expect(dead_code)]
+    lock: Option<nix::fcntl::Flock<File>>,
 }
 
 impl SessionWriter {
@@ -51,9 +62,19 @@ impl SessionWriter {
             path: path.clone(),
             source: err,
         })?;
+        #[cfg(unix)]
+        let lock = {
+            let dup = file.try_clone().map_err(|err| SessionError::Io {
+                path: path.clone(),
+                source: err,
+            })?;
+            acquire_lock(dup, &path)?
+        };
         let mut writer = Self {
             path,
             inner: BufWriter::new(file),
+            #[cfg(unix)]
+            lock,
         };
         writer.append(&SessionEntry::Header(header))?;
         Ok(writer)
@@ -65,9 +86,10 @@ impl SessionWriter {
     /// regardless of what other process may have written in between. A torn
     /// trailing line left by a crashed appender is truncated away first:
     /// appending after it would glue the next entry onto the fragment and
-    /// turn a skippable partial write into a permanent decode error. No
-    /// validation of the header is performed here; readers detect malformed
-    /// files.
+    /// turn a skippable partial write into a permanent decode error. The
+    /// advisory lock is taken before that repair so a second appender never
+    /// truncates a concurrent writer's in-flight entry. No validation of
+    /// the header is performed here; readers detect malformed files.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, SessionError> {
         let path = path.into();
         let mut file = OpenOptions::new()
@@ -79,6 +101,14 @@ impl SessionWriter {
                 source: err,
             })?;
         check_version(&file, &path)?;
+        #[cfg(unix)]
+        let lock = {
+            let dup = file.try_clone().map_err(|err| SessionError::Io {
+                path: path.clone(),
+                source: err,
+            })?;
+            acquire_lock(dup, &path)?
+        };
         repair_torn_tail(&mut file).map_err(|err| SessionError::Io {
             path: path.clone(),
             source: err,
@@ -86,6 +116,8 @@ impl SessionWriter {
         Ok(Self {
             path,
             inner: BufWriter::new(file),
+            #[cfg(unix)]
+            lock,
         })
     }
 
@@ -183,6 +215,24 @@ fn repair_torn_tail(file: &mut File) -> std::io::Result<()> {
     }
     file.set_len(last_newline.map_or(0, |pos| pos + 1))?;
     file.sync_all()
+}
+
+/// Take an exclusive non-blocking advisory lock on the file.
+///
+/// `EWOULDBLOCK` means another appender holds the lock, reported as
+/// [`SessionError::Locked`]. Any other `flock` failure (filesystems
+/// without lock support) proceeds unlocked: the lock guards against a
+/// second kage process, not against the storage layer.
+#[cfg(unix)]
+fn acquire_lock(file: File, path: &Path) -> Result<Option<nix::fcntl::Flock<File>>, SessionError> {
+    use nix::fcntl::{Flock, FlockArg};
+    match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+        Ok(lock) => Ok(Some(lock)),
+        Err((_, nix::errno::Errno::EWOULDBLOCK)) => Err(SessionError::Locked {
+            path: path.to_path_buf(),
+        }),
+        Err((_, _)) => Ok(None),
+    }
 }
 
 #[cfg(test)]
@@ -312,6 +362,18 @@ mod tests {
             }
             other => panic!("expected UnsupportedVersion, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_fails_while_another_writer_holds_the_lock() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess.jsonl");
+        let w = SessionWriter::create(&path, fresh_header()).unwrap();
+        let err = SessionWriter::open(&path).unwrap_err();
+        assert!(matches!(err, SessionError::Locked { .. }));
+        drop(w);
+        SessionWriter::open(&path).unwrap();
     }
 
     #[test]

@@ -82,6 +82,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
                 unreachable!("reader does not produce UnsupportedVersion")
             }
             SessionError::Encode { .. } => unreachable!("reader does not produce Encode"),
+            SessionError::Locked { .. } => unreachable!("reader does not produce Locked"),
         })?;
     let SessionEntry::Header(header) = first else {
         return Err(missing_header_error(path));

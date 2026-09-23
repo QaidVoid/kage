@@ -39,14 +39,18 @@ impl SessionWriter {
                 source: err,
             })?;
         }
-        let file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&path)
-            .map_err(|err| SessionError::Io {
-                path: path.clone(),
-                source: err,
-            })?;
+        let mut opts = OpenOptions::new();
+        opts.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // Session logs carry full conversations; keep them owner-only.
+            opts.mode(0o600);
+        }
+        let file = opts.open(&path).map_err(|err| SessionError::Io {
+            path: path.clone(),
+            source: err,
+        })?;
         let mut writer = Self {
             path,
             inner: BufWriter::new(file),
@@ -205,6 +209,18 @@ mod tests {
         let path = dir.path().join("does-not-exist.jsonl");
         let err = SessionWriter::open(&path).unwrap_err();
         assert!(matches!(err, SessionError::Io { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn created_files_are_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess.jsonl");
+        SessionWriter::create(&path, fresh_header()).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "group/other must have no access");
+        assert_ne!(mode & 0o200, 0, "owner must be able to write");
     }
 
     #[test]

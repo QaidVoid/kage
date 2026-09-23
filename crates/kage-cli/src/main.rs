@@ -639,10 +639,15 @@ pub(crate) fn build_provider_registry() -> ProviderRegistry {
     // agent declared in `[acp.agents.*]` or via `kage.acp.add_agent`.
     // Always registered (plugin-declared agents are resolved lazily);
     // its permission resolver defers to `kage.on_acp_permission` and
-    // denies otherwise.
-    let acp_cfg = kage_core::config::Config::load_default()
-        .map(|c| c.acp)
-        .unwrap_or_default();
+    // denies otherwise. A malformed config warns and degrades to no
+    // configured agents rather than failing registry build.
+    let acp_cfg = match kage_core::config::Config::load_default() {
+        Ok(c) => c.acp,
+        Err(e) => {
+            eprintln!("kage: acp: {e}; no configured acp agents");
+            kage_core::config::AcpConfig::default()
+        }
+    };
     registry.register(Arc::new(
         kage_acp::client::AcpProvider::from_config(&acp_cfg)
             .with_permission(acp_glue::permission_resolver())

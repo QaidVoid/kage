@@ -191,7 +191,7 @@ fn loop_config(workdir: &std::path::Path) -> LoopConfig {
             ..LoopConfig::default()
         },
         Err(e) => {
-            eprintln!("kage: rpc: config error: {e}; using defaults");
+            eprintln!("kage: rpc: {e}; using defaults");
             LoopConfig {
                 parallel_tools: false,
                 ..LoopConfig::default()

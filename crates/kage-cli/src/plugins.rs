@@ -48,10 +48,15 @@ pub fn setup_runtime_with_sink(
     // Capability grants and the load allowlist come from the same
     // layered config the rest of the host reads. Fail closed: if the
     // config cannot be loaded, no plugin gets any elevated capability
-    // rather than silently proceeding with an unknown grant set.
-    let plugins_cfg = kage_core::config::Config::load_layered(workdir)
-        .map(|c| c.plugins)
-        .unwrap_or_default();
+    // rather than silently proceeding with an unknown grant set; the
+    // error is printed so the downgrade is visible.
+    let plugins_cfg = match kage_core::config::Config::load_layered(workdir) {
+        Ok(c) => c.plugins,
+        Err(e) => {
+            eprintln!("kage: plugins: {e}; capability grants not applied");
+            kage_core::config::PluginsConfig::default()
+        }
+    };
     let runtime = PluginRuntime::builder()
         .sink(sink)
         .workdir(workdir.to_path_buf())

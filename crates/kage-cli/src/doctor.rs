@@ -318,9 +318,17 @@ fn check_plugins(workdir: &Path) -> Check {
     // Use a no-op sink so plugin errors don't pollute stderr while we
     // diagnose - we surface them in our own line instead.
     let sink: kage_plugin::SharedHostLog = Arc::new(Mutex::new(Box::new(SilentSink)));
-    let enabled = Config::load_layered(workdir)
-        .map(|c| c.plugins.enabled)
-        .unwrap_or_default();
+    let enabled = match Config::load_layered(workdir) {
+        Ok(c) => c.plugins.enabled,
+        Err(err) => {
+            return Check {
+                name: "plugins",
+                status: Status::Warn,
+                body: format!("config unreadable: {err} (skipped)"),
+                hint: None,
+            };
+        }
+    };
     let runtime = match PluginRuntime::builder()
         .sink(Arc::clone(&sink))
         .workdir(workdir.to_path_buf())
@@ -382,13 +390,16 @@ fn check_plugins(workdir: &Path) -> Check {
 
 fn check_sandbox(workdir: &Path) -> Check {
     use kage_core::config::SandboxBackend;
-    let Ok(cfg) = Config::load_layered(workdir) else {
-        return Check {
-            name: "sandbox",
-            status: Status::Warn,
-            body: "config could not be parsed; falling back to defaults".into(),
-            hint: None,
-        };
+    let cfg = match Config::load_layered(workdir) {
+        Ok(c) => c,
+        Err(err) => {
+            return Check {
+                name: "sandbox",
+                status: Status::Warn,
+                body: format!("config unreadable: {err}; checked against defaults"),
+                hint: None,
+            };
+        }
     };
     let backend = match cfg.sandbox.backend {
         SandboxBackend::Local => "local",

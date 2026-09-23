@@ -23,7 +23,7 @@ pub(crate) fn execute_print_run(
             ..LoopConfig::default()
         },
         Err(e) => {
-            eprintln!("kage: config error: {e}; using defaults");
+            eprintln!("kage: {e}; using defaults");
             LoopConfig::default()
         }
     };

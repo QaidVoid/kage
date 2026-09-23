@@ -42,12 +42,16 @@ pub(crate) fn run_serve() -> ExitCode {
 /// then any a plugin declared via `kage.mcp.add_server` (a plugin
 /// entry overrides a config entry of the same name, matching the
 /// "plugins configure, core spawns" model used for ACP agents). A
-/// malformed config degrades to just the plugin-declared set rather
-/// than failing the run.
+/// malformed config warns on stderr and degrades to just the
+/// plugin-declared set rather than failing the run.
 fn merged_config(workdir: &Path, runtime: Option<&PluginRuntime>) -> McpConfig {
-    let mut merged = Config::load_layered(workdir)
-        .map(|c| c.mcp)
-        .unwrap_or_default();
+    let mut merged = match Config::load_layered(workdir) {
+        Ok(c) => c.mcp,
+        Err(e) => {
+            eprintln!("kage: mcp: {e}; spawning only plugin-declared servers");
+            McpConfig::default()
+        }
+    };
     if let Some(rt) = runtime {
         for (name, server) in rt.registered_mcp_servers() {
             merged.servers.insert(name, server);

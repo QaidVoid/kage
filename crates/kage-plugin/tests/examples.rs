@@ -9,8 +9,8 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use kage_plugin::{
-    BridgePrep, BridgeStep, CommandOutput, HostLog, LogLevel, PluginRuntime, SharedHostLog,
-    SwitchTarget,
+    BridgePrep, BridgeStep, CommandOutput, HostLog, LogLevel, PendingSessionOp, PluginRuntime,
+    SharedHostLog, SwitchTarget,
 };
 use serde_json::json;
 
@@ -735,4 +735,103 @@ fn undo_with_only_one_exchange_has_nothing_to_undo() {
 
     assert_eq!(run_plain_command(&rt, "undo"), "nothing to undo");
     assert_eq!(rt.take_switch_request(), None);
+}
+
+fn load_block_demo(sink: SharedHostLog) -> PluginRuntime {
+    let rt = PluginRuntime::builder().sink(sink).build().unwrap();
+    let source = std::fs::read_to_string(examples_dir().join("block_renderer_demo.lua"))
+        .expect("read block_renderer_demo.lua");
+    rt.eval(&source).expect("block_renderer_demo.lua loads");
+    rt
+}
+
+fn card_command_args(rt: &PluginRuntime, raw: &str) -> kage_plugin::BridgeArgs {
+    let cmd = rt
+        .registered_commands()
+        .into_iter()
+        .find(|c| c.name() == "card")
+        .expect("card command registered");
+    match cmd.prepare_bridge(raw, &json!(null)).unwrap() {
+        BridgePrep::Ready(bargs) => bargs,
+        BridgePrep::ArgError(out) => panic!("unexpected arg error: {}", out.text),
+    }
+}
+
+#[test]
+fn block_renderer_demo_paints_a_boxed_demo_card() {
+    let (_rec, sink) = forwarding_sink();
+    let rt = load_block_demo(sink);
+
+    let renderers = rt.registered_block_renderers();
+    assert_eq!(renderers.len(), 1, "demo registers exactly one renderer");
+    assert_eq!(renderers[0].kind(), "demo:card");
+
+    // width 40 -> 38-char inner bar wrapped in '.' / "'" per the demo.
+    let lines = renderers[0].render(&json!({ "kind": "demo:card", "text": "hello", "width": 40 }));
+    assert_eq!(lines.len(), 3, "top bar, title row, bottom bar: {lines:?}");
+    let top = &lines[0].spans[0];
+    assert_eq!(top.text.len(), 40);
+    assert!(top.text.starts_with('.') && top.text.ends_with('.'));
+    assert_eq!(top.fg.as_deref(), Some("cyan"));
+    assert_eq!(lines[1].spans[1].text, "hello");
+    assert_eq!(lines[1].spans[1].fg.as_deref(), Some("green"));
+    let bottom = &lines[2].spans[0];
+    assert!(bottom.text.starts_with('\'') && bottom.text.ends_with('\''));
+}
+
+#[test]
+fn block_renderer_demo_card_with_title_appends_a_custom_entry() {
+    let (_rec, sink) = forwarding_sink();
+    let rt = load_block_demo(sink);
+    let bargs = card_command_args(&rt, "hello");
+
+    match rt.bridge_call(&bargs.handler, &bargs.args).unwrap() {
+        BridgeStep::Done(v) => {
+            assert_eq!(CommandOutput::from_json(&v).text, "rendered card: hello");
+        }
+        BridgeStep::Suspended(_) => panic!("card with a title must not suspend"),
+    }
+    let ops = rt.take_pending_session_ops();
+    assert_eq!(ops.len(), 1);
+    match &ops[0] {
+        PendingSessionOp::AppendCustom { kind, data } => {
+            assert_eq!(kind, "demo:card");
+            assert_eq!(data["title"], "hello");
+        }
+        PendingSessionOp::SetLabel { .. } => panic!("expected AppendCustom"),
+    }
+}
+
+#[test]
+fn block_renderer_demo_card_without_title_asks_via_ui_select() {
+    let (_rec, sink) = forwarding_sink();
+    let rt = load_block_demo(sink);
+    let bargs = card_command_args(&rt, "");
+
+    match rt.bridge_call(&bargs.handler, &bargs.args).unwrap() {
+        BridgeStep::Suspended(req) => {
+            assert_eq!(req.kind, "ui.select");
+            assert_eq!(
+                req.payload,
+                json!({
+                    "title": "Card title",
+                    "items": ["Hello from Lua", "Fully hackable UI", "PT.7 shipped"],
+                })
+            );
+        }
+        BridgeStep::Done(v) => panic!("expected suspend, got Done({v})"),
+    }
+    let BridgeStep::Done(value) = rt.bridge_resume(&json!("PT.7 shipped")).unwrap() else {
+        panic!("expected Done after resume");
+    };
+    assert_eq!(
+        CommandOutput::from_json(&value).text,
+        "rendered card: PT.7 shipped"
+    );
+    let ops = rt.take_pending_session_ops();
+    assert_eq!(ops.len(), 1);
+    assert!(matches!(
+        &ops[0],
+        PendingSessionOp::AppendCustom { kind, .. } if kind == "demo:card"
+    ));
 }

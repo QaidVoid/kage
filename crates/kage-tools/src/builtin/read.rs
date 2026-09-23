@@ -1,6 +1,7 @@
 //! `read` tool: read a file from the workspace, optionally limited to a line range.
 
 use std::fmt::Write;
+use std::io::Read;
 use std::path::Path;
 
 use kage_core::{Risk, ToolOutput};
@@ -55,11 +56,14 @@ impl Tool for ReadTool {
         let input: ReadInput = serde_json::from_value(input)?;
         let path = resolve(cx.workdir(), Path::new(&input.path))?;
 
-        let bytes = std::fs::read(&path)?;
-        let total_bytes = bytes.len();
-        let truncated = total_bytes > MAX_BYTES;
-        let head = &bytes[..total_bytes.min(MAX_BYTES)];
-        let text = String::from_utf8_lossy(head).into_owned();
+        // Cap the read itself, not just the output: a multi-gigabyte file
+        // must not be slurped into memory before truncation.
+        let file = std::fs::File::open(&path)?;
+        let total_bytes = file.metadata()?.len();
+        let mut head = Vec::new();
+        file.take(MAX_BYTES as u64).read_to_end(&mut head)?;
+        let truncated = total_bytes > MAX_BYTES as u64;
+        let text = String::from_utf8_lossy(&head).into_owned();
 
         let sliced = slice_lines(&text, input.start_line, input.end_line);
 

@@ -48,12 +48,13 @@ pub(crate) use crate::session::SessionRecordingHooks;
 #[derive(Parser, Debug)]
 #[command(name = "kage", version, about, long_about = None)]
 struct Cli {
-    /// Subcommand. Omitting one requires `-p/--print` and runs print mode.
+    /// Subcommand. With no subcommand, `-p/--print` runs print mode;
+    /// with neither, the interactive TUI opens.
     #[command(subcommand)]
     command: Option<Command>,
 
     /// Run a single prompt through the agent loop and stream the response
-    /// to stdout. Required in Phase 4 (the interactive TUI lands later).
+    /// to stdout.
     #[arg(short = 'p', long = "print")]
     print: Option<String>,
 

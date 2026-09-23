@@ -49,9 +49,6 @@ impl App {
     }
 
     pub(crate) fn apply(&mut self, action: InputAction) -> Option<AppExit> {
-        // Phase 9.10/9.11/9.17 will wire BeginCommand/BeginSearch/Yank;
-        // for now they fall through to the silent EnterMode arm so the
-        // modal state machine still cycles cleanly.
         match action {
             InputAction::Submit(text) => self.handle_submit(text),
             InputAction::DroppedStaleAttach => {
@@ -344,7 +341,7 @@ impl App {
     }
 
     /// Apply a key directly without going through crossterm. Used by
-    /// tests and by external command handlers (Phase 9.10) that want to
+    /// tests and by external command handlers that want to
     /// drive the modal state machine programmatically.
     pub fn handle_key(&mut self, key: ratatui::crossterm::event::KeyEvent) -> Option<AppExit> {
         self.dispatch_key(key)

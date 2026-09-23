@@ -11,10 +11,10 @@
 //! reader detects by failed JSON parse and skips.
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufWriter, Write};
+use std::io::{BufRead, BufWriter, Seek, Write};
 use std::path::{Path, PathBuf};
 
-use crate::entry::{Header, SessionEntry};
+use crate::entry::{FORMAT_VERSION, Header, SessionEntry};
 use crate::error::SessionError;
 
 /// Writes one [`SessionEntry`] per line, fsyncing on every append.
@@ -70,7 +70,7 @@ impl SessionWriter {
     /// files.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, SessionError> {
         let path = path.into();
-        let file = OpenOptions::new()
+        let mut file = OpenOptions::new()
             .read(true)
             .append(true)
             .open(&path)
@@ -78,7 +78,8 @@ impl SessionWriter {
                 path: path.clone(),
                 source: err,
             })?;
-        repair_torn_tail(&file).map_err(|err| SessionError::Io {
+        check_version(&file, &path)?;
+        repair_torn_tail(&mut file).map_err(|err| SessionError::Io {
             path: path.clone(),
             source: err,
         })?;
@@ -122,6 +123,33 @@ impl SessionWriter {
     }
 }
 
+/// Refuse to append to a file whose header declares a format version this
+/// build does not understand. A first line that is not a header is left for
+/// readers to report, matching the previous behavior.
+fn check_version(file: &File, path: &Path) -> Result<(), SessionError> {
+    let mut reader = std::io::BufReader::new(file);
+    let mut line = String::new();
+    let read = reader
+        .read_line(&mut line)
+        .map_err(|err| SessionError::Io {
+            path: path.to_path_buf(),
+            source: err,
+        })?;
+    if read == 0 {
+        return Ok(());
+    }
+    if let Ok(SessionEntry::Header(header)) = serde_json::from_str::<SessionEntry>(&line)
+        && header.version != FORMAT_VERSION
+    {
+        return Err(SessionError::UnsupportedVersion {
+            path: path.to_path_buf(),
+            found: header.version,
+            supported: FORMAT_VERSION,
+        });
+    }
+    Ok(())
+}
+
 /// Drop an unterminated trailing line from `file`.
 ///
 /// Scans for the final `\n`; if the file does not end with one, the bytes
@@ -129,14 +157,15 @@ impl SessionWriter {
 /// away. The reader would have skipped those bytes anyway, so truncation
 /// changes nothing it could see — it only keeps the next append from being
 /// glued onto the fragment.
-fn repair_torn_tail(file: &File) -> std::io::Result<()> {
+fn repair_torn_tail(file: &mut File) -> std::io::Result<()> {
+    file.rewind()?;
     let len = file.metadata()?.len();
     if len == 0 {
         return Ok(());
     }
     let mut last_newline: Option<u64> = None;
     let mut offset = 0u64;
-    let mut reader = std::io::BufReader::new(file);
+    let mut reader = std::io::BufReader::new(&mut *file);
     loop {
         let mut chunk = Vec::new();
         let n = reader.read_until(b'\n', &mut chunk)?;
@@ -263,6 +292,26 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o077, 0, "group/other must have no access");
         assert_ne!(mode & 0o200, 0, "owner must be able to write");
+    }
+
+    #[test]
+    fn open_rejects_unsupported_format_version() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sess.jsonl");
+        let header = Header {
+            version: FORMAT_VERSION + 1,
+            ..fresh_header()
+        };
+        SessionWriter::create(&path, header).unwrap();
+        match SessionWriter::open(&path) {
+            Err(SessionError::UnsupportedVersion {
+                found, supported, ..
+            }) => {
+                assert_eq!(found, FORMAT_VERSION + 1);
+                assert_eq!(supported, FORMAT_VERSION);
+            }
+            other => panic!("expected UnsupportedVersion, got {other:?}"),
+        }
     }
 
     #[test]

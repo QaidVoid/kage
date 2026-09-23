@@ -38,4 +38,16 @@ pub enum SessionError {
         #[source]
         source: serde_json::Error,
     },
+    /// Session file was written with a schema version this build cannot
+    /// interpret. Refusing up front beats opaque decode errors partway
+    /// through replaying a newer format.
+    #[error("session {path} uses format version {found}; this build supports version {supported}")]
+    UnsupportedVersion {
+        /// Path of the offending file.
+        path: PathBuf,
+        /// Version recorded in the file's header.
+        found: u32,
+        /// Highest version this build understands.
+        supported: u32,
+    },
 }

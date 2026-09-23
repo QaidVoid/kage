@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use kage_core::{Content, Message, MessageId, Role};
 
-use crate::entry::{Header, SessionEntry};
+use crate::entry::{FORMAT_VERSION, Header, SessionEntry};
 use crate::error::SessionError;
 use crate::list::list;
 use crate::reader::SessionReader;
@@ -78,11 +78,15 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
         .ok_or_else(|| empty_file_error(path))?
         .map_err(|e| match e {
             SessionError::Decode { .. } | SessionError::Io { .. } => e,
+            SessionError::UnsupportedVersion { .. } => {
+                unreachable!("reader does not produce UnsupportedVersion")
+            }
             SessionError::Encode { .. } => unreachable!("reader does not produce Encode"),
         })?;
     let SessionEntry::Header(header) = first else {
         return Err(missing_header_error(path));
     };
+    ensure_supported_version(path, header.version)?;
 
     let mut model = header.model.clone();
     let mut thinking_level: Option<String> = None;
@@ -168,6 +172,18 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
         tool_durations,
         usage_total,
         thinking_level,
+    })
+}
+
+/// Reject a header whose schema version this build cannot interpret.
+fn ensure_supported_version(path: &Path, version: u32) -> Result<(), SessionError> {
+    if version == FORMAT_VERSION {
+        return Ok(());
+    }
+    Err(SessionError::UnsupportedVersion {
+        path: path.to_path_buf(),
+        found: version,
+        supported: FORMAT_VERSION,
     })
 }
 
@@ -365,6 +381,23 @@ mod tests {
         let result = replay(&path).unwrap();
         assert_eq!(result.model, "openai:gpt-4o");
         assert_eq!(result.history.len(), 2);
+    }
+
+    #[test]
+    fn replay_rejects_unsupported_format_version() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("a.jsonl");
+        let header = Header {
+            version: FORMAT_VERSION + 1,
+            ..fresh_header()
+        };
+        write(&path, header, &[message_entry(Role::User, "hi")]);
+        match replay(&path) {
+            Err(SessionError::UnsupportedVersion { found, .. }) => {
+                assert_eq!(found, FORMAT_VERSION + 1);
+            }
+            other => panic!("expected UnsupportedVersion, got {other:?}"),
+        }
     }
 
     #[test]

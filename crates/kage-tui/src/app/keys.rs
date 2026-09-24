@@ -28,7 +28,37 @@ impl App {
         snapshot.iter().any(|hook| hook.handle(&descriptor))
     }
 
-    /// Drive the state machine forward by one key.
+    /// The parsed target of the `[keybindings]` entry bound to `key`,
+    /// or `None` when no config binding matches.
+    fn config_binding_for(
+        &self,
+        key: &ratatui::crossterm::event::KeyEvent,
+    ) -> Option<BindingTarget> {
+        self.config_keybindings
+            .iter()
+            .find(|(matcher, _, _)| matcher.matches(key))
+            .map(|(_, _, target)| target.clone())
+    }
+
+    /// Execute a config binding target: a command string through the
+    /// same executor as the `:` cmdline, an `action:` target as its
+    /// builtin action.
+    fn run_config_binding(&mut self, target: BindingTarget) -> Option<AppExit> {
+        match target {
+            BindingTarget::Command(command) => {
+                let registry = cmdline_registry(&self.plugin_command_specs);
+                match self.run_command_validated(&command, &registry) {
+                    CommandResult::Done(exit) => exit,
+                    CommandResult::ValidationError(msg) => {
+                        self.push_error(format!("keybinding `{command}`: {msg}"));
+                        None
+                    }
+                }
+            }
+            BindingTarget::Action(action) => self.apply(action),
+        }
+    }
+
     pub(crate) fn dispatch_key(
         &mut self,
         key: ratatui::crossterm::event::KeyEvent,
@@ -110,22 +140,12 @@ impl App {
 
         // `[keybindings]` config is user-authoritative: checked before
         // plugin and builtin handling so a user can always reclaim a
-        // key. The bound string runs through the same executor as the
-        // `:` cmdline, so `quit`, plugin commands, everything works.
-        if let Some(command) = self
-            .config_keybindings
-            .iter()
-            .find(|(matcher, _, _)| matcher.matches(&key))
-            .map(|(_, _, command)| command.clone())
-        {
-            let registry = cmdline_registry(&self.plugin_command_specs);
-            return match self.run_command_validated(&command, &registry) {
-                CommandResult::Done(exit) => exit,
-                CommandResult::ValidationError(msg) => {
-                    self.push_error(format!("keybinding `{command}`: {msg}"));
-                    None
-                }
-            };
+        // key. A bound command string runs through the same executor
+        // as the `:` cmdline, so `quit`, plugin commands, everything
+        // works; a bound `action:` target applies its builtin action
+        // directly instead.
+        if let Some(target) = self.config_binding_for(&key) {
+            return self.run_config_binding(target);
         }
 
         // Ctrl+V: attach an image from the OS clipboard. Terminals

@@ -51,6 +51,32 @@ pub(crate) enum CommandResult {
     ValidationError(String),
 }
 
+/// What a `[keybindings]` entry runs when its chord fires. Values are
+/// either a `:` command line (the default form) or a builtin
+/// [`InputAction`] bound through the `action:` form.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum BindingTarget {
+    /// Run this string through the same executor as the `:` cmdline.
+    Command(String),
+    /// Apply this builtin input action directly.
+    Action(InputAction),
+}
+
+impl BindingTarget {
+    /// Render the target the way `:keybindings` echoes it back: the
+    /// original config value for either form.
+    #[must_use]
+    pub(crate) fn echo(&self) -> String {
+        match self {
+            Self::Command(command) => format!(":{command}"),
+            Self::Action(action) => match action.rebindable_name() {
+                Some(name) => format!("action:{name}"),
+                None => "action:<non-rebindable>".to_owned(),
+            },
+        }
+    }
+}
+
 /// When `KAGE_DEBUG_KEYS` is set to a non-empty value, every press is
 /// appended to the file at that path (or `$XDG_STATE_HOME/kage/keys.log`
 /// when the value is `1`). Lets us diagnose terminal-specific quirks
@@ -594,12 +620,13 @@ pub struct App {
     /// Checked after modal layers but before builtin key handling so a
     /// plugin chord wins over the builtin binding for that key.
     plugin_keybindings: Vec<(Chord, String)>,
-    /// Parsed `[keybindings]` config: `(matcher, chord text, command
-    /// line)`. A matching key runs the command string through the
-    /// same executor as the `:` cmdline. Checked before plugin
-    /// keybindings so user config is authoritative. The chord text is
-    /// kept for `:keybindings` to echo back.
-    config_keybindings: Vec<(Chord, String, String)>,
+    /// Parsed `[keybindings]` config: `(matcher, chord text,
+    /// target)`. A matching key either runs the command string
+    /// through the same executor as the `:` cmdline or applies a
+    /// bound builtin [`InputAction`] directly. Checked before
+    /// plugin keybindings so user config is authoritative. The
+    /// chord text is kept for `:keybindings` to echo back.
+    config_keybindings: Vec<(Chord, String, BindingTarget)>,
     /// Status-bar widgets supplied by plugins via
     /// `kage.register_widget`. Each entry's `render(width)` runs on
     /// the plugin-refresh cadence and the resulting string is painted

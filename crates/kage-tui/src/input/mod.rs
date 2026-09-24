@@ -146,6 +146,66 @@ pub enum InputAction {
     CycleThinkingLevel,
 }
 
+/// Every rebindable action as `(config name, action)`. Unit variants
+/// only, so the table is a valid const and the parser and the echo
+/// read one source of truth that cannot drift.
+const REBINDABLE_ACTIONS: &[(&str, InputAction)] = &[
+    ("Cancel", InputAction::Cancel),
+    ("BeginCommand", InputAction::BeginCommand),
+    ("BeginSearch", InputAction::BeginSearch),
+    ("ScrollToTop", InputAction::ScrollToTop),
+    ("ScrollToBottom", InputAction::ScrollToBottom),
+    ("ToggleFold", InputAction::ToggleFold),
+    ("UnfoldAll", InputAction::UnfoldAll),
+    ("FoldAll", InputAction::FoldAll),
+    ("Yank", InputAction::Yank),
+    ("ClearSelection", InputAction::ClearSelection),
+    ("OpenModelPicker", InputAction::OpenModelPicker),
+    ("OpenSessionPicker", InputAction::OpenSessionPicker),
+    ("OpenCommandPalette", InputAction::OpenCommandPalette),
+    ("SearchNext", InputAction::SearchNext),
+    ("SearchPrev", InputAction::SearchPrev),
+    ("YankFocusedBlock", InputAction::YankFocusedBlock),
+    ("CycleThinkingLevel", InputAction::CycleThinkingLevel),
+    ("CyclePane", InputAction::CyclePane),
+    ("FocusPrev", InputAction::FocusPrev),
+    ("FocusNext", InputAction::FocusNext),
+];
+
+impl InputAction {
+    /// Parse a `[keybindings]` action name (the part after the
+    /// `action:` prefix) into the builtin it names, or `None` when
+    /// the name matches no rebindable action. Only payload-free,
+    /// context-free variants are rebindable: a config binding fires
+    /// with no arguments, so variants that carry state cannot be
+    /// expressed as one. Excluded are `Submit` (a prompt payload),
+    /// `Scroll` (a line delta), `EnterMode` (a mode), and
+    /// `FocusPane` (a pane), the `Visual*` family (meaningful only
+    /// inside Visual mode, whose state machine already routes them),
+    /// and `DroppedStaleAttach` (a host-internal notice about a
+    /// dropped image attach, not a user action). Names match the
+    /// variant identifiers exactly.
+    #[must_use]
+    pub fn parse_rebindable(name: &str) -> Option<Self> {
+        REBINDABLE_ACTIONS
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map(|(_, action)| action.clone())
+    }
+
+    /// The config name for this action under the `action:` form, the
+    /// exact inverse of [`Self::parse_rebindable`]. `None` for a
+    /// non-rebindable variant; the `:keybindings` echo uses this to
+    /// render a bound action back as `action:<name>`.
+    #[must_use]
+    pub fn rebindable_name(&self) -> Option<&'static str> {
+        REBINDABLE_ACTIONS
+            .iter()
+            .find(|(_, action)| action == self)
+            .map(|(known, _)| *known)
+    }
+}
+
 /// Cap on retained history entries. The host's persistence layer is
 /// expected to truncate to the same bound when it serializes.
 pub const HISTORY_MAX: usize = 1000;

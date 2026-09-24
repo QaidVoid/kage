@@ -173,6 +173,81 @@ fn keybindings_command_lists_config_and_reserved() {
 }
 
 #[test]
+fn config_action_binding_fires_builtin_action() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    let errs = app.set_config_keybindings(vec![("ctrl+g".into(), "action:BeginCommand".into())]);
+    assert!(errs.is_empty(), "{errs:?}");
+    assert_eq!(app.handle_key(ctrl('g')), None);
+    assert!(
+        app.cmdline.is_some(),
+        "the bound action opened the command line"
+    );
+    // The binding consumed the key before builtin insert handling,
+    // so the editor never saw the char.
+    assert_eq!(app.input().text(), "");
+}
+
+#[test]
+fn set_config_keybindings_reports_unknown_action_name() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    let errs = app.set_config_keybindings(vec![
+        ("ctrl+g".into(), "action:Nonsense".into()),
+        ("ctrl+h".into(), "action:".into()),
+        ("ctrl+i".into(), "quit".into()),
+    ]);
+    assert_eq!(errs.len(), 2, "{errs:?}");
+    assert!(errs[0].contains("action:Nonsense"), "{}", errs[0]);
+    assert!(errs[0].contains("action:"), "{}", errs[0]);
+    assert!(errs[1].contains("`action:`"), "{}", errs[1]);
+    assert_eq!(app.config_keybindings.len(), 1, "good binding kept");
+}
+
+#[test]
+fn config_action_binding_wins_over_builtin_handler() {
+    let buffer = shared_buffer();
+    if let Ok(mut buf) = buffer.lock() {
+        buf.append_thinking_delta("step one");
+        buf.finish_streaming();
+    }
+    let (tx, _rx) = mpsc::channel();
+    let mut app = App::new(buffer.clone(), tx);
+    // ctrl+o builtin is ToggleFold on the focused block; the binding
+    // must take the action path instead.
+    let _ = app.set_config_keybindings(vec![("ctrl+o".into(), "action:BeginCommand".into())]);
+    assert_eq!(app.handle_key(ctrl('o')), None);
+    assert!(app.cmdline.is_some(), "the bound action ran");
+    if let Ok(buf) = buffer.lock() {
+        assert!(
+            matches!(
+                buf.blocks()[0],
+                crate::buffer::Block::Thinking { folded: false, .. }
+            ),
+            "the builtin fold toggle did not run"
+        );
+    }
+}
+
+#[test]
+fn keybindings_command_lists_action_bindings() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = App::new(buffer.clone(), tx);
+    let _ = app.set_config_keybindings(vec![("ctrl+g".into(), "action:BeginCommand".into())]);
+    app.push_keybindings();
+    let buf = buffer.lock().unwrap();
+    let rendered = match buf.blocks().last() {
+        Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
+        other => panic!("expected a custom block, got {other:?}"),
+    };
+    assert!(rendered.contains("ctrl+g"), "{rendered}");
+    assert!(rendered.contains("action:BeginCommand"), "{rendered}");
+}
+
+#[test]
 fn plugin_command_alias_resolves_to_canonical_invoke() {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();

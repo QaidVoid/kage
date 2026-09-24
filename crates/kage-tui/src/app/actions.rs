@@ -501,8 +501,8 @@ impl App {
         if self.config_keybindings.is_empty() {
             lines.push("  (none; add a [keybindings] table to config.toml)".to_owned());
         } else {
-            for (_, chord, command) in &self.config_keybindings {
-                lines.push(format!("  {chord:<16} :{command}"));
+            for (_, chord, target) in &self.config_keybindings {
+                lines.push(format!("  {chord:<16} {}", target.echo()));
             }
         }
 

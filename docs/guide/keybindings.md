@@ -199,6 +199,60 @@ reclaim a key. A chord that does not parse is reported inline at
 startup (never silently dropped). Prefer modified chords - a bare
 letter will shadow typing it into the prompt.
 
+### binding builtin actions (`action:` form)
+
+A binding value can also name a builtin input action directly with
+the `action:` prefix. The bound chord then fires the same action the
+built-in key for it would, checked before builtin handling so the
+remap wins:
+
+```toml
+[keybindings]
+"ctrl+l" = "action:OpenModelPicker"
+"ctrl+y" = "action:YankFocusedBlock"
+```
+
+Chord-triggered `:` commands remain the default form: a value
+without the `action:` prefix is a command string, exactly as before,
+and an `action:` value is never run through the command executor.
+
+These action names are rebindable:
+
+| Group      | Name                 | Effect                            |
+| ---------- | -------------------- | --------------------------------- |
+| navigation | `ScrollToTop`        | snap the buffer to the top        |
+| navigation | `ScrollToBottom`     | snap the buffer to the bottom     |
+| navigation | `FocusPrev`          | focus the previous block          |
+| navigation | `FocusNext`          | focus the next block              |
+| navigation | `CyclePane`          | cycle pane focus (input / buffer) |
+| overlays   | `OpenModelPicker`    | open the model picker             |
+| overlays   | `OpenSessionPicker`  | open the session picker           |
+| overlays   | `OpenCommandPalette` | open the slash command palette    |
+| folds      | `ToggleFold`         | toggle the focused block's fold   |
+| folds      | `UnfoldAll`          | open every fold                   |
+| folds      | `FoldAll`            | close every fold                  |
+| search     | `BeginSearch`        | open the `/` search line          |
+| search     | `SearchNext`         | jump to the next match            |
+| search     | `SearchPrev`         | jump to the previous match        |
+| misc       | `BeginCommand`       | open the `:` command line         |
+| misc       | `Cancel`             | cancel the in-flight turn         |
+| misc       | `Yank`               | copy the active selection         |
+| misc       | `YankFocusedBlock`   | copy the focused block            |
+| misc       | `ClearSelection`     | drop the active selection         |
+| misc       | `CycleThinkingLevel` | step the thinking level           |
+
+Payload-carrying actions (`Submit`, `Scroll`, `EnterMode`,
+`FocusPane`) and the visual-mode cursor moves are not nameable: a
+config binding fires with no arguments, so only payload-free
+actions have names. An unknown or empty name after `action:` fails
+startup with an error line naming the offending value, the same
+surface an unparseable chord uses.
+
+`CycleThinkingLevel` steps the thinking level (also `Shift+Tab`).
+The level a new TUI session starts on comes from
+`[ui] thinking_level` (one of `off`, `minimal`, `low`, `medium`,
+`high`, `xhigh`); the cycle still overrides it per session.
+
 `Ctrl+Q` quits as a panic hatch even from a stuck modal. It yields
 **only** if you explicitly bind `ctrl+q` to something in
 `[keybindings]` - then your config wins and quit is reachable via

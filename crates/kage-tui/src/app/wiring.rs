@@ -435,25 +435,40 @@ impl App {
     }
 
     /// Register `[keybindings]` config entries: `chord -> command
-    /// line`. A matching key runs the command through the cmdline
-    /// executor, so anything `:` can do (including `quit` and plugin
-    /// commands) is bindable. Returns one message per entry whose
-    /// chord did not parse so the caller can surface it; a bad entry
-    /// is dropped, never silently "sort of" applied.
+    /// line`, or `chord -> "action:<name>"` to bind a builtin
+    /// [`InputAction`] directly. A command binding runs through the
+    /// cmdline executor, so anything `:` can do (including `quit`
+    /// and plugin commands) is bindable; an action binding applies
+    /// the action directly and never reaches the command executor.
+    /// Returns one message per entry whose chord did not parse or
+    /// whose action name is unknown so the caller can surface it; a
+    /// bad entry is dropped, never silently "sort of" applied.
     #[must_use]
     pub fn set_config_keybindings(&mut self, entries: Vec<(String, String)>) -> Vec<String> {
         let mut errors = Vec::new();
         self.config_keybindings = entries
             .into_iter()
-            .filter_map(|(chord, command)| {
-                if let Some(m) = Chord::parse(&chord) {
-                    Some((m, chord, command))
-                } else {
+            .filter_map(|(chord, value)| {
+                let Some(matcher) = Chord::parse(&chord) else {
                     errors.push(format!(
-                        "keybindings: cannot parse chord `{chord}` (bound to `{command}`)"
+                        "keybindings: cannot parse chord `{chord}` (bound to `{value}`)"
                     ));
-                    None
-                }
+                    return None;
+                };
+                let target = if let Some(name) = value.strip_prefix("action:") {
+                    let Some(action) = InputAction::parse_rebindable(name) else {
+                        errors.push(format!(
+                            "keybindings: unknown action name in `{value}` (the `action:` \
+                             form takes one of the rebindable action names; see \
+                             docs/guide/keybindings.md)"
+                        ));
+                        return None;
+                    };
+                    BindingTarget::Action(action)
+                } else {
+                    BindingTarget::Command(value)
+                };
+                Some((matcher, chord, target))
             })
             .collect();
         errors

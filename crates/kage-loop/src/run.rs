@@ -213,6 +213,7 @@ where
                 tools,
                 &workdir,
                 cancel,
+                cx.confine_paths,
                 assistant_id,
                 hooks,
                 &mut emit,

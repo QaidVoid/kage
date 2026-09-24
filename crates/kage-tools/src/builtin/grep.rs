@@ -13,7 +13,7 @@ use kage_core::{Risk, ToolOutput};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{Tool, ToolContext, ToolError, resolve, schema_for};
+use crate::{Tool, ToolContext, ToolError, schema_for};
 
 const DEFAULT_MAX_MATCHES: u64 = 1_000;
 
@@ -63,7 +63,7 @@ impl Tool for GrepTool {
     ) -> Result<ToolOutput, ToolError> {
         let input: GrepInput = serde_json::from_value(input)?;
         let root = match &input.path {
-            Some(p) => resolve(cx.workdir(), Path::new(p))?,
+            Some(p) => cx.resolve_path(Path::new(p))?,
             None => cx.workdir().to_path_buf(),
         };
         let max = input.max_matches.unwrap_or(DEFAULT_MAX_MATCHES);

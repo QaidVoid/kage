@@ -130,11 +130,13 @@ fn record_batch_error(slot: &mut Option<LoopError>, kind: &LoopError) {
 /// the loop cannot recover from, the failing call and every remaining call
 /// get synthesized `is_error` results, the completed results are kept, and
 /// the failure is carried in [`DispatchOutcome::error`].
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
     pending: Vec<PendingToolCall>,
     tools: &ToolRegistry,
     workdir: &Path,
     cancel: &CancelFlag,
+    confine_paths: bool,
     parent: MessageId,
     hooks: &mut dyn Hooks,
     emit: &mut F,
@@ -150,7 +152,7 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
                 Some(out)
             } else {
                 let sink_dyn = Arc::clone(&sink) as Arc<dyn ProgressSink>;
-                match execute(tools, &call, workdir, cancel, Some(sink_dyn)) {
+                match execute(tools, &call, workdir, cancel, confine_paths, Some(sink_dyn)) {
                     Ok(out) => Some(out),
                     Err(kind) => {
                         record_batch_error(&mut error, &kind);
@@ -215,11 +217,13 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
 /// `is_error` result; every call that did produce an output keeps it. The
 /// batch-level failure (cancel preferred over panic, first otherwise) is
 /// carried in [`DispatchOutcome::error`].
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
     pending: Vec<PendingToolCall>,
     tools: &ToolRegistry,
     workdir: &Path,
     cancel: &CancelFlag,
+    confine_paths: bool,
     parent: MessageId,
     hooks: &mut dyn Hooks,
     emit: &mut F,
@@ -260,8 +264,9 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
                     Slot::Run => {
                         let call = call.clone();
                         let sink = Arc::clone(sink);
-                        let handle =
-                            scope.spawn(move || execute(tools, &call, workdir, cancel, Some(sink)));
+                        let handle = scope.spawn(move || {
+                            execute(tools, &call, workdir, cancel, confine_paths, Some(sink))
+                        });
                         handles.push(Some(handle));
                     }
                 }
@@ -333,6 +338,7 @@ fn execute(
     call: &PendingToolCall,
     workdir: &Path,
     cancel: &CancelFlag,
+    confine_paths: bool,
     progress: Option<Arc<dyn ProgressSink>>,
 ) -> Result<ToolOutput, LoopError> {
     let Some(tool) = tools.get(&call.name) else {
@@ -345,6 +351,9 @@ fn execute(
     };
 
     let mut cx = ToolContext::new(workdir, cancel);
+    if confine_paths {
+        cx = cx.with_confine();
+    }
     if let Some(sink) = progress {
         cx = cx.with_progress(sink);
     }

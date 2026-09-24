@@ -129,6 +129,7 @@ fn tool_updates_are_emitted_before_tool_call_end() {
         &tools,
         std::path::Path::new("/tmp"),
         &cancel,
+        false,
         parent,
         &mut hooks,
         &mut |ev| emitted.push(ev),
@@ -174,6 +175,7 @@ fn parallel_dispatch_emits_tool_updates_per_call() {
         &tools,
         std::path::Path::new("/tmp"),
         &cancel,
+        false,
         parent,
         &mut hooks,
         &mut |ev| emitted.push(ev),
@@ -204,6 +206,7 @@ fn dispatches_in_input_order_and_appends_results() {
         &tools,
         std::path::Path::new("/tmp"),
         &cancel,
+        false,
         parent,
         &mut hooks,
         &mut |ev| emitted.push(ev),
@@ -238,6 +241,7 @@ fn unknown_tool_yields_error_output_not_loop_failure() {
         &tools,
         std::path::Path::new("/tmp"),
         &cancel,
+        false,
         parent,
         &mut hooks,
         &mut |_| {},
@@ -267,6 +271,7 @@ fn tool_error_converts_to_error_output() {
         &tools,
         std::path::Path::new("/tmp"),
         &cancel,
+        false,
         parent,
         &mut hooks,
         &mut |_| {},
@@ -314,6 +319,7 @@ fn before_tool_call_can_short_circuit_execution() {
         &tools,
         std::path::Path::new("/tmp"),
         &cancel,
+        false,
         parent,
         &mut hooks,
         &mut |_| {},
@@ -351,6 +357,7 @@ fn after_tool_call_can_rewrite_output() {
         &tools,
         std::path::Path::new("/tmp"),
         &cancel,
+        false,
         parent,
         &mut hooks,
         &mut |_| {},
@@ -417,6 +424,7 @@ fn parallel_dispatch_preserves_input_order() {
         &tools,
         std::path::Path::new("/tmp"),
         &cancel,
+        false,
         parent,
         &mut hooks,
         &mut |_| {},
@@ -458,6 +466,7 @@ fn parallel_dispatch_actually_runs_concurrently() {
         &tools,
         std::path::Path::new("/tmp"),
         &cancel,
+        false,
         parent,
         &mut hooks,
         &mut |_| {},
@@ -515,6 +524,7 @@ fn parallel_dispatch_honors_before_tool_call_short_circuit() {
         &tools,
         std::path::Path::new("/tmp"),
         &cancel,
+        false,
         parent,
         &mut hooks,
         &mut |_| {},
@@ -544,6 +554,7 @@ fn cancelled_batch_synthesizes_error_results() {
         &tools,
         std::path::Path::new("/tmp"),
         &cancel,
+        false,
         parent,
         &mut hooks,
         &mut |ev| emitted.push(ev),
@@ -614,6 +625,7 @@ fn mid_batch_cancel_synthesizes_remaining_results() {
         &tools,
         std::path::Path::new("/tmp"),
         &cancel,
+        false,
         parent,
         &mut hooks,
         &mut |ev| emitted.push(ev),
@@ -689,6 +701,7 @@ fn parallel_batch_keeps_successful_outputs_when_one_panics() {
         &tools,
         std::path::Path::new("/tmp"),
         &cancel,
+        false,
         parent,
         &mut hooks,
         &mut |_| {},
@@ -729,6 +742,7 @@ fn parallel_cancelled_call_synthesizes_and_keeps_others() {
         &tools,
         std::path::Path::new("/tmp"),
         &cancel,
+        false,
         parent,
         &mut hooks,
         &mut |_| {},
@@ -745,4 +759,76 @@ fn parallel_cancelled_call_synthesizes_and_keeps_others() {
     assert!(!err0 && out0.contains("\"i\":0"));
     let (out1, err1) = as_block(&outcome.results[1]);
     assert!(err1 && out1.contains("cancelled"));
+}
+
+/// Tool that reports whether its context is confined, standing in for
+/// the path-confinement plumbing the dispatcher must propagate.
+#[derive(Debug)]
+struct ConfineProbe;
+
+impl Tool for ConfineProbe {
+    fn name(&self) -> &'static str {
+        "confine_probe"
+    }
+    fn description(&self) -> &'static str {
+        "reports context confinement"
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn risk(&self) -> Risk {
+        Risk::Read
+    }
+    fn execute(
+        &self,
+        _input: serde_json::Value,
+        cx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput {
+            is_error: false,
+            text: cx.is_confined().to_string(),
+            structured: None,
+            terminate: false,
+        })
+    }
+}
+
+#[test]
+fn dispatch_propagates_confine_flag_to_tool_context() {
+    let tools = ToolRegistry::new().with(Arc::new(ConfineProbe));
+    let cancel = CancelFlag::new();
+    let parent = MessageId::new();
+    let mut hooks = NoopHooks;
+
+    let results = dispatch_tool_calls(
+        vec![pending("confine_probe", serde_json::json!({}))],
+        &tools,
+        std::path::Path::new("/tmp"),
+        &cancel,
+        false,
+        parent,
+        &mut hooks,
+        &mut |_| {},
+    )
+    .results;
+    match &results[0].content[0] {
+        Content::ToolResultBlock { output, .. } => assert_eq!(output, "false"),
+        other => panic!("unexpected content: {other:?}"),
+    }
+
+    let results = dispatch_tool_calls_parallel(
+        vec![pending("confine_probe", serde_json::json!({}))],
+        &tools,
+        std::path::Path::new("/tmp"),
+        &cancel,
+        true,
+        parent,
+        &mut hooks,
+        &mut |_| {},
+    )
+    .results;
+    match &results[0].content[0] {
+        Content::ToolResultBlock { output, .. } => assert_eq!(output, "true"),
+        other => panic!("unexpected content: {other:?}"),
+    }
 }

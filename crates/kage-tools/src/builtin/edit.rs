@@ -18,7 +18,7 @@ use serde::Deserialize;
 use similar::TextDiff;
 
 use crate::atomic::atomic_write;
-use crate::{Tool, ToolContext, ToolError, resolve, schema_for};
+use crate::{Tool, ToolContext, ToolError, schema_for};
 
 /// Input shape for the `edit` tool. Accepts either the shorthand
 /// single-substring form or the multi-change form.
@@ -108,7 +108,7 @@ impl Tool for EditTool {
         cx: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
         let input: EditInput = serde_json::from_value(input)?;
-        let path = resolve(cx.workdir(), Path::new(&input.path))?;
+        let path = cx.resolve_path(Path::new(&input.path))?;
         let original = std::fs::read_to_string(&path)?;
 
         let changes = match collect_changes(&input) {

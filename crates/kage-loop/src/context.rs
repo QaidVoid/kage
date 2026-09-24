@@ -89,6 +89,12 @@ pub struct AgentContext {
     /// `reasoning_effort`, Gemini `thinkingConfig.thinkingBudget`).
     /// `None` leaves thinking unconfigured (provider default).
     pub thinking_level: Option<kage_provider::ThinkingLevel>,
+    /// Opt-in path confinement for the built-in file tools: when
+    /// `true`, every [`kage_tools::ToolContext`] the dispatcher builds
+    /// resolves paths through escape-checked resolution, so reads and
+    /// writes stay under `workdir`. Defaults to `false` (the
+    /// historical behavior).
+    pub confine_paths: bool,
     /// Running token totals.
     pub budget: TokenBudget,
 }
@@ -106,6 +112,7 @@ impl AgentContext {
             context_window: 200_000,
             max_output_tokens: None,
             thinking_level: None,
+            confine_paths: false,
             budget: TokenBudget::default(),
         }
     }
@@ -136,6 +143,14 @@ impl AgentContext {
     #[must_use]
     pub fn with_thinking_level(mut self, level: kage_provider::ThinkingLevel) -> Self {
         self.thinking_level = Some(level);
+        self
+    }
+
+    /// Switch tool dispatch to escape-checked path resolution so
+    /// built-in file tools stay under `workdir`.
+    #[must_use]
+    pub fn with_confine_paths(mut self) -> Self {
+        self.confine_paths = true;
         self
     }
 }

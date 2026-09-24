@@ -12,7 +12,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::atomic::atomic_write;
-use crate::{Tool, ToolContext, ToolError, resolve, schema_for};
+use crate::{Tool, ToolContext, ToolError, schema_for};
 
 /// Input shape for the `write` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -55,7 +55,7 @@ impl Tool for WriteTool {
         cx: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
         let input: WriteInput = serde_json::from_value(input)?;
-        let target = resolve(cx.workdir(), Path::new(&input.path))?;
+        let target = cx.resolve_path(Path::new(&input.path))?;
 
         if target.exists() && !input.overwrite {
             return Ok(ToolOutput {
@@ -195,5 +195,46 @@ mod tests {
         let s = out.structured.unwrap();
         assert_eq!(s["bytes"], 5);
         assert_eq!(s["path"], "a.txt");
+    }
+
+    #[test]
+    fn confined_write_rejects_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir
+            .path()
+            .parent()
+            .unwrap()
+            .join("outside-write-confined.txt");
+        let _ = fs::remove_file(&outside);
+        let cancel = CancelFlag::new();
+        let cx = ToolContext::new(dir.path(), &cancel).with_confine();
+        let err = WriteTool
+            .execute(
+                serde_json::json!({"path":"../outside-write-confined.txt","content":"x"}),
+                &cx,
+            )
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Path { .. }), "got {err:?}");
+        assert!(!outside.exists());
+    }
+
+    #[test]
+    fn unconfined_write_accepts_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir
+            .path()
+            .parent()
+            .unwrap()
+            .join("outside-write-unconfined.txt");
+        let _ = fs::remove_file(&outside);
+        let out = run(
+            &WriteTool,
+            dir.path(),
+            serde_json::json!({"path":"../outside-write-unconfined.txt","content":"x"}),
+        )
+        .unwrap();
+        assert!(!out.is_error);
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "x");
+        let _ = fs::remove_file(&outside);
     }
 }

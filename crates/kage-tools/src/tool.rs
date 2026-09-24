@@ -1,11 +1,12 @@
 //! [`Tool`] trait and per-call execution context.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use kage_core::{CancelFlag, Risk, ToolOutput, ToolUpdate};
 
 use crate::ToolError;
+use crate::path::{resolve, resolve_under};
 
 /// Sink the dispatcher hands to a [`ToolContext`] so a long-running tool
 /// can stream progress without blocking on the loop's emit closure.
@@ -80,13 +81,16 @@ pub trait Tool: Send + Sync + std::fmt::Debug {
 /// Per-call execution context handed to [`Tool::execute`].
 ///
 /// Carries the working directory the tool must respect, a cancellation flag
-/// the tool should poll at safe points for long-running work, and an
-/// optional [`ProgressSink`] long-running tools call to stream progress.
+/// the tool should poll at safe points for long-running work, an optional
+/// [`ProgressSink`] long-running tools call to stream progress, and the
+/// opt-in path-confinement flag that switches [`ToolContext::resolve_path`]
+/// to escape-checked resolution.
 #[derive(Clone)]
 pub struct ToolContext<'a> {
     workdir: &'a Path,
     cancel: &'a CancelFlag,
     progress: Option<Arc<dyn ProgressSink>>,
+    confine: bool,
 }
 
 impl std::fmt::Debug for ToolContext<'_> {
@@ -94,18 +98,21 @@ impl std::fmt::Debug for ToolContext<'_> {
         f.debug_struct("ToolContext")
             .field("workdir", &self.workdir)
             .field("has_progress", &self.progress.is_some())
+            .field("confine", &self.confine)
             .finish_non_exhaustive()
     }
 }
 
 impl<'a> ToolContext<'a> {
-    /// Construct a context with no progress sink.
+    /// Construct a context with no progress sink and no path
+    /// confinement.
     #[must_use]
     pub fn new(workdir: &'a Path, cancel: &'a CancelFlag) -> Self {
         Self {
             workdir,
             cancel,
             progress: None,
+            confine: false,
         }
     }
 
@@ -117,10 +124,44 @@ impl<'a> ToolContext<'a> {
         self
     }
 
+    /// Switch [`Self::resolve_path`] to escape-checked resolution so
+    /// every path the tool touches stays under the workdir. Off by
+    /// default: the historical behavior resolves against the workdir
+    /// but accepts absolute paths and `..` traversals that escape it.
+    #[must_use]
+    pub fn with_confine(mut self) -> Self {
+        self.confine = true;
+        self
+    }
+
     /// The directory tools must scope all filesystem operations under.
     #[must_use]
     pub fn workdir(&self) -> &Path {
         self.workdir
+    }
+
+    /// Whether the caller requested path confinement.
+    #[must_use]
+    pub fn is_confined(&self) -> bool {
+        self.confine
+    }
+
+    /// Resolve `candidate` against the context workdir. Unconfined
+    /// contexts use [`crate::path::resolve`]; confined ones use
+    /// [`crate::path::resolve_under`], which rejects `..` traversals,
+    /// outside absolute paths, and escaping symlinks with
+    /// [`ToolError::Path`].
+    ///
+    /// # Errors
+    ///
+    /// Whatever the selected resolution entry point returns; under
+    /// confinement that includes the escape rejection.
+    pub fn resolve_path(&self, candidate: &Path) -> Result<PathBuf, ToolError> {
+        if self.confine {
+            resolve_under(self.workdir, candidate)
+        } else {
+            resolve(self.workdir, candidate)
+        }
     }
 
     /// Whether the caller has requested cancellation.

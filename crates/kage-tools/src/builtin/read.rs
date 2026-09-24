@@ -8,7 +8,7 @@ use kage_core::{Risk, ToolOutput};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{Tool, ToolContext, ToolError, resolve, schema_for};
+use crate::{Tool, ToolContext, ToolError, schema_for};
 
 /// Files larger than this are truncated; the model is told via a footer.
 const MAX_BYTES: usize = 2_000_000;
@@ -54,7 +54,7 @@ impl Tool for ReadTool {
         cx: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
         let input: ReadInput = serde_json::from_value(input)?;
-        let path = resolve(cx.workdir(), Path::new(&input.path))?;
+        let path = cx.resolve_path(Path::new(&input.path))?;
 
         // Cap the read itself, not just the output: a multi-gigabyte file
         // must not be slurped into memory before truncation.
@@ -187,5 +187,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out.text, "a\nb");
+    }
+
+    #[test]
+    fn confined_read_rejects_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().parent().unwrap().join("outside-read.txt");
+        fs::write(&outside, "secret").unwrap();
+        let cancel = CancelFlag::new();
+        let cx = ToolContext::new(dir.path(), &cancel).with_confine();
+        let err = ReadTool
+            .execute(serde_json::json!({"path":"../outside-read.txt"}), &cx)
+            .unwrap_err();
+        assert!(matches!(err, ToolError::Path { .. }), "got {err:?}");
+    }
+
+    #[test]
+    fn unconfined_read_accepts_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().parent().unwrap().join("outside-read.txt");
+        fs::write(&outside, "secret").unwrap();
+        let out = run(
+            &ReadTool,
+            dir.path(),
+            serde_json::json!({"path":"../outside-read.txt"}),
+        )
+        .unwrap();
+        assert_eq!(out.text, "secret");
     }
 }

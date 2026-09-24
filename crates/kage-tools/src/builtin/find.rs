@@ -9,7 +9,7 @@ use kage_core::{Risk, ToolOutput};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{Tool, ToolContext, ToolError, resolve, schema_for};
+use crate::{Tool, ToolContext, ToolError, schema_for};
 
 /// Upper bound on returned paths; keeps a huge tree from flooding the
 /// model's context.
@@ -58,7 +58,7 @@ impl Tool for FindTool {
     ) -> Result<ToolOutput, ToolError> {
         let input: FindInput = serde_json::from_value(input)?;
         let root = match &input.path {
-            Some(p) => resolve(cx.workdir(), Path::new(p))?,
+            Some(p) => cx.resolve_path(Path::new(p))?,
             None => cx.workdir().to_path_buf(),
         };
         let glob = Glob::new(&input.pattern)

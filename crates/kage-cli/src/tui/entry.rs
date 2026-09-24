@@ -96,12 +96,32 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     }
 
     if registry.ids().count() == 0 {
-        eprintln!(
-            "kage: no provider credentials found. Run `kage auth login` to save \
-             one, or export an env var (ANTHROPIC_API_KEY, OPENAI_API_KEY, \
-             GEMINI_API_KEY, ZAI_API_KEY, ZAI_CODING_API_KEY)."
-        );
-        return ExitCode::from(1);
+        // First-run onboarding: with no credentials anywhere, walk the
+        // new user through `auth login` (its provider picker and key
+        // prompt run in the normal terminal before the TUI starts)
+        // instead of exiting with instructions. Esc on the picker or
+        // an empty key falls back to the env-var guidance and exits.
+        eprintln!("kage: welcome! no provider credentials found, let's add one.");
+        loop {
+            let code = crate::auth::run_login(None, &app_config);
+            if code != ExitCode::SUCCESS {
+                eprintln!(
+                    "kage: no provider credentials found. Run `kage auth login` to save \
+                     one, or export an env var (ANTHROPIC_API_KEY, OPENAI_API_KEY, \
+                     GEMINI_API_KEY, ZAI_API_KEY, ZAI_CODING_API_KEY)."
+                );
+                return ExitCode::from(1);
+            }
+            registry = crate::build_provider_registry();
+            if let Some(rt) = plugin_runtime.as_ref() {
+                crate::plugins::merge_plugin_providers(rt, &mut registry);
+            }
+            if registry.ids().count() > 0 {
+                break;
+            }
+            eprintln!("kage: credential saved, but no provider is usable yet; add another.");
+        }
+        eprintln!("kage: connected. starting kage...");
     }
     // Recompute the default against the merged registry so a last-used
     // plugin-provided model resolves on restart.

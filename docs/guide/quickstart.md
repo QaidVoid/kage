@@ -6,8 +6,11 @@ Open a terminal in any project directory and run:
 kage
 ```
 
-You land in the interactive TUI. The cursor sits in the input card at
-the bottom of the screen, ready for your prompt.
+The first launch connects a provider: kage opens a provider picker and
+prompts for an API key (env vars like `ANTHROPIC_API_KEY` also work;
+set one and restart instead). After connecting, you land in the
+interactive TUI. The cursor sits in the input card at the bottom of
+the screen, ready for your prompt.
 
 ## a first turn
 
@@ -23,6 +26,12 @@ up as their own blocks with their inputs, outputs, and timing.
 
 Cancel a running turn with Ctrl+C. Quit with Ctrl+Q or by typing
 `:q`.
+
+## finding your way around
+
+Press `?` in Normal mode (`Esc`, then `?`) for the keyboard reference
+overlay. Type `:` for the command line, `:settings` for themes,
+model, and thinking defaults.
 
 ## modal navigation
 

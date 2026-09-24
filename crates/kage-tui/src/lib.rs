@@ -13,6 +13,8 @@ pub mod events;
 pub mod hostlog;
 pub mod image;
 pub mod input;
+#[cfg_attr(not(test), allow(dead_code))]
+mod keymap;
 pub mod layout;
 pub mod markdown;
 pub mod opaque;

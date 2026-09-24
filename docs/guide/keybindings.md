@@ -1,8 +1,8 @@
 # keybindings
 
-This page covers the keys kage's TUI listens for. It is not the full
-input grammar; refer to `crates/kage-tui/src/input/mod.rs` for the
-authoritative key-to-action map.
+This page covers the keys kage's TUI listens for. Inside the TUI,
+press `?` on an empty prompt (or run `/help`) for the same reference
+as an overlay.
 
 The TUI supports two editor modes: **modeless** (the default) and
 **vim** (`editor = "vim"` in config). Both share the same
@@ -39,12 +39,17 @@ in the input. When no paste is collapsed, it toggles the fold.
 
 | Key             | From    | Effect                              |
 | --------------- | ------- | ----------------------------------- |
-| `Esc`           | any     | Return to Normal mode               |
+| `Esc`           | Insert, Visual | Return to Normal mode        |
 | `i`             | Normal  | Enter Insert mode                   |
 | `v`             | Normal  | Enter Visual mode                   |
-| `Ctrl+W`        | any     | Cycle focused pane (input / buffer) |
-| `Ctrl+Q`        | any     | Quit immediately                    |
+| `Ctrl+W`        | Normal  | Cycle focused pane (input / buffer) |
+| `?`             | Normal  | Open the keyboard reference         |
+| `:`             | Normal  | Open the `:` command line           |
+| `Ctrl+Q`        | any     | Quit                                |
 | `Ctrl+C`        | any     | Cancel current request              |
+
+In vim Insert mode, `Ctrl+W` kills the previous word instead (see
+[input editing](#input-editing)).
 
 ## modeless mode
 
@@ -55,31 +60,42 @@ without any mode switching.
 
 | Key  | Effect                          |
 | ---- | ------------------------------- |
+| `Enter` | Send the prompt |
+| `Shift+Enter` / `Alt+Enter` | Insert a newline |
 | `Esc` | Cancel the current turn |
+| `Ctrl+C` | Cancel the current turn |
 | `PageUp` / `PageDown` | Scroll the conversation buffer 10 lines |
+| `Ctrl+W` | Kill the previous word |
+| `Ctrl+G` | Edit the prompt draft in `$VISUAL`/`$EDITOR` |
+| `Shift+Tab` | Cycle the thinking level |
+| `/`   | Open the command palette (empty prompt only) |
+| `!`   | Switch to shell mode (empty prompt only) |
 | `?`   | Open the keyboard reference (empty prompt only) |
+| `Ctrl+Q` | Quit |
 
 The `?` (keys), `/` (command palette), and `!` (shell escape)
 prefixes all key off an empty prompt, so every surface stays one
-keystroke away without a mode switch.
+keystroke away without a mode switch. With text in the prompt they
+are typed as literal characters. In shell mode the placeholder reads
+`run a shell command... (Backspace to cancel)`: Enter runs the line
+with `sh`, and `Backspace` on the empty prompt leaves shell mode.
 
 ## command pathways
 
-There are two surfaces over the same command spec registry: the `:`
-ex-line and the `/` palette. Both parse, complete, and dispatch
-through identical code paths. The only visual difference is layout:
-`:` sits on the status row, `/` opens inline above the input card and
-lists matching commands.
+`/` on an empty prompt opens the command palette inline above the
+input card. It lists matching commands as you type. This works in
+modeless mode and in vim Insert mode.
 
-| Key   | From         | Effect                                 |
-| ----- | ------------ | -------------------------------------- |
-| `:`   | Normal       | Open the colon command line            |
-| `/`   | Insert empty | Open the slash command palette         |
-| `/`   | Normal       | Begin a buffer search                  |
+In vim mode there is also the `:` ex line on the status row, opened
+from Normal mode. It shares the palette's command registry, parser,
+completion, and dispatch, so `:model anthropic:claude-sonnet-4` and
+`/model anthropic:claude-sonnet-4` have identical effect.
 
-Both `:` and `/` accept the same commands and arguments. For example,
-`:model anthropic:claude-sonnet-4` and `/model anthropic:claude-sonnet-4`
-have identical effect.
+| Key   | From                       | Effect                          |
+| ----- | -------------------------- | ------------------------------- |
+| `/`   | empty prompt               | Open the slash command palette  |
+| `:`   | vim Normal                 | Open the colon command line     |
+| `/`   | vim Normal                 | Begin a buffer search           |
 
 ## command line autocomplete
 
@@ -106,16 +122,17 @@ match completions resolve and close in one keystroke.
 Submitting an invalid command keeps the line open and surfaces an
 inline error below the row. Examples:
 
-- `:mouse maybe` shows `state must be one of: on, off, toggle`
-- `:model` shows `missing required arg: id`
-- `:quut` shows `unknown command: quut (did you mean :quit?)`
+- `/mouse maybe` shows ``argument `state` must be one of: on, off, toggle (got `maybe`)``
+- `/model` shows `` missing required argument `id` ``
+- `/quut` shows `unknown command: quut (did you mean /quit?)`
 
 Editing the line clears the error.
 
 ## vim normal-mode keys (buffer pane)
 
 These keys work when the buffer pane is focused in vim Normal mode
-(use `Ctrl+W` to switch panes, or press `Esc` from Insert).
+(press `Ctrl+W` in Normal mode to switch panes, or press `Esc` from
+Insert).
 
 | Key       | Effect                                       |
 | --------- | -------------------------------------------- |
@@ -142,8 +159,11 @@ work in both vim Insert mode and modeless mode.
 
 | Key            | Effect                                            |
 | -------------- | ------------------------------------------------- |
+| `Enter`        | Send the prompt                                   |
+| `Shift+Enter`  | Insert a newline (`Alt+Enter` also works)         |
+| `Up` / `Down`  | Move between lines, then walk the prompt history  |
 | `Ctrl+A` / `Ctrl+E` | Start / end of the current line              |
-| `Ctrl+W`       | Kill the word before the cursor                   |
+| `Ctrl+W`       | Kill the word before the cursor (in vim Normal mode it cycles panes instead) |
 | `Ctrl+U`       | Kill to start of line                              |
 | `Ctrl+K`       | Kill to end of line                                |
 | `Alt+Backspace` | Kill the previous word                           |
@@ -154,6 +174,7 @@ work in both vim Insert mode and modeless mode.
 | `Ctrl+O`       | Toggle fold (or expand a collapsed paste)          |
 | `Ctrl+S`       | Open session picker                                |
 | `Ctrl+P`       | Open model picker                                  |
+| `Ctrl+G`       | Edit the draft in `$VISUAL`/`$EDITOR`              |
 
 `Ctrl+W`, `Ctrl+U`, `Ctrl+K`, `Alt+Backspace`, and `Alt+D` feed a
 kill ring; `Ctrl+Y` yanks the most recent entry. A bracketed paste
@@ -192,8 +213,8 @@ operators are available for editing the prompt text.
 ## remapping keys (`[keybindings]`)
 
 Bind any chord to any command in `config.toml`. The bound string runs
-through the same executor as the `:` command line, so anything `:`
-can do - including `quit` and plugin commands - is bindable:
+through the same executor as the command palette, so anything `/`
+can do is bindable, including `quit` and plugin commands:
 
 ```toml
 [keybindings]
@@ -221,7 +242,7 @@ remap wins:
 "ctrl+y" = "action:YankFocusedBlock"
 ```
 
-Chord-triggered `:` commands remain the default form: a value
+Command strings remain the default form: a value
 without the `action:` prefix is a command string, exactly as before,
 and an `action:` value is never run through the command executor.
 

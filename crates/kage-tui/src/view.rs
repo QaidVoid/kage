@@ -2,7 +2,7 @@
 //!
 //! [`render`] is the single entry point. It walks the buffer's blocks,
 //! turns each one into a styled [`Line`], lays them out in a scrollable
-//! [`Paragraph`], and paints the status bar and input area on top.
+//! [`Paragraph`], and paints the chrome slots and the input around it.
 //!
 //! Block styling lives in the per-kind widget modules (`view::user`,
 //! `view::assistant`, etc.); `render_buffer` dispatches via
@@ -39,7 +39,7 @@ pub(crate) use ratatui::Frame;
 pub(crate) use ratatui::layout::{Alignment, Rect};
 pub(crate) use ratatui::style::{Color, Modifier, Style};
 pub(crate) use ratatui::text::{Line, Span};
-pub(crate) use ratatui::widgets::{Block as RtBlock, Borders, Paragraph, Wrap};
+pub(crate) use ratatui::widgets::{Block as RtBlock, Paragraph, Wrap};
 pub(crate) use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub(crate) use crate::buffer::{Block, Buffer};
@@ -48,14 +48,17 @@ pub(crate) use crate::input::{InputState, Mode, Pane};
 pub(crate) use crate::layout::Regions;
 pub(crate) use crate::usage::SessionUsage;
 
-/// Read-only snapshot of the live state the status bar needs to
-/// paint. Built fresh each frame from whatever the host has wired in.
+/// Read-only snapshot of the live state the chrome needs to paint.
+/// Built fresh each frame from whatever the host has wired in.
 #[derive(Default)]
 pub struct StatusCtx<'a> {
-    /// Active `provider:model` id, if known.
+    /// Friendly label of the active model (the model picker's label,
+    /// else the `provider:model` id), if known.
     pub model: Option<&'a str>,
     /// Short session id pill, if recording is active.
     pub session_id: Option<&'a str>,
+    /// Active session title, for the `title` component.
+    pub title: Option<&'a str>,
     /// Currently submitted search pattern, if any. Blocks whose
     /// content contains this pattern get a `Match` emphasis.
     pub search_pattern: Option<&'a str>,
@@ -63,11 +66,12 @@ pub struct StatusCtx<'a> {
     /// order. Avoids O(text) substring scan per visible block per
     /// frame.
     pub search_match_set: Option<&'a [usize]>,
-    /// Open `/` search line, if the user is mid-typing one.
+    /// Open `/` search line, if the user is mid-typing one. Painted
+    /// over the footer row.
     pub search_line: Option<&'a CommandLine>,
     /// `(current_1_indexed, total)` for the active search. `current`
     /// is `0` when the focus isn't on any match. Painted as
-    /// `match X/Y` on the right side of the status bar.
+    /// `match X/Y` by the `search` component and on the search line.
     pub search_match_count: Option<(usize, usize)>,
     /// Pre-rendered output of any plugin-registered status-bar widgets,
     /// in registration order. The host pre-renders each entry by
@@ -78,12 +82,15 @@ pub struct StatusCtx<'a> {
     /// Painted alongside widgets on the right edge in key-sorted
     /// order. Empty when no plugins push status.
     pub plugin_status: &'a [(String, String)],
-    /// Slot specs for the header, footer, input pill and start screen.
-    /// The default paints kage's built-in chrome. The `:` command line
-    /// and `/` search line still paint over the header.
+    /// Slot specs for the header, activity row, input pill, footer and
+    /// start screen. The default paints kage's built-in chrome.
     pub slots: kage_plugin::SlotSpecs,
-    /// Keys of a pending mapping sequence, for the `hint` component.
-    pub key_hint: Option<&'a str>,
+    /// Footer hint for the `hint` component: the pending keys, or what
+    /// the next key does.
+    pub hint: Option<&'a str>,
+    /// Working row text for the `activity` component, present while a
+    /// run is in flight.
+    pub activity: Option<&'a str>,
     /// Working directory, for the `cwd` component.
     pub cwd: Option<&'a str>,
 }
@@ -173,8 +180,8 @@ pub fn render(
             full,
         );
     }
-    let sources = slot::Sources::new(status, session_usage, input.mode());
-    render_status(frame, regions, cmdline, status, &sources);
+    let sources = slot::Sources::new(status, session_usage, input);
+    slot::render_header(frame, regions.header, &sources);
     render_buffer(
         frame,
         regions,
@@ -185,58 +192,65 @@ pub fn render(
     if buffer.blocks().is_empty() {
         slot::render_start(frame, regions.buffer, &sources);
     }
+    slot::render_activity(frame, regions.activity, &sources);
     render_input(frame, regions, input, &sources);
-    slot::render_footer(frame, regions.status_bottom, &sources);
     if !toasts.is_empty() {
         let theme = crate::theme::current();
         render_toasts(frame, regions.buffer, toasts, &theme);
     }
     if let Some(cl) = cmdline {
+        render_cmdline_line(frame, regions.footer, cl);
         render_cmdline_error(frame, regions, cl);
         render_cmdline_popup(frame, regions, cl);
         place_cmdline_cursor(frame, regions, cl);
     } else if let Some(sl) = status.search_line {
-        place_search_cursor(frame, regions, sl);
+        render_search_line(frame, regions.footer, sl, status.search_match_count);
+        place_cmdline_cursor(frame, regions, sl);
+    } else {
+        slot::render_footer(frame, regions.footer, &sources);
     }
     capture_and_overlay(frame, regions, buffer, screen_selection, captured_rows);
 }
 
-fn render_status(
-    frame: &mut Frame,
-    regions: Regions,
-    cmdline: Option<&CommandLine>,
+/// Row heights of the chrome for one frame: the header and activity
+/// rows collapse while their slots paint nothing, and the input fits
+/// its draft.
+#[must_use]
+pub fn chrome_heights(
     status: &StatusCtx<'_>,
-    sources: &slot::Sources<'_>,
-) {
-    let theme = crate::theme::current();
-    if let Some(cl) = cmdline {
-        let line = Line::from(vec![
-            Span::styled(":", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(cl.text().to_owned()),
-        ]);
-        let paragraph = Paragraph::new(line)
-            .alignment(Alignment::Left)
-            .style(Style::default().bg(theme.status_bg));
-        frame.render_widget(paragraph, regions.status);
-        return;
+    session_usage: Option<&SessionUsage>,
+    input: &InputState,
+    width: u16,
+) -> crate::layout::Heights {
+    let sources = slot::Sources::new(status, session_usage, input);
+    crate::layout::Heights {
+        header: u16::from(slot::row_has_content(
+            kage_plugin::SlotName::Header,
+            &sources,
+        )),
+        activity: u16::from(slot::row_has_content(
+            kage_plugin::SlotName::Activity,
+            &sources,
+        )),
+        input: input_height(input, width),
+        footer: 1,
     }
-    if let Some(sl) = status.search_line {
-        let line = Line::from(vec![
-            Span::styled(
-                "/",
-                Style::default()
-                    .fg(theme.match_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(sl.text().to_owned()),
-        ]);
-        let paragraph = Paragraph::new(line)
-            .alignment(Alignment::Left)
-            .style(Style::default().bg(theme.status_bg));
-        frame.render_widget(paragraph, regions.status);
-        return;
-    }
-    slot::render_header(frame, regions.status, sources);
+}
+
+/// Input region height for `input`'s draft at terminal `width`: the
+/// wrapped content rows, clamped to the configured bounds, plus the
+/// two rules.
+#[must_use]
+pub fn input_height(input: &InputState, width: u16) -> u16 {
+    let rows = input_visual_row_count(input.text(), input_body_width(width));
+    crate::layout::input_height_for(rows)
+}
+
+/// Width of the input's text column at terminal `width`: everything
+/// right of the prompt glyph.
+#[must_use]
+pub fn input_body_width(width: u16) -> u16 {
+    width.saturating_sub(INPUT_GLYPH_WIDTH)
 }
 
 /// Clip `s` to at most `max` display columns, appending `suffix`
@@ -322,20 +336,20 @@ mod input;
 mod modeline;
 mod slot;
 
-// Render entry points the top-level `render` / `render_status` call.
+// Render entry points the top-level `render` calls.
 use buffer::{capture_and_overlay, render_buffer};
 use cmdline::{
-    place_cmdline_cursor, place_search_cursor, render_cmdline_error, render_cmdline_popup,
+    place_cmdline_cursor, render_cmdline_error, render_cmdline_line, render_cmdline_popup,
+    render_search_line,
 };
 use input::render_input;
 
 // Helpers shared across the split submodules, re-routed through the
 // parent so each submodule's `use super::*` keeps resolving them.
-pub(crate) use blocks::mode_glyph;
 pub(crate) use cmdline::highlight_matches_in_lines;
-pub(crate) use input::{INPUT_PLACEHOLDER_INSERT, INPUT_PLACEHOLDER_NORMAL, wrap_input_rows};
+pub(crate) use input::wrap_input_rows;
 pub(crate) use modeline::{
-    input_cursor_position, input_scroll_offset, mode_border_color, mode_pill_style, placeholder_for,
+    input_cursor_position, input_scroll_offset, mode_border_color, mode_pill_style,
 };
 
 // Internal helpers the test module exercises directly.

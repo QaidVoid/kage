@@ -196,8 +196,8 @@ impl App {
 
     /// True when the worker has marked the [`crate::usage::SessionUsage`]
     /// snapshot as `working`. The render path uses it to drive the
-    /// modeline spinner; the event loop uses it to force periodic
-    /// redraws so the spinner animates.
+    /// spinner and the working row; the event loop uses it to force
+    /// periodic redraws so they animate.
     pub(crate) fn is_working(&self) -> bool {
         self.session_usage.as_ref().is_some_and(|h| lock(h).working)
     }
@@ -276,9 +276,19 @@ impl App {
         self.last_cursor_style = Some(key);
     }
 
-    #[allow(clippy::too_many_lines)]
     pub(crate) fn draw(&mut self, tui: &mut Tui) -> Result<(), TuiError> {
         self.sync_cursor_style();
+        self.paint(tui.terminal())
+    }
+
+    /// Paint one frame into `terminal`: the chrome, the buffer and
+    /// every open overlay.
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn paint<B>(&mut self, terminal: &mut ratatui::Terminal<B>) -> Result<(), TuiError>
+    where
+        B: ratatui::backend::Backend,
+        B::Error: std::error::Error + Send + Sync + 'static,
+    {
         // Enforce the scrollback cap before anything reads block
         // indices: compaction shifts them, and its version bump makes
         // the search-match list below rebuild against the new numbering.
@@ -292,19 +302,27 @@ impl App {
         } else {
             None
         };
-        let render_width = tui.terminal().size().map_or(80, |r| r.width);
+        let render_width = terminal.size().map_or(80, |r| r.width);
         self.refresh_plugin_widget_texts_if_due(render_width);
         let (mut buffer, buffer_version) = self.take_draw_snapshot();
-        let cmdline = self.cmdline.as_ref();
-        let model_snapshot = self.status_model.as_ref().map(|m| lock(m).clone());
-        let key_hint = self.key_hint();
+        let session_usage = self.session_usage_snapshot();
+        self.track_run(session_usage.as_ref());
+        let hint = self.footer_hint();
+        let activity = self.activity_label(&buffer);
+        let title = self
+            .slots
+            .as_ref()
+            .and_then(|slots| lock(&slots.ui_state()).session_title.clone());
+        let model_label = self.model_label(session_usage.as_ref());
         let cwd = self
             .completion_workdir
             .as_ref()
             .map(|dir| dir.display().to_string());
+        let cmdline = self.cmdline.as_ref();
         let status = view::StatusCtx {
-            model: model_snapshot.as_deref(),
+            model: model_label.as_deref(),
             session_id: self.status_session_id.as_deref(),
+            title: title.as_deref(),
             search_pattern: self.search_pattern.as_deref(),
             search_match_set: search_match_set.as_deref(),
             search_line: self.search_line.as_ref(),
@@ -312,18 +330,13 @@ impl App {
             plugin_widgets: &self.plugin_widget_texts,
             plugin_status: &self.plugin_status_cache,
             slots: self.slot_frame(render_width),
-            key_hint: key_hint.as_deref(),
+            hint: Some(hint.as_str()),
+            activity: activity.as_deref(),
             cwd: cwd.as_deref(),
         };
         let screen_selection = self.screen_selection;
         let mut captured_rows = std::mem::take(&mut self.captured_rows);
-        let session_usage = self.session_usage_snapshot();
         let live_toasts = self.live_toasts();
-        let bottom = if self.modeline_visible() {
-            crate::layout::STATUS_BOTTOM_LINES_DEFAULT
-        } else {
-            0
-        };
         // The autocomplete popup yields to every modal layer; it only
         // paints during plain input editing.
         let show_completion = self.input_completion.is_some()
@@ -350,80 +363,86 @@ impl App {
         };
         let context_menu = self.context_menu.as_ref();
         let input = &self.input;
-        tui.terminal().draw(|frame| {
-            // Compute the input region size from the *visual* row
-            // count after wrap, not the logical `\n` count, so a
-            // long single line that overflows the body width grows
-            // the input card instead of being silently clipped.
-            let body_width = frame
-                .area()
-                .width
-                .saturating_sub(2 + view::INPUT_GLYPH_WIDTH);
-            let input_visual_lines = view::input_visual_row_count(input.text(), body_width);
-            let input_height = input_height_for(input_visual_lines);
-            let regions = split(frame.area(), input_height, bottom);
-            view::render(
-                frame,
-                regions,
-                &mut buffer,
-                input,
-                cmdline,
-                &status,
-                screen_selection,
-                &mut captured_rows,
-                session_usage.as_ref(),
-                &live_toasts,
-            );
-            if let Some(picker) = picker {
-                picker.render(frame, frame.area());
-            }
-            if let Some(settings) = settings_overlay {
-                settings.render(frame, frame.area());
-            }
-            if let Some(tree) = session_tree {
-                tree.render(frame, frame.area());
-            }
-            if let Some(help) = help_overlay {
-                let modal = crate::overlay::OverlayWidget::measure(help, frame.area());
-                frame.render_widget(crate::opaque::OpaqueClear, modal);
-                let theme = crate::theme::current();
-                let ctx = crate::overlay::OverlayCtx {
-                    theme: &theme,
-                    viewport: frame.area(),
-                };
-                crate::overlay::OverlayWidget::render(help, modal, frame.buffer_mut(), &ctx);
-            }
-            if let Some(palette) = slash_palette {
-                palette.render(frame, regions);
-                palette.place_cursor(frame, regions);
-            }
-            if let Some(completion) = input_completion {
-                completion.render(frame, regions);
-            }
-            if let Some(menu) = context_menu {
-                menu.render(frame, regions.buffer);
-            }
-            if let Some(overlay) = plugin_overlay {
-                let modal = overlay.measure(frame.area());
-                frame.render_widget(crate::opaque::OpaqueClear, modal);
-                let theme = crate::theme::current();
-                let ctx = crate::overlay::OverlayCtx {
-                    theme: &theme,
-                    viewport: frame.area(),
-                };
-                overlay.render(modal, frame.buffer_mut(), &ctx);
-            }
-            if let Some(permission) = permission_overlay {
-                let modal = crate::overlay::OverlayWidget::measure(permission, frame.area());
-                frame.render_widget(crate::opaque::OpaqueClear, modal);
-                let theme = crate::theme::current();
-                let ctx = crate::overlay::OverlayCtx {
-                    theme: &theme,
-                    viewport: frame.area(),
-                };
-                crate::overlay::OverlayWidget::render(permission, modal, frame.buffer_mut(), &ctx);
-            }
-        })?;
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                let heights =
+                    view::chrome_heights(&status, session_usage.as_ref(), input, area.width);
+                let regions = split(area, heights);
+                view::render(
+                    frame,
+                    regions,
+                    &mut buffer,
+                    input,
+                    cmdline,
+                    &status,
+                    screen_selection,
+                    &mut captured_rows,
+                    session_usage.as_ref(),
+                    &live_toasts,
+                );
+                if let Some(picker) = picker {
+                    picker.render(frame, area);
+                }
+                if let Some(settings) = settings_overlay {
+                    settings.render(frame, area);
+                }
+                if let Some(tree) = session_tree {
+                    tree.render(frame, area);
+                }
+                if let Some(help) = help_overlay {
+                    let above_input = ratatui::layout::Rect::new(
+                        area.x,
+                        area.y,
+                        area.width,
+                        regions.input.y.saturating_sub(area.y),
+                    );
+                    let modal = crate::overlay::OverlayWidget::measure(help, above_input);
+                    frame.render_widget(crate::opaque::OpaqueClear, modal);
+                    let theme = crate::theme::current();
+                    let ctx = crate::overlay::OverlayCtx {
+                        theme: &theme,
+                        viewport: above_input,
+                    };
+                    crate::overlay::OverlayWidget::render(help, modal, frame.buffer_mut(), &ctx);
+                }
+                if let Some(palette) = slash_palette {
+                    palette.render(frame, regions);
+                    palette.place_cursor(frame, regions);
+                }
+                if let Some(completion) = input_completion {
+                    completion.render(frame, regions);
+                }
+                if let Some(menu) = context_menu {
+                    menu.render(frame, regions.buffer);
+                }
+                if let Some(overlay) = plugin_overlay {
+                    let modal = overlay.measure(area);
+                    frame.render_widget(crate::opaque::OpaqueClear, modal);
+                    let theme = crate::theme::current();
+                    let ctx = crate::overlay::OverlayCtx {
+                        theme: &theme,
+                        viewport: area,
+                    };
+                    overlay.render(modal, frame.buffer_mut(), &ctx);
+                }
+                if let Some(permission) = permission_overlay {
+                    let modal = crate::overlay::OverlayWidget::measure(permission, area);
+                    frame.render_widget(crate::opaque::OpaqueClear, modal);
+                    let theme = crate::theme::current();
+                    let ctx = crate::overlay::OverlayCtx {
+                        theme: &theme,
+                        viewport: area,
+                    };
+                    crate::overlay::OverlayWidget::render(
+                        permission,
+                        modal,
+                        frame.buffer_mut(),
+                        &ctx,
+                    );
+                }
+            })
+            .map_err(|err| TuiError::Io(std::io::Error::other(err.to_string())))?;
         // Merge renderer-owned state (caches, clamped scroll, last-frame
         // geometry) from the snapshot back into the live buffer. The
         // mutex is never held across the paint itself. Then park the

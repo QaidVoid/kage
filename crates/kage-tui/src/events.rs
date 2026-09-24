@@ -526,7 +526,14 @@ mod tests {
             let input = crate::input::InputState::new();
             terminal
                 .draw(|frame| {
-                    let regions = crate::layout::split(frame.area(), 1, 0);
+                    let regions = crate::layout::split(
+                        frame.area(),
+                        crate::layout::Heights {
+                            header: 1,
+                            input: crate::layout::INPUT_MIN_LINES,
+                            ..crate::layout::Heights::default()
+                        },
+                    );
                     crate::view::render(
                         frame,
                         regions,

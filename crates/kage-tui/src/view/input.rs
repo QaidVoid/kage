@@ -3,23 +3,28 @@
 #[allow(clippy::wildcard_imports)] // free-fn split: shares the parent view module scope
 use super::*;
 
-/// Width in cells of the leading prompt glyph plus its trailing
-/// space. Painted on the first content row only; subsequent rows
-/// (multi-line draft, soft-wrapped continuation) align under the
-/// glyph slot but stay blank.
-pub(crate) const INPUT_GLYPH_WIDTH: u16 = 1;
+/// Width in cells of the prompt column: a space, the glyph and a
+/// space. The glyph is painted on the first logical line only, so it
+/// scrolls away with it; every other row stays blank here.
+pub(crate) const INPUT_GLYPH_WIDTH: u16 = 3;
 
-/// Single-character prompt glyph painted at the start of the input
-/// content. Plain ASCII so it renders the same in every terminal and
-/// doesn't trigger our "no fancy chars" lint when grep'd.
-const INPUT_GLYPH: &str = "|";
+/// Prompt glyph painted at the start of the draft.
+const INPUT_GLYPH: &str = ">";
 /// Prompt glyph while shell-escape mode is armed.
 const INPUT_GLYPH_SHELL: &str = "!";
 
-/// Default placeholder text shown when the input is empty.
-pub(crate) const INPUT_PLACEHOLDER_INSERT: &str =
-    "Send a message...  (/ commands, ! shell, ? keys)";
-pub(crate) const INPUT_PLACEHOLDER_NORMAL: &str = "press i to type, ? for keys, / to search";
+/// Placeholder of the empty draft in insert mode and the modeless
+/// editor.
+const INPUT_PLACEHOLDER_INSERT: &str = "Ask kage anything";
+/// Placeholder of the empty draft in vim normal mode.
+const INPUT_PLACEHOLDER_NORMAL: &str = "Press i to type";
+/// Placeholder of the empty draft while shell-escape mode is armed.
+const INPUT_PLACEHOLDER_SHELL: &str = "Run a shell command (Backspace leaves shell mode)";
+
+/// The rule glyph of the input's top and bottom rules.
+const RULE: &str = "\u{2500}";
+/// Rule cells kept outside a title on either end of a rule.
+const RULE_LEAD: usize = 2;
 
 pub(super) fn render_input(
     frame: &mut Frame,
@@ -28,75 +33,49 @@ pub(super) fn render_input(
     sources: &super::slot::Sources<'_>,
 ) {
     let area = regions.input;
-    if area.height == 0 || area.width == 0 {
+    if area.height < crate::layout::INPUT_CHROME_LINES || area.width == 0 {
         return;
     }
     let theme = crate::theme::current();
     let mode = input.mode();
+    let shell = input.shell_armed();
     let pane_focused = input.focused_pane() == Pane::Input;
-    // Buffer pane focused: recede the input chrome to the muted tier
-    // so the eye tracks the focused buffer block, but stay visible
-    // (the bars no longer sit on a band, so `DIM` would vanish).
-    let border_color = if pane_focused {
-        mode_border_color(&theme, mode)
-    } else {
-        theme.muted_fg
-    };
-    let pill_style = if pane_focused {
-        mode_pill_style(&theme, mode)
-    } else {
-        Style::default().fg(theme.muted_fg)
-    };
-
-    let (pill_left, pill_right) = super::slot::pill_titles(sources, pill_style);
-    let mut block = RtBlock::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(border_color))
-        .title(pill_left);
-    if let Some(right) = pill_right {
-        block = block.title(right);
-    }
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if inner.width == 0 || inner.height == 0 {
-        return;
-    }
-
-    let glyph_width = INPUT_GLYPH_WIDTH.min(inner.width);
-    let body_width = inner.width.saturating_sub(glyph_width);
-    let body_area = ratatui::layout::Rect::new(
-        inner.x.saturating_add(glyph_width),
-        inner.y,
-        body_width,
-        inner.height,
+    let body_area = Rect::new(
+        area.x.saturating_add(INPUT_GLYPH_WIDTH.min(area.width)),
+        area.y + 1,
+        input_body_width(area.width),
+        area.height - crate::layout::INPUT_CHROME_LINES,
     );
     let scroll_off = input_scroll_offset(input, body_area);
+    paint_rules(frame, area, body_area, scroll_off, input, sources);
 
-    let glyph_area = ratatui::layout::Rect::new(inner.x, inner.y, glyph_width, 1);
-    if glyph_width >= INPUT_GLYPH_WIDTH {
-        let glyph = Paragraph::new(Line::from(Span::styled(
-            if input.shell_armed() {
-                INPUT_GLYPH_SHELL
-            } else {
-                INPUT_GLYPH
-            }
-            .to_owned(),
-            Style::default().fg(theme.input_glyph_fg),
-        )));
-        frame.render_widget(glyph, glyph_area);
+    if body_area.height == 0 {
+        return;
+    }
+    if scroll_off == 0 && area.width >= INPUT_GLYPH_WIDTH {
+        let glyph = if shell {
+            INPUT_GLYPH_SHELL
+        } else {
+            INPUT_GLYPH
+        };
+        let line = Line::from(vec![
+            Span::raw(" "),
+            Span::styled(glyph.to_owned(), Style::default().fg(theme.input_glyph_fg)),
+        ]);
+        frame.render_widget(
+            Paragraph::new(line),
+            Rect::new(area.x, body_area.y, INPUT_GLYPH_WIDTH, 1),
+        );
     }
 
-    if input.text().is_empty() && input.shell_armed() {
-        let placeholder = Paragraph::new(Line::from(Span::styled(
-            "run a shell command... (Backspace to cancel)",
-            Style::default()
-                .fg(theme.input_placeholder_fg)
-                .add_modifier(Modifier::ITALIC),
-        )));
-        frame.render_widget(placeholder, body_area);
-    } else if input.text().is_empty() {
-        if let Some(text) = placeholder_for(mode) {
+    let placeholder = match mode {
+        _ if shell => Some(INPUT_PLACEHOLDER_SHELL),
+        Mode::Insert => Some(INPUT_PLACEHOLDER_INSERT),
+        Mode::Normal => Some(INPUT_PLACEHOLDER_NORMAL),
+        Mode::Visual => None,
+    };
+    if input.text().is_empty() {
+        if let Some(text) = placeholder {
             let placeholder = Paragraph::new(Line::from(Span::styled(
                 text,
                 Style::default()
@@ -105,7 +84,7 @@ pub(super) fn render_input(
             )));
             frame.render_widget(placeholder, body_area);
         }
-    } else if body_width > 0 {
+    } else if body_area.width > 0 {
         // Visual mode paints the selection; otherwise, when the
         // cursor is parked at the tail of an `[image #N ...]` chip,
         // paint that whole chip so the user sees the block one
@@ -125,25 +104,125 @@ pub(super) fn render_input(
         } else {
             (None, Style::default())
         };
-        // Lines are pre-wrapped at body_width display columns to
-        // match input_visual_cursor exactly; no Paragraph::wrap
-        // needed.
-        let lines = build_input_body_lines(input.text(), range, highlight, body_width);
+        // Lines are pre-wrapped at the body width to match
+        // input_visual_cursor exactly; no Paragraph::wrap needed.
+        let lines = build_input_body_lines(input.text(), range, highlight, body_area.width);
         let body = Paragraph::new(lines).scroll((scroll_off, 0));
         frame.render_widget(body, body_area);
     }
 
-    // Cursor visibility: present in the input card whenever the
-    // input pane has window focus AND the user is in a mode where
-    // we want a hardware cursor on the input. That includes Normal
-    // (vim cursor), Insert (editing), and an active input-pane
-    // visual selection. Buffer-cell visual leaves the input cursor
-    // hidden because the user's attention is on the buffer overlay.
+    // A visual selection in the buffer hides the input cursor.
     let input_visual_active = mode == Mode::Visual && input.input_visual_range().is_some();
-    let show_cursor = input.focused_pane() == Pane::Input
-        && (matches!(mode, Mode::Normal | Mode::Insert) || input_visual_active);
+    let show_cursor =
+        pane_focused && (matches!(mode, Mode::Normal | Mode::Insert) || input_visual_active);
     if show_cursor && let Some(pos) = input_cursor_position(input, body_area, scroll_off) {
         frame.set_cursor_position(pos);
+    }
+}
+
+/// Paint the top rule with the input pill and the bottom rule with the
+/// count of draft rows scrolled out of `body_area`.
+fn paint_rules(
+    frame: &mut Frame,
+    area: Rect,
+    body_area: Rect,
+    scroll_off: u16,
+    input: &InputState,
+    sources: &super::slot::Sources<'_>,
+) {
+    let theme = crate::theme::current();
+    let mode = input.mode();
+    let shell = input.shell_armed();
+    let pane_focused = input.focused_pane() == Pane::Input;
+    // Buffer pane focused: recede the rules to the muted tier so the
+    // eye tracks the focused buffer block.
+    let rule_color = if shell {
+        theme.warning_fg
+    } else if pane_focused {
+        mode_border_color(&theme, mode)
+    } else {
+        theme.muted_fg
+    };
+    let rule = Style::default().fg(rule_color);
+    let strong = if pane_focused && !shell {
+        mode_pill_style(&theme, mode)
+    } else {
+        rule.add_modifier(Modifier::BOLD)
+    };
+    let (left, right) = super::slot::pill_titles(sources, rule, strong);
+    let top = Rect::new(area.x, area.y, area.width, 1);
+    frame.render_widget(
+        Paragraph::new(rule_line(area.width, left, right, rule)),
+        top,
+    );
+    let hidden = if input.text().is_empty() {
+        None
+    } else {
+        let rows = wrap_input_rows(input.text(), body_area.width).len();
+        let above = usize::from(scroll_off);
+        let below = rows.saturating_sub(above + usize::from(body_area.height));
+        overflow_label(above, below)
+    };
+    let label = hidden
+        .map(|text| vec![Span::styled(text, rule)])
+        .unwrap_or_default();
+    let bottom = Rect::new(area.x, area.bottom() - 1, area.width, 1);
+    frame.render_widget(
+        Paragraph::new(rule_line(area.width, Vec::new(), label, rule)),
+        bottom,
+    );
+}
+
+/// One rule row `width` cells wide: `left` after two rule cells and
+/// `right` before the last two, each padded by a space, with rule
+/// cells between. `right` is dropped when both do not fit.
+fn rule_line(
+    width: u16,
+    left: Vec<Span<'static>>,
+    mut right: Vec<Span<'static>>,
+    rule: Style,
+) -> Line<'static> {
+    let titled = |spans: &[Span<'static>]| {
+        if spans.is_empty() {
+            0
+        } else {
+            RULE_LEAD + 2 + spans.iter().map(Span::width).sum::<usize>()
+        }
+    };
+    let width = usize::from(width);
+    let left_width = titled(&left);
+    let mut right_width = titled(&right);
+    if left_width + right_width > width {
+        right.clear();
+        right_width = 0;
+    }
+    let rules = |n: usize| Span::styled(RULE.repeat(n), rule);
+    let space = || Span::styled(" ", rule);
+    let mut spans = Vec::with_capacity(left.len() + right.len() + 7);
+    if !left.is_empty() {
+        spans.push(rules(RULE_LEAD));
+        spans.push(space());
+        spans.extend(left);
+        spans.push(space());
+    }
+    spans.push(rules(width.saturating_sub(left_width + right_width)));
+    if !right.is_empty() {
+        spans.push(space());
+        spans.extend(right);
+        spans.push(space());
+        spans.push(rules(RULE_LEAD));
+    }
+    Line::from(spans)
+}
+
+/// What the bottom rule says about draft rows scrolled out of view.
+fn overflow_label(above: usize, below: usize) -> Option<String> {
+    let lines = |n: usize| if n == 1 { "line" } else { "lines" };
+    match (above, below) {
+        (0, 0) => None,
+        (n, 0) => Some(format!("{n} more {} above", lines(n))),
+        (0, n) => Some(format!("{n} more {} below", lines(n))),
+        (a, b) => Some(format!("{a} more above, {b} below")),
     }
 }
 

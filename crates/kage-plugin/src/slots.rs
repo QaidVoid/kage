@@ -1,8 +1,10 @@
 //! Slots: the fixed chrome regions and the components that fill them.
 //!
-//! Four slots exist: `header` (the top row), `footer` (the modeline
-//! row), `input_pill` (the input card's top border) and `start` (the
-//! buffer region while the buffer is empty). `kage.api.slot_set(name,
+//! Five slots exist: `header` (the top row, collapsed while empty),
+//! `activity` (the working row above the input, collapsed while
+//! empty), `input_pill` (the input's top rule), `footer` (the bottom
+//! row) and `start` (the buffer region while the buffer is empty).
+//! `kage.api.slot_set(name,
 //! spec)` sets one, and `nil` restores the spec `_defaults.lua` set. A
 //! row slot takes `{ left = items, right = items, sep = string? }`, and
 //! `start` takes `{ lines = items }`, one line per item. An item is:
@@ -46,23 +48,30 @@ const DEFAULT_WIDTH: u16 = 80;
 /// A named chrome region.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SlotName {
-    /// The top row.
+    /// The top row, collapsed while it paints nothing.
     Header,
-    /// The modeline row.
+    /// The bottom row.
     Footer,
-    /// The input card's top border.
+    /// The input's top rule.
     InputPill,
     /// The buffer region while the buffer is empty.
     Start,
+    /// The working row above the input, collapsed while it paints
+    /// nothing.
+    Activity,
 }
+
+/// Number of slots.
+const SLOTS: usize = SlotName::ALL.len();
 
 impl SlotName {
     /// Every slot, in index order.
-    pub const ALL: [SlotName; 4] = [
+    pub const ALL: [SlotName; 5] = [
         SlotName::Header,
         SlotName::Footer,
         SlotName::InputPill,
         SlotName::Start,
+        SlotName::Activity,
     ];
 
     /// The name Lua uses for this slot.
@@ -73,6 +82,7 @@ impl SlotName {
             SlotName::Footer => "footer",
             SlotName::InputPill => "input_pill",
             SlotName::Start => "start",
+            SlotName::Activity => "activity",
         }
     }
 
@@ -90,11 +100,13 @@ impl SlotName {
 /// Names of the built-in components the host implements.
 pub const BUILTIN_COMPONENTS: &[&str] = &[
     "brand",
+    "title",
     "model",
     "widgets",
     "search",
     "session",
     "working",
+    "activity",
     "context",
     "tokens",
     "thinking",
@@ -161,39 +173,37 @@ pub fn default_spec(slot: SlotName) -> Arc<SlotSpec> {
     Arc::clone(&DEFAULT_SPECS[slot.index()])
 }
 
-static DEFAULT_SPECS: LazyLock<[Arc<SlotSpec>; 4]> = LazyLock::new(|| {
+static DEFAULT_SPECS: LazyLock<[Arc<SlotSpec>; SLOTS]> = LazyLock::new(|| {
     let items = |names: &[&'static str]| names.iter().copied().map(SlotItem::Builtin).collect();
     [
         Arc::new(SlotSpec {
-            left: items(&["brand", "model"]),
-            right: items(&["widgets", "search", "session"]),
+            left: items(&["title"]),
+            right: items(&["widgets", "search"]),
             ..SlotSpec::default()
         }),
         Arc::new(SlotSpec {
-            left: items(&[
-                "working",
-                "model",
-                "context",
-                "tokens",
-                "thinking",
-                "permission",
-            ]),
-            sep: " . ".to_owned(),
+            left: items(&["hint"]),
+            right: items(&["model", "permission", "context", "tokens"]),
+            sep: " \u{B7} ".to_owned(),
             ..SlotSpec::default()
         }),
         Arc::new(SlotSpec {
-            left: items(&["mode"]),
-            right: items(&["hint"]),
+            left: items(&["working", "mode"]),
+            right: items(&["thinking"]),
             ..SlotSpec::default()
         }),
         Arc::new(SlotSpec::default()),
+        Arc::new(SlotSpec {
+            left: items(&["activity"]),
+            ..SlotSpec::default()
+        }),
     ]
 });
 
 /// Every slot's spec at one point in time. The default value holds no
 /// spec, so every slot paints its [`default_spec`].
 #[derive(Clone, Debug, Default)]
-pub struct SlotSpecs([Option<Arc<SlotSpec>>; 4]);
+pub struct SlotSpecs([Option<Arc<SlotSpec>>; SLOTS]);
 
 impl SlotSpecs {
     /// The spec to paint for `slot`: the one set, or [`default_spec`].
@@ -286,14 +296,14 @@ struct Shared {
 
 #[derive(Default)]
 struct SlotTable {
-    set: [Option<Arc<SlotSpec>>; 4],
-    defaults: [Option<Arc<SlotSpec>>; 4],
+    set: [Option<Arc<SlotSpec>>; SLOTS],
+    defaults: [Option<Arc<SlotSpec>>; SLOTS],
 }
 
 /// Autocmd and timer ids that feed the components of each slot's spec.
 /// Lives in the Lua app data, so only the owner thread touches it.
 #[derive(Default)]
-struct Hooks([Vec<Hook>; 4]);
+struct Hooks([Vec<Hook>; SLOTS]);
 
 enum Hook {
     Autocmd(i64),
@@ -420,7 +430,7 @@ fn fail(message: String) -> mlua::Error {
 fn slot_named(func: &str, name: &str) -> mlua::Result<SlotName> {
     SlotName::parse(name).ok_or_else(|| {
         fail(format!(
-            "kage.api.{func}: unknown slot '{name}' (header, footer, input_pill, start)"
+            "kage.api.{func}: unknown slot '{name}' (header, activity, input_pill, footer, start)"
         ))
     })
 }

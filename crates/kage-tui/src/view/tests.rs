@@ -179,23 +179,37 @@ fn block_wrap_empty_line_yields_single_empty_row() {
 }
 
 fn snapshot_lines(buffer: &mut Buffer, input: &InputState, area: Rect) -> Vec<String> {
+    snapshot_frame(buffer, input, None, &StatusCtx::default(), None, area)
+}
+
+/// Paint one full frame with the chrome sized as the App sizes it and
+/// return its rows, right-trimmed.
+fn snapshot_frame(
+    buffer: &mut Buffer,
+    input: &InputState,
+    cmdline: Option<&CommandLine>,
+    status: &StatusCtx<'_>,
+    usage: Option<&SessionUsage>,
+    area: Rect,
+) -> Vec<String> {
     let backend = TestBackend::new(area.width, area.height);
     let mut terminal = Terminal::new(backend).unwrap();
     let mut captured: std::collections::BTreeMap<usize, Vec<CapturedCell>> =
         std::collections::BTreeMap::new();
     terminal
         .draw(|frame| {
-            let regions = crate::layout::split(frame.area(), 1, 0);
+            let heights = chrome_heights(status, usage, input, frame.area().width);
+            let regions = crate::layout::split(frame.area(), heights);
             render(
                 frame,
                 regions,
                 buffer,
                 input,
-                None,
-                &StatusCtx::default(),
+                cmdline,
+                status,
                 None,
                 &mut captured,
-                None,
+                usage,
                 &[],
             );
         })
@@ -538,16 +552,15 @@ fn token_counts_scale_to_k_m_b_trimmed() {
     assert_eq!(super::format_token_count(2_000_000_000), "2B");
 }
 
-/// Mirror what [`super::render_input`] does to derive the inner
-/// content rect (`body_area`) from a full input region rect: inset
-/// by one cell on every side for the bordered card, then by
-/// [`super::INPUT_GLYPH_WIDTH`] columns on the left for the prompt
-/// glyph.
+/// Mirror what [`super::render_input`] does to derive the draft's
+/// text rect (`body_area`) from a full input region rect: the rules
+/// take the top and bottom rows, the prompt column the left
+/// [`super::INPUT_GLYPH_WIDTH`] cells.
 fn body_area_for(region: Rect) -> Rect {
     Rect::new(
-        region.x + 1 + super::INPUT_GLYPH_WIDTH,
+        region.x + super::INPUT_GLYPH_WIDTH,
         region.y + 1,
-        region.width.saturating_sub(2 + super::INPUT_GLYPH_WIDTH),
+        region.width.saturating_sub(super::INPUT_GLYPH_WIDTH),
         region.height.saturating_sub(2),
     )
 }
@@ -565,7 +578,7 @@ fn cursor_position_advances_with_typed_text() {
         ));
     }
     let pos = super::input_cursor_position(&input, body, 0).unwrap();
-    // body.x = 3 (border + glyph), body.y = 5 (skip top border);
+    // body.x = 3 (prompt column), body.y = 5 (below the top rule);
     // 5 chars typed -> col 8, row 5.
     assert_eq!(pos, (body.x + 5, body.y));
 }
@@ -611,58 +624,197 @@ fn input_does_not_scroll_when_text_fits() {
     assert_eq!(super::input_scroll_offset(&input, body), 0);
 }
 
+const RULE: char = '\u{2500}';
+
+fn vim_normal() -> InputState {
+    let mut input = InputState::new();
+    input.handle_key(ratatui::crossterm::event::KeyEvent::from(
+        ratatui::crossterm::event::KeyCode::Esc,
+    ));
+    input
+}
+
 #[test]
-fn input_card_shows_mode_pill() {
-    // Mode display lives on the input card's top border now (not
-    // on the top status bar). Frame is wide enough so the pill
-    // fits inside the card border.
-    let mut buffer = Buffer::new();
-    let input = InputState::new();
-    // Default mode is Insert; the pill should show * without
-    // pressing 'i'.
-    let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 8));
+fn the_top_rule_carries_the_vim_mode_and_nothing_in_modeless() {
+    let area = Rect::new(0, 0, 60, 8);
+    let vim = snapshot_lines(&mut Buffer::new(), &vim_normal(), area);
+    let top = &vim[area.height as usize - 4];
     assert!(
-        lines.iter().any(|l| l.contains('*')),
-        "expected mode pill * somewhere on screen, got: {lines:#?}"
+        top.starts_with("\u{2500}\u{2500} NORMAL \u{2500}"),
+        "{vim:#?}"
     );
-    // Top status bar no longer carries the mode pill.
-    assert!(!lines[0].contains('*'));
+    let mut modeless = InputState::new();
+    modeless.set_modeless(true);
+    let rows = snapshot_lines(&mut Buffer::new(), &modeless, area);
+    let top = &rows[area.height as usize - 4];
+    assert!(top.chars().all(|c| c == RULE), "{rows:#?}");
+    assert_eq!(top.chars().count(), 60);
+}
+
+#[test]
+fn the_input_has_rules_and_no_side_borders() {
+    let area = Rect::new(0, 0, 40, 8);
+    let rows = snapshot_lines(&mut Buffer::new(), &vim_normal(), area);
+    let [top, body, bottom] = [4, 3, 2].map(|back| &rows[area.height as usize - back]);
+    assert!(top.starts_with(RULE), "{rows:#?}");
+    assert!(bottom.chars().all(|c| c == RULE), "{rows:#?}");
+    assert_eq!(body, " > Press i to type");
+    assert!(
+        rows.iter().all(|r| !r.contains(['\u{2502}', '|'])),
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn the_glyph_stays_on_the_first_logical_line_and_the_rule_counts_hidden_lines() {
+    let area = Rect::new(0, 0, 40, 16);
+    let mut input = InputState::new();
+    let lines = |range: std::ops::RangeInclusive<u32>| {
+        range
+            .map(|n| format!("line {n}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    input.paste(&lines(1..=6));
+    input.paste(&format!("\n{}", lines(7..=12)));
+    let rows = snapshot_lines(&mut Buffer::new(), &input, area);
+    let footer = rows.len() - 1;
+    let bottom = &rows[footer - 1];
+    let body = &rows[footer - 1 - usize::from(crate::layout::INPUT_CONTENT_MAX_LINES)..footer - 1];
+    assert_eq!(body.last().unwrap(), "   line 12", "{rows:#?}");
+    assert!(body.iter().all(|r| !r.contains('>')), "{rows:#?}");
+    assert!(
+        bottom.ends_with("4 more lines above \u{2500}\u{2500}"),
+        "{rows:#?}"
+    );
+
+    let mut short = InputState::new();
+    short.paste("one\ntwo");
+    let rows = snapshot_lines(&mut Buffer::new(), &short, area);
+    assert!(rows.iter().any(|r| r == " > one"), "{rows:#?}");
+    assert!(rows.iter().any(|r| r == "   two"), "{rows:#?}");
+    assert!(rows[rows.len() - 2].chars().all(|c| c == RULE), "{rows:#?}");
+}
+
+#[test]
+fn the_shell_look_swaps_the_glyph_and_the_placeholder() {
+    let mut input = InputState::new();
+    input.handle_key(ratatui::crossterm::event::KeyEvent::from(
+        ratatui::crossterm::event::KeyCode::Char('!'),
+    ));
+    assert!(input.shell_armed());
+    let rows = snapshot_lines(&mut Buffer::new(), &input, Rect::new(0, 0, 70, 8));
+    assert!(
+        rows.iter()
+            .any(|r| r == " ! Run a shell command (Backspace leaves shell mode)"),
+        "{rows:#?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.contains("\u{2500} shell \u{2500}")),
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn the_header_collapses_without_a_title_and_returns_with_one() {
+    let area = Rect::new(0, 0, 40, 8);
+    let mut buffer = Buffer::new();
+    buffer.push_user("hello");
+    let input = InputState::new();
+    let rows = snapshot_frame(&mut buffer, &input, None, &StatusCtx::default(), None, area);
+    assert!(rows[0].contains("hello"), "{rows:#?}");
+    let status = StatusCtx {
+        title: Some("fix the parser"),
+        ..StatusCtx::default()
+    };
+    let rows = snapshot_frame(&mut buffer, &input, None, &status, None, area);
+    assert!(rows[0].contains("fix the parser"), "{rows:#?}");
+    assert!(rows[1].contains("hello"), "{rows:#?}");
+}
+
+#[test]
+fn the_activity_row_sits_above_the_input_only_while_it_has_text() {
+    let area = Rect::new(0, 0, 60, 10);
+    let input = InputState::new();
+    let status = StatusCtx {
+        activity: Some("Running cargo test (3s, ctrl+c to interrupt)"),
+        ..StatusCtx::default()
+    };
+    let rows = snapshot_frame(&mut Buffer::new(), &input, None, &status, None, area);
+    assert_eq!(
+        rows[5], "  Running cargo test (3s, ctrl+c to interrupt)",
+        "{rows:#?}"
+    );
+    assert!(rows[6].starts_with(RULE), "{rows:#?}");
+    let rows = snapshot_lines(&mut Buffer::new(), &input, area);
+    assert!(rows[5].is_empty(), "{rows:#?}");
+}
+
+#[test]
+fn the_footer_row_holds_the_hint_and_the_session_facts() {
+    let usage = SessionUsage {
+        model: "fake:m".into(),
+        input_tokens: 14_000,
+        current_context: 24_000,
+        context_window: 200_000,
+        ..SessionUsage::default()
+    };
+    let status = StatusCtx {
+        model: Some("Fake"),
+        hint: Some("? for shortcuts"),
+        ..StatusCtx::default()
+    };
+    let rows = snapshot_frame(
+        &mut Buffer::new(),
+        &InputState::new(),
+        None,
+        &status,
+        Some(&usage),
+        Rect::new(0, 0, 60, 6),
+    );
+    let footer = rows.last().unwrap();
+    assert!(footer.starts_with("  ? for shortcuts"), "{footer:?}");
+    assert!(
+        footer.ends_with("Fake \u{B7} 12% ctx \u{B7} 14k tok"),
+        "{footer:?}"
+    );
+}
+
+#[test]
+fn the_colon_and_search_lines_paint_on_the_footer_row() {
+    let area = Rect::new(0, 0, 40, 8);
+    let empty = crate::cmdparse::Completions::default();
+    let cl = CommandLine::for_test("quit", empty.clone(), true, None);
+    let rows = snapshot_with_cmdline(&cl, area);
+    assert_eq!(rows.last().unwrap(), ":quit", "{rows:#?}");
+    let search = CommandLine::for_test("needle", empty, true, None);
+    let status = StatusCtx {
+        search_line: Some(&search),
+        search_match_count: Some((2, 5)),
+        ..StatusCtx::default()
+    };
+    let rows = snapshot_frame(
+        &mut Buffer::new(),
+        &InputState::new(),
+        None,
+        &status,
+        None,
+        area,
+    );
+    let footer = rows.last().unwrap();
+    assert!(footer.starts_with("/needle"), "{rows:#?}");
+    assert!(footer.ends_with("match 2/5"), "{rows:#?}");
 }
 
 fn snapshot_with_cmdline(cmdline: &CommandLine, area: Rect) -> Vec<String> {
-    let backend = TestBackend::new(area.width, area.height);
-    let mut terminal = Terminal::new(backend).unwrap();
-    let mut buffer = Buffer::new();
-    let input = InputState::new();
-    let mut captured: std::collections::BTreeMap<usize, Vec<CapturedCell>> =
-        std::collections::BTreeMap::new();
-    terminal
-        .draw(|frame| {
-            let regions = crate::layout::split(frame.area(), 1, 0);
-            render(
-                frame,
-                regions,
-                &mut buffer,
-                &input,
-                Some(cmdline),
-                &StatusCtx::default(),
-                None,
-                &mut captured,
-                None,
-                &[],
-            );
-        })
-        .unwrap();
-    let buf = terminal.backend().buffer();
-    let mut out = Vec::new();
-    for y in 0..buf.area.height {
-        let mut row = String::new();
-        for x in 0..buf.area.width {
-            row.push_str(buf[(x, y)].symbol());
-        }
-        out.push(row.trim_end().to_owned());
-    }
-    out
+    snapshot_frame(
+        &mut Buffer::new(),
+        &InputState::new(),
+        Some(cmdline),
+        &StatusCtx::default(),
+        None,
+        area,
+    )
 }
 
 fn cell_bg_at(cmdline: &CommandLine, area: Rect, x: u16, y: u16) -> Color {
@@ -672,16 +824,18 @@ fn cell_bg_at(cmdline: &CommandLine, area: Rect, x: u16, y: u16) -> Color {
     let input = InputState::new();
     let mut captured: std::collections::BTreeMap<usize, Vec<CapturedCell>> =
         std::collections::BTreeMap::new();
+    let status = StatusCtx::default();
     terminal
         .draw(|frame| {
-            let regions = crate::layout::split(frame.area(), 1, 0);
+            let heights = chrome_heights(&status, None, &input, frame.area().width);
+            let regions = crate::layout::split(frame.area(), heights);
             render(
                 frame,
                 regions,
                 &mut buffer,
                 &input,
                 Some(cmdline),
-                &StatusCtx::default(),
+                &status,
                 None,
                 &mut captured,
                 None,
@@ -745,16 +899,17 @@ fn popup_paints_many_items_and_highlights_selected() {
     let lines = snapshot_with_cmdline(&cl, area);
     assert!(lines.iter().any(|l| l.contains("model")), "{lines:#?}");
     assert!(lines.iter().any(|l| l.contains("mouse")), "{lines:#?}");
-    // The selected row (index 1, painted at y=2) should have the
-    // overlay selection bg; the unselected row (y=1) should not.
+    // The popup sits directly above the footer row: the selected row
+    // (index 1) at y=10 has the overlay selection bg, the unselected
+    // row at y=9 does not.
     let sel = crate::theme::current().overlay_selected_bg;
     assert_eq!(
-        cell_bg_at(&cl, area, 3, 2),
+        cell_bg_at(&cl, area, 3, 10),
         sel,
         "selected row bg should be the overlay selection color"
     );
     assert_ne!(
-        cell_bg_at(&cl, area, 3, 1),
+        cell_bg_at(&cl, area, 3, 9),
         sel,
         "unselected row bg should not be the overlay selection color"
     );
@@ -838,22 +993,22 @@ fn error_line_shows_marker_and_message() {
         "argument `state` must be one of on|off|toggle",
     );
     let lines = snapshot_with_cmdline(&cl, Rect::new(0, 0, 60, 12));
-    // Row 0 is the status row with ":mouse mayb".
-    // Row 1 should contain the error marker and message.
+    // The footer row holds ":mouse mayb" and the row above it the
+    // error marker and message.
     assert!(
-        lines[0].contains("mouse mayb"),
-        "status row should show typed text, got {:?}",
-        lines[0]
+        lines[11].contains("mouse mayb"),
+        "footer row should show typed text, got {:?}",
+        lines[11]
     );
     assert!(
-        lines[1].contains('!'),
+        lines[10].contains('!'),
         "error row should contain the error marker, got {:?}",
-        lines[1]
+        lines[10]
     );
     assert!(
-        lines[1].contains("must be one of"),
+        lines[10].contains("must be one of"),
         "error row should contain the error message, got {:?}",
-        lines[1]
+        lines[10]
     );
 }
 
@@ -886,7 +1041,7 @@ fn error_line_truncates_in_narrow_viewport() {
     let long_msg = "this is a very long error message that should definitely be truncated when the viewport is narrow";
     let cl = CommandLine::for_test_with_error("x", long_msg);
     let lines = snapshot_with_cmdline(&cl, Rect::new(0, 0, 30, 8));
-    let error_row = &lines[1];
+    let error_row = &lines[6];
     assert!(
         error_row.contains('\u{2026}'),
         "long error should be truncated with ellipsis, got {error_row:?}"
@@ -894,14 +1049,14 @@ fn error_line_truncates_in_narrow_viewport() {
 }
 
 fn modeline_rows(usage: Option<&SessionUsage>, width: u16) -> Vec<String> {
-    let backend = TestBackend::new(width, 2);
+    let backend = TestBackend::new(width, 1);
     let mut terminal = Terminal::new(backend).unwrap();
-    let regions = crate::layout::split(Rect::new(0, 0, width, 2), 1, 1);
     terminal
         .draw(|frame| {
             let status = StatusCtx::default();
-            let sources = slot::Sources::new(&status, usage, Mode::Normal);
-            slot::render_footer(frame, regions.status_bottom, &sources);
+            let input = InputState::new();
+            let sources = slot::Sources::new(&status, usage, &input);
+            slot::render_footer(frame, frame.area(), &sources);
         })
         .unwrap();
     terminal
@@ -928,7 +1083,7 @@ fn modeline_paints_permission_pill_when_overridden() {
     };
     let rows = modeline_rows(Some(&usage), 60);
     assert!(
-        rows.iter().any(|r| r.contains("perm:ask")),
+        rows.iter().any(|r| r.contains("ask mode")),
         "modeline should show the ask override, got {rows:?}"
     );
 }
@@ -941,7 +1096,7 @@ fn modeline_hides_permission_pill_without_override() {
     };
     let rows = modeline_rows(Some(&usage), 60);
     assert!(
-        rows.iter().all(|r| !r.contains("perm:")),
+        rows.iter().all(|r| !r.contains(" mode")),
         "no pill without an override, got {rows:?}"
     );
 }

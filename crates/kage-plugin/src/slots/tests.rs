@@ -36,7 +36,12 @@ fn wait_until(mut done: impl FnMut() -> bool) {
 fn defaults_set_the_built_in_chrome() {
     let rt = PluginRuntime::new().unwrap();
     crate::load_all(None, &rt).unwrap();
-    for slot in [SlotName::Header, SlotName::Footer, SlotName::InputPill] {
+    for slot in [
+        SlotName::Header,
+        SlotName::Activity,
+        SlotName::InputPill,
+        SlotName::Footer,
+    ] {
         assert_eq!(rt.slots().spec(slot), Some(default_spec(slot)), "{slot:?}");
     }
     assert!(rt.slots().spec(SlotName::Start).is_none());

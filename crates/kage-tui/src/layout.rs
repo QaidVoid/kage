@@ -1,37 +1,31 @@
-//! Four-region layout: top status bar, conversation buffer, input
-//! card, bottom modeline.
+//! Five-region layout: header, conversation buffer, activity row,
+//! input, footer.
 //!
 //! ratatui already implements differential rendering, so this crate's
-//! "layout engine" is just a thin helper over [`ratatui::layout::Layout`]
+//! "layout engine" is a thin helper over [`ratatui::layout::Layout`]
 //! that locks in the kage TUI's vertical structure:
 //!
 //! ```text
 //! +-----------------------------+
-//! | status bar (1 line)         |  status_top
+//! | header (0 or 1 row)         |  collapses when empty
 //! +-----------------------------+
-//! |                             |
-//! | conversation buffer (rest)  |  buffer
-//! |                             |
+//! | conversation buffer (rest)  |
 //! +-----------------------------+
-//! | +-----+-----+-----+-----+   |
-//! | | bordered input card   |   |  input  (3..=10 rows)
-//! | +-----+-----+-----+-----+   |
+//! | activity (0 or 1 row)       |  the working row
 //! +-----------------------------+
-//! | modeline (1 line)           |  status_bottom
+//! | top rule                    |
+//! | input content (1..max rows) |  input
+//! | bottom rule                 |
+//! +-----------------------------+
+//! | footer (1 row)              |  `:` and `/` lines paint here
 //! +-----------------------------+
 //! ```
 //!
-//! The input area grows with content up to a small cap so a runaway
-//! prompt never eats the entire screen. The bordered card claims two
-//! extra rows over the raw text height for its top and bottom borders;
-//! the [`INPUT_CHROME_LINES`] constant captures that overhead.
-//!
-//! The bottom modeline is opt-in plugin chrome: callers pass
-//! `status_bottom_height = 0` to suppress the row entirely (the
-//! default until a plugin or extension registers a widget there) and
-//! a positive height once content is available. The mode label lives
-//! on the input card's top border, not in the modeline; this row is
-//! reserved exclusively for plugin status widgets.
+//! The caller decides every height except the buffer's per frame and
+//! passes them as [`Heights`]. The input grows with its content up to
+//! a small cap ([`input_height_for`]) so a runaway prompt never eats
+//! the entire screen; [`INPUT_CHROME_LINES`] is the two rules around
+//! the content.
 
 use std::sync::RwLock;
 
@@ -71,68 +65,71 @@ pub fn set_input_bounds(min: u16, max: u16) {
     let max = max.clamp(min, INPUT_CONTENT_MAX_CEILING);
     *write(&INPUT_BOUNDS) = (min, max);
 }
-/// Rows the bordered chrome around the input content claims (top
-/// border + bottom border).
+/// Rows the rules above and below the input content claim.
 pub const INPUT_CHROME_LINES: u16 = 2;
 /// Total minimum input region height (content + chrome).
 pub const INPUT_MIN_LINES: u16 = INPUT_CONTENT_MIN_LINES + INPUT_CHROME_LINES;
 /// Total maximum input region height (content + chrome).
 pub const INPUT_MAX_LINES: u16 = INPUT_CONTENT_MAX_LINES + INPUT_CHROME_LINES;
-/// Rows the bottom modeline claims when it has anything to show.
-/// Stage A treats this as opt-in: callers pass `0` to suppress the
-/// row entirely (default behavior until plugin widgets register
-/// themselves), and `STATUS_BOTTOM_LINES_DEFAULT` when content is
-/// available.
-pub const STATUS_BOTTOM_LINES_DEFAULT: u16 = 1;
+
+/// Row heights of the fixed regions for one frame. The buffer takes
+/// whatever is left.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Heights {
+    /// Header rows: 1 when the header slot paints anything, else 0.
+    pub header: u16,
+    /// Activity rows: 1 when the activity slot paints anything, else 0.
+    pub activity: u16,
+    /// Input rows, rules included.
+    pub input: u16,
+    /// Footer rows.
+    pub footer: u16,
+}
 
 /// Output of [`split`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Regions {
-    /// Top single-line status bar (model, session pill, search count).
-    pub status: Rect,
+    /// Top row (session title, widgets, search count). Zero height
+    /// while the header slot paints nothing.
+    pub header: Rect,
     /// Center conversation buffer; consumes whatever vertical space is
-    /// left after status, input, and modeline.
+    /// left after the other regions.
     pub buffer: Rect,
-    /// Bordered input card. Render with `Borders::ALL`; the renderer
-    /// owns the inset math for the inner content area.
+    /// The working row. Zero height while the activity slot paints
+    /// nothing.
+    pub activity: Rect,
+    /// The input: a top rule, the content rows and a bottom rule.
     pub input: Rect,
-    /// Bottom single-line modeline (mode pill, plugin widgets).
-    pub status_bottom: Rect,
+    /// Bottom row: the footer slot, or the open `:` or `/` line.
+    pub footer: Rect,
 }
 
-/// Split `area` into the four kage regions. `input_height` is
-/// clamped to `INPUT_MIN_LINES..=INPUT_MAX_LINES`. `status_bottom`
-/// is opt-in: pass `0` when nothing wants to draw there (the row is
-/// returned with `height = 0` so renderers naturally skip it), or a
-/// positive height when plugin widgets / extension chrome have
-/// registered themselves.
+/// Split `area` into the kage regions, top to bottom, with the given
+/// fixed heights. The buffer takes the rest.
 #[must_use]
-pub fn split(area: Rect, input_height: u16, status_bottom_height: u16) -> Regions {
-    let (cmin, cmax) = input_bounds();
-    let input = input_height.clamp(
-        cmin.saturating_add(INPUT_CHROME_LINES),
-        cmax.saturating_add(INPUT_CHROME_LINES),
-    );
+pub fn split(area: Rect, heights: Heights) -> Regions {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
+            Constraint::Length(heights.header),
             Constraint::Min(0),
-            Constraint::Length(input),
-            Constraint::Length(status_bottom_height),
+            Constraint::Length(heights.activity),
+            Constraint::Length(heights.input),
+            Constraint::Length(heights.footer),
         ])
         .split(area);
     Regions {
-        status: chunks[0],
+        header: chunks[0],
         buffer: chunks[1],
-        input: chunks[2],
-        status_bottom: chunks[3],
+        activity: chunks[2],
+        input: chunks[3],
+        footer: chunks[4],
     }
 }
 
 /// Pick the input region height that fits `content_lines` of text,
-/// adding chrome for the bordered card. Result is in
-/// [`INPUT_MIN_LINES`]..=[`INPUT_MAX_LINES`].
+/// adding the two rules. Result is in
+/// [`INPUT_MIN_LINES`]..=[`INPUT_MAX_LINES`] under the default bounds.
 #[must_use]
 pub fn input_height_for(content_lines: u16) -> u16 {
     let (cmin, cmax) = input_bounds();
@@ -160,49 +157,41 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    fn heights(header: u16, activity: u16, input: u16) -> Heights {
+        Heights {
+            header,
+            activity,
+            input,
+            footer: 1,
+        }
+    }
+
     #[test]
-    fn split_carves_four_regions_top_to_bottom() {
-        let _globals = process_globals();
+    fn split_stacks_every_height_combination_top_to_bottom() {
         let area = Rect::new(0, 0, 80, 24);
-        let regions = split(area, INPUT_MIN_LINES, STATUS_BOTTOM_LINES_DEFAULT);
-        assert_eq!(regions.status, Rect::new(0, 0, 80, 1));
-        assert_eq!(regions.input, Rect::new(0, 20, 80, INPUT_MIN_LINES));
-        assert_eq!(regions.status_bottom, Rect::new(0, 23, 80, 1));
-        assert_eq!(
-            regions.buffer,
-            Rect::new(0, 1, 80, 24 - 1 - 1 - INPUT_MIN_LINES)
-        );
-    }
-
-    #[test]
-    fn split_with_zero_status_bottom_collapses_modeline() {
-        let _globals = process_globals();
-        let area = Rect::new(0, 0, 80, 24);
-        let regions = split(area, INPUT_MIN_LINES, 0);
-        assert_eq!(regions.status_bottom.height, 0);
-        // Buffer reclaims the row that the modeline would have used.
-        assert_eq!(regions.buffer.height, 24 - 1 - INPUT_MIN_LINES);
-    }
-
-    #[test]
-    fn split_grows_input_up_to_cap() {
-        let _globals = process_globals();
-        let area = Rect::new(0, 0, 80, 30);
-        let regions = split(area, 30, STATUS_BOTTOM_LINES_DEFAULT);
-        assert_eq!(regions.input.height, INPUT_MAX_LINES);
-        assert_eq!(regions.status_bottom.height, STATUS_BOTTOM_LINES_DEFAULT);
-        assert_eq!(
-            regions.buffer.height,
-            30 - 1 - INPUT_MAX_LINES - STATUS_BOTTOM_LINES_DEFAULT
-        );
-    }
-
-    #[test]
-    fn split_clamps_below_minimum() {
-        let _globals = process_globals();
-        let area = Rect::new(0, 0, 80, 12);
-        let regions = split(area, 0, 0);
-        assert_eq!(regions.input.height, INPUT_MIN_LINES);
+        for header in [0, 1] {
+            for activity in [0, 1] {
+                for input in [INPUT_MIN_LINES, INPUT_MAX_LINES] {
+                    let r = split(area, heights(header, activity, input));
+                    let label = format!("header {header}, activity {activity}, input {input}");
+                    assert_eq!(r.header, Rect::new(0, 0, 80, header), "{label}");
+                    assert_eq!(r.buffer.y, header, "{label}");
+                    assert_eq!(
+                        r.buffer.height,
+                        24 - header - activity - input - 1,
+                        "{label}"
+                    );
+                    assert_eq!(r.activity.y, r.buffer.bottom(), "{label}");
+                    assert_eq!(r.activity.height, activity, "{label}");
+                    assert_eq!(
+                        r.input,
+                        Rect::new(0, r.activity.bottom(), 80, input),
+                        "{label}"
+                    );
+                    assert_eq!(r.footer, Rect::new(0, 23, 80, 1), "{label}");
+                }
+            }
+        }
     }
 
     #[test]
@@ -224,7 +213,7 @@ mod tests {
         assert_eq!(input_height_for(15), 15 + INPUT_CHROME_LINES);
         assert_eq!(input_height_for(0), 2 + INPUT_CHROME_LINES, "min floor");
         assert_eq!(input_height_for(99), 20 + INPUT_CHROME_LINES, "max cap");
-        let r = split(Rect::new(0, 0, 80, 40), 99, 0);
+        let r = split(Rect::new(0, 0, 80, 40), heights(0, 0, input_height_for(99)));
         assert_eq!(r.input.height, 20 + INPUT_CHROME_LINES);
         // Out-of-range config is clamped, not honored verbatim.
         set_input_bounds(0, 9999);

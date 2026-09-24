@@ -108,21 +108,13 @@ fn paint_toast(frame: &mut Frame, area: Rect, toast: &Toast, theme: &Theme) {
     // selection skips the overlay.
     frame.render_widget(RtBlock::default().style(chrome_style), area);
 
-    // Vertical accent bar, full toast height.
-    let accent_area = Rect {
-        x: area.x,
-        y: area.y,
-        width: 1,
-        height: area.height,
-    };
     let accent_style = Style::default()
         .fg(accent_fg)
         .bg(card_bg)
-        .add_modifier(Modifier::BOLD)
         .add_modifier(DECORATION_MARKER);
     let buf = frame.buffer_mut();
-    for y in accent_area.y..accent_area.y + accent_area.height {
-        buf.set_string(accent_area.x, y, "\u{2588}", accent_style);
+    for y in area.y..area.bottom() {
+        buf.set_string(area.x, y, "\u{258E}", accent_style);
     }
 
     // Content row sits in the vertical middle of the toast (row 1
@@ -236,7 +228,7 @@ mod tests {
         // Row 0 is the top margin (blank). Rows 1..=3 are the toast.
         assert!(rows[0].chars().all(|c| c == ' '), "row 0 margin");
         assert!(
-            rows[1].contains('\u{2588}'),
+            rows[1].contains('\u{258E}'),
             "row 1 should contain accent block, got {:?}",
             rows[1]
         );
@@ -254,7 +246,7 @@ mod tests {
         // Bottom row of the toast still has the accent bar (full
         // height) but no text.
         assert!(
-            rows[3].contains('\u{2588}'),
+            rows[3].contains('\u{258E}'),
             "row 3 should still have accent bar, got {:?}",
             rows[3]
         );

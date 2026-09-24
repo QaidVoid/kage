@@ -668,10 +668,11 @@ pub(super) const CLASSES: &[Class] = &[
     Class {
         name: "kage.SlotSpec",
         doc: &[
-            "The layout of a slot. `header`, `footer` and `input_pill`",
-            "take `left`, `right` and `sep`; `start` takes `lines`. An",
-            "item is a built-in component name, a `kage.Span`, or a",
-            "`kage.SlotComponent`.",
+            "The layout of a slot. `header`, `activity`, `input_pill`",
+            "and `footer` take `left`, `right` and `sep`; `start` takes",
+            "`lines`. The `header` and `activity` rows collapse while",
+            "they paint nothing. An item is a built-in component name, a",
+            "`kage.Span`, or a `kage.SlotComponent`.",
         ],
         fields: &[
             Field {

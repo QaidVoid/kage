@@ -1,13 +1,9 @@
-//! Live session-usage snapshot rendered in the bottom modeline.
+//! Live session-usage snapshot rendered in the chrome.
 //!
 //! [`SessionUsage`] is the small bundle of numbers the App updates from
-//! the engine's state and usage events. The renderer reads it to paint
-//! a one-line strip below the input card with model id, total token
-//! usage, and context-window fill.
-//!
-//! The modeline only appears when a host registers a usage handle on
-//! the [`crate::App`]; without one, [`crate::layout::split`] is
-//! called with `status_bottom_height = 0` and the row collapses.
+//! the engine's state and usage events. The footer reads the model,
+//! token totals and context-window fill from it, and the input rule
+//! and the working row read the working flag.
 
 use std::sync::{Arc, Mutex};
 

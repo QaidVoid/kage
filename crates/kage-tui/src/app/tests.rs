@@ -1150,7 +1150,10 @@ fn set_header_nil_restores_the_built_in_header() {
     assert!(snapshot_rows(&render_app(&mut app))[0].contains("TAKEOVER"));
     rt.eval("kage.ui.set_header(nil)").unwrap();
     let rows = snapshot_rows(&render_app(&mut app));
-    assert!(rows[0].starts_with(" kage"), "{:?}", rows[0]);
+    assert!(rows.iter().all(|r| !r.contains("TAKEOVER")), "{rows:?}");
+    lock(&rt.slots().ui_state()).session_title = Some("the title".to_owned());
+    let rows = snapshot_rows(&render_app(&mut app));
+    assert_eq!(rows[0], " the title", "{rows:?}");
 }
 
 #[test]
@@ -1176,15 +1179,99 @@ fn a_start_spec_paints_on_an_empty_buffer_only() {
 }
 
 #[test]
-fn the_pill_hint_shows_a_pending_key_sequence() {
+fn the_footer_hint_shows_a_pending_key_sequence_first() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
     let mut app = app_with_defaults(buffer, tx);
     app.handle_key(code(KeyCode::Esc));
-    app.handle_key(key('z'));
     let rows = snapshot_rows(&render_app(&mut app));
-    let pill = rows.iter().find(|r| r.contains(" - ")).expect("pill row");
-    assert!(pill.trim_end().ends_with(" z \u{2510}"), "{pill:?}");
+    assert_eq!(
+        rows.last().unwrap(),
+        "  i to type \u{B7} ? for shortcuts \u{B7} : for commands"
+    );
+    app.handle_key(key('g'));
+    let rows = snapshot_rows(&render_app(&mut app));
+    assert_eq!(rows.last().unwrap(), "  g ...");
+}
+
+#[test]
+fn the_footer_hint_follows_the_editor_state() {
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(shared_buffer(), tx);
+    app.set_editor_modeless(true);
+    let usage = crate::usage::shared_session_usage();
+    app.set_session_usage(usage.clone());
+    assert_eq!(app.footer_hint(), "? for shortcuts \u{B7} / for commands");
+    app.handle_key(key('x'));
+    assert_eq!(
+        app.footer_hint(),
+        "enter to send \u{B7} shift+enter for a newline"
+    );
+    lock(&usage).working = true;
+    assert_eq!(app.footer_hint(), "enter to steer \u{B7} esc to interrupt");
+    app.handle_key(code(KeyCode::Backspace));
+    assert_eq!(app.footer_hint(), "esc to interrupt");
+}
+
+#[test]
+fn key_label_follows_a_remap_of_the_model_picker() {
+    let (mut app, _rx, _buffer) = app_with_config("", &[]);
+    assert_eq!(app.key_label("OpenModelPicker").as_deref(), Some("ctrl+p"));
+    assert_eq!(
+        app.key_label("CycleThinkingLevel").as_deref(),
+        Some("shift+tab")
+    );
+    let (mut app, _rx, _buffer) = app_with_config(
+        "kage.keymap.set('g', '<M-m>', kage.action.OpenModelPicker)",
+        &[],
+    );
+    assert_eq!(app.key_label("OpenModelPicker").as_deref(), Some("alt+m"));
+    assert_eq!(app.key_label("NoSuchAction"), None);
+}
+
+#[test]
+fn the_activity_row_shows_while_working_with_elapsed_seconds() {
+    let buffer = shared_buffer();
+    lock(&buffer).push_user("hello");
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer.clone(), tx);
+    let usage = crate::usage::shared_session_usage();
+    app.set_session_usage(usage.clone());
+    let idle = snapshot_rows(&render_app(&mut app));
+    assert!(idle.iter().all(|r| !r.contains("Working")), "{idle:?}");
+    lock(&usage).working = true;
+    let rows = snapshot_rows(&render_app(&mut app));
+    let row = rows
+        .iter()
+        .position(|r| r.starts_with("  Working (0s, ctrl+c to interrupt)"));
+    let row = row.unwrap_or_else(|| panic!("{rows:?}"));
+    assert!(rows[row + 1].starts_with('\u{2500}'), "{rows:?}");
+    app.run_started = Instant::now().checked_sub(Duration::from_secs(14));
+    lock(&buffer).push_tool_call("c1", "bash", serde_json::json!({ "command": "cargo test" }));
+    lock(&buffer).set_tool_phase("c1", crate::view::tool_view::ToolPhase::Running);
+    let rows = snapshot_rows(&render_app(&mut app));
+    assert!(
+        rows.iter()
+            .any(|r| r == "  Running cargo test (14s, ctrl+c to interrupt)"),
+        "{rows:?}"
+    );
+    lock(&usage).working = false;
+    let rows = snapshot_rows(&render_app(&mut app));
+    assert!(rows.iter().all(|r| !r.contains("interrupt")), "{rows:?}");
+}
+
+#[test]
+fn the_help_overlay_never_overlaps_the_input_rows() {
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(shared_buffer(), tx);
+    app.set_editor_modeless(true);
+    let blank = snapshot_rows(&render_app(&mut app));
+    app.handle_key(key('?'));
+    assert!(app.help_overlay.is_some());
+    let rows = snapshot_rows(&render_app(&mut app));
+    let input_top = blank.len() - 4;
+    assert_eq!(rows[input_top..], blank[input_top..], "{rows:?}");
+    assert_ne!(rows[..input_top], blank[..input_top], "{rows:?}");
 }
 
 #[test]

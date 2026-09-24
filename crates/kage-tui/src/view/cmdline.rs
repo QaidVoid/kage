@@ -1,11 +1,42 @@
-//! Cmdline/search popup and cursor rendering.
+//! The `:` command line and the `/` search line, painted over the
+//! footer row like vim, with their error row and completion popup
+//! stacked above it.
 
 #[allow(clippy::wildcard_imports)] // free-fn split: shares the parent view module scope
 use super::*;
 
-/// Same as [`place_cmdline_cursor`] but for the `/` search line.
-pub(super) fn place_search_cursor(frame: &mut Frame, regions: Regions, line: &CommandLine) {
-    place_cmdline_cursor(frame, regions, line);
+/// Paint the open `:` command line over `row`.
+pub(super) fn render_cmdline_line(frame: &mut Frame, row: Rect, cmdline: &CommandLine) {
+    let line = Line::from(vec![
+        Span::styled(":", Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(cmdline.text().to_owned()),
+    ]);
+    frame.render_widget(crate::opaque::OpaqueClear, row);
+    frame.render_widget(Paragraph::new(line), row);
+}
+
+/// Paint the open `/` search line over `row`, with the match count on
+/// the right.
+pub(super) fn render_search_line(
+    frame: &mut Frame,
+    row: Rect,
+    line: &CommandLine,
+    count: Option<(usize, usize)>,
+) {
+    let theme = crate::theme::current();
+    let prefix = Style::default()
+        .fg(theme.match_color)
+        .add_modifier(Modifier::BOLD);
+    let mut spans = vec![Span::styled("/", prefix), Span::raw(line.text().to_owned())];
+    if let Some(count) = count {
+        let label = super::slot::search_count_label(count);
+        let used = 1 + line.text().width() + label.width();
+        let pad = usize::from(row.width).saturating_sub(used);
+        spans.push(Span::raw(" ".repeat(pad)));
+        spans.push(Span::styled(label, Style::default().fg(theme.muted_fg)));
+    }
+    frame.render_widget(crate::opaque::OpaqueClear, row);
+    frame.render_widget(Paragraph::new(Line::from(spans)), row);
 }
 
 /// Walk every `Line` in `lines` and split spans whose text contains
@@ -110,9 +141,7 @@ const POPUP_MAX_VISIBLE: usize = 8;
 
 /// Selected rows use the overlay selection roles so every popup
 /// reads as the same surface. Background is [`Theme::modeline_bg`]
-/// (dark navy) so the popup is distinct from the status row's
-/// [`Theme::status_bg`], rather than merging into a single
-/// dark-gray block.
+/// so the popup stands apart from the input it covers.
 fn popup_styles() -> (Style, Style, Style) {
     let theme = crate::theme::current();
     let bg = theme.modeline_bg;
@@ -125,7 +154,7 @@ fn popup_styles() -> (Style, Style, Style) {
     (row, sel, dim)
 }
 
-/// Paint an inline validation error below the cmdline status row.
+/// Paint an inline validation error on the row above the cmdline.
 /// Shown when the host set [`CommandLine::set_error`] after a failed
 /// submit attempt. The error is rendered in the tool-error foreground
 /// colour so it is visually distinct from the completion popup. The
@@ -140,15 +169,13 @@ pub(super) fn render_cmdline_error(frame: &mut Frame, regions: Regions, cmdline:
     let fg = theme.tool_error_fg;
     let style = Style::default().fg(fg).bg(bg);
 
-    let y = regions.status.y.saturating_add(1);
-    if y >= regions.buffer.y.saturating_add(regions.buffer.height) {
+    if regions.footer.y <= regions.buffer.y {
         return;
     }
-    let width = regions.status.width.max(regions.buffer.width);
     let area = Rect {
-        x: regions.status.x,
-        y,
-        width,
+        x: regions.footer.x,
+        y: regions.footer.y - 1,
+        width: regions.footer.width,
         height: 1,
     };
 
@@ -166,8 +193,8 @@ pub(super) fn render_cmdline_error(frame: &mut Frame, regions: Regions, cmdline:
     frame.render_widget(Paragraph::new(line), area);
 }
 
-/// Paint the completion popup over the conversation buffer when the
-/// cmdline has candidate completions. Each row shows the value plus an
+/// Paint the completion popup directly above the cmdline when it has
+/// candidate completions. Each row shows the value plus an
 /// optional dimmed description; the [`CommandLine::selected`] row is
 /// highlighted. When there are more items than fit, a sliding window
 /// follows the selection and `... N more above` / `... N more below`
@@ -192,8 +219,8 @@ pub(super) fn render_cmdline_popup(frame: &mut Frame, regions: Regions, cmdline:
     let rows_below = usize::from(below > 0);
     let total_rows = window + rows_above + rows_below;
 
-    let buf_h = usize::from(regions.buffer.height);
-    let total_rows = total_rows.min(buf_h);
+    let space = usize::from(regions.footer.y.saturating_sub(regions.buffer.y));
+    let total_rows = total_rows.min(space);
     if total_rows == 0 {
         return;
     }
@@ -203,16 +230,12 @@ pub(super) fn render_cmdline_popup(frame: &mut Frame, regions: Regions, cmdline:
     if width == 0 {
         return;
     }
-    let anchor_x = regions.status.x.saturating_add(1);
     let area = Rect {
-        x: anchor_x,
-        y: regions.status.y.saturating_add(1),
+        x: regions.footer.x.saturating_add(1),
+        y: regions.footer.y - height,
         width,
         height,
     };
-    if area.y >= regions.buffer.y.saturating_add(regions.buffer.height) {
-        return;
-    }
 
     let (row_style, sel_style, dim_style) = popup_styles();
     let max_value_width = completions
@@ -287,7 +310,7 @@ fn popup_width(regions: Regions, completions: &crate::cmdparse::Completions) -> 
     if completions.items.len() > POPUP_MAX_VISIBLE {
         desired = desired.max(22);
     }
-    let viewport = usize::from(regions.buffer.width.max(regions.status.width));
+    let viewport = usize::from(regions.footer.width);
     let cap = viewport.saturating_sub(2).min(80);
     let width = desired.min(cap).max(max_value + leading);
     u16::try_from(width.min(viewport)).unwrap_or(u16::MAX)
@@ -327,12 +350,12 @@ fn popup_row(
     Line::from(spans)
 }
 
-/// Position the terminal cursor on the status row at the cmdline's
-/// editing position when the `:` command line is open. Without this
-/// the user has no visual cue where typing will land.
+/// Position the terminal cursor on the footer row at the editing
+/// position of the open `:` or `/` line. Without this the user has no
+/// visual cue where typing will land.
 pub(super) fn place_cmdline_cursor(frame: &mut Frame, regions: Regions, cmdline: &CommandLine) {
-    let row = regions.status;
-    if row.width == 0 {
+    let row = regions.footer;
+    if row.width == 0 || row.height == 0 {
         return;
     }
     let prefix_width = 1u16;

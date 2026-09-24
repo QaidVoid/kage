@@ -29,7 +29,7 @@ use std::collections::BTreeMap;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use kage_tui::view::{self, CapturedCell, StatusCtx};
-use kage_tui::{Buffer, InputState, input_height_for, split};
+use kage_tui::{Buffer, Heights, InputState, input_height_for, split};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
@@ -98,7 +98,14 @@ fn draw(terminal: &mut Terminal<TestBackend>, buffer: &mut Buffer) {
     let mut captured: BTreeMap<usize, Vec<CapturedCell>> = BTreeMap::new();
     terminal
         .draw(|frame| {
-            let regions = split(frame.area(), input_height_for(1), 0);
+            let regions = split(
+                frame.area(),
+                Heights {
+                    header: 1,
+                    input: input_height_for(1),
+                    ..Heights::default()
+                },
+            );
             view::render(
                 frame,
                 regions,

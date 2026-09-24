@@ -1,11 +1,11 @@
-//! Slot painting: the header, the footer, the input pill and the start
-//! screen, composed from their [`SlotSpec`]s.
+//! Slot painting: the header, the activity row, the input pill, the
+//! footer and the start screen, composed from their [`SlotSpec`]s.
 //!
 //! Built-in components render here from frame state and carry their own
 //! spacing. Lua components and span items paint the lines the plugin
 //! runtime retained, so painting never calls Lua. A spec's `sep` goes
-//! between two adjacent items that both produced output, except next to
-//! `working`, which is a lead-in indicator.
+//! between two adjacent items that both produced output, except after
+//! `working`, which is a lead-in indicator followed by one space.
 
 #[allow(clippy::wildcard_imports)] // free-fn split: shares the parent view module scope
 use super::*;
@@ -26,6 +26,8 @@ pub(super) struct Styles {
     pub pad: Style,
     /// The separator.
     pub sep: Style,
+    /// The `hint` component.
+    pub hint: Style,
 }
 
 impl Styles {
@@ -36,6 +38,7 @@ impl Styles {
             strong: style.add_modifier(Modifier::BOLD),
             pad: Style::default(),
             sep: style,
+            hint: style,
         }
     }
 }
@@ -43,16 +46,20 @@ impl Styles {
 /// Frame state the built-in components read.
 pub(super) struct Sources<'a> {
     pub status: &'a StatusCtx<'a>,
-    /// Session usage, only when the modeline has anything to show.
+    /// Session usage, only when it has anything to show.
     pub usage: Option<&'a SessionUsage>,
     pub mode: Mode,
+    /// Whether the editor is modeless, which hides the `mode` pill.
+    pub modeless: bool,
+    /// Whether `!` shell mode is armed.
+    pub shell: bool,
 }
 
 impl<'a> Sources<'a> {
     pub(super) fn new(
         status: &'a StatusCtx<'a>,
         usage: Option<&'a SessionUsage>,
-        mode: Mode,
+        input: &InputState,
     ) -> Self {
         let usage = usage.filter(|u| {
             !u.model.is_empty() || u.total_tokens() > 0 || u.current_context > 0 || u.working
@@ -60,9 +67,24 @@ impl<'a> Sources<'a> {
         Self {
             status,
             usage,
-            mode,
+            mode: input.mode(),
+            modeless: input.is_modeless(),
+            shell: input.shell_armed(),
         }
     }
+}
+
+/// Whether `slot`'s row paints anything this frame. Runs the same item
+/// painters as the row itself, without a frame.
+pub(super) fn row_has_content(slot: SlotName, src: &Sources<'_>) -> bool {
+    let spec = src.status.slots.get(slot);
+    let styles = Styles::uniform(Style::default());
+    let mut piece = Vec::new();
+    spec.left.iter().chain(&spec.right).any(|item| {
+        piece.clear();
+        push_item(item, src, &styles, &mut piece);
+        piece.iter().any(|span| !span.content.is_empty())
+    })
 }
 
 /// Paint the header slot into `area`.
@@ -75,37 +97,59 @@ pub(super) fn render_header(frame: &mut Frame, area: Rect, src: &Sources<'_>) {
         strong: text.add_modifier(Modifier::BOLD),
         pad: Style::default().bg(theme.status_bg),
         sep: text,
+        hint: text,
     };
     let spec = src.status.slots.get(SlotName::Header);
-    paint_row(frame, area, &spec, SlotName::Header, src, &styles);
+    paint_row(frame, area, &spec, src, &styles);
+}
+
+/// Paint the activity slot, the working row, into `area`.
+pub(super) fn render_activity(frame: &mut Frame, area: Rect, src: &Sources<'_>) {
+    let theme = crate::theme::current();
+    let text = Style::default()
+        .fg(theme.muted_fg)
+        .patch(theme.group_style("KageWorking"));
+    let mut styles = Styles::uniform(text);
+    styles.hint = Style::default().fg(theme.input_hint_fg);
+    let spec = src.status.slots.get(SlotName::Activity);
+    paint_row(frame, area, &spec, src, &styles);
 }
 
 /// Paint the footer slot into `area`.
 pub(super) fn render_footer(frame: &mut Frame, area: Rect, src: &Sources<'_>) {
     let theme = crate::theme::current();
-    let text = Style::default().fg(theme.modeline_fg).bg(theme.modeline_bg);
+    let text = Style::default().fg(theme.muted_fg);
     let styles = Styles {
         base: text,
         text,
         strong: text.add_modifier(Modifier::BOLD),
-        pad: Style::default().bg(theme.modeline_bg),
-        sep: Style::default().fg(theme.muted_fg).bg(theme.modeline_bg),
+        pad: Style::default(),
+        sep: text,
+        hint: Style::default().fg(theme.input_hint_fg),
     };
     let spec = src.status.slots.get(SlotName::Footer);
-    paint_row(frame, area, &spec, SlotName::Footer, src, &styles);
+    paint_row(frame, area, &spec, src, &styles);
 }
 
-/// The input pill as a left title and an optional right title.
+/// The input pill as the spans of the top rule's left and right
+/// titles. `rule` styles plain text and `strong` the emphasized parts.
 pub(super) fn pill_titles(
     src: &Sources<'_>,
-    pill: Style,
-) -> (Line<'static>, Option<Line<'static>>) {
-    let styles = Styles::uniform(pill);
+    rule: Style,
+    strong: Style,
+) -> (Vec<Span<'static>>, Vec<Span<'static>>) {
+    let styles = Styles {
+        base: rule,
+        text: rule,
+        strong,
+        pad: rule,
+        sep: rule,
+        hint: rule,
+    };
     let spec = src.status.slots.get(SlotName::InputPill);
-    let left = row_spans(&spec.left, &spec.sep, SlotName::InputPill, src, &styles);
-    let right = row_spans(&spec.right, &spec.sep, SlotName::InputPill, src, &styles);
-    let right = (!right.is_empty()).then(|| Line::from(right).right_aligned());
-    (Line::from(left), right)
+    let left = row_spans(&spec.left, &spec.sep, src, &styles);
+    let right = row_spans(&spec.right, &spec.sep, src, &styles);
+    (left, right)
 }
 
 /// Paint the start slot centered in the empty buffer region.
@@ -125,7 +169,7 @@ pub(super) fn render_start(frame: &mut Frame, area: Rect, src: &Sources<'_>) {
             }
             other => {
                 let mut spans = Vec::new();
-                push_item(other, SlotName::Start, src, &styles, &mut spans);
+                push_item(other, src, &styles, &mut spans);
                 lines.push(Line::from(spans));
             }
         }
@@ -142,19 +186,12 @@ pub(super) fn render_start(frame: &mut Frame, area: Rect, src: &Sources<'_>) {
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), rect);
 }
 
-fn paint_row(
-    frame: &mut Frame,
-    area: Rect,
-    spec: &SlotSpec,
-    slot: SlotName,
-    src: &Sources<'_>,
-    styles: &Styles,
-) {
+fn paint_row(frame: &mut Frame, area: Rect, spec: &SlotSpec, src: &Sources<'_>, styles: &Styles) {
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let mut spans = row_spans(&spec.left, &spec.sep, slot, src, styles);
-    let right = row_spans(&spec.right, &spec.sep, slot, src, styles);
+    let mut spans = row_spans(&spec.left, &spec.sep, src, styles);
+    let right = row_spans(&spec.right, &spec.sep, src, styles);
     let used: usize = spans.iter().chain(&right).map(Span::width).sum();
     let pad = usize::from(area.width).saturating_sub(used);
     if pad > 0 {
@@ -170,24 +207,26 @@ fn paint_row(
 fn row_spans(
     items: &[SlotItem],
     sep: &str,
-    slot: SlotName,
     src: &Sources<'_>,
     styles: &Styles,
 ) -> Vec<Span<'static>> {
     let mut out = Vec::new();
-    let mut separable = false;
+    let mut previous: Option<&SlotItem> = None;
     let mut piece = Vec::new();
     for item in items {
         piece.clear();
-        push_item(item, slot, src, styles, &mut piece);
+        push_item(item, src, styles, &mut piece);
         if piece.iter().all(|span| span.content.is_empty()) {
             continue;
         }
-        let takes_sep = !matches!(item, SlotItem::Builtin("working"));
-        if separable && takes_sep && !sep.is_empty() {
-            out.push(Span::styled(sep.to_owned(), styles.sep));
+        match previous {
+            Some(SlotItem::Builtin("working")) => {
+                out.push(Span::styled(" ".to_owned(), styles.pad));
+            }
+            Some(_) if !sep.is_empty() => out.push(Span::styled(sep.to_owned(), styles.sep)),
+            _ => {}
         }
-        separable = takes_sep;
+        previous = Some(item);
         out.append(&mut piece);
     }
     out
@@ -200,15 +239,9 @@ fn with_hl(base: Style, hl: Option<&str>) -> Style {
     }
 }
 
-fn push_item(
-    item: &SlotItem,
-    slot: SlotName,
-    src: &Sources<'_>,
-    styles: &Styles,
-    out: &mut Vec<Span<'static>>,
-) {
+fn push_item(item: &SlotItem, src: &Sources<'_>, styles: &Styles, out: &mut Vec<Span<'static>>) {
     match item {
-        SlotItem::Builtin(name) => push_builtin(name, slot, src, styles, out),
+        SlotItem::Builtin(name) => push_builtin(name, src, styles, out),
         SlotItem::Text(span) => {
             let line = ChromeLine {
                 spans: vec![span.clone()],
@@ -233,7 +266,6 @@ fn push_line(line: &ChromeLine, base: Style, out: &mut Vec<Span<'static>>) {
 /// no output this frame.
 pub(super) fn push_builtin(
     name: &str,
-    slot: SlotName,
     src: &Sources<'_>,
     styles: &Styles,
     out: &mut Vec<Span<'static>>,
@@ -241,15 +273,18 @@ pub(super) fn push_builtin(
     let status = src.status;
     match name {
         "brand" => out.push(Span::styled(" kage".to_owned(), styles.text)),
-        "model" if slot == SlotName::Header => {
-            if let Some(model) = status.model.filter(|m| !m.is_empty()) {
-                out.push(Span::styled(" ".to_owned(), styles.pad));
-                out.push(Span::styled(model.to_owned(), styles.text));
+        "title" => {
+            if let Some(title) = status.title.filter(|t| !t.is_empty()) {
+                out.push(Span::styled(format!(" {title}"), styles.text));
             }
         }
         "model" => {
-            if let Some(u) = src.usage.filter(|u| !u.model.is_empty()) {
-                out.push(Span::styled(u.model.clone(), styles.strong));
+            let model = status
+                .model
+                .or_else(|| src.usage.map(|u| u.model.as_str()))
+                .filter(|m| !m.is_empty());
+            if let Some(model) = model {
+                out.push(Span::styled(model.to_owned(), styles.text));
             }
         }
         "widgets" => {
@@ -262,20 +297,16 @@ pub(super) fn push_builtin(
             }
         }
         "search" => {
-            if let Some((current, total)) = status.search_match_count {
-                let label = if total == 0 {
-                    "no match".to_owned()
-                } else if current == 0 {
-                    format!("match -/{total}")
-                } else {
-                    format!("match {current}/{total}")
-                };
+            if let Some(count) = status.search_match_count {
                 let theme = crate::theme::current();
                 let style = styles
                     .pad
                     .fg(theme.match_color)
                     .add_modifier(Modifier::BOLD);
-                out.push(Span::styled(format!("{label}  "), style));
+                out.push(Span::styled(
+                    format!("{}  ", search_count_label(count)),
+                    style,
+                ));
             }
         }
         "session" => {
@@ -283,18 +314,33 @@ pub(super) fn push_builtin(
                 out.push(Span::styled(format!("#{sid} "), styles.text));
             }
         }
+        "activity" => {
+            if let Some(text) = status.activity.filter(|t| !t.is_empty()) {
+                out.push(Span::styled(format!("  {text}"), styles.text));
+            }
+        }
         "working" | "context" | "tokens" | "thinking" | "permission" => {
             if let Some(u) = src.usage {
                 push_usage(name, u, styles, out);
             }
         }
-        "mode" => out.push(Span::styled(
-            format!(" {} ", mode_glyph(src.mode)),
-            styles.text,
-        )),
+        "mode" => {
+            let label = if src.shell {
+                "shell"
+            } else if src.modeless {
+                return;
+            } else {
+                match src.mode {
+                    Mode::Normal => "NORMAL",
+                    Mode::Insert => "INSERT",
+                    Mode::Visual => "VISUAL",
+                }
+            };
+            out.push(Span::styled(label.to_owned(), styles.strong));
+        }
         "hint" => {
-            if let Some(hint) = status.key_hint.filter(|h| !h.is_empty()) {
-                out.push(Span::styled(format!(" {hint} "), styles.text));
+            if let Some(hint) = status.hint.filter(|h| !h.is_empty()) {
+                out.push(Span::styled(format!("  {hint}"), styles.hint));
             }
         }
         "cwd" => {
@@ -310,67 +356,65 @@ pub(super) fn push_builtin(
     }
 }
 
+/// `match 2/5`, `match -/5` off the matches, or `no match`.
+pub(super) fn search_count_label((current, total): (usize, usize)) -> String {
+    if total == 0 {
+        "no match".to_owned()
+    } else if current == 0 {
+        format!("match -/{total}")
+    } else {
+        format!("match {current}/{total}")
+    }
+}
+
 /// Paint a built-in component that reads the session usage.
 fn push_usage(name: &str, u: &SessionUsage, styles: &Styles, out: &mut Vec<Span<'static>>) {
     match name {
-        "working" => {
-            out.push(Span::styled(" ".to_owned(), styles.pad));
-            if u.working {
-                out.push(Span::styled(format!("{} ", spinner_frame()), styles.strong));
-            } else {
-                out.push(Span::styled("  ".to_owned(), styles.pad));
-            }
+        "working" if u.working => {
+            out.push(Span::styled(spinner_frame().to_owned(), styles.strong));
         }
         "context" => {
             if u.context_window > 0 {
                 #[allow(clippy::cast_precision_loss)]
                 let pct =
                     (u.current_context as f64 / u.context_window as f64 * 100.0).clamp(0.0, 999.9);
-                out.push(Span::styled(
-                    format!(
-                        "ctx {}/{} ({:.0}%)",
-                        format_token_count(u.current_context),
-                        format_token_count(u.context_window),
-                        pct
-                    ),
-                    styles.text,
-                ));
+                out.push(Span::styled(format!("{pct:.0}% ctx"), styles.text));
             } else if u.current_context > 0 {
                 out.push(Span::styled(
-                    format!("ctx {}", format_token_count(u.current_context)),
+                    format!("{} ctx", format_token_count(u.current_context)),
                     styles.text,
                 ));
             }
         }
         "tokens" => {
-            out.push(Span::styled(
-                format!(
-                    "io {}+{}",
-                    format_token_count(u.input_tokens),
-                    format_token_count(u.output_tokens)
-                ),
-                styles.text,
-            ));
+            let total = u.total_tokens();
+            if total > 0 {
+                out.push(Span::styled(
+                    format!("{} tok", format_token_count(total)),
+                    styles.text,
+                ));
+            }
             if u.total_cost > 0.0 {
-                out.push(Span::styled(format!(" ${:.4}", u.total_cost), styles.text));
+                let lead = if total > 0 { " " } else { "" };
+                out.push(Span::styled(
+                    format!("{lead}${:.2}", u.total_cost),
+                    styles.text,
+                ));
             }
         }
         "thinking" => {
             if let Some(level) = u.thinking_level.filter(|l| !l.is_off()) {
                 out.push(Span::styled(
-                    format!("think:{}", level.label()),
-                    styles.strong,
+                    format!("thinking {}", level.label()),
+                    styles.text,
                 ));
             }
         }
         "permission" => {
-            if let Some(mode) = u
-                .permission_mode
-                .filter(|m| *m != kage_core::permissions::PermissionAction::Allow)
-            {
+            if let Some(mode) = u.permission_mode {
                 out.push(Span::styled(
-                    format!("perm:{}", mode_label(mode)),
-                    styles.strong,
+                    format!("{} mode", mode_label(mode)),
+                    styles.text,
                 ));
             }
         }
@@ -387,6 +431,7 @@ mod tests {
         let usage = SessionUsage {
             model: "m".into(),
             working: true,
+            input_tokens: 10,
             context_window: 10,
             thinking_level: Some(kage_core::ThinkingLevel::High),
             permission_mode: Some(kage_core::permissions::PermissionAction::Ask),
@@ -396,20 +441,70 @@ mod tests {
         let status = StatusCtx {
             model: Some("m"),
             session_id: Some("s"),
+            title: Some("t"),
             search_match_count: Some((1, 2)),
             plugin_widgets: &widgets,
-            key_hint: Some("g"),
+            hint: Some("g"),
+            activity: Some("Working"),
             cwd: Some("/w"),
             ..StatusCtx::default()
         };
-        let src = Sources::new(&status, Some(&usage), Mode::Insert);
+        let src = Sources::new(&status, Some(&usage), &InputState::new());
         let styles = Styles::uniform(Style::default());
-        for slot in SlotName::ALL {
-            for name in kage_plugin::slots::BUILTIN_COMPONENTS {
-                let mut out = Vec::new();
-                push_builtin(name, slot, &src, &styles, &mut out);
-                assert!(!out.is_empty(), "{name} painted nothing in {slot:?}");
-            }
+        for name in kage_plugin::slots::BUILTIN_COMPONENTS {
+            let mut out = Vec::new();
+            push_builtin(name, &src, &styles, &mut out);
+            assert!(!out.is_empty(), "{name} painted nothing");
         }
+    }
+
+    fn painted(name: &str, usage: &SessionUsage, input: &InputState) -> String {
+        let status = StatusCtx::default();
+        let src = Sources::new(&status, Some(usage), input);
+        let mut out = Vec::new();
+        push_builtin(name, &src, &Styles::uniform(Style::default()), &mut out);
+        out.iter().map(|span| span.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn footer_components_read_as_plain_words() {
+        let usage = SessionUsage {
+            model: "fake:m".into(),
+            input_tokens: 12_000,
+            output_tokens: 2_000,
+            current_context: 24_000,
+            context_window: 200_000,
+            total_cost: 0.02,
+            thinking_level: Some(kage_core::ThinkingLevel::High),
+            permission_mode: Some(kage_core::permissions::PermissionAction::Ask),
+            ..SessionUsage::default()
+        };
+        let input = InputState::new();
+        assert_eq!(painted("context", &usage, &input), "12% ctx");
+        assert_eq!(painted("tokens", &usage, &input), "14k tok $0.02");
+        assert_eq!(painted("thinking", &usage, &input), "thinking high");
+        assert_eq!(painted("permission", &usage, &input), "ask mode");
+        assert_eq!(painted("model", &usage, &input), "fake:m");
+        let quiet = SessionUsage {
+            model: "fake:m".into(),
+            thinking_level: Some(kage_core::ThinkingLevel::Off),
+            ..SessionUsage::default()
+        };
+        assert_eq!(painted("thinking", &quiet, &input), "");
+        assert_eq!(painted("tokens", &quiet, &input), "");
+        assert_eq!(painted("permission", &quiet, &input), "");
+    }
+
+    #[test]
+    fn mode_is_empty_in_modeless_and_a_word_in_vim() {
+        let usage = SessionUsage::default();
+        let mut input = InputState::new();
+        assert_eq!(painted("mode", &usage, &input), "INSERT");
+        input.handle_key(ratatui::crossterm::event::KeyEvent::from(
+            ratatui::crossterm::event::KeyCode::Esc,
+        ));
+        assert_eq!(painted("mode", &usage, &input), "NORMAL");
+        input.set_modeless(true);
+        assert_eq!(painted("mode", &usage, &input), "");
     }
 }

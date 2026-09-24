@@ -48,18 +48,20 @@ pub(super) const ALIASES: &[Alias] = &[
     Alias {
         name: "kage.SlotName",
         doc: &["A chrome region `kage.ui.set_slot` fills."],
-        variants: &["header", "footer", "input_pill", "start"],
+        variants: &["header", "activity", "input_pill", "footer", "start"],
     },
     Alias {
         name: "kage.Component",
         doc: &["A built-in slot component, painted by the host every frame."],
         variants: &[
             "brand",
+            "title",
             "model",
             "widgets",
             "search",
             "session",
             "working",
+            "activity",
             "context",
             "tokens",
             "thinking",

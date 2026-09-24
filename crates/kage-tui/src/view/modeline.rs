@@ -144,14 +144,6 @@ pub(crate) fn mode_pill_style(theme: &crate::theme::Theme, mode: Mode) -> Style 
     Style::default().fg(fg).add_modifier(Modifier::BOLD)
 }
 
-pub(crate) fn placeholder_for(mode: Mode) -> Option<&'static str> {
-    match mode {
-        Mode::Insert => Some(INPUT_PLACEHOLDER_INSERT),
-        Mode::Normal => Some(INPUT_PLACEHOLDER_NORMAL),
-        Mode::Visual => None,
-    }
-}
-
 /// How many rows to scroll the input Paragraph so that the cursor row
 /// always stays inside the visible content area. Once the prompt has
 /// more rows than the input area can fit ([`INPUT_CONTENT_MAX_LINES`]

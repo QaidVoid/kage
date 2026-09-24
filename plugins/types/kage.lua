@@ -42,16 +42,18 @@
 ---@alias kage.KeymapMode "n"|"b"|"i"|"v"|"g"
 
 --- A chrome region `kage.ui.set_slot` fills.
----@alias kage.SlotName "header"|"footer"|"input_pill"|"start"
+---@alias kage.SlotName "header"|"activity"|"input_pill"|"footer"|"start"
 
 --- A built-in slot component, painted by the host every frame.
 ---@alias kage.Component
 ---| "brand"
+---| "title"
 ---| "model"
 ---| "widgets"
 ---| "search"
 ---| "session"
 ---| "working"
+---| "activity"
 ---| "context"
 ---| "tokens"
 ---| "thinking"
@@ -277,10 +279,11 @@
 --- A Rust action from `kage.action`, used as a mapping rhs.
 ---@class kage.Action
 
---- The layout of a slot. `header`, `footer` and `input_pill`
---- take `left`, `right` and `sep`; `start` takes `lines`. An
---- item is a built-in component name, a `kage.Span`, or a
---- `kage.SlotComponent`.
+--- The layout of a slot. `header`, `activity`, `input_pill`
+--- and `footer` take `left`, `right` and `sep`; `start` takes
+--- `lines`. The `header` and `activity` rows collapse while
+--- they paint nothing. An item is a built-in component name, a
+--- `kage.Span`, or a `kage.SlotComponent`.
 ---@class kage.SlotSpec
 ---@field left? (kage.Component|kage.Span|kage.SlotComponent)[] Painted from the left edge.
 ---@field right? (kage.Component|kage.Span|kage.SlotComponent)[] Painted against the right edge.

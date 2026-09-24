@@ -32,7 +32,7 @@ pub(crate) use crate::input::{InputAction, InputState, Mode, Pane};
 pub(crate) use crate::keymap::{
     self, EditState, Sequencer, Step, event_from_key, help_groups, key_from_event,
 };
-pub(crate) use crate::layout::{input_height_for, split};
+pub(crate) use crate::layout::split;
 pub(crate) use crate::overlay::{
     CompletionAction, ContextAction, ContextMenu, ContextMenuOutcome, InputCompletion,
     OverlayAction, OverlayPicker, SessionTreeOverlay, SessionTreeSource, SettingsInit,
@@ -571,7 +571,7 @@ pub struct App {
     /// disables the picker (Ctrl+S is a no-op).
     session_lister: Option<SessionLister>,
     /// Open `:` command line, if any. While present it owns key input
-    /// and replaces the status bar's mode pill.
+    /// and paints over the footer row.
     cmdline: Option<CommandLine>,
     /// Open `/` slash palette overlay, if any. Wraps a [`CommandLine`]
     /// and renders as a centered modal; shares the parser, completer,
@@ -766,10 +766,9 @@ pub struct App {
     /// the cursor when the style is reapplied.
     last_cursor_style: Option<(Mode, bool)>,
     /// Optional shared snapshot of the current session's running
-    /// token totals + context window. When `Some`, the renderer
-    /// claims a one-row modeline below the input card and paints
-    /// `model :: in/out :: total/window (pct)`. Updated by the host
-    /// worker thread after every turn.
+    /// token totals + context window. The footer, the input rule and
+    /// the working row read it. Updated by the host worker thread
+    /// after every turn.
     session_usage: Option<crate::usage::SharedSessionUsage>,
     /// Shared queue of ephemeral toast notifications painted as a
     /// top-right overlay over the conversation buffer. The handle is
@@ -816,6 +815,11 @@ pub struct App {
     pending_permission: Option<engine::PendingApproval>,
     /// Permission requests waiting for the overlay.
     permission_queue: std::collections::VecDeque<engine::PendingApproval>,
+    /// When the run in flight started, from the working flag's
+    /// transition. `None` while idle.
+    run_started: Option<Instant>,
+    /// Cached hint labels for [`Self::key_label`].
+    key_labels: wiring::KeyLabels,
 }
 
 mod actions;

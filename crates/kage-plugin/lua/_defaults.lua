@@ -3,12 +3,15 @@
 -- Keys the Rust editor grammar handles (motions, operators, readline
 -- edits, Enter, Esc) are not here.
 
-kage.ui.set_slot("header", { left = { "brand", "model" }, right = { "widgets", "search", "session" } })
+local dot = " \u{B7} "
+kage.ui.set_slot("header", { left = { "title" }, right = { "widgets", "search" } })
+kage.ui.set_slot("activity", { left = { "activity" } })
+kage.ui.set_slot("input_pill", { left = { "working", "mode" }, right = { "thinking" } })
 kage.ui.set_slot("footer", {
-  left = { "working", "model", "context", "tokens", "thinking", "permission" },
-  sep = " . ",
+  left = { "hint" },
+  right = { "model", "permission", "context", "tokens" },
+  sep = dot,
 })
-kage.ui.set_slot("input_pill", { left = { "mode" }, right = { "hint" } })
 
 local map, act = kage.keymap.set, kage.action
 

@@ -85,14 +85,15 @@ impl App {
             permission_overlay: None,
             pending_permission: None,
             permission_queue: std::collections::VecDeque::new(),
+            run_started: None,
+            key_labels: KeyLabels::default(),
         }
     }
 
-    /// Hand the App a shared session-usage snapshot. While set, the
-    /// renderer reserves a one-row modeline below the input card and
-    /// paints the snapshot's model + token totals + context-window
-    /// fill. Pass `None` (or never call this) to keep the modeline
-    /// collapsed.
+    /// Hand the App a shared session-usage snapshot. The footer, the
+    /// input rule and the working row read the model, token totals,
+    /// context fill and working flag from it. Without one they show
+    /// none of those.
     pub fn set_session_usage(&mut self, usage: crate::usage::SharedSessionUsage) {
         self.session_usage = Some(usage);
     }
@@ -136,13 +137,6 @@ impl App {
     /// Ask the engine to cancel the in-flight run.
     pub(crate) fn trip_cancel(&mut self) {
         let _ = self.send_request(RunRequest::Cancel);
-    }
-
-    /// Whether the host has registered a session-usage handle. Used
-    /// by the layout split to decide if the modeline row claims a
-    /// line of vertical space.
-    pub(crate) fn modeline_visible(&self) -> bool {
-        self.session_usage.is_some()
     }
 
     /// Snapshot the session-usage handle, returning `None` when the
@@ -479,11 +473,143 @@ impl App {
         slots.specs()
     }
 
-    /// The pending mapping sequence in Vim notation, if keys are
-    /// buffered.
-    pub(crate) fn key_hint(&self) -> Option<String> {
+    /// Start or stop the run clock on the working flag's transitions.
+    pub(crate) fn track_run(&mut self, usage: Option<&crate::usage::SessionUsage>) {
+        let working = usage.is_some_and(|u| u.working);
+        if working != self.run_started.is_some() {
+            self.run_started = working.then(Instant::now);
+        }
+    }
+
+    /// The footer hint: the pending keys of a mapping sequence, else
+    /// what the next keys do in the current state.
+    pub(crate) fn footer_hint(&mut self) -> String {
         let keys = self.sequencer.pending();
-        (!keys.is_empty()).then(|| kage_core::keymap::display_keys(keys))
+        if !keys.is_empty() {
+            return format!("{} ...", kage_core::keymap::display_keys(keys));
+        }
+        let working = self.is_working();
+        let draft = !self.input.text().is_empty();
+        let mut parts: Vec<String> = Vec::new();
+        let mut say = |part: &str| parts.push(part.to_owned());
+        if self.input.is_modeless() {
+            match (working, draft) {
+                (true, false) => say("esc to interrupt"),
+                (true, true) => {
+                    say("enter to steer");
+                    say("esc to interrupt");
+                }
+                (false, true) => {
+                    say("enter to send");
+                    say("shift+enter for a newline");
+                }
+                (false, false) => {
+                    say("? for shortcuts");
+                    say("/ for commands");
+                }
+            }
+            return parts.join(HINT_SEP);
+        }
+        match self.input.mode() {
+            Mode::Normal => {
+                if working {
+                    say("ctrl+c to interrupt");
+                }
+                say("i to type");
+                if let Some(key) = self.key_label("OpenHelp") {
+                    parts.push(format!("{key} for shortcuts"));
+                }
+                if let Some(key) = self.key_label("BeginCommand") {
+                    parts.push(format!("{key} for commands"));
+                }
+            }
+            Mode::Insert => {
+                match (working, draft) {
+                    (true, false) => say("ctrl+c to interrupt"),
+                    (true, true) => say("enter to steer"),
+                    (false, true) => say("enter to send"),
+                    (false, false) => {}
+                }
+                say("esc for normal mode");
+            }
+            Mode::Visual => say("esc to leave visual mode"),
+        }
+        parts.join(HINT_SEP)
+    }
+
+    /// The key that runs `action` in the current editing state, as
+    /// `ctrl+p`. A mapping from `init.lua` or `config.toml` wins over
+    /// the defaults. Cached per keymap generation and editing state.
+    pub(crate) fn key_label(&mut self, action: &'static str) -> Option<String> {
+        let keymap = lock(&self.keymap);
+        let state = self.edit_state();
+        let key = (keymap.generation(), state);
+        if self.key_labels.key != Some(key) {
+            self.key_labels = KeyLabels {
+                key: Some(key),
+                labels: Vec::new(),
+            };
+        }
+        if let Some((_, label)) = self.key_labels.labels.iter().find(|(a, _)| *a == action) {
+            return label.clone();
+        }
+        let modes = state.modes();
+        let entries = keymap.entries();
+        let runs = |e: &&kage_core::keymap::Entry<'_>| {
+            modes.contains(&e.mode)
+                && matches!(e.mapping.rhs, Rhs::Action { name, .. } if name == action)
+        };
+        let label = entries
+            .iter()
+            .filter(runs)
+            .find(|e| e.mapping.user_owned())
+            .or_else(|| entries.iter().find(runs))
+            .map(|e| e.lhs.iter().map(key_chord).collect::<String>());
+        self.key_labels.labels.push((action, label.clone()));
+        label
+    }
+
+    /// The working row text while a run is in flight: what kage is
+    /// doing, the run's elapsed time and, when the next key would
+    /// reach the editor with an empty draft, the key that interrupts
+    /// the run.
+    pub(crate) fn activity_label(&self, buffer: &crate::Buffer) -> Option<String> {
+        let started = self.run_started?;
+        let approving = self.pending_permission.is_some();
+        let doing = if approving {
+            "Waiting for your approval".to_owned()
+        } else {
+            current_work(buffer)
+        };
+        let elapsed = started.elapsed();
+        let elapsed = if elapsed.as_secs() < 60 {
+            format!("{}s", elapsed.as_secs())
+        } else {
+            view::tool_view::format_elapsed(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        };
+        if approving || !self.input.text().is_empty() {
+            return Some(format!("{doing} ({elapsed})"));
+        }
+        let key = if self.input.is_modeless() {
+            "esc"
+        } else {
+            "ctrl+c"
+        };
+        Some(format!("{doing} ({elapsed}, {key} to interrupt)"))
+    }
+
+    /// The model picker's label for the active model, else its id.
+    pub(crate) fn model_label(&self, usage: Option<&crate::usage::SessionUsage>) -> Option<String> {
+        let id = match usage.map(|u| u.model.as_str()).filter(|m| !m.is_empty()) {
+            Some(id) => id.to_owned(),
+            None => self.status_model.as_ref().map(|m| lock(m).clone())?,
+        };
+        let label = self
+            .model_choices
+            .iter()
+            .find(|item| item.value == id)
+            .map(|item| item.label.clone());
+        Some(label.unwrap_or(id))
     }
 
     pub(crate) fn refresh_plugin_widget_texts(&mut self, width: u16) {
@@ -750,4 +876,67 @@ impl App {
         let mut s = lock(slot);
         *s = entries;
     }
+}
+
+/// Separator between the parts of a footer hint.
+const HINT_SEP: &str = " \u{B7} ";
+
+/// Labels from [`App::key_label`], valid for one keymap generation and
+/// editing state.
+#[derive(Debug, Default)]
+pub(crate) struct KeyLabels {
+    key: Option<(u64, EditState)>,
+    labels: Vec<(&'static str, Option<String>)>,
+}
+
+/// One key in hint form: `<C-p>` reads `ctrl+p`, `<S-Tab>` reads
+/// `shift+tab`, and a plain character stays itself.
+fn key_chord(key: &kage_core::keymap::Key) -> String {
+    let vim = key.to_string();
+    let Some(mut inner) = vim.strip_prefix('<').and_then(|v| v.strip_suffix('>')) else {
+        return vim;
+    };
+    let mut out = String::new();
+    loop {
+        let (prefix, rest) = match inner.split_at_checked(2) {
+            Some(("C-", rest)) => ("ctrl+", rest),
+            Some(("M-", rest)) => ("alt+", rest),
+            Some(("S-", rest)) => ("shift+", rest),
+            Some(("D-", rest)) => ("super+", rest),
+            _ => break,
+        };
+        out.push_str(prefix);
+        inner = rest;
+    }
+    match inner {
+        "CR" => out.push_str("enter"),
+        "BS" => out.push_str("backspace"),
+        name => out.push_str(&name.to_lowercase()),
+    }
+    out
+}
+
+/// What the current run is doing, from the newest blocks back to the
+/// prompt that started it: running a tool, thinking, or just working.
+fn current_work(buffer: &crate::Buffer) -> String {
+    use crate::view::tool_view::{ToolPhase, describe};
+    for block in buffer.blocks().iter().rev() {
+        match block {
+            crate::Block::User { .. } => break,
+            crate::Block::ToolCall {
+                name,
+                input,
+                phase: ToolPhase::Running,
+                ..
+            } => {
+                let label = describe(name, input);
+                return format!("{} {}", label.verb_live, label.target)
+                    .trim_end()
+                    .to_owned();
+            }
+            crate::Block::Thinking { live: true, .. } => return "Thinking".to_owned(),
+            _ => {}
+        }
+    }
+    "Working".to_owned()
 }

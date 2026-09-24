@@ -485,7 +485,14 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
-                let regions = crate::layout::split(frame.area(), 3, 0);
+                let regions = crate::layout::split(
+                    frame.area(),
+                    crate::layout::Heights {
+                        header: 1,
+                        input: 3,
+                        ..crate::layout::Heights::default()
+                    },
+                );
                 palette.render(frame, regions);
             })
             .unwrap();
@@ -589,7 +596,14 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
-                let regions = crate::layout::split(frame.area(), 3, 0);
+                let regions = crate::layout::split(
+                    frame.area(),
+                    crate::layout::Heights {
+                        header: 1,
+                        input: 3,
+                        ..crate::layout::Heights::default()
+                    },
+                );
                 p.render(frame, regions);
             })
             .unwrap();

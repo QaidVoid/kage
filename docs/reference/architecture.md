@@ -14,7 +14,6 @@ kage-acp        (core + jsonrpc + provider)
 kage-plugin     (core + provider + tools)
 kage-loop       (core + provider + tools)
 kage-tui        (core + loop + plugin)
-kage-sandbox                                          (empty placeholder)
 kage-cli        (binary)            (depends on everything it uses)
 ```
 
@@ -35,7 +34,6 @@ the only crate that wires the whole graph together.
 | `kage-acp`       | ACP agent (editors drive kage) and ACP client (kage drives another agent as a provider) |
 | `kage-plugin`    | Lua runtime, sandbox, host API surface              |
 | `kage-tui`       | The interactive TUI, modal input, block renderer    |
-| `kage-sandbox`   | Reserved slot for OS-level command isolation; ships empty in 0.1 |
 | `kage-cli`       | The binary, CLI flags, main wiring                  |
 
 ## data flow per turn

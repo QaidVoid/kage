@@ -1,8 +1,7 @@
 //! `bash` tool: run a shell command with a timeout and truncated output.
 //!
-//! Commands run unsandboxed today. `kage-sandbox` is the placeholder where
-//! bubblewrap or sandbox-exec backends can land later without changing the
-//! call shape.
+//! Commands run unsandboxed today; an OS-level isolation backend (for
+//! example bubblewrap) can land later without changing the call shape.
 
 use std::fmt::Write as _;
 use std::io::Read;

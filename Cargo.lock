@@ -1577,10 +1577,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "kage-sandbox"
-version = "0.1.0"
-
-[[package]]
 name = "kage-session"
 version = "0.1.0"
 dependencies = [

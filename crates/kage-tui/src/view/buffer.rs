@@ -421,7 +421,7 @@ fn slice_lines_for_window(
 /// Routes through the [`registry::BlockRenderer`] so block rendering
 /// goes through the same widget dispatch plugins hook into via
 /// `set_builtin` / `set_custom`.
-fn build_block_lines(
+pub(crate) fn build_block_lines(
     buffer: &Buffer,
     idx: usize,
     width: u16,

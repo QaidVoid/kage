@@ -202,6 +202,7 @@ impl App {
         if let Some(line) = self.search_line.as_mut() {
             let empty: [&CommandSpec; 0] = [];
             line.paste_str(text, &empty, &EmptyResolver);
+            self.preview_search();
             return;
         }
         self.input.paste(text);

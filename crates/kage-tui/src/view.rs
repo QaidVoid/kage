@@ -422,6 +422,7 @@ pub(crate) use bubble::{
     user_block_lines, wrap_in_bubble_focused,
 };
 pub use buffer::CapturedCell;
+pub(crate) use buffer::build_block_lines;
 pub use input::PendingPrompt;
 pub(crate) use input::{INPUT_GLYPH_WIDTH, pending_height, split_pending};
 pub use modeline::input_visual_row_count;

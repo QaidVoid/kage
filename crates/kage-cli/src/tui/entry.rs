@@ -9,6 +9,7 @@ use kage_core::ThinkingLevel;
 use kage_core::options::{OptionStore, OptionValue};
 use kage_core::protocol::{HostEvent, NoticeLevel};
 use kage_plugin::LogLevel;
+use kage_tui::TranscriptScope;
 use kage_tui::hostlog::LogPublisher;
 
 /// Drop into the interactive TUI. Returns the appropriate process exit
@@ -331,7 +332,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
             rt.set_option(name, value).map_err(|e| e.to_string())
         }) as kage_tui::OptionSetter
     });
-    app.set_options(options, setter);
+    app.set_options(Arc::clone(&options), setter);
     if let Some(status) = plugin_status {
         app.set_plugin_status(status);
     }
@@ -392,16 +393,43 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     }
     app.set_start_info(start);
     let result = app.run(&mut tui);
+    let width = tui.terminal().size().map_or(80, |size| size.width);
     drop(tui);
     drop(app);
     engine.shutdown();
 
     match result {
-        Ok(_) => ExitCode::SUCCESS,
+        Ok(_) => {
+            print_exit_summary(&buffer, width, &options, lock(&mirror).path());
+            ExitCode::SUCCESS
+        }
         Err(e) => {
             eprintln!("kage: tui error: {e}");
             ExitCode::from(1)
         }
+    }
+}
+
+/// Print what stays in the terminal once the alt screen is gone: the
+/// transcript `transcript_on_exit` asks for at `width`, then the
+/// session file when one was recorded.
+fn print_exit_summary(
+    buffer: &kage_tui::SharedBuffer,
+    width: u16,
+    options: &kage_plugin::SharedOptions,
+    session: Option<&std::path::Path>,
+) {
+    let scope = lock(options)
+        .get("transcript_on_exit")
+        .and_then(OptionValue::as_str)
+        .and_then(TranscriptScope::parse)
+        .unwrap_or(TranscriptScope::Full);
+    let transcript = kage_tui::transcript::render(&lock(buffer), width, scope);
+    if !transcript.is_empty() {
+        println!("{transcript}\n");
+    }
+    if let Some(path) = session.filter(|path| path.exists()) {
+        println!("session saved to {}", path.display());
     }
 }
 

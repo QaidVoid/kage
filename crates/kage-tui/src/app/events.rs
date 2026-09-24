@@ -144,9 +144,7 @@ impl App {
             InputAction::VisualLineStart => self.snap_visual_cursor_x(0),
             InputAction::VisualLineEnd => self.snap_visual_cursor_x(i32::MAX),
             InputAction::YankFocusedBlock => self.yank_focused_block(),
-            InputAction::BeginSearch => {
-                self.search_line = Some(CommandLine::new());
-            }
+            InputAction::BeginSearch => self.begin_search(),
             InputAction::SearchNext => self.jump_to_search_match(true),
             InputAction::SearchPrev => self.jump_to_search_match(false),
             InputAction::CyclePane => {
@@ -274,24 +272,31 @@ impl App {
     }
 
     /// Mouse drag while left-button is held: extend the selection
-    /// cursor to the virtual-row under `(row, col)`. Drag rows
-    /// outside the buffer area clamp to the closest visible row so
-    /// sweeping past the input area still extends correctly.
+    /// cursor to the virtual-row under `(row, col)`. A drag above or
+    /// below the buffer area scrolls one line toward it and extends
+    /// the selection to the row that scrolled in. At either end of the
+    /// conversation it clamps to the closest visible row instead.
     pub(crate) fn mouse_drag(&mut self, row: u16, col: u16) {
         let Some((anchor, _)) = self.screen_selection else {
             return;
         };
-        let buf = lock(&self.buffer);
+        let mut buf = lock(&self.buffer);
         let area_y = buf.last_area_y();
         let area_height = buf.last_area_height();
         if area_height == 0 {
             return;
         }
         let last_visible_row = area_y.saturating_add(area_height).saturating_sub(1);
-        let clamped_row = row.clamp(area_y, last_visible_row);
-        let vrow = buf
-            .last_virtual_top()
-            .saturating_add(usize::from(clamped_row - area_y));
+        let top = buf.scroll().unwrap_or_else(|| buf.last_virtual_top());
+        let vrow = if row < area_y && top > 0 {
+            buf.set_scroll(top - 1);
+            top - 1
+        } else if row > last_visible_row && !buf.is_following() {
+            buf.set_scroll(top + 1);
+            top + usize::from(area_height)
+        } else {
+            top + usize::from(row.clamp(area_y, last_visible_row) - area_y)
+        };
         self.screen_selection = Some((anchor, (vrow, col)));
         if let Some((_, _, ref mut dragged)) = self.mouse_drag_anchor {
             *dragged = true;

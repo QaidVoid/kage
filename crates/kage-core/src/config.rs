@@ -406,6 +406,11 @@ pub struct UiConfig {
     /// kage-provider, which sits above kage-core.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_level: Option<String>,
+    /// What prints to the terminal after exit: `full` for the whole
+    /// transcript, `last` for the last prompt and what followed, or
+    /// `none` for only the session path. Validated by the option
+    /// registry, which keeps the default for any other value.
+    pub transcript_on_exit: String,
 }
 
 impl Default for UiConfig {
@@ -417,6 +422,7 @@ impl Default for UiConfig {
             input_min_lines: 1,
             input_max_lines: 8,
             thinking_level: None,
+            transcript_on_exit: "full".into(),
         }
     }
 }

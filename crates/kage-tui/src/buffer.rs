@@ -302,7 +302,7 @@ pub struct ToolTopology {
 
 impl ToolTopology {
     /// Derive the pairing and grouping from an append-only block list.
-    fn build(blocks: &[Block]) -> Self {
+    pub(crate) fn build(blocks: &[Block]) -> Self {
         let mut topo = Self::default();
         for (i, block) in blocks.iter().enumerate() {
             if let Block::ToolResult { call_id, .. } = block {

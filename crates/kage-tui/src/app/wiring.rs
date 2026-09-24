@@ -60,6 +60,7 @@ impl App {
             slots: None,
             search_line: None,
             search_pattern: None,
+            search_origin: None,
             search_match_set: Vec::new(),
             search_match_version: 0,
             search_match_pattern: String::new(),

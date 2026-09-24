@@ -322,6 +322,7 @@
 ---@field editor "vim"|"modeless" Prompt editing style.
 ---@field input_min_lines integer Minimum content rows of the input card.
 ---@field input_max_lines integer Content rows the input card grows to before it scrolls.
+---@field transcript_on_exit "full"|"last"|"none" What prints after exit: the whole transcript, from the last prompt on, or only the session path.
 ---@field thinking_level ""|"off"|"minimal"|"low"|"medium"|"high"|"xhigh" Thinking level for new sessions, or empty for the default.
 ---@field compaction_threshold number Fraction of the context window that triggers compaction. 0 turns compaction off.
 ---@field leader string The key `<leader>` expands to when a mapping is set.

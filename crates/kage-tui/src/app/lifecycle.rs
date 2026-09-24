@@ -219,12 +219,19 @@ impl App {
 
     /// Recompute `search_match_set` when stale (pattern changed or
     /// buffer version moved) and clear it when no pattern is active.
-    /// Call before `search_matches`. Streaming deltas inside the
-    /// re-parse throttle window skip the rescan: the match list may
-    /// lag the live text by one window, which the counter and jump
-    /// already tolerate.
+    /// Blocks that enter or leave the set drop their render caches,
+    /// which bake in the match rule. Call before `search_matches`.
+    /// Streaming deltas inside the re-parse throttle window skip the
+    /// rescan: the match list may lag the live text by one window,
+    /// which the counter and jump already tolerate.
     pub(crate) fn refresh_search_matches(&mut self) {
         let Some(pattern) = self.search_pattern.as_deref() else {
+            if !self.search_match_set.is_empty() {
+                let mut buf = lock(&self.buffer);
+                for &idx in &self.search_match_set {
+                    buf.invalidate_height(idx);
+                }
+            }
             self.search_match_set.clear();
             self.search_match_pattern.clear();
             return;
@@ -238,8 +245,17 @@ impl App {
             return;
         }
         if pattern_changed || version != self.search_match_version {
-            self.search_match_set = lock(&self.buffer).match_indices(pattern);
-            self.search_match_version = version;
+            let mut buf = lock(&self.buffer);
+            let matches = buf.match_indices(pattern);
+            let old = &self.search_match_set;
+            let entered = matches.iter().filter(|i| old.binary_search(i).is_err());
+            let left = old.iter().filter(|i| matches.binary_search(i).is_err());
+            for &idx in entered.chain(left) {
+                buf.invalidate_height(idx);
+            }
+            self.search_match_version = buf.version();
+            drop(buf);
+            self.search_match_set = matches;
             self.search_match_pattern = pattern.to_owned();
         }
     }

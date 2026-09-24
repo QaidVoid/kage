@@ -594,10 +594,14 @@ pub struct App {
     /// terminal. Set by the command handler (which has no terminal
     /// access); consumed by the loop like the external-editor chord.
     pending_login: Option<PendingLogin>,
-    /// The most recently submitted search pattern. While set, blocks
-    /// containing the pattern render with a Match emphasis and `n` /
-    /// `N` walk between them.
+    /// The active search pattern: the open search line's text, else
+    /// the last one submitted. While set, blocks containing the
+    /// pattern render with a Match emphasis and `n` / `N` walk between
+    /// them.
     search_pattern: Option<String>,
+    /// The pattern and view from before the open search line, which
+    /// `Esc` restores.
+    search_origin: Option<keys::SearchOrigin>,
     /// Cached block indices matching `search_pattern`, in buffer
     /// order. Recomputed when the pattern or buffer version changes.
     search_match_set: Vec<usize>,

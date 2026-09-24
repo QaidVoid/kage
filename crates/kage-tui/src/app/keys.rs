@@ -25,6 +25,15 @@ pub(crate) enum Escalation {
     QuitArmed,
 }
 
+/// What an open search line restores on `Esc`: the pattern and the
+/// view from before it opened.
+#[derive(Debug)]
+pub(crate) struct SearchOrigin {
+    pattern: Option<String>,
+    focus: Option<usize>,
+    scroll: Option<usize>,
+}
+
 impl App {
     /// The editing state keys resolve in, which selects the keymap
     /// modes to search.
@@ -403,23 +412,73 @@ impl App {
         self.refresh_input_completion();
     }
 
+    /// Open the search line on the footer row, remembering the pattern
+    /// and the view that `Esc` restores.
+    pub(crate) fn begin_search(&mut self) {
+        let buf = lock(&self.buffer);
+        self.search_origin = Some(SearchOrigin {
+            pattern: self.search_pattern.clone(),
+            focus: buf.focus(),
+            scroll: buf.scroll(),
+        });
+        drop(buf);
+        self.search_line = Some(CommandLine::new());
+    }
+
+    /// Drive the open search line. Every edit searches live, Up and
+    /// Down walk the matches, Enter keeps the pattern for `n` and `N`,
+    /// and `Esc` restores the pattern and view from before.
     pub(crate) fn dispatch_search_key(
         &mut self,
         key: ratatui::crossterm::event::KeyEvent,
     ) -> Option<AppExit> {
+        use ratatui::crossterm::event::{KeyCode, KeyEventKind};
         let line = self.search_line.as_mut()?;
+        if key.kind == KeyEventKind::Press && matches!(key.code, KeyCode::Up | KeyCode::Down) {
+            self.jump_to_search_match(key.code == KeyCode::Down);
+            return None;
+        }
         match line.handle_key(key, &[], &EmptyResolver) {
-            CommandLineEvent::Pending => None,
-            CommandLineEvent::Cancelled => {
-                self.search_line = None;
-                None
-            }
+            CommandLineEvent::Pending => self.preview_search(),
+            CommandLineEvent::Cancelled => self.cancel_search(),
             CommandLineEvent::Submit(text) => {
                 self.search_line = None;
+                self.search_origin = None;
                 self.search_pattern = Some(text);
-                self.jump_to_search_match(true);
-                None
             }
+        }
+        None
+    }
+
+    /// Search for the open line's text and focus the first match at or
+    /// after where the search began, else the last match before it.
+    /// With no match the view goes back to where it was.
+    pub(crate) fn preview_search(&mut self) {
+        let (Some(line), Some(origin)) = (&self.search_line, &self.search_origin) else {
+            return;
+        };
+        let text = line.text();
+        let (focus, scroll) = (origin.focus, origin.scroll);
+        self.search_pattern = (!text.trim().is_empty()).then(|| text.to_owned());
+        self.refresh_search_matches();
+        let matches = self.search_matches();
+        let mut buf = lock(&self.buffer);
+        let from = focus.or_else(|| buf.last_selectable_index()).unwrap_or(0);
+        let hit = matches
+            .get(matches.partition_point(|&i| i < from))
+            .or_else(|| matches.last());
+        if let Some(&hit) = hit {
+            buf.set_focus(Some(hit));
+        } else {
+            restore_view(&mut buf, focus, scroll);
+        }
+    }
+
+    fn cancel_search(&mut self) {
+        self.search_line = None;
+        if let Some(origin) = self.search_origin.take() {
+            self.search_pattern = origin.pattern;
+            restore_view(&mut lock(&self.buffer), origin.focus, origin.scroll);
         }
     }
 
@@ -537,5 +596,13 @@ impl App {
                 }
             }
         }
+    }
+}
+
+fn restore_view(buf: &mut crate::Buffer, focus: Option<usize>, scroll: Option<usize>) {
+    buf.set_focus(focus);
+    match scroll {
+        Some(scroll) => buf.set_scroll(scroll),
+        None => buf.follow(),
     }
 }

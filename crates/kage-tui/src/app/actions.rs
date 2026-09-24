@@ -266,16 +266,11 @@ impl App {
         buf.push_custom("kage:error", msg, false);
     }
 
-    /// Copy the active screen selection to the system clipboard via
-    /// OSC52. Walks every captured row in the selection range,
-    /// strips renderer-only decoration glyphs (rule chars), trims
-    /// trailing whitespace per row, joins with `\n`, and clears the
-    /// selection.
-    /// Push `text` to the system clipboard via the OSC52 escape.
-    /// Returns the number of chars written (0 for empty input, which
-    /// is a no-op). The terminal owns the actual clipboard handoff;
-    /// failures to write stdout are silently dropped because a copy
-    /// is best-effort and never load-bearing.
+    /// Push `text` to the system clipboard: the OSC52 escape for the
+    /// terminal, and `arboard` on a background thread for terminals
+    /// that ignore OSC52. Returns the number of chars written (0 for
+    /// empty input, which is a no-op). A copy is best-effort, so
+    /// failures are silently dropped.
     pub(crate) fn copy_to_clipboard(text: &str) -> usize {
         if text.is_empty() {
             return 0;
@@ -284,9 +279,15 @@ impl App {
         let mut stdout = std::io::stdout();
         let _ = write!(stdout, "\x1b]52;c;{encoded}\x07");
         let _ = stdout.flush();
+        // Tests must not overwrite the developer's real clipboard.
+        #[cfg(not(test))]
+        set_os_clipboard(text.to_owned());
         text.chars().count()
     }
 
+    /// Copy the active screen selection to the clipboard, or the
+    /// focused block's source when nothing is selected, and clear the
+    /// selection.
     pub(crate) fn yank_screen_selection(&mut self) {
         if self.screen_selection.is_none() {
             // No selection: `y` means "copy the focused response",
@@ -301,7 +302,7 @@ impl App {
         }
         let n = Self::copy_to_clipboard(&text);
         self.clear_selection();
-        self.notify(format!("yanked {n} chars to clipboard"));
+        self.notify(format!("copied {n} characters"));
     }
 
     pub(crate) fn clear_selection(&mut self) {
@@ -403,7 +404,7 @@ impl App {
             return;
         }
         let n = Self::copy_to_clipboard(&text);
-        self.notify(format!("yanked {n} chars to clipboard"));
+        self.notify(format!("copied {n} characters"));
     }
 
     /// Copy block `idx`'s raw source to the clipboard. Backs the
@@ -417,7 +418,7 @@ impl App {
         let text = text.trim_end();
         let n = Self::copy_to_clipboard(text);
         if n > 0 {
-            self.notify(format!("copied {n} chars to clipboard"));
+            self.notify(format!("copied {n} characters"));
         }
     }
 
@@ -639,4 +640,31 @@ impl App {
         let mut buf = lock(&self.buffer);
         buf.push_custom("kage:help", body, false);
     }
+}
+
+/// Hand `text` to the OS clipboard off the UI thread. On X11 and
+/// Wayland the thread keeps serving the text until another client
+/// takes the clipboard over, since the contents vanish with their
+/// owner.
+#[cfg(not(test))]
+fn set_os_clipboard(text: String) {
+    std::thread::spawn(move || {
+        let Ok(mut clipboard) = arboard::Clipboard::new() else {
+            return;
+        };
+        #[cfg(all(
+            unix,
+            not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
+        ))]
+        let set = {
+            use arboard::SetExtLinux;
+            clipboard.set().wait()
+        };
+        #[cfg(not(all(
+            unix,
+            not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
+        )))]
+        let set = clipboard.set();
+        let _ = set.text(text);
+    });
 }

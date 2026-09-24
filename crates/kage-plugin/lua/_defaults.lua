@@ -15,6 +15,7 @@ kage.ui.set_slot("footer", {
 
 local tips = {
   "Tab queues a message while kage works. Enter steers the running turn.",
+  "Ctrl+F searches the conversation. Up and Down walk the matches.",
   "Shift+Enter inserts a newline. Ctrl+G edits the prompt in $EDITOR.",
   "Ctrl+O folds or unfolds the focused block. Alt+P and Alt+N move the focus.",
   "Start a prompt with ! to run a shell command. Type @ to complete a file path.",
@@ -39,6 +40,7 @@ map("g", "<F3>", act.OpenJumpPicker, { desc = "jump to a message", group = "gene
 map("g", "<S-Tab>", act.CycleThinkingLevel, { desc = "cycle thinking level", group = "general" })
 map("g", "<C-v>", act.AttachClipboardImage, { desc = "attach image from clipboard", group = "general" })
 map("i", "<Tab>", act.QueuePrompt, { desc = "queue the prompt until the run ends", group = "general" })
+map("i", "<C-f>", act.BeginSearch, { desc = "search the conversation", group = "general" })
 
 local conversation = "conversation"
 map({ "i", "n" }, "<PageUp>", act.scroll(-10), { desc = "scroll up ten lines", group = conversation })

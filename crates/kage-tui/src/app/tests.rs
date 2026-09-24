@@ -3051,6 +3051,99 @@ fn search_count_is_none_without_a_pattern() {
 }
 
 #[test]
+fn ctrl_f_counts_matches_while_typing() {
+    let (mut app, buffer) = search_fixture();
+    app.handle_key(ctrl('f'));
+    assert!(app.search_line.is_some());
+    for c in "needle".chars() {
+        app.handle_key(key(c));
+    }
+    assert!(app.search_line.is_some(), "still open before Enter");
+    assert_eq!(app.compute_search_match_count(), Some((1, 2)));
+    assert_eq!(buffer.lock().unwrap().focus(), Some(1));
+    app.handle_key(key('x'));
+    assert_eq!(app.compute_search_match_count(), Some((0, 0)));
+    assert_eq!(
+        buffer.lock().unwrap().focus(),
+        Some(0),
+        "no match keeps the view"
+    );
+}
+
+#[test]
+fn search_line_down_and_up_walk_matches() {
+    let (mut app, buffer) = search_fixture();
+    app.handle_key(ctrl('f'));
+    for c in "needle".chars() {
+        app.handle_key(key(c));
+    }
+    app.handle_key(code(KeyCode::Down));
+    assert_eq!(buffer.lock().unwrap().focus(), Some(3));
+    assert_eq!(app.search_line.as_ref().unwrap().text(), "needle");
+    app.handle_key(code(KeyCode::Up));
+    assert_eq!(buffer.lock().unwrap().focus(), Some(1));
+    app.handle_key(code(KeyCode::Enter));
+    assert!(app.search_line.is_none());
+    assert_eq!(app.search_pattern.as_deref(), Some("needle"));
+    assert_eq!(buffer.lock().unwrap().focus(), Some(1));
+}
+
+#[test]
+fn search_from_the_bottom_lands_on_the_latest_match() {
+    let (mut app, buffer) = search_fixture();
+    buffer.lock().unwrap().set_focus(None);
+    app.handle_key(ctrl('f'));
+    for c in "needle".chars() {
+        app.handle_key(key(c));
+    }
+    assert_eq!(buffer.lock().unwrap().focus(), Some(3));
+}
+
+#[test]
+fn esc_restores_the_previous_pattern_and_view() {
+    let (mut app, buffer) = search_fixture();
+    app.search_pattern = Some("gamma".into());
+    buffer.lock().unwrap().set_scroll(2);
+    app.handle_key(ctrl('f'));
+    for c in "needle".chars() {
+        app.handle_key(key(c));
+    }
+    app.handle_key(code(KeyCode::Down));
+    assert_eq!(app.search_pattern.as_deref(), Some("needle"));
+    app.handle_key(code(KeyCode::Esc));
+    assert!(app.search_line.is_none());
+    assert_eq!(app.search_pattern.as_deref(), Some("gamma"));
+    let buf = buffer.lock().unwrap();
+    assert_eq!(buf.focus(), Some(0));
+    assert_eq!(buf.scroll(), Some(2));
+}
+
+#[test]
+fn a_block_leaving_the_match_set_loses_its_match_rule() {
+    let (mut app, buffer) = search_fixture();
+    let mut terminal = Terminal::new(TestBackend::new(40, 16)).unwrap();
+    let rule_of_block_1 = |app: &mut App, terminal: &mut Terminal<TestBackend>| {
+        app.render_into(terminal).unwrap();
+        let buf = buffer.lock().unwrap();
+        let (top, _) = buf.screen_rows_of(1).expect("block 1 painted");
+        terminal.backend().buffer()[(0, top)].symbol().to_owned()
+    };
+    app.search_pattern = Some("needle".into());
+    assert_eq!(rule_of_block_1(&mut app, &mut terminal), "\u{258c}");
+    app.search_pattern = Some("gamma".into());
+    assert_eq!(rule_of_block_1(&mut app, &mut terminal), " ");
+}
+
+#[test]
+fn pasting_into_the_search_line_searches() {
+    let (mut app, buffer) = search_fixture();
+    app.handle_key(ctrl('f'));
+    app.handle_paste("gamma");
+    assert_eq!(app.compute_search_match_count(), Some((1, 1)));
+    assert_eq!(buffer.lock().unwrap().focus(), Some(2));
+}
+
+#[test]
 fn noh_command_clears_search_highlighting() {
     let (mut app, _buffer) = search_fixture();
     app.search_pattern = Some("needle".into());
@@ -3079,6 +3172,80 @@ fn mouse_event(
         row: 5,
         modifiers: KeyModifiers::NONE,
     }
+}
+
+/// An App over forty one-line replies, painted into a 40x12 terminal
+/// and scrolled to the top, with a selection anchored on the first
+/// buffer row.
+fn drag_fixture() -> (App, SharedBuffer, Terminal<TestBackend>) {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer.clone(), tx);
+    {
+        let mut buf = buffer.lock().unwrap();
+        for i in 0..40 {
+            buf.append_assistant_delta(&format!("reply {i}"));
+            buf.finish_streaming();
+        }
+        buf.set_scroll(0);
+    }
+    let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+    app.render_into(&mut terminal).unwrap();
+    let area_y = buffer.lock().unwrap().last_area_y();
+    app.mouse_down(area_y, 2);
+    app.render_into(&mut terminal).unwrap();
+    (app, buffer, terminal)
+}
+
+#[test]
+fn a_drag_below_the_buffer_scrolls_one_line_and_extends_the_selection() {
+    let (mut app, buffer, mut terminal) = drag_fixture();
+    let (area_y, height) = {
+        let buf = buffer.lock().unwrap();
+        (buf.last_area_y(), buf.last_area_height())
+    };
+    let below = area_y + height + 1;
+    app.mouse_drag(below, 5);
+    assert_eq!(buffer.lock().unwrap().scroll(), Some(1));
+    let (_, cursor) = app.screen_selection.unwrap();
+    assert_eq!(cursor, (usize::from(height), 5));
+
+    app.render_into(&mut terminal).unwrap();
+    app.mouse_drag(below, 5);
+    assert_eq!(buffer.lock().unwrap().scroll(), Some(2));
+    let (anchor, cursor) = app.screen_selection.unwrap();
+    assert_eq!(anchor, (0, 2));
+    assert_eq!(cursor, (usize::from(height) + 1, 5));
+}
+
+#[test]
+fn a_drag_above_the_top_clamps_and_a_drag_inside_does_not_scroll() {
+    let (mut app, buffer, _terminal) = drag_fixture();
+    let area_y = buffer.lock().unwrap().last_area_y();
+    app.mouse_drag(area_y.saturating_sub(1), 3);
+    assert_eq!(buffer.lock().unwrap().scroll(), Some(0));
+    assert_eq!(app.screen_selection.unwrap().1, (0, 3));
+    app.mouse_drag(area_y + 2, 3);
+    assert_eq!(buffer.lock().unwrap().scroll(), Some(0));
+    assert_eq!(app.screen_selection.unwrap().1, (2, 3));
+}
+
+#[test]
+fn a_drag_release_toasts_the_copied_characters() {
+    let (mut app, buffer, mut terminal) = drag_fixture();
+    app.set_toasts(crate::toast::shared_toasts());
+    let area_y = buffer.lock().unwrap().last_area_y();
+    app.mouse_drag(area_y, 30);
+    app.render_into(&mut terminal).unwrap();
+    app.mouse_up(area_y);
+    assert!(app.screen_selection.is_none());
+    let toasts = app.live_toasts();
+    assert!(
+        toasts
+            .iter()
+            .any(|t| t.text.starts_with("copied ") && t.text.ends_with(" characters")),
+        "{toasts:?}"
+    );
 }
 
 #[test]

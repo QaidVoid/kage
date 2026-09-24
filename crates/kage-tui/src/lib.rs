@@ -22,6 +22,7 @@ pub mod syntax;
 pub mod terminal;
 pub mod theme;
 pub mod toast;
+pub mod transcript;
 pub mod usage;
 pub mod view;
 
@@ -58,6 +59,7 @@ pub use toast::{
     DEFAULT_TOAST_DURATION, MAX_VISIBLE_TOASTS, SharedToasts, Toast, ToastKind, push_toast,
     shared_toasts,
 };
+pub use transcript::TranscriptScope;
 pub use usage::{SessionUsage, SharedSessionUsage, shared_session_usage};
 pub use view::{
     AssistantBlockWidget, BlockFactory, BlockRenderer, BlockWidget, BuiltinKind, EmptyBlockWidget,

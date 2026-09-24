@@ -128,6 +128,17 @@ pub const OPTIONS: &[OptionDef] = &[
         live: true,
     },
     OptionDef {
+        name: "transcript_on_exit",
+        toml: "ui.transcript_on_exit",
+        kind: OptionKind::Choice {
+            values: &["full", "last", "none"],
+            default: "full",
+        },
+        doc: "What prints after exit: the whole transcript, from the last prompt on, or only the session path.",
+        since: 2,
+        live: true,
+    },
+    OptionDef {
         name: "thinking_level",
         toml: "ui.thinking_level",
         kind: OptionKind::Choice {
@@ -459,6 +470,7 @@ fn config_value(name: &str, config: &Config) -> Option<OptionValue> {
         ),
         "input_min_lines" => OptionValue::Int(i64::from(ui.input_min_lines)),
         "input_max_lines" => OptionValue::Int(i64::from(ui.input_max_lines)),
+        "transcript_on_exit" => OptionValue::Str(ui.transcript_on_exit.clone()),
         "thinking_level" => OptionValue::Str(ui.thinking_level.clone().unwrap_or_default()),
         "compaction_threshold" => {
             OptionValue::Float(widen(config.loop_settings.compaction_threshold))
@@ -558,6 +570,11 @@ mod tests {
             ("editor", "\"vim\"", OptionValue::Str("vim".into())),
             ("input_min_lines", "2", OptionValue::Int(2)),
             ("input_max_lines", "12", OptionValue::Int(12)),
+            (
+                "transcript_on_exit",
+                "\"last\"",
+                OptionValue::Str("last".into()),
+            ),
             (
                 "thinking_level",
                 "\"high\"",
@@ -689,6 +706,38 @@ mod tests {
             .set("nope", OptionValue::Bool(true), OptionSource::Lua)
             .unwrap_err();
         assert!(err.to_string().contains("theme, mouse"), "{err}");
+    }
+
+    #[test]
+    fn transcript_on_exit_takes_its_three_values() {
+        let mut store = OptionStore::default();
+        assert_eq!(
+            store.get("transcript_on_exit"),
+            Some(&OptionValue::Str("full".into()))
+        );
+        for value in ["full", "last", "none"] {
+            assert!(
+                store
+                    .set(
+                        "transcript_on_exit",
+                        OptionValue::Str(value.into()),
+                        OptionSource::Lua
+                    )
+                    .is_ok(),
+                "{value}"
+            );
+        }
+        let err = store
+            .set(
+                "transcript_on_exit",
+                OptionValue::Str("all".into()),
+                OptionSource::Lua,
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("\"full\", \"last\", \"none\""),
+            "{err}"
+        );
     }
 
     #[test]

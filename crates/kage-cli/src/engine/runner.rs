@@ -90,6 +90,9 @@ impl Run {
 
         bus.publish(session, HostEvent::RunStarted);
         let mut emit = |event: LoopEvent| {
+            if let Some(rt) = &plugins {
+                crate::plugins::forward_event(rt, &event);
+            }
             if let Some(rec) = recorder.as_mut()
                 && let Err(err) = rec.observe(&event)
             {

@@ -314,7 +314,7 @@ impl Buffer {
     /// buffer; the version bump it performs makes index-bearing
     /// caches elsewhere (the search-match list) rebuild themselves.
     ///
-    /// Not to be confused with `kage_loop::compact::maybe_compact`:
+    /// Not to be confused with the agent loop's context compaction:
     /// that compacts the *session history* against the token budget;
     /// this only trims *rendered scrollback*.
     pub(crate) fn trim_scrollback(&mut self) -> usize {

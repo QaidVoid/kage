@@ -376,8 +376,8 @@ function kage.register_block_renderer(kind, render) end
 function kage.register_keybinding(spec, handler) end
 
 --- Add a prompt-input autocomplete provider. Providers form a
---- stack; the most recently added wins. Runs synchronously in
---- the shared Lua mutex, so keep it cheap.
+--- stack; the most recently added wins. Runs synchronously on
+--- the Lua thread, so keep it cheap.
 ---@param spec kage.AutocompleteSpec
 function kage.add_autocomplete_provider(spec) end
 

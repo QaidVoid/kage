@@ -36,8 +36,7 @@ use crate::{AgentContext, Hooks, LoopConfig, SteeringMode};
 /// loop appends is announced with [`LoopEvent::MessageAppended`]; the
 /// initiating message is the caller's to announce.
 ///
-/// Streaming events are delivered to `emit` in order. The same events also
-/// flow through `hooks.on_event`, which fires first.
+/// Streaming events are delivered to `emit` in order.
 ///
 /// Cancellation is cooperative: the loop polls `cancel` between turns and
 /// after each provider event. On cancel, the run terminates with
@@ -66,36 +65,31 @@ where
 
     loop {
         if cancel.is_cancelled() {
-            return finish_cancelled(hooks, &mut emit);
+            return finish_cancelled(&mut emit);
         }
 
         loop {
             if cancel.is_cancelled() {
-                return finish_cancelled(hooks, &mut emit);
+                return finish_cancelled(&mut emit);
             }
 
             if let Some(text) = drain_messages(config.steering_mode, || hooks.get_steering()) {
-                push_user_text(cx, hooks, &mut emit, text);
+                push_user_text(cx, &mut emit, text);
             }
 
             if let Err(kind) = maybe_compact(cx, config, provider, cancel, hooks, &mut emit) {
-                emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
+                emit(LoopEvent::Error { kind: kind.clone() });
                 return Err(kind);
             }
 
-            hooks.on_turn_start(turn_index);
-            emit_one(
-                hooks,
-                &mut emit,
-                LoopEvent::TurnStarted { index: turn_index },
-            );
+            emit(LoopEvent::TurnStarted { index: turn_index });
 
             if let Err(message) = hooks.transform_context(&mut cx.history) {
                 let kind = LoopError::HookFailed {
                     hook: "transform_context".to_owned(),
                     message,
                 };
-                emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
+                emit(LoopEvent::Error { kind: kind.clone() });
                 return Err(kind);
             }
 
@@ -105,7 +99,7 @@ where
                     hook: "transform_provider_request".to_owned(),
                     message,
                 };
-                emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
+                emit(LoopEvent::Error { kind: kind.clone() });
                 return Err(kind);
             }
             let parent = cx.history.last().map(|m| m.id);
@@ -123,19 +117,12 @@ where
                 let mut attempt: u32 = 0;
                 loop {
                     if cancel.is_cancelled() {
-                        return finish_cancelled(hooks, &mut emit);
+                        return finish_cancelled(&mut emit);
                     }
-                    match stream_one_attempt(
-                        provider,
-                        req.clone(),
-                        parent,
-                        cancel,
-                        hooks,
-                        &mut emit,
-                    ) {
+                    match stream_one_attempt(provider, req.clone(), parent, cancel, &mut emit) {
                         Ok(t) => break t,
                         Err(TurnFailure::Fatal(kind)) => {
-                            emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
+                            emit(LoopEvent::Error { kind: kind.clone() });
                             return Err(kind);
                         }
                         Err(TurnFailure::Provider(e)) => {
@@ -147,25 +134,21 @@ where
                                         message: other.to_string(),
                                     },
                                 };
-                                emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
+                                emit(LoopEvent::Error { kind: kind.clone() });
                                 return Err(kind);
                             }
                             attempt += 1;
                             let requested = e.retry_after();
                             let wait = retry_backoff(attempt, &e);
-                            emit_one(
-                                hooks,
-                                &mut emit,
-                                LoopEvent::ProviderRetry {
-                                    attempt,
-                                    max_attempts: config.max_provider_retries,
-                                    wait_secs: wait.as_secs().max(1),
-                                    requested_secs: requested.map(|d| d.as_secs()),
-                                    error: e.to_string(),
-                                },
-                            );
+                            emit(LoopEvent::ProviderRetry {
+                                attempt,
+                                max_attempts: config.max_provider_retries,
+                                wait_secs: wait.as_secs().max(1),
+                                requested_secs: requested.map(|d| d.as_secs()),
+                                error: e.to_string(),
+                            });
                             if !sleep_cancelable(cancel, wait) {
-                                return finish_cancelled(hooks, &mut emit);
+                                return finish_cancelled(&mut emit);
                             }
                         }
                     }
@@ -176,18 +159,13 @@ where
             let turn_usage = turn.usage;
             let assistant_id = turn.message.id;
             let pending = turn.tool_calls.clone();
-            append(cx, hooks, &mut emit, turn.message);
+            append(cx, &mut emit, turn.message);
 
             let had_tool_calls = !pending.is_empty();
-            hooks.on_turn_end(turn_index, had_tool_calls);
-            emit_one(
-                hooks,
-                &mut emit,
-                LoopEvent::TurnEnded {
-                    index: turn_index,
-                    had_tool_calls,
-                },
-            );
+            emit(LoopEvent::TurnEnded {
+                index: turn_index,
+                had_tool_calls,
+            });
             let summary = crate::hooks::TurnSummary {
                 index: turn_index,
                 had_tool_calls,
@@ -231,8 +209,8 @@ where
                 // Every tool_use in the assistant message now has an answer
                 // in `outcome.results`; append them so in-memory history and
                 // the persisted session never carry a dangling tool_use.
-                append_all(cx, hooks, &mut emit, outcome.results);
-                emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
+                append_all(cx, &mut emit, outcome.results);
+                emit(LoopEvent::Error { kind: kind.clone() });
                 return Err(kind);
             }
             let results = outcome.results;
@@ -240,7 +218,7 @@ where
             // results and exit the run cleanly. The loop never asks the
             // model for another turn, never dequeues a follow-up.
             if outcome.all_terminate {
-                append_all(cx, hooks, &mut emit, results);
+                append_all(cx, &mut emit, results);
                 return Ok(());
             }
 
@@ -256,16 +234,16 @@ where
                     steering = Some(msg);
                 }
             }
-            append_all(cx, hooks, &mut emit, results);
+            append_all(cx, &mut emit, results);
             if let Some(text) = steering {
-                push_user_text(cx, hooks, &mut emit, text);
+                push_user_text(cx, &mut emit, text);
             }
         }
 
         let Some(text) = drain_messages(config.followup_mode, || hooks.get_followup()) else {
             return Ok(());
         };
-        push_user_text(cx, hooks, &mut emit, text);
+        push_user_text(cx, &mut emit, text);
     }
 }
 
@@ -290,49 +268,26 @@ fn drain_messages<F: FnMut() -> Option<String>>(mode: SteeringMode, mut poll: F)
 
 /// Append `message` to history and announce it with
 /// [`LoopEvent::MessageAppended`].
-fn append<F: FnMut(LoopEvent)>(
-    cx: &mut AgentContext,
-    hooks: &mut dyn Hooks,
-    emit: &mut F,
-    message: Message,
-) {
+fn append<F: FnMut(LoopEvent)>(cx: &mut AgentContext, emit: &mut F, message: Message) {
     cx.history.push(message.clone());
-    emit_one(hooks, emit, LoopEvent::MessageAppended { message });
+    emit(LoopEvent::MessageAppended { message });
 }
 
-fn append_all<F: FnMut(LoopEvent)>(
-    cx: &mut AgentContext,
-    hooks: &mut dyn Hooks,
-    emit: &mut F,
-    messages: Vec<Message>,
-) {
+fn append_all<F: FnMut(LoopEvent)>(cx: &mut AgentContext, emit: &mut F, messages: Vec<Message>) {
     for message in messages {
-        append(cx, hooks, emit, message);
+        append(cx, emit, message);
     }
 }
 
 /// Append a user text message that the loop injected (steering, follow-up,
 /// or a doom-loop nudge).
-fn push_user_text<F: FnMut(LoopEvent)>(
-    cx: &mut AgentContext,
-    hooks: &mut dyn Hooks,
-    emit: &mut F,
-    text: String,
-) {
+fn push_user_text<F: FnMut(LoopEvent)>(cx: &mut AgentContext, emit: &mut F, text: String) {
     let message = Message::new(
         kage_core::Role::User,
         vec![Content::Text { text }],
         cx.history.last().map(|m| m.id),
     );
-    hooks.on_user_message(&message);
-    append(cx, hooks, emit, message);
-}
-
-/// Emit one event to both the host's `Hooks::on_event` and the user emit
-/// callback, in that order.
-pub(crate) fn emit_one<F: FnMut(LoopEvent)>(hooks: &mut dyn Hooks, emit: &mut F, event: LoopEvent) {
-    hooks.on_event(&event);
-    emit(event);
+    append(cx, emit, message);
 }
 
 /// Rewrite persisted `Content::Thinking` blocks into inline
@@ -404,17 +359,10 @@ fn build_request(
     req
 }
 
-fn finish_cancelled<F: FnMut(LoopEvent)>(
-    hooks: &mut dyn Hooks,
-    emit: &mut F,
-) -> Result<(), LoopError> {
-    emit_one(
-        hooks,
-        emit,
-        LoopEvent::Error {
-            kind: LoopError::Cancelled,
-        },
-    );
+fn finish_cancelled<F: FnMut(LoopEvent)>(emit: &mut F) -> Result<(), LoopError> {
+    emit(LoopEvent::Error {
+        kind: LoopError::Cancelled,
+    });
     Err(LoopError::Cancelled)
 }
 
@@ -427,13 +375,12 @@ fn stream_one_attempt<F: FnMut(LoopEvent)>(
     req: StreamRequest,
     parent: Option<MessageId>,
     cancel: &CancelFlag,
-    hooks: &mut dyn Hooks,
     emit: &mut F,
 ) -> Result<TurnResult, TurnFailure> {
     let stream = provider
         .stream(req, cancel)
         .map_err(TurnFailure::Provider)?;
-    collect_turn(parent, stream, cancel, hooks, emit)
+    collect_turn(parent, stream, cancel, emit)
 }
 
 /// Backoff before retry `attempt` (1-based). A provider `retry_after`

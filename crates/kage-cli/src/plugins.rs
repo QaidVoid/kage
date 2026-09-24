@@ -203,10 +203,89 @@ fn log_plugin_error(rt: &PluginRuntime, args: std::fmt::Arguments<'_>) {
     lock(&sink).log(LogLevel::Error, &args.to_string());
 }
 
-/// Hooks adapter that forwards loop events to plugin event handlers.
-///
-/// The host wraps another `Hooks` (typically the session recorder) so
-/// plugin dispatch and session recording both see every event. Plugin
+/// Fire the plugin events that mirror a loop event: message, tool, and
+/// turn lifecycle.
+pub(crate) fn forward_event(rt: &PluginRuntime, event: &LoopEvent) {
+    match event {
+        LoopEvent::MessageStart { id } if rt.handler_count("message_start") > 0 => {
+            let _ = rt.dispatch_event("message_start", &json!({ "id": id.to_string() }));
+        }
+        LoopEvent::TextDelta { id, delta } if rt.handler_count("message_update") > 0 => {
+            let _ = rt.dispatch_event(
+                "message_update",
+                &json!({
+                    "id": id.to_string(),
+                    "delta": delta,
+                }),
+            );
+        }
+        LoopEvent::MessageEnd { id, usage, .. } => {
+            let payload = json!({
+                "id": id.to_string(),
+                "usage": {
+                    "input": usage.input,
+                    "output": usage.output,
+                    "cache_read": usage.cache_read,
+                    "cache_write": usage.cache_write,
+                },
+            });
+            let _ = rt.dispatch_event("message_end", &payload);
+            if rt.handler_count("after_provider_response") > 0 {
+                let _ = rt.dispatch_event("after_provider_response", &payload);
+            }
+        }
+        LoopEvent::ToolCallStart {
+            id,
+            name,
+            input_partial,
+        } => {
+            let _ = rt.dispatch_event(
+                "tool_call",
+                &json!({
+                    "id": id.to_string(),
+                    "name": name,
+                    "input": input_partial,
+                }),
+            );
+        }
+        LoopEvent::ToolCallEnd { id, output } => {
+            let _ = rt.dispatch_event(
+                "tool_result",
+                &json!({
+                    "id": id.to_string(),
+                    "is_error": output.is_error,
+                    "text": output.text,
+                }),
+            );
+        }
+        LoopEvent::ToolUpdate { id, update } if rt.handler_count("tool_update") > 0 => {
+            let _ = rt.dispatch_event(
+                "tool_update",
+                &json!({
+                    "id": id.to_string(),
+                    "content": update.content,
+                    "structured": update.structured,
+                }),
+            );
+        }
+        LoopEvent::TurnStarted { index } => {
+            let _ = rt.dispatch_event("turn_start", &json!({ "index": index }));
+        }
+        LoopEvent::TurnEnded {
+            index,
+            had_tool_calls,
+        } => {
+            let _ = rt.dispatch_event(
+                "turn_end",
+                &json!({ "index": index, "had_tool_calls": had_tool_calls }),
+            );
+        }
+        _ => {}
+    }
+}
+
+/// Hooks adapter that lets plugins steer a run: context and request
+/// transforms, compaction, stop predicates, and queued messages. Plugin
 /// dispatch errors are logged through the runtime's host log; they never
 /// abort the loop.
 pub struct PluginEventHooks<H: Hooks> {
@@ -248,82 +327,6 @@ impl<H: Hooks> Hooks for PluginEventHooks<H> {
 
     fn after_tool_call(&mut self, name: &str, output: ToolOutput) -> ToolOutput {
         self.inner.after_tool_call(name, output)
-    }
-
-    fn on_event(&mut self, event: &LoopEvent) {
-        match event {
-            LoopEvent::MessageStart { id } if self.runtime.handler_count("message_start") > 0 => {
-                let _ = self
-                    .runtime
-                    .dispatch_event("message_start", &json!({ "id": id.to_string() }));
-            }
-            LoopEvent::TextDelta { id, delta }
-                if self.runtime.handler_count("message_update") > 0 =>
-            {
-                let _ = self.runtime.dispatch_event(
-                    "message_update",
-                    &json!({
-                        "id": id.to_string(),
-                        "delta": delta,
-                    }),
-                );
-            }
-            LoopEvent::MessageEnd { id, usage, .. } => {
-                let payload = json!({
-                    "id": id.to_string(),
-                    "usage": {
-                        "input": usage.input,
-                        "output": usage.output,
-                        "cache_read": usage.cache_read,
-                        "cache_write": usage.cache_write,
-                    },
-                });
-                let _ = self.runtime.dispatch_event("message_end", &payload);
-                if self.runtime.handler_count("after_provider_response") > 0 {
-                    let _ = self
-                        .runtime
-                        .dispatch_event("after_provider_response", &payload);
-                }
-            }
-            LoopEvent::ToolCallStart {
-                id,
-                name,
-                input_partial,
-            } => {
-                let _ = self.runtime.dispatch_event(
-                    "tool_call",
-                    &json!({
-                        "id": id.to_string(),
-                        "name": name,
-                        "input": input_partial,
-                    }),
-                );
-            }
-            LoopEvent::ToolCallEnd { id, output } => {
-                let _ = self.runtime.dispatch_event(
-                    "tool_result",
-                    &json!({
-                        "id": id.to_string(),
-                        "is_error": output.is_error,
-                        "text": output.text,
-                    }),
-                );
-            }
-            LoopEvent::ToolUpdate { id, update }
-                if self.runtime.handler_count("tool_update") > 0 =>
-            {
-                let _ = self.runtime.dispatch_event(
-                    "tool_update",
-                    &json!({
-                        "id": id.to_string(),
-                        "content": update.content,
-                        "structured": update.structured,
-                    }),
-                );
-            }
-            _ => {}
-        }
-        self.inner.on_event(event);
     }
 
     fn transform_context(&mut self, messages: &mut Vec<Message>) -> Result<(), String> {
@@ -392,24 +395,6 @@ impl<H: Hooks> Hooks for PluginEventHooks<H> {
         Ok(())
     }
 
-    fn on_turn_start(&mut self, index: u32) {
-        let _ = self
-            .runtime
-            .dispatch_event("turn_start", &json!({ "index": index }));
-        self.inner.on_turn_start(index);
-    }
-
-    fn on_turn_end(&mut self, index: u32, had_tool_calls: bool) {
-        let _ = self.runtime.dispatch_event(
-            "turn_end",
-            &json!({
-                "index": index,
-                "had_tool_calls": had_tool_calls,
-            }),
-        );
-        self.inner.on_turn_end(index, had_tool_calls);
-    }
-
     fn should_stop_after_turn(&mut self, summary: &TurnSummary) -> bool {
         if self.inner.should_stop_after_turn(summary) {
             return true;
@@ -458,10 +443,6 @@ impl<H: Hooks> Hooks for PluginEventHooks<H> {
         }
         self.drain_plugin_messages();
         self.pending_steering.pop_front()
-    }
-
-    fn on_user_message(&mut self, message: &Message) {
-        self.inner.on_user_message(message);
     }
 }
 

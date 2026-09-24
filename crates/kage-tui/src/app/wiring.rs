@@ -38,6 +38,7 @@ impl App {
             plugin_texts_refreshed_at: None,
             plugin_texts_width: 0,
             plugin_texts_dirty: false,
+            plugin_redraw: None,
             plugin_status: None,
             plugin_status_cache: Vec::new(),
             draw_snapshot: None,
@@ -548,12 +549,9 @@ impl App {
     }
 
     /// Refresh the plugin text caches only when something observable
-    /// can have changed: the coarse tick elapsed, the width moved, or
-    /// a (re)registration marked them dirty. Widget and chrome
-    /// `render` calls each take the runtime's Lua mutex, so refreshing
-    /// every frame makes plugin latency show up as render lag. The
-    /// caches feed status-bar chrome consumed at human timescale, so
-    /// half a second of staleness is invisible.
+    /// can have changed: the coarse tick elapsed, the width moved, a
+    /// (re)registration marked them dirty, or the plugin runtime
+    /// reported fresh output.
     pub(crate) fn refresh_plugin_widget_texts_if_due(&mut self, width: u16) {
         const PLUGIN_TEXT_INTERVAL: Duration = Duration::from_millis(500);
         let due = self.plugin_texts_dirty
@@ -568,6 +566,25 @@ impl App {
         self.plugin_texts_width = width;
         self.plugin_texts_refreshed_at = Some(Instant::now());
         self.refresh_plugin_widget_texts(width);
+    }
+
+    /// Register the flag the plugin runtime sets when a widget, chrome
+    /// row, or block renderer produced new output.
+    pub fn set_plugin_redraw(&mut self, flag: Arc<std::sync::atomic::AtomicBool>) {
+        self.plugin_redraw = Some(flag);
+    }
+
+    /// Whether plugin output changed since the last check. Marks the
+    /// text caches for refresh.
+    pub(crate) fn take_plugin_redraw(&mut self) -> bool {
+        let fresh = self
+            .plugin_redraw
+            .as_ref()
+            .is_some_and(|f| f.swap(false, std::sync::atomic::Ordering::Relaxed));
+        if fresh {
+            self.plugin_texts_dirty = true;
+        }
+        fresh
     }
 
     /// Drain any pending `kage.compact()` request and forward it as

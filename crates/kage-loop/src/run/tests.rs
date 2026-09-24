@@ -237,19 +237,16 @@ fn shell_emits_steering_message_before_first_turn() {
     ));
 }
 
-#[derive(Default)]
-struct TurnRecording {
-    starts: Vec<u32>,
-    ends: Vec<(u32, bool)>,
-}
-
-impl Hooks for TurnRecording {
-    fn on_turn_start(&mut self, index: u32) {
-        self.starts.push(index);
-    }
-    fn on_turn_end(&mut self, index: u32, had_tool_calls: bool) {
-        self.ends.push((index, had_tool_calls));
-    }
+/// Turn boundaries seen in `events`, as `(start or end, index)`.
+fn turns(events: &[LoopEvent]) -> Vec<(&'static str, u32)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            LoopEvent::TurnStarted { index } => Some(("start", *index)),
+            LoopEvent::TurnEnded { index, .. } => Some(("end", *index)),
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]
@@ -265,29 +262,23 @@ fn turn_boundaries_fire_once_for_text_only_turn() {
     let mut cx = AgentContext::new("mock:m", "");
     cx.history.push(user_msg("hello"));
     let cfg = LoopConfig::default();
-    let mut hooks = TurnRecording::default();
     let cancel = CancelFlag::new();
     let registry = ToolRegistry::new();
+    let mut events = Vec::new();
 
-    run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {}).unwrap();
-    assert_eq!(hooks.starts, vec![0]);
-    assert_eq!(hooks.ends, vec![(0, false)]);
-}
-
-struct Combined {
-    inner: TurnRecording,
-    follow: OneFollowup,
-}
-impl Hooks for Combined {
-    fn on_turn_start(&mut self, index: u32) {
-        self.inner.on_turn_start(index);
-    }
-    fn on_turn_end(&mut self, index: u32, had_tool_calls: bool) {
-        self.inner.on_turn_end(index, had_tool_calls);
-    }
-    fn get_followup(&mut self) -> Option<String> {
-        self.follow.get_followup()
-    }
+    run(
+        &mock,
+        &registry,
+        &mut cx,
+        cfg,
+        &mut NoopHooks,
+        &cancel,
+        |e| {
+            events.push(e);
+        },
+    )
+    .unwrap();
+    assert_eq!(turns(&events), [("start", 0), ("end", 0)]);
 }
 
 #[test]
@@ -306,16 +297,19 @@ fn turn_index_advances_across_followup_rounds() {
     let mut cx = AgentContext::new("mock:m", "");
     cx.history.push(user_msg("hi"));
     let cfg = LoopConfig::default();
-    let mut hooks = Combined {
-        inner: TurnRecording::default(),
-        follow: OneFollowup(true),
-    };
+    let mut hooks = OneFollowup(true);
     let cancel = CancelFlag::new();
     let registry = ToolRegistry::new();
+    let mut events = Vec::new();
 
-    run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {}).unwrap();
-    assert_eq!(hooks.inner.starts, vec![0, 1]);
-    assert_eq!(hooks.inner.ends, vec![(0, false), (1, false)]);
+    run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |e| {
+        events.push(e);
+    })
+    .unwrap();
+    assert_eq!(
+        turns(&events),
+        [("start", 0), ("end", 0), ("start", 1), ("end", 1)]
+    );
 }
 
 struct StaticTransform {
@@ -1221,9 +1215,17 @@ impl kage_tools::Tool for CountingTool {
     }
 }
 
+fn event_tag(event: &LoopEvent) -> String {
+    serde_json::to_value(event).unwrap()["type"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// Records hook calls and emitted events in one shared log.
 #[derive(Default)]
 struct OrderRecording {
-    order: Vec<String>,
+    order: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
 }
 impl Hooks for OrderRecording {
     fn before_tool_call(
@@ -1232,7 +1234,7 @@ impl Hooks for OrderRecording {
         name: &str,
         _input: &serde_json::Value,
     ) -> Option<kage_core::ToolOutput> {
-        self.order.push(format!("before:{name}"));
+        self.order.borrow_mut().push(format!("before:{name}"));
         None
     }
     fn after_tool_call(
@@ -1240,15 +1242,8 @@ impl Hooks for OrderRecording {
         name: &str,
         output: kage_core::ToolOutput,
     ) -> kage_core::ToolOutput {
-        self.order.push(format!("after:{name}"));
+        self.order.borrow_mut().push(format!("after:{name}"));
         output
-    }
-    fn on_event(&mut self, event: &LoopEvent) {
-        let tag = serde_json::to_value(event).unwrap()["type"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        self.order.push(format!("event:{tag}"));
     }
 }
 
@@ -1292,9 +1287,21 @@ fn end_to_end_event_ordering_and_hook_callbacks() {
     cx.history.push(user_msg("kick off"));
     let cfg = LoopConfig::default();
     let mut hooks = OrderRecording::default();
+    let log = std::rc::Rc::clone(&hooks.order);
     let cancel = CancelFlag::new();
 
-    let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {});
+    let res = run(
+        &mock,
+        &registry,
+        &mut cx,
+        cfg,
+        &mut hooks,
+        &cancel,
+        |event| {
+            log.borrow_mut()
+                .push(format!("event:{}", event_tag(&event)));
+        },
+    );
     assert!(res.is_ok());
 
     // Tool ran exactly once with the expected input.
@@ -1310,7 +1317,8 @@ fn end_to_end_event_ordering_and_hook_callbacks() {
     assert_eq!(cx.history[3].role, Role::Assistant);
 
     // Hook ordering across the whole run.
-    let order: Vec<&str> = hooks.order.iter().map(String::as_str).collect();
+    let order = hooks.order.borrow().clone();
+    let order: Vec<&str> = order.iter().map(String::as_str).collect();
     let before_pos = order
         .iter()
         .position(|s| *s == "before:counting")
@@ -1491,22 +1499,22 @@ fn end_to_end_tool_call_loop() {
 
 #[derive(Default)]
 struct EventLog {
-    events: Vec<LoopEvent>,
+    events: std::cell::RefCell<Vec<LoopEvent>>,
     cancel_on_notice: Option<CancelFlag>,
 }
-impl Hooks for EventLog {
-    fn on_event(&mut self, event: &LoopEvent) {
+impl EventLog {
+    fn record(&self, event: LoopEvent) {
         if let LoopEvent::ProviderRetry { .. } = event
             && let Some(c) = &self.cancel_on_notice
         {
             c.cancel();
         }
-        self.events.push(event.clone());
+        self.events.borrow_mut().push(event);
     }
-}
-impl EventLog {
+
     fn notices(&self) -> usize {
         self.events
+            .borrow()
             .iter()
             .filter(|e| matches!(e, LoopEvent::ProviderRetry { .. }))
             .count()
@@ -1534,14 +1542,22 @@ fn transient_provider_failure_is_retried_then_succeeds() {
     let mut cx = AgentContext::new("mock:m", "");
     cx.history.push(user_msg("hello"));
     let cfg = LoopConfig::default();
-    let mut hooks = EventLog::default();
+    let log = EventLog::default();
     let cancel = CancelFlag::new();
     let registry = ToolRegistry::new();
 
-    let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {});
+    let res = run(
+        &mock,
+        &registry,
+        &mut cx,
+        cfg,
+        &mut NoopHooks,
+        &cancel,
+        |e| log.record(e),
+    );
     assert!(res.is_ok(), "run should recover, got {res:?}");
     assert_eq!(mock.call_count(), 2, "one retry after the transient fail");
-    assert_eq!(hooks.notices(), 1, "exactly one retry notice");
+    assert_eq!(log.notices(), 1, "exactly one retry notice");
     assert!(cx.history.iter().any(|m| m.role == Role::Assistant));
 }
 
@@ -1553,14 +1569,22 @@ fn non_transient_failure_is_not_retried() {
     let mut cx = AgentContext::new("mock:m", "");
     cx.history.push(user_msg("hello"));
     let cfg = LoopConfig::default();
-    let mut hooks = EventLog::default();
+    let log = EventLog::default();
     let cancel = CancelFlag::new();
     let registry = ToolRegistry::new();
 
-    let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {});
+    let res = run(
+        &mock,
+        &registry,
+        &mut cx,
+        cfg,
+        &mut NoopHooks,
+        &cancel,
+        |e| log.record(e),
+    );
     assert!(matches!(res, Err(LoopError::Provider { .. })));
     assert_eq!(mock.call_count(), 1, "decode error must not retry");
-    assert_eq!(hooks.notices(), 0);
+    assert_eq!(log.notices(), 0);
 }
 
 #[test]
@@ -1571,11 +1595,19 @@ fn auth_failure_ends_the_run_with_auth_and_no_retry() {
     let mut cx = AgentContext::new("mock:m", "");
     cx.history.push(user_msg("hello"));
     let cfg = LoopConfig::default();
-    let mut hooks = EventLog::default();
+    let log = EventLog::default();
     let cancel = CancelFlag::new();
     let registry = ToolRegistry::new();
 
-    let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {});
+    let res = run(
+        &mock,
+        &registry,
+        &mut cx,
+        cfg,
+        &mut NoopHooks,
+        &cancel,
+        |e| log.record(e),
+    );
     assert_eq!(
         res,
         Err(LoopError::Auth {
@@ -1583,7 +1615,7 @@ fn auth_failure_ends_the_run_with_auth_and_no_retry() {
         })
     );
     assert_eq!(mock.call_count(), 1, "auth error must not retry");
-    assert_eq!(hooks.notices(), 0);
+    assert_eq!(log.notices(), 0);
 }
 
 #[test]
@@ -1595,22 +1627,29 @@ fn retries_are_bounded_then_surface_the_error() {
         max_provider_retries: 1,
         ..LoopConfig::default()
     };
-    let mut hooks = EventLog::default();
+    let log = EventLog::default();
     let cancel = CancelFlag::new();
     let registry = ToolRegistry::new();
 
-    let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {});
+    let res = run(
+        &mock,
+        &registry,
+        &mut cx,
+        cfg,
+        &mut NoopHooks,
+        &cancel,
+        |e| log.record(e),
+    );
     assert!(matches!(res, Err(LoopError::Provider { .. })));
     assert_eq!(mock.call_count(), 2, "initial attempt + one bounded retry");
-    assert_eq!(hooks.notices(), 1);
+    assert_eq!(log.notices(), 1);
 }
 
 #[test]
-fn steering_message_fires_on_user_message_then_lands_in_history() {
+fn steering_message_is_announced_then_lands_in_history() {
     #[derive(Default)]
     struct Steerer {
         queued: Vec<String>,
-        recorded: Vec<String>,
     }
     impl Hooks for Steerer {
         fn get_steering(&mut self) -> Option<String> {
@@ -1620,17 +1659,6 @@ fn steering_message_fires_on_user_message_then_lands_in_history() {
                 Some(self.queued.remove(0))
             }
         }
-        fn on_user_message(&mut self, message: &Message) {
-            let text = message
-                .content
-                .iter()
-                .find_map(|c| match c {
-                    Content::Text { text } => Some(text.clone()),
-                    _ => None,
-                })
-                .unwrap_or_default();
-            self.recorded.push(text);
-        }
     }
 
     let mock = MockProvider::sequence(vec![good_turn(), good_turn()]);
@@ -1639,17 +1667,31 @@ fn steering_message_fires_on_user_message_then_lands_in_history() {
     let cfg = LoopConfig::default();
     let mut hooks = Steerer {
         queued: vec!["mid-run nudge".into()],
-        recorded: Vec::new(),
     };
     let cancel = CancelFlag::new();
     let registry = ToolRegistry::new();
 
-    run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {}).unwrap();
+    let mut announced = Vec::new();
+    run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |e| {
+        if let LoopEvent::MessageAppended { message } = e
+            && message.role == Role::User
+        {
+            announced.push(message);
+        }
+    })
+    .unwrap();
 
+    let texts: Vec<&str> = announced
+        .iter()
+        .filter_map(|m| match m.content.first() {
+            Some(Content::Text { text }) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        hooks.recorded,
-        vec!["mid-run nudge".to_owned()],
-        "the steering text must be reported via on_user_message",
+        texts,
+        ["mid-run nudge"],
+        "the steering text must be announced as an appended user message",
     );
     let last_user = cx
         .history
@@ -1675,17 +1717,26 @@ fn provider_retry_event_surfaces_server_retry_after() {
     // Cancel during the (capped) backoff so the test does not actually
     // sleep 60s while still letting the ProviderRetry event fire.
     let cancel = CancelFlag::new();
-    let mut hooks = EventLog {
-        events: Vec::new(),
+    let log = EventLog {
+        events: std::cell::RefCell::default(),
         cancel_on_notice: Some(cancel.clone()),
     };
     let cfg = LoopConfig::default();
     let registry = ToolRegistry::new();
 
-    let _ = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {});
+    let _ = run(
+        &mock,
+        &registry,
+        &mut cx,
+        cfg,
+        &mut NoopHooks,
+        &cancel,
+        |e| log.record(e),
+    );
 
-    let retry = hooks
+    let retry = log
         .events
+        .borrow()
         .iter()
         .find_map(|e| match e {
             LoopEvent::ProviderRetry {
@@ -1712,13 +1763,21 @@ fn cancel_during_backoff_aborts_cleanly() {
     cx.history.push(user_msg("hello"));
     let cfg = LoopConfig::default();
     let cancel = CancelFlag::new();
-    let mut hooks = EventLog {
-        events: Vec::new(),
+    let log = EventLog {
+        events: std::cell::RefCell::default(),
         cancel_on_notice: Some(cancel.clone()),
     };
     let registry = ToolRegistry::new();
 
-    let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {});
+    let res = run(
+        &mock,
+        &registry,
+        &mut cx,
+        cfg,
+        &mut NoopHooks,
+        &cancel,
+        |e| log.record(e),
+    );
     assert!(matches!(res, Err(LoopError::Cancelled)));
     assert_eq!(mock.call_count(), 1, "retry never issued after cancel");
 }

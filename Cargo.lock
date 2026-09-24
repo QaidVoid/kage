@@ -1625,7 +1625,6 @@ dependencies = [
  "ignore",
  "image",
  "kage-core",
- "kage-loop",
  "kage-plugin",
  "pulldown-cmark",
  "ratatui",

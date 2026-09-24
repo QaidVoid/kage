@@ -696,3 +696,38 @@ fn first_exchange_records_a_title() {
     let file = std::fs::read_to_string(&path).unwrap();
     assert!(file.contains("\"type\":\"title\""), "{file}");
 }
+
+#[test]
+fn plugin_turn_end_entries_land_in_the_session_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(PluginRuntime::new().unwrap());
+    runtime
+        .eval(
+            "kage.on('turn_end', function() \
+                kage.session.append_entry('plugin:mark', { ok = true }) \
+            end)",
+        )
+        .unwrap();
+    let h = harness(MockProvider::replaying(text_turn("hello")));
+    let id = SessionId::new();
+    let (_, path) = recorder_in(dir.path(), id);
+    let writer = SessionWriter::open(&path).unwrap();
+    h.engine.open(SessionSpec {
+        id,
+        model: "mock:m".into(),
+        cx: AgentContext::new("m", "").with_workdir("/tmp"),
+        recorder: Some(Recorder::new(writer, Some(Arc::clone(&runtime)))),
+        tools: h.tools.clone(),
+        plugins: Some(runtime),
+        gate: PermissionGate::new(PermissionsConfig::default()),
+        loop_cfg: LoopConfig::default(),
+        mcp: None,
+        interactive: true,
+        title: false,
+    });
+    prompt(&h.engine, id, "hi", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+    h.engine.shutdown();
+    let file = std::fs::read_to_string(&path).unwrap();
+    assert!(file.contains("plugin:mark"), "{file}");
+}

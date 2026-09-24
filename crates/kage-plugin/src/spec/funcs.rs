@@ -410,8 +410,8 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &[
             "Add a prompt-input autocomplete provider. Providers form a",
-            "stack; the most recently added wins. Runs synchronously in",
-            "the shared Lua mutex, so keep it cheap.",
+            "stack; the most recently added wins. Runs synchronously on",
+            "the Lua thread, so keep it cheap.",
         ],
         path: "kage.add_autocomplete_provider",
         params: &[Field {

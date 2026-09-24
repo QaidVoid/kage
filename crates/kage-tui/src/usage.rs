@@ -1,9 +1,9 @@
 //! Live session-usage snapshot rendered in the bottom modeline.
 //!
-//! [`SessionUsage`] is the small bundle of numbers the host worker
-//! thread updates after every agent turn. The renderer reads it via
-//! an `Arc<Mutex<...>>` to paint a one-line strip below the input
-//! card with model id, total token usage, and context-window fill.
+//! [`SessionUsage`] is the small bundle of numbers the App updates from
+//! the engine's state and usage events. The renderer reads it to paint
+//! a one-line strip below the input card with model id, total token
+//! usage, and context-window fill.
 //!
 //! The modeline only appears when a host registers a usage handle on
 //! the [`crate::App`]; without one, [`crate::layout::split`] is
@@ -11,11 +11,11 @@
 
 use std::sync::{Arc, Mutex};
 
-use kage_loop::ThinkingLevel;
+use kage_core::ThinkingLevel;
 
 /// Snapshot of one session's running token totals plus the active
-/// model and its context window. The host produces this from
-/// [`kage_loop::AgentContext`] after every turn.
+/// model and its context window, kept current from the engine's
+/// session events.
 ///
 /// Two scalars track tokens: [`Self::current_context`] is the most
 /// recent turn's full prompt size (`input + output + cache_*`) and
@@ -44,23 +44,20 @@ pub struct SessionUsage {
     /// Effective context window for `model`, in tokens. `0` when
     /// unknown (renderer hides the percentage in that case).
     pub context_window: u64,
-    /// `true` while the agent loop is mid-flight on a turn (provider
-    /// streaming, tool dispatch, or compaction). The modeline
-    /// reads this to paint a spinner; the host worker thread sets
-    /// it `true` on `run_with_hooks` entry and `false` on return.
+    /// `true` while a run is in flight (provider streaming, tool
+    /// dispatch, or compaction). The modeline reads this to paint a
+    /// spinner.
     pub working: bool,
     /// Cumulative dollar cost across every turn this session. `0.0`
     /// when the active model has no catalog cost data.
     pub total_cost: f64,
     /// Active unified thinking level. `None` (and `Some(Off)`) leave
     /// the modeline pill suppressed; the renderer draws a short
-    /// "think:<level>" pill for any other variant. Mutated by the
-    /// host worker when `Shift+Tab` cycles the level.
+    /// "think:<level>" pill for any other variant.
     pub thinking_level: Option<ThinkingLevel>,
     /// Session permission mode override. `None` hides the pill (the
     /// configured `[permissions]` rules decide); the renderer draws
-    /// `perm:ask` / `perm:deny` for the matching override. Mutated
-    /// by the host worker on `:permission`.
+    /// `perm:ask` / `perm:deny` for the matching override.
     pub permission_mode: Option<kage_core::permissions::PermissionAction>,
 }
 

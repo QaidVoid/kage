@@ -13,7 +13,7 @@ kage-mcp        (core + jsonrpc + tools)
 kage-acp        (core + jsonrpc + provider)
 kage-plugin     (core + provider + tools)
 kage-loop       (core + provider + tools)
-kage-tui        (core + loop + plugin)
+kage-tui        (core + plugin)
 kage-cli        (binary)            (depends on everything it uses)
 ```
 
@@ -24,7 +24,7 @@ the only crate that wires the whole graph together.
 
 | Crate            | Responsibility                                      |
 | ---------------- | --------------------------------------------------- |
-| `kage-core`      | Message types, content blocks, errors, cancel flag  |
+| `kage-core`      | Message types, content blocks, errors, cancel flag, the engine protocol (events and commands) |
 | `kage-jsonrpc`   | Shared bidirectional JSON-RPC peer over stdio       |
 | `kage-provider`  | LLM provider clients, registry, model catalog       |
 | `kage-tools`     | Tool trait, built-in tools, tool registry           |
@@ -34,29 +34,50 @@ the only crate that wires the whole graph together.
 | `kage-acp`       | ACP agent (editors drive kage) and ACP client (kage drives another agent as a provider) |
 | `kage-plugin`    | Lua runtime, sandbox, host API surface              |
 | `kage-tui`       | The interactive TUI, modal input, block renderer    |
-| `kage-cli`       | The binary, CLI flags, main wiring                  |
+| `kage-cli`       | The binary, CLI flags, the session engine, frontend wiring |
+
+## the engine
+
+Every frontend (the TUI, `kage rpc` for editors, and `-p` print mode)
+drives the same engine through two channels:
+
+- **Events out.** Each event is an envelope addressed to the session
+  that produced it, with a per-session sequence number:
+  `{"session":"01J...","seq":42,"type":"text_delta",...}`. Durable
+  events describe state a client keeps (a message was appended, a run
+  ended, the model changed). Live events are deltas and progress a
+  client may drop (streamed text, tool output tails). `kage -p --json`
+  prints these envelopes one per line.
+- **Commands in.** Prompt, cancel, answer a permission request, switch
+  model or thinking level, compact, run a shell command, and the
+  session operations (new, resume, fork, clone, delete, export).
+
+A dispatcher thread owns the sessions and never blocks on a run. Each
+run executes the agent loop on its own thread and hands the session
+back when it ends. Permission questions travel over the same channels:
+the engine publishes `permission_requested` and waits for the client's
+answer. The TUI renders the stream into its buffer; the ACP adapter
+turns it into `session/update` notifications.
 
 ## data flow per turn
 
 ```
 user keypress
    v
-kage-tui modal dispatch
-   v  (submits text)
-kage-cli worker thread
+kage-tui input dispatch
+   v  (a request)
+kage-cli TUI host  ->  engine command
    v
-kage-loop run()
+engine runner thread: kage-loop run()
    v -> kage-provider stream request
    v <- provider streams events
    v
-hooks emit LoopEvents
+each loop event:
+   -> Lua plugin events ("turn_start", "message_update", ...)
+   -> session recorder appends JSONL
+   -> event bus: TUI, ACP client, or print output
    v
-kage-plugin dispatch ("turn_start", "message_update", ...)
-   v
-kage-tui buffer updates
-   v -> kage-session writer appends JSONL
-   v
-kage-tui repaints the visible region
+kage-tui applies the event and repaints the visible region
 ```
 
 The loop is fully synchronous. There is no async runtime in core.
@@ -90,9 +111,12 @@ file in the plugins directory against it, and stores Lua-registered
 tools, commands, providers, and event handlers. The host pulls
 snapshots when it needs to wire them into the agent loop.
 
-Lua state is wrapped in an `Arc<Mutex<Lua>>` so the synchronous tool
-dispatch path can call back into Lua without re-entrancy. The mutex
-also serializes plugin status writes and event dispatches.
+A single thread owns the Lua state. Everything else (tools, event
+dispatch, commands, keybindings) sends it jobs and waits for the reply,
+so calls never interleave. Status widgets, header and footer chrome,
+and block renderers keep their last output, so the screen never waits
+on Lua. A long Lua tool or provider occupies that thread until it
+finishes.
 
 ## why no async
 

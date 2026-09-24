@@ -9,9 +9,6 @@
 use kage_core::{Content, LoopError, LoopEvent, Message, MessageId, Role, TokenUsage, ToolCallId};
 use kage_provider::{EventStream, ProviderError, ProviderEvent};
 
-use crate::Hooks;
-use crate::run::emit_one;
-
 /// Output of consuming one provider stream.
 #[derive(Debug)]
 pub(crate) struct TurnResult {
@@ -64,7 +61,6 @@ pub(crate) fn collect_turn<F: FnMut(LoopEvent)>(
     parent: Option<MessageId>,
     stream: EventStream,
     cancel: &kage_core::CancelFlag,
-    hooks: &mut dyn Hooks,
     emit: &mut F,
 ) -> Result<TurnResult, TurnFailure> {
     let mut assembler = Assembler::new(parent);
@@ -76,8 +72,8 @@ pub(crate) fn collect_turn<F: FnMut(LoopEvent)>(
         }
         let event = event.map_err(TurnFailure::Provider)?;
 
-        if let Some(result) = handle_event(event, &mut assembler, &mut started, hooks, emit)
-            .map_err(TurnFailure::Fatal)?
+        if let Some(result) =
+            handle_event(event, &mut assembler, &mut started, emit).map_err(TurnFailure::Fatal)?
         {
             return Ok(result);
         }
@@ -95,42 +91,37 @@ fn handle_event<F: FnMut(LoopEvent)>(
     event: ProviderEvent,
     assembler: &mut Assembler,
     started: &mut bool,
-    hooks: &mut dyn Hooks,
     emit: &mut F,
 ) -> Result<Option<TurnResult>, LoopError> {
     let id = assembler.message_id;
-    let mut ensure_started = |hooks: &mut dyn Hooks, emit: &mut F| {
+    let mut ensure_started = |emit: &mut F| {
         if !*started {
             *started = true;
-            emit_one(hooks, emit, LoopEvent::MessageStart { id });
+            emit(LoopEvent::MessageStart { id });
         }
     };
 
     match event {
         ProviderEvent::MessageStart => {
-            ensure_started(hooks, emit);
+            ensure_started(emit);
         }
         ProviderEvent::TextDelta { delta } => {
-            ensure_started(hooks, emit);
+            ensure_started(emit);
             assembler.push_text(&delta);
-            emit_one(hooks, emit, LoopEvent::TextDelta { id, delta });
+            emit(LoopEvent::TextDelta { id, delta });
         }
         ProviderEvent::ThinkingDelta { delta } => {
-            ensure_started(hooks, emit);
+            ensure_started(emit);
             assembler.push_thinking(&delta);
-            emit_one(hooks, emit, LoopEvent::ThinkingDelta { id, delta });
+            emit(LoopEvent::ThinkingDelta { id, delta });
         }
         ProviderEvent::ToolCallStart { id: call_id, name } => {
-            ensure_started(hooks, emit);
-            emit_one(
-                hooks,
-                emit,
-                LoopEvent::ToolCallArgsDelta {
-                    id: call_id.clone(),
-                    name: name.clone(),
-                    input_partial: serde_json::json!({}),
-                },
-            );
+            ensure_started(emit);
+            emit(LoopEvent::ToolCallArgsDelta {
+                id: call_id.clone(),
+                name: name.clone(),
+                input_partial: serde_json::json!({}),
+            });
             assembler.begin_tool(call_id, name);
         }
         ProviderEvent::ToolCallArgsDelta {
@@ -158,21 +149,17 @@ fn handle_event<F: FnMut(LoopEvent)>(
                     name: name.clone(),
                     input_partial: value,
                 };
-                emit_one(hooks, emit, ev);
+                emit(ev);
             }
         }
         ProviderEvent::ToolCallEnd { id: call_id, input } => {
             assembler.partial_args.remove(&call_id);
             let (call_id, name, input) = assembler.complete_tool(call_id, input)?;
-            emit_one(
-                hooks,
-                emit,
-                LoopEvent::ToolCallStart {
-                    id: call_id.clone(),
-                    name: name.clone(),
-                    input_partial: input.clone(),
-                },
-            );
+            emit(LoopEvent::ToolCallStart {
+                id: call_id.clone(),
+                name: name.clone(),
+                input_partial: input.clone(),
+            });
             assembler.tool_calls.push(PendingToolCall {
                 id: call_id,
                 name,
@@ -180,16 +167,12 @@ fn handle_event<F: FnMut(LoopEvent)>(
             });
         }
         ProviderEvent::MessageEnd { usage, stop_reason } => {
-            ensure_started(hooks, emit);
-            emit_one(
-                hooks,
-                emit,
-                LoopEvent::MessageEnd {
-                    id,
-                    usage,
-                    stop_reason,
-                },
-            );
+            ensure_started(emit);
+            emit(LoopEvent::MessageEnd {
+                id,
+                usage,
+                stop_reason,
+            });
             return Ok(Some(assembler.finish(usage)));
         }
     }
@@ -284,7 +267,6 @@ mod tests {
     use kage_provider::{Provider, StopReason, StreamRequest, testing::MockProvider};
 
     use super::*;
-    use crate::NoopHooks;
 
     fn run_collect(events: Vec<Result<ProviderEvent, kage_provider::ProviderError>>) -> TurnResult {
         let mock = MockProvider::replaying(events);
@@ -292,9 +274,8 @@ mod tests {
         let stream = mock
             .stream(StreamRequest::new("m", vec![]), &cancel)
             .unwrap();
-        let mut hooks = NoopHooks;
         let mut emitted = Vec::new();
-        collect_turn(None, stream, &cancel, &mut hooks, &mut |ev| {
+        collect_turn(None, stream, &cancel, &mut |ev| {
             emitted.push(ev);
         })
         .unwrap()
@@ -308,9 +289,8 @@ mod tests {
         let stream = mock
             .stream(StreamRequest::new("m", vec![]), &cancel)
             .unwrap();
-        let mut hooks = NoopHooks;
         let mut emitted = Vec::new();
-        let res = collect_turn(None, stream, &cancel, &mut hooks, &mut |ev| {
+        let res = collect_turn(None, stream, &cancel, &mut |ev| {
             emitted.push(ev);
         })
         .unwrap();
@@ -570,8 +550,7 @@ mod tests {
         let stream = mock
             .stream(StreamRequest::new("m", vec![]), &cancel)
             .unwrap();
-        let mut hooks = NoopHooks;
-        let res = collect_turn(None, stream, &cancel, &mut hooks, &mut |_| {});
+        let res = collect_turn(None, stream, &cancel, &mut |_| {});
         assert!(matches!(
             res,
             Err(TurnFailure::Fatal(LoopError::Provider { .. }))
@@ -589,8 +568,7 @@ mod tests {
         let stream = mock
             .stream(StreamRequest::new("m", vec![]), &cancel)
             .unwrap();
-        let mut hooks = NoopHooks;
-        let res = collect_turn(None, stream, &cancel, &mut hooks, &mut |_| {});
+        let res = collect_turn(None, stream, &cancel, &mut |_| {});
         assert!(matches!(res, Err(TurnFailure::Fatal(LoopError::Cancelled))));
     }
 
@@ -603,8 +581,7 @@ mod tests {
         let stream = mock
             .stream(StreamRequest::new("m", vec![]), &cancel)
             .unwrap();
-        let mut hooks = NoopHooks;
-        let res = collect_turn(None, stream, &cancel, &mut hooks, &mut |_| {});
+        let res = collect_turn(None, stream, &cancel, &mut |_| {});
         // The original ProviderError is preserved (not stringified) so
         // the run loop can classify it; Auth is not transient.
         match res {
@@ -622,8 +599,7 @@ mod tests {
         let stream = mock
             .stream(StreamRequest::new("m", vec![]), &cancel)
             .unwrap();
-        let mut hooks = NoopHooks;
-        match collect_turn(None, stream, &cancel, &mut hooks, &mut |_| {}) {
+        match collect_turn(None, stream, &cancel, &mut |_| {}) {
             Err(TurnFailure::Provider(e)) => assert!(e.is_transient()),
             other => panic!("expected a transient Provider failure, got {other:?}"),
         }
@@ -637,8 +613,7 @@ mod tests {
         let stream = mock
             .stream(StreamRequest::new("m", vec![]), &cancel)
             .unwrap();
-        let mut hooks = NoopHooks;
-        let res = collect_turn(Some(parent), stream, &cancel, &mut hooks, &mut |_| {}).unwrap();
+        let res = collect_turn(Some(parent), stream, &cancel, &mut |_| {}).unwrap();
         assert_eq!(res.message.parent, Some(parent));
     }
 }

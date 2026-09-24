@@ -253,11 +253,11 @@ pub fn populate_from_history(
 
 /// True when `text` looks like the synthetic compaction-summary
 /// message the loop inserts in place of drained history. Detection
-/// matches the framing constants in [`kage_loop::compact`] so resumed
+/// matches the framing constants in [`kage_core::message`] so resumed
 /// sessions route the summary through the compaction widget instead
 /// of rendering it as a plain user / assistant bubble.
 fn is_compaction_summary(text: &str) -> bool {
-    text.starts_with(kage_loop::COMPACTION_SUMMARY_PREFIX)
+    text.starts_with(kage_core::message::COMPACTION_SUMMARY_PREFIX)
         || text.contains("<summary>") && text.contains("</summary>")
 }
 
@@ -651,9 +651,9 @@ mod tests {
     fn populate_routes_compaction_summary_to_custom_block() {
         let framed = format!(
             "{}{}{}",
-            kage_loop::COMPACTION_SUMMARY_PREFIX,
+            kage_core::message::COMPACTION_SUMMARY_PREFIX,
             "the actual summary content",
-            kage_loop::COMPACTION_SUMMARY_SUFFIX
+            kage_core::message::COMPACTION_SUMMARY_SUFFIX
         );
         let mut buf = Buffer::new();
         let history = vec![Message::new(

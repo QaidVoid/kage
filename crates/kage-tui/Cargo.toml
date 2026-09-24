@@ -28,7 +28,6 @@ base64.workspace = true
 ignore.workspace = true
 image = { version = "0.25.9", default-features = false, features = ["png"] }
 kage-core.workspace = true
-kage-loop.workspace = true
 kage-plugin.workspace = true
 pulldown-cmark.workspace = true
 ratatui.workspace = true

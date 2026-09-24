@@ -162,6 +162,17 @@ impl Message {
     }
 }
 
+/// Framing wrapper for the synthetic summary message that replaces the
+/// drained history. The labelled block keeps providers seeing a clear
+/// context summary rather than a rogue assistant turn. Exposed so the
+/// resume path can detect the same framing in replayed history and route
+/// it back through the compaction widget instead of rendering it as a
+/// plain assistant block.
+pub const COMPACTION_SUMMARY_PREFIX: &str = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n";
+/// Closing framing for the synthetic compaction summary message. See
+/// [`COMPACTION_SUMMARY_PREFIX`].
+pub const COMPACTION_SUMMARY_SUFFIX: &str = "\n</summary>";
+
 #[cfg(test)]
 mod tests {
     use super::*;

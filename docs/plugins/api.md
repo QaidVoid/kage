@@ -97,8 +97,9 @@ kage.ui.set_footer(function(width)
 end)
 ```
 
-The render function runs inside the shared Lua mutex, so keep it
-cheap: no blocking dialogs, no network.
+kage keeps the last output on screen and calls the render function
+again on a short cadence or when the width changes, so the screen never
+waits on Lua. Keep it cheap anyway: no blocking dialogs, no network.
 
 ### `kage.register_block_renderer(kind, render | nil)`
 
@@ -144,7 +145,7 @@ Every payload also carries `kind` and `width`. `tool_call` /
 call+result pair spans two blocks and is not overridable through this
 single-block path.
 
-Same mutex/cost rule as `set_header`. The picker a plugin needs for
+Same retained-output and cost rule as `set_header`. The picker a plugin needs for
 interactive UI is [`kage.ui.select`](#blocking-dialogs) - there is no
 separate `open_picker`. See `plugins/examples/block_renderer_demo.lua`.
 
@@ -310,8 +311,8 @@ return or an error yields no items.
 
 In the popup: `Up`/`Down` (or `Ctrl-p`/`Ctrl-n`) navigate, `Tab`
 accepts, `Esc` dismisses; any other key passes through to normal
-editing and re-queries. Providers run inside the shared Lua mutex
-(synchronous; keep them cheap).
+editing and re-queries. Providers run synchronously on the Lua thread
+and return nothing while it is busy with a tool, so keep them cheap.
 
 A built-in provider sits at the bottom of the stack: when the token
 under the cursor starts with `@`, it completes workdir-relative file
@@ -340,7 +341,8 @@ end)
 
 `code` is `"char"` (with `char` set), `"enter"`, `"esc"`, `"tab"`,
 `"backtab"`, `"backspace"`, an arrow / nav key, `"f1"`..`"f12"`, or
-`"other"`. Handlers run synchronously in the shared Lua mutex.
+`"other"`. Handlers run synchronously on the Lua thread; a handler that
+takes longer than 20 ms lets the key through.
 
 This is a sharp tool. Prefer
 [`kage.register_keybinding`](#keybindings) for "run X on chord Y":

@@ -22,7 +22,6 @@ use kage_core::{
 use kage_tools::{ProgressSink, ToolContext, ToolError, ToolRegistry};
 
 use crate::Hooks;
-use crate::run::emit_one;
 use crate::stream::PendingToolCall;
 
 /// Message from a tool thread to the dispatching loop thread.
@@ -57,7 +56,7 @@ impl Drop for DoneOnDrop {
 /// Execute `calls` on scoped threads and emit their progress live.
 ///
 /// The calling thread forwards every update as a [`LoopEvent::ToolUpdate`]
-/// until all threads finish, so hooks and `emit` stay on the loop thread.
+/// until all threads finish, so `emit` stays on the loop thread.
 /// Results come back in input order. A panicking tool yields an error.
 #[allow(clippy::too_many_arguments)]
 fn execute_live<F: FnMut(LoopEvent)>(
@@ -66,7 +65,6 @@ fn execute_live<F: FnMut(LoopEvent)>(
     workdir: &Path,
     cancel: &CancelFlag,
     confine_paths: bool,
-    hooks: &mut dyn Hooks,
     emit: &mut F,
 ) -> Vec<Result<ToolOutput, LoopError>> {
     let (tx, rx) = mpsc::channel();
@@ -90,7 +88,7 @@ fn execute_live<F: FnMut(LoopEvent)>(
         while running > 0 {
             match rx.recv() {
                 Ok(Progress::Update(id, update)) => {
-                    emit_one(hooks, emit, LoopEvent::ToolUpdate { id, update });
+                    emit(LoopEvent::ToolUpdate { id, update });
                 }
                 Ok(Progress::Done) => running -= 1,
                 Err(_) => break,
@@ -190,10 +188,9 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
             if let Some(out) = pre {
                 Some(out)
             } else {
-                let result =
-                    execute_live(&[&call], tools, workdir, cancel, confine_paths, hooks, emit)
-                        .pop()
-                        .expect("one call yields one result");
+                let result = execute_live(&[&call], tools, workdir, cancel, confine_paths, emit)
+                    .pop()
+                    .expect("one call yields one result");
                 match result {
                     Ok(out) => Some(out),
                     Err(kind) => {
@@ -216,14 +213,10 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
         };
         all_terminate &= output.terminate;
 
-        emit_one(
-            hooks,
-            emit,
-            LoopEvent::ToolCallEnd {
-                id: call.id.clone(),
-                output: output.clone(),
-            },
-        );
+        emit(LoopEvent::ToolCallEnd {
+            id: call.id.clone(),
+            output: output.clone(),
+        });
 
         results.push(Message::new(
             Role::ToolResult,
@@ -298,7 +291,7 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
             .map(|(call, _)| call)
             .collect();
         let mut ran =
-            execute_live(&to_run, tools, workdir, cancel, confine_paths, hooks, emit).into_iter();
+            execute_live(&to_run, tools, workdir, cancel, confine_paths, emit).into_iter();
         slots
             .into_iter()
             .map(|slot| match slot {
@@ -320,14 +313,10 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
             None => hooks.after_tool_call(&call.name, synthesized_output(&LoopError::Cancelled)),
         };
         all_terminate &= output.terminate;
-        emit_one(
-            hooks,
-            emit,
-            LoopEvent::ToolCallEnd {
-                id: call.id.clone(),
-                output: output.clone(),
-            },
-        );
+        emit(LoopEvent::ToolCallEnd {
+            id: call.id.clone(),
+            output: output.clone(),
+        });
         results.push(Message::new(
             Role::ToolResult,
             vec![Content::ToolResultBlock {

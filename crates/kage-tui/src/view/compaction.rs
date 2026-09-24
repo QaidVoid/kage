@@ -1,6 +1,6 @@
 //! Custom widget for `kage:compaction` blocks.
 //!
-//! Compaction events from `kage_loop::compact` arrive as a custom
+//! Compaction events from the agent loop arrive as a custom
 //! block whose payload is `"[compacted: kept N, summarized M]\n<body>"`.
 //! The default custom widget renders that as a kind-tagged card with
 //! plain body text - readable but visually identical to other custom

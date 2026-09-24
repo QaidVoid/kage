@@ -5,7 +5,7 @@
 //! make the trait noop-by-default: a host overrides only the methods it cares
 //! about.
 
-use kage_core::{LoopEvent, Message, TokenUsage, ToolOutput};
+use kage_core::{Message, TokenUsage, ToolOutput};
 use kage_provider::StreamRequest;
 
 /// Outcome of a pre-action hook that can veto, patch, or pass through.
@@ -146,14 +146,6 @@ pub trait Hooks {
         output
     }
 
-    /// Fired for every [`LoopEvent`] the loop emits.
-    ///
-    /// Receives events before they reach the caller's emit callback. Use
-    /// this for logging, metrics, or driving UI sinks.
-    fn on_event(&mut self, event: &LoopEvent) {
-        let _ = event;
-    }
-
     /// Fired immediately before the loop hands a built [`StreamRequest`]
     /// to the provider. Hosts can rewrite the request in place: inject a
     /// system header, strip or rewrite tools, swap the model, etc. The
@@ -200,26 +192,6 @@ pub trait Hooks {
         Ok(())
     }
 
-    /// Fired just before each inner-loop iteration begins a provider call.
-    ///
-    /// `index` is the zero-based turn index within the current `run`: the
-    /// first provider call has `index == 0`. Compaction-induced extra calls
-    /// do not advance the index; follow-up rounds do. Use this for per-turn
-    /// timers, request logging, or plugin notifications.
-    fn on_turn_start(&mut self, index: u32) {
-        let _ = index;
-    }
-
-    /// Fired after the provider stream for the current turn closes.
-    ///
-    /// `had_tool_calls` is `true` when the model finished a turn that
-    /// requested at least one tool call (the inner loop will continue);
-    /// `false` when the turn produced text only and the inner loop will
-    /// break. Pair with [`Self::on_turn_start`] for tok/s-style metrics.
-    fn on_turn_end(&mut self, index: u32, had_tool_calls: bool) {
-        let _ = (index, had_tool_calls);
-    }
-
     /// Polled after every turn closes. Returning `true` short-circuits the
     /// run: pending tool calls are abandoned, follow-ups are not dequeued,
     /// and the loop returns `Ok(())` immediately. Use this for plan-mode
@@ -259,20 +231,6 @@ pub trait Hooks {
         None
     }
 
-    /// Fired right after the loop appends a user message it produced
-    /// itself: a drained steering message, a follow-up, or a synthetic
-    /// nudge from the loop's stall guard. The first user message of a
-    /// run does not flow through here because the host pushes it onto
-    /// history before calling [`run`](crate::run).
-    ///
-    /// Use this to persist the just-added message: the agent loop does
-    /// not emit user messages as [`LoopEvent`]s, so session writers and
-    /// other recorders that hook [`Self::on_event`] would otherwise
-    /// miss it. The default implementation is a no-op.
-    fn on_user_message(&mut self, message: &Message) {
-        let _ = message;
-    }
-
     /// Polled after the model declares the turn finished.
     ///
     /// A `Some(text)` return value re-enters the inner loop with the text
@@ -292,13 +250,11 @@ impl Hooks for NoopHooks {}
 
 #[cfg(test)]
 mod tests {
-    use kage_core::{MessageId, StopReason, TokenUsage};
 
     use super::*;
 
     #[derive(Default)]
     struct Recording {
-        events: Vec<String>,
         tool_calls_before: Vec<String>,
         tool_calls_after: Vec<String>,
         steering: Option<String>,
@@ -319,15 +275,6 @@ mod tests {
         fn after_tool_call(&mut self, name: &str, output: ToolOutput) -> ToolOutput {
             self.tool_calls_after.push(name.to_owned());
             output
-        }
-
-        fn on_event(&mut self, event: &LoopEvent) {
-            self.events.push(
-                serde_json::to_value(event).unwrap()["type"]
-                    .as_str()
-                    .unwrap()
-                    .to_owned(),
-            );
         }
 
         fn get_steering(&mut self) -> Option<String> {
@@ -358,11 +305,6 @@ mod tests {
         };
         let back = h.after_tool_call("read", out.clone());
         assert_eq!(back, out);
-        h.on_event(&LoopEvent::MessageEnd {
-            id: MessageId::new(),
-            usage: TokenUsage::default(),
-            stop_reason: StopReason::EndTurn,
-        });
         assert!(h.get_steering().is_none());
         assert!(h.get_followup().is_none());
     }
@@ -384,12 +326,8 @@ mod tests {
                 terminate: false,
             },
         );
-        h.on_event(&LoopEvent::MessageStart {
-            id: MessageId::new(),
-        });
         assert_eq!(h.tool_calls_before, vec!["bash"]);
         assert_eq!(h.tool_calls_after, vec!["bash"]);
-        assert_eq!(h.events, vec!["message_start"]);
     }
 
     #[test]

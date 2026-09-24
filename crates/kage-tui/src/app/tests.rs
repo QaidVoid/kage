@@ -338,7 +338,7 @@ fn set_plugin_commands_reuses_leaked_specs_on_unchanged_reload() {
 }
 
 #[test]
-fn drain_plugin_refresh_reseeds_commands_and_widgets() {
+fn drain_plugin_refresh_reseeds_commands_widgets_and_keys() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
     let mut app = App::new(buffer, tx);
@@ -363,10 +363,23 @@ fn drain_plugin_refresh_reseeds_commands_and_widgets() {
             args: Vec::new(),
         }],
         widgets: Vec::new(),
+        keybindings: vec!["ctrl+g".into()],
+        autocomplete: Vec::new(),
         models: Vec::new(),
     })
     .unwrap();
+    app.set_plugin_keybindings(vec!["ctrl+x".into()]);
     assert!(app.drain_plugin_refresh(), "a queued snapshot applies");
+    let chords: Vec<&str> = app
+        .plugin_keybindings
+        .iter()
+        .map(|(_, chord)| chord.as_str())
+        .collect();
+    assert_eq!(
+        chords,
+        ["ctrl+g"],
+        "keybindings re-seeded from the snapshot"
+    );
     assert!(
         !std::ptr::eq(app.plugin_command_specs[0], pre),
         "commands re-seeded from the snapshot"

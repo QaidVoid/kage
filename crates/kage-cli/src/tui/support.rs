@@ -463,3 +463,20 @@ pub(crate) fn available_model_items(
     }
     items
 }
+
+/// Point the TUI's block registry at `rt`'s block renderers, replacing any
+/// earlier plugin registrations.
+pub(crate) fn register_block_renderers(rt: &PluginRuntime) {
+    use kage_tui::view::registry;
+    registry::reset_to_builtins();
+    for renderer in rt.registered_block_renderers() {
+        let kind = renderer.kind().to_owned();
+        let factory = Arc::new(kage_tui::view::plugin_block::PluginBlockFactory::new(
+            renderer,
+        ));
+        match registry::builtin_kind_from_name(&kind) {
+            Some(builtin) => registry::register_builtin(builtin, factory),
+            None => registry::register_custom(kind, factory),
+        }
+    }
+}

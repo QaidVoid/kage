@@ -320,14 +320,8 @@ impl Host {
     }
 
     fn refresh_providers(&mut self) {
-        let mut fresh = crate::build_provider_registry();
-        if let Some(rt) = &self.plugins {
-            crate::plugins::merge_plugin_providers(rt, &mut fresh);
-        }
+        let active_ok = self.rebuild_registry();
         let active = lock(&self.mirror).state.model.clone();
-        let active_ok = fresh.resolve(&active).is_ok();
-        self.registry = Arc::new(fresh);
-        self.commander.set_registry(Arc::clone(&self.registry));
         self.publish_plugin_refresh(&active);
         if active_ok {
             self.notify("providers refreshed".to_owned());
@@ -336,11 +330,30 @@ impl Host {
         }
     }
 
-    fn reload_plugins(&self) {
-        let (Some(rt), Some(dir)) = (&self.plugins, &self.plugins_dir) else {
+    /// Rebuild the provider registry with plugin providers and hand it to
+    /// the engine. Returns whether the active model still resolves.
+    fn rebuild_registry(&mut self) -> bool {
+        let mut fresh = crate::build_provider_registry();
+        if let Some(rt) = &self.plugins {
+            crate::plugins::merge_plugin_providers(rt, &mut fresh);
+        }
+        let active_ok = fresh.resolve(&lock(&self.mirror).state.model).is_ok();
+        self.registry = Arc::new(fresh);
+        self.commander.set_registry(Arc::clone(&self.registry));
+        active_ok
+    }
+
+    /// Re-read plugins from disk and republish everything they
+    /// contribute: tools, block renderers, providers, commands, widgets,
+    /// keybindings, and autocomplete.
+    fn reload_plugins(&mut self) {
+        let (Some(rt), Some(dir)) = (self.plugins.clone(), self.plugins_dir.clone()) else {
             return;
         };
-        let reload = rt.reload_dir(dir);
+        let reload = rt.reload_dir(&dir);
+        self.commander.reload_plugin_tools();
+        super::support::register_block_renderers(&rt);
+        self.rebuild_registry();
         let active = lock(&self.mirror).state.model.clone();
         self.publish_plugin_refresh(&active);
         match reload {
@@ -361,18 +374,24 @@ impl Host {
         }
     }
 
-    /// Hand the App fresh plugin commands, widgets, and model choices.
+    /// Hand the App fresh plugin contributions and model choices.
     fn publish_plugin_refresh(&self, active_model: &str) {
+        let rt = self.plugins.as_ref();
         let _ = self.plugin_refresh_tx.send(PluginRefresh {
-            commands: self
-                .plugins
-                .as_ref()
+            commands: rt
                 .map(|rt| snapshot_plugin_commands(rt))
                 .unwrap_or_default(),
-            widgets: self
-                .plugins
-                .as_ref()
-                .map(|rt| rt.registered_widgets())
+            widgets: rt.map(|rt| rt.registered_widgets()).unwrap_or_default(),
+            keybindings: rt
+                .map(|rt| {
+                    rt.registered_keybindings()
+                        .iter()
+                        .map(|kb| kb.chord().to_owned())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            autocomplete: rt
+                .map(|rt| rt.registered_autocomplete_providers())
                 .unwrap_or_default(),
             models: available_model_items(&self.registry, active_model),
         });

@@ -8,6 +8,7 @@
 //! answers with `ResolvePermission`.
 
 mod bus;
+mod plugin_tools;
 mod recorder;
 mod runner;
 mod sessions;
@@ -38,6 +39,7 @@ pub(crate) use recorder::Recorder;
 pub(crate) use sessions::render_session_markdown;
 
 use bus::Bus;
+use plugin_tools::PluginTools;
 use runner::{Finished, Run, Steering, Work};
 
 use crate::permissions::{Asker, PermissionGate, PermissionPrompt};
@@ -88,6 +90,12 @@ impl Commander {
     pub(crate) fn set_registry(&self, registry: Arc<ProviderRegistry>) {
         let _ = self.0.send(Input::SetRegistry(registry));
     }
+
+    /// Replace every session's plugin tools with what its plugin runtime
+    /// registers now, after a plugin reload.
+    pub(crate) fn reload_plugin_tools(&self) {
+        let _ = self.0.send(Input::ReloadPluginTools);
+    }
 }
 
 enum Input {
@@ -106,6 +114,7 @@ enum Input {
     },
     Publish(HostEvent),
     SetRegistry(Arc<ProviderRegistry>),
+    ReloadPluginTools,
 }
 
 impl Engine {
@@ -190,6 +199,7 @@ struct Session {
     pending_history: Vec<Message>,
     title: bool,
     title_pending: bool,
+    plugin_tools: PluginTools,
 }
 
 /// What a session holds while no run owns it.
@@ -231,6 +241,12 @@ impl Dispatcher {
                     }
                 }
                 Input::SetRegistry(registry) => self.registry = registry,
+                Input::ReloadPluginTools => {
+                    let ids: Vec<SessionId> = self.sessions.keys().copied().collect();
+                    for id in ids {
+                        self.apply_plugin_tools(id);
+                    }
+                }
             }
             if self.shutting_down && self.sessions.values().all(|s| s.idle.is_some()) {
                 return;
@@ -290,9 +306,31 @@ impl Dispatcher {
                 pending_history: Vec::new(),
                 title,
                 title_pending,
+                plugin_tools: PluginTools::default(),
             },
         );
         self.active.get_or_insert(id);
+        self.apply_plugin_tools(id);
+    }
+
+    /// Register the session's plugin tools, replacing earlier ones.
+    fn apply_plugin_tools(&mut self, id: SessionId) {
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        let Some(rt) = session.plugins.clone() else {
+            return;
+        };
+        for name in session.plugin_tools.apply(&mut session.tools, &rt) {
+            notice(
+                &self.bus,
+                id,
+                NoticeLevel::Warning,
+                format!(
+                    "override_tool: no tool named `{name}` to override; treating as new registration"
+                ),
+            );
+        }
     }
 
     fn command(&mut self, command: Command) {

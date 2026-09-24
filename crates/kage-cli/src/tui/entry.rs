@@ -168,36 +168,8 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     let mut plugin_terminal_hooks: Option<kage_plugin::RegisteredTerminalHooks> = None;
     let mut plugin_keybinding_chords: Vec<String> = Vec::new();
     if let Some(rt) = plugin_runtime.as_ref() {
-        for tool in rt.registered_tools() {
-            tools.register(tool);
-        }
-        for tool in rt.registered_tool_overrides() {
-            if tools.get(tool.name()).is_none() {
-                let mut buf = lock(&buffer);
-                buf.push_custom(
-                    "kage:error",
-                    format!(
-                        "override_tool: no tool named `{}` to override; treating as new registration",
-                        tool.name()
-                    ),
-                    false,
-                );
-            }
-            tools.register(tool);
-        }
         plugin_command_listing = support::snapshot_plugin_commands(rt);
-        for renderer in rt.registered_block_renderers() {
-            let kind = renderer.kind().to_owned();
-            let factory = std::sync::Arc::new(
-                kage_tui::view::plugin_block::PluginBlockFactory::new(renderer),
-            );
-            match kage_tui::view::registry::builtin_kind_from_name(&kind) {
-                Some(builtin) => {
-                    kage_tui::view::registry::register_builtin(builtin, factory);
-                }
-                None => kage_tui::view::registry::register_custom(kind, factory),
-            }
-        }
+        support::register_block_renderers(rt);
         plugin_widgets = rt.registered_widgets();
         plugin_autocomplete = rt.registered_autocomplete_providers();
         plugin_status = Some(rt.shared_status());

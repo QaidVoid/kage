@@ -164,9 +164,6 @@ impl CliAcpAgent {
         let system_prompt =
             runtime_env::build_system_prompt(&self.system_role, &workdir, &model, &skills);
         let mut tools = builtin_registry();
-        if let Some(rt) = plugins.as_ref() {
-            crate::apply_plugin_tools(&mut tools, rt);
-        }
         let (mcp, mcp_errors) =
             crate::mcp::spawn_and_register(&mut tools, &workdir, plugins.as_deref());
         for (server, err) in mcp_errors {

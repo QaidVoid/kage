@@ -344,6 +344,10 @@ pub struct PluginRefresh {
     pub commands: Vec<crate::command::PluginCommand>,
     /// Status-bar widgets registered in the reloaded runtime.
     pub widgets: Vec<Arc<kage_plugin::LuaWidget>>,
+    /// Canonical chords of the reloaded runtime's keybindings.
+    pub keybindings: Vec<String>,
+    /// Autocomplete providers registered in the reloaded runtime.
+    pub autocomplete: Vec<Arc<kage_plugin::LuaAutocompleteProvider>>,
     /// The full model list for the picker/autocomplete, recomputed
     /// from the current provider registry (builtin + plugin
     /// contributions). Empty only when no providers exist.

@@ -754,6 +754,9 @@ impl App {
         };
         self.set_plugin_commands(snapshot.commands);
         self.set_plugin_widgets(snapshot.widgets);
+        self.set_plugin_keybindings(snapshot.keybindings);
+        self.set_plugin_autocomplete(snapshot.autocomplete);
+        lock(&self.buffer).invalidate_all_heights();
         if !snapshot.models.is_empty() {
             self.model_choices = snapshot.models;
         }

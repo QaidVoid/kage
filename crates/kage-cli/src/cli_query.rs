@@ -91,9 +91,6 @@ pub(crate) fn run_resume(
         }
     };
     let mut tools = builtin_registry();
-    if let Some(rt) = plugin_runtime.as_ref() {
-        apply_plugin_tools(&mut tools, rt);
-    }
     let (mcp_manager, mcp_errors) =
         mcp::spawn_and_register(&mut tools, &workdir, plugin_runtime.as_deref());
     for (server, err) in mcp_errors {

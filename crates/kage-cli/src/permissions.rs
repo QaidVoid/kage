@@ -8,8 +8,8 @@
 //! default, ask for editor sessions). Deny synthesizes an error output, allow
 //! passes through, and ask blocks the run until an [`Asker`] delivers the
 //! answer, or, when there is none (print mode), denies with a message
-//! pointing at the config. Tools approved for the session skip every
-//! check except a deny mode.
+//! pointing at the config. Tools approved for the session skip the
+//! ask, but never a deny mode or a configured deny.
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -63,8 +63,8 @@ pub(crate) struct PermissionGate {
     /// evaluates the configured rules, which default to allow. Never
     /// persisted: it lives and dies with this session.
     mode: Arc<Mutex<Option<PermissionAction>>>,
-    /// Tools the user allowed for this session. Checked after a deny
-    /// mode and before an ask mode and the rules. Never persisted.
+    /// Tools the user allowed for this session. They skip an ask, but
+    /// not a deny mode or a configured deny. Never persisted.
     session_allowed: Arc<Mutex<BTreeSet<String>>>,
     /// Where "always allow" decisions are written. `None` (every
     /// production construction) resolves [`Config::default_path`] at
@@ -201,6 +201,18 @@ impl PermissionGate {
         }
     }
 
+    /// What the configured rules say about `name` on `subject`.
+    fn configured_action(&self, name: &str, subject: &str) -> (PermissionAction, Rule) {
+        let rules = lock(&self.rules);
+        if rules.tools.contains_key(name) {
+            (rules.check(name, subject), Rule::Tool)
+        } else if let Some(server) = self.mcp_server_of(name) {
+            (rules.mcp_action(server), Rule::Mcp(server.to_owned()))
+        } else {
+            (self.fallback, Rule::Tool)
+        }
+    }
+
     fn allow_for_session(&self, tool: &str) {
         lock(&self.session_allowed).insert(tool.to_owned());
     }
@@ -257,22 +269,15 @@ impl Hooks for PermissionGate {
         input: &serde_json::Value,
     ) -> Option<ToolOutput> {
         let mode = self.mode();
-        if mode != Some(PermissionAction::Deny) && lock(&self.session_allowed).contains(name) {
+        let subject = PermissionsConfig::subject_for(input);
+        let configured = self.configured_action(name, &subject);
+        if mode != Some(PermissionAction::Deny)
+            && configured.0 != PermissionAction::Deny
+            && lock(&self.session_allowed).contains(name)
+        {
             return None;
         }
-        let subject = PermissionsConfig::subject_for(input);
-        let (action, rule) = if let Some(mode) = mode {
-            (mode, Rule::Mode)
-        } else {
-            let rules = lock(&self.rules);
-            if rules.tools.contains_key(name) {
-                (rules.check(name, &subject), Rule::Tool)
-            } else if let Some(server) = self.mcp_server_of(name) {
-                (rules.mcp_action(server), Rule::Mcp(server.to_owned()))
-            } else {
-                (self.fallback, Rule::Tool)
-            }
-        };
+        let (action, rule) = mode.map_or(configured, |mode| (mode, Rule::Mode));
         match (action, &rule) {
             (PermissionAction::Allow, _) => None,
             (PermissionAction::Deny, Rule::Mode) => Some(error_output(
@@ -615,6 +620,28 @@ mod tests {
             saved.permissions.check("bash", "anything"),
             PermissionAction::Allow
         );
+    }
+
+    #[test]
+    fn a_configured_deny_pattern_outlives_a_session_approval() {
+        let mut rules = rules_for(PermissionAction::Ask);
+        rules.tools.get_mut("bash").unwrap().deny = vec!["rm *".to_owned()];
+        let gate = PermissionGate::new(rules);
+        assert!(answer_ask(&gate, PermissionDecision::AllowSession));
+        let mut gate = gate.with_asker(panicking_asker());
+        gate.set_mode(None);
+        assert!(
+            gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+                .is_none()
+        );
+        let out = gate
+            .before_tool_call(
+                &kage_core::ToolCallId::new("call"),
+                "bash",
+                &serde_json::json!({"command": "rm -rf target"}),
+            )
+            .unwrap();
+        assert!(out.text.contains("permission denied"), "{}", out.text);
     }
 
     #[test]

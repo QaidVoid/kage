@@ -113,11 +113,10 @@ reads `waiting` until you answer, then runs or reads `denied`.
 
 Both "allow" scopes cover the tool by name, every call of it, for as
 long as kage runs, including sessions you switch to with `/new` or the
-session picker. They are checked before `/permission ask` and before
-the `[permissions]` rules, so an approved tool stops asking even in
-ask mode. Only `/permission deny` still refuses it. This also skips
-the tool's `deny` patterns until kage exits, so approve a tool for the
-session only when you would run any call of it.
+session picker. They are checked before `/permission ask`, so an
+approved tool stops asking even in ask mode. They never lift a refusal:
+`/permission deny` and the tool's `deny` patterns in `[permissions]`
+still apply.
 
 "Always allow" also persists `[permissions.tools.<name>] default =
 "allow"` into your user config file (`~/.config/kage/config.toml`),

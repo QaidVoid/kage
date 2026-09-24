@@ -7,11 +7,11 @@
 //! because the workspace forbids `unsafe`, ruling out a raw handler
 //! that restores the default disposition on the second signal.
 
+use std::sync::OnceLock;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::sync::OnceLock;
 
 fn flag() -> &'static Arc<AtomicBool> {
     static FLAG: OnceLock<Arc<AtomicBool>> = OnceLock::new();

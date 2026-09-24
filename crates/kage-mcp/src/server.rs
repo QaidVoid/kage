@@ -138,8 +138,8 @@ impl McpConnection {
     /// handshake on an already-connected `peer`, then spawn a thread
     /// that drains server-initiated traffic: `tools/list_changed`
     /// notifications flip an internal flag, `roots/list` requests are
-    /// answered from `roots` (advertised as a client capability), and
-    /// any other server request is answered with `method not found` so
+    /// answered from `roots` (advertised as a client capability), `ping`
+    /// gets an empty result, and any other server request is answered with `method not found` so
     /// a server that asks for an unsupported feature (sampling,
     /// elicitation) is not left hanging.
     ///
@@ -230,6 +230,9 @@ impl McpConnection {
                         Inbound::Notification { .. } => {}
                         Inbound::Request { id, method, .. } if method == "roots/list" => {
                             let _ = peer.respond(&id, Ok(roots_result.clone()));
+                        }
+                        Inbound::Request { id, method, .. } if method == "ping" => {
+                            let _ = peer.respond(&id, Ok(serde_json::json!({})));
                         }
                         Inbound::Request { id, method, params } => {
                             // Offer the request to the host handler
@@ -700,6 +703,15 @@ mod tests {
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0]["uri"], "file:///work/project");
         assert_eq!(roots[0]["name"], "project");
+    }
+
+    #[test]
+    fn server_ping_is_answered_with_an_empty_result() {
+        let (_conn, srv) = stub_server();
+        let result = srv
+            .request("ping", serde_json::json!({}))
+            .expect("ping is answered");
+        assert_eq!(result, serde_json::json!({}));
     }
 
     #[test]

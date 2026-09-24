@@ -20,11 +20,22 @@
 //! expired session, or an unreachable host); any other HTTP status
 //! fails that one request and leaves the transport open.
 //!
+//! Each outgoing request is sent as a POST on its own detached
+//! thread, so the peer's writer lock is released as soon as the
+//! message is handed off. A long `tools/call` can therefore stream for as long as it
+//! likes while the server sends `roots/list` or `ping` mid-call and
+//! kage answers it, and a local cancel returns immediately. When that
+//! POST fails, the thread feeds a synthetic error response for the
+//! request id into the pipe so the waiting caller fails fast.
+//! Notifications and responses are posted inline: servers answer them
+//! with a quick 202, and it keeps `notifications/initialized` ordered
+//! after the `initialize` reply.
+//!
 //! Synchronous throughout: blocking `ureq` calls and `std::thread`, no
-//! async, matching the rest of the workspace. The GET pump thread is
-//! detached and may stay parked on an open remote stream until the
-//! server closes it or the process exits; closing the transport only
-//! takes away the pipe writer it forwards into.
+//! async, matching the rest of the workspace. The GET pump and request
+//! threads are detached and may stay parked on an open remote stream
+//! until the server closes it or the process exits; closing the
+//! transport only takes away the pipe writer they forward into.
 
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -174,6 +185,126 @@ fn pump_sse<R: Read>(body: R, out: &OutSlot) -> io::Result<()> {
     Ok(())
 }
 
+/// Take away the pipe writer: the reader side sees EOF, the jsonrpc
+/// drain ends, and the connection reports itself dead.
+fn close(out: &OutSlot) {
+    *kage_core::sync::lock(out) = None;
+}
+
+/// The `id` of `body` when it is a JSON-RPC request, that is, a
+/// message carrying both `method` and a non-null `id`.
+fn request_id(body: &[u8]) -> Option<serde_json::Value> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    value.get("method")?;
+    value.get("id").filter(|id| !id.is_null()).cloned()
+}
+
+/// A failed POST, and whether it leaves the transport unusable.
+struct PostFailure {
+    error: io::Error,
+    fatal: bool,
+}
+
+impl PostFailure {
+    fn fatal(error: io::Error) -> Self {
+        Self { error, fatal: true }
+    }
+}
+
+/// POST one JSON-RPC message and absorb the response. A successful
+/// response records the session id (first one wins) and unblocks the
+/// GET pump before any body is forwarded, so the next POST already
+/// carries the session; an SSE response or a JSON body is forwarded
+/// into the pipe, a 202 or empty body is a bare success.
+fn post_and_forward(
+    agent: &ureq::Agent,
+    url: &str,
+    headers: &BTreeMap<String, String>,
+    shared: &SharedState,
+    out: &OutSlot,
+    body: &[u8],
+) -> Result<(), PostFailure> {
+    let mut req = agent
+        .post(url)
+        .header("accept", "application/json, text/event-stream")
+        .header("content-type", "application/json");
+    {
+        let guard = kage_core::sync::lock(&shared.0);
+        if let Some(session) = &guard.session_id {
+            req = req.header("mcp-session-id", session.as_str());
+        }
+        if guard.ready {
+            req = req.header("MCP-Protocol-Version", PROTOCOL_VERSION);
+        }
+    }
+    // Configured headers go last so they can override the defaults.
+    for (key, value) in headers {
+        req = req.header(key.as_str(), value.as_str());
+    }
+    let response = match req.send(body) {
+        Ok(response) => response,
+        // The spec defines 404 as a terminated session.
+        Err(ureq::Error::StatusCode(404)) => {
+            return Err(PostFailure::fatal(io::Error::other(
+                "mcp http session expired (404)",
+            )));
+        }
+        Err(ureq::Error::StatusCode(code)) => {
+            return Err(PostFailure {
+                error: io::Error::other(format!("mcp post {url}: status {code}")),
+                fatal: false,
+            });
+        }
+        Err(e) => {
+            return Err(PostFailure::fatal(io::Error::other(format!(
+                "mcp post {url}: {e}"
+            ))));
+        }
+    };
+    {
+        let mut guard = kage_core::sync::lock(&shared.0);
+        if guard.session_id.is_none()
+            && let Some(session) = response
+                .headers()
+                .get("mcp-session-id")
+                .and_then(|v| v.to_str().ok())
+        {
+            guard.session_id = Some(session.to_owned());
+        }
+        guard.ready = true;
+    }
+    shared.1.notify_all();
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    // A failure past this point may leave the response part-consumed,
+    // so the transport can no longer be trusted.
+    if content_type.starts_with("text/event-stream") {
+        return pump_sse(response.into_body().into_reader(), out).map_err(PostFailure::fatal);
+    }
+    let mut payload = Vec::new();
+    response
+        .into_body()
+        .into_reader()
+        .take(MAX_JSON_BODY + 1)
+        .read_to_end(&mut payload)
+        .map_err(PostFailure::fatal)?;
+    if u64::try_from(payload.len()).unwrap_or(u64::MAX) > MAX_JSON_BODY {
+        return Err(PostFailure::fatal(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "mcp http body exceeds size cap",
+        )));
+    }
+    if status == 202 || payload.iter().all(u8::is_ascii_whitespace) {
+        return Ok(());
+    }
+    forward(out, &payload).map_err(PostFailure::fatal)
+}
+
 /// `Write` adapter that POSTs each buffered JSON-RPC message to the
 /// server endpoint on flush and absorbs the response into the pipe.
 struct HttpPoster {
@@ -185,117 +316,62 @@ struct HttpPoster {
     buf: Vec<u8>,
 }
 
-impl HttpPoster {
-    /// Take away the pipe writer: the reader side sees EOF, the
-    /// jsonrpc drain ends, and the connection reports itself dead.
-    fn close(&self) {
-        *kage_core::sync::lock(&self.out) = None;
-    }
-}
-
 impl Write for HttpPoster {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         self.buf.extend_from_slice(data);
         Ok(data.len())
     }
 
-    /// POST the buffered message and absorb the response. A successful
-    /// response records the session id (first one wins) and unblocks
-    /// the GET pump; an SSE response or a JSON body is forwarded into
-    /// the pipe, a 202 or empty body is a bare success.
+    /// POST the buffered message. A request is posted on its own
+    /// thread and `flush` returns at once, so a long call does not
+    /// hold the peer's writer lock while the server sends requests of
+    /// its own; a failed POST is answered with a synthetic error
+    /// response so the caller does not wait forever. Notifications
+    /// and responses are posted inline, which keeps
+    /// `notifications/initialized` ordered after the `initialize`
+    /// reply.
     fn flush(&mut self) -> io::Result<()> {
         if self.buf.is_empty() {
             return Ok(());
         }
         let body = std::mem::take(&mut self.buf);
-        let mut req = self
-            .agent
-            .post(&self.url)
-            .header("accept", "application/json, text/event-stream")
-            .header("content-type", "application/json");
-        {
-            let guard = kage_core::sync::lock(&self.shared.0);
-            if let Some(session) = &guard.session_id {
-                req = req.header("mcp-session-id", session.as_str());
-            }
-            if guard.ready {
-                req = req.header("MCP-Protocol-Version", PROTOCOL_VERSION);
-            }
-        }
-        // Configured headers go last so they can override the defaults.
-        for (key, value) in &self.headers {
-            req = req.header(key.as_str(), value.as_str());
-        }
-        match req.send(&body[..]) {
-            Ok(response) => {
-                {
-                    let mut guard = kage_core::sync::lock(&self.shared.0);
-                    if guard.session_id.is_none()
-                        && let Some(session) = response
-                            .headers()
-                            .get("mcp-session-id")
-                            .and_then(|v| v.to_str().ok())
-                    {
-                        guard.session_id = Some(session.to_owned());
-                    }
-                    guard.ready = true;
+        let Some(id) = request_id(&body) else {
+            return post_and_forward(
+                &self.agent,
+                &self.url,
+                &self.headers,
+                &self.shared,
+                &self.out,
+                &body,
+            )
+            .map_err(|failure| {
+                if failure.fatal {
+                    close(&self.out);
                 }
-                self.shared.1.notify_all();
-                let status = response.status().as_u16();
-                let content_type = response
-                    .headers()
-                    .get("content-type")
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or_default()
-                    .to_owned();
-                let outcome = if content_type.starts_with("text/event-stream") {
-                    pump_sse(response.into_body().into_reader(), &self.out)
-                } else {
-                    let mut payload = Vec::new();
-                    let read = response
-                        .into_body()
-                        .into_reader()
-                        .take(MAX_JSON_BODY + 1)
-                        .read_to_end(&mut payload);
-                    match read {
-                        Err(e) => Err(e),
-                        Ok(_)
-                            if u64::try_from(payload.len()).unwrap_or(u64::MAX) > MAX_JSON_BODY =>
-                        {
-                            Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "mcp http body exceeds size cap",
-                            ))
-                        }
-                        Ok(_) if status == 202 => Ok(()),
-                        Ok(_) if payload.iter().all(u8::is_ascii_whitespace) => Ok(()),
-                        Ok(_) => forward(&self.out, &payload),
-                    }
-                };
-                if let Err(e) = outcome {
-                    // The response stream may be part-consumed, so the
-                    // transport can no longer be trusted.
-                    self.close();
-                    return Err(e);
-                }
-                Ok(())
+                failure.error
+            });
+        };
+        let agent = self.agent.clone();
+        let url = self.url.clone();
+        let headers = self.headers.clone();
+        let shared = Arc::clone(&self.shared);
+        let out = Arc::clone(&self.out);
+        std::thread::spawn(move || {
+            let Err(failure) = post_and_forward(&agent, &url, &headers, &shared, &out, &body)
+            else {
+                return;
+            };
+            let reply = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": { "code": -32603, "message": failure.error.to_string() },
+            });
+            let _ = forward(&out, reply.to_string().as_bytes());
+            if failure.fatal {
+                close(&out);
             }
-            Err(ureq::Error::StatusCode(404)) => {
-                // The spec defines 404 as a terminated session.
-                self.close();
-                Err(io::Error::other("mcp http session expired (404)"))
-            }
-            Err(ureq::Error::StatusCode(code)) => Err(io::Error::other(format!(
-                "mcp post {}: status {code}",
-                self.url
-            ))),
-            Err(e) => {
-                // Unreachable server: close so the connection reads as
-                // dead and the manager evicts it.
-                self.close();
-                Err(io::Error::other(format!("mcp post {}: {e}", self.url)))
-            }
-        }
+        });
+        Ok(())
     }
 }
 
@@ -401,8 +477,16 @@ mod tests {
     }
 
     /// The handler each test server call goes through: one recorded
-    /// request in, one full HTTP response out.
-    type Handler = Arc<dyn Fn(&Recorded) -> Vec<u8> + Send + Sync>;
+    /// request in, the HTTP response written to the connection.
+    type Handler = Arc<dyn Fn(&Recorded, &mut UnixStream) + Send + Sync>;
+
+    /// A [`Handler`] answering every request with the full response
+    /// `respond` builds.
+    fn fixed(respond: impl Fn(&Recorded) -> Vec<u8> + Send + Sync + 'static) -> Handler {
+        Arc::new(move |request, stream| {
+            let _ = stream.write_all(&respond(request));
+        })
+    }
 
     /// Parse one HTTP/1.1 request off `stream`: request line, headers
     /// (keys lowercased), and a content-length-delimited body.
@@ -599,7 +683,7 @@ mod tests {
                     // sees EOF and reports a transport failure.
                     return;
                 }
-                let _ = remote.write_all(&handler(&request));
+                handler(&request, &mut remote);
                 let _ = remote.flush();
             });
             let buffers = LazyBuffers::new(
@@ -659,15 +743,43 @@ mod tests {
         }
     }
 
+    /// Run `f` on its own thread and return its result, or `None` when
+    /// it has not finished within 5 s.
+    fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(Duration::from_secs(5)).ok()
+    }
+
     /// The URL tests hand to [`open_http`]; never dialed, the fake
     /// connector ignores it.
     const TEST_URL: &str = "http://mcp.test/mcp";
+
+    /// The `initialize` answer the fake servers send.
+    fn initialize_response() -> Vec<u8> {
+        response_bytes(
+            "HTTP/1.1 200 OK",
+            Some("application/json"),
+            &[],
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": { "tools": {} }
+                }
+            })
+            .to_string(),
+        )
+    }
 
     #[test]
     fn http_round_trip_json_with_session_echo() {
         let log: Arc<Mutex<Vec<Recorded>>> = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&log);
-        let handler = Arc::new(move |request: &Recorded| -> Vec<u8> {
+        let handler = fixed(move |request: &Recorded| -> Vec<u8> {
             recorded.lock().unwrap().push(request.clone());
             if request.method == "GET" {
                 return response_bytes("HTTP/1.1 405 Method Not Allowed", None, &[], "");
@@ -736,7 +848,7 @@ mod tests {
 
     #[test]
     fn http_round_trip_sse_response() {
-        let handler = Arc::new(|request: &Recorded| -> Vec<u8> {
+        let handler = fixed(|request: &Recorded| -> Vec<u8> {
             if request.method == "GET" {
                 return response_bytes("HTTP/1.1 405 Method Not Allowed", None, &[], "");
             }
@@ -772,28 +884,15 @@ mod tests {
     }
 
     #[test]
-    fn transport_failure_marks_connection_dead() {
-        let handler = Arc::new(|request: &Recorded| -> Vec<u8> {
+    fn transport_failure_fails_the_request_and_marks_connection_dead() {
+        let handler = fixed(|request: &Recorded| -> Vec<u8> {
             if request.method == "GET" {
                 return response_bytes("HTTP/1.1 405 Method Not Allowed", None, &[], "");
             }
             let body: serde_json::Value =
                 serde_json::from_str(&request.body).unwrap_or(serde_json::Value::Null);
             match body.get("method").and_then(|m| m.as_str()) {
-                Some("initialize") => response_bytes(
-                    "HTTP/1.1 200 OK",
-                    Some("application/json"),
-                    &[],
-                    &serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "result": {
-                            "protocolVersion": "2025-06-18",
-                            "capabilities": {}
-                        }
-                    })
-                    .to_string(),
-                ),
+                Some("initialize") => initialize_response(),
                 Some("notifications/initialized") => {
                     response_bytes("HTTP/1.1 202 Accepted", None, &[], "")
                 }
@@ -804,11 +903,92 @@ mod tests {
         // POST is the dropped third request.
         let (peer, inbound, _reader) =
             open_http(fake_agent(handler, 2), TEST_URL, &BTreeMap::new()).unwrap();
-        let conn = McpConnection::initialize("srv", peer, inbound, &[], None).unwrap();
+        let conn = Arc::new(McpConnection::initialize("srv", peer, inbound, &[], None).unwrap());
         assert!(!conn.is_dead());
-        let err = conn.list_tools().unwrap_err();
-        assert!(matches!(err, McpError::Rpc { .. }));
+        let caller = Arc::clone(&conn);
+        let err = within(move || caller.list_tools())
+            .expect("a failed POST must not leave the request hanging")
+            .unwrap_err();
+        match err {
+            McpError::Rpc { source, .. } => {
+                assert!(source.message.contains("mcp post"), "got {source:?}");
+            }
+            other => panic!("expected an rpc error, got {other:?}"),
+        }
         wait_for(|| conn.is_dead());
         assert!(conn.is_dead());
+    }
+
+    #[test]
+    fn server_request_during_a_streaming_call_is_answered() {
+        let (roots_tx, roots_rx) = std::sync::mpsc::channel::<serde_json::Value>();
+        let roots_rx = Mutex::new(roots_rx);
+        let handler: Handler = Arc::new(move |request, stream| {
+            if request.method == "GET" {
+                let _ = stream.write_all(&response_bytes(
+                    "HTTP/1.1 405 Method Not Allowed",
+                    None,
+                    &[],
+                    "",
+                ));
+                return;
+            }
+            let body: serde_json::Value =
+                serde_json::from_str(&request.body).unwrap_or(serde_json::Value::Null);
+            let response = match body.get("method").and_then(|m| m.as_str()) {
+                Some("initialize") => initialize_response(),
+                Some("notifications/initialized") => {
+                    response_bytes("HTTP/1.1 202 Accepted", None, &[], "")
+                }
+                Some("tools/call") => {
+                    let ask = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": "roots-1",
+                        "method": "roots/list",
+                    });
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                         connection: close\r\n\r\ndata: {ask}\n\n"
+                    );
+                    let _ = stream.flush();
+                    let Ok(roots) = roots_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(10))
+                    else {
+                        return;
+                    };
+                    let reply = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": body["id"],
+                        "result": {
+                            "content": [ { "type": "text", "text": roots["roots"][0]["uri"] } ]
+                        }
+                    });
+                    let _ = write!(stream, "data: {reply}\n\n");
+                    return;
+                }
+                None if body["id"] == "roots-1" => {
+                    let _ = roots_tx.send(body["result"].clone());
+                    response_bytes("HTTP/1.1 202 Accepted", None, &[], "")
+                }
+                _ => response_bytes("HTTP/1.1 500 Internal Server Error", None, &[], ""),
+            };
+            let _ = stream.write_all(&response);
+        });
+        let (peer, inbound, _reader) =
+            open_http(fake_agent(handler, usize::MAX), TEST_URL, &BTreeMap::new()).unwrap();
+        let roots = [std::path::PathBuf::from("/work/project")];
+        let conn = McpConnection::initialize("srv", peer, inbound, &roots, None).unwrap();
+        let result = within(move || {
+            conn.request(
+                "tools/call",
+                serde_json::json!({ "name": "t", "arguments": {} }),
+            )
+        })
+        .expect("the call must finish while the server asks for roots")
+        .unwrap();
+        assert_eq!(result["content"][0]["text"], "file:///work/project");
     }
 }

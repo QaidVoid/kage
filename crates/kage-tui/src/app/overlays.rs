@@ -2,6 +2,7 @@
 
 #[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
+use kage_core::options::OptionDef;
 
 impl App {
     pub(crate) fn run_theme_command(&mut self, rest: &str) {
@@ -369,15 +370,25 @@ impl App {
         None
     }
 
+    /// Drive the settings dialog. Each edit applies live, `Esc`
+    /// restores the values it opened with, and a resolve persists.
     pub(crate) fn dispatch_settings_key(
         &mut self,
         key: ratatui::crossterm::event::KeyEvent,
     ) -> Option<AppExit> {
         let overlay = self.settings_overlay.as_mut()?;
         match crate::overlay::OverlayWidget::handle_key(overlay, key) {
-            OverlayAction::Stay | OverlayAction::PropagateKey => {}
+            OverlayAction::Stay | OverlayAction::PropagateKey => {
+                if let Some((name, value)) = overlay.take_edit() {
+                    self.set_option(name, value);
+                }
+            }
             OverlayAction::Close => {
+                let reverts = overlay.reverts();
                 self.settings_overlay = None;
+                for (name, value) in reverts {
+                    self.update_option(name, value);
+                }
             }
             OverlayAction::Resolve(value) => {
                 self.settings_overlay = None;
@@ -415,71 +426,24 @@ impl App {
         }
     }
 
-    /// Open the `:settings` dialog, seeding it from the option store
-    /// plus live state (active model) and the configured keybindings.
+    /// Open the `/settings` dialog over the current option values.
     pub(crate) fn open_settings(&mut self) {
-        let workdir = self
-            .completion_workdir
-            .clone()
-            .unwrap_or_else(|| std::path::PathBuf::from("."));
-        let cfg = match kage_core::config::Config::load_layered(&workdir) {
-            Ok(c) => c,
-            Err(e) => {
-                self.push_error(format!("settings: config load failed: {e}"));
-                return;
-            }
-        };
-        let model = self
-            .status_model
-            .as_ref()
-            .map_or_else(|| cfg.provider.default_model.clone(), |m| lock(m).clone());
-        let store = lock(&self.options);
-        let text = |name| {
-            store
-                .get(name)
-                .and_then(OptionValue::as_str)
-                .unwrap_or_default()
-                .to_owned()
-        };
-        let thinking_level = text("thinking_level");
-        #[allow(clippy::cast_possible_truncation)]
-        let threshold = store
-            .get("compaction_threshold")
-            .and_then(OptionValue::as_float)
-            .unwrap_or_default() as f32;
-        let init = SettingsInit {
-            themes: crate::theme::Theme::available_names(self.themes_dir.as_deref()),
-            theme: text("theme"),
-            models: self.model_choices.iter().map(|p| p.value.clone()).collect(),
-            model,
-            mouse: store.get("mouse").and_then(OptionValue::as_bool) == Some(true),
-            threshold,
-            keybindings: cfg
-                .keybindings
-                .bindings
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            editor_modeless: text("editor") == "modeless",
-            thinking_level: if thinking_level.is_empty() {
-                "off".into()
-            } else {
-                thinking_level
-            },
-            from_lua: kage_core::options::OPTIONS
-                .iter()
-                .map(|def| def.name)
-                .filter(|name| store.source(name) == Some(OptionSource::Lua))
-                .collect(),
-        };
-        drop(store);
-        self.settings_overlay = Some(SettingsOverlay::new(init));
+        let themes = crate::theme::Theme::available_names(self.themes_dir.as_deref());
+        self.settings_overlay = Some(SettingsOverlay::new(&lock(&self.options), themes));
     }
 
-    /// Apply the settings-dialog result: set the changed options (theme,
-    /// mouse and editor apply live), switch the model, then persist the changed fields to the user config
-    /// file (comment-preserving). A persistence failure is surfaced,
-    /// not swallowed. An empty resolve means nothing changed.
+    /// [`Self::set_option`], skipped when `name` already holds `value`.
+    fn update_option(&mut self, name: &str, value: OptionValue) {
+        if lock(&self.options).get(name) != Some(&value) {
+            self.set_option(name, value);
+        }
+    }
+
+    /// Apply the settings-dialog result `{ name: value }`: set every
+    /// valid option not yet applied, persist them to the user config
+    /// file (comment-preserving), and move the live session to a new
+    /// thinking level once it is saved. An empty resolve means nothing
+    /// changed.
     pub(crate) fn apply_settings(&mut self, value: &serde_json::Value) {
         self.apply_settings_at(value, kage_core::config::Config::default_path());
     }
@@ -492,98 +456,39 @@ impl App {
         value: &serde_json::Value,
         path: Option<std::path::PathBuf>,
     ) {
-        if value.as_object().is_some_and(serde_json::Map::is_empty) {
+        let edits: Vec<(&OptionDef, OptionValue)> = value
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(name, value)| {
+                let def = kage_core::options::find(name)?;
+                Some((def, def.validate(option_from_json(value)?).ok()?))
+            })
+            .collect();
+        if edits.is_empty() {
             self.notify("settings: nothing changed");
             return;
         }
-        let theme = value.get("theme").and_then(|v| v.as_str()).unwrap_or("");
-        let model = value.get("model").and_then(|v| v.as_str()).unwrap_or("");
-        let mouse = value.get("mouse").and_then(serde_json::Value::as_bool);
-        let threshold = value
-            .get("compaction_threshold")
-            .and_then(serde_json::Value::as_f64);
-        // `None` when the key is absent or unrecognized; only an
-        // explicit "modeless"/"vim" changes anything.
-        let editor_modeless = match value.get("editor").and_then(|v| v.as_str()) {
-            Some("modeless") => Some(true),
-            Some("vim") => Some(false),
-            _ => None,
-        };
-        // `None` when the key is absent or not a ladder string; the
-        // worker parses the same six names, so anything else is
-        // refused here and can never reach the config or the session.
-        let thinking_level = match value.get("thinking_level").and_then(|v| v.as_str()) {
-            Some(level @ ("off" | "minimal" | "low" | "medium" | "high" | "xhigh")) => Some(level),
-            _ => None,
-        };
-
-        if !theme.is_empty() && theme != crate::theme::current().name {
-            self.set_option("theme", OptionValue::Str(theme.to_owned()));
+        for (def, value) in &edits {
+            self.update_option(def.name, value.clone());
         }
-        if let Some(mouse) = mouse {
-            self.set_option("mouse", OptionValue::Bool(mouse));
-        }
-        if let Some(modeless) = editor_modeless {
-            let editor = if modeless { "modeless" } else { "vim" };
-            self.set_option("editor", OptionValue::Str(editor.to_owned()));
-        }
-        if let Some(t) = threshold {
-            self.set_option("compaction_threshold", OptionValue::Float(t));
-        }
-        if let Some(level) = thinking_level {
-            self.set_option("thinking_level", OptionValue::Str(level.to_owned()));
-        }
-        let current_model = self.status_model.as_ref().map(|m| lock(m).clone());
-        if !model.is_empty() && current_model.as_deref() != Some(model) {
-            let _ = self.send_request(RunRequest::SwitchModel(model.to_owned()));
-        }
-
         let Some(path) = path else {
             self.push_error("settings: no home directory; not persisted");
             return;
         };
-        let mut cfg = match kage_core::config::Config::load(&path) {
-            Ok(c) => c,
-            Err(e) => {
-                self.push_error(format!("settings: config load failed: {e}"));
-                return;
+        if let Err(e) = save_options(&path, &edits) {
+            self.push_error(format!("settings: {e}"));
+            return;
+        }
+        self.notify("settings saved");
+        let level = edits.iter().find_map(|(def, value)| match value {
+            OptionValue::Str(level) if def.name == "thinking_level" && !level.is_empty() => {
+                Some(level.clone())
             }
-        };
-        if !theme.is_empty() {
-            theme.clone_into(&mut cfg.ui.theme);
-        }
-        if !model.is_empty() {
-            model.clone_into(&mut cfg.provider.default_model);
-        }
-        if let Some(mouse) = mouse {
-            cfg.ui.mouse = mouse;
-        }
-        if let Some(t) = threshold {
-            #[allow(clippy::cast_possible_truncation)]
-            {
-                cfg.loop_settings.compaction_threshold = t as f32;
-            }
-        }
-        if let Some(modeless) = editor_modeless {
-            cfg.ui.editor = if modeless {
-                kage_core::config::EditorMode::Modeless
-            } else {
-                kage_core::config::EditorMode::Vim
-            };
-        }
-        if let Some(level) = thinking_level {
-            cfg.ui.thinking_level = Some(level.to_owned());
-        }
-        match cfg.save(&path) {
-            Ok(()) => {
-                self.notify("settings saved");
-                if let Some(level) = thinking_level {
-                    // Follows the save: the live session only adopts
-                    // a change that actually stuck.
-                    let _ = self.send_request(RunRequest::SetThinkingLevel(level.to_owned()));
-                }
-            }
-            Err(e) => self.push_error(format!("settings: save failed: {e}")),
+            _ => None,
+        });
+        if let Some(level) = level {
+            let _ = self.send_request(RunRequest::SetThinkingLevel(level));
         }
     }
 
@@ -706,5 +611,122 @@ impl App {
             ApprovalOutcome::Decide(decision) => self.answer_permission(decision),
             ApprovalOutcome::Feedback(text) => self.answer_with_feedback(text),
         }
+    }
+}
+
+fn option_from_json(value: &serde_json::Value) -> Option<OptionValue> {
+    Some(match value {
+        serde_json::Value::Bool(b) => OptionValue::Bool(*b),
+        serde_json::Value::Number(n) => match n.as_i64() {
+            Some(n) => OptionValue::Int(n),
+            None => OptionValue::Float(n.as_f64()?),
+        },
+        serde_json::Value::String(s) => OptionValue::Str(s.clone()),
+        _ => return None,
+    })
+}
+
+/// Write `edits` into the user config at `path`, each at its option's
+/// TOML path.
+fn save_options(path: &std::path::Path, edits: &[(&OptionDef, OptionValue)]) -> Result<(), String> {
+    use kage_core::config::Config;
+    let cfg = Config::load(path).map_err(|e| format!("config load failed: {e}"))?;
+    let mut doc = toml::Value::try_from(&cfg).map_err(|e| e.to_string())?;
+    for (def, value) in edits {
+        let Some((table, key)) = def.toml.rsplit_once('.') else {
+            continue;
+        };
+        let Some(toml::Value::Table(table)) = table
+            .split('.')
+            .try_fold(&mut doc, |node, part| node.get_mut(part))
+        else {
+            continue;
+        };
+        let value = match value {
+            OptionValue::Bool(b) => toml::Value::Boolean(*b),
+            OptionValue::Int(n) => toml::Value::Integer(*n),
+            OptionValue::Float(x) => toml::Value::Float(*x),
+            OptionValue::Str(s) => toml::Value::String(s.clone()),
+        };
+        table.insert(key.to_owned(), value);
+    }
+    let cfg: Config = doc.try_into().map_err(|e| e.to_string())?;
+    cfg.save(path).map_err(|e| format!("save failed: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc;
+
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::*;
+
+    fn press(app: &mut App, code: KeyCode) {
+        app.dispatch_settings_key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    fn settings_app(name: &str) -> (App, mpsc::Receiver<RunRequest>) {
+        let (tx, rx) = mpsc::channel();
+        let mut app = App::new(crate::events::shared_buffer(), tx);
+        app.open_settings();
+        let target = kage_core::options::OPTIONS
+            .iter()
+            .position(|def| def.name == name)
+            .unwrap();
+        for _ in 0..target {
+            press(&mut app, KeyCode::Down);
+        }
+        (app, rx)
+    }
+
+    #[test]
+    fn cycling_editor_applies_live_and_esc_restores_it() {
+        let (mut app, _rx) = settings_app("editor");
+        app.input.set_modeless(true);
+        press(&mut app, KeyCode::Right);
+        assert!(app.apply_option_changes());
+        assert!(!app.input.is_modeless());
+        press(&mut app, KeyCode::Esc);
+        assert!(app.settings_overlay.is_none());
+        assert!(app.apply_option_changes());
+        assert!(app.input.is_modeless());
+    }
+
+    #[test]
+    fn enter_persists_the_edited_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "# mine\n[ui]\nmouse = true\n").unwrap();
+        let (mut app, rx) = settings_app("thinking_level");
+        press(&mut app, KeyCode::Left);
+        press(&mut app, KeyCode::Down);
+        for c in "0.5".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        let overlay = app.settings_overlay.as_mut().unwrap();
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let OverlayAction::Resolve(value) =
+            crate::overlay::OverlayWidget::handle_key(overlay, enter)
+        else {
+            panic!("enter resolves");
+        };
+        app.apply_settings_at(&value, Some(path.clone()));
+        let cfg = kage_core::config::Config::load(&path).unwrap();
+        assert_eq!(cfg.ui.thinking_level.as_deref(), Some("xhigh"));
+        assert!((cfg.loop_settings.compaction_threshold - 0.5).abs() < f32::EPSILON);
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .starts_with("# mine")
+        );
+        assert_eq!(
+            lock(&app.options).get("compaction_threshold"),
+            Some(&OptionValue::Float(0.5))
+        );
+        assert_eq!(
+            rx.try_recv(),
+            Ok(RunRequest::SetThinkingLevel("xhigh".into()))
+        );
     }
 }

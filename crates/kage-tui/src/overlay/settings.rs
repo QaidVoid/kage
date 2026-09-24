@@ -1,223 +1,130 @@
-//! `:settings` multi-tab overlay.
+//! `/settings` dialog: one list generated from the option registry.
 //!
-//! A modal [`OverlayWidget`] with seven sections: Theme, Model,
-//! Mouse, Autocompaction, a read-only Keybindings list, Editor, and
-//! Thinking. `Tab`/`BackTab` cycle sections; within a section the
-//! arrow keys change the value; `Enter` or `Ctrl+S` resolves the
-//! values that changed as JSON and `Esc` cancels. The host applies
-//! the result live (theme, mouse, model, thinking level) and
-//! persists it comment-preserving via `Config::save`.
-//!
-//! The Thinking tab edits the persisted default level for new
-//! sessions; the live session level stays on the `Shift+Tab` cycle
-//! and follows when the host applies a resolved change.
-//!
-//! A tab whose option was last set from Lua says so, since `init.lua`
-//! sets it again on the next start and shadows the saved value.
+//! A modal [`OverlayWidget`] with a row per [`OPTIONS`] entry showing
+//! its name, its value and whether `init.lua` set it. The selected
+//! option's doc shows below the list. Left, Right and Space cycle
+//! booleans, choices and themes and step numbers, digits type a
+//! number, and any printable key sets a key option. Each edit is
+//! queued for the host to apply live ([`SettingsOverlay::take_edit`]).
+//! `Enter` or `Ctrl+S` resolves the edited options as JSON for the
+//! host to persist, and `Esc` closes so the host restores
+//! [`SettingsOverlay::reverts`].
 
+use kage_core::options::{OPTIONS, OptionDef, OptionKind, OptionSource, OptionStore, OptionValue};
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Widget};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget, Wrap};
 
 use crate::overlay::widget::{OverlayAction, OverlayCtx, OverlayWidget};
 use crate::view::scroll_offset_centered;
 
-/// Smallest / largest / step for the autocompaction threshold. The
-/// loop clamps to `(0.0, 1.0]`; the dialog keeps it in a sane band.
-const THRESHOLD_MIN: f32 = 0.10;
-const THRESHOLD_MAX: f32 = 1.0;
-const THRESHOLD_STEP: f32 = 0.05;
+/// Row marker for an option whose value came from Lua.
+const LUA_MARK: &str = "set in init.lua";
 
-/// Section tabs in display order.
-const TABS: &[&str] = &[
-    "Theme",
-    "Model",
-    "Mouse",
-    "Autocompaction",
-    "Keybindings",
-    "Editor",
-    "Thinking",
-];
+/// Rows reserved for the selected option's doc.
+const DOC_ROWS: u16 = 3;
 
-/// Option each tab edits, by tab index.
-const TAB_OPTIONS: [Option<&str>; 7] = [
-    Some("theme"),
-    None,
-    Some("mouse"),
-    Some("compaction_threshold"),
-    None,
-    Some("editor"),
-    Some("thinking_level"),
-];
+/// Help line of a number row.
+const NUMBER_HINT: &str = "type or left/right to change  enter save  esc cancel";
 
-/// Shown on a tab whose option was last set from Lua.
-const LUA_NOTE: &str = "  set from Lua: init.lua shadows a saved value on the next start";
+/// Help line of a key row.
+const KEY_HINT: &str = "press a key to set it  enter save  esc cancel";
 
-/// Thinking-level ladder, mirroring the `kage_provider::ThinkingLevel`
-/// wire strings. kage-tui is provider-free, so the ladder is spelled
-/// here and the host's worker parses the resolved string.
-const LADDER: [&str; 6] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+/// Help line of every other row.
+const CYCLE_HINT: &str = "left/right to change  enter save  esc cancel";
 
-/// Inputs the host gathers (from the loaded config + live state) to
-/// seed the dialog.
-#[derive(Clone, Debug, Default)]
-pub struct SettingsInit {
-    /// All selectable theme names, host order.
-    pub themes: Vec<String>,
-    /// Currently active theme name.
-    pub theme: String,
-    /// All selectable `provider:model` ids.
-    pub models: Vec<String>,
-    /// Currently active model id.
-    pub model: String,
-    /// Whether mouse capture is on.
-    pub mouse: bool,
-    /// Autocompaction threshold (fraction of the context window).
-    pub threshold: f32,
-    /// Read-only `(chord, action)` pairs to display.
-    pub keybindings: Vec<(String, String)>,
-    /// Whether the prompt input is non-modal (`editor = "modeless"`).
-    pub editor_modeless: bool,
-    /// Persisted thinking level the dialog starts from, one of the
-    /// [`LADDER`] strings; unknown strings fall back to `"off"`.
-    pub thinking_level: String,
-    /// Options whose current value was last set from Lua.
-    pub from_lua: Vec<&'static str>,
+#[derive(Debug)]
+struct Row {
+    def: &'static OptionDef,
+    value: OptionValue,
+    seed: OptionValue,
+    lua: bool,
 }
 
-/// The `:settings` overlay.
+/// The `/settings` overlay.
 #[derive(Debug)]
 pub struct SettingsOverlay {
-    tab: usize,
+    rows: Vec<Row>,
     themes: Vec<String>,
-    theme_idx: usize,
-    models: Vec<String>,
-    model_idx: usize,
-    mouse: bool,
-    threshold: f32,
-    keybindings: Vec<(String, String)>,
-    editor_modeless: bool,
-    thinking_idx: usize,
-    /// The values the dialog opened with. `result_json` resolves only
-    /// fields that differ from these, so a value inherited from the
-    /// project config layer is never stamped into the user file.
-    seed: SettingsInit,
-    list_scroll: usize,
+    selected: usize,
+    draft: Option<String>,
+    edit: Option<usize>,
+    name_width: usize,
+    value_width: usize,
 }
 
 impl SettingsOverlay {
-    /// Build the overlay from host-gathered state. Selection starts on
-    /// the active theme / model when present.
+    /// Build the dialog from the current option values. `themes` are
+    /// the names the `theme` row cycles through.
     #[must_use]
-    pub fn new(init: SettingsInit) -> Self {
-        let theme_idx = init
-            .themes
+    pub fn new(store: &OptionStore, themes: Vec<String>) -> Self {
+        let rows: Vec<Row> = OPTIONS
             .iter()
-            .position(|t| *t == init.theme)
-            .unwrap_or(0);
-        let model_idx = init
-            .models
+            .map(|def| {
+                let value = store
+                    .get(def.name)
+                    .cloned()
+                    .unwrap_or_else(|| def.default_value());
+                Row {
+                    def,
+                    seed: value.clone(),
+                    value,
+                    lua: store.source(def.name) == Some(OptionSource::Lua),
+                }
+            })
+            .collect();
+        let choices = OPTIONS
             .iter()
-            .position(|m| *m == init.model)
-            .unwrap_or(0);
-        let thinking_idx = LADDER
+            .filter_map(|def| match def.kind {
+                OptionKind::Choice { values, .. } => Some(values),
+                _ => None,
+            })
+            .flatten();
+        let value_width = rows
             .iter()
-            .position(|l| *l == init.thinking_level)
-            .unwrap_or(0);
+            .map(|row| display(&row.value).len())
+            .chain(themes.iter().map(String::len))
+            .chain(choices.map(|value| display(&OptionValue::Str((*value).to_owned())).len()))
+            .max()
+            .unwrap_or_default();
         Self {
-            tab: 0,
-            seed: init.clone(),
-            themes: init.themes,
-            theme_idx,
-            models: init.models,
-            model_idx,
-            mouse: init.mouse,
-            threshold: init.threshold.clamp(THRESHOLD_MIN, THRESHOLD_MAX),
-            keybindings: init.keybindings,
-            editor_modeless: init.editor_modeless,
-            thinking_idx,
-            list_scroll: 0,
+            name_width: OPTIONS.iter().map(|def| def.name.len()).max().unwrap_or(0),
+            value_width,
+            rows,
+            themes,
+            selected: 0,
+            draft: None,
+            edit: None,
         }
     }
 
-    /// Selected theme name, or empty when no themes were supplied.
-    #[must_use]
-    pub fn selected_theme(&self) -> &str {
-        self.themes.get(self.theme_idx).map_or("", String::as_str)
+    /// The last edit not yet applied, as `(name, value)`.
+    pub fn take_edit(&mut self) -> Option<(&'static str, OptionValue)> {
+        let row = &self.rows[self.edit.take()?];
+        Some((row.def.name, row.value.clone()))
     }
 
-    /// Selected model id, or empty when no models were supplied.
+    /// The values the dialog opened with, for every edited option.
     #[must_use]
-    pub fn selected_model(&self) -> &str {
-        self.models.get(self.model_idx).map_or("", String::as_str)
+    pub fn reverts(&self) -> Vec<(&'static str, OptionValue)> {
+        self.edited()
+            .map(|row| (row.def.name, row.seed.clone()))
+            .collect()
     }
 
-    /// Whether mouse capture is enabled in the current edit.
-    #[must_use]
-    pub fn mouse(&self) -> bool {
-        self.mouse
-    }
-
-    /// The edited autocompaction threshold.
-    #[must_use]
-    pub fn threshold(&self) -> f32 {
-        self.threshold
-    }
-
-    /// Selected thinking level, a [`LADDER`] wire string.
-    #[must_use]
-    pub fn selected_thinking_level(&self) -> &'static str {
-        LADDER[self.thinking_idx]
-    }
-
-    /// The edited settings as the JSON the host applies on resolve.
-    /// Only values that differ from the seed are included: the host
-    /// persists whatever arrives, so values inherited from the
-    /// project config layer are never copied into the user file.
+    /// The edited options as `{ name: value }`. Unchanged options are
+    /// left out, so a value inherited from the project config layer is
+    /// never stamped into the user file.
     #[must_use]
     pub fn result_json(&self) -> serde_json::Value {
-        // The threshold moves on a 0.05 grid; round to 2 decimals so
-        // neither the JSON nor the persisted config carries an ugly
-        // f32->f64 tail (0.800000011...).
-        let threshold = (f64::from(self.threshold) * 100.0).round() / 100.0;
-        let seed_threshold = (f64::from(self.seed.threshold) * 100.0).round() / 100.0;
-        let editor = if self.editor_modeless {
-            "modeless"
-        } else {
-            "vim"
-        };
-        let seed_editor = if self.seed.editor_modeless {
-            "modeless"
-        } else {
-            "vim"
-        };
-        let mut out = serde_json::Map::new();
-        if self.selected_theme() != self.seed.theme {
-            out.insert("theme".into(), serde_json::json!(self.selected_theme()));
-        }
-        if self.selected_model() != self.seed.model {
-            out.insert("model".into(), serde_json::json!(self.selected_model()));
-        }
-        if self.mouse != self.seed.mouse {
-            out.insert("mouse".into(), serde_json::json!(self.mouse));
-        }
-        if (threshold - seed_threshold).abs() > f64::EPSILON {
-            out.insert("compaction_threshold".into(), serde_json::json!(threshold));
-        }
-        if editor != seed_editor {
-            out.insert("editor".into(), serde_json::json!(editor));
-        }
-        if self.selected_thinking_level() != self.seed.thinking_level {
-            out.insert(
-                "thinking_level".into(),
-                serde_json::json!(self.selected_thinking_level()),
-            );
-        }
-        serde_json::Value::Object(out)
+        self.edited()
+            .map(|row| (row.def.name.to_owned(), to_json(&row.value)))
+            .collect::<serde_json::Map<_, _>>()
+            .into()
     }
 
     /// Inherent render wrapper, matching `OverlayPicker::render`, so
@@ -233,134 +140,215 @@ impl SettingsOverlay {
         OverlayWidget::render(self, modal, frame.buffer_mut(), &ctx);
     }
 
-    fn move_selection(&mut self, delta: isize) {
-        match self.tab {
-            0 => self.theme_idx = step_index(self.theme_idx, self.themes.len(), delta),
-            1 => self.model_idx = step_index(self.model_idx, self.models.len(), delta),
-            2 => self.mouse = !self.mouse,
-            3 => {
-                let next = if delta < 0 {
-                    self.threshold - THRESHOLD_STEP
+    fn edited(&self) -> impl Iterator<Item = &Row> {
+        self.rows.iter().filter(|row| row.value != row.seed)
+    }
+
+    fn row(&self) -> &Row {
+        &self.rows[self.selected]
+    }
+
+    fn set(&mut self, value: OptionValue) {
+        let row = &mut self.rows[self.selected];
+        if let Ok(value) = row.def.validate(value)
+            && value != row.value
+        {
+            row.value = value;
+            self.edit = Some(self.selected);
+        }
+    }
+
+    fn select(&mut self, delta: isize) {
+        self.commit();
+        self.selected = self
+            .selected
+            .saturating_add_signed(delta)
+            .min(self.rows.len() - 1);
+    }
+
+    fn cycle(&mut self, delta: i8) {
+        self.commit();
+        let row = self.row();
+        let next = match (row.def.kind, &row.value) {
+            (OptionKind::Bool { .. }, OptionValue::Bool(on)) => OptionValue::Bool(!on),
+            (OptionKind::Int { min, max, .. }, OptionValue::Int(n)) => {
+                OptionValue::Int((n + i64::from(delta)).clamp(min, max))
+            }
+            (OptionKind::Fraction { .. }, OptionValue::Float(x)) => {
+                OptionValue::Float((((x * 20.0).round() + f64::from(delta)) / 20.0).clamp(0.0, 1.0))
+            }
+            (OptionKind::Choice { values, .. }, OptionValue::Str(cur)) => step(values, cur, delta),
+            (OptionKind::Str { .. }, OptionValue::Str(cur)) if row.def.name == "theme" => {
+                step(&self.themes, cur, delta)
+            }
+            _ => return,
+        };
+        self.set(next);
+    }
+
+    fn type_char(&mut self, c: char) {
+        match self.row().def.kind {
+            OptionKind::Int { .. } if c.is_ascii_digit() => {
+                self.draft.get_or_insert_default().push(c);
+            }
+            OptionKind::Fraction { .. } if c.is_ascii_digit() || c == '.' => {
+                self.draft.get_or_insert_default().push(c);
+            }
+            OptionKind::Key { .. } => {
+                let key = if c == ' ' {
+                    "<Space>".to_owned()
                 } else {
-                    self.threshold + THRESHOLD_STEP
+                    c.to_string()
                 };
-                // Round to the step grid so repeated presses stay tidy.
-                let snapped = (next / THRESHOLD_STEP).round() * THRESHOLD_STEP;
-                self.threshold = snapped.clamp(THRESHOLD_MIN, THRESHOLD_MAX);
+                self.set(OptionValue::Str(key));
             }
-            4 => {
-                let n = self.keybindings.len();
-                if n > 0 {
-                    self.list_scroll = step_index(self.list_scroll, n, delta);
-                }
-            }
-            5 => self.editor_modeless = !self.editor_modeless,
-            6 => self.thinking_idx = step_index(self.thinking_idx, LADDER.len(), delta),
+            _ if c == ' ' => self.cycle(1),
             _ => {}
         }
     }
-}
 
-fn step_index(cur: usize, len: usize, delta: isize) -> usize {
-    if len == 0 {
-        return 0;
+    fn backspace(&mut self) {
+        if !is_number(self.row().def) {
+            return;
+        }
+        let value = display(&self.row().value);
+        self.draft.get_or_insert(value).pop();
     }
-    if delta < 0 {
-        if cur == 0 { len - 1 } else { cur - 1 }
-    } else {
-        (cur + 1) % len
-    }
-}
 
-fn center(available: Rect, pct_w: u16, pct_h: u16) -> Rect {
-    let w = (available.width * pct_w / 100).max(1);
-    let h = (available.height * pct_h / 100).max(1);
-    let x = available.x + (available.width.saturating_sub(w)) / 2;
-    let y = available.y + (available.height.saturating_sub(h)) / 2;
-    Rect::new(x, y, w, h)
+    fn commit(&mut self) {
+        if let Some(value) = self.draft.take().and_then(|d| self.parse_draft(&d)) {
+            self.set(value);
+        }
+    }
+
+    fn parse_draft(&self, draft: &str) -> Option<OptionValue> {
+        let def = self.row().def;
+        let value = match def.kind {
+            OptionKind::Int { .. } => OptionValue::Int(draft.parse().ok()?),
+            _ => OptionValue::Float(draft.parse().ok()?),
+        };
+        def.validate(value).ok()
+    }
+
+    fn hint(&self) -> &'static str {
+        match self.row().def.kind {
+            OptionKind::Int { .. } | OptionKind::Fraction { .. } => NUMBER_HINT,
+            OptionKind::Key { .. } => KEY_HINT,
+            _ => CYCLE_HINT,
+        }
+    }
+
+    fn doc(&self) -> String {
+        let row = self.row();
+        let mut doc = row.def.doc.to_owned();
+        if !row.def.live {
+            doc.push_str(" Applies to new sessions.");
+        }
+        if row.lua {
+            doc.push_str(" init.lua sets it again on the next start.");
+        }
+        doc
+    }
+
+    fn row_line(&self, idx: usize, ctx: &OverlayCtx<'_>) -> Line<'static> {
+        let row = &self.rows[idx];
+        let selected = idx == self.selected;
+        let base = if selected {
+            Style::default()
+                .fg(ctx.theme.overlay_selected_fg)
+                .bg(ctx.theme.overlay_selected_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(ctx.theme.overlay_fg)
+        };
+        let (value, value_style) = match self.draft.as_deref().filter(|_| selected) {
+            Some(draft) if self.parse_draft(draft).is_none() => {
+                (format!("{draft}_"), base.fg(ctx.theme.tool_error_fg))
+            }
+            Some(draft) => (format!("{draft}_"), base),
+            None => (display(&row.value), base),
+        };
+        let mark_style = if selected {
+            base
+        } else {
+            base.fg(ctx.theme.muted_fg)
+        };
+        let (nw, vw) = (self.name_width, self.value_width);
+        Line::from(vec![
+            Span::styled(
+                format!(
+                    "{} {:<nw$}  ",
+                    if selected { ">" } else { " " },
+                    row.def.name
+                ),
+                base,
+            ),
+            Span::styled(format!("{value:<vw$}  "), value_style),
+            Span::styled(if row.lua { LUA_MARK } else { "" }, mark_style),
+        ])
+    }
 }
 
 impl OverlayWidget for SettingsOverlay {
     fn measure(&self, available: Rect) -> Rect {
-        center(available, 70, 70)
+        let row = 2 + self.name_width + 2 + self.value_width + 2 + LUA_MARK.len();
+        let hint = [NUMBER_HINT, KEY_HINT, CYCLE_HINT]
+            .iter()
+            .map(|h| h.len() + 2)
+            .max()
+            .unwrap_or(0);
+        let width = u16::try_from(row.max(hint) + 3).unwrap_or(u16::MAX);
+        let rows = u16::try_from(self.rows.len()).unwrap_or(u16::MAX);
+        let height = rows + 1 + DOC_ROWS + 1 + 2;
+        let width = width.min(available.width);
+        let height = height.min(available.height);
+        let x = available.x + available.width.saturating_sub(width) / 2;
+        let y = available.y + available.height.saturating_sub(height) / 2;
+        Rect::new(x, y, width, height)
     }
 
     fn render(&mut self, area: Rect, buf: &mut Buffer, ctx: &OverlayCtx<'_>) {
-        let accent = ctx.theme.focus_color;
         let block = Block::default()
             .title(" settings ")
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(accent));
+            .border_style(Style::default().fg(ctx.theme.overlay_border));
         let inner = block.inner(area);
         Widget::render(block, area, buf);
 
-        let rows = Layout::default()
+        let [list, doc, hint] = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(1),
-                Constraint::Length(1),
                 Constraint::Min(1),
+                Constraint::Length(DOC_ROWS + 1),
                 Constraint::Length(1),
             ])
-            .split(inner);
+            .areas(inner);
 
-        // Tab bar.
-        let mut tab_spans: Vec<Span<'static>> = Vec::new();
-        for (i, name) in TABS.iter().enumerate() {
-            if i > 0 {
-                tab_spans.push(Span::styled("  ", Style::default()));
-            }
-            let style = if i == self.tab {
-                Style::default()
-                    .fg(ctx.theme.selection_fg)
-                    .bg(accent)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(ctx.theme.status_dim_fg)
-            };
-            tab_spans.push(Span::styled(format!(" {name} "), style));
+        let visible = usize::from(list.height);
+        let offset = scroll_offset_centered(self.selected, self.rows.len(), visible);
+        for (y, idx) in (list.y..list.bottom()).zip(offset..self.rows.len()) {
+            buf.set_line(list.x, y, &self.row_line(idx, ctx), list.width);
         }
-        buf.set_line(rows[0].x, rows[0].y, &Line::from(tab_spans), rows[0].width);
 
-        buf.set_line(
-            rows[1].x,
-            rows[1].y,
-            &Line::from(Span::styled(
-                "-".repeat(usize::from(rows[1].width)),
-                Style::default().fg(ctx.theme.status_dim_fg),
-            )),
-            rows[1].width,
-        );
-
-        let mut body = rows[2];
-        if self.set_from_lua() {
-            body.height = body.height.saturating_sub(1);
-            buf.set_line(
-                body.x,
-                body.y + body.height,
-                &Line::from(Span::styled(
-                    LUA_NOTE,
-                    Style::default().fg(ctx.theme.status_dim_fg),
-                )),
-                body.width,
-            );
-        }
-        self.render_body(buf, body, ctx);
-
-        let help = match self.tab {
-            2 | 5 => "Tab section - Space toggle - Enter/Ctrl+S save - Esc cancel",
-            3 => "Tab section - Left/Right adjust - Enter/Ctrl+S save - Esc cancel",
-            _ => "Tab section - Up/Down move - Enter/Ctrl+S save - Esc cancel",
+        let text = Rect {
+            x: doc.x + 2,
+            y: doc.y + 1,
+            width: doc.width.saturating_sub(3),
+            height: DOC_ROWS.min(doc.height.saturating_sub(1)),
         };
+        Paragraph::new(self.doc())
+            .style(Style::default().fg(ctx.theme.overlay_fg))
+            .wrap(Wrap { trim: true })
+            .render(text, buf);
         buf.set_line(
-            rows[3].x,
-            rows[3].y,
+            hint.x + 2,
+            hint.y,
             &Line::from(Span::styled(
-                help,
-                Style::default().fg(ctx.theme.status_dim_fg),
+                self.hint(),
+                Style::default().fg(ctx.theme.muted_fg),
             )),
-            rows[3].width,
+            hint.width.saturating_sub(2),
         );
     }
 
@@ -369,213 +357,68 @@ impl OverlayWidget for SettingsOverlay {
             return OverlayAction::Stay;
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if ctrl && matches!(key.code, KeyCode::Char('c')) {
-            return OverlayAction::Close;
-        }
-        if ctrl && matches!(key.code, KeyCode::Char('s')) {
-            return OverlayAction::Resolve(self.result_json());
-        }
         match key.code {
-            KeyCode::Esc => OverlayAction::Close,
-            KeyCode::Enter => OverlayAction::Resolve(self.result_json()),
-            KeyCode::Tab => {
-                self.tab = (self.tab + 1) % TABS.len();
-                self.list_scroll = 0;
-                OverlayAction::Stay
+            KeyCode::Esc => return OverlayAction::Close,
+            KeyCode::Char('c') if ctrl => return OverlayAction::Close,
+            KeyCode::Enter => {
+                self.commit();
+                return OverlayAction::Resolve(self.result_json());
             }
-            KeyCode::BackTab => {
-                self.tab = if self.tab == 0 {
-                    TABS.len() - 1
-                } else {
-                    self.tab - 1
-                };
-                self.list_scroll = 0;
-                OverlayAction::Stay
+            KeyCode::Char('s') if ctrl => {
+                self.commit();
+                return OverlayAction::Resolve(self.result_json());
             }
-            KeyCode::Up | KeyCode::Left | KeyCode::Char('k' | 'h') => {
-                self.move_selection(-1);
-                OverlayAction::Stay
-            }
-            KeyCode::Down | KeyCode::Right | KeyCode::Char('j' | 'l') => {
-                self.move_selection(1);
-                OverlayAction::Stay
-            }
-            KeyCode::Char(' ') if self.tab == 2 => {
-                self.mouse = !self.mouse;
-                OverlayAction::Stay
-            }
-            KeyCode::Char(' ') if self.tab == 5 => {
-                self.editor_modeless = !self.editor_modeless;
-                OverlayAction::Stay
-            }
-            _ => OverlayAction::Stay,
+            KeyCode::Up => self.select(-1),
+            KeyCode::Down => self.select(1),
+            KeyCode::Left => self.cycle(-1),
+            KeyCode::Right => self.cycle(1),
+            KeyCode::Backspace => self.backspace(),
+            KeyCode::Char(c) if !ctrl => self.type_char(c),
+            _ => {}
         }
+        OverlayAction::Stay
     }
 }
 
-impl SettingsOverlay {
-    /// Whether the active tab's option was last set from Lua.
-    fn set_from_lua(&self) -> bool {
-        TAB_OPTIONS[self.tab].is_some_and(|name| self.seed.from_lua.contains(&name))
-    }
+fn is_number(def: &OptionDef) -> bool {
+    matches!(
+        def.kind,
+        OptionKind::Int { .. } | OptionKind::Fraction { .. }
+    )
+}
 
-    fn render_body(&self, buf: &mut Buffer, area: Rect, ctx: &OverlayCtx<'_>) {
-        match self.tab {
-            0 => Self::render_list(buf, area, ctx, &self.themes, self.theme_idx),
-            1 => Self::render_list(buf, area, ctx, &self.models, self.model_idx),
-            2 => {
-                let mark = if self.mouse { "[x]" } else { "[ ]" };
-                buf.set_line(
-                    area.x,
-                    area.y,
-                    &Line::from(Span::styled(
-                        format!("  {mark} capture mouse"),
-                        Style::default().fg(ctx.theme.assistant_fg),
-                    )),
-                    area.width,
-                );
-            }
-            3 => {
-                buf.set_line(
-                    area.x,
-                    area.y,
-                    &Line::from(Span::styled(
-                        format!("  compaction threshold: {:.0}%", self.threshold * 100.0),
-                        Style::default()
-                            .fg(ctx.theme.assistant_fg)
-                            .add_modifier(Modifier::BOLD),
-                    )),
-                    area.width,
-                );
-                buf.set_line(
-                    area.x,
-                    area.y + 1,
-                    &Line::from(Span::styled(
-                        "  compact older history once the prompt fills this much of the window",
-                        Style::default().fg(ctx.theme.status_dim_fg),
-                    )),
-                    area.width,
-                );
-            }
-            4 => self.render_keybindings(buf, area, ctx),
-            5 => {
-                let mark = if self.editor_modeless { "[x]" } else { "[ ]" };
-                buf.set_line(
-                    area.x,
-                    area.y,
-                    &Line::from(Span::styled(
-                        format!("  {mark} modeless editor (off = vim modal)"),
-                        Style::default().fg(ctx.theme.assistant_fg),
-                    )),
-                    area.width,
-                );
-                buf.set_line(
-                    area.x,
-                    area.y + 1,
-                    &Line::from(Span::styled(
-                        "  non-modal: Emacs keys, Esc cancels the turn. Applies immediately.",
-                        Style::default().fg(ctx.theme.status_dim_fg),
-                    )),
-                    area.width,
-                );
-            }
-            6 => {
-                buf.set_line(
-                    area.x,
-                    area.y,
-                    &Line::from(Span::styled(
-                        format!("  thinking level: {}", self.selected_thinking_level()),
-                        Style::default()
-                            .fg(ctx.theme.assistant_fg)
-                            .add_modifier(Modifier::BOLD),
-                    )),
-                    area.width,
-                );
-                buf.set_line(
-                    area.x,
-                    area.y + 1,
-                    &Line::from(Span::styled(
-                        "  default for new sessions; shift+tab cycles this session",
-                        Style::default().fg(ctx.theme.status_dim_fg),
-                    )),
-                    area.width,
-                );
-            }
-            _ => {}
-        }
-    }
-
-    fn render_list(
-        buf: &mut Buffer,
-        area: Rect,
-        ctx: &OverlayCtx<'_>,
-        items: &[String],
-        selected: usize,
-    ) {
-        if items.is_empty() {
-            buf.set_line(
-                area.x,
-                area.y,
-                &Line::from(Span::styled(
-                    "  (none available)",
-                    Style::default().fg(ctx.theme.status_dim_fg),
-                )),
-                area.width,
-            );
-            return;
-        }
-        let rows = usize::from(area.height);
-        let offset = scroll_offset_centered(selected, items.len(), rows);
-        for (row, (idx, item)) in items.iter().enumerate().skip(offset).take(rows).enumerate() {
-            let style = if idx == selected {
-                Style::default()
-                    .fg(ctx.theme.selection_fg)
-                    .bg(ctx.theme.focus_color)
-                    .add_modifier(Modifier::BOLD)
+fn step<S: AsRef<str>>(values: &[S], cur: &str, delta: i8) -> OptionValue {
+    let len = values.len();
+    let idx = values
+        .iter()
+        .position(|v| v.as_ref() == cur)
+        .map_or(0, |i| {
+            if delta < 0 {
+                (i + len - 1) % len
             } else {
-                Style::default().fg(ctx.theme.assistant_fg)
-            };
-            let marker = if idx == selected { "> " } else { "  " };
-            buf.set_line(
-                area.x,
-                area.y + u16::try_from(row).unwrap_or(0),
-                &Line::from(Span::styled(format!("{marker}{item}"), style)),
-                area.width,
-            );
-        }
-    }
+                (i + 1) % len
+            }
+        });
+    OptionValue::Str(values.get(idx).map_or(cur, AsRef::as_ref).to_owned())
+}
 
-    fn render_keybindings(&self, buf: &mut Buffer, area: Rect, ctx: &OverlayCtx<'_>) {
-        if self.keybindings.is_empty() {
-            buf.set_line(
-                area.x,
-                area.y,
-                &Line::from(Span::styled(
-                    "  (no keybinding overrides configured)",
-                    Style::default().fg(ctx.theme.status_dim_fg),
-                )),
-                area.width,
-            );
-            return;
-        }
-        let rows = usize::from(area.height);
-        let offset = scroll_offset_centered(self.list_scroll, self.keybindings.len(), rows);
-        for (row, (chord, action)) in self.keybindings.iter().skip(offset).take(rows).enumerate() {
-            buf.set_line(
-                area.x,
-                area.y + u16::try_from(row).unwrap_or(0),
-                &Line::from(vec![
-                    Span::styled(
-                        format!("  {chord:<18}"),
-                        Style::default()
-                            .fg(ctx.theme.focus_color)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(action.clone(), Style::default().fg(ctx.theme.assistant_fg)),
-                ]),
-                area.width,
-            );
-        }
+fn display(value: &OptionValue) -> String {
+    match value {
+        OptionValue::Bool(true) => "on".to_owned(),
+        OptionValue::Bool(false) => "off".to_owned(),
+        OptionValue::Int(n) => n.to_string(),
+        OptionValue::Float(x) => x.to_string(),
+        OptionValue::Str(s) if s.is_empty() => "default".to_owned(),
+        OptionValue::Str(s) => s.clone(),
+    }
+}
+
+fn to_json(value: &OptionValue) -> serde_json::Value {
+    match value {
+        OptionValue::Bool(b) => serde_json::json!(b),
+        OptionValue::Int(n) => serde_json::json!(n),
+        OptionValue::Float(x) => serde_json::json!(x),
+        OptionValue::Str(s) => serde_json::json!(s),
     }
 }
 
@@ -587,207 +430,196 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    fn sample() -> SettingsOverlay {
-        SettingsOverlay::new(SettingsInit {
-            themes: vec!["default".into(), "tokyo-night".into(), "ayu".into()],
-            theme: "tokyo-night".into(),
-            models: vec!["anthropic:opus".into(), "anthropic:sonnet".into()],
-            model: "anthropic:sonnet".into(),
-            mouse: true,
-            threshold: 0.8,
-            keybindings: vec![("ctrl+x".into(), "compact".into())],
-            editor_modeless: false,
-            thinking_level: "off".into(),
-            from_lua: vec!["mouse"],
-        })
+    fn themes() -> Vec<String> {
+        vec!["default".into(), "tokyo-night".into(), "ayu".into()]
     }
 
-    fn rendered(s: &mut SettingsOverlay) -> String {
-        let area = Rect::new(0, 0, 90, 20);
+    fn sample() -> SettingsOverlay {
+        SettingsOverlay::new(&OptionStore::default(), themes())
+    }
+
+    fn select(s: &mut SettingsOverlay, name: &str) {
+        let target = OPTIONS.iter().position(|def| def.name == name).unwrap();
+        while s.selected != target {
+            let dir = if s.selected < target {
+                KeyCode::Down
+            } else {
+                KeyCode::Up
+            };
+            s.handle_key(key(dir));
+        }
+    }
+
+    fn value(s: &SettingsOverlay, name: &str) -> OptionValue {
+        let row = s.rows.iter().find(|row| row.def.name == name).unwrap();
+        row.value.clone()
+    }
+
+    fn rendered(s: &mut SettingsOverlay, width: u16, height: u16) -> Vec<String> {
+        let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
         let theme = crate::theme::current();
         let ctx = OverlayCtx {
             theme: &theme,
             viewport: area,
         };
-        OverlayWidget::render(s, area, &mut buf, &ctx);
-        buf.content()
-            .iter()
-            .map(ratatui::buffer::Cell::symbol)
+        let modal = OverlayWidget::measure(s, area);
+        OverlayWidget::render(s, modal, &mut buf, &ctx);
+        (0..height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())
             .collect()
     }
 
     #[test]
-    fn tab_set_from_lua_shows_the_shadow_note() {
-        let mut s = sample();
-        assert!(!rendered(&mut s).contains("set from Lua"));
-        s.handle_key(key(KeyCode::Tab));
-        s.handle_key(key(KeyCode::Tab));
-        assert_eq!(s.tab, 2);
-        assert!(rendered(&mut s).contains("set from Lua: init.lua shadows"));
-    }
-
-    #[test]
-    fn selection_starts_on_active_values() {
-        let s = sample();
-        assert_eq!(s.selected_theme(), "tokyo-night");
-        assert_eq!(s.selected_model(), "anthropic:sonnet");
-        assert!(s.mouse());
-    }
-
-    #[test]
-    fn tab_cycles_sections_and_wraps() {
-        let mut s = sample();
-        for _ in 0..TABS.len() {
-            assert_eq!(s.handle_key(key(KeyCode::Tab)), OverlayAction::Stay);
+    fn every_option_appears_once() {
+        let rows = rendered(&mut sample(), 120, 36);
+        for def in OPTIONS {
+            let hits = rows
+                .iter()
+                .filter(|row| row.contains(&format!(" {} ", def.name)))
+                .count();
+            assert_eq!(hits, 1, "{}", def.name);
         }
-        assert_eq!(s.tab, 0);
-        assert_eq!(s.handle_key(key(KeyCode::BackTab)), OverlayAction::Stay);
-        assert_eq!(s.tab, TABS.len() - 1);
     }
 
     #[test]
-    fn up_down_change_theme_selection_and_wrap() {
-        let mut s = sample(); // theme tab, idx 1 (tokyo-night)
-        s.handle_key(key(KeyCode::Down));
-        assert_eq!(s.selected_theme(), "ayu");
-        s.handle_key(key(KeyCode::Down));
-        assert_eq!(s.selected_theme(), "default");
-        s.handle_key(key(KeyCode::Up));
-        assert_eq!(s.selected_theme(), "ayu");
-    }
-
-    #[test]
-    fn mouse_tab_space_toggles() {
+    fn dialog_fits_80x24() {
         let mut s = sample();
-        s.handle_key(key(KeyCode::Tab)); // Model
-        s.handle_key(key(KeyCode::Tab)); // Mouse
-        assert_eq!(s.tab, 2);
-        assert!(s.mouse());
+        let modal = OverlayWidget::measure(&s, Rect::new(0, 0, 80, 24));
+        assert!(modal.width <= 80 && modal.height <= 24, "{modal:?}");
+        let rows = rendered(&mut s, 80, 24).join("\n");
+        assert!(rows.contains("timeoutlen"), "{rows}");
+        assert!(rows.contains("enter save"), "{rows}");
+        assert!(rows.contains("Color theme"), "{rows}");
+    }
+
+    #[test]
+    fn lua_marker_shows_for_a_lua_set_option() {
+        let mut store = OptionStore::default();
+        store
+            .set("mouse", OptionValue::Bool(false), OptionSource::Lua)
+            .unwrap();
+        let mut s = SettingsOverlay::new(&store, themes());
+        let rows = rendered(&mut s, 120, 36);
+        let marked: Vec<&String> = rows.iter().filter(|r| r.contains(LUA_MARK)).collect();
+        assert_eq!(marked.len(), 1, "{rows:#?}");
+        assert!(marked[0].contains("mouse"));
+        select(&mut s, "mouse");
+        assert!(
+            rendered(&mut s, 120, 36)
+                .join(" ")
+                .contains("init.lua sets it again")
+        );
+    }
+
+    #[test]
+    fn cycling_queues_live_edits() {
+        let mut s = sample();
+        select(&mut s, "editor");
+        s.handle_key(key(KeyCode::Right));
+        assert_eq!(
+            s.take_edit(),
+            Some(("editor", OptionValue::Str("vim".into())))
+        );
+        assert_eq!(s.take_edit(), None);
         s.handle_key(key(KeyCode::Char(' ')));
-        assert!(!s.mouse());
-        s.handle_key(key(KeyCode::Up));
-        assert!(s.mouse());
+        assert_eq!(value(&s, "editor"), OptionValue::Str("modeless".into()));
     }
 
     #[test]
-    fn editor_tab_toggles_and_resolves_modeless() {
+    fn theme_cycles_through_the_given_names() {
         let mut s = sample();
-        // Editor is the second-to-last tab; Thinking follows it.
-        for _ in 0..(TABS.len() - 2) {
-            s.handle_key(key(KeyCode::Tab));
-        }
-        assert_eq!(s.tab, TABS.len() - 2);
-        // Default sample is vim (false); Space flips to modeless.
-        s.handle_key(key(KeyCode::Char(' ')));
-        match s.handle_key(key(KeyCode::Enter)) {
-            OverlayAction::Resolve(v) => assert_eq!(v["editor"], serde_json::json!("modeless")),
-            other => panic!("expected Resolve, got {other:?}"),
-        }
+        s.handle_key(key(KeyCode::Left));
+        assert_eq!(value(&s, "theme"), OptionValue::Str("ayu".into()));
+        s.handle_key(key(KeyCode::Right));
+        s.handle_key(key(KeyCode::Right));
+        assert_eq!(value(&s, "theme"), OptionValue::Str("tokyo-night".into()));
     }
 
     #[test]
-    fn unchanged_fields_are_omitted_from_result() {
-        // Fresh from the seed nothing changed, so nothing resolves:
-        // the host then applies nothing and rewrites no config. This
-        // is what keeps a project-layer value from being stamped
-        // into the user config on an untouched dialog.
-        let s = sample();
-        assert!(s.result_json().as_object().unwrap().is_empty());
-        // Change only the theme: exactly that key resolves.
+    fn numbers_step_within_bounds() {
         let mut s = sample();
-        s.handle_key(key(KeyCode::Down)); // theme -> ayu
-        let v = s.result_json();
-        assert_eq!(v["theme"], serde_json::json!("ayu"));
-        assert!(v.get("model").is_none());
-        assert!(v.get("mouse").is_none());
-        assert!(v.get("compaction_threshold").is_none());
-        assert!(v.get("editor").is_none());
-    }
-
-    #[test]
-    fn autocompaction_clamps_to_band() {
-        let mut s = sample();
-        for _ in 0..3 {
-            s.handle_key(key(KeyCode::Tab));
-        }
-        assert_eq!(s.tab, 3);
-        for _ in 0..50 {
+        select(&mut s, "input_min_lines");
+        s.handle_key(key(KeyCode::Left));
+        assert_eq!(value(&s, "input_min_lines"), OptionValue::Int(1));
+        s.handle_key(key(KeyCode::Right));
+        assert_eq!(value(&s, "input_min_lines"), OptionValue::Int(2));
+        select(&mut s, "compaction_threshold");
+        s.handle_key(key(KeyCode::Right));
+        assert_eq!(value(&s, "compaction_threshold"), OptionValue::Float(0.85));
+        for _ in 0..10 {
             s.handle_key(key(KeyCode::Right));
         }
-        assert!((s.threshold() - THRESHOLD_MAX).abs() < f32::EPSILON);
-        for _ in 0..50 {
-            s.handle_key(key(KeyCode::Left));
-        }
-        assert!((s.threshold() - THRESHOLD_MIN).abs() < f32::EPSILON);
+        assert_eq!(value(&s, "compaction_threshold"), OptionValue::Float(1.0));
     }
 
     #[test]
-    fn enter_resolves_only_edited_values() {
+    fn digits_edit_numbers_and_invalid_drafts_are_dropped() {
         let mut s = sample();
-        s.handle_key(key(KeyCode::Down)); // theme -> ayu
-        match s.handle_key(key(KeyCode::Enter)) {
-            OverlayAction::Resolve(v) => {
-                assert_eq!(v["theme"], serde_json::json!("ayu"));
-                assert_eq!(v.as_object().unwrap().len(), 1, "only the edit resolves");
-            }
-            other => panic!("expected Resolve, got {other:?}"),
+        select(&mut s, "timeoutlen");
+        for c in "300".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
         }
-    }
-
-    #[test]
-    fn thinking_tab_cycles_ladder_and_wraps() {
-        let mut s = sample();
-        for _ in 0..(TABS.len() - 1) {
-            s.handle_key(key(KeyCode::Tab));
-        }
-        assert_eq!(s.tab, TABS.len() - 1);
-        assert_eq!(s.selected_thinking_level(), "off");
-        s.handle_key(key(KeyCode::Down));
-        assert_eq!(s.selected_thinking_level(), "minimal");
-        for _ in 0..4 {
-            s.handle_key(key(KeyCode::Down));
-        }
-        assert_eq!(s.selected_thinking_level(), "xhigh");
-        // Both ladder ends wrap.
-        s.handle_key(key(KeyCode::Down));
-        assert_eq!(s.selected_thinking_level(), "off");
+        assert_eq!(value(&s, "timeoutlen"), OptionValue::Int(1000));
         s.handle_key(key(KeyCode::Up));
-        assert_eq!(s.selected_thinking_level(), "xhigh");
+        assert_eq!(value(&s, "timeoutlen"), OptionValue::Int(300));
+
+        select(&mut s, "timeoutlen");
+        for c in "99999".chars() {
+            s.handle_key(key(KeyCode::Char(c)));
+        }
+        assert!(rendered(&mut s, 120, 36).join(" ").contains("99999_"));
         s.handle_key(key(KeyCode::Up));
-        assert_eq!(s.selected_thinking_level(), "high");
+        assert_eq!(value(&s, "timeoutlen"), OptionValue::Int(300));
+
+        select(&mut s, "compaction_threshold");
+        s.handle_key(key(KeyCode::Backspace));
+        s.handle_key(key(KeyCode::Char('6')));
+        s.handle_key(key(KeyCode::Enter));
+        assert_eq!(value(&s, "compaction_threshold"), OptionValue::Float(0.6));
     }
 
     #[test]
-    fn thinking_level_resolves_only_when_changed() {
-        let s = sample();
-        assert!(s.result_json().get("thinking_level").is_none());
+    fn a_printable_key_sets_the_leader() {
         let mut s = sample();
-        for _ in 0..(TABS.len() - 1) {
-            s.handle_key(key(KeyCode::Tab));
-        }
-        s.handle_key(key(KeyCode::Down)); // off -> minimal
-        match s.handle_key(key(KeyCode::Enter)) {
-            OverlayAction::Resolve(v) => {
-                assert_eq!(v["thinking_level"], serde_json::json!("minimal"));
-                assert_eq!(v.as_object().unwrap().len(), 1, "only the edit resolves");
-            }
-            other => panic!("expected Resolve, got {other:?}"),
-        }
+        select(&mut s, "leader");
+        s.handle_key(key(KeyCode::Char(',')));
+        assert_eq!(value(&s, "leader"), OptionValue::Str(",".into()));
+        s.handle_key(key(KeyCode::Char(' ')));
+        assert_eq!(value(&s, "leader"), OptionValue::Str("<Space>".into()));
     }
 
     #[test]
-    fn unknown_thinking_seed_falls_back_to_off() {
-        let init = SettingsInit {
-            thinking_level: "maximum".into(),
-            ..SettingsInit::default()
-        };
-        let s = SettingsOverlay::new(init);
-        assert_eq!(s.selected_thinking_level(), "off");
+    fn enter_resolves_only_edited_options() {
+        let mut s = sample();
+        assert_eq!(
+            s.handle_key(key(KeyCode::Enter)),
+            OverlayAction::Resolve(serde_json::json!({}))
+        );
+        select(&mut s, "mouse");
+        s.handle_key(key(KeyCode::Char(' ')));
+        select(&mut s, "input_max_lines");
+        s.handle_key(key(KeyCode::Char('1')));
+        s.handle_key(key(KeyCode::Char('2')));
+        let cs = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        assert_eq!(
+            s.handle_key(cs),
+            OverlayAction::Resolve(serde_json::json!({ "mouse": false, "input_max_lines": 12 }))
+        );
     }
 
     #[test]
-    fn esc_and_ctrl_c_cancel() {
+    fn reverts_restore_the_seed_of_edited_options() {
+        let mut s = sample();
+        s.handle_key(key(KeyCode::Right));
+        s.handle_key(key(KeyCode::Down));
+        s.handle_key(key(KeyCode::Right));
+        s.handle_key(key(KeyCode::Right));
+        assert_eq!(s.reverts(), [("theme", OptionValue::Str("default".into()))]);
+    }
+
+    #[test]
+    fn esc_and_ctrl_c_close() {
         let mut s = sample();
         assert_eq!(s.handle_key(key(KeyCode::Esc)), OverlayAction::Close);
         let cc = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
@@ -795,19 +627,13 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_s_resolves() {
+    fn selection_stops_at_both_ends() {
         let mut s = sample();
-        let cs = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
-        assert!(matches!(s.handle_key(cs), OverlayAction::Resolve(_)));
-    }
-
-    #[test]
-    fn empty_lists_do_not_panic() {
-        let mut s = SettingsOverlay::new(SettingsInit::default());
-        s.handle_key(key(KeyCode::Down));
-        s.handle_key(key(KeyCode::Tab));
-        s.handle_key(key(KeyCode::Down));
-        assert_eq!(s.selected_theme(), "");
-        assert_eq!(s.selected_model(), "");
+        s.handle_key(key(KeyCode::Up));
+        assert_eq!(s.selected, 0);
+        for _ in 0..OPTIONS.len() + 3 {
+            s.handle_key(key(KeyCode::Down));
+        }
+        assert_eq!(s.selected, OPTIONS.len() - 1);
     }
 }

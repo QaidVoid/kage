@@ -36,8 +36,7 @@ pub(crate) use crate::layout::split;
 pub(crate) use crate::overlay::{
     ApprovalOutcome, CompletionAction, ContextAction, ContextMenu, ContextMenuOutcome,
     InputCompletion, OverlayAction, OverlayPicker, SessionTreeOverlay, SessionTreeSource,
-    SettingsInit, SettingsOverlay, SlashContext, SlashPalette, file_completions,
-    prefix_before_cursor,
+    SettingsOverlay, SlashContext, SlashPalette, file_completions, prefix_before_cursor,
 };
 pub(crate) use crate::picker::PickItem;
 pub(crate) use crate::terminal::Tui;

@@ -3271,18 +3271,10 @@ fn modal_open_reflects_every_modal_field() {
     assert!(app.modal_open());
     app.session_tree = None;
 
-    app.settings_overlay = Some(SettingsOverlay::new(SettingsInit {
-        themes: Vec::new(),
-        theme: String::new(),
-        models: Vec::new(),
-        model: String::new(),
-        mouse: false,
-        threshold: 0.8,
-        keybindings: Vec::new(),
-        editor_modeless: false,
-        thinking_level: "off".into(),
-        from_lua: Vec::new(),
-    }));
+    app.settings_overlay = Some(SettingsOverlay::new(
+        &kage_core::options::OptionStore::default(),
+        Vec::new(),
+    ));
     assert!(app.modal_open());
     app.settings_overlay = None;
 

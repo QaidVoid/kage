@@ -37,6 +37,6 @@ pub use help::HelpOverlay;
 pub use input::InputOverlay;
 pub use picker::OverlayPicker;
 pub use session_tree::{SessionNode, SessionTreeOverlay, SessionTreeSource};
-pub use settings::{SettingsInit, SettingsOverlay};
+pub use settings::SettingsOverlay;
 pub use slash::{SlashContext, SlashPalette};
 pub use widget::{EmptyOverlayWidget, OverlayAction, OverlayCtx, OverlayWidget};

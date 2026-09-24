@@ -12,11 +12,13 @@
 //!   (`default`, `toml`, `lua` or `runtime`).
 //! * `kage.api.option_set(name, value)` is the assignment as a call.
 //!
-//! A set validates the value (`theme` must be one of the names from
-//! [`crate::PluginRuntimeBuilder::theme_names`] when the host gave
-//! any), records the source, queues the change for the host to apply,
-//! and fires `option_set` with `{ name, old, new, source }`, matched on
-//! the option name. Host UI changes go through
+//! A set validates the value (`theme` must be one of the names of the
+//! [`crate::ThemeResolver`] from [`crate::PluginRuntimeBuilder::themes`]
+//! when the host gave one), records the source, queues the change for
+//! the host to apply, and fires `option_set` with
+//! `{ name, old, new, source }`, matched on the option name. A `theme`
+//! set that picks a different theme first switches the base highlight
+//! groups and fires `color_scheme` (see [`crate::highlight`]). Host UI changes go through
 //! [`crate::PluginRuntime::set_option`], which runs the same set on the
 //! owner thread, so every `option_set` fires there in order.
 //!
@@ -29,21 +31,20 @@ use kage_core::options::{self, OptionError, OptionSource, OptionStore, OptionVal
 use kage_core::sync::lock;
 use mlua::{Lua, MetaMethod, Table, UserData, UserDataMethods, Value};
 
-use crate::api::{SharedHostLog, json_to_lua};
+use crate::api::{LogLevel, SharedHostLog, json_to_lua};
 use crate::autocmd;
 use crate::error::PluginError;
+use crate::highlight::{self, SharedHighlights, SharedThemeResolver, ThemeBase};
 
 /// Option store shared by the host, the runtime and Lua.
 pub type SharedOptions = Arc<Mutex<OptionStore>>;
-
-/// Returns the theme names the `theme` option accepts.
-pub type ThemeNames = Arc<dyn Fn() -> Vec<String> + Send + Sync>;
 
 /// The option store plus what a set needs besides it.
 #[derive(Clone)]
 pub(crate) struct Options {
     pub(crate) store: SharedOptions,
-    pub(crate) themes: Option<ThemeNames>,
+    pub(crate) themes: Option<SharedThemeResolver>,
+    pub(crate) highlights: SharedHighlights,
     pub(crate) sink: SharedHostLog,
 }
 
@@ -55,7 +56,7 @@ impl Options {
         if let (Some(themes), OptionValue::Str(theme)) = (&self.themes, &value)
             && def.name == "theme"
         {
-            let names = themes();
+            let names = themes.names();
             if !names.contains(theme) {
                 let quoted: Vec<String> = names.iter().map(|n| format!("\"{n}\"")).collect();
                 return Err(OptionError::Invalid {
@@ -77,9 +78,16 @@ impl Options {
         source: OptionSource,
     ) -> mlua::Result<()> {
         let value = self.check(name, value).map_err(mlua::Error::external)?;
+        let base = self
+            .theme_switch(name, &value)
+            .map_err(mlua::Error::external)?;
         let change = lock(&self.store)
             .set(name, value, source)
             .map_err(mlua::Error::external)?;
+        if let (Some(base), OptionValue::Str(theme)) = (base, &change.new) {
+            highlight::set_base(&self.highlights, theme, base);
+            highlight::fire_color_scheme(lua, &self.sink, theme)?;
+        }
         if autocmd::count(lua, "option_set") == 0 {
             return Ok(());
         }
@@ -91,6 +99,48 @@ impl Options {
         });
         let data = json_to_lua(lua, &payload)?;
         autocmd::exec(lua, &self.sink, "option_set", Some(change.name), &data)
+    }
+
+    /// The base groups to switch to when setting `name` to `value`
+    /// picks a theme other than the one the groups came from.
+    fn theme_switch(&self, name: &str, value: &OptionValue) -> Result<Option<ThemeBase>, String> {
+        let (Some(themes), "theme", OptionValue::Str(theme)) = (&self.themes, name, value) else {
+            return Ok(None);
+        };
+        if lock(&self.highlights).theme() == theme {
+            return Ok(None);
+        }
+        themes.groups(theme).map(Some)
+    }
+
+    /// The current value of the `theme` option.
+    pub(crate) fn theme(&self) -> String {
+        lock(&self.store)
+            .get("theme")
+            .and_then(OptionValue::as_str)
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// Load the base groups of the current theme. When that fails the
+    /// error is logged and the `default` theme is loaded instead.
+    pub(crate) fn load_theme(&self) {
+        let Some(themes) = &self.themes else {
+            return;
+        };
+        let theme = self.theme();
+        let loaded = themes
+            .groups(&theme)
+            .map(|base| (theme, base))
+            .or_else(|err| {
+                lock(&self.sink).log(LogLevel::Error, &format!("theme: {err}"));
+                themes
+                    .groups("default")
+                    .map(|base| ("default".to_owned(), base))
+            });
+        if let Ok((theme, base)) = loaded {
+            highlight::set_base(&self.highlights, &theme, base);
+        }
     }
 
     fn set_lua(&self, lua: &Lua, name: &str, value: Value) -> mlua::Result<()> {

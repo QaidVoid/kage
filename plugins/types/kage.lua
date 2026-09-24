@@ -64,6 +64,7 @@
 ---| "user_bash"
 ---| "permission_mode_select"
 ---| "option_set"
+---| "color_scheme"
 ---| "user"
 ---| "transform_context"
 ---| "before_provider_request"
@@ -214,7 +215,8 @@
 --- What an autocmd callback receives. `match` is the tool name
 --- for `tool_call` and `tool_result`, the new value for
 --- `model_select` and `thinking_level_select`, the option name
---- for `option_set`, and the exec pattern for `user`.
+--- for `option_set`, the theme name for `color_scheme`, and the
+--- exec pattern for `user`.
 ---@class kage.AutocmdEvent
 ---@field id integer Autocmd id.
 ---@field event kage.Event Event name.
@@ -226,6 +228,31 @@
 ---@class kage.KeymapOpts
 ---@field desc? string Shown in `?` help. Mappings without one are hidden there.
 ---@field group? string Help section. Defaults to `other`.
+
+--- A highlight group. Colors are `#rrggbb`, a color name
+--- (`red`, `lightblue`, ...) or a palette index `0` to `255`.
+---@class kage.HlSpec
+---@field fg? string Foreground color.
+---@field bg? string Background color.
+---@field bold? boolean
+---@field italic? boolean
+---@field underline? boolean
+---@field dim? boolean
+---@field reverse? boolean Swap foreground and background.
+---@field link? string Group to follow. Wins over every other field.
+
+--- A styled run of text in chrome rows and block renderers.
+--- Styles resolve when the row is painted, so they follow
+--- theme switches.
+---@class kage.Span
+---@field text string
+---@field hl? string Highlight group whose colors and attributes apply first.
+---@field fg? string A group name (its fg), a theme role name, or a color.
+---@field bg? string A group name (its bg), a theme role name, or a color.
+---@field bold? boolean
+---@field dim? boolean
+---@field italic? boolean
+---@field underline? boolean
 
 --- A Rust action from `kage.action`, used as a mapping rhs.
 ---@class kage.Action
@@ -441,8 +468,9 @@ function kage.ui.input(title, placeholder) end
 function kage.ui.editor(title, prefill) end
 
 --- Take over the top status row. `fn(width)` runs each redraw
---- and returns a string, a span table, or an array of those.
---- Pass nil to restore the built-in status bar.
+--- and returns a string, a `kage.Span`, or an array of those
+--- (one line each; an array of spans is one line). Pass nil to
+--- restore the built-in status bar.
 --- Since API 1.
 ---@param fn fun(width: integer): any|nil
 function kage.ui.set_header(fn) end
@@ -691,9 +719,10 @@ function kage.theme.current() end
 ---@return string[]
 function kage.theme.list() end
 
---- Request a theme switch. The host sets the `theme` option
---- from it shortly after, which fires `option_set`. Errors on
---- a non-string or empty name.
+--- Switch theme by setting the `theme` option. The base
+--- highlight groups change before it returns, then
+--- `color_scheme` and `option_set` fire. Raises on a
+--- non-string, empty or unknown name.
 --- Since API 1.
 ---@param name string
 function kage.theme.set(name) end
@@ -780,6 +809,25 @@ function kage.api.option_get(name) end
 ---@param name string
 ---@param value any
 function kage.api.option_set(name, value) end
+
+--- Set highlight group `name`, replacing any earlier override.
+--- A `link` wins over the other fields. Raises on an invalid
+--- color or an unknown field. Overrides of `Kage*` groups reset
+--- on a theme switch; set them from a `color_scheme` autocmd to
+--- keep them.
+--- Since API 2.
+---@param name string
+---@param spec kage.HlSpec
+function kage.api.hl_set(name, spec) end
+
+--- Highlight group `name` as set, or nil when it does not
+--- exist. With `{ link = false }` links are followed and the
+--- effective spec is returned; a cycle gives an empty spec.
+--- Since API 2.
+---@param name string
+---@param opts? { link?: boolean }
+---@return kage.HlSpec|nil
+function kage.api.hl_get(name, opts) end
 
 --- Map `lhs` in one mode. See `kage.keymap.set`, which takes a
 --- list of modes.

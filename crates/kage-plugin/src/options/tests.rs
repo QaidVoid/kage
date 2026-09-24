@@ -4,12 +4,13 @@ use kage_core::config::{Config, EditorMode};
 use kage_core::options::{OptionSource, OptionStore, OptionValue};
 use kage_core::sync::lock;
 
+use crate::highlight::FakeThemes;
 use crate::{PluginRuntime, SharedOptions};
 
 fn runtime(store: &SharedOptions) -> PluginRuntime {
     PluginRuntime::builder()
         .options(Arc::clone(store))
-        .theme_names(Arc::new(|| vec!["default".into(), "tokyo-night".into()]))
+        .themes(Arc::new(FakeThemes))
         .build()
         .unwrap()
 }

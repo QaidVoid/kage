@@ -1,85 +1,42 @@
 //! `kage.theme.list` / `kage.theme.set` / `kage.theme.current`:
-//! plugin-facing theme manager.
+//! plugin-facing theme manager over the `theme` option.
 //!
-//! Reading is synchronous off a host-maintained snapshot
-//! ([`SharedThemeState`]); the host refreshes `current` and
-//! `available` on its redraw cadence. Switching is deferred: a plugin
-//! writes the requested name into [`SharedThemeRequest`] and the host
-//! drains it between turns, validating and applying it through the
-//! same path as `:theme set`. Lets a plugin auto-toggle light/dark on
-//! a system event without owning the theme registry.
+//! `current` reads the option store, `list` asks the host's
+//! [`crate::ThemeResolver`], and `set` sets the option from Lua, which
+//! switches the base highlight groups before it returns and fires
+//! `color_scheme` and `option_set`. Lets a plugin auto-toggle
+//! light/dark on a system event without owning the theme registry.
 
-use std::sync::{Arc, Mutex};
-
-use kage_core::sync::lock;
-
+use kage_core::options::{OptionSource, OptionValue};
 use mlua::{Lua, Table, Value};
 
 use crate::error::PluginError;
-
-/// Host-maintained theme snapshot the read APIs return.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ThemeState {
-    /// Active theme name.
-    pub current: String,
-    /// Names a plugin may pass to `kage.theme.set`, in host order.
-    pub available: Vec<String>,
-}
-
-/// Shared theme snapshot. The host overwrites it as the active theme
-/// or theme list changes; plugins read it via `kage.theme.current()`
-/// and `kage.theme.list()`.
-pub type SharedThemeState = Arc<Mutex<ThemeState>>;
-
-/// Construct an empty theme snapshot.
-#[must_use]
-pub fn shared_theme_state() -> SharedThemeState {
-    Arc::new(Mutex::new(ThemeState::default()))
-}
-
-/// Pending theme-switch request. `Some(name)` means a plugin asked
-/// the host to switch; the host validates and applies it, then
-/// clears the slot.
-pub type SharedThemeRequest = Arc<Mutex<Option<String>>>;
-
-/// Construct an empty theme-request slot.
-#[must_use]
-pub fn shared_theme_request() -> SharedThemeRequest {
-    Arc::new(Mutex::new(None))
-}
+use crate::options::Options;
 
 /// Install `kage.theme.{list,set,current}` on the running Lua state.
-pub fn install_theme(
-    lua: &Lua,
-    state: SharedThemeState,
-    request: SharedThemeRequest,
-) -> Result<(), PluginError> {
+pub(crate) fn install_theme(lua: &Lua, options: &Options) -> Result<(), PluginError> {
     let kage: Table = lua.globals().get("kage")?;
     let theme = lua.create_table()?;
 
-    let current_state = state.clone();
+    let current = options.clone();
     theme.set(
         "current",
-        lua.create_function(move |_, ()| Ok(lock(&current_state).current.clone()))?,
+        lua.create_function(move |_, ()| Ok(current.theme()))?,
     )?;
 
-    let list_state = state;
+    let list = options.clone();
     theme.set(
         "list",
         lua.create_function(move |lua, ()| {
-            let names = lock(&list_state).available.clone();
-            let arr = lua.create_table()?;
-            for (idx, name) in names.into_iter().enumerate() {
-                arr.set(idx + 1, name)?;
-            }
-            Ok(arr)
+            let names = list.themes.as_ref().map(|t| t.names()).unwrap_or_default();
+            lua.create_sequence_from(names)
         })?,
     )?;
 
-    let request_slot = request;
+    let set = options.clone();
     theme.set(
         "set",
-        lua.create_function(move |_, name: Value| {
+        lua.create_function(move |lua, name: Value| {
             let Value::String(name) = name else {
                 return Err(mlua::Error::external(
                     "kage.theme.set: name must be a string",
@@ -91,11 +48,7 @@ pub fn install_theme(
                     "kage.theme.set: name must be non-empty",
                 ));
             }
-            let mut slot = request_slot
-                .lock()
-                .map_err(|_| mlua::Error::external("plugin theme request poisoned"))?;
-            *slot = Some(name);
-            Ok(())
+            set.set(lua, "theme", OptionValue::Str(name), OptionSource::Lua)
         })?,
     )?;
 
@@ -105,57 +58,73 @@ pub fn install_theme(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use kage_core::options::OptionValue;
+    use kage_core::sync::lock;
+
     use crate::PluginRuntime;
+    use crate::highlight::FakeThemes;
 
-    #[test]
-    fn current_reads_the_host_snapshot() {
-        let rt = PluginRuntime::new().unwrap();
-        if let Ok(mut s) = rt.shared_theme_state().lock() {
-            s.current = "kage-dark".to_owned();
-            s.available = vec!["kage-dark".to_owned(), "ansi".to_owned()];
-        }
-        let ok: bool = rt
-            .eval("return kage.theme.current() == 'kage-dark'")
+    fn runtime() -> PluginRuntime {
+        PluginRuntime::builder()
+            .themes(Arc::new(FakeThemes))
+            .build()
             .unwrap()
-            .as_boolean()
-            .unwrap_or(false);
-        assert!(ok);
+    }
+
+    fn eval_bool(rt: &PluginRuntime, source: &str) -> bool {
+        rt.eval(source).unwrap().as_boolean().unwrap_or(false)
     }
 
     #[test]
-    fn list_returns_available_names() {
-        let rt = PluginRuntime::new().unwrap();
-        if let Ok(mut s) = rt.shared_theme_state().lock() {
-            s.available = vec!["a".to_owned(), "b".to_owned()];
-        }
-        let n: i64 = rt
-            .eval("return #kage.theme.list()")
-            .unwrap()
-            .as_integer()
-            .unwrap_or(0);
-        assert_eq!(n, 2);
-        let ok: bool = rt
-            .eval("local t = kage.theme.list(); return t[1] == 'a' and t[2] == 'b'")
-            .unwrap()
-            .as_boolean()
-            .unwrap_or(false);
-        assert!(ok);
+    fn current_reads_the_option() {
+        let rt = runtime();
+        assert!(eval_bool(&rt, "return kage.theme.current() == 'default'"));
+        rt.eval("kage.opt.theme = 'tokyo-night'").unwrap();
+        assert!(eval_bool(
+            &rt,
+            "return kage.theme.current() == 'tokyo-night'"
+        ));
     }
 
     #[test]
-    fn set_queues_a_request_the_host_drains() {
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval("kage.theme.set('solarized')").unwrap();
-        assert_eq!(rt.take_theme_request().as_deref(), Some("solarized"));
-        // Drained: a second take is empty.
-        assert_eq!(rt.take_theme_request(), None);
+    fn list_returns_the_resolver_names() {
+        let rt = runtime();
+        assert!(eval_bool(
+            &rt,
+            "local t = kage.theme.list(); return #t == 2 and t[1] == 'default' and t[2] == 'tokyo-night'"
+        ));
+        let bare = PluginRuntime::new().unwrap();
+        assert!(eval_bool(&bare, "return #kage.theme.list() == 0"));
     }
 
     #[test]
-    fn set_rejects_non_string_and_empty() {
-        let rt = PluginRuntime::new().unwrap();
+    fn set_applies_before_it_returns() {
+        let rt = runtime();
+        let fg: String = rt
+            .eval(
+                "kage.theme.set('tokyo-night')
+                 return kage.api.hl_get('KageMuted').fg",
+            )
+            .unwrap()
+            .as_string()
+            .map(mlua::String::to_string_lossy)
+            .unwrap_or_default();
+        assert_eq!(fg, "#000002");
+        assert_eq!(
+            lock(&rt.options()).get("theme"),
+            Some(&OptionValue::Str("tokyo-night".into()))
+        );
+        assert_eq!(lock(&rt.highlights()).theme(), "tokyo-night");
+    }
+
+    #[test]
+    fn set_rejects_non_string_empty_and_unknown() {
+        let rt = runtime();
         assert!(rt.eval("kage.theme.set(42)").is_err());
         assert!(rt.eval("kage.theme.set('')").is_err());
-        assert_eq!(rt.take_theme_request(), None);
+        assert!(rt.eval("kage.theme.set('nope')").is_err());
+        assert!(lock(&rt.options()).take_changes().is_empty());
     }
 }

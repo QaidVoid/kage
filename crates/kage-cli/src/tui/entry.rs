@@ -168,10 +168,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     let mut plugin_session_list: Option<kage_plugin::SharedSessionList> = None;
     let mut plugin_fork_request: Option<kage_plugin::SharedForkRequest> = None;
     let mut plugin_switch_request: Option<kage_plugin::SharedSwitchRequest> = None;
-    let mut plugin_theme: Option<(
-        kage_plugin::SharedThemeState,
-        kage_plugin::SharedThemeRequest,
-    )> = None;
+    let mut plugin_highlights: Option<kage_plugin::SharedHighlights> = None;
     let mut plugin_chrome: Option<(kage_plugin::SharedChrome, kage_plugin::SharedChrome)> = None;
     let mut plugin_terminal_hooks: Option<kage_plugin::RegisteredTerminalHooks> = None;
     if let Some(rt) = plugin_runtime.as_ref() {
@@ -185,7 +182,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         plugin_session_list = Some(rt.shared_session_list());
         plugin_fork_request = Some(rt.shared_fork_request());
         plugin_switch_request = Some(rt.shared_switch_request());
-        plugin_theme = Some((rt.shared_theme_state(), rt.shared_theme_request()));
+        plugin_highlights = Some(rt.highlights());
         plugin_chrome = Some((rt.shared_header(), rt.shared_footer()));
         plugin_terminal_hooks = Some(rt.shared_terminal_hooks());
     }
@@ -355,8 +352,8 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     if let Some(req) = plugin_switch_request {
         app.set_plugin_switch_request(req);
     }
-    if let Some((state, request)) = plugin_theme {
-        app.set_plugin_theme(state, request);
+    if let Some(highlights) = plugin_highlights {
+        app.set_highlights(highlights);
     }
     if let Some((header, footer)) = plugin_chrome {
         app.set_plugin_chrome(header, footer);

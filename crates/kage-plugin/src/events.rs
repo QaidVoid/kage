@@ -154,6 +154,11 @@ pub const KNOWN_EVENTS: &[(&str, &str, &str)] = &[
     ),
     ("option_set", "notification", "an option changed"),
     (
+        "color_scheme",
+        "notification",
+        "the theme's base groups changed",
+    ),
+    (
         "user",
         "notification",
         "fired by autocmd_exec with a pattern",

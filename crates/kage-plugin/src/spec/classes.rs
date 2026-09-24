@@ -514,7 +514,8 @@ pub(super) const CLASSES: &[Class] = &[
             "What an autocmd callback receives. `match` is the tool name",
             "for `tool_call` and `tool_result`, the new value for",
             "`model_select` and `thinking_level_select`, the option name",
-            "for `option_set`, and the exec pattern for `user`.",
+            "for `option_set`, the theme name for `color_scheme`, and the",
+            "exec pattern for `user`.",
         ],
         fields: &[
             Field {
@@ -557,6 +558,105 @@ pub(super) const CLASSES: &[Class] = &[
                 name: "group?",
                 ty: "string",
                 doc: "Help section. Defaults to `other`.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.HlSpec",
+        doc: &[
+            "A highlight group. Colors are `#rrggbb`, a color name",
+            "(`red`, `lightblue`, ...) or a palette index `0` to `255`.",
+        ],
+        fields: &[
+            Field {
+                name: "fg?",
+                ty: "string",
+                doc: "Foreground color.",
+            },
+            Field {
+                name: "bg?",
+                ty: "string",
+                doc: "Background color.",
+            },
+            Field {
+                name: "bold?",
+                ty: "boolean",
+                doc: "",
+            },
+            Field {
+                name: "italic?",
+                ty: "boolean",
+                doc: "",
+            },
+            Field {
+                name: "underline?",
+                ty: "boolean",
+                doc: "",
+            },
+            Field {
+                name: "dim?",
+                ty: "boolean",
+                doc: "",
+            },
+            Field {
+                name: "reverse?",
+                ty: "boolean",
+                doc: "Swap foreground and background.",
+            },
+            Field {
+                name: "link?",
+                ty: "string",
+                doc: "Group to follow. Wins over every other field.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.Span",
+        doc: &[
+            "A styled run of text in chrome rows and block renderers.",
+            "Styles resolve when the row is painted, so they follow",
+            "theme switches.",
+        ],
+        fields: &[
+            Field {
+                name: "text",
+                ty: "string",
+                doc: "",
+            },
+            Field {
+                name: "hl?",
+                ty: "string",
+                doc: "Highlight group whose colors and attributes apply first.",
+            },
+            Field {
+                name: "fg?",
+                ty: "string",
+                doc: "A group name (its fg), a theme role name, or a color.",
+            },
+            Field {
+                name: "bg?",
+                ty: "string",
+                doc: "A group name (its bg), a theme role name, or a color.",
+            },
+            Field {
+                name: "bold?",
+                ty: "boolean",
+                doc: "",
+            },
+            Field {
+                name: "dim?",
+                ty: "boolean",
+                doc: "",
+            },
+            Field {
+                name: "italic?",
+                ty: "boolean",
+                doc: "",
+            },
+            Field {
+                name: "underline?",
+                ty: "boolean",
+                doc: "",
             },
         ],
     },

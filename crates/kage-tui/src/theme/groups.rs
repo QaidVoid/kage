@@ -5,16 +5,20 @@
 //! ([`groups_for`]) and [`Theme::from_groups`] compiles a highlight
 //! table back into the [`Theme`] struct the renderer reads.
 //!
+//! [`Themes`] hands the same base groups to the plugin runtime, which
+//! owns the live table. Plugin spans resolve group names at paint time
+//! through [`Theme::group_style`] and [`Theme::span_color`].
+//!
 //! Colors in a group are kage-core color strings (`#rrggbb`, one of the
 //! 16 names, or `0` to `255`). An absent color compiles to
 //! [`Color::Reset`], the terminal default, which is also what `reset`
 //! under `[colors]` turns into.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use kage_core::highlight::{self, COLOR_NAMES, Highlights, HlSpec};
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier, Style};
 
 use super::Theme;
 
@@ -138,15 +142,46 @@ pub fn groups_for(name: &str, themes_dir: Option<&Path>) -> Result<ThemeGroups, 
     ))
 }
 
+/// The theme registry the plugin runtime resolves the `theme` option
+/// against: the bundled themes plus `<name>.toml` files in a themes
+/// directory.
+#[derive(Clone, Debug, Default)]
+pub struct Themes {
+    dir: Option<PathBuf>,
+}
+
+impl Themes {
+    /// Themes from the bundled set and, when given, `dir`.
+    #[must_use]
+    pub fn new(dir: Option<PathBuf>) -> Self {
+        Self { dir }
+    }
+}
+
+impl kage_plugin::ThemeResolver for Themes {
+    fn names(&self) -> Vec<String> {
+        Theme::available_names(self.dir.as_deref())
+    }
+
+    fn groups(&self, name: &str) -> Result<kage_plugin::ThemeBase, String> {
+        let groups = groups_for(name, self.dir.as_deref())?;
+        Ok(kage_plugin::ThemeBase {
+            transparent: groups.transparent,
+            groups: groups.groups,
+        })
+    }
+}
+
 impl Theme {
     /// Compile a highlight table into the renderer palette. Each role
     /// reads its slot of its resolved group; a missing color becomes
-    /// [`Color::Reset`].
+    /// [`Color::Reset`]. The table is kept in [`Theme::groups`].
     #[must_use]
     pub fn from_groups(hl: &Highlights) -> Self {
         let mut theme = Self {
             name: hl.theme().to_owned(),
             transparent: hl.transparent(),
+            groups: hl.clone(),
             ..Self::default_dark()
         };
         for (role, group, slot) in ROLE_GROUPS {
@@ -159,6 +194,49 @@ impl Theme {
             debug_assert!(set.is_ok(), "{role} is not a theme role");
         }
         theme
+    }
+
+    /// The style of group `name` with links followed: the colors it
+    /// sets and its attributes. An unknown group gives the empty style.
+    #[must_use]
+    pub fn group_style(&self, name: &str) -> Style {
+        let spec = self.groups.resolve(name);
+        let mut style = Style::default();
+        if let Some(fg) = &spec.fg {
+            style = style.fg(to_color(fg));
+        }
+        if let Some(bg) = &spec.bg {
+            style = style.bg(to_color(bg));
+        }
+        for (on, modifier) in [
+            (spec.bold, Modifier::BOLD),
+            (spec.italic, Modifier::ITALIC),
+            (spec.underline, Modifier::UNDERLINED),
+            (spec.dim, Modifier::DIM),
+            (spec.reverse, Modifier::REVERSED),
+        ] {
+            if on {
+                style = style.add_modifier(modifier);
+            }
+        }
+        style
+    }
+
+    /// Resolve a plugin span color: a group name gives the group's
+    /// `slot` color, then a theme role name, then ratatui's color
+    /// grammar (`red`, `#rrggbb`, an index). `None` when nothing
+    /// matches or the group leaves that color unset.
+    #[must_use]
+    pub fn span_color(&self, name: &str, slot: Slot) -> Option<Color> {
+        if self.groups.get(name).is_some() {
+            let spec = self.groups.resolve(name);
+            let color = match slot {
+                Slot::Fg => spec.fg,
+                Slot::Bg => spec.bg,
+            };
+            return color.as_deref().map(to_color);
+        }
+        self.role(name).or_else(|| name.parse::<Color>().ok())
     }
 }
 

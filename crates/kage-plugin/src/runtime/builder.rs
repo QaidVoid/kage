@@ -92,11 +92,14 @@ impl PluginRuntimeBuilder {
         self
     }
 
-    /// Set the source of theme names the `theme` option accepts.
-    /// Unset, any non-empty name is accepted.
+    /// Set the host's theme registry. The `theme` option then accepts
+    /// only its names, the build loads the base highlight groups of the
+    /// configured theme, and every theme switch loads new ones. Unset,
+    /// any non-empty name is accepted and the highlight table starts
+    /// empty.
     #[must_use]
-    pub fn theme_names(mut self, theme_names: ThemeNames) -> Self {
-        self.theme_names = Some(theme_names);
+    pub fn themes(mut self, themes: SharedThemeResolver) -> Self {
+        self.themes = Some(themes);
         self
     }
 
@@ -154,8 +157,6 @@ impl PluginRuntimeBuilder {
         let session_ops_slot = shared_session_ops();
         let pending_messages_slot = shared_pending_messages();
         let bridge_slot = shared_bridge();
-        let theme_state_slot = shared_theme_state();
-        let theme_request_slot = shared_theme_request();
         let header_slot = shared_chrome();
         let footer_slot = shared_chrome();
         let block_renderer_map = shared_block_renderers();
@@ -179,10 +180,13 @@ impl PluginRuntimeBuilder {
         keymap::install(&lua, &keymaps)?;
         let options = Options {
             store: self.options,
-            themes: self.theme_names,
+            themes: self.themes,
+            highlights: SharedHighlights::default(),
             sink: self.sink.clone(),
         };
+        options.load_theme();
         options::install(&lua, &options)?;
+        highlight::install(&lua, &options.highlights)?;
         let grants = Arc::new(capabilities::parse_grants(&self.capabilities)?);
         let cap_registry = capabilities::capability_registry();
         let session_entries = session_write::shared_session_entries();
@@ -246,11 +250,7 @@ impl PluginRuntimeBuilder {
             Arc::clone(&session_ops_slot),
         )?;
         messages::install_send_message(&lua, Arc::clone(&pending_messages_slot))?;
-        theme::install_theme(
-            &lua,
-            Arc::clone(&theme_state_slot),
-            Arc::clone(&theme_request_slot),
-        )?;
+        theme::install_theme(&lua, &options)?;
         chrome::install_chrome(
             &lua,
             weak_host.clone(),
@@ -295,6 +295,7 @@ impl PluginRuntimeBuilder {
             capabilities: cap_registry,
             keymaps,
             keybindings: self.keybindings,
+            options: options.clone(),
         });
         Ok(PluginRuntime {
             host,
@@ -317,8 +318,6 @@ impl PluginRuntimeBuilder {
             session_ops: session_ops_slot,
             pending_messages: pending_messages_slot,
             bridge: bridge_slot,
-            theme_state: theme_state_slot,
-            theme_request: theme_request_slot,
             header: header_slot,
             footer: footer_slot,
             block_renderers: block_renderer_map,

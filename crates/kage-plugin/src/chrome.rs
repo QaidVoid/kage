@@ -12,15 +12,17 @@
 //!
 //! The render function receives the row width and returns one of:
 //! a plain string (one unstyled span), a span table
-//! (`{ text = "x", fg = "red", bold = true }`), or an array of those
-//! (one line per element; an element that is itself an array becomes a
-//! multi-span line). A `nil` return or a non-conforming value yields no
+//! (`{ text = "x", hl = "KageMuted", fg = "red", bold = true }`), or an
+//! array of those (one line per element; an element that is itself an
+//! array becomes a multi-span line). A `nil` return or a non-conforming value yields no
 //! lines, so the host falls back to its built-in chrome. A Lua error
 //! logs to the host sink and keeps the previous lines.
 //!
-//! Colors are passed through as strings (`"red"`, `"#1f1f28"`) and
-//! resolved by the host against the active theme; this crate does not
-//! depend on the TUI's color types.
+//! Styles are passed through as strings and resolved by the host when
+//! it paints the row, so retained lines never depend on the theme.
+//! `hl` names a highlight group whose colors and attributes apply
+//! first. `fg` and `bg` take a group name (its fg or bg), a theme role
+//! name (`muted_fg`), or a color (`"red"`, `"#1f1f28"`).
 
 use std::sync::{Arc, Mutex};
 
@@ -119,9 +121,11 @@ impl ChromeAttrs {
 pub struct ChromeSpan {
     /// Display text.
     pub text: String,
-    /// Foreground color name or `#rrggbb` hex; host resolves it.
+    /// Highlight group applied before `fg`, `bg` and `attrs`.
+    pub hl: Option<String>,
+    /// Foreground: a group name, a theme role or a color; host resolves it.
     pub fg: Option<String>,
-    /// Background color name or `#rrggbb` hex; host resolves it.
+    /// Background: a group name, a theme role or a color; host resolves it.
     pub bg: Option<String>,
     /// Text attributes (bold, dim, italic, underline).
     pub attrs: ChromeAttrs,
@@ -297,6 +301,7 @@ fn parse_span_table(t: &Table) -> ChromeSpan {
     }
     ChromeSpan {
         text: opt_string("text").unwrap_or_default(),
+        hl: opt_string("hl"),
         fg: opt_string("fg"),
         bg: opt_string("bg"),
         attrs,
@@ -414,12 +419,13 @@ mod tests {
         let rt = PluginRuntime::new().unwrap();
         rt.eval(
             "kage.ui.set_header(function()
-                 return { text = 'on', fg = 'red', bold = true }
+                 return { text = 'on', hl = 'KageMuted', fg = 'red', bold = true }
              end)",
         )
         .unwrap();
         let span = &rt.header_chrome().unwrap().render(80)[0].spans[0];
         assert_eq!(span.text, "on");
+        assert_eq!(span.hl.as_deref(), Some("KageMuted"));
         assert_eq!(span.fg.as_deref(), Some("red"));
         assert!(span.attrs.bold());
         assert!(!span.attrs.dim());

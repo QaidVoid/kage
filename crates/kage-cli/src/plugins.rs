@@ -71,8 +71,8 @@ pub fn setup_runtime(
 /// `keybindings` are the already loaded config tables, `options` the
 /// store seeded from the same config, and `sink` receives plugin
 /// output, so nothing is written to stderr while the TUI owns the
-/// screen. The `theme` option accepts the bundled themes and those in
-/// the user themes dir.
+/// screen. Themes resolve against the bundled set and the user themes
+/// dir, which also provide the base highlight groups.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn setup_tui_runtime(
     plugins_dir: Option<&Path>,
@@ -93,9 +93,7 @@ pub(crate) fn setup_tui_runtime(
         .user_dir(user_dir.map(Path::to_path_buf))
         .keybindings(keybindings)
         .options(options)
-        .theme_names(Arc::new(move || {
-            kage_tui::theme::Theme::available_names(themes_dir.as_deref())
-        }))
+        .themes(Arc::new(kage_tui::theme::Themes::new(themes_dir)))
         .build()
         .map_err(|e| format!("plugin runtime: {e}"))?;
     load_tui_runtime(runtime, plugins_dir)

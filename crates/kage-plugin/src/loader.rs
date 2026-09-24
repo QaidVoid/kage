@@ -7,6 +7,8 @@
 //! (see [`crate::PluginRuntimeBuilder::keybindings`]), and finally
 //! evaluates the trusted `init.lua` when the runtime has a user dir
 //! (see [`crate::user`]). Each later layer overrides the earlier ones.
+//! The load ends by firing `color_scheme` for the current theme, so
+//! highlight setups written as autocmds apply.
 //! Each file is loaded independently: a broken plugin, a bad
 //! `[keybindings]` entry or a broken `init.lua` logs an error through
 //! the runtime's host log and the load proceeds. The function returns a
@@ -66,8 +68,8 @@ pub fn load_dir(dir: &Path, runtime: &PluginRuntime) -> Result<LoadReport, Plugi
 
 /// Run the full load against `runtime`: `_defaults.lua`, the plugins in
 /// `plugins_dir` as [`load_dir`] does, the `[keybindings]` table, then
-/// the trusted `init.lua` when the runtime has a user dir. `None` loads
-/// no plugins.
+/// the trusted `init.lua` when the runtime has a user dir, then fire
+/// `color_scheme`. `None` loads no plugins.
 pub fn load_all(
     plugins_dir: Option<&Path>,
     runtime: &PluginRuntime,
@@ -97,6 +99,10 @@ pub(crate) fn load_on(
         lock(eval.sink()).log(LogLevel::Error, err);
     }
     report.init = crate::user::load(lua, eval);
+    let theme = eval.options.theme();
+    if let Err(err) = crate::highlight::fire_color_scheme(lua, eval.sink(), &theme) {
+        lock(eval.sink()).log(LogLevel::Error, &format!("color_scheme: {err}"));
+    }
     Ok(report)
 }
 

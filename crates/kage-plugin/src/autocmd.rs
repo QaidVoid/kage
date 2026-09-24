@@ -22,8 +22,8 @@
 //! Callbacks receive `ev = { id, event, match, group, data }`. Events
 //! with a match key filter on it: the tool name for `tool_call` and
 //! `tool_result`, the new value for `model_select` and
-//! `thinking_level_select`, the option name for `option_set`, and the
-//! exec pattern for `user`. A pattern
+//! `thinking_level_select`, the option name for `option_set`, the theme
+//! name for `color_scheme`, and the exec pattern for `user`. A pattern
 //! is an exact string or a list of them, and `*` matches everything.
 //! Events without a match key accept only `*`. A `once` autocmd is
 //! removed before its callback runs.
@@ -52,6 +52,7 @@ const MATCH_FIELDS: &[(&str, &str)] = &[
     ("model_select", "next"),
     ("thinking_level_select", "next"),
     ("option_set", "name"),
+    ("color_scheme", "name"),
 ];
 
 /// Autocmd metadata shared between the owner thread and the host.

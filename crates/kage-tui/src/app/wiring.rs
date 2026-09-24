@@ -48,8 +48,8 @@ impl App {
             plugin_session_list: None,
             plugin_fork_request: None,
             plugin_switch_request: None,
-            plugin_theme_state: None,
-            plugin_theme_request: None,
+            highlights: None,
+            highlights_generation: 0,
             options: kage_plugin::SharedOptions::default(),
             option_setter: None,
             autocomplete_providers: Vec::new(),
@@ -322,17 +322,14 @@ impl App {
         self.plugin_switch_request = Some(request);
     }
 
-    /// Wire the theme snapshot and pending-switch slots so
-    /// `kage.theme.*` can read the active theme / list and request a
-    /// switch. Without these the read APIs see empty values and
-    /// `kage.theme.set` is a no-op.
-    pub fn set_plugin_theme(
-        &mut self,
-        state: kage_plugin::SharedThemeState,
-        request: kage_plugin::SharedThemeRequest,
-    ) {
-        self.plugin_theme_state = Some(state);
-        self.plugin_theme_request = Some(request);
+    /// Wire the plugin runtime's highlight table and compile the
+    /// palette from it. From then on the palette follows the table:
+    /// theme switches, `kage.api.hl_set` and theme files all land there.
+    /// Without this the palette stays the default one.
+    pub fn set_highlights(&mut self, highlights: kage_plugin::SharedHighlights) {
+        self.highlights = Some(highlights);
+        self.highlights_generation = 0;
+        self.refresh_highlights();
     }
 
     /// Wire the header/footer chrome slots populated by
@@ -393,12 +390,11 @@ impl App {
     }
 
     /// Share the option store with the plugin runtime and apply its
-    /// current values: theme (a bad name surfaces inline), mouse,
-    /// editor, input bounds and the key sequence timeout. Changes
-    /// queued before this call are
-    /// covered by those values and dropped. `setter` routes later sets
-    /// through the runtime. Call after [`Self::set_themes_dir`] so
-    /// user themes resolve.
+    /// current values: mouse, editor, input bounds and the key sequence
+    /// timeout. Changes queued before this call are covered by those
+    /// values and dropped. `setter` routes later sets through the
+    /// runtime. The theme reaches the palette through
+    /// [`Self::set_highlights`].
     pub fn set_options(
         &mut self,
         options: kage_plugin::SharedOptions,
@@ -409,7 +405,7 @@ impl App {
         let current: Vec<(&str, Option<OptionValue>)> = {
             let mut store = lock(&self.options);
             store.take_changes();
-            ["theme", "mouse", "editor", "input_min_lines", "timeoutlen"]
+            ["mouse", "editor", "input_min_lines", "timeoutlen"]
                 .into_iter()
                 .map(|name| (name, store.get(name).cloned()))
                 .collect()
@@ -614,34 +610,23 @@ impl App {
         }
     }
 
-    /// Drain a pending `kage.theme.set` and set the `theme` option
-    /// from it, the same path as `:theme set`, so an unknown name
-    /// surfaces an inline error rather than failing silently.
-    pub(crate) fn drain_plugin_theme(&mut self) -> bool {
-        let pending = self
-            .plugin_theme_request
-            .as_ref()
-            .and_then(|slot| lock(slot).take());
-        if let Some(name) = pending {
-            self.set_option("theme", OptionValue::Str(name));
-            return true;
-        }
-        false
-    }
-
-    /// Refresh the `kage.theme.*` snapshot: the current theme name plus
-    /// the available-themes list. The latter scans the themes directory
-    /// from disk, so this is far too costly to run on every event-loop
-    /// wake (which fires at the streaming tick rate while the agent
-    /// works). Plugins read this snapshot on human-timescale actions
-    /// (opening a theme picker), so the loop refreshes it on a slow
-    /// fixed cadence instead.
-    pub(crate) fn refresh_plugin_theme_state(&mut self) {
-        if let Some(state) = self.plugin_theme_state.as_ref() {
-            let mut s = lock(state);
-            s.current.clone_from(&crate::theme::current().name);
-            s.available = crate::theme::Theme::available_names(self.themes_dir.as_deref());
-        }
+    /// Recompile the palette when the highlight table changed since the
+    /// last compile. Returns whether it did.
+    pub(crate) fn refresh_highlights(&mut self) -> bool {
+        let Some(shared) = self.highlights.as_ref() else {
+            return false;
+        };
+        let hl = {
+            let hl = lock(shared);
+            if hl.generation() == self.highlights_generation {
+                return false;
+            }
+            hl.clone()
+        };
+        self.highlights_generation = hl.generation();
+        crate::theme::set_current(crate::theme::Theme::from_groups(&hl));
+        lock(&self.buffer).invalidate_all_heights();
+        true
     }
 
     /// Drain one pending blocking [`PluginDialog`] and open its

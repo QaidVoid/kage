@@ -61,6 +61,7 @@ pub(crate) use crate::error::PluginError;
 pub(crate) use crate::events;
 pub(crate) use crate::exec;
 pub(crate) use crate::fs as plugin_fs;
+pub(crate) use crate::highlight::{self, SharedHighlights, SharedThemeResolver};
 pub(crate) use crate::host::LuaHost;
 pub(crate) use crate::http;
 pub(crate) use crate::keymap::{self, Keymaps};
@@ -73,7 +74,7 @@ pub(crate) use crate::mcp::{
 pub(crate) use crate::messages::{
     self, PendingMessage, SharedPendingMessages, shared_pending_messages,
 };
-pub(crate) use crate::options::{self, Options, SharedOptions, ThemeNames};
+pub(crate) use crate::options::{self, Options, SharedOptions};
 pub(crate) use crate::providers::{self, LuaProvider, RegisteredProviders, registered_providers};
 pub(crate) use crate::schedule;
 pub(crate) use crate::session_write::{
@@ -87,9 +88,7 @@ pub(crate) use crate::status::{self, SharedStatus, shared_status};
 pub(crate) use crate::stdlib;
 pub(crate) use crate::store;
 pub(crate) use crate::terminal_input::{self, RegisteredTerminalHooks, registered_terminal_hooks};
-pub(crate) use crate::theme::{
-    self, SharedThemeRequest, SharedThemeState, shared_theme_request, shared_theme_state,
-};
+pub(crate) use crate::theme;
 pub(crate) use crate::tools::{self, RegisteredTools, registered_tools};
 pub(crate) use crate::ui;
 pub(crate) use crate::watchdog;
@@ -128,8 +127,6 @@ pub struct PluginRuntime {
     session_ops: SharedSessionOps,
     pending_messages: SharedPendingMessages,
     bridge: SharedBridge,
-    theme_state: SharedThemeState,
-    theme_request: SharedThemeRequest,
     header: SharedChrome,
     footer: SharedChrome,
     block_renderers: SharedBlockRenderers,
@@ -137,7 +134,7 @@ pub struct PluginRuntime {
     terminal_hooks: RegisteredTerminalHooks,
     /// Autocmd metadata, read without a round trip to the owner thread.
     autocmds: SharedAutocmds,
-    /// Option store and the theme names it validates against.
+    /// Option store, highlight table and the theme resolver.
     options: Options,
     /// Host-maintained snapshot of the current session's entry
     /// metadata, read by `session_write`'s `kage.session.entries`.
@@ -185,6 +182,9 @@ pub(crate) struct EvalState {
     /// `[keybindings]` from `config.toml`, applied after the plugins on
     /// every load.
     pub(crate) keybindings: kage_core::config::KeybindingsConfig,
+    /// Option store and highlight table, for the `color_scheme` fired
+    /// at the end of every load.
+    pub(crate) options: Options,
 }
 
 impl EvalState {
@@ -282,7 +282,7 @@ pub struct PluginRuntimeBuilder {
     defaults: &'static str,
     user_dir: Option<PathBuf>,
     options: SharedOptions,
-    theme_names: Option<ThemeNames>,
+    themes: Option<SharedThemeResolver>,
     keybindings: kage_core::config::KeybindingsConfig,
 }
 

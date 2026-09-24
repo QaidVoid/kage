@@ -316,8 +316,9 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &[
             "Take over the top status row. `fn(width)` runs each redraw",
-            "and returns a string, a span table, or an array of those.",
-            "Pass nil to restore the built-in status bar.",
+            "and returns a string, a `kage.Span`, or an array of those",
+            "(one line each; an array of spans is one line). Pass nil to",
+            "restore the built-in status bar.",
         ],
         path: "kage.ui.set_header",
         since: 1,
@@ -824,9 +825,10 @@ pub(super) const FUNCS: &[Func] = &[
     },
     Func {
         doc: &[
-            "Request a theme switch. The host sets the `theme` option",
-            "from it shortly after, which fires `option_set`. Errors on",
-            "a non-string or empty name.",
+            "Switch theme by setting the `theme` option. The base",
+            "highlight groups change before it returns, then",
+            "`color_scheme` and `option_set` fire. Raises on a",
+            "non-string, empty or unknown name.",
         ],
         path: "kage.theme.set",
         since: 1,
@@ -1024,6 +1026,52 @@ pub(super) const FUNCS: &[Func] = &[
             },
         ],
         ret: None,
+    },
+    Func {
+        doc: &[
+            "Set highlight group `name`, replacing any earlier override.",
+            "A `link` wins over the other fields. Raises on an invalid",
+            "color or an unknown field. Overrides of `Kage*` groups reset",
+            "on a theme switch; set them from a `color_scheme` autocmd to",
+            "keep them.",
+        ],
+        path: "kage.api.hl_set",
+        since: 2,
+        params: &[
+            Field {
+                name: "name",
+                ty: "string",
+                doc: "",
+            },
+            Field {
+                name: "spec",
+                ty: "kage.HlSpec",
+                doc: "",
+            },
+        ],
+        ret: None,
+    },
+    Func {
+        doc: &[
+            "Highlight group `name` as set, or nil when it does not",
+            "exist. With `{ link = false }` links are followed and the",
+            "effective spec is returned; a cycle gives an empty spec.",
+        ],
+        path: "kage.api.hl_get",
+        since: 2,
+        params: &[
+            Field {
+                name: "name",
+                ty: "string",
+                doc: "",
+            },
+            Field {
+                name: "opts?",
+                ty: "{ link?: boolean }",
+                doc: "",
+            },
+        ],
+        ret: Some("kage.HlSpec|nil"),
     },
     Func {
         doc: &[

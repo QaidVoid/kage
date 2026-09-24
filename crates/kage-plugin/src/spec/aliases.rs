@@ -72,6 +72,7 @@ pub(super) const ALIASES: &[Alias] = &[
             "user_bash",
             "permission_mode_select",
             "option_set",
+            "color_scheme",
             "user",
             "transform_context",
             "before_provider_request",

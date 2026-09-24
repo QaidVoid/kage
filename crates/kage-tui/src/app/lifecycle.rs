@@ -46,7 +46,7 @@ impl App {
             if self.drain_engine_events() || self.take_plugin_redraw() {
                 needs_redraw = true;
             }
-            if self.drain_plugin_theme() {
+            if self.refresh_highlights() {
                 needs_redraw = true;
             }
             let now = Instant::now();
@@ -62,7 +62,6 @@ impl App {
                 self.refresh_input_completion();
             }
             if last_plugin_snapshot.is_none_or(|t| t.elapsed() >= PLUGIN_SNAPSHOT_INTERVAL) {
-                self.refresh_plugin_theme_state();
                 self.refresh_plugin_session_list();
                 last_plugin_snapshot = Some(Instant::now());
             }

@@ -22,10 +22,11 @@ mod groups;
 use std::path::Path;
 use std::sync::{Arc, OnceLock, RwLock};
 
+use kage_core::highlight::Highlights;
 use kage_core::sync::{read, write};
 use ratatui::style::Color;
 
-pub use groups::{ROLE_GROUPS, Slot, ThemeGroups, groups_for};
+pub use groups::{ROLE_GROUPS, Slot, ThemeGroups, Themes, groups_for};
 
 static CURRENT: RwLock<Option<Arc<Theme>>> = RwLock::new(None);
 static DEFAULT: OnceLock<Arc<Theme>> = OnceLock::new();
@@ -191,6 +192,10 @@ pub struct Theme {
     pub md_code_fg: Color,
     /// Affirmative state, e.g. the `*` badge in pickers.
     pub success_fg: Color,
+    /// The highlight table this palette was compiled from. Plugin
+    /// spans resolve group names against it. Empty for a palette
+    /// built directly.
+    pub groups: Highlights,
 }
 
 /// Expand `$m! { "role" => field, ... }` over every color role a
@@ -305,6 +310,7 @@ impl Theme {
             md_link_fg: Color::Rgb(120, 170, 216),
             md_code_fg: Color::Rgb(214, 178, 120),
             success_fg: Color::Rgb(140, 190, 130),
+            groups: Highlights::new(),
         }
     }
 
@@ -361,6 +367,7 @@ impl Theme {
             md_link_fg: Color::Rgb(125, 207, 255),
             md_code_fg: Color::Rgb(224, 175, 104),
             success_fg: Color::Rgb(158, 206, 106),
+            groups: Highlights::new(),
         }
     }
 
@@ -416,6 +423,7 @@ impl Theme {
             md_link_fg: Color::Rgb(137, 220, 235),
             md_code_fg: Color::Rgb(249, 226, 175),
             success_fg: Color::Rgb(166, 227, 161),
+            groups: Highlights::new(),
         }
     }
 

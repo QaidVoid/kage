@@ -74,10 +74,15 @@ impl App {
     }
 
     /// Apply one live option value. Options without a live effect
-    /// return `false`. `announce` toasts a theme switch.
+    /// return `false`. `announce` toasts a theme switch, which the
+    /// palette picks up from the highlight table.
     pub(crate) fn apply_option(&mut self, name: &str, value: &OptionValue, announce: bool) -> bool {
         match (name, value) {
-            ("theme", OptionValue::Str(theme)) => self.apply_theme_resolved(theme, announce),
+            ("theme", OptionValue::Str(theme)) => {
+                if announce {
+                    self.notify(format!("theme: {theme}"));
+                }
+            }
             ("mouse", OptionValue::Bool(on)) => self.pending_mouse_capture = Some(*on),
             ("editor", OptionValue::Str(editor)) => self.input.set_modeless(editor == "modeless"),
             ("timeoutlen", OptionValue::Int(ms)) => {
@@ -101,35 +106,6 @@ impl App {
             _ => return false,
         }
         true
-    }
-
-    /// Resolve `name` against the bundled set and the user theme
-    /// directory, then make it the active palette. `announce` toasts
-    /// the switch (`:theme set`, settings, plugin); startup passes
-    /// `false`. Resolution failures (unknown name, unreadable file,
-    /// bad TOML) surface inline rather than failing silently.
-    pub(crate) fn apply_theme_resolved(&mut self, name: &str, announce: bool) {
-        let theme = match crate::theme::Theme::resolve(name, self.themes_dir.as_deref()) {
-            Ok(t) => t,
-            Err(e) => {
-                self.push_error(format!("theme: {e}"));
-                return;
-            }
-        };
-        crate::theme::set_current(theme);
-        {
-            let mut buf = lock(&self.buffer);
-            // Force a fresh layout pass: every block's cached height
-            // was measured against the prior theme's bubble
-            // background, which doesn't change geometry but
-            // invalidating is cheap and protects against future
-            // theme-driven height tweaks (different rule glyph
-            // widths, etc.).
-            buf.invalidate_all_heights();
-        }
-        if announce {
-            self.notify(format!("theme: {name}"));
-        }
     }
 
     /// Queue an async OS-clipboard image read (Ctrl+V, or `:attach`

@@ -1977,35 +1977,32 @@ fn open_overlay_suppresses_mappings() {
 }
 
 #[test]
-fn plugin_theme_drain_applies_request_and_refresh_populates_snapshot() {
+fn the_palette_follows_the_highlight_table_without_a_turn_boundary() {
     let _guard = crate::theme::theme_test_lock();
+    let rt = kage_plugin::PluginRuntime::builder()
+        .themes(Arc::new(crate::theme::Themes::new(None)))
+        .build()
+        .unwrap();
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
     let mut app = app_with_defaults(buffer, tx);
-    let state: kage_plugin::SharedThemeState =
-        std::sync::Arc::new(std::sync::Mutex::new(kage_plugin::ThemeState::default()));
-    let request: kage_plugin::SharedThemeRequest = std::sync::Arc::new(std::sync::Mutex::new(None));
-    app.set_plugin_theme(state.clone(), request.clone());
+    app.set_highlights(rt.highlights());
+    assert_eq!(crate::theme::current().name, "default");
 
-    // The dedicated snapshot refresh populates current + available.
-    app.refresh_plugin_theme_state();
-    {
-        let s = state.lock().unwrap();
-        assert!(!s.current.is_empty());
-        assert!(s.available.iter().any(|n| n == "tokyo-night"));
-    }
-
-    // Queue a switch; the drain sets the option, the next option
-    // pass applies it on this thread, and the snapshot is untouched.
-    *request.lock().unwrap() = Some("tokyo-night".to_owned());
-    app.drain_plugin_theme();
-    assert!(app.apply_option_changes());
+    rt.eval("kage.theme.set('tokyo-night')").unwrap();
+    assert!(app.refresh_highlights());
+    assert!(!app.refresh_highlights());
+    let tokyo = crate::theme::Theme::tokyo_night();
     assert_eq!(crate::theme::current().name, "tokyo-night");
-    assert!(request.lock().unwrap().is_none(), "request was drained");
+    assert_eq!(crate::theme::current().user_bg, tokyo.user_bg);
 
-    // The next refresh reflects the applied theme in the snapshot.
-    app.refresh_plugin_theme_state();
-    assert_eq!(state.lock().unwrap().current, "tokyo-night");
+    rt.eval("kage.api.hl_set('KageUserBubble', { bg = '#010203' })")
+        .unwrap();
+    assert!(app.refresh_highlights());
+    assert_eq!(
+        crate::theme::current().user_bg,
+        ratatui::style::Color::Rgb(1, 2, 3)
+    );
     crate::theme::reset_current_for_tests();
 }
 

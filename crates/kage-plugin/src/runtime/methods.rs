@@ -31,7 +31,7 @@ impl PluginRuntime {
             defaults: stdlib::DEFAULTS,
             user_dir: None,
             options: SharedOptions::default(),
-            theme_names: None,
+            themes: None,
             keybindings: kage_core::config::KeybindingsConfig::default(),
         }
     }
@@ -494,27 +494,11 @@ impl PluginRuntime {
         lock(&self.switch_request).take()
     }
 
-    /// Cloneable handle to the theme snapshot. The host overwrites
-    /// `current` / `available` on its redraw cadence so
-    /// `kage.theme.current()` and `kage.theme.list()` stay fresh.
+    /// Cloneable handle to the highlight table. The host recompiles
+    /// its palette when the table's generation moves.
     #[must_use]
-    pub fn shared_theme_state(&self) -> SharedThemeState {
-        Arc::clone(&self.theme_state)
-    }
-
-    /// Cloneable handle to the pending theme-switch slot, for a host
-    /// that drains it on its own (UI) thread rather than via
-    /// [`Self::take_theme_request`].
-    #[must_use]
-    pub fn shared_theme_request(&self) -> SharedThemeRequest {
-        Arc::clone(&self.theme_request)
-    }
-
-    /// Drain a pending `kage.theme.set` request. `Some(name)` means
-    /// the host should validate `name` and switch to it.
-    #[must_use]
-    pub fn take_theme_request(&self) -> Option<String> {
-        lock(&self.theme_request).take()
+    pub fn highlights(&self) -> SharedHighlights {
+        Arc::clone(&self.options.highlights)
     }
 
     /// Snapshot the renderer a plugin installed via
@@ -741,7 +725,6 @@ impl PluginRuntime {
         lock(&self.mcp_restart).clear();
         lock(&self.pending_messages).clear();
         lock(&self.session_ops).clear();
-        *lock(&self.theme_request) = None;
         *lock(&self.compact_request) = None;
         *lock(&self.fork_request) = None;
         *lock(&self.switch_request) = None;

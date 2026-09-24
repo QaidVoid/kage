@@ -688,13 +688,11 @@ pub struct App {
     /// `kage.session.switch` / `fork_to`. Drained between event polls
     /// and relayed as [`RunRequest::SwitchSession`] to the worker.
     plugin_switch_request: Option<kage_plugin::SharedSwitchRequest>,
-    /// Theme snapshot `kage.theme.current()` / `list()` read from.
-    /// Refreshed on the coarse plugin snapshot tick with the active
-    /// theme + bundled names.
-    plugin_theme_state: Option<kage_plugin::SharedThemeState>,
-    /// Pending `kage.theme.set` slot. Drained between event polls and
-    /// applied on this (UI) thread, the same path as `:theme set`.
-    plugin_theme_request: Option<kage_plugin::SharedThemeRequest>,
+    /// Highlight table owned by the plugin runtime. The palette is
+    /// recompiled from it when its generation moves.
+    highlights: Option<kage_plugin::SharedHighlights>,
+    /// Generation of [`Self::highlights`] the palette was compiled at.
+    highlights_generation: u64,
     /// Option store shared with the plugin runtime. Queued changes are
     /// applied by [`Self::apply_option_changes`] on every loop pass.
     options: kage_plugin::SharedOptions,

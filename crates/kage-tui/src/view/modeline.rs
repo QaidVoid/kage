@@ -3,18 +3,20 @@
 #[allow(clippy::wildcard_imports)] // free-fn split: shares the parent view module scope
 use super::*;
 
+use crate::theme::Slot;
+
 /// Map plugin-supplied [`kage_plugin::ChromeLine`]s onto ratatui
-/// lines. `base` carries the row's default fg/bg; a span's `fg` / `bg`
-/// overrides it when the string resolves (see [`parse_chrome_color`]),
-/// and the attribute bits map to terminal modifiers. An unresolvable
-/// color is dropped so the span inherits `base` rather than failing
-/// the whole row.
+/// lines against the active theme. `base` carries the row's default
+/// fg/bg. A span's `hl` group patches it first, then its `fg` / `bg`
+/// override it when the string resolves (see
+/// [`crate::theme::Theme::span_color`]), and the attribute bits map to
+/// terminal modifiers. An unresolvable color is dropped so the span
+/// inherits rather than failing the whole row.
 pub(crate) fn chrome_lines_to_ratatui(
     lines: &[kage_plugin::ChromeLine],
     base: Style,
 ) -> Vec<Line<'static>> {
     let theme = crate::theme::current();
-    let color = |name: &str| parse_chrome_color(&theme, name);
     lines
         .iter()
         .map(|cl| {
@@ -23,10 +25,16 @@ pub(crate) fn chrome_lines_to_ratatui(
                 .iter()
                 .map(|sp| {
                     let mut style = base;
-                    if let Some(c) = sp.fg.as_deref().and_then(color) {
+                    if let Some(group) = sp.hl.as_deref() {
+                        style = style.patch(theme.group_style(group));
+                    }
+                    let color = |name: Option<&str>, slot| {
+                        name.and_then(|name| theme.span_color(name, slot))
+                    };
+                    if let Some(c) = color(sp.fg.as_deref(), Slot::Fg) {
                         style = style.fg(c);
                     }
-                    if let Some(c) = sp.bg.as_deref().and_then(color) {
+                    if let Some(c) = color(sp.bg.as_deref(), Slot::Bg) {
                         style = style.bg(c);
                     }
                     let a = sp.attrs;
@@ -48,13 +56,6 @@ pub(crate) fn chrome_lines_to_ratatui(
             Line::from(spans)
         })
         .collect()
-}
-
-/// Resolve a plugin color string: a theme role name (`muted_fg`) first,
-/// then ratatui's color grammar (named colors such as `red`, `#rrggbb`
-/// hex, or an indexed number). Unparseable input yields `None`.
-fn parse_chrome_color(theme: &crate::theme::Theme, name: &str) -> Option<Color> {
-    theme.role(name).or_else(|| name.parse::<Color>().ok())
 }
 
 /// Paint the bottom modeline. When the host has registered a
@@ -394,5 +395,66 @@ mod tests {
         assert_eq!(lines[0].spans[0].style.fg, Some(Color::Rgb(1, 2, 3)));
         assert_eq!(lines[1].spans[0].style.fg, Some(Color::Red));
         assert_eq!(lines[2].spans[0].style.fg, None);
+    }
+
+    #[test]
+    fn span_hl_and_group_colors_resolve_at_paint_time() {
+        use kage_core::highlight::HlSpec;
+        use kage_plugin::ChromeAttrs;
+
+        let _guard = theme::theme_test_lock();
+        let mut hl = theme::groups_for("default", None)
+            .unwrap()
+            .into_highlights("default");
+        hl.set(
+            "Loud",
+            HlSpec {
+                bg: Some("#0a0b0c".into()),
+                italic: true,
+                underline: true,
+                ..HlSpec::default()
+            },
+        )
+        .unwrap();
+        theme::set_current(Theme::from_groups(&hl));
+        let muted = theme::current().muted_fg;
+        let bubble = theme::current().user_bg;
+        let mut bold = ChromeAttrs::empty();
+        bold.insert(ChromeAttrs::BOLD);
+        let spans = [
+            ChromeSpan {
+                hl: Some("KageMuted".into()),
+                attrs: bold,
+                ..ChromeSpan::default()
+            },
+            ChromeSpan {
+                hl: Some("Loud".into()),
+                fg: Some("KageMuted".into()),
+                ..ChromeSpan::default()
+            },
+            ChromeSpan {
+                fg: Some("Loud".into()),
+                bg: Some("KageUserBubble".into()),
+                ..ChromeSpan::default()
+            },
+        ];
+        let lines = chrome_lines_to_ratatui(
+            &[ChromeLine {
+                spans: spans.to_vec(),
+            }],
+            Style::default().fg(Color::White),
+        );
+        theme::reset_current_for_tests();
+        let [a, b, c] = [0, 1, 2].map(|i| lines[0].spans[i].style);
+        assert_eq!(a.fg, Some(muted));
+        assert!(a.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(b.fg, Some(muted));
+        assert_eq!(b.bg, Some(Color::Rgb(10, 11, 12)));
+        assert!(
+            b.add_modifier
+                .contains(Modifier::ITALIC | Modifier::UNDERLINED)
+        );
+        assert_eq!(c.fg, Some(Color::White));
+        assert_eq!(c.bg, Some(bubble));
     }
 }

@@ -458,7 +458,7 @@ impl App {
                 }
             })
             .map_err(|err| TuiError::Io(std::io::Error::other(err.to_string())))?;
-        lock(&self.buffer).merge_render_state(buffer);
+        lock(&self.buffer).merge_render_state(&buffer);
         self.captured_rows = captured_rows;
         Ok(())
     }

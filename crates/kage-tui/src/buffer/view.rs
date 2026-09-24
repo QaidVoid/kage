@@ -125,6 +125,53 @@ impl Buffer {
         self.stream_dirty_since.is_some()
     }
 
+    /// Cached call/result block pairing for the current block
+    /// list, rebuilt here when the block count changed since it was
+    /// last built. The returned handle is shared, so this runs at
+    /// most once per block-list change rather than per frame.
+    pub(crate) fn tool_topology(&mut self) -> Arc<ToolTopology> {
+        if let Some((len, topo)) = &self.tool_topology
+            && *len == self.blocks.len()
+        {
+            return Arc::clone(topo);
+        }
+        let topo = Arc::new(ToolTopology::build(&self.blocks));
+        self.tool_topology = Some((self.blocks.len(), Arc::clone(&topo)));
+        topo
+    }
+
+    /// Message-level jump targets for the F3 picker: `(block_idx,
+    /// label)` pairs, one per user prompt, assistant reply, tool
+    /// call, and notice block. Labels are single-line summaries
+    /// truncated to `label_width` characters. Thinking blocks and
+    /// standalone results are skipped (the first pair merges into
+    /// its call; the latter are noise).
+    #[must_use]
+    pub fn jump_targets(&self, label_width: usize) -> Vec<(usize, String)> {
+        let mut out = Vec::new();
+        for (idx, block) in self.blocks.iter().enumerate() {
+            let label = match block {
+                Block::User { text } => Some(format!("you: {}", first_line(text))),
+                Block::Assistant { text, .. } | Block::Custom { text, .. } => {
+                    Some(first_line(text))
+                }
+                Block::ToolCall {
+                    name,
+                    input_summary,
+                    ..
+                } => Some(format!("tool {name}: {input_summary}")),
+                Block::Thinking { .. } | Block::ToolResult { .. } => None,
+            };
+            if let Some(label) = label
+                .as_deref()
+                .and_then(|l| truncate_label(l, label_width))
+            {
+                out.push((idx, label));
+            }
+        }
+        out
+    }
+
     /// Cached rendered height (in wrapped rows) for the block at
     /// `idx`, but only if the cache entry was captured at the given
     /// `width`. Width-mismatched entries return `None` so the caller
@@ -257,7 +304,7 @@ impl Buffer {
     /// indices would mislabel. (Shrinking mutations are UI-thread
     /// only, so they cannot overlap a draw on that same thread; the
     /// guard is defensive.)
-    pub fn merge_render_state(&mut self, snapshot: Self) {
+    pub fn merge_render_state(&mut self, snapshot: &Self) {
         if snapshot.blocks.len() > self.blocks.len() {
             return;
         }
@@ -278,8 +325,10 @@ impl Buffer {
         self.scroll = snapshot.scroll;
         self.last_drawn_focus = snapshot.last_drawn_focus;
         self.last_user_focus = snapshot.last_user_focus;
-        self.last_block_screen_rows = snapshot.last_block_screen_rows;
-        self.last_block_virtual_rows = snapshot.last_block_virtual_rows;
+        self.last_block_screen_rows
+            .clone_from(&snapshot.last_block_screen_rows);
+        self.last_block_virtual_rows
+            .clone_from(&snapshot.last_block_virtual_rows);
         self.last_area_x = snapshot.last_area_x;
         self.last_area_y = snapshot.last_area_y;
         self.last_area_width = snapshot.last_area_width;
@@ -291,6 +340,10 @@ impl Buffer {
         // delta landing mid-draw re-arms on the next frame at the
         // cost of one extra window of staleness, at worst.
         self.stream_dirty_since = snapshot.stream_dirty_since;
+        // The pairing cache is shared, not copied: the snapshot's
+        // build length travels with it so a length mismatch here
+        // triggers one rebuild on the next render.
+        self.tool_topology.clone_from(&snapshot.tool_topology);
     }
 
     /// Width of the last-painted buffer area, in cells.

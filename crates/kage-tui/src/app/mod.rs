@@ -271,6 +271,8 @@ pub enum AppExit {
 enum PickerKind {
     Model,
     Session,
+    /// F3 history jump: value is the target block index.
+    Jump,
 }
 
 /// A blocking plugin dialog the worker handed to the App to run.
@@ -777,6 +779,15 @@ pub struct App {
     /// `y` recover the full selected text even when part of the
     /// selection has scrolled off-screen.
     captured_rows: std::collections::BTreeMap<usize, Vec<view::CapturedCell>>,
+    /// The last frame's buffer snapshot, parked for the next draw.
+    /// An unchanged buffer version redraws it verbatim instead of
+    /// deep-cloning the live buffer again; renderer caches live in
+    /// this copy and are merged back into the live buffer after
+    /// every paint. `None` until the first draw.
+    draw_snapshot: Option<crate::Buffer>,
+    /// The live-buffer version [`Self::draw_snapshot`] was cloned
+    /// at. The reuse check in [`Self::draw`] keys on it.
+    draw_snapshot_version: u64,
     /// Last DECSCUSR cursor shape we emitted to the terminal, keyed
     /// by `(mode, pane_focused_on_input)`. Stored so [`Self::draw`]
     /// can skip the escape on frames where the cursor shape would be

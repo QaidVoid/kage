@@ -390,7 +390,7 @@ fn merge_render_state_copies_renderer_state_and_keeps_appends() {
     snap.set_last_drawn_focus(Some(0));
     snap.set_last_block_screen_rows(vec![(0, 1, 4)]);
     live.push_user("world");
-    live.merge_render_state(snap);
+    live.merge_render_state(&snap);
     assert_eq!(live.scroll(), Some(7));
     assert_eq!(live.cached_height(0, 80), Some(3));
     assert_eq!(live.cached_height(1, 80), None);
@@ -407,7 +407,7 @@ fn merge_render_state_skips_when_live_has_fewer_blocks() {
     snap.push_user("a");
     snap.push_user("b");
     snap.set_scroll(4);
-    live.merge_render_state(snap);
+    live.merge_render_state(&snap);
     assert_eq!(live.scroll(), None);
     assert_eq!(live.blocks().len(), 1);
 }
@@ -481,7 +481,7 @@ fn merge_render_state_carries_throttle_flag() {
 
     live.append_assistant_delta(" world");
     assert!(live.stream_edits_pending());
-    live.merge_render_state(snap);
+    live.merge_render_state(&snap);
     assert!(!live.stream_edits_pending());
 }
 
@@ -635,4 +635,40 @@ fn trim_scrollback_enforces_the_block_cap() {
         matches!(&buf.blocks()[MAX_BLOCKS - 1], Block::User { text } if *text == format!("m{}", MAX_BLOCKS + extra - 1)),
         "newest block survives"
     );
+}
+
+#[test]
+fn jump_targets_lists_messages_with_labels_not_thinking() {
+    let mut buf = Buffer::new();
+    buf.push_user("hello there");
+    buf.begin_thinking();
+    buf.append_thinking_delta("secret thoughts");
+    buf.begin_assistant();
+    buf.append_assistant_delta("the answer\nsecond line");
+    buf.push_tool_call("c1", "bash", "bash(\"ls\")", "{}");
+    buf.push_tool_result_with_duration("c1", "ok", false, None);
+
+    let targets = buf.jump_targets(80);
+    let labels: Vec<&str> = targets.iter().map(|(_, l)| l.as_str()).collect();
+    assert_eq!(
+        labels,
+        vec!["you: hello there", "the answer", "tool bash: bash(\"ls\")"],
+        "thinking and consumed results are skipped"
+    );
+    assert_eq!(targets[0].0, 0);
+    assert_eq!(targets[1].0, 2);
+    assert_eq!(targets[2].0, 3);
+}
+
+#[test]
+fn jump_targets_truncate_and_skip_empty() {
+    let mut buf = Buffer::new();
+    buf.push_user(format!("x{}", "y".repeat(200)));
+    buf.begin_assistant();
+    buf.append_assistant_delta("");
+
+    let targets = buf.jump_targets(20);
+    assert_eq!(targets.len(), 1, "empty labels are skipped");
+    assert_eq!(targets[0].1.chars().count(), 20);
+    assert!(targets[0].1.ends_with("..."));
 }

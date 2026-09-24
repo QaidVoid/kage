@@ -22,29 +22,15 @@ pub(super) fn render_buffer(
     // The opaque base canvas is painted once for the whole frame in
     // `render`; blocks tint their own rows on top of it.
 
-    // Owned-key snapshots of the call/result topology. Owning the
-    // call_id strings here means we don't keep an immutable borrow of
-    // `buffer.blocks()` alive across the height-cache writes below.
+    // Owned-key snapshots of the call/result topology. The pairing
+    // is cached on the buffer and rebuilt only when the block count
+    // changes, so steady-state frames share one `Arc` instead of
+    // cloning every call id twice per frame.
+    let topology = buffer.tool_topology();
+    let result_by_call = &topology.result_by_call;
+    let consumed_results = &topology.consumed_results;
+    let call_idx_for_result = &topology.call_idx_for_result;
     let n = buffer.blocks().len();
-    let mut result_by_call: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::with_capacity(n);
-    for (i, b) in buffer.blocks().iter().enumerate() {
-        if let Block::ToolResult { call_id, .. } = b {
-            result_by_call.entry(call_id.clone()).or_insert(i);
-        }
-    }
-    let mut consumed_results: std::collections::HashSet<usize> =
-        std::collections::HashSet::with_capacity(n);
-    let mut call_idx_for_result: std::collections::HashMap<usize, usize> =
-        std::collections::HashMap::with_capacity(n);
-    for (i, b) in buffer.blocks().iter().enumerate() {
-        if let Block::ToolCall { call_id, .. } = b
-            && let Some(&rid) = result_by_call.get(call_id)
-        {
-            consumed_results.insert(rid);
-            call_idx_for_result.insert(rid, i);
-        }
-    }
 
     let registry = read(registry::global());
     let focus = buffer.effective_focus();
@@ -66,7 +52,7 @@ pub(super) fn render_buffer(
                 buffer,
                 idx,
                 width,
-                &result_by_call,
+                result_by_call,
                 Emphasis::None,
                 &registry,
                 Some(0),
@@ -203,8 +189,8 @@ pub(super) fn render_buffer(
             idx,
             focus,
             search_match_set,
-            &consumed_results,
-            &call_idx_for_result,
+            consumed_results,
+            call_idx_for_result,
         );
         let cached_owner;
         let built_owner;
@@ -216,7 +202,7 @@ pub(super) fn render_buffer(
             } else {
                 let budget = Some(intra_block_skip.saturating_add(take_rows));
                 let built =
-                    build_block_lines(buffer, idx, width, &result_by_call, emp, &registry, budget);
+                    build_block_lines(buffer, idx, width, result_by_call, emp, &registry, budget);
                 let measured = built.len();
                 let stored = u16::try_from(measured).unwrap_or(u16::MAX);
                 buffer.set_cached_height(idx, width, stored);

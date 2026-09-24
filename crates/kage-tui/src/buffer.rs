@@ -13,6 +13,8 @@ pub(crate) use std::mem;
 pub(crate) use std::sync::Arc;
 pub(crate) use std::time::{Duration, Instant};
 
+use std::collections::{HashMap, HashSet};
+
 pub(crate) use ratatui::text::Line;
 
 /// One renderable region of the conversation.
@@ -190,6 +192,61 @@ fn count_lines(text: &str) -> usize {
     text.split('\n').count()
 }
 
+/// First line of `text`, for single-line summaries.
+fn first_line(text: &str) -> String {
+    text.lines().next().unwrap_or_default().to_owned()
+}
+
+/// Trim `label` to at most `label_width` characters, appending an
+/// ellipsis when truncated. `None` for empty labels.
+fn truncate_label(label: &str, label_width: usize) -> Option<String> {
+    if label.is_empty() {
+        return None;
+    }
+    if label.chars().count() <= label_width {
+        return Some(label.to_owned());
+    }
+    let cut: String = label.chars().take(label_width.saturating_sub(3)).collect();
+    Some(format!("{cut}..."))
+}
+
+/// Call/result pairing for [`Block::ToolCall`] and
+/// [`Block::ToolResult`] blocks, derived from the block list and
+/// cached between frames. The renderer rebuilds it only when the
+/// block count changes; holding it behind an [`Arc`] lets buffer
+/// snapshots share it instead of copying a map of every call id per
+/// frame.
+#[derive(Debug, Default)]
+pub struct ToolTopology {
+    /// Result block index for each call id; the first result wins.
+    pub(crate) result_by_call: HashMap<String, usize>,
+    /// Result block indexes already merged into their call block.
+    pub(crate) consumed_results: HashSet<usize>,
+    /// Result block index to its call block index.
+    pub(crate) call_idx_for_result: HashMap<usize, usize>,
+}
+
+impl ToolTopology {
+    /// Derive the pairing from an append-only block list.
+    fn build(blocks: &[Block]) -> Self {
+        let mut topo = Self::default();
+        for (i, block) in blocks.iter().enumerate() {
+            if let Block::ToolResult { call_id, .. } = block {
+                topo.result_by_call.entry(call_id.clone()).or_insert(i);
+            }
+        }
+        for (i, block) in blocks.iter().enumerate() {
+            if let Block::ToolCall { call_id, .. } = block
+                && let Some(&rid) = topo.result_by_call.get(call_id)
+            {
+                topo.consumed_results.insert(rid);
+                topo.call_idx_for_result.insert(rid, i);
+            }
+        }
+        topo
+    }
+}
+
 /// Append-only conversation history with a viewport anchor in
 /// absolute virtual-row space. `scroll == None` means the viewport is
 /// pinned to the latest content (auto-follow on streaming);
@@ -236,6 +293,11 @@ pub struct Buffer {
     /// Stored behind `Arc` so the mutex isn't holding a clone of a
     /// possibly-huge vector while the renderer is still using it.
     block_render_lines: Vec<Option<(u16, Arc<Vec<Line<'static>>>)>>,
+    /// Cached call/result block pairing together with the block
+    /// count it was built at, shared behind an [`Arc`]. See
+    /// [`ToolTopology`]. `None` until the first render; rebuilt by
+    /// the renderer whenever the count changed since.
+    tool_topology: Option<(usize, Arc<ToolTopology>)>,
     /// Monotonically increasing counter bumped by every mutation
     /// (push, append, fold, focus, scroll). The render loop reads
     /// this to decide whether to repaint: an unchanged version means

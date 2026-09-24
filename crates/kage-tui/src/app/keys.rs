@@ -59,6 +59,10 @@ impl App {
         }
     }
 
+    /// Dispatch one key event through the modal layers, config
+    /// bindings, and input handlers. Grows with every modal; the
+    /// line count is layer plumbing, not complexity.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn dispatch_key(
         &mut self,
         key: ratatui::crossterm::event::KeyEvent,
@@ -221,6 +225,13 @@ impl App {
             return None;
         }
 
+        // F3 opens the message jump picker from any editing state;
+        // the modal layers above already own the keyboard when open.
+        if Self::jump_picker_chord(&key) {
+            self.open_jump_picker();
+            return None;
+        }
+
         let actions = self.input.handle_key(key);
         for action in actions {
             if let Some(exit) = self.apply(action) {
@@ -244,6 +255,15 @@ impl App {
             && !self.input.shell_armed()
             && !key.modifiers.contains(KeyModifiers::CONTROL)
             && matches!(key.code, KeyCode::Char('?'))
+    }
+
+    /// F3 with no modifiers opens the message jump picker.
+    fn jump_picker_chord(key: &ratatui::crossterm::event::KeyEvent) -> bool {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        matches!(key.code, KeyCode::F(3))
+            && !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT)
     }
 
     pub(crate) fn refresh_input_completion(&mut self) {

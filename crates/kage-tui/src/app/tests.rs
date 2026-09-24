@@ -2203,3 +2203,47 @@ fn login_command_errors_without_a_runner() {
     };
     assert!(rendered.contains("login: unavailable"), "{rendered}");
 }
+
+#[test]
+fn draw_snapshot_is_reused_while_the_buffer_is_unchanged() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+
+    // First take: no resident snapshot yet, so this is a fresh clone.
+    let (snap, version) = app.take_draw_snapshot();
+    app.park_draw_snapshot(snap, version);
+
+    // Unchanged version: the parked snapshot comes back at the same
+    // version, ready to redraw verbatim.
+    let (snap2, version2) = app.take_draw_snapshot();
+    assert_eq!(version, version2, "nothing mutated between takes");
+    app.park_draw_snapshot(snap2, version2);
+
+    // A mutation bumps the version and forces a fresh clone.
+    app.buffer.lock().unwrap().push_user("bump");
+    let (_, version3) = app.take_draw_snapshot();
+    assert_ne!(version2, version3, "mutation invalidates the snapshot");
+}
+
+#[test]
+fn f3_opens_the_jump_picker_and_resolve_focuses_the_block() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    {
+        let mut buf = app.buffer.lock().unwrap();
+        buf.push_user("find me");
+        buf.begin_assistant();
+        buf.append_assistant_delta("answer");
+    }
+
+    app.dispatch_key(KeyEvent::new(KeyCode::F(3), KeyModifiers::NONE));
+    assert_eq!(app.picker_kind, Some(crate::app::PickerKind::Jump));
+
+    // Rows are newest-first: row 0 is the latest block (the
+    // assistant reply at buffer index 1).
+    app.dispatch_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.picker.is_none(), "picker closed on resolve");
+    assert_eq!(app.buffer.lock().unwrap().effective_focus(), Some(1));
+}

@@ -22,6 +22,7 @@ switch modes or panes.
 | `Ctrl+End`       | Snap to the bottom, re-arm auto-follow      |
 | `Ctrl+P`         | Open the model picker                       |
 | `Ctrl+S`         | Open the session picker                     |
+| `F3`             | Open the message jump picker (filter, Enter jumps) |
 | `Alt+P` / `Alt+N` | Jump to the previous / next block          |
 | `Ctrl+N`         | Jump to the next block                      |
 | `Ctrl+O`         | Toggle fold on the focused block            |

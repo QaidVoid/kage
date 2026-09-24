@@ -40,6 +40,8 @@ impl App {
             plugin_texts_dirty: false,
             plugin_status: None,
             plugin_status_cache: Vec::new(),
+            draw_snapshot: None,
+            draw_snapshot_version: 0,
             plugin_usage: None,
             plugin_compact_request: None,
             plugin_session_list: None,

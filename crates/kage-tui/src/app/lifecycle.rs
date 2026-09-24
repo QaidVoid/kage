@@ -294,7 +294,7 @@ impl App {
         };
         let render_width = tui.terminal().size().map_or(80, |r| r.width);
         self.refresh_plugin_widget_texts_if_due(render_width);
-        let mut buffer = lock(&self.buffer).clone();
+        let (mut buffer, buffer_version) = self.take_draw_snapshot();
         let cmdline = self.cmdline.as_ref();
         let model_snapshot = self.status_model.as_ref().map(|m| lock(m).clone());
         let status = view::StatusCtx {
@@ -420,9 +420,45 @@ impl App {
         })?;
         // Merge renderer-owned state (caches, clamped scroll, last-frame
         // geometry) from the snapshot back into the live buffer. The
-        // mutex is never held across the paint itself.
-        lock(&self.buffer).merge_render_state(buffer);
+        // mutex is never held across the paint itself. Then park the
+        // drawn snapshot: an unchanged version redraws it verbatim.
+        lock(&self.buffer).merge_render_state(&buffer);
+        self.park_draw_snapshot(buffer, buffer_version);
         self.captured_rows = captured_rows;
         Ok(())
+    }
+
+    /// Produce the buffer to draw on and the live version it was
+    /// taken at. When the live buffer is untouched since the last
+    /// draw (and no stream reparse is pending), the parked snapshot
+    /// is returned instead of deep-cloning every block again; on a
+    /// large resumed session that clone dominates idle-frame cost.
+    pub(crate) fn take_draw_snapshot(&mut self) -> (crate::Buffer, u64) {
+        let (live_version, stream_pending) = {
+            let live = lock(&self.buffer);
+            (live.version(), live.stream_edits_pending())
+        };
+        let reuse = !stream_pending && self.draw_snapshot_version == live_version;
+        let buffer = match self.draw_snapshot.take() {
+            Some(snap) if reuse => snap,
+            _ => {
+                let mut fresh = lock(&self.buffer).clone();
+                // Carry the parked snapshot's warm renderer caches
+                // into the fresh clone; the merge guard rejects it
+                // when the block list shrank (compaction, `:clear`).
+                if let Some(resident) = self.draw_snapshot.take() {
+                    fresh.merge_render_state(&resident);
+                }
+                fresh
+            }
+        };
+        (buffer, live_version)
+    }
+
+    /// Park a drawn snapshot for [`Self::take_draw_snapshot`] to
+    /// hand back on the next unchanged frame.
+    pub(crate) fn park_draw_snapshot(&mut self, buffer: crate::Buffer, version: u64) {
+        self.draw_snapshot_version = version;
+        self.draw_snapshot = Some(buffer);
     }
 }

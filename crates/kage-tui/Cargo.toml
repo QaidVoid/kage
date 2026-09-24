@@ -18,6 +18,10 @@ bench = false
 harness = false
 name = "render"
 
+[[bench]]
+harness = false
+name = "scale"
+
 [dependencies]
 arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 base64.workspace = true

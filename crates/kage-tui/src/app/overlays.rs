@@ -255,6 +255,28 @@ impl App {
         self.picker_kind = Some(PickerKind::Session);
     }
 
+    /// Open the F3 history-jump picker: one row per user prompt,
+    /// assistant reply, tool call, and notice. Resolving scrolls the
+    /// focused block into view.
+    pub(crate) fn open_jump_picker(&mut self) {
+        let items: Vec<crate::picker::PickItem> = lock(&self.buffer)
+            .jump_targets(72)
+            .into_iter()
+            .map(|(idx, label)| crate::picker::PickItem {
+                value: idx.to_string(),
+                label,
+                badge: None,
+                group: None,
+                right: None,
+            })
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        self.picker = Some(OverlayPicker::new("Jump to message", items));
+        self.picker_kind = Some(PickerKind::Jump);
+    }
+
     pub(crate) fn dispatch_picker_key(
         &mut self,
         key: ratatui::crossterm::event::KeyEvent,
@@ -294,6 +316,14 @@ impl App {
                         let _ = self.send_request(RunRequest::ResumeSession(
                             std::path::PathBuf::from(value),
                         ));
+                    }
+                    Some(PickerKind::Jump) => {
+                        // Focus drives the renderer's scroll-into-view
+                        // pass; the index always came from a live
+                        // block list, but a stale pick must not panic.
+                        if let Ok(idx) = value.parse::<usize>() {
+                            lock(&self.buffer).set_focus(Some(idx));
+                        }
                     }
                     None => {}
                 }

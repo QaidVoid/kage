@@ -52,6 +52,7 @@ fn rows() -> Vec<Row> {
         Key("Ctrl+/", "undo last edit"),
         Key("/ or ?", "empty prompt: command palette / keys"),
         Header("pickers & overlays"),
+        Key("F3", "jump to a message"),
         Key("Ctrl+P", "model picker"),
         Key("Ctrl+S", "session picker"),
         Key(": or /", "command line / command palette"),

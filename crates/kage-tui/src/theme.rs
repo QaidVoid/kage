@@ -12,12 +12,20 @@
 //! [`set_current`] - typically once at startup, but `:theme set <name>`
 //! also goes through this path so a swap takes effect on the next
 //! frame without restarting the TUI.
+//!
+//! Highlight groups sit behind the palette: [`groups_for`] gives a
+//! theme's base groups and [`Theme::from_groups`] compiles them back
+//! into a [`Theme`].
+
+mod groups;
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use kage_core::sync::{read, write};
 use ratatui::style::Color;
+
+pub use groups::{ROLE_GROUPS, Slot, ThemeGroups, groups_for};
 
 static CURRENT: RwLock<Option<Arc<Theme>>> = RwLock::new(None);
 static DEFAULT: OnceLock<Arc<Theme>> = OnceLock::new();
@@ -222,6 +230,17 @@ macro_rules! with_roles {
         }
     };
 }
+
+#[cfg(test)]
+macro_rules! role_names {
+    ($($n:literal => $f:ident),+ $(,)?) => {
+        [$($n),+]
+    };
+}
+
+/// Every role name, in declaration order.
+#[cfg(test)]
+const ROLE_NAMES: &[&str] = &with_roles!(role_names);
 
 impl Default for Theme {
     fn default() -> Self {
@@ -482,24 +501,16 @@ impl Theme {
     }
 
     /// Build a theme from a user TOML document: start from the
-    /// bundled `base` (default `"default"`), flip `transparent`, then
-    /// apply every `[colors]` override.
+    /// bundled `base` (default `"default"`), flip `transparent`, apply
+    /// every `[colors]` override by role, then every `[groups]` spec.
     ///
     /// # Errors
     ///
     /// Returns a message when the TOML is malformed, a color does not
-    /// parse, or a role name is unknown.
+    /// parse, a role name is unknown, or a `Kage*` group is unknown.
     pub fn from_toml(toml: &str) -> Result<Self, String> {
-        let file: ThemeFile = toml::from_str(toml).map_err(|e| e.to_string())?;
-        let mut theme = Self::by_name(file.base.as_deref().unwrap_or("default"));
-        if let Some(t) = file.transparent {
-            theme.transparent = t;
-        }
-        for (role, value) in &file.colors {
-            let color = parse_color(value)?;
-            theme.set_role(role, color)?;
-        }
-        Ok(theme)
+        let (base, groups) = groups::parse_theme_file(toml)?;
+        Ok(Self::from_groups(&groups.into_highlights(&base)))
     }
 
     /// Resolve a theme name to a palette: a bundled name wins;
@@ -513,20 +524,8 @@ impl Theme {
         if Self::bundled_names().contains(&name) {
             return Ok(Self::by_name(name));
         }
-        if let Some(dir) = themes_dir {
-            let path = dir.join(format!("{name}.toml"));
-            if path.exists() {
-                let body = std::fs::read_to_string(&path)
-                    .map_err(|e| format!("read {}: {e}", path.display()))?;
-                let mut theme =
-                    Self::from_toml(&body).map_err(|e| format!("theme `{name}`: {e}"))?;
-                name.clone_into(&mut theme.name);
-                return Ok(theme);
-            }
-        }
-        Err(format!(
-            "unknown theme `{name}` (not bundled and no `{name}.toml`)"
-        ))
+        let groups = groups_for(name, themes_dir)?;
+        Ok(Self::from_groups(&groups.into_highlights(name)))
     }
 
     /// Whether the canvas background reads as light. Used to pair a
@@ -599,29 +598,6 @@ fn ansi_rgb(i: u8) -> (u32, u32, u32) {
         14 => (95, 255, 255),
         _ => (255, 255, 255),
     }
-}
-
-/// A user theme file (`~/.config/kage/themes/<name>.toml`).
-#[derive(Debug, Default, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ThemeFile {
-    /// Bundled palette to start from. Defaults to `"default"`.
-    #[serde(default)]
-    base: Option<String>,
-    /// Whole-UI opaque (`false`, default) vs let-terminal-through.
-    #[serde(default)]
-    transparent: Option<bool>,
-    /// `role = "#rrggbb"` overrides under `[colors]`.
-    #[serde(default)]
-    colors: std::collections::BTreeMap<String, String>,
-}
-
-/// Parse a color string via ratatui's grammar: `#rrggbb` / `#rgb`
-/// hex, a named color (`cyan`), or an indexed number.
-fn parse_color(s: &str) -> Result<Color, String> {
-    s.trim()
-        .parse::<Color>()
-        .map_err(|_| format!("invalid color `{s}` (use `#rrggbb`, a name, or an index)"))
 }
 
 #[cfg(test)]

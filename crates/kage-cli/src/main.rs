@@ -10,6 +10,7 @@
 mod acp_glue;
 mod auth;
 mod doctor;
+mod engine;
 mod history;
 mod init;
 mod mcp;
@@ -76,12 +77,12 @@ struct Cli {
     #[arg(long = "no-session")]
     no_session: bool,
 
-    /// Emit one JSON object per loop event on stdout instead of plain
-    /// text. Only meaningful with `-p/--print`; the same event alphabet
-    /// the `rpc` transport uses (`message_start`, `text_delta`,
-    /// `tool_call_start`, `tool_call_end`, `message_end`, `compaction`,
-    /// `error`). Lets external tools parse the agent's output without
-    /// screen-scraping.
+    /// Emit one JSON object per event on stdout instead of plain text.
+    /// Only meaningful with `-p/--print`. Each line carries the event's
+    /// `type` (such as `text_delta`, `tool_call_start`, `message_appended`,
+    /// or `run_ended`) plus the `session` it belongs to and a per-session
+    /// `seq` number, so external tools can parse the agent's output
+    /// without screen-scraping.
     #[arg(long = "json", requires = "print")]
     json: bool,
 }
@@ -105,8 +106,8 @@ pub(crate) enum Command {
         /// was last using.
         #[arg(short = 'm', long = "model")]
         model: Option<String>,
-        /// Emit one JSON object per loop event on stdout instead of
-        /// plain text. Same alphabet as the top-level `--json` flag.
+        /// Emit one JSON object per event on stdout instead of plain
+        /// text. Same format as the top-level `--json` flag.
         #[arg(long = "json", requires = "print")]
         json: bool,
     },
@@ -415,9 +416,6 @@ fn run_print_mode(cli: Cli) -> ExitCode {
     if let Some(out) = runtime_env::max_output_tokens_for(&registry, &model) {
         cx = cx.with_max_output_tokens(out);
     }
-    let user_msg = Message::new(Role::User, vec![Content::Text { text: prompt }], None);
-    cx.history.push(user_msg.clone());
-
     let writer = if cli.no_session {
         None
     } else {
@@ -434,10 +432,11 @@ fn run_print_mode(cli: Cli) -> ExitCode {
     };
 
     let exit = execute_print_run(
-        resolved.provider.as_ref(),
-        &tools,
-        &mut cx,
-        &user_msg,
+        Arc::new(registry),
+        &model,
+        tools,
+        cx,
+        prompt,
         writer,
         plugin_runtime,
         cli.json,
@@ -454,7 +453,7 @@ mod cli_query;
 mod sigint;
 
 pub(crate) use cli_loop_run::{execute_print_run, run_with_hooks};
-pub(crate) use cli_printing::{print_event, print_event_json};
+pub(crate) use cli_printing::{print_envelope_json, print_event};
 pub(crate) use cli_query::{run_fork, run_resume, run_search};
 
 /// Resolve `$XDG_DATA_HOME/kage` (default `~/.local/share/kage`).

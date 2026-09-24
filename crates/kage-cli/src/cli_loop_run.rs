@@ -3,19 +3,22 @@
 #[allow(clippy::wildcard_imports)] // split out of main.rs; shares the crate-root scope
 use super::*;
 
-/// Drive one print-mode run. Streams loop events to stdout and, when a
-/// writer is supplied, records the conversation. When a plugin runtime is
-/// supplied, plugin event handlers fire at turn boundaries. Returns the
-/// appropriate process exit code.
+/// Drive one print-mode run on the engine. Streams events to stdout as
+/// text or JSONL, records the conversation when a writer is supplied, and
+/// maps the outcome to a process exit code.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_print_run(
-    provider: &dyn kage_provider::Provider,
-    tools: &kage_tools::ToolRegistry,
-    cx: &mut AgentContext,
-    user_msg: &Message,
+    registry: Arc<ProviderRegistry>,
+    model: &str,
+    tools: kage_tools::ToolRegistry,
+    mut cx: AgentContext,
+    prompt: String,
     writer: Option<SessionWriter>,
-    plugin_runtime: Option<std::sync::Arc<kage_plugin::PluginRuntime>>,
+    plugin_runtime: Option<Arc<kage_plugin::PluginRuntime>>,
     json_mode: bool,
 ) -> ExitCode {
+    use kage_core::protocol::{Command, CommandKind, Delivery, Event, HostEvent, RunOutcome};
+
     let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let layered = match kage_core::config::Config::load_layered(&workdir) {
         Ok(c) => c,
@@ -24,8 +27,6 @@ pub(crate) fn execute_print_run(
             kage_core::config::Config::default()
         }
     };
-    // Structurally broken permission rules are a hard error, mirroring
-    // the providers validation in `build_provider_registry`.
     if let Err(e) = layered.permissions.validate() {
         eprintln!("kage: {e}");
         return ExitCode::from(1);
@@ -33,47 +34,75 @@ pub(crate) fn execute_print_run(
     if layered.permissions.confine_paths {
         cx.confine_paths = true;
     }
-    let cfg = LoopConfig {
-        compaction_threshold: layered.loop_settings.compaction_threshold,
-        ..LoopConfig::default()
-    };
-    let cancel = CancelFlag::new();
-    let permission_gate =
-        crate::permissions::PermissionGate::new(layered.permissions).with_cancel(cancel.clone());
     if let Err(err) = crate::sigint::install() {
         eprintln!("kage: {err}; Ctrl-C will kill the process");
     }
-    let mut stdout = io::stdout().lock();
-    let result = run_with_hooks(
-        provider,
-        tools,
-        cx,
-        cfg,
-        &cancel,
-        permission_gate,
-        user_msg,
-        writer,
-        plugin_runtime,
-        |event| {
-            if crate::sigint::requested() {
-                cancel.cancel();
+
+    let (ended_tx, ended_rx) = std::sync::mpsc::channel();
+    let printer: crate::engine::Subscriber = Box::new(move |envelope| {
+        let mut stdout = io::stdout().lock();
+        if json_mode {
+            print_envelope_json(&mut stdout, envelope);
+        }
+        match &envelope.event {
+            Event::Loop(event) if !json_mode => print_event(&mut stdout, event),
+            Event::Host(HostEvent::Notice { text, .. }) if !json_mode => eprintln!("kage: {text}"),
+            Event::Host(HostEvent::RunEnded { outcome }) => {
+                let _ = ended_tx.send(outcome.clone());
             }
-            if json_mode {
-                print_event_json(&mut stdout, &event);
-            } else {
-                print_event(&mut stdout, &event);
-            }
+            _ => {}
+        }
+    });
+
+    let session = writer
+        .as_ref()
+        .and_then(|w| crate::engine::session_id_of(w.path()))
+        .unwrap_or_default();
+    let engine = crate::engine::Engine::start(
+        crate::engine::EngineConfig {
+            registry,
+            tools,
+            loop_cfg: LoopConfig {
+                compaction_threshold: layered.loop_settings.compaction_threshold,
+                ..LoopConfig::default()
+            },
+            gate: crate::permissions::PermissionGate::new(layered.permissions),
+            plugins: plugin_runtime.clone(),
         },
+        vec![printer],
     );
+    engine.open(crate::engine::SessionSpec {
+        id: session,
+        model: model.to_owned(),
+        cx,
+        recorder: writer.map(|w| crate::engine::Recorder::new(w, plugin_runtime)),
+    });
+    engine.send(Command::active(CommandKind::Prompt {
+        content: vec![Content::Text { text: prompt }],
+        delivery: Delivery::Queue,
+    }));
+
+    let outcome = loop {
+        match ended_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(outcome) => break Some(outcome),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if crate::sigint::requested() {
+                    engine.send(Command::active(CommandKind::Cancel));
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break None,
+        }
+    };
+    engine.shutdown();
     if !json_mode {
-        let _ = writeln!(stdout);
+        println!();
     }
     if crate::sigint::requested() {
         return ExitCode::from(130);
     }
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(_) => ExitCode::from(1),
+    match outcome {
+        Some(RunOutcome::Completed) => ExitCode::SUCCESS,
+        _ => ExitCode::from(1),
     }
 }
 

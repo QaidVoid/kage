@@ -129,20 +129,12 @@ pub(crate) fn run_resume(
     cx.budget.used_cache_read = replay.usage_total.cache_read;
     cx.budget.used_cache_write = replay.usage_total.cache_write;
     cx.budget.current_context = replay.usage_total.last_context;
-    let user_msg = Message::new(
-        Role::User,
-        vec![Content::Text {
-            text: prompt.to_owned(),
-        }],
-        cx.history.last().map(|m| m.id),
-    );
-    cx.history.push(user_msg.clone());
-
     let exit = execute_print_run(
-        resolved.provider.as_ref(),
-        &tools,
-        &mut cx,
-        &user_msg,
+        Arc::new(registry),
+        &model,
+        tools,
+        cx,
+        prompt.to_owned(),
         Some(writer),
         plugin_runtime,
         json,

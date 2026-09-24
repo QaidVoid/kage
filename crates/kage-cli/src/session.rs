@@ -20,6 +20,33 @@ use kage_loop::Hooks;
 use kage_plugin::{PendingSessionOp, PluginRuntime};
 use kage_session::{Compaction, Custom, EntryId, Label, MessageEntry, SessionEntry, SessionWriter};
 
+/// Turn a plugin-requested session operation into the entry to append.
+///
+/// A label whose anchor is not a valid entry id is dropped with a warning:
+/// writing it with a fresh id would silently detach it from its target.
+pub(crate) fn plugin_op_entry(op: PendingSessionOp) -> Option<SessionEntry> {
+    match op {
+        PendingSessionOp::AppendCustom { kind, data } => Some(SessionEntry::Custom(Custom {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            kind,
+            data,
+        })),
+        PendingSessionOp::SetLabel { anchor, text } => {
+            let Ok(parsed) = ulid::Ulid::from_string(&anchor) else {
+                eprintln!("kage: set_label: invalid entry id '{anchor}', dropping");
+                return None;
+            };
+            Some(SessionEntry::Label(Label {
+                id: EntryId::new(),
+                ts: Utc::now(),
+                text,
+                anchor: EntryId(parsed),
+            }))
+        }
+    }
+}
+
 /// Wraps another [`Hooks`] and persists the conversation to a session file.
 #[derive(Debug)]
 pub struct SessionRecordingHooks<H: Hooks> {
@@ -101,35 +128,6 @@ impl<H: Hooks> SessionRecordingHooks<H> {
         self
     }
 
-    /// Apply one plugin-requested session op to the writer.
-    fn apply_plugin_op(&mut self, op: PendingSessionOp) {
-        let entry = match op {
-            PendingSessionOp::AppendCustom { kind, data } => SessionEntry::Custom(Custom {
-                id: EntryId::new(),
-                ts: Utc::now(),
-                kind,
-                data,
-            }),
-            PendingSessionOp::SetLabel { anchor, text } => {
-                // Parse the plugin-supplied anchor id back into a
-                // ULID. A malformed id is logged and the label is
-                // dropped: writing a label with a fresh id would
-                // silently detach from its intended target.
-                let Ok(parsed) = ulid::Ulid::from_string(&anchor) else {
-                    eprintln!("kage: set_label: invalid entry id '{anchor}', dropping");
-                    return;
-                };
-                SessionEntry::Label(Label {
-                    id: EntryId::new(),
-                    ts: Utc::now(),
-                    text,
-                    anchor: EntryId(parsed),
-                })
-            }
-        };
-        self.append(&entry);
-    }
-
     /// Drain every queued plugin session op and write each as a
     /// session entry. Called at turn boundaries so a plugin's
     /// `append_entry` lands next to the surrounding messages.
@@ -138,8 +136,8 @@ impl<H: Hooks> SessionRecordingHooks<H> {
             return;
         };
         let ops = runtime.take_pending_session_ops();
-        for op in ops {
-            self.apply_plugin_op(op);
+        for entry in ops.into_iter().filter_map(plugin_op_entry) {
+            self.append(&entry);
         }
     }
 

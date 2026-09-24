@@ -46,26 +46,21 @@ pub(crate) fn print_event<W: Write>(out: &mut W, event: &LoopEvent) {
     }
 }
 
-/// Emit `event` as one JSONL row on `out`. Skips the trailing newline
-/// the text-mode path adds because each event already terminates with
-/// `\n`, so consumers can split on `\n` and run `serde_json::from_str`
-/// on each line. Serialization can only fail on cycle errors, which
-/// our event types can't produce; we still flush so streaming
-/// consumers see the row immediately.
-pub(crate) fn print_event_json<W: Write>(out: &mut W, event: &LoopEvent) {
-    match serde_json::to_string(event) {
+/// Emit `envelope` as one JSONL row on `out` and flush, so streaming
+/// consumers can split on `\n` and parse each line on arrival.
+pub(crate) fn print_envelope_json<W: Write>(out: &mut W, envelope: &kage_core::protocol::Envelope) {
+    match serde_json::to_string(envelope) {
         Ok(line) => {
             let _ = writeln!(out, "{line}");
-            let _ = out.flush();
         }
         Err(err) => {
             let _ = writeln!(
                 out,
                 r#"{{"type":"error","kind":{{"kind":"other","message":"encode: {err}"}}}}"#
             );
-            let _ = out.flush();
         }
     }
+    let _ = out.flush();
 }
 
 #[cfg(test)]
@@ -94,46 +89,48 @@ mod text_print_tests {
 
 #[cfg(test)]
 mod json_print_tests {
-    use kage_core::{MessageId, StopReason, TokenUsage};
+    use kage_core::protocol::Envelope;
+    use kage_core::{MessageId, SessionId, StopReason, TokenUsage};
 
     use super::*;
 
-    #[test]
-    fn text_delta_renders_as_single_jsonl_row() {
+    fn json_row(event: LoopEvent) -> serde_json::Value {
         let mut buf = Vec::new();
-        print_event_json(
+        print_envelope_json(
             &mut buf,
-            &LoopEvent::TextDelta {
-                id: MessageId::new(),
-                delta: "hi".into(),
+            &Envelope {
+                session: SessionId::new(),
+                seq: 1,
+                event: event.into(),
             },
         );
         let line = String::from_utf8(buf).unwrap();
         assert!(line.ends_with('\n'));
-        let trimmed = line.trim_end();
-        // Body is one JSON value per line.
-        let parsed: serde_json::Value = serde_json::from_str(trimmed).unwrap();
+        serde_json::from_str(line.trim_end()).unwrap()
+    }
+
+    #[test]
+    fn text_delta_renders_as_single_jsonl_row() {
+        let parsed = json_row(LoopEvent::TextDelta {
+            id: MessageId::new(),
+            delta: "hi".into(),
+        });
+        assert_eq!(parsed["seq"], 1);
         assert_eq!(parsed["type"], "text_delta");
         assert_eq!(parsed["delta"], "hi");
     }
 
     #[test]
     fn message_end_carries_usage_through_jsonl() {
-        let mut buf = Vec::new();
-        print_event_json(
-            &mut buf,
-            &LoopEvent::MessageEnd {
-                id: MessageId::new(),
-                usage: TokenUsage {
-                    input: 12,
-                    output: 7,
-                    ..TokenUsage::default()
-                },
-                stop_reason: StopReason::EndTurn,
+        let parsed = json_row(LoopEvent::MessageEnd {
+            id: MessageId::new(),
+            usage: TokenUsage {
+                input: 12,
+                output: 7,
+                ..TokenUsage::default()
             },
-        );
-        let line = String::from_utf8(buf).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
+            stop_reason: StopReason::EndTurn,
+        });
         assert_eq!(parsed["type"], "message_end");
         assert_eq!(parsed["usage"]["input"], 12);
         assert_eq!(parsed["usage"]["output"], 7);

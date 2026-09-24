@@ -32,6 +32,9 @@ pub enum PluginError {
     /// named a capability that does not exist.
     #[error("plugin config error: {0}")]
     Config(String),
+    /// An option name or value was rejected.
+    #[error("{0}")]
+    Option(#[from] kage_core::options::OptionError),
     /// The Lua owner thread could not start, or is gone because the
     /// runtime shut down.
     #[error("plugin host error: {0}")]

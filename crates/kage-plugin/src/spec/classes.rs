@@ -513,8 +513,8 @@ pub(super) const CLASSES: &[Class] = &[
         doc: &[
             "What an autocmd callback receives. `match` is the tool name",
             "for `tool_call` and `tool_result`, the new value for",
-            "`model_select` and `thinking_level_select`, and the exec",
-            "pattern for `user`.",
+            "`model_select` and `thinking_level_select`, the option name",
+            "for `option_set`, and the exec pattern for `user`.",
         ],
         fields: &[
             Field {

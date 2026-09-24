@@ -764,8 +764,9 @@ pub(super) const FUNCS: &[Func] = &[
     },
     Func {
         doc: &[
-            "Request a theme switch. The host validates and applies it",
-            "between turns. Errors on a non-string or empty name.",
+            "Request a theme switch. The host sets the `theme` option",
+            "from it shortly after, which fires `option_set`. Errors on",
+            "a non-string or empty name.",
         ],
         path: "kage.theme.set",
         since: 1,
@@ -923,6 +924,42 @@ pub(super) const FUNCS: &[Func] = &[
             Field {
                 name: "opts?",
                 ty: "{ pattern: string?, data: any }",
+                doc: "",
+            },
+        ],
+        ret: None,
+    },
+    Func {
+        doc: &[
+            "The value of option `name` and where it came from. Raises",
+            "on an unknown name. `kage.opt.<name>` reads the value alone.",
+        ],
+        path: "kage.api.option_get",
+        since: 2,
+        params: &[Field {
+            name: "name",
+            ty: "string",
+            doc: "",
+        }],
+        ret: Some("any, kage.OptionSource"),
+    },
+    Func {
+        doc: &[
+            "Set option `name` and fire `option_set`. Raises on an",
+            "unknown name or an invalid value, naming what is valid.",
+            "Same as assigning to `kage.opt.<name>`.",
+        ],
+        path: "kage.api.option_set",
+        since: 2,
+        params: &[
+            Field {
+                name: "name",
+                ty: "string",
+                doc: "",
+            },
+            Field {
+                name: "value",
+                ty: "any",
                 doc: "",
             },
         ],

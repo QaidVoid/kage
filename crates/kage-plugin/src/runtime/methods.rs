@@ -2,6 +2,7 @@
 
 use std::sync::atomic::AtomicBool;
 
+use kage_core::options::{OptionSource, OptionValue};
 use kage_core::sync::lock;
 
 #[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
@@ -29,6 +30,8 @@ impl PluginRuntime {
             script_budget: watchdog::BUDGET,
             defaults: stdlib::DEFAULTS,
             user_dir: None,
+            options: SharedOptions::default(),
+            theme_names: None,
         }
     }
 
@@ -242,6 +245,36 @@ impl PluginRuntime {
     #[must_use]
     pub fn handler_count(&self, event_name: &str) -> usize {
         lock(&self.autocmds).count(event_name)
+    }
+
+    /// Cloneable handle to the option store. The host drains its
+    /// queued changes with `take_changes` and applies them.
+    #[must_use]
+    pub fn options(&self) -> SharedOptions {
+        Arc::clone(&self.options.store)
+    }
+
+    /// Set option `name` from the host UI, with source `runtime`.
+    ///
+    /// The value is validated here, so a bad name or value fails at
+    /// once. The set itself is queued on the owner thread, where it
+    /// fires `option_set` in order with sets made from Lua. The change
+    /// reaches the store when that job runs.
+    pub fn set_option(&self, name: &str, value: OptionValue) -> Result<(), PluginError> {
+        let value = self.options.check(name, value)?;
+        let (options, name) = (self.options.clone(), name.to_owned());
+        let (sink, budget) = (self.sink(), self.eval.script_budget);
+        self.host.submit(move |lua| {
+            let result = watchdog::run(lua, budget, || {
+                options.set(lua, &name, value, OptionSource::Runtime)
+            });
+            if let Err(err) = result {
+                lock(&sink).log(
+                    crate::api::LogLevel::Error,
+                    &format!("option `{name}`: {err}"),
+                );
+            }
+        })
     }
 
     /// Snapshot the tools registered by plugins so far. Each call returns

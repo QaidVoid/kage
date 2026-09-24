@@ -123,3 +123,24 @@ fn label_prefers_title_then_prompt_then_placeholder() {
              time is the picker's right column, neither baked in"
     );
 }
+
+#[test]
+fn options_set_in_init_lua_seed_the_first_session() {
+    let user = tempfile::tempdir().unwrap();
+    std::fs::write(
+        user.path().join("init.lua"),
+        "kage.opt.thinking_level = 'high'\nkage.opt.compaction_threshold = 0.5",
+    )
+    .unwrap();
+    let options = kage_plugin::SharedOptions::default();
+    let rt = PluginRuntime::builder()
+        .user_dir(Some(user.path().to_path_buf()))
+        .options(Arc::clone(&options))
+        .build()
+        .unwrap();
+    let report = kage_plugin::load_all(None, &rt).unwrap();
+    assert_eq!(report.init, Some(Ok(())));
+    let (loop_cfg, thinking) = startup_options(&options);
+    assert_eq!(thinking, Some(kage_core::ThinkingLevel::High));
+    assert!((loop_cfg.compaction_threshold - 0.5).abs() < f32::EPSILON);
+}

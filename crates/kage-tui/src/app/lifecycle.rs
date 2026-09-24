@@ -21,6 +21,9 @@ impl App {
         let mut needs_redraw = true;
         let mut last_plugin_snapshot: Option<Instant> = None;
         loop {
+            if self.apply_option_changes() {
+                needs_redraw = true;
+            }
             if let Some(enable) = self.pending_mouse_capture.take() {
                 tui.set_mouse_capture(enable);
             }

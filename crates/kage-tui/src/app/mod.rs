@@ -13,6 +13,7 @@ pub(crate) use std::sync::mpsc::{Sender, TrySendError};
 pub(crate) use std::sync::{Arc, Mutex};
 pub(crate) use std::time::{Duration, Instant};
 
+pub(crate) use kage_core::options::{OptionSource, OptionValue};
 pub(crate) use kage_core::sync::lock;
 pub(crate) use ratatui::crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
 
@@ -443,6 +444,11 @@ impl PluginDialogState {
 /// and `:resume` completion, and by the in-picker "all dirs" toggle).
 pub type SessionLister = Box<dyn Fn(bool) -> Vec<PickItem> + Send + 'static>;
 
+/// Sets an option with source `runtime` on behalf of a command or the
+/// settings dialog. The host routes it through the plugin runtime so
+/// `option_set` fires. An `Err` carries the message to show.
+pub type OptionSetter = Box<dyn Fn(&str, OptionValue) -> Result<(), String> + Send + 'static>;
+
 /// Unified command registry the completion engine consumes: builtin
 /// commands first, then any plugin-registered commands (built once at
 /// `set_plugin_commands` time and stored as `&'static` refs).
@@ -706,6 +712,12 @@ pub struct App {
     /// Pending `kage.theme.set` slot. Drained between event polls and
     /// applied on this (UI) thread, the same path as `:theme set`.
     plugin_theme_request: Option<kage_plugin::SharedThemeRequest>,
+    /// Option store shared with the plugin runtime. Queued changes are
+    /// applied by [`Self::apply_option_changes`] on every loop pass.
+    options: kage_plugin::SharedOptions,
+    /// Route for option sets from commands and dialogs. `None` sets
+    /// [`Self::options`] directly.
+    option_setter: Option<OptionSetter>,
     /// Header-chrome slot populated by `kage.ui.set_header`. Snapshotted
     /// per redraw; when a renderer is present its styled lines replace
     /// the built-in status bar.

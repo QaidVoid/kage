@@ -46,6 +46,9 @@
 //!   command was killed by a signal.
 //! * `permission_mode_select` - the permission mode changed. Payload:
 //!   `{ prev, next, source }`.
+//! * `option_set` - an option changed. Payload: `{ name, old, new,
+//!   source }` where `source` is `"lua"` or `"runtime"`. Matched
+//!   against the option name.
 //! * `user` - fired only by `kage.api.autocmd_exec("user", { pattern,
 //!   data })`, matched against `pattern`.
 //!
@@ -149,6 +152,7 @@ pub const KNOWN_EVENTS: &[(&str, &str, &str)] = &[
         "notification",
         "permission mode changed",
     ),
+    ("option_set", "notification", "an option changed"),
     (
         "user",
         "notification",

@@ -435,13 +435,16 @@ Plain notification events (the handler's return value is ignored):
 | `thinking_level_select`  | `{ prev, next, source }`                          |
 | `user_bash`              | `{ cmd, exit_code }`                              |
 | `permission_mode_select` | `{ prev, next, source }`                          |
+| `option_set`             | `{ name, old, new, source }`                      |
 
 `usage` is `{ input, output, cache_read, cache_write }`. For
 `model_select`, `source` is `"set"`. For `thinking_level_select`,
 `source` is `"cycle"` or `"settings"`. `user_bash` fires after an
 inline `!cmd` from the input pane completes; `exit_code` is `nil`
 when the command was killed by a signal. `tool_update` only fires
-when at least one handler is subscribed.
+when at least one handler is subscribed. `option_set` fires when
+`kage.opt.<name>` is assigned (`source` is `"lua"`) or a command or
+the settings dialog changes an option (`source` is `"runtime"`).
 
 ### transform hooks
 

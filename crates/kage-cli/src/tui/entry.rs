@@ -3,6 +3,9 @@
 #[allow(clippy::wildcard_imports)] // tui split: shares the parent module scope
 use super::*;
 
+use kage_core::ThinkingLevel;
+use kage_core::options::{OptionStore, OptionValue};
+
 /// Drop into the interactive TUI. Returns the appropriate process exit
 /// code once the user quits.
 #[allow(clippy::too_many_lines)]
@@ -37,9 +40,8 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         }
     }
     crate::trust::confirm_project_trust(&workdir);
-    // Load user/project config and map the loop-tunable subset onto
-    // the real LoopConfig. A malformed config is surfaced as an inline
-    // error block rather than silently falling back to defaults.
+    // Load user/project config. A malformed config is surfaced as an
+    // inline error block rather than silently falling back to defaults.
     let app_config = match kage_core::config::Config::load_layered(&workdir) {
         Ok(c) => c,
         Err(e) => {
@@ -55,10 +57,14 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         eprintln!("kage: {e}");
         return ExitCode::from(1);
     }
-    let loop_cfg = LoopConfig {
-        compaction_threshold: app_config.loop_settings.compaction_threshold,
-        ..LoopConfig::default()
-    };
+    // Seed the options from config before any Lua runs, so `init.lua`
+    // overrides them. An invalid value keeps its default and is shown.
+    let (store, option_errors) = OptionStore::from_config(&app_config);
+    for err in option_errors {
+        let mut buf = lock(&buffer);
+        buf.push_custom("kage:error", format!("config: {err}"), false);
+    }
+    let options: kage_plugin::SharedOptions = Arc::new(Mutex::new(store));
     // Build the plugin runtime against a bare prompt first; skills land
     // below once plugins have had a chance to contribute extra dirs via
     // `resources_discover`.
@@ -79,6 +85,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         plugins_dir_path.as_deref(),
         user_dir.as_deref(),
         app_config.plugins.clone(),
+        Arc::clone(&options),
         &workdir,
         &provisional_model,
         &bare_prompt,
@@ -203,17 +210,9 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     if let Some(out) = crate::runtime_env::max_output_tokens_for(&registry, &qualified_model) {
         cx = cx.with_max_output_tokens(out);
     }
-    if let Some(level) = app_config.ui.thinking_level.as_deref() {
-        if let Some(parsed) = kage_provider::ThinkingLevel::parse(level) {
-            cx = cx.with_thinking_level(parsed);
-        } else {
-            let mut buf = lock(&buffer);
-            buf.push_custom(
-                "kage:error",
-                format!("config: unknown ui.thinking_level `{level}`"),
-                false,
-            );
-        }
+    let (loop_cfg, thinking_level) = startup_options(&options);
+    if let Some(level) = thinking_level {
+        cx = cx.with_thinking_level(level);
     }
     let (tx, rx) = mpsc::channel::<RunRequest>();
     let tx_watcher = tx.clone();
@@ -324,10 +323,6 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     app.set_plugin_commands(plugin_command_listing);
     app.set_plugin_widgets(plugin_widgets);
     app.set_plugin_autocomplete(plugin_autocomplete);
-    app.set_editor_modeless(matches!(
-        app_config.ui.editor,
-        kage_core::config::EditorMode::Modeless
-    ));
     // `:login` runs the interactive credential flow in the real
     // terminal (the App suspends itself around the call) and then
     // refreshes providers through the worker.
@@ -341,11 +336,12 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     if let Ok(dir) = crate::themes_dir() {
         app.set_themes_dir(dir);
     }
-    app.apply_startup_theme(&app_config.ui.theme);
-    kage_tui::layout::set_input_bounds(
-        app_config.ui.input_min_lines,
-        app_config.ui.input_max_lines,
-    );
+    let setter = plugin_runtime.clone().map(|rt| {
+        Box::new(move |name: &str, value: OptionValue| {
+            rt.set_option(name, value).map_err(|e| e.to_string())
+        }) as kage_tui::OptionSetter
+    });
+    app.set_options(options, setter);
     if let Some(status) = plugin_status {
         app.set_plugin_status(status);
     }
@@ -417,4 +413,28 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Read the options that apply when a session starts. Called after the
+/// runtime loaded `init.lua`, so values set there reach the first
+/// session.
+pub(crate) fn startup_options(
+    options: &kage_plugin::SharedOptions,
+) -> (LoopConfig, Option<ThinkingLevel>) {
+    let store = lock(options);
+    let mut loop_cfg = LoopConfig::default();
+    if let Some(threshold) = store
+        .get("compaction_threshold")
+        .and_then(OptionValue::as_float)
+    {
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            loop_cfg.compaction_threshold = threshold as f32;
+        }
+    }
+    let thinking = store
+        .get("thinking_level")
+        .and_then(OptionValue::as_str)
+        .and_then(ThinkingLevel::parse);
+    (loop_cfg, thinking)
 }

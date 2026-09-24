@@ -34,7 +34,7 @@ impl App {
                     self.push_error("theme set: usage `/theme set <name>`");
                     return;
                 }
-                self.apply_theme_by_name(sub_rest);
+                self.set_option("theme", OptionValue::Str(sub_rest.to_owned()));
             }
             other => {
                 self.push_error(format!(
@@ -44,8 +44,59 @@ impl App {
         }
     }
 
-    pub(crate) fn apply_theme_by_name(&mut self, name: &str) {
-        self.apply_theme_resolved(name, true);
+    /// Set option `name` with source `runtime`, through the plugin
+    /// runtime when one is wired so `option_set` fires. The change
+    /// applies once it reaches the store. A rejected value surfaces
+    /// inline.
+    pub(crate) fn set_option(&mut self, name: &str, value: OptionValue) {
+        let result = match &self.option_setter {
+            Some(set) => set(name, value),
+            None => lock(&self.options)
+                .set(name, value, OptionSource::Runtime)
+                .map(drop)
+                .map_err(|e| e.to_string()),
+        };
+        if let Err(err) = result {
+            self.push_error(err);
+        }
+    }
+
+    /// Apply the option changes queued in the store since the last
+    /// call. Returns whether anything was applied.
+    pub(crate) fn apply_option_changes(&mut self) -> bool {
+        let changes = lock(&self.options).take_changes();
+        let mut applied = false;
+        for change in changes.into_iter().filter(|c| c.old != c.new) {
+            let announce = change.source == OptionSource::Runtime;
+            applied |= self.apply_option(change.name, &change.new, announce);
+        }
+        applied
+    }
+
+    /// Apply one live option value. Options without a live effect
+    /// return `false`. `announce` toasts a theme switch.
+    pub(crate) fn apply_option(&mut self, name: &str, value: &OptionValue, announce: bool) -> bool {
+        match (name, value) {
+            ("theme", OptionValue::Str(theme)) => self.apply_theme_resolved(theme, announce),
+            ("mouse", OptionValue::Bool(on)) => self.pending_mouse_capture = Some(*on),
+            ("editor", OptionValue::Str(editor)) => self.input.set_modeless(editor == "modeless"),
+            ("input_min_lines" | "input_max_lines", _) => {
+                let (min, max) = {
+                    let store = lock(&self.options);
+                    let rows = |name| {
+                        store
+                            .get(name)
+                            .and_then(OptionValue::as_int)
+                            .and_then(|n| u16::try_from(n).ok())
+                            .unwrap_or(1)
+                    };
+                    (rows("input_min_lines"), rows("input_max_lines"))
+                };
+                crate::layout::set_input_bounds(min, max);
+            }
+            _ => return false,
+        }
+        true
     }
 
     /// Resolve `name` against the bundled set and the user theme
@@ -208,16 +259,17 @@ impl App {
     pub(crate) fn run_mouse_command(&mut self, rest: &str) {
         match rest {
             "off" | "disable" => {
-                self.pending_mouse_capture = Some(false);
+                self.set_option("mouse", OptionValue::Bool(false));
                 self.notify("mouse capture off - drag selects via the terminal's native clipboard");
             }
             "on" | "enable" => {
-                self.pending_mouse_capture = Some(true);
+                self.set_option("mouse", OptionValue::Bool(true));
                 self.notify("mouse capture on - drag selects blocks inside kage");
             }
             "toggle" | "" => {
-                let now_enabled = !self.pending_mouse_capture.unwrap_or(true);
-                self.pending_mouse_capture = Some(now_enabled);
+                let now_enabled =
+                    lock(&self.options).get("mouse") != Some(&OptionValue::Bool(true));
+                self.set_option("mouse", OptionValue::Bool(now_enabled));
                 let state = if now_enabled { "on" } else { "off" };
                 self.notify(format!("mouse capture {state}"));
             }
@@ -371,8 +423,8 @@ impl App {
         }
     }
 
-    /// Open the `:settings` dialog, seeding it from the loaded
-    /// user/project config plus live state (active theme/model).
+    /// Open the `:settings` dialog, seeding it from the option store
+    /// plus live state (active model) and the configured keybindings.
     pub(crate) fn open_settings(&mut self) {
         let workdir = self
             .completion_workdir
@@ -389,31 +441,51 @@ impl App {
             .status_model
             .as_ref()
             .map_or_else(|| cfg.provider.default_model.clone(), |m| lock(m).clone());
+        let store = lock(&self.options);
+        let text = |name| {
+            store
+                .get(name)
+                .and_then(OptionValue::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let thinking_level = text("thinking_level");
+        #[allow(clippy::cast_possible_truncation)]
+        let threshold = store
+            .get("compaction_threshold")
+            .and_then(OptionValue::as_float)
+            .unwrap_or_default() as f32;
         let init = SettingsInit {
             themes: crate::theme::Theme::available_names(self.themes_dir.as_deref()),
-            theme: crate::theme::current().name.clone(),
+            theme: text("theme"),
             models: self.model_choices.iter().map(|p| p.value.clone()).collect(),
             model,
-            mouse: self.pending_mouse_capture.unwrap_or(cfg.ui.mouse),
-            threshold: cfg.loop_settings.compaction_threshold,
+            mouse: store.get("mouse").and_then(OptionValue::as_bool) == Some(true),
+            threshold,
             keybindings: cfg
                 .keybindings
                 .bindings
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
-            editor_modeless: matches!(cfg.ui.editor, kage_core::config::EditorMode::Modeless),
-            thinking_level: cfg
-                .ui
-                .thinking_level
-                .clone()
-                .unwrap_or_else(|| "off".into()),
+            editor_modeless: text("editor") == "modeless",
+            thinking_level: if thinking_level.is_empty() {
+                "off".into()
+            } else {
+                thinking_level
+            },
+            from_lua: kage_core::options::OPTIONS
+                .iter()
+                .map(|def| def.name)
+                .filter(|name| store.source(name) == Some(OptionSource::Lua))
+                .collect(),
         };
+        drop(store);
         self.settings_overlay = Some(SettingsOverlay::new(init));
     }
 
-    /// Apply the settings-dialog result: live-switch theme / mouse /
-    /// model, then persist the changed fields to the user config
+    /// Apply the settings-dialog result: set the changed options (theme,
+    /// mouse and editor apply live), switch the model, then persist the changed fields to the user config
     /// file (comment-preserving). A persistence failure is surfaced,
     /// not swallowed. An empty resolve means nothing changed.
     pub(crate) fn apply_settings(&mut self, value: &serde_json::Value) {
@@ -454,14 +526,20 @@ impl App {
         };
 
         if !theme.is_empty() && theme != crate::theme::current().name {
-            self.apply_theme_by_name(theme);
+            self.set_option("theme", OptionValue::Str(theme.to_owned()));
         }
         if let Some(mouse) = mouse {
-            self.pending_mouse_capture = Some(mouse);
+            self.set_option("mouse", OptionValue::Bool(mouse));
         }
         if let Some(modeless) = editor_modeless {
-            // Live-apply: the input editor flips immediately.
-            self.input.set_modeless(modeless);
+            let editor = if modeless { "modeless" } else { "vim" };
+            self.set_option("editor", OptionValue::Str(editor.to_owned()));
+        }
+        if let Some(t) = threshold {
+            self.set_option("compaction_threshold", OptionValue::Float(t));
+        }
+        if let Some(level) = thinking_level {
+            self.set_option("thinking_level", OptionValue::Str(level.to_owned()));
         }
         let current_model = self.status_model.as_ref().map(|m| lock(m).clone());
         if !model.is_empty() && current_model.as_deref() != Some(model) {

@@ -11,6 +11,9 @@
 //! The Thinking tab edits the persisted default level for new
 //! sessions; the live session level stays on the `Shift+Tab` cycle
 //! and follows when the host applies a resolved change.
+//!
+//! A tab whose option was last set from Lua says so, since `init.lua`
+//! sets it again on the next start and shadows the saved value.
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -40,6 +43,20 @@ const TABS: &[&str] = &[
     "Thinking",
 ];
 
+/// Option each tab edits, by tab index.
+const TAB_OPTIONS: [Option<&str>; 7] = [
+    Some("theme"),
+    None,
+    Some("mouse"),
+    Some("compaction_threshold"),
+    None,
+    Some("editor"),
+    Some("thinking_level"),
+];
+
+/// Shown on a tab whose option was last set from Lua.
+const LUA_NOTE: &str = "  set from Lua: init.lua shadows a saved value on the next start";
+
 /// Thinking-level ladder, mirroring the `kage_provider::ThinkingLevel`
 /// wire strings. kage-tui is provider-free, so the ladder is spelled
 /// here and the host's worker parses the resolved string.
@@ -68,6 +85,8 @@ pub struct SettingsInit {
     /// Persisted thinking level the dialog starts from, one of the
     /// [`LADDER`] strings; unknown strings fall back to `"off"`.
     pub thinking_level: String,
+    /// Options whose current value was last set from Lua.
+    pub from_lua: Vec<&'static str>,
 }
 
 /// The `:settings` overlay.
@@ -314,7 +333,20 @@ impl OverlayWidget for SettingsOverlay {
             rows[1].width,
         );
 
-        self.render_body(buf, rows[2], ctx);
+        let mut body = rows[2];
+        if self.set_from_lua() {
+            body.height = body.height.saturating_sub(1);
+            buf.set_line(
+                body.x,
+                body.y + body.height,
+                &Line::from(Span::styled(
+                    LUA_NOTE,
+                    Style::default().fg(ctx.theme.status_dim_fg),
+                )),
+                body.width,
+            );
+        }
+        self.render_body(buf, body, ctx);
 
         let help = match self.tab {
             2 | 5 => "Tab section - Space toggle - Enter/Ctrl+S save - Esc cancel",
@@ -382,6 +414,11 @@ impl OverlayWidget for SettingsOverlay {
 }
 
 impl SettingsOverlay {
+    /// Whether the active tab's option was last set from Lua.
+    fn set_from_lua(&self) -> bool {
+        TAB_OPTIONS[self.tab].is_some_and(|name| self.seed.from_lua.contains(&name))
+    }
+
     fn render_body(&self, buf: &mut Buffer, area: Rect, ctx: &OverlayCtx<'_>) {
         match self.tab {
             0 => Self::render_list(buf, area, ctx, &self.themes, self.theme_idx),
@@ -561,7 +598,33 @@ mod tests {
             keybindings: vec![("ctrl+x".into(), "compact".into())],
             editor_modeless: false,
             thinking_level: "off".into(),
+            from_lua: vec!["mouse"],
         })
+    }
+
+    fn rendered(s: &mut SettingsOverlay) -> String {
+        let area = Rect::new(0, 0, 90, 20);
+        let mut buf = Buffer::empty(area);
+        let theme = crate::theme::current();
+        let ctx = OverlayCtx {
+            theme: &theme,
+            viewport: area,
+        };
+        OverlayWidget::render(s, area, &mut buf, &ctx);
+        buf.content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect()
+    }
+
+    #[test]
+    fn tab_set_from_lua_shows_the_shadow_note() {
+        let mut s = sample();
+        assert!(!rendered(&mut s).contains("set from Lua"));
+        s.handle_key(key(KeyCode::Tab));
+        s.handle_key(key(KeyCode::Tab));
+        assert_eq!(s.tab, 2);
+        assert!(rendered(&mut s).contains("set from Lua: init.lua shadows"));
     }
 
     #[test]

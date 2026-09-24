@@ -22,7 +22,8 @@
 //! Callbacks receive `ev = { id, event, match, group, data }`. Events
 //! with a match key filter on it: the tool name for `tool_call` and
 //! `tool_result`, the new value for `model_select` and
-//! `thinking_level_select`, and the exec pattern for `user`. A pattern
+//! `thinking_level_select`, the option name for `option_set`, and the
+//! exec pattern for `user`. A pattern
 //! is an exact string or a list of them, and `*` matches everything.
 //! Events without a match key accept only `*`. A `once` autocmd is
 //! removed before its callback runs.
@@ -50,6 +51,7 @@ const MATCH_FIELDS: &[(&str, &str)] = &[
     ("tool_result", "name"),
     ("model_select", "next"),
     ("thinking_level_select", "next"),
+    ("option_set", "name"),
 ];
 
 /// Autocmd metadata shared between the owner thread and the host.
@@ -377,7 +379,7 @@ pub(crate) fn install(
         })?,
     )?;
 
-    api.set("autocmd_exec", exec_fn(lua, Arc::clone(&shared), sink)?)?;
+    api.set("autocmd_exec", exec_fn(lua, sink)?)?;
 
     Ok(shared)
 }
@@ -426,7 +428,7 @@ fn create_fn(
     })
 }
 
-fn exec_fn(lua: &Lua, autocmds: SharedAutocmds, sink: SharedHostLog) -> mlua::Result<Function> {
+fn exec_fn(lua: &Lua, sink: SharedHostLog) -> mlua::Result<Function> {
     lua.create_function(move |lua, (event, opts): (String, Option<Table>)| {
         if !is_known(&event) {
             return Err(fail(format!("autocmd_exec: unknown event '{event}'")));
@@ -438,21 +440,38 @@ fn exec_fn(lua: &Lua, autocmds: SharedAutocmds, sink: SharedHostLog) -> mlua::Re
             ),
             None => (None, Value::Nil),
         };
-        {
-            let mut autocmds = lock(&autocmds);
-            if autocmds.exec_depth >= MAX_EXEC_DEPTH {
-                return Err(fail(format!(
-                    "autocmd_exec: nested deeper than {MAX_EXEC_DEPTH}"
-                )));
-            }
-            autocmds.exec_depth += 1;
-        }
-        let result = targets(lua, &event, pattern.as_deref()).map(|targets| {
-            notify(lua, &sink, &event, pattern.as_deref(), &targets, &data);
-        });
-        lock(&autocmds).exec_depth -= 1;
-        result
+        exec(lua, &sink, &event, pattern.as_deref(), &data)
     })
+}
+
+/// Fire `event` from inside Lua with `matched` as the match and `data`
+/// as the payload. Callback errors are logged. Nested calls, through
+/// `autocmd_exec` or an option set in a callback, are capped at
+/// [`MAX_EXEC_DEPTH`] levels.
+pub(crate) fn exec(
+    lua: &Lua,
+    sink: &SharedHostLog,
+    event: &str,
+    matched: Option<&str>,
+    data: &Value,
+) -> mlua::Result<()> {
+    let Some(autocmds) = lua.app_data_ref::<SharedAutocmds>().map(|a| Arc::clone(&a)) else {
+        return Ok(());
+    };
+    {
+        let mut autocmds = lock(&autocmds);
+        if autocmds.exec_depth >= MAX_EXEC_DEPTH {
+            return Err(fail(format!(
+                "autocmd_exec: nested deeper than {MAX_EXEC_DEPTH}"
+            )));
+        }
+        autocmds.exec_depth += 1;
+    }
+    let result = targets(lua, event, matched).map(|targets| {
+        notify(lua, sink, event, matched, &targets, data);
+    });
+    lock(&autocmds).exec_depth -= 1;
+    result
 }
 
 #[cfg(test)]

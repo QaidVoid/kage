@@ -28,7 +28,8 @@ pub mod usage;
 pub mod view;
 
 pub use app::{
-    App, AppExit, PermissionDecision, PluginDialog, PluginRefresh, RunRequest, SessionLister,
+    App, AppExit, OptionSetter, PermissionDecision, PluginDialog, PluginRefresh, RunRequest,
+    SessionLister,
 };
 pub use buffer::{Block, Buffer};
 pub use chord::Chord;

@@ -82,6 +82,24 @@ impl PluginRuntimeBuilder {
         self
     }
 
+    /// Share `options` with the runtime. The host seeds it from config
+    /// before [`build`](Self::build), so every Lua layer sees the
+    /// configured values and `init.lua` can override them. Defaults to
+    /// a store holding the registry defaults.
+    #[must_use]
+    pub fn options(mut self, options: SharedOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Set the source of theme names the `theme` option accepts.
+    /// Unset, any non-empty name is accepted.
+    #[must_use]
+    pub fn theme_names(mut self, theme_names: ThemeNames) -> Self {
+        self.theme_names = Some(theme_names);
+        self
+    }
+
     /// Replace the embedded `_defaults.lua` source.
     #[cfg(test)]
     #[must_use]
@@ -93,8 +111,8 @@ impl PluginRuntimeBuilder {
     /// Finalize the runtime: build the Lua state, apply sandbox removals,
     /// install the `kage` API table with its `kage.api` primitives, wire
     /// `kage.register_tool`, `kage.register_command`,
-    /// `kage.register_provider`, `kage.fs.*`, and `kage.schedule`,
-    /// `kage.defer` and `kage.timer`, evaluate the embedded stdlib
+    /// `kage.register_provider`, `kage.fs.*`, `kage.opt`, and
+    /// `kage.schedule`, `kage.defer` and `kage.timer`, evaluate the embedded stdlib
     /// (which defines `kage.on`), freeze the shared tables, then hand
     /// the state to its owner thread.
     #[allow(clippy::too_many_lines)]
@@ -143,6 +161,12 @@ impl PluginRuntimeBuilder {
             Arc::clone(&current_plugin),
             self.script_budget,
         )?;
+        let options = Options {
+            store: self.options,
+            themes: self.theme_names,
+            sink: self.sink.clone(),
+        };
+        options::install(&lua, &options)?;
         let grants = Arc::new(capabilities::parse_grants(&self.capabilities)?);
         let cap_registry = capabilities::capability_registry();
         let session_entries = session_write::shared_session_entries();
@@ -290,6 +314,7 @@ impl PluginRuntimeBuilder {
             autocomplete: autocomplete_registry,
             terminal_hooks: terminal_hook_registry,
             autocmds,
+            options,
             session_entries,
             switch_request,
         })

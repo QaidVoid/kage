@@ -73,6 +73,7 @@ pub(crate) use crate::mcp::{
 pub(crate) use crate::messages::{
     self, PendingMessage, SharedPendingMessages, shared_pending_messages,
 };
+pub(crate) use crate::options::{self, Options, SharedOptions, ThemeNames};
 pub(crate) use crate::providers::{self, LuaProvider, RegisteredProviders, registered_providers};
 pub(crate) use crate::schedule;
 pub(crate) use crate::session_write::{
@@ -137,6 +138,8 @@ pub struct PluginRuntime {
     terminal_hooks: RegisteredTerminalHooks,
     /// Autocmd metadata, read without a round trip to the owner thread.
     autocmds: SharedAutocmds,
+    /// Option store and the theme names it validates against.
+    options: Options,
     /// Host-maintained snapshot of the current session's entry
     /// metadata, read by `session_write`'s `kage.session.entries`.
     session_entries: SharedSessionEntries,
@@ -274,6 +277,8 @@ pub struct PluginRuntimeBuilder {
     script_budget: u64,
     defaults: &'static str,
     user_dir: Option<PathBuf>,
+    options: SharedOptions,
+    theme_names: Option<ThemeNames>,
 }
 
 impl std::fmt::Debug for PluginRuntimeBuilder {

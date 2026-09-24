@@ -174,6 +174,23 @@ pub fn find(name: &str) -> Option<&'static OptionDef> {
     OPTIONS.iter().find(|def| def.name == name)
 }
 
+/// Look up an option by name, or fail with [`OptionError::Unknown`]
+/// listing every valid name.
+pub fn lookup(name: &str) -> Result<&'static OptionDef, OptionError> {
+    find(name).ok_or_else(|| unknown(name))
+}
+
+fn unknown(name: &str) -> OptionError {
+    OptionError::Unknown {
+        name: name.to_owned(),
+        valid: OPTIONS
+            .iter()
+            .map(|def| def.name)
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
 impl OptionDef {
     /// The default value.
     #[must_use]
@@ -221,7 +238,9 @@ impl OptionDef {
         })
     }
 
-    fn expected(&self) -> String {
+    /// What the option accepts, as used in error messages.
+    #[must_use]
+    pub fn expected(&self) -> String {
         match self.kind {
             OptionKind::Bool { .. } => "a boolean".to_owned(),
             OptionKind::Int { min, max, .. } => format!("an integer from {min} to {max}"),
@@ -395,14 +414,7 @@ impl OptionStore {
         value: OptionValue,
         source: OptionSource,
     ) -> Result<OptionChange, OptionError> {
-        let i = index(name).ok_or_else(|| OptionError::Unknown {
-            name: name.to_owned(),
-            valid: OPTIONS
-                .iter()
-                .map(|def| def.name)
-                .collect::<Vec<_>>()
-                .join(", "),
-        })?;
+        let i = index(name).ok_or_else(|| unknown(name))?;
         let def = &OPTIONS[i];
         let new = def.validate(value)?;
         let (old, _) = std::mem::replace(&mut self.values[i], (new.clone(), source));

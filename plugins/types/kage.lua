@@ -33,6 +33,9 @@
 --- per-plugin in `[plugins.capabilities]`.
 ---@alias kage.Capability "session_write"|"exec"|"env"|"net"
 
+--- Where the current value of an option came from.
+---@alias kage.OptionSource "default"|"toml"|"lua"|"runtime"
+
 --- Every event name `kage.on` and `kage.api.autocmd_create`
 --- accept. Notification events ignore the handler return;
 --- transform events chain it; predicate and session-op events
@@ -55,6 +58,7 @@
 ---| "thinking_level_select"
 ---| "user_bash"
 ---| "permission_mode_select"
+---| "option_set"
 ---| "user"
 ---| "transform_context"
 ---| "before_provider_request"
@@ -204,8 +208,8 @@
 
 --- What an autocmd callback receives. `match` is the tool name
 --- for `tool_call` and `tool_result`, the new value for
---- `model_select` and `thinking_level_select`, and the exec
---- pattern for `user`.
+--- `model_select` and `thinking_level_select`, the option name
+--- for `option_set`, and the exec pattern for `user`.
 ---@class kage.AutocmdEvent
 ---@field id integer Autocmd id.
 ---@field event kage.Event Event name.
@@ -213,8 +217,25 @@
 ---@field group? integer Group id.
 ---@field data any Event payload.
 
+--- Every option `kage.opt` reads and writes.
+---@class kage.Options
+---@field theme string Color theme, bundled or from the themes directory.
+---@field mouse boolean Capture mouse events.
+---@field editor "vim"|"modeless" Prompt editing style.
+---@field input_min_lines integer Minimum content rows of the input card.
+---@field input_max_lines integer Content rows the input card grows to before it scrolls.
+---@field thinking_level ""|"off"|"minimal"|"low"|"medium"|"high"|"xhigh" Thinking level for new sessions, or empty for the default.
+---@field compaction_threshold number Fraction of the context window that triggers compaction. 0 turns compaction off.
+---@field leader string The key `<leader>` expands to when a mapping is set.
+---@field timeoutlen integer Milliseconds a mapping that is also a prefix waits for more keys.
+
 ---@class kage
 kage = {}
+
+--- Options by name. Assigning validates the value, records the
+--- source and fires `option_set`.
+---@type kage.Options
+kage.opt = {}
 
 --- Wall-clock milliseconds since the Unix epoch.
 --- Since API 1.
@@ -596,8 +617,9 @@ function kage.theme.current() end
 ---@return string[]
 function kage.theme.list() end
 
---- Request a theme switch. The host validates and applies it
---- between turns. Errors on a non-string or empty name.
+--- Request a theme switch. The host sets the `theme` option
+--- from it shortly after, which fires `option_set`. Errors on
+--- a non-string or empty name.
 --- Since API 1.
 ---@param name string
 function kage.theme.set(name) end
@@ -669,6 +691,21 @@ function kage.api.augroup_del(group) end
 ---@param event kage.Event
 ---@param opts? { pattern: string?, data: any }
 function kage.api.autocmd_exec(event, opts) end
+
+--- The value of option `name` and where it came from. Raises
+--- on an unknown name. `kage.opt.<name>` reads the value alone.
+--- Since API 2.
+---@param name string
+---@return any, kage.OptionSource
+function kage.api.option_get(name) end
+
+--- Set option `name` and fire `option_set`. Raises on an
+--- unknown name or an invalid value, naming what is valid.
+--- Same as assigning to `kage.opt.<name>`.
+--- Since API 2.
+---@param name string
+---@param value any
+function kage.api.option_set(name, value) end
 
 --- Metadata for every entry in the current session, in
 --- order, each `{ id, kind, role?, ts }`. Use it to find

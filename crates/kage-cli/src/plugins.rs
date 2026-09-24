@@ -16,7 +16,9 @@ use std::sync::Arc;
 use kage_core::config::PluginsConfig;
 use kage_core::{LoopEvent, Message, ToolOutput, sync::lock};
 use kage_loop::{CompactionPrep, Hooks, StreamRequest, TurnSummary};
-use kage_plugin::{LoadReport, LogLevel, PluginRuntime, PluginRuntimeBuilder, SharedHostLog};
+use kage_plugin::{
+    LoadReport, LogLevel, PluginRuntime, PluginRuntimeBuilder, SharedHostLog, SharedOptions,
+};
 use kage_provider::{Provider, ProviderRegistry};
 use serde_json::json;
 
@@ -66,22 +68,31 @@ pub fn setup_runtime(
 /// runtime, even with no plugins, so the embedded defaults have a Lua
 /// state. It loads the plugins in `plugins_dir` and then the trusted
 /// `<user_dir>/init.lua`. `plugins_cfg` is the already loaded
-/// `[plugins]` table, and `sink` receives plugin output, so nothing is
-/// written to stderr while the TUI owns the screen.
+/// `[plugins]` table, `options` the store seeded from the same config,
+/// and `sink` receives plugin output, so nothing is written to stderr
+/// while the TUI owns the screen. The `theme` option accepts the
+/// bundled themes and those in the user themes dir.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn setup_tui_runtime(
     plugins_dir: Option<&Path>,
     user_dir: Option<&Path>,
     plugins_cfg: PluginsConfig,
+    options: SharedOptions,
     workdir: &Path,
     model: &str,
     system_prompt: &str,
     sink: SharedHostLog,
 ) -> Result<Arc<PluginRuntime>, String> {
     migrate_plugin_store_dir();
+    let themes_dir = crate::themes_dir().ok();
     let runtime = runtime_builder(plugins_cfg, workdir, model, system_prompt)
         .sink(sink)
         .state_dir(crate::data_root().ok().map(|r| r.join("plugin-state")))
         .user_dir(user_dir.map(Path::to_path_buf))
+        .options(options)
+        .theme_names(Arc::new(move || {
+            kage_tui::theme::Theme::available_names(themes_dir.as_deref())
+        }))
         .build()
         .map_err(|e| format!("plugin runtime: {e}"))?;
     load_tui_runtime(runtime, plugins_dir)

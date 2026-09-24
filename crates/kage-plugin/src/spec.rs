@@ -14,6 +14,8 @@
 //! with the Rust bindings. Keeping the description in this crate makes
 //! adding a binding a single edit instead of two.
 
+pub use kage_core::options::{OptionDef, OptionKind};
+
 /// One `---@param` (on a function) or `---@field` (on a class).
 #[derive(Clone, Copy, Debug)]
 pub struct Field {
@@ -104,6 +106,9 @@ pub struct Surface {
     /// Capability-gated functions, present only on a plugin granted
     /// the named capability.
     pub gated: &'static [GatedFunc],
+    /// The option registry behind `kage.opt`, rendered as the
+    /// `kage.Options` class.
+    pub options: &'static [OptionDef],
 }
 
 /// The single source of truth: the full `kage` plugin surface.
@@ -115,6 +120,7 @@ pub fn surface() -> Surface {
         tables: tables::TABLES,
         funcs: funcs::FUNCS,
         gated: gated::GATED,
+        options: kage_core::options::OPTIONS,
     }
 }
 

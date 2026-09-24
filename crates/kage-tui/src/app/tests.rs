@@ -1106,6 +1106,49 @@ fn set_editor_modeless_flips_the_input_editor() {
 }
 
 #[test]
+fn lua_option_sets_apply_on_the_next_tick() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    let store = kage_plugin::SharedOptions::default();
+    let rt = Arc::new(
+        kage_plugin::PluginRuntime::builder()
+            .options(Arc::clone(&store))
+            .build()
+            .unwrap(),
+    );
+    let setter = Arc::clone(&rt);
+    app.set_options(
+        store,
+        Some(Box::new(move |name, value| {
+            setter.set_option(name, value).map_err(|e| e.to_string())
+        })),
+    );
+    assert!(app.input().is_modeless(), "the default editor applies");
+
+    rt.eval(
+        "seen = {}
+         kage.on('option_set', function(d) seen[#seen + 1] = d.name .. ':' .. d.source end)
+         kage.opt.editor = 'vim'
+         kage.opt.mouse = false",
+    )
+    .unwrap();
+    assert!(app.input().is_modeless(), "nothing applies before the tick");
+    assert!(app.apply_option_changes());
+    assert!(!app.input().is_modeless());
+    assert_eq!(app.pending_mouse_capture.take(), Some(false));
+
+    app.run_mouse_command("toggle");
+    let seen = rt.eval("return table.concat(seen, ' ')").unwrap();
+    assert_eq!(
+        seen.as_string().unwrap().to_string_lossy(),
+        "editor:lua mouse:lua mouse:runtime"
+    );
+    assert!(app.apply_option_changes());
+    assert_eq!(app.pending_mouse_capture.take(), Some(true));
+}
+
+#[test]
 fn modeless_question_mark_on_empty_prompt_opens_help() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
@@ -1899,10 +1942,11 @@ fn plugin_theme_drain_applies_request_and_refresh_populates_snapshot() {
         assert!(s.available.iter().any(|n| n == "tokyo-night"));
     }
 
-    // Queue a switch; the drain applies it on this thread but does
-    // not touch the snapshot.
+    // Queue a switch; the drain sets the option, the next option
+    // pass applies it on this thread, and the snapshot is untouched.
     *request.lock().unwrap() = Some("tokyo-night".to_owned());
     app.drain_plugin_theme();
+    assert!(app.apply_option_changes());
     assert_eq!(crate::theme::current().name, "tokyo-night");
     assert!(request.lock().unwrap().is_none(), "request was drained");
 
@@ -2141,6 +2185,7 @@ fn modal_open_reflects_every_modal_field() {
         keybindings: Vec::new(),
         editor_modeless: false,
         thinking_level: "off".into(),
+        from_lua: Vec::new(),
     }));
     assert!(app.modal_open());
     app.settings_overlay = None;

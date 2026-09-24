@@ -32,6 +32,11 @@ pub(super) const ALIASES: &[Alias] = &[
         variants: &["session_write", "exec", "env", "net"],
     },
     Alias {
+        name: "kage.OptionSource",
+        doc: &["Where the current value of an option came from."],
+        variants: &["default", "toml", "lua", "runtime"],
+    },
+    Alias {
         name: "kage.Event",
         doc: &[
             "Every event name `kage.on` and `kage.api.autocmd_create`",
@@ -57,6 +62,7 @@ pub(super) const ALIASES: &[Alias] = &[
             "thinking_level_select",
             "user_bash",
             "permission_mode_select",
+            "option_set",
             "user",
             "transform_context",
             "before_provider_request",

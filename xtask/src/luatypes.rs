@@ -103,6 +103,9 @@ pub fn render() -> String {
         }
     }
 
+    s.push('\n');
+    render_options(&mut s, surface.options);
+
     // Declare `kage` as a GLOBAL, not a `local` module. The host
     // injects `kage` as a global into every plugin; modelling it as a
     // local module (with a trailing `return kage`) makes
@@ -111,6 +114,12 @@ pub fn render() -> String {
     // return types the injected global correctly and keeps
     // `lua-language-server --check` clean on real plugins.
     s.push_str("\n---@class kage\nkage = {}\n");
+    s.push_str(
+        "\n--- Options by name. Assigning validates the value, records the\n\
+         --- source and fires `option_set`.\n\
+         ---@type kage.Options\n\
+         kage.opt = {}\n",
+    );
 
     // Base functions, then capability-gated ones. Gated functions are
     // rendered the same way (so editors still offer them when the
@@ -128,6 +137,25 @@ pub fn render() -> String {
     // No trailing `return kage`: this is a global definition file, not
     // a module. (`---@meta` already marks it definitions-only.)
     s
+}
+
+/// Render the `kage.Options` class from the option registry.
+fn render_options(s: &mut String, options: &[spec::OptionDef]) {
+    s.push_str("--- Every option `kage.opt` reads and writes.\n---@class kage.Options\n");
+    for def in options {
+        let ty = match def.kind {
+            spec::OptionKind::Bool { .. } => "boolean".to_owned(),
+            spec::OptionKind::Int { .. } => "integer".to_owned(),
+            spec::OptionKind::Fraction { .. } => "number".to_owned(),
+            spec::OptionKind::Choice { values, .. } => values
+                .iter()
+                .map(|v| format!("\"{v}\""))
+                .collect::<Vec<_>>()
+                .join("|"),
+            spec::OptionKind::Str { .. } | spec::OptionKind::Key { .. } => "string".to_owned(),
+        };
+        let _ = writeln!(s, "---@field {} {ty} {}", def.name, def.doc);
+    }
 }
 
 /// Emit one function: its sub-table declaration (once), doc, the API
@@ -249,6 +277,15 @@ mod tests {
                 t.path
             );
         }
+    }
+
+    #[test]
+    fn options_class_is_generated_from_the_registry() {
+        let s = render();
+        assert!(s.contains("---@class kage.Options\n---@field theme string "));
+        assert!(s.contains("---@field editor \"vim\"|\"modeless\" "));
+        assert!(s.contains("---@field mouse boolean "));
+        assert!(s.contains("---@type kage.Options\nkage.opt = {}\n"));
     }
 
     #[test]

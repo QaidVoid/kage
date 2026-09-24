@@ -50,6 +50,8 @@ impl App {
             plugin_switch_request: None,
             plugin_theme_state: None,
             plugin_theme_request: None,
+            options: kage_plugin::SharedOptions::default(),
+            option_setter: None,
             autocomplete_providers: Vec::new(),
             input_completion: None,
             completion_workdir: None,
@@ -390,15 +392,32 @@ impl App {
         self.themes_dir = Some(dir);
     }
 
-    /// Apply the configured startup theme (bundled name or a user
-    /// `<name>.toml`). Silent on success; a bad name surfaces an
-    /// inline error and leaves the default palette in place. Call
-    /// after [`Self::set_themes_dir`] so user themes resolve.
-    pub fn apply_startup_theme(&mut self, name: &str) {
-        if name.is_empty() {
-            return;
+    /// Share the option store with the plugin runtime and apply its
+    /// current values: theme (a bad name surfaces inline), mouse,
+    /// editor and input bounds. Changes queued before this call are
+    /// covered by those values and dropped. `setter` routes later sets
+    /// through the runtime. Call after [`Self::set_themes_dir`] so
+    /// user themes resolve.
+    pub fn set_options(
+        &mut self,
+        options: kage_plugin::SharedOptions,
+        setter: Option<OptionSetter>,
+    ) {
+        self.options = options;
+        self.option_setter = setter;
+        let current: Vec<(&str, Option<OptionValue>)> = {
+            let mut store = lock(&self.options);
+            store.take_changes();
+            ["theme", "mouse", "editor", "input_min_lines"]
+                .into_iter()
+                .map(|name| (name, store.get(name).cloned()))
+                .collect()
+        };
+        for (name, value) in current {
+            if let Some(value) = value {
+                self.apply_option(name, &value, false);
+            }
         }
-        self.apply_theme_resolved(name, false);
     }
 
     /// Register the plugin keybindings the App should dispatch.
@@ -637,17 +656,16 @@ impl App {
         }
     }
 
-    /// Refresh the theme snapshot `kage.theme.*` reads, then drain a
-    /// pending `kage.theme.set` and apply it on this thread (the same
-    /// path as `:theme set`, so an unknown name surfaces an inline
-    /// error rather than failing silently).
+    /// Drain a pending `kage.theme.set` and set the `theme` option
+    /// from it, the same path as `:theme set`, so an unknown name
+    /// surfaces an inline error rather than failing silently.
     pub(crate) fn drain_plugin_theme(&mut self) -> bool {
         let pending = self
             .plugin_theme_request
             .as_ref()
             .and_then(|slot| lock(slot).take());
         if let Some(name) = pending {
-            self.apply_theme_by_name(&name);
+            self.set_option("theme", OptionValue::Str(name));
             return true;
         }
         false

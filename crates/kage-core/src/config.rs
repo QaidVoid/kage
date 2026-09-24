@@ -496,11 +496,40 @@ pub struct SandboxConfig {
 }
 
 /// Keybinding overrides expressed as a flat map of chord to command name.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KeybindingsConfig {
     /// Map of keybinding chord (for example `<leader>cf`) to command name.
     pub bindings: BTreeMap<String, String>,
+    /// The key `<leader>` expands to, as one key in keymap notation.
+    #[serde(skip_serializing_if = "is_default_leader")]
+    pub leader: String,
+    /// How long a mapping that is also a prefix waits for more keys,
+    /// in milliseconds.
+    #[serde(skip_serializing_if = "is_default_timeoutlen")]
+    pub timeoutlen: u32,
+}
+
+const DEFAULT_LEADER: &str = "\\";
+const DEFAULT_TIMEOUTLEN: u32 = 1000;
+
+fn is_default_leader(leader: &str) -> bool {
+    leader == DEFAULT_LEADER
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_default_timeoutlen(timeoutlen: &u32) -> bool {
+    *timeoutlen == DEFAULT_TIMEOUTLEN
+}
+
+impl Default for KeybindingsConfig {
+    fn default() -> Self {
+        Self {
+            bindings: BTreeMap::new(),
+            leader: DEFAULT_LEADER.to_owned(),
+            timeoutlen: DEFAULT_TIMEOUTLEN,
+        }
+    }
 }
 
 /// External ACP agents kage can drive as a provider. Each entry is
@@ -911,6 +940,40 @@ mod tests {
             thinking: false,
             caching: false,
         }
+    }
+
+    #[test]
+    fn keybindings_leader_and_timeoutlen_skip_defaults() {
+        let body = toml::to_string(&Config::default()).unwrap();
+        assert!(!body.contains("leader"), "{body}");
+        assert!(!body.contains("timeoutlen"), "{body}");
+
+        let mut cfg = Config::default();
+        cfg.keybindings.leader = ",".to_owned();
+        cfg.keybindings.timeoutlen = 300;
+        let body = toml::to_string(&cfg).unwrap();
+        assert!(body.contains("leader = \",\""), "{body}");
+        assert!(body.contains("timeoutlen = 300"), "{body}");
+    }
+
+    #[test]
+    fn keybindings_leader_and_timeoutlen_parse() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.toml",
+                r#"
+                [keybindings]
+                leader = "<Space>"
+                timeoutlen = 250
+                "#,
+            )?;
+            let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
+            assert_eq!(cfg.keybindings.leader, "<Space>");
+            assert_eq!(cfg.keybindings.timeoutlen, 250);
+            assert!(cfg.keybindings.bindings.is_empty());
+            Ok(())
+        });
     }
 
     #[test]

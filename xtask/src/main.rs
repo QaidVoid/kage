@@ -49,7 +49,6 @@ const SUPPORTED_PROVIDERS: &[ProviderMap] = &[
     ProviderMap::same("openrouter"),
     ProviderMap::same("fireworks-ai"),
     ProviderMap::same("moonshotai"),
-    ProviderMap::same("kimi-for-coding"),
     ProviderMap::same("xiaomi"),
     ProviderMap::same("xiaomi-token-plan-ams"),
     ProviderMap::same("xiaomi-token-plan-cn"),

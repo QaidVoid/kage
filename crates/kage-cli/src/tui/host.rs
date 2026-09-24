@@ -140,7 +140,11 @@ impl Host {
     #[allow(clippy::too_many_lines)]
     fn handle(&mut self, request: RunRequest) {
         match request {
-            RunRequest::Submit { text, images } => {
+            RunRequest::Submit {
+                text,
+                images,
+                queue,
+            } => {
                 if let Err(err) = crate::history::append(&text) {
                     self.error(format!("history: {err}"));
                 }
@@ -152,10 +156,12 @@ impl Host {
                     source: img.source,
                     mime: img.mime,
                 }));
-                self.send(CommandKind::Prompt {
-                    content,
-                    delivery: Delivery::Steer,
-                });
+                let delivery = if queue {
+                    Delivery::Queue
+                } else {
+                    Delivery::Steer
+                };
+                self.send(CommandKind::Prompt { content, delivery });
             }
             RunRequest::Cancel => self.send(CommandKind::Cancel),
             RunRequest::ResolvePermission {

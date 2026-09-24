@@ -25,8 +25,8 @@ impl InputState {
 
     /// Switch between vim-modal and non-modal (modeless) editing.
     /// Turning modeless on snaps the editor into the insert-like
-    /// state and keeps it there; `Esc` then cancels the turn rather
-    /// than entering Normal. Live-applicable from the settings
+    /// state and keeps it there; `Esc` then clears the draft or
+    /// interrupts the turn rather than entering Normal. Live-applicable from the settings
     /// dialog.
     pub fn set_modeless(&mut self, on: bool) {
         self.modeless = on;

@@ -100,6 +100,9 @@ pub struct StatusCtx<'a> {
     pub start: Option<&'a StartInfo>,
     /// Keys for the start card's change hints.
     pub start_keys: StartKeys,
+    /// Prompts sent during the run that were not delivered yet, listed
+    /// above the input.
+    pub pending: &'a [PendingPrompt],
 }
 
 /// Start card data the chrome state does not carry. Set once by the
@@ -282,18 +285,18 @@ pub fn chrome_heights(
             kage_plugin::SlotName::Activity,
             &sources,
         )),
-        input: input_height(input, width),
+        input: input_height(input, status.pending.len(), width),
         footer: 1,
     }
 }
 
 /// Input region height for `input`'s draft at terminal `width`: the
-/// wrapped content rows, clamped to the configured bounds, plus the
-/// two rules.
+/// rows of `pending` prompts, then the wrapped content rows, clamped
+/// to the configured bounds, plus the two rules.
 #[must_use]
-pub fn input_height(input: &InputState, width: u16) -> u16 {
+pub fn input_height(input: &InputState, pending: usize, width: u16) -> u16 {
     let rows = input_visual_row_count(input.text(), input_body_width(width));
-    crate::layout::input_height_for(rows)
+    crate::layout::input_height_for(rows).saturating_add(pending_height(pending))
 }
 
 /// Width of the input's text column at terminal `width`: everything
@@ -419,7 +422,8 @@ pub(crate) use bubble::{
     user_block_lines, wrap_in_bubble_focused,
 };
 pub use buffer::CapturedCell;
-pub(crate) use input::INPUT_GLYPH_WIDTH;
+pub use input::PendingPrompt;
+pub(crate) use input::{INPUT_GLYPH_WIDTH, pending_height, split_pending};
 pub use modeline::input_visual_row_count;
 pub(crate) use modeline::{chrome_lines_to_ratatui, spinner_frame_index};
 pub(crate) use slot::START_SESSIONS;

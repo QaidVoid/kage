@@ -1144,7 +1144,7 @@ fn modeline_hides_permission_pill_without_override() {
 
 // --- Start card ---
 
-const TIP: &str = "   Tip: Enter while kage works steers the running turn.";
+const TIP: &str = "   Tip: Tab queues a message while kage works. Enter steers the running turn.";
 
 fn start_info(sessions: usize) -> StartInfo {
     let titles = [

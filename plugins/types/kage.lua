@@ -354,6 +354,7 @@
 ---@field OpenJumpPicker kage.Action Open the jump-to-message picker.
 ---@field AttachClipboardImage kage.Action Attach an image from the clipboard.
 ---@field EnterVisual kage.Action Enter visual selection.
+---@field QueuePrompt kage.Action Queue the prompt until the run ends. Does nothing while idle.
 
 ---@class kage
 kage = {}

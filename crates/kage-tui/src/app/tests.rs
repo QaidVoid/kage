@@ -243,9 +243,20 @@ fn ctrl_q_yields_only_to_a_user_owned_mapping() {
 #[test]
 fn init_lua_can_reclaim_ctrl_c_in_one_mode() {
     let (mut app, rx, _) = app_with_config("kage.keymap.set('i', '<C-c>', ':clear')", &[]);
+    let usage = crate::usage::shared_session_usage();
+    app.set_session_usage(usage.clone());
+    app.handle_key(key('x'));
     app.handle_key(ctrl('c'));
+    assert_eq!(
+        app.handle_key(ctrl('c')),
+        None,
+        "the hatch never armed quit"
+    );
     assert!(rx.try_recv().is_err(), "insert mode ran the mapping");
+    assert_eq!(app.input.text(), "x", "the mapping kept the draft");
+    lock(&usage).working = true;
     normal(&mut app, Pane::Input);
+    app.input.clear_draft();
     app.handle_key(ctrl('c'));
     assert_eq!(
         rx.try_recv(),
@@ -521,7 +532,8 @@ fn submitting_a_prompt_sends_it_without_painting() {
         req,
         RunRequest::Submit {
             text: "hi".into(),
-            images: Vec::new()
+            images: Vec::new(),
+            queue: false,
         }
     );
     assert!(
@@ -544,13 +556,14 @@ fn submit_while_a_run_is_in_flight_is_still_sent() {
     usage.lock().unwrap().working = true;
     app.set_session_usage(usage);
 
-    app.handle_submit("later".into());
+    app.handle_submit("later".into(), false);
 
     assert_eq!(
         rx.recv_timeout(Duration::from_millis(100)).unwrap(),
         RunRequest::Submit {
             text: "later".into(),
-            images: Vec::new()
+            images: Vec::new(),
+            queue: false,
         }
     );
 }
@@ -568,10 +581,10 @@ fn submit_carries_attached_images() {
         bytes: 3,
     });
 
-    app.handle_submit("look".into());
+    app.handle_submit("look".into(), false);
 
     match rx.recv_timeout(Duration::from_millis(100)).unwrap() {
-        RunRequest::Submit { text, images } => {
+        RunRequest::Submit { text, images, .. } => {
             assert_eq!(text, "look");
             assert_eq!(images.len(), 1);
         }
@@ -896,6 +909,7 @@ fn feedback_denies_then_submits_the_text() {
             RunRequest::Submit {
                 text: "use ls".to_owned(),
                 images: Vec::new(),
+                queue: false,
             },
         ]
     );
@@ -1033,26 +1047,193 @@ fn state_changes_update_the_modeline() {
     assert!(app.is_run_in_flight());
 }
 
-#[test]
-fn ctrl_c_in_normal_emits_cancel_request() {
-    let buffer = shared_buffer();
+/// An App with defaults and a usage snapshot whose working flag the
+/// test flips.
+fn app_with_usage() -> (
+    App,
+    mpsc::Receiver<RunRequest>,
+    crate::usage::SharedSessionUsage,
+) {
     let (tx, rx) = mpsc::channel();
-    let mut app = app_with_defaults(buffer, tx);
-    // Switch to Normal first; default is Insert.
-    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+    let mut app = app_with_defaults(shared_buffer(), tx);
+    let usage = crate::usage::shared_session_usage();
+    app.set_session_usage(usage.clone());
+    (app, rx, usage)
+}
+
+#[test]
+fn ctrl_c_in_normal_interrupts_a_run() {
+    let (mut app, rx, usage) = app_with_usage();
+    lock(&usage).working = true;
+    app.handle_key(code(KeyCode::Esc));
     app.handle_key(ctrl('c'));
     assert_eq!(rx.try_recv(), Ok(RunRequest::Cancel));
 }
 
 #[test]
-fn ctrl_c_in_insert_cancels_instead_of_typing_c() {
-    let buffer = shared_buffer();
-    let (tx, rx) = mpsc::channel();
-    let mut app = app_with_defaults(buffer, tx);
-    app.handle_key(key('x')); // default mode is Insert
+fn ctrl_c_in_insert_clears_the_draft_instead_of_typing_c() {
+    let (mut app, rx, usage) = app_with_usage();
+    lock(&usage).working = true;
+    app.handle_key(key('x'));
     app.handle_key(ctrl('c'));
+    assert!(rx.try_recv().is_err(), "a draft is cleared, not the run");
+    assert_eq!(app.input().text(), "");
+    app.handle_key(code(KeyCode::Up));
+    assert_eq!(app.input().text(), "x");
+}
+
+#[test]
+fn esc_with_a_draft_clears_it_and_up_restores_it() {
+    let (mut app, rx, usage) = app_with_usage();
+    app.set_editor_modeless(true);
+    lock(&usage).working = true;
+    for c in "fix it".chars() {
+        app.handle_key(key(c));
+    }
+    app.handle_key(code(KeyCode::Esc));
+    assert_eq!(app.input().text(), "");
+    assert!(rx.try_recv().is_err(), "the run keeps going");
+    assert_eq!(app.footer_hint(), "draft cleared, up restores it");
+    app.handle_paste("x");
+    assert_ne!(app.footer_hint(), "draft cleared, up restores it");
+    app.handle_key(code(KeyCode::Esc));
+    app.handle_key(code(KeyCode::Up));
+    assert_eq!(app.input().text(), "x");
+    app.handle_key(code(KeyCode::Up));
+    assert_eq!(app.input().text(), "fix it");
+    assert_ne!(app.footer_hint(), "draft cleared, up restores it");
+}
+
+#[test]
+fn esc_on_an_empty_draft_while_working_interrupts() {
+    let (mut app, rx, usage) = app_with_usage();
+    app.set_editor_modeless(true);
+    lock(&usage).working = true;
+    app.handle_key(code(KeyCode::Esc));
     assert_eq!(rx.try_recv(), Ok(RunRequest::Cancel));
-    assert_eq!(app.input().text(), "x", "ctrl+c must not type 'c'");
+}
+
+#[test]
+fn idle_esc_on_an_empty_draft_sends_nothing() {
+    let (mut app, rx, _usage) = app_with_usage();
+    app.set_editor_modeless(true);
+    assert_eq!(app.handle_key(code(KeyCode::Esc)), None);
+    assert_eq!(app.handle_key(code(KeyCode::Esc)), None);
+    assert!(rx.try_recv().is_err());
+    assert_eq!(app.footer_hint(), "? for shortcuts \u{B7} / for commands");
+}
+
+#[test]
+fn ctrl_c_twice_within_the_window_quits() {
+    let (mut app, rx, _usage) = app_with_usage();
+    assert_eq!(app.handle_key(ctrl('c')), None, "one press only arms");
+    assert_eq!(app.footer_hint(), "ctrl+c again to quit");
+    assert_eq!(app.handle_key(ctrl('c')), Some(AppExit::Quit));
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn an_armed_quit_lapses_or_yields_to_another_key() {
+    let (mut app, _rx, _usage) = app_with_usage();
+    app.handle_key(ctrl('c'));
+    app.escalation = Some((keys::Escalation::QuitArmed, Instant::now()));
+    assert_eq!(app.handle_key(ctrl('c')), None, "the window passed");
+    app.handle_key(code(KeyCode::Left));
+    assert_eq!(app.handle_key(ctrl('c')), None, "another key disarmed it");
+    assert_eq!(app.handle_key(ctrl('c')), Some(AppExit::Quit));
+}
+
+#[test]
+fn tab_queues_only_while_working() {
+    let (mut app, rx, usage) = app_with_usage();
+    app.handle_key(key('a'));
+    app.handle_key(code(KeyCode::Tab));
+    assert!(rx.try_recv().is_err(), "idle tab sends nothing");
+    assert_eq!(app.input().text(), "a");
+    lock(&usage).working = true;
+    app.handle_key(code(KeyCode::Tab));
+    assert_eq!(
+        rx.try_recv(),
+        Ok(RunRequest::Submit {
+            text: "a".into(),
+            images: Vec::new(),
+            queue: true,
+        })
+    );
+    assert_eq!(app.input().text(), "");
+    assert_eq!(app.input().history(), ["a"]);
+}
+
+fn user_message(text: &str) -> kage_core::protocol::Event {
+    let message = kage_core::Message::new(
+        kage_core::Role::User,
+        vec![kage_core::Content::Text { text: text.into() }],
+        None,
+    );
+    kage_core::LoopEvent::MessageAppended { message }.into()
+}
+
+fn pending_rows(app: &mut App) -> Vec<String> {
+    let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+    app.render_into(&mut terminal).unwrap();
+    snapshot_rows(&terminal)
+        .into_iter()
+        .filter(|r| r.starts_with("  > "))
+        .collect()
+}
+
+#[test]
+fn pending_rows_show_until_delivered_steers_first() {
+    let (mut app, _rx, events) = app_with_events();
+    lock(app.session_usage.as_ref().unwrap()).working = true;
+    for c in "later".chars() {
+        app.handle_key(key(c));
+    }
+    app.handle_key(code(KeyCode::Tab));
+    for c in "now".chars() {
+        app.handle_key(key(c));
+    }
+    app.handle_key(code(KeyCode::Enter));
+    let steer = format!("  > now{}after the current tool call", " ".repeat(24));
+    let queue = format!("  > later{}when this run ends", " ".repeat(31));
+    assert_eq!(pending_rows(&mut app), [queue.clone(), steer]);
+    feed(&mut app, &events, vec![user_message("now")]);
+    assert_eq!(pending_rows(&mut app), [queue]);
+    feed(
+        &mut app,
+        &events,
+        vec![user_message("rewritten by a plugin")],
+    );
+    assert!(pending_rows(&mut app).is_empty());
+}
+
+#[test]
+fn pending_rows_fold_past_three_and_clear_on_session_change() {
+    let (mut app, _rx, events) = app_with_events();
+    lock(app.session_usage.as_ref().unwrap()).working = true;
+    for text in ["one", "two", "three", "four", "five"] {
+        app.handle_submit(text.into(), true);
+    }
+    let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
+    app.render_into(&mut terminal).unwrap();
+    let rows = snapshot_rows(&terminal);
+    let first = rows.iter().position(|r| r.starts_with("  > one")).unwrap();
+    assert!(rows[first + 2].starts_with("  > three"), "{rows:#?}");
+    assert_eq!(rows[first + 3], "  +2 more");
+    assert!(rows[first + 4].starts_with('\u{2500}'), "{rows:#?}");
+    feed(
+        &mut app,
+        &events,
+        vec![
+            kage_core::protocol::HostEvent::SessionChanged {
+                path: std::path::PathBuf::from("/tmp/s.jsonl"),
+                title: None,
+                messages: Vec::new(),
+            }
+            .into(),
+        ],
+    );
+    assert!(app.pending.is_empty());
 }
 
 #[test]
@@ -1362,9 +1543,31 @@ fn the_footer_hint_follows_the_editor_state() {
         "enter to send \u{B7} shift+enter for a newline"
     );
     lock(&usage).working = true;
-    assert_eq!(app.footer_hint(), "enter to steer \u{B7} esc to interrupt");
+    assert_eq!(
+        app.footer_hint(),
+        "enter to steer \u{B7} tab to queue \u{B7} esc to clear the draft"
+    );
     app.handle_key(code(KeyCode::Backspace));
-    assert_eq!(app.footer_hint(), "esc to interrupt");
+    assert_eq!(app.footer_hint(), "tab to queue \u{B7} esc to interrupt");
+    app.set_editor_modeless(false);
+    assert_eq!(
+        app.footer_hint(),
+        "tab to queue \u{B7} ctrl+c to interrupt \u{B7} esc for normal mode"
+    );
+    app.handle_key(key('x'));
+    assert_eq!(
+        app.footer_hint(),
+        "enter to steer \u{B7} tab to queue \u{B7} esc for normal mode"
+    );
+    app.handle_key(code(KeyCode::Esc));
+    assert_eq!(
+        app.footer_hint(),
+        "ctrl+c to clear the draft \u{B7} i to type \u{B7} ? for shortcuts \u{B7} : for commands"
+    );
+    lock(&usage).working = false;
+    app.handle_key(ctrl('c'));
+    app.handle_key(ctrl('c'));
+    assert_eq!(app.footer_hint(), "ctrl+c again to quit");
 }
 
 #[test]

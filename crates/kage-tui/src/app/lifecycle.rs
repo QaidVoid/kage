@@ -50,6 +50,10 @@ impl App {
                 needs_redraw = true;
             }
             let now = Instant::now();
+            if self.escalation.is_some_and(|(_, until)| until <= now) {
+                self.escalation = None;
+                needs_redraw = true;
+            }
             if self.keymap_deadline().is_some_and(|at| at <= now) {
                 needs_redraw = true;
                 let routed = self.tick_keymap(now);
@@ -114,6 +118,11 @@ impl App {
             // no further key arrives.
             if let Some(keymap_deadline) = self.keymap_deadline() {
                 deadline = deadline.min(keymap_deadline);
+            }
+            // An armed quit and the cleared-draft note lapse on their
+            // own, and the footer hint changes with them.
+            if let Some((_, until)) = self.escalation {
+                deadline = deadline.min(until);
             }
             while Instant::now() < deadline {
                 let remaining = deadline
@@ -338,6 +347,7 @@ impl App {
             model_id: model_id.as_deref(),
             start: self.start_info.as_ref(),
             start_keys,
+            pending: &self.pending,
         };
         let screen_selection = self.screen_selection;
         let mut captured_rows = std::mem::take(&mut self.captured_rows);
@@ -384,8 +394,13 @@ impl App {
                 }
                 let regions = split(area, heights);
                 let mut view_regions = regions;
+                // The palette and the completion popup anchor to the
+                // input box, below the pending rows.
+                let mut box_regions = regions;
                 if approval.is_some() {
                     view_regions.input.height = 0;
+                } else {
+                    box_regions.input = view::split_pending(regions.input, status.pending.len()).1;
                 }
                 view::render(
                     frame,
@@ -428,11 +443,11 @@ impl App {
                     crate::overlay::OverlayWidget::render(help, modal, frame.buffer_mut(), &ctx);
                 }
                 if let Some(palette) = slash_palette {
-                    palette.render(frame, regions);
-                    palette.place_cursor(frame, regions);
+                    palette.render(frame, box_regions);
+                    palette.place_cursor(frame, box_regions);
                 }
                 if let Some(completion) = input_completion {
-                    completion.render(frame, regions);
+                    completion.render(frame, box_regions);
                 }
                 if let Some(menu) = context_menu {
                     menu.render(frame, regions.buffer);

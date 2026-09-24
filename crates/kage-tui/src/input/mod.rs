@@ -104,6 +104,12 @@ pub enum InputAction {
     ClearSelection,
     /// Cancel the in-flight turn.
     Cancel,
+    /// `Esc` in the modeless editor. The host escalates it: clear the
+    /// draft, else interrupt the run in flight.
+    Escape,
+    /// Send the draft to run after the run in flight ends. The host
+    /// ignores it while idle.
+    QueuePrompt,
     /// Open the in-TUI model picker overlay.
     OpenModelPicker,
     /// Open the in-TUI session picker overlay so the user can resume
@@ -176,6 +182,10 @@ const KILL_RING_MAX: usize = 60;
 /// text). Keeps a multi-hundred-line paste from flooding the input.
 const PASTE_COLLAPSE_LINES: usize = 10;
 
+/// A shorter bracketed paste of more than this many characters is
+/// collapsed too, as `[paste #N: M chars]`.
+const PASTE_COLLAPSE_CHARS: usize = 1000;
+
 /// Upper bound for a vim-style count prefix (`5dw`). Digit runs past
 /// this saturate here instead of building a count large enough to
 /// hang motion loops or explode paste allocations.
@@ -197,13 +207,14 @@ struct EditSnapshot {
 }
 
 /// A large bracketed paste held out of the visible draft. The draft
-/// shows `[paste #id: lines lines]`; the real text is restored when
-/// the user expands (Ctrl+O) or submits.
+/// shows `[paste #id: size]`; the real text is restored when the user
+/// expands (Ctrl+O) or submits.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct PasteBlob {
     id: u32,
     text: String,
-    lines: usize,
+    /// `12 lines` or `1234 chars`.
+    size: String,
 }
 
 impl PasteBlob {
@@ -211,7 +222,7 @@ impl PasteBlob {
     /// in the draft. Resolution matches it verbatim, so editing into
     /// it simply drops the substitution (the literal token is sent).
     fn placeholder(&self) -> String {
-        format!("[paste #{}: {} lines]", self.id, self.lines)
+        format!("[paste #{}: {}]", self.id, self.size)
     }
 }
 
@@ -299,8 +310,8 @@ pub struct InputState {
     /// mutation. Vim's `<C-r>` pops from here.
     redo_stack: Vec<EditSnapshot>,
     /// When true the editor is non-modal (`[ui] editor = "modeless"`):
-    /// it never leaves an insert-like state, `Esc` cancels the turn,
-    /// and `PageUp` / `PageDown` scroll the buffer. Set by the host
+    /// it never leaves an insert-like state, `Esc` clears the draft or
+    /// interrupts the turn, and `PageUp` / `PageDown` scroll the buffer. Set by the host
     /// from config / the settings dialog.
     modeless: bool,
     /// Emacs kill ring. Ctrl+W / Ctrl+U / Ctrl+K and the Alt word

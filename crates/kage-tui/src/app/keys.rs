@@ -3,6 +3,28 @@
 #[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
 
+/// How long an armed quit, or the note that the draft was cleared,
+/// waits for the next press.
+const ESCALATION_WINDOW: Duration = Duration::from_secs(2);
+
+/// The key that asked [`App::escalate`] to step.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Trigger {
+    /// `Esc` in the modeless editor.
+    Esc,
+    /// The global `Ctrl+C` hatch.
+    CtrlC,
+}
+
+/// What the last escalation step left for the next press.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Escalation {
+    /// The draft was cleared. Up restores it.
+    DraftCleared,
+    /// Idle with an empty draft: one more `Ctrl+C` quits.
+    QuitArmed,
+}
+
 impl App {
     /// The editing state keys resolve in, which selects the keymap
     /// modes to search.
@@ -53,22 +75,21 @@ impl App {
         key: ratatui::crossterm::event::KeyEvent,
     ) -> Option<AppExit> {
         // Global escape hatches before any modal layer: ctrl+q quits,
-        // ctrl+c interrupts the in-flight turn from every mode
-        // (insert, modeless, any open overlay). Both yield to a
-        // mapping from `init.lua` or `config.toml` on the chord, so
-        // `quit` and `:cancel` stay reachable through whatever the
-        // user mapped instead.
+        // ctrl+c escalates from every mode (insert, modeless, any open
+        // overlay). Both yield to a mapping from `init.lua` or
+        // `config.toml` on the chord, so `quit` and `:cancel` stay
+        // reachable through whatever the user mapped instead.
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('q') if !self.user_mapped(&key) => return Some(AppExit::Quit),
                 KeyCode::Char('c') if !self.user_mapped(&key) => {
-                    let _ = self.apply(InputAction::Cancel);
-                    return None;
+                    return self.escalate(Trigger::CtrlC);
                 }
                 _ => {}
             }
         }
+        self.escalation = None;
 
         // Raw plugin terminal-input hooks see the key before any modal
         // layer (but never before the global hatches above, so a hook
@@ -164,6 +185,37 @@ impl App {
             self.refresh_input_completion();
         }
         exit
+    }
+
+    /// One step of the Esc and Ctrl+C escalation: clear the draft (Up
+    /// restores it), else interrupt the run in flight, else, for
+    /// Ctrl+C, arm quit, which a second press within
+    /// [`ESCALATION_WINDOW`] carries out. Over an open overlay Ctrl+C
+    /// only interrupts, since the draft is out of sight.
+    pub(crate) fn escalate(&mut self, trigger: Trigger) -> Option<AppExit> {
+        let now = Instant::now();
+        let previous = self
+            .escalation
+            .take()
+            .filter(|(_, until)| *until > now)
+            .map(|(step, _)| step);
+        if trigger == Trigger::CtrlC && self.keyboard_modal_open() {
+            self.trip_cancel();
+            return None;
+        }
+        if self.input.has_draft() {
+            self.input.clear_draft();
+            self.input_completion = None;
+            self.escalation = Some((Escalation::DraftCleared, now + ESCALATION_WINDOW));
+        } else if self.is_run_in_flight() {
+            self.trip_cancel();
+        } else if trigger == Trigger::CtrlC {
+            if previous == Some(Escalation::QuitArmed) {
+                return Some(AppExit::Quit);
+            }
+            self.escalation = Some((Escalation::QuitArmed, now + ESCALATION_WINDOW));
+        }
+        None
     }
 
     /// Resolve a key in the editing state: through the keymap

@@ -5,6 +5,7 @@
 use super::*;
 
 use kage_core::protocol::{Envelope, Event, HostEvent, NoticeLevel, RequestId};
+use kage_core::{LoopEvent, Role};
 
 use crate::view::tool_view::ToolPhase;
 
@@ -50,8 +51,25 @@ impl App {
             return;
         }
         match envelope.event {
-            Event::Loop(event) => crate::events::apply_loop_event(&mut lock(&self.buffer), &event),
+            Event::Loop(event) => {
+                if let LoopEvent::MessageAppended { message } = &event
+                    && message.role == Role::User
+                {
+                    self.pending_delivered();
+                }
+                crate::events::apply_loop_event(&mut lock(&self.buffer), &event);
+            }
             Event::Host(event) => self.apply_host_event(event),
+        }
+    }
+
+    /// Drop the pending row of the prompt the engine just delivered.
+    /// Rows are counted, not matched by text, since an `input` plugin
+    /// may rewrite a prompt. The engine delivers steers first.
+    fn pending_delivered(&mut self) {
+        let at = self.pending.iter().position(|p| !p.queued).unwrap_or(0);
+        if at < self.pending.len() {
+            self.pending.remove(at);
         }
     }
 
@@ -106,6 +124,7 @@ impl App {
                 lock(&self.buffer).push_custom(kind, text, false);
             }
             HostEvent::SessionChanged { messages, .. } => {
+                self.pending.clear();
                 let durations = crate::events::tool_durations(&messages);
                 {
                     let mut buf = lock(&self.buffer);
@@ -240,12 +259,6 @@ impl App {
     /// the next turn boundary. The draft and its attachments stay.
     pub(crate) fn answer_with_feedback(&mut self, text: String) {
         self.answer_permission(PermissionDecision::Deny);
-        let submit = RunRequest::Submit {
-            text,
-            images: Vec::new(),
-        };
-        if self.send_request(submit).is_err() {
-            self.push_error("submit failed: agent worker has stopped");
-        }
+        self.send_prompt(text, Vec::new(), false);
     }
 }

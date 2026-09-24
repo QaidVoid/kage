@@ -6,29 +6,33 @@ use super::*;
 impl InputState {
     /// Insert pasted text at the cursor when in [`Mode::Insert`]. No-op
     /// in other modes so a stray paste in normal mode does not mutate
-    /// the prompt. The paste is preserved verbatim, including newlines,
-    /// so a multi-line paste does not auto-submit.
+    /// the prompt. Line breaks are kept, so a multi-line paste does not
+    /// auto-submit. Terminals send them as CR, CRLF or LF; all become
+    /// LF. A paste of many lines or characters collapses to a
+    /// placeholder.
     pub fn paste(&mut self, text: &str) {
         if self.mode != Mode::Insert {
             return;
         }
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
         let lines = text.split('\n').count();
-        if lines >= PASTE_COLLAPSE_LINES {
-            let id = self.next_paste_id;
-            self.next_paste_id = self.next_paste_id.wrapping_add(1);
-            let blob = PasteBlob {
-                id,
-                text: text.to_owned(),
-                lines,
-            };
-            let token = blob.placeholder();
-            self.pastes.push(blob);
-            self.text.insert_str(self.cursor, &token);
-            self.cursor += token.len();
+        let chars = text.chars().count();
+        let size = if lines >= PASTE_COLLAPSE_LINES {
+            format!("{lines} lines")
+        } else if chars > PASTE_COLLAPSE_CHARS {
+            format!("{chars} chars")
+        } else {
+            self.text.insert_str(self.cursor, &text);
+            self.cursor += text.len();
             return;
-        }
-        self.text.insert_str(self.cursor, text);
-        self.cursor += text.len();
+        };
+        let id = self.next_paste_id;
+        self.next_paste_id = self.next_paste_id.wrapping_add(1);
+        let blob = PasteBlob { id, text, size };
+        let token = blob.placeholder();
+        self.pastes.push(blob);
+        self.text.insert_str(self.cursor, &token);
+        self.cursor += token.len();
     }
 
     /// Replace every collapsed-paste placeholder in `s` with its full

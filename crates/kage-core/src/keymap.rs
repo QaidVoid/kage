@@ -484,6 +484,10 @@ pub const ACTIONS: &[ActionDef] = &[
         "Attach an image from the clipboard.",
     ),
     action("EnterVisual", "Enter visual selection."),
+    action(
+        "QueuePrompt",
+        "Queue the prompt until the run ends. Does nothing while idle.",
+    ),
 ];
 
 /// Look up an action by name.
@@ -936,7 +940,7 @@ mod tests {
 
     #[test]
     fn actions_hold_the_rebindable_names() {
-        assert_eq!(ACTIONS.len(), 25);
+        assert_eq!(ACTIONS.len(), 26);
         for (i, a) in ACTIONS.iter().enumerate() {
             assert!(
                 ACTIONS[..i].iter().all(|b| b.name != a.name),

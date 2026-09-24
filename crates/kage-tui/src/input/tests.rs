@@ -1012,6 +1012,71 @@ fn large_paste_collapses_to_placeholder() {
 }
 
 #[test]
+fn a_cr_paste_keeps_its_lines() {
+    let mut state = InputState::new();
+    state.paste("one\rtwo\r\nthree\n");
+    assert_eq!(state.text(), "one\ntwo\nthree\n");
+    let blob = "row\r".repeat(12);
+    state.paste(&blob);
+    assert!(
+        state.text().ends_with("[paste #1: 13 lines]"),
+        "{}",
+        state.text()
+    );
+}
+
+#[test]
+fn a_long_single_line_paste_collapses() {
+    let mut state = InputState::new();
+    let blob = "x".repeat(1500);
+    state.paste(&blob);
+    assert_eq!(state.text(), "[paste #1: 1500 chars]");
+    let acts = state.handle_key(key(KeyCode::Enter));
+    assert_eq!(acts, vec![InputAction::Submit(blob)]);
+    state.paste(&"y".repeat(1000));
+    assert_eq!(state.collapsed_paste_count(), 0, "1000 chars stay inline");
+}
+
+#[test]
+fn clear_draft_keeps_it_in_the_history_for_up() {
+    let mut state = InputState::new();
+    state.paste(&"p\n".repeat(10));
+    state.attach_image(img("a.png"));
+    state.handle_key(key(KeyCode::Char('!')));
+    assert!(state.has_draft());
+    state.clear_draft();
+    assert_eq!(state.text(), "");
+    assert!(!state.has_draft());
+    assert!(state.attached().is_empty());
+    assert_eq!(state.collapsed_paste_count(), 0);
+    state.handle_key(key(KeyCode::Up));
+    assert_eq!(state.text(), format!("{}!", "p\n".repeat(10)));
+}
+
+#[test]
+fn clear_draft_disarms_shell_mode() {
+    let mut state = InputState::new();
+    state.handle_key(key(KeyCode::Char('!')));
+    assert!(state.shell_armed() && state.has_draft());
+    state.clear_draft();
+    assert!(!state.shell_armed());
+    assert!(state.history().is_empty());
+}
+
+#[test]
+fn take_prompt_skips_empty_and_shell_drafts() {
+    let mut state = InputState::new();
+    assert_eq!(state.take_prompt(), None);
+    state.paste("later");
+    assert_eq!(state.take_prompt().as_deref(), Some("later"));
+    assert_eq!(state.history(), ["later"]);
+    state.handle_key(key(KeyCode::Char('!')));
+    state.paste("ls");
+    assert_eq!(state.take_prompt(), None);
+    assert_eq!(state.text(), "ls");
+}
+
+#[test]
 fn small_paste_is_inserted_verbatim() {
     let mut state = InputState::new();
     state.paste("a\nb\nc");
@@ -1079,11 +1144,11 @@ fn set_modeless_forces_insert() {
 }
 
 #[test]
-fn modeless_esc_cancels_turn_and_stays_insert() {
+fn modeless_esc_goes_to_the_host_and_stays_insert() {
     let mut state = InputState::new();
     state.set_modeless(true);
     let acts = state.handle_key(key(KeyCode::Esc));
-    assert_eq!(acts, vec![InputAction::Cancel]);
+    assert_eq!(acts, vec![InputAction::Escape]);
     // Never leaves the insert-like state.
     assert_eq!(state.mode(), Mode::Insert);
     // ... and is still editable afterward.

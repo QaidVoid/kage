@@ -128,6 +128,7 @@ pub fn action(name: &str, arg: Option<i64>) -> Option<InputAction> {
         "OpenJumpPicker" => InputAction::OpenJumpPicker,
         "AttachClipboardImage" => InputAction::AttachClipboardImage,
         "EnterVisual" => InputAction::EnterVisual,
+        "QueuePrompt" => InputAction::QueuePrompt,
         _ => return None,
     })
 }

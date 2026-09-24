@@ -4,19 +4,54 @@
 use super::*;
 
 impl App {
-    /// Resolve an `InputAction::Submit`: send the prompt and its images
-    /// to the engine. The user block appears when the engine delivers the
-    /// prompt, which is the next turn boundary when a run is in flight.
-    pub(crate) fn handle_submit(&mut self, text: String) {
+    /// Resolve a submitted draft: send the prompt and its images to the
+    /// engine, steered into the run in flight or, with `queue`, held
+    /// until it ends.
+    pub(crate) fn handle_submit(&mut self, text: String, queue: bool) {
         let images = self.input.take_attached();
-        let queued = self.is_run_in_flight();
-        if self
-            .send_request(RunRequest::Submit { text, images })
-            .is_err()
+        self.send_prompt(text, images, queue);
+    }
+
+    /// Resolve an `InputAction::QueuePrompt`: send the draft to run
+    /// after the run in flight. Idle it does nothing, so a stray Tab
+    /// never sends a prompt.
+    fn queue_prompt(&mut self) {
+        if self.is_run_in_flight()
+            && let Some(text) = self.input.take_prompt()
         {
+            self.handle_submit(text, true);
+        }
+    }
+
+    /// Send a prompt to the engine. The user block appears when the
+    /// engine delivers it. During a run that happens later, so until
+    /// then it shows as a pending row above the input.
+    pub(crate) fn send_prompt(
+        &mut self,
+        text: String,
+        images: Vec<crate::image::AttachedImage>,
+        queue: bool,
+    ) {
+        let pending = self.is_run_in_flight().then(|| view::PendingPrompt {
+            text: text
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or("[image]")
+                .to_owned(),
+            // The engine steers text only, so a prompt with images
+            // waits for the end of the run.
+            queued: queue || !images.is_empty(),
+        });
+        let submit = RunRequest::Submit {
+            text,
+            images,
+            queue,
+        };
+        if self.send_request(submit).is_err() {
             self.push_error("submit failed: agent worker has stopped");
-        } else if queued {
-            self.notify("queued for the next turn");
+        } else if let Some(pending) = pending {
+            self.pending.push(pending);
         }
     }
 
@@ -31,7 +66,9 @@ impl App {
 
     pub(crate) fn apply(&mut self, action: InputAction) -> Option<AppExit> {
         match action {
-            InputAction::Submit(text) => self.handle_submit(text),
+            InputAction::Submit(text) => self.handle_submit(text, false),
+            InputAction::QueuePrompt => self.queue_prompt(),
+            InputAction::Escape => return self.escalate(keys::Trigger::Esc),
             InputAction::RunShell(text) => self.handle_shell(text),
             InputAction::DroppedStaleAttach => {
                 self.notify("dropped stale image attach (the prompt was empty)");

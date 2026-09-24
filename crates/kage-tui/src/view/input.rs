@@ -26,16 +26,40 @@ const RULE: &str = "\u{2500}";
 /// Rule cells kept outside a title on either end of a rule.
 const RULE_LEAD: usize = 2;
 
+/// Pending prompts listed above the top rule before the rest fold
+/// into a `+N more` row.
+const PENDING_MAX_ROWS: usize = 3;
+/// Lead of a pending row, lined up with the working row.
+const PENDING_LEAD: &str = "  > ";
+
+/// A prompt sent during a run that the engine has not delivered yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingPrompt {
+    /// The prompt's first non-blank line.
+    pub text: String,
+    /// `true` when it waits for the run to end, `false` when it steers
+    /// into the run at the next turn boundary.
+    pub queued: bool,
+}
+
+/// Rows the pending prompts take above the input's top rule.
+pub(crate) fn pending_height(count: usize) -> u16 {
+    let rows = count.min(PENDING_MAX_ROWS) + usize::from(count > PENDING_MAX_ROWS);
+    u16::try_from(rows).unwrap_or(u16::MAX)
+}
+
 pub(super) fn render_input(
     frame: &mut Frame,
     regions: Regions,
     input: &InputState,
     sources: &super::slot::Sources<'_>,
 ) {
-    let area = regions.input;
+    let pending = sources.status.pending;
+    let (pending_area, area) = split_pending(regions.input, pending.len());
     if area.height < crate::layout::INPUT_CHROME_LINES || area.width == 0 {
         return;
     }
+    paint_pending(frame, pending_area, pending);
     let theme = crate::theme::current();
     let mode = input.mode();
     let shell = input.shell_armed();
@@ -118,6 +142,76 @@ pub(super) fn render_input(
     if show_cursor && let Some(pos) = input_cursor_position(input, body_area, scroll_off) {
         frame.set_cursor_position(pos);
     }
+}
+
+/// Split the input region into the rows of `pending` prompts and the
+/// input box. A short region keeps the box's two rules first.
+pub(crate) fn split_pending(input: Rect, pending: usize) -> (Rect, Rect) {
+    let rows = pending_height(pending).min(
+        input
+            .height
+            .saturating_sub(crate::layout::INPUT_CHROME_LINES),
+    );
+    let top = Rect {
+        height: rows,
+        ..input
+    };
+    let rest = Rect {
+        y: input.y + rows,
+        height: input.height - rows,
+        ..input
+    };
+    (top, rest)
+}
+
+/// Paint the pending prompts, oldest first, each with when it will be
+/// delivered.
+fn paint_pending(frame: &mut Frame, area: Rect, pending: &[PendingPrompt]) {
+    if area.height == 0 {
+        return;
+    }
+    let muted = Style::default().fg(crate::theme::current().muted_fg);
+    let width = usize::from(area.width);
+    let mut lines: Vec<Line<'static>> = pending
+        .iter()
+        .take(PENDING_MAX_ROWS)
+        .map(|p| {
+            let when = if p.queued {
+                "when this run ends"
+            } else {
+                "after the current tool call"
+            };
+            pending_line(&p.text, when, width, muted)
+        })
+        .collect();
+    if let Some(more) = pending
+        .len()
+        .checked_sub(PENDING_MAX_ROWS)
+        .filter(|n| *n > 0)
+    {
+        lines.push(Line::from(Span::styled(format!("  +{more} more"), muted)));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// One pending row: the lead, the prompt clipped to fit, and `when`
+/// right-aligned two cells from the edge, dropped when the row is too
+/// narrow for both.
+fn pending_line(text: &str, when: &str, width: usize, muted: Style) -> Line<'static> {
+    const MIN_TEXT: usize = 8;
+    let room = width.saturating_sub(PENDING_LEAD.len() + 2);
+    let with_when = room.checked_sub(when.len() + 2).filter(|r| *r >= MIN_TEXT);
+    let text = truncate_to_width(text, with_when.unwrap_or(room), "\u{2026}");
+    let mut spans = vec![Span::styled(PENDING_LEAD, muted)];
+    if with_when.is_some() {
+        let gap = room - text.width() - when.len();
+        spans.push(Span::raw(text));
+        spans.push(Span::raw(" ".repeat(gap)));
+        spans.push(Span::styled(when.to_owned(), muted));
+    } else {
+        spans.push(Span::raw(text));
+    }
+    Line::from(spans)
 }
 
 /// Paint the top rule with the input pill and the bottom rule with the

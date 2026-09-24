@@ -17,8 +17,8 @@ impl InputState {
     }
 
     /// Non-modal dispatch. The editor is always insert-like: `Esc`
-    /// cancels the in-flight turn (never enters Normal) and every
-    /// other key goes through the insert handler. The insert handler's
+    /// goes to the host as [`InputAction::Escape`] (never enters
+    /// Normal) and every other key goes through the insert handler. The insert handler's
     /// only mode transition is its own `Esc` arm, which is intercepted
     /// here, so the editor can never leave the insert state.
     ///
@@ -30,7 +30,7 @@ impl InputState {
         match key.code {
             KeyCode::Esc => {
                 self.reset_history_navigation();
-                vec![InputAction::Cancel]
+                vec![InputAction::Escape]
             }
             KeyCode::Char('?')
                 if self.text.is_empty()

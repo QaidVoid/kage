@@ -140,31 +140,18 @@ impl InputState {
                     } else {
                         Vec::new()
                     }
-                } else {
-                    let raw = std::mem::take(&mut self.text);
-                    let shell = self.shell;
-                    self.shell = false;
-                    let expanded = self.resolve_pastes(&raw);
-                    self.pastes.clear();
-                    // Keep only images whose `[image #N ...]` marker
-                    // still exists; strip the markers from the text
-                    // the model receives (the image rides as a
-                    // `Content::Image` block instead).
-                    let live = image_marker_ids(&expanded);
-                    self.attached.retain(|(id, _)| live.contains(id));
-                    let text = strip_image_markers(&expanded);
-                    self.cursor = 0;
+                } else if self.shell {
                     // Shell commands stay out of the prompt history;
                     // they are not prompts.
-                    if !shell {
-                        self.push_history(&text);
-                    }
+                    self.shell = false;
+                    let text = self.take_draft();
                     self.reset_history_navigation();
-                    if shell {
-                        vec![InputAction::RunShell(text)]
-                    } else {
-                        vec![InputAction::Submit(text)]
-                    }
+                    vec![InputAction::RunShell(text)]
+                } else {
+                    self.take_prompt()
+                        .map(InputAction::Submit)
+                        .into_iter()
+                        .collect()
                 }
             }
             KeyCode::Up => {
@@ -230,6 +217,50 @@ impl InputState {
             }
             _ => Vec::new(),
         }
+    }
+
+    /// Take the draft as the text to send and empty it: collapsed
+    /// pastes resolve to their full text, images whose `[image #N ...]`
+    /// marker is gone are dropped, and the markers are stripped (the
+    /// images ride as `Content::Image` blocks instead).
+    fn take_draft(&mut self) -> String {
+        let raw = std::mem::take(&mut self.text);
+        let expanded = self.resolve_pastes(&raw);
+        self.pastes.clear();
+        let live = image_marker_ids(&expanded);
+        self.attached.retain(|(id, _)| live.contains(id));
+        self.cursor = 0;
+        strip_image_markers(&expanded)
+    }
+
+    /// Take the draft as a prompt, as Enter submits it, and record it
+    /// in the history. `None` when the draft is empty or shell mode is
+    /// armed.
+    pub(crate) fn take_prompt(&mut self) -> Option<String> {
+        if self.text.is_empty() || self.shell {
+            return None;
+        }
+        let text = self.take_draft();
+        self.push_history(&text);
+        self.reset_history_navigation();
+        Some(text)
+    }
+
+    /// Whether there is a draft to clear: text, or an armed shell mode.
+    #[must_use]
+    pub(crate) fn has_draft(&self) -> bool {
+        !self.text.is_empty() || self.shell
+    }
+
+    /// Throw the draft away, keeping its text in the history so Up
+    /// restores it. Collapsed pastes are kept expanded in that entry.
+    /// Attached images and shell mode are dropped.
+    pub(crate) fn clear_draft(&mut self) {
+        let text = self.take_draft();
+        self.attached.clear();
+        self.shell = false;
+        self.push_history(&text);
+        self.reset_history_navigation();
     }
 
     /// Remove `text[start..end]` and clamp the cursor to the deletion

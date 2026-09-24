@@ -230,7 +230,7 @@ fn start_lines() -> Vec<SlotItem> {
         SlotItem::Builtin("sessions"),
         SlotItem::Builtin("notices"),
         text(
-            "Tip: Enter while kage works steers the running turn.",
+            "Tip: Tab queues a message while kage works. Enter steers the running turn.",
             Some("KageMuted"),
         ),
     ]

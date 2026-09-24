@@ -88,6 +88,8 @@ impl App {
             run_started: None,
             key_labels: KeyLabels::default(),
             start_info: None,
+            pending: Vec::new(),
+            escalation: None,
         }
     }
 
@@ -509,51 +511,63 @@ impl App {
         if let Some(panel) = &self.approval_panel {
             return panel.hint();
         }
+        let now = Instant::now();
+        let note = self
+            .escalation
+            .filter(|(_, until)| *until > now && !self.input.has_draft());
+        match note {
+            Some((keys::Escalation::QuitArmed, _)) => return "ctrl+c again to quit".to_owned(),
+            Some((keys::Escalation::DraftCleared, _)) => {
+                return "draft cleared, up restores it".to_owned();
+            }
+            None => {}
+        }
         let working = self.is_working();
         let draft = !self.input.text().is_empty();
-        let mut parts: Vec<String> = Vec::new();
-        let mut say = |part: &str| parts.push(part.to_owned());
+        let label =
+            |app: &mut Self, action, what| app.key_label(action).map(|key| format!("{key} {what}"));
+        let queue = label(self, "QueuePrompt", "to queue").filter(|_| working);
+        let queue = queue.as_deref();
+        let mut parts: Vec<&str> = Vec::new();
         if self.input.is_modeless() {
             match (working, draft) {
-                (true, false) => say("esc to interrupt"),
+                (true, false) => parts.extend(queue.into_iter().chain(["esc to interrupt"])),
                 (true, true) => {
-                    say("enter to steer");
-                    say("esc to interrupt");
+                    parts.push("enter to steer");
+                    parts.extend(queue);
+                    parts.push("esc to clear the draft");
                 }
-                (false, true) => {
-                    say("enter to send");
-                    say("shift+enter for a newline");
-                }
-                (false, false) => {
-                    say("? for shortcuts");
-                    say("/ for commands");
-                }
+                (false, true) => parts.extend(["enter to send", "shift+enter for a newline"]),
+                (false, false) => parts.extend(["? for shortcuts", "/ for commands"]),
             }
             return parts.join(HINT_SEP);
         }
+        let help = label(self, "OpenHelp", "for shortcuts");
+        let commands = label(self, "BeginCommand", "for commands");
         match self.input.mode() {
             Mode::Normal => {
-                if working {
-                    say("ctrl+c to interrupt");
+                match (working, draft) {
+                    (_, true) => parts.push("ctrl+c to clear the draft"),
+                    (true, false) => parts.push("ctrl+c to interrupt"),
+                    (false, false) => {}
                 }
-                say("i to type");
-                if let Some(key) = self.key_label("OpenHelp") {
-                    parts.push(format!("{key} for shortcuts"));
-                }
-                if let Some(key) = self.key_label("BeginCommand") {
-                    parts.push(format!("{key} for commands"));
-                }
+                parts.push("i to type");
+                parts.extend(help.as_deref());
+                parts.extend(commands.as_deref());
             }
             Mode::Insert => {
                 match (working, draft) {
-                    (true, false) => say("ctrl+c to interrupt"),
-                    (true, true) => say("enter to steer"),
-                    (false, true) => say("enter to send"),
+                    (true, false) => parts.extend(queue.into_iter().chain(["ctrl+c to interrupt"])),
+                    (true, true) => {
+                        parts.push("enter to steer");
+                        parts.extend(queue);
+                    }
+                    (false, true) => parts.push("enter to send"),
                     (false, false) => {}
                 }
-                say("esc for normal mode");
+                parts.push("esc for normal mode");
             }
-            Mode::Visual => say("esc to leave visual mode"),
+            Mode::Visual => parts.push("esc to leave visual mode"),
         }
         parts.join(HINT_SEP)
     }

@@ -127,6 +127,10 @@ pub enum RunRequest {
         text: String,
         /// Queued image attachments, in attach order.
         images: Vec<crate::image::AttachedImage>,
+        /// While a run is in flight: `true` delivers the prompt after
+        /// the run ends, `false` steers it into the run at the next
+        /// turn boundary. Ignored while idle.
+        queue: bool,
     },
     /// Trip the agent loop's cancellation flag.
     Cancel,
@@ -823,6 +827,12 @@ pub struct App {
     key_labels: wiring::KeyLabels,
     /// What the start card lists. `None` until the host sets it.
     start_info: Option<view::StartInfo>,
+    /// Prompts sent during a run that the engine has not delivered
+    /// yet, in send order, shown above the input.
+    pending: Vec<view::PendingPrompt>,
+    /// What the last Esc or Ctrl+C left for the next press, and when
+    /// it lapses.
+    escalation: Option<(keys::Escalation, Instant)>,
 }
 
 mod actions;

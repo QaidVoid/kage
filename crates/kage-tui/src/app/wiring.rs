@@ -493,14 +493,6 @@ impl App {
         slots.specs()
     }
 
-    /// Start or stop the run clock on the working flag's transitions.
-    pub(crate) fn track_run(&mut self, usage: Option<&crate::usage::SessionUsage>) {
-        let working = usage.is_some_and(|u| u.working);
-        if working != self.run_started.is_some() {
-            self.run_started = working.then(Instant::now);
-        }
-    }
-
     /// The footer hint: the pending keys of a mapping sequence, else
     /// what the next keys do in the current state.
     pub(crate) fn footer_hint(&mut self) -> String {

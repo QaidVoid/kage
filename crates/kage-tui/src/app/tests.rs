@@ -1665,11 +1665,20 @@ fn the_activity_row_shows_while_working_with_elapsed_seconds() {
     lock(&buffer).push_user("hello");
     let (tx, _rx) = mpsc::channel();
     let mut app = app_with_defaults(buffer.clone(), tx);
-    let usage = crate::usage::shared_session_usage();
-    app.set_session_usage(usage.clone());
+    app.set_session_usage(crate::usage::shared_session_usage());
+    let (events_tx, events_rx) = mpsc::channel();
+    app.set_engine_events(events_rx);
+    let session = kage_core::SessionId::new();
+    let run_event = |seq, event: kage_core::protocol::HostEvent| {
+        events_tx.send(envelope(session, seq, event)).unwrap();
+    };
+    let ended = || kage_core::protocol::HostEvent::RunEnded {
+        outcome: kage_core::protocol::RunOutcome::Completed,
+    };
     let idle = snapshot_rows(&render_app(&mut app));
     assert!(idle.iter().all(|r| !r.contains("Working")), "{idle:?}");
-    lock(&usage).working = true;
+    run_event(1, kage_core::protocol::HostEvent::RunStarted);
+    app.drain_engine_events();
     let rows = snapshot_rows(&render_app(&mut app));
     let row = rows
         .iter()
@@ -1685,9 +1694,14 @@ fn the_activity_row_shows_while_working_with_elapsed_seconds() {
             .any(|r| r == "  Running cargo test (14s, ctrl+c to interrupt)"),
         "{rows:?}"
     );
-    lock(&usage).working = false;
+    run_event(2, ended());
+    run_event(3, kage_core::protocol::HostEvent::RunStarted);
+    app.drain_engine_events();
+    assert!(app.run_started.unwrap().elapsed() < Duration::from_secs(1));
+    run_event(4, ended());
+    app.drain_engine_events();
     let rows = snapshot_rows(&render_app(&mut app));
-    assert!(rows.iter().all(|r| !r.contains("interrupt")), "{rows:?}");
+    assert!(rows.iter().all(|r| !r.contains("to interrupt")), "{rows:?}");
 }
 
 #[test]

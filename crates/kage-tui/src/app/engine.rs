@@ -164,16 +164,20 @@ impl App {
                 });
             }
             HostEvent::PermissionResolved { request_id } => self.drop_permission(request_id),
-            HostEvent::RunEnded { .. } => {
-                self.permission_queue.clear();
-                self.approval_panel = None;
-                self.pending_permission = None;
-                let mut buf = lock(&self.buffer);
-                buf.finish_streaming();
-                buf.interrupt_running_tools();
-            }
-            HostEvent::RunStarted | HostEvent::TitleChanged { .. } => {}
+            HostEvent::RunStarted => self.run_started = Some(Instant::now()),
+            HostEvent::RunEnded { .. } => self.end_run(),
+            HostEvent::TitleChanged { .. } => {}
         }
+    }
+
+    fn end_run(&mut self) {
+        self.run_started = None;
+        self.permission_queue.clear();
+        self.approval_panel = None;
+        self.pending_permission = None;
+        let mut buf = lock(&self.buffer);
+        buf.finish_streaming();
+        buf.interrupt_running_tools();
     }
 
     /// Show the oldest waiting permission request once the screen is

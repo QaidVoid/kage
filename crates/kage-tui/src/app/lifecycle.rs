@@ -315,7 +315,6 @@ impl App {
         self.refresh_plugin_widget_texts_if_due(render_width);
         let (mut buffer, buffer_version) = self.take_draw_snapshot();
         let session_usage = self.session_usage_snapshot();
-        self.track_run(session_usage.as_ref());
         let hint = self.footer_hint();
         let activity = self.activity_label(&buffer);
         let title = self

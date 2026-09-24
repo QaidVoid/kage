@@ -1,406 +1,437 @@
-//! Tool-pair and tool block line builders and styles.
+//! Tool row and block line builders and styles.
 
 #[allow(clippy::wildcard_imports)] // free-fn split: shares the parent view module scope
 use super::*;
 
-/// Render a paired `ToolCall` + `ToolResult` as one composite block.
+use serde_json::Value;
+
+use super::modeline::spinner_frame;
+use super::tool_view::{
+    BashExit, BodyLine, LineKind, ToolBody, ToolLabel, ToolPhase, arg_rows, bash_output, describe,
+    edit_diff, format_elapsed, group_summary,
+};
+
+/// Output lines a folded row shows for bash, errors and unknown tools.
+const FOLDED_BODY_LINES: usize = 5;
+/// Diff lines a folded edit row shows.
+const FOLDED_DIFF_LINES: usize = 10;
+/// Max body lines shown for an unfolded tool row. Bounds the
+/// worst-case line construction cost without affecting typical
+/// outputs.
+const UNFOLDED_MAX_LINES: usize = 500;
+/// Byte cap that complements [`UNFOLDED_MAX_LINES`].
+const UNFOLDED_MAX_BYTES: usize = 256 * 1024;
+/// Indent of body lines, two cells past the verb.
+const BODY_INDENT: &str = "    ";
+
+/// One tool call as the row renderer sees it.
+pub(crate) struct ToolRow<'a> {
+    /// Tool name as the model invoked it.
+    pub(crate) name: &'a str,
+    /// Parsed input.
+    pub(crate) input: &'a Value,
+    /// Where the call is in its lifecycle.
+    pub(crate) phase: ToolPhase,
+    /// Whether the body is collapsed.
+    pub(crate) folded: bool,
+    /// Elapsed time while running, or the recorded duration once
+    /// finished.
+    pub(crate) elapsed_ms: Option<u64>,
+    /// The result text once finished, otherwise the latest progress.
+    pub(crate) output: &'a str,
+}
+
+/// Render one tool call as a verb-first row on its state-tinted band:
 ///
-/// Layout (folded -> just the header):
 /// ```text
-/// > read README.md                    <- header
-///                                     <- blank
-///   ... (12 earlier lines)            <- truncation hint
-///   matching first visible line       <- body (tail-truncated)
-///   matching second visible line
-///                                     <- blank
-///   Took 23ms | 1.2 KB                <- dim footer
+/// * Ran cargo build -p kage-cli                              4.9s
+///     ... 9 earlier lines
+///        Finished `dev` profile target(s) in 4.8s
 /// ```
-pub(crate) fn tool_pair_to_lines(
-    call: &Block,
-    result: &Block,
+///
+/// The header carries a state bullet, the verb, the target, any stats
+/// and a right-aligned duration, exit code or state word. Folded rows
+/// show a short body by kind: nothing for read-only tools, the output
+/// tail for bash, the diff for edits, and the first lines for errors
+/// and other tools. Unfolded rows show the full body up to
+/// [`UNFOLDED_MAX_LINES`].
+pub(crate) fn tool_row_lines(
+    row: &ToolRow<'_>,
     width: u16,
     emphasis: Emphasis,
     row_budget: Option<usize>,
 ) -> Vec<Line<'static>> {
-    let (name, input_summary, input_pretty, folded) = match call {
-        Block::ToolCall {
-            name,
-            input_summary,
-            input_pretty,
-            folded,
-            ..
-        } => (name, input_summary, input_pretty, *folded),
-        _ => return Vec::new(),
-    };
-    let (output, is_error, duration_ms) = match result {
-        Block::ToolResult {
-            output,
-            is_error,
-            duration_ms,
-            ..
-        } => (output, *is_error, *duration_ms),
-        _ => return Vec::new(),
-    };
-
-    let style = tool_call_style();
-    let dim = Style::default().fg(crate::theme::current().muted_fg);
-    let mut content: Vec<Line<'static>> = Vec::new();
-
-    // Header: `<fold> <name> <summary>  <size>  Took <ms>` packs the
-    // most-useful at-a-glance info on a single row regardless of fold
-    // state. The body preview grows below it.
-    let mut header_spans = vec![
-        Span::styled(
-            format!("{} ", fold_indicator(folded)),
-            style.add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(name.to_owned(), style.add_modifier(Modifier::BOLD)),
-    ];
-    if !input_summary.is_empty() {
-        header_spans.push(Span::raw(" "));
-        header_spans.push(Span::styled(input_summary.to_owned(), style));
-    }
-    header_spans.push(Span::raw("  "));
-    if is_error {
-        header_spans.push(Span::styled(
-            "ERROR".to_owned(),
-            tool_error_style().add_modifier(Modifier::BOLD),
-        ));
-    } else {
-        header_spans.push(Span::styled(human_size(output.len()), dim));
-    }
-    if let Some(footer) = duration_footer(duration_ms) {
-        header_spans.push(Span::raw("  "));
-        header_spans.push(Span::styled(footer, dim));
-    }
-    content.push(Line::from(header_spans));
-
-    // Body: tail-truncated. Folded gets a small preview window;
-    // unfolded shows much more. Unfolded with hundreds of huge tool
-    // outputs hurts frame time so the cap is intentional in both.
-    let (cap_lines, cap_bytes) = if folded {
-        (FOLDED_PREVIEW_LINES, FOLDED_PREVIEW_BYTES)
-    } else {
-        (UNFOLDED_MAX_LINES, UNFOLDED_MAX_BYTES)
-    };
-    let body_style = if is_error {
-        tool_error_style()
-    } else {
-        tool_result_style()
-    };
-    let body = truncated_body(
-        output,
-        body_style,
-        cap_lines,
-        cap_bytes,
-        body_trim_for(name),
-    );
-    if !body.is_empty() {
-        content.push(Line::raw(""));
-        let highlight_limit = row_budget.map(|b| b.saturating_sub(3));
-        let highlighted = highlight_read_body_if_applicable(
-            name,
-            input_summary,
-            &body,
-            body_style,
-            highlight_limit,
-        );
-        for line in highlighted {
-            content.push(line);
-        }
-    }
-    if !folded && input_recap_worth_showing(name, input_summary, input_pretty) {
-        content.push(Line::raw(""));
-        content.push(Line::from(Span::styled("input:".to_owned(), dim)));
-        for body_line in plain_lines(input_pretty, style) {
-            content.push(body_line);
-        }
-    }
     let theme = crate::theme::current();
-    let bg = if is_error {
-        theme.tool_error_bg
+    let label = describe(row.name, row.input);
+    let max = bubble_content_width(width);
+    let (output, exit) = if row.name == "bash" {
+        bash_output(row.output)
     } else {
-        theme.tool_bg
+        (text_lines(row.output), None)
     };
-    let rule = if is_error {
-        theme.tool_error_rule
+    let (bullet, bullet_style) = phase_bullet(row.phase, &theme);
+    let verb = if matches!(
+        row.phase,
+        ToolPhase::Streaming | ToolPhase::Waiting | ToolPhase::Running
+    ) {
+        label.verb_live
     } else {
-        theme.tool_rule
+        label.verb_done
     };
-    wrap_in_bubble_focused(content, rule, bg, width, emphasis, None)
-}
-
-/// Lines and bytes shown in a folded tool block's preview. Trades
-/// completeness for screen real estate; the user expands with `zo` to
-/// see more.
-const FOLDED_PREVIEW_LINES: usize = 6;
-/// Byte cap that complements [`FOLDED_PREVIEW_LINES`].
-const FOLDED_PREVIEW_BYTES: usize = 2 * 1024;
-/// Max body lines shown for an unfolded tool block. Bounds the
-/// worst-case line construction cost without affecting typical
-/// outputs (most are well under this). The height estimator uses the
-/// same cap so scroll geometry stays consistent.
-const UNFOLDED_MAX_LINES: usize = 500;
-/// Byte cap for unfolded tool output body.
-const UNFOLDED_MAX_BYTES: usize = 256 * 1024;
-
-/// Heuristic: should we show the pretty-printed input above the output
-/// body? Skip it when the header summary already conveys the call (the
-/// common case for `read README.md`, `find *.rs`, etc.) and only show
-/// it when the user might genuinely want to inspect arguments
-/// (multi-line bash, complex JSON inputs).
-fn input_recap_worth_showing(name: &str, summary: &str, pretty: &str) -> bool {
-    // Bash commands often span multiple lines via embedded newlines;
-    // showing the full pretty version is useful there.
-    if matches!(name, "bash" | "shell") && summary.contains('\n') {
-        return true;
-    }
-    // For any other tool, skip the recap when the pretty form is just
-    // the same JSON we already summarized to. The summary covers it.
-    let pretty_compact = pretty.replace([' ', '\n'], "");
-    pretty_compact.len() > 80 && !pretty_compact.contains(summary.replace(' ', "").as_str())
-}
-
-/// `Took 12ms` style timing string, or `None` when timing is unknown.
-#[allow(clippy::cast_precision_loss)]
-fn duration_footer(ms: Option<u64>) -> Option<String> {
-    let ms = ms?;
-    if ms < 1000 {
-        Some(format!("Took {ms}ms"))
-    } else {
-        let secs = ms as f64 / 1000.0;
-        Some(format!("Took {secs:.1}s"))
-    }
-}
-
-/// Render `output` showing its **last** N lines (with a `... ({n}
-/// earlier lines)` marker on top). Tools like `find`, `grep`, and
-/// `bash` typically have the most relevant content near the tail; we
-/// follow pi's convention of preserving that.
-/// Whether a tool's body preview should keep the head (start) or
-/// tail (end) of the output when truncated. Reading a file means the
-/// top is most useful; running `find`/`grep`/`bash` means the most
-/// recent / final lines carry the result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BodyTrim {
-    Head,
-    Tail,
-}
-
-fn body_trim_for(tool: &str) -> BodyTrim {
-    match tool {
-        "read" | "view" => BodyTrim::Head,
-        _ => BodyTrim::Tail,
-    }
-}
-
-/// For `read`/`view` tool blocks, run the (already-truncated) body
-/// through syntect using the syntax inferred from the file path's
-/// extension. Other tools pass through unchanged.
-///
-/// Operates on already-rendered lines so it preserves the tail/head
-/// truncation marker added by `truncated_body`. The marker line is
-/// the only one whose first span style is the dim `DarkGray`; we
-/// detect that and skip highlighting it.
-fn highlight_read_body_if_applicable(
-    tool_name: &str,
-    input_summary: &str,
-    body: &[Line<'static>],
-    fallback: Style,
-    highlight_limit: Option<usize>,
-) -> Vec<Line<'static>> {
-    if !matches!(tool_name, "read" | "view") {
-        return body.to_vec();
-    }
-    let path = input_summary.split_whitespace().next().unwrap_or("");
-    let ext = std::path::Path::new(path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
-    if ext.is_empty() {
-        return body.to_vec();
-    }
-    let mut out: Vec<Line<'static>> = Vec::with_capacity(body.len());
-    let mut highlighted_count = 0usize;
-    for line in body {
-        let original_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        if original_text.trim_start().starts_with("...") {
-            out.push(line.clone());
-            continue;
-        }
-        let over_budget = highlight_limit.is_some_and(|limit| highlighted_count >= limit);
-        if over_budget {
-            out.push(line.clone());
-        } else {
-            let highlighted = crate::syntax::highlight_extension(&original_text, ext, fallback);
-            highlighted_count += highlighted.len();
-            for hl in highlighted {
-                out.push(hl);
-            }
-        }
-    }
-    out
-}
-
-fn truncated_body(
-    output: &str,
-    style: Style,
-    cap_lines: usize,
-    cap_bytes: usize,
-    trim: BodyTrim,
-) -> Vec<Line<'static>> {
-    if output.is_empty() {
-        return Vec::new();
-    }
-    let lines: Vec<&str> = output.split('\n').collect();
-    let total = lines.len();
-    let mut bytes = 0usize;
-    let take_iter: Box<dyn Iterator<Item = &&str>> = match trim {
-        BodyTrim::Head => Box::new(lines.iter()),
-        BodyTrim::Tail => Box::new(lines.iter().rev()),
-    };
-    let mut taken: Vec<&str> = Vec::new();
-    for line in take_iter {
-        if taken.len() >= cap_lines || bytes >= cap_bytes {
-            break;
-        }
-        bytes += line.len() + 1;
-        taken.push(*line);
-    }
-    if matches!(trim, BodyTrim::Tail) {
-        taken.reverse();
-    }
-    let elided = total - taken.len();
-    let dim = Style::default().fg(crate::theme::current().muted_fg);
-    let elision = match trim {
-        BodyTrim::Head => format!("... ({elided} more lines)"),
-        BodyTrim::Tail => format!("... ({elided} earlier lines)"),
-    };
-    let mut out = Vec::new();
-    if matches!(trim, BodyTrim::Tail) && elided > 0 {
-        out.push(Line::from(Span::styled(elision.clone(), dim)));
-    }
-    for line in taken {
-        out.push(Line::from(Span::styled(line.to_owned(), style)));
-    }
-    if matches!(trim, BodyTrim::Head) && elided > 0 {
-        out.push(Line::from(Span::styled(elision, dim)));
-    }
-    out
-}
-
-/// Header for a tool-call block: `{indicator} {name} {summary}` with no
-/// bracketed tag. The summary is bold so the tool name and the salient
-/// argument both pop, but the surrounding line stays compact.
-/// Header for a tool-result block. Folded results inline a size pill
-/// (or `ERROR` glyph) and a one-line preview of the output so the user
-/// sees the gist without expanding. Unfolded results keep just the
-/// name + size and rely on the body for detail.
-pub(crate) fn tool_result_header_line(
-    folded: bool,
-    name: &str,
-    output: &str,
-    is_error: bool,
-) -> Line<'static> {
-    let indicator = if folded { '<' } else { 'v' };
-    let style = if is_error {
+    let right = right_text(row, exit);
+    let right_style = if row.phase == ToolPhase::Failed {
         tool_error_style()
     } else {
-        tool_result_style()
+        Style::default().fg(theme.muted_fg)
+    };
+    let mut content = vec![header_row(
+        (bullet, bullet_style),
+        verb,
+        &label.target,
+        &label.stats,
+        (&right, right_style),
+        max,
+    )];
+    let body = if row.folded {
+        folded_body(row, &label, output)
+    } else {
+        unfolded_body(row, &label, output, row_budget)
+    };
+    let clip = row.folded.then_some(max.saturating_sub(BODY_INDENT.len()));
+    content.extend(body.into_iter().map(|line| indent_body(line, clip)));
+    let (rule, bg) = match row.phase {
+        ToolPhase::Failed => (theme.tool_error_rule, theme.tool_error_bg),
+        ToolPhase::Streaming | ToolPhase::Waiting | ToolPhase::Running => {
+            (theme.tool_pending_rule, theme.tool_pending_bg)
+        }
+        ToolPhase::Done | ToolPhase::Denied | ToolPhase::Interrupted => {
+            (theme.tool_rule, theme.tool_bg)
+        }
+    };
+    wrap_in_bubble_focused(content, rule, bg, width, emphasis)
+}
+
+/// Render a run of finished read-only calls as one `Explored` row,
+/// listing the targets below it with consecutive calls of one verb
+/// joined on a line.
+pub(crate) fn tool_group_lines(
+    calls: &[&Block],
+    width: u16,
+    emphasis: Emphasis,
+) -> Vec<Line<'static>> {
+    let theme = crate::theme::current();
+    let max = bubble_content_width(width);
+    let labels: Vec<ToolLabel> = calls
+        .iter()
+        .filter_map(|b| match b {
+            Block::ToolCall { name, input, .. } => Some(describe(name, input)),
+            _ => None,
+        })
+        .collect();
+    let mut content = vec![header_row(
+        phase_bullet(ToolPhase::Done, &theme),
+        "Explored",
+        &group_summary(&labels),
+        "",
+        ("", Style::default()),
+        max,
+    )];
+    let mut lines: Vec<(&str, Vec<&str>)> = Vec::new();
+    for label in &labels {
+        match lines.last_mut() {
+            Some((verb, targets)) if *verb == label.verb_done => targets.push(&label.target),
+            _ => lines.push((label.verb_done, vec![&label.target])),
+        }
+    }
+    let style = tool_result_style();
+    for (verb, targets) in lines {
+        let line = Line::from(Span::styled(
+            format!("{verb} {}", targets.join(", ")),
+            style,
+        ));
+        content.push(indent_body(
+            line,
+            Some(max.saturating_sub(BODY_INDENT.len())),
+        ));
+    }
+    wrap_in_bubble_focused(content, theme.tool_rule, theme.tool_bg, width, emphasis)
+}
+
+/// The state bullet of a tool row and its style.
+fn phase_bullet(phase: ToolPhase, theme: &crate::theme::Theme) -> (&'static str, Style) {
+    let fg = |c| Style::default().fg(c);
+    match phase {
+        ToolPhase::Streaming => ("\u{2022}", fg(theme.tool_pending_rule)),
+        ToolPhase::Running => (spinner_frame(), fg(theme.tool_pending_rule)),
+        ToolPhase::Waiting => ("\u{2022}", theme.group_style("KageApproval")),
+        ToolPhase::Done => ("\u{2022}", fg(theme.success_fg)),
+        ToolPhase::Failed => ("\u{2717}", fg(theme.tool_error_rule)),
+        ToolPhase::Denied | ToolPhase::Interrupted => ("\u{2298}", fg(theme.muted_fg)),
+    }
+}
+
+/// The right-aligned part of a tool header: the duration, a failed
+/// command's exit status, or the state word.
+fn right_text(row: &ToolRow<'_>, exit: Option<BashExit>) -> String {
+    let elapsed = row.elapsed_ms.map(format_elapsed);
+    match row.phase {
+        ToolPhase::Streaming => String::new(),
+        ToolPhase::Waiting => "waiting".to_owned(),
+        ToolPhase::Denied => "denied".to_owned(),
+        ToolPhase::Interrupted => "interrupted".to_owned(),
+        ToolPhase::Running | ToolPhase::Done => elapsed.unwrap_or_default(),
+        ToolPhase::Failed => {
+            let status = match exit {
+                Some(BashExit::Code(code)) => Some(format!("exit {code}")),
+                Some(BashExit::Signal) => Some("signal".to_owned()),
+                None => None,
+            };
+            [status, elapsed]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" \u{b7} ")
+        }
+    }
+}
+
+/// One header row: `bullet verb target stats`, then `right` pushed to
+/// the right edge of `max` cells. The target is cut to fit, and the
+/// stats are dropped when too little room is left for the target.
+fn header_row(
+    (bullet, bullet_style): (&str, Style),
+    verb: &str,
+    target: &str,
+    stats: &str,
+    (right, right_style): (&str, Style),
+    max: usize,
+) -> Line<'static> {
+    let theme = crate::theme::current();
+    let text = Style::default().fg(theme.tool_result_fg);
+    let dim = Style::default().fg(theme.muted_fg);
+    let reserve = if right.is_empty() {
+        0
+    } else {
+        right.width() + 2
+    };
+    let avail = max.saturating_sub(bullet.width() + 1 + verb.width() + reserve);
+    let stats_w = if stats.is_empty() {
+        0
+    } else {
+        stats.width() + 1
+    };
+    let (target_room, stats) = if avail >= target.width() + 1 + stats_w || avail >= stats_w + 12 {
+        (avail - stats_w, stats)
+    } else {
+        (avail, "")
     };
     let mut spans = vec![
-        Span::styled(format!("{indicator} "), style.add_modifier(Modifier::BOLD)),
-        Span::styled(name.to_owned(), style.add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{bullet} "),
+            bullet_style.add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(verb.to_owned(), text.add_modifier(Modifier::BOLD)),
     ];
-    spans.push(Span::raw("  "));
-    if is_error {
-        spans.push(Span::styled(
-            "ERROR".to_owned(),
-            tool_error_style().add_modifier(Modifier::BOLD),
-        ));
-    } else {
-        spans.push(Span::styled(
-            human_size(output.len()),
-            Style::default().fg(crate::theme::current().muted_fg),
-        ));
+    if !target.is_empty() && target_room > 1 {
+        let cut = truncate_to_width(target, target_room - 1, "...");
+        spans.push(Span::styled(format!(" {cut}"), text));
     }
-    if folded && let Some(preview) = first_line_preview(output, 60) {
-        spans.push(Span::raw("  "));
-        spans.push(Span::styled(
-            format!("\u{b7} {preview}"),
-            Style::default().fg(crate::theme::current().muted_fg),
-        ));
+    if !stats.is_empty() {
+        spans.push(Span::styled(format!(" {stats}"), dim));
+    }
+    if !right.is_empty() {
+        let used: usize = spans.iter().map(|s| s.content.width()).sum();
+        let gap = max.saturating_sub(used + right.width()).max(2);
+        spans.push(Span::raw(" ".repeat(gap)));
+        spans.push(Span::styled(right.to_owned(), right_style));
     }
     Line::from(spans)
 }
 
-/// Render a byte count as a short human-readable string. Used for the
-/// `(1.2 KB)` style annotation in tool result headers.
-#[must_use]
-#[allow(clippy::cast_precision_loss)]
-pub(crate) fn human_size(bytes: usize) -> String {
-    const KB: usize = 1024;
-    const MB: usize = KB * 1024;
-    const GB: usize = MB * 1024;
-    if bytes < KB {
-        format!("{bytes} B")
-    } else if bytes < MB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else if bytes < GB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
+/// The body of a folded row.
+fn folded_body(row: &ToolRow<'_>, label: &ToolLabel, output: Vec<BodyLine>) -> Vec<Line<'static>> {
+    match (row.phase, label.body) {
+        (ToolPhase::Denied, _) => Vec::new(),
+        (_, ToolBody::Tail) => tail(output, FOLDED_BODY_LINES),
+        (ToolPhase::Failed, _) => head(output, FOLDED_BODY_LINES, tool_error_style()),
+        (ToolPhase::Done, ToolBody::Diff) => head(
+            edit_diff(row.input).lines,
+            FOLDED_DIFF_LINES,
+            tool_result_style(),
+        ),
+        (ToolPhase::Done, ToolBody::Head) => head(output, FOLDED_BODY_LINES, tool_result_style()),
+        _ => Vec::new(),
     }
 }
 
-/// Cap on the rendered body of a tool result. Beyond either limit the
-/// body is truncated and a one-line marker tells the user how many
-/// rows were elided. Tool outputs from `find`, `grep`, or large file
-/// reads otherwise dominate the screen and slow each frame down.
-const MAX_BODY_LINES: usize = 200;
-/// Byte cap that complements [`MAX_BODY_LINES`] for outputs with very
-/// long lines (e.g., a single-line JSON dump).
-const MAX_BODY_BYTES: usize = 16 * 1024;
-
-/// Render `output` as a list of styled lines, capping at
-/// [`MAX_BODY_LINES`] / [`MAX_BODY_BYTES`] and appending a
-/// `... (N more lines)` marker when content was elided. The full text
-/// stays in the buffer's `Block` so a future "expand fully" gesture
-/// can show the rest without rerunning the tool.
-pub(crate) fn truncated_body_lines(output: &str, style: Style) -> Vec<Line<'static>> {
-    if output.is_empty() {
-        return Vec::new();
+/// The body of an unfolded row: the diff for edits, or the arguments
+/// for tools without a tailored summary or without output yet, then
+/// the output.
+fn unfolded_body(
+    row: &ToolRow<'_>,
+    label: &ToolLabel,
+    output: Vec<BodyLine>,
+    row_budget: Option<usize>,
+) -> Vec<Line<'static>> {
+    let mut out = Vec::new();
+    if label.body == ToolBody::Diff {
+        out.extend(head(
+            edit_diff(row.input).lines,
+            UNFOLDED_MAX_LINES,
+            tool_result_style(),
+        ));
+    } else if label.verb_done == "Called" || output.is_empty() {
+        let key = Style::default().fg(crate::theme::current().muted_fg);
+        out.extend(arg_rows(row.input).into_iter().map(|(k, v)| {
+            Line::from(vec![
+                Span::styled(format!("{k}  "), key),
+                Span::styled(v, tool_result_style()),
+            ])
+        }));
     }
-    let total_lines = output.split('\n').count();
-    let mut bytes = 0usize;
-    let mut shown = 0usize;
-    let mut out: Vec<Line<'static>> = Vec::new();
-    for line in output.split('\n') {
-        if shown >= MAX_BODY_LINES || bytes >= MAX_BODY_BYTES {
-            break;
-        }
-        bytes += line.len() + 1;
-        out.push(Line::from(Span::styled(line.to_owned(), style)));
-        shown += 1;
-    }
-    if shown < total_lines {
-        let remaining = total_lines - shown;
-        out.push(Line::from(Span::styled(
-            format!("... ({remaining} more lines)"),
-            Style::default()
-                .fg(crate::theme::current().muted_fg)
-                .add_modifier(Modifier::DIM),
-        )));
+    let output = capped(output);
+    match (row.phase, label.body) {
+        (_, ToolBody::Tail) => out.extend(tail(output, UNFOLDED_MAX_LINES)),
+        (ToolPhase::Failed, _) => out.extend(head(output, UNFOLDED_MAX_LINES, tool_error_style())),
+        (_, ToolBody::Diff) => {}
+        (phase, _) => match read_extension(row).filter(|_| phase == ToolPhase::Done) {
+            Some(ext) => out.extend(highlighted_head(output, ext, row_budget)),
+            None => out.extend(head(output, UNFOLDED_MAX_LINES, tool_result_style())),
+        },
     }
     out
 }
 
-/// First non-empty line of `text`, trimmed and truncated to `max`
-/// display columns. Returns `None` when there is no non-empty
-/// content.
-pub(crate) fn first_line_preview(text: &str, max: usize) -> Option<String> {
-    let line = text.lines().find(|l| !l.trim().is_empty())?;
-    Some(truncate_to_width(line.trim(), max, "..."))
+/// The file extension of a successful `read`, whose output is syntax
+/// highlighted when unfolded.
+fn read_extension<'a>(row: &ToolRow<'a>) -> Option<&'a str> {
+    if !matches!(row.name, "read" | "view") {
+        return None;
+    }
+    let path = row.input.get("path").and_then(Value::as_str)?;
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+}
+
+/// The first [`UNFOLDED_MAX_LINES`] lines of a read, syntax
+/// highlighted as far as the caller will display them.
+fn highlighted_head(
+    mut output: Vec<BodyLine>,
+    ext: &str,
+    row_budget: Option<usize>,
+) -> Vec<Line<'static>> {
+    let more = output.len().saturating_sub(UNFOLDED_MAX_LINES);
+    output.truncate(UNFOLDED_MAX_LINES);
+    let plain = output.split_off(row_budget.map_or(output.len(), |b| b.min(output.len())));
+    let code = output
+        .iter()
+        .map(|l| l.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut out = if output.is_empty() {
+        Vec::new()
+    } else {
+        crate::syntax::highlight_extension(&code, ext, tool_result_style())
+    };
+    out.extend(head(plain, usize::MAX, tool_result_style()));
+    if more > 0 {
+        out.push(elision(format!("... {more} more lines")));
+    }
+    out
+}
+
+/// `text` split into plain body lines.
+fn text_lines(text: &str) -> Vec<BodyLine> {
+    text.lines()
+        .map(|l| BodyLine {
+            kind: LineKind::Text,
+            text: l.to_owned(),
+        })
+        .collect()
+}
+
+/// The longest prefix of `lines` within [`UNFOLDED_MAX_BYTES`].
+fn capped(mut lines: Vec<BodyLine>) -> Vec<BodyLine> {
+    let mut bytes = 0usize;
+    if let Some(end) = lines.iter().position(|l| {
+        bytes += l.text.len() + 1;
+        bytes > UNFOLDED_MAX_BYTES
+    }) {
+        lines.truncate(end);
+    }
+    lines
+}
+
+/// The first `n` lines, with a marker for the rest.
+fn head(lines: Vec<BodyLine>, n: usize, text: Style) -> Vec<Line<'static>> {
+    let more = lines.len().saturating_sub(n);
+    let mut out: Vec<Line<'static>> = lines
+        .into_iter()
+        .take(n)
+        .map(|l| body_line(l, text))
+        .collect();
+    if more > 0 {
+        out.push(elision(format!("... {more} more lines")));
+    }
+    out
+}
+
+/// The last `n` lines, after a marker for the earlier ones.
+fn tail(lines: Vec<BodyLine>, n: usize) -> Vec<Line<'static>> {
+    let skip = lines.len().saturating_sub(n);
+    let mut out = Vec::with_capacity(n + 1);
+    if skip > 0 {
+        out.push(elision(format!("... {skip} earlier lines")));
+    }
+    let text = tool_result_style();
+    out.extend(lines.into_iter().skip(skip).map(|l| body_line(l, text)));
+    out
+}
+
+fn body_line(line: BodyLine, text: Style) -> Line<'static> {
+    let group = |name| crate::theme::current().group_style(name);
+    let span = match line.kind {
+        LineKind::Text => Span::styled(line.text, text),
+        LineKind::Add => Span::styled(format!("+ {}", line.text), group("KageDiffAdd")),
+        LineKind::Delete => Span::styled(format!("- {}", line.text), group("KageDiffDelete")),
+        LineKind::Marker => Span::styled(line.text, group("KageMuted")),
+    };
+    Line::from(span)
+}
+
+fn elision(text: String) -> Line<'static> {
+    Line::from(Span::styled(
+        text,
+        Style::default().fg(crate::theme::current().muted_fg),
+    ))
+}
+
+/// Indent a body line under the verb, cutting it to `clip` cells when
+/// given so a folded row stays one screen row per line.
+fn indent_body(line: Line<'static>, clip: Option<usize>) -> Line<'static> {
+    let mut spans = vec![Span::raw(BODY_INDENT)];
+    let Some(mut room) = clip else {
+        spans.extend(line.spans);
+        return Line::from(spans);
+    };
+    for span in line.spans {
+        if room == 0 {
+            break;
+        }
+        let w = span.content.width();
+        if w <= room {
+            room -= w;
+            spans.push(span);
+        } else {
+            spans.push(Span::styled(
+                truncate_to_width(&span.content, room, "..."),
+                span.style,
+            ));
+            room = 0;
+        }
+    }
+    Line::from(spans)
 }
 
 pub(crate) fn header_line(

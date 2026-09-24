@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use kage_core::{Content, LoopError, LoopEvent, Message, Role, StopReason};
 
 use crate::buffer::Buffer;
+use crate::view::tool_view::ToolPhase;
 
 /// Cloneable handle to the conversation buffer shared between the App
 /// and its renderer.
@@ -31,32 +32,30 @@ pub fn apply_loop_event(buf: &mut Buffer, event: &LoopEvent) {
             push_user_message(buf, message);
         }
         LoopEvent::MessageStart { .. }
-        | LoopEvent::ToolUpdate { .. }
         | LoopEvent::MessageAppended { .. }
         | LoopEvent::TurnStarted { .. }
         | LoopEvent::TurnEnded { .. } => {
             // The buffer lazily begins an Assistant block on the first
             // text/thinking delta, so MessageStart is a no-op here.
-            // Mid-execution tool progress is consumed by plugin event
-            // handlers; the conversation buffer shows only the final
-            // tool result.
         }
         LoopEvent::TextDelta { delta, .. } => buf.append_assistant_delta(delta),
         LoopEvent::ThinkingDelta { delta, .. } => buf.append_thinking_delta(delta),
+        LoopEvent::ToolCallArgsDelta {
+            id,
+            name,
+            input_partial,
+        } => buf.upsert_tool_call(id.to_string(), name, input_partial.clone()),
         LoopEvent::ToolCallStart {
             id,
             name,
             input_partial,
-        }
-        | LoopEvent::ToolCallArgsDelta {
-            id,
-            name,
-            input_partial,
         } => {
-            let summary = summarize_input(name, input_partial);
-            let pretty = serde_json::to_string_pretty(input_partial)
-                .unwrap_or_else(|_| input_partial.to_string());
-            buf.upsert_tool_call(id.to_string(), name, summary, pretty);
+            let id = id.to_string();
+            buf.upsert_tool_call(id.clone(), name, input_partial.clone());
+            buf.set_tool_phase(&id, ToolPhase::Running);
+        }
+        LoopEvent::ToolUpdate { id, update } => {
+            buf.set_tool_progress(&id.to_string(), update.content.clone());
         }
         LoopEvent::ToolCallEnd { id, output } => {
             buf.push_tool_result(id.to_string(), output.text.clone(), output.is_error);
@@ -82,8 +81,8 @@ pub fn apply_loop_event(buf: &mut Buffer, event: &LoopEvent) {
         } => {
             buf.push_custom(
                 "kage:compaction",
-                format!("[compacted: kept {kept}, summarized {summarized}]\n{summary}"),
-                false,
+                format!("Compacted history (kept {kept}, summarized {summarized})\n{summary}"),
+                true,
             );
         }
         LoopEvent::ProviderRetry {
@@ -102,12 +101,12 @@ pub fn apply_loop_event(buf: &mut Buffer, event: &LoopEvent) {
                 use std::fmt::Write as _;
                 let _ = write!(msg, " (server asked for {req}s)");
             }
-            buf.push_custom("kage:notify", msg, false);
+            buf.replace_or_push_custom("kage:retry", msg);
         }
         LoopEvent::Error { kind } => {
             buf.finish_streaming();
             match kind {
-                LoopError::Cancelled => buf.push_custom("kage:notify", "interrupted", false),
+                LoopError::Cancelled => buf.push_custom("kage:notify", "Interrupted", false),
                 LoopError::Auth { message } => buf.push_custom(
                     "kage:error",
                     format!(
@@ -178,8 +177,9 @@ pub fn tool_durations(messages: &[Message]) -> HashMap<String, u64> {
 /// bubbles, assistant text/thinking blocks become their respective
 /// streamed-and-finished blocks, tool calls and tool results become the
 /// merged tool composites the renderer pairs at draw time. Pass
-/// `tool_durations` to recover real `Took Xms` values from session
-/// entry timestamps; an empty map renders as `Took --`.
+/// `tool_durations` to recover real durations from session entry
+/// timestamps; a call missing from the map shows none. Calls left
+/// without a result read as interrupted.
 #[allow(clippy::implicit_hasher)]
 pub fn populate_from_history(
     buf: &mut Buffer,
@@ -191,7 +191,7 @@ pub fn populate_from_history(
             Role::User => {
                 if let Some(text) = first_text(msg) {
                     if is_compaction_summary(&text) {
-                        buf.push_custom("kage:compaction", text, false);
+                        buf.push_custom("kage:compaction", text, true);
                     } else {
                         buf.push_user(text);
                     }
@@ -202,21 +202,15 @@ pub fn populate_from_history(
                     match block {
                         Content::Text { text } => {
                             if is_compaction_summary(text) {
-                                buf.push_custom("kage:compaction", text.clone(), false);
+                                buf.push_custom("kage:compaction", text.clone(), true);
                             } else {
                                 buf.append_assistant_delta(text);
                                 buf.finish_streaming();
                             }
                         }
-                        Content::Thinking { text } => {
-                            buf.append_thinking_delta(text);
-                            buf.finish_streaming();
-                        }
+                        Content::Thinking { text } => buf.push_thinking(text.clone()),
                         Content::ToolCall { id, name, input } => {
-                            let summary = summarize_input(name, input);
-                            let pretty = serde_json::to_string_pretty(input)
-                                .unwrap_or_else(|_| input.to_string());
-                            buf.push_tool_call(id.to_string(), name, summary, pretty);
+                            buf.push_tool_call(id.to_string(), name, input.clone());
                         }
                         Content::ToolResultBlock { .. }
                         | Content::Image { .. }
@@ -235,7 +229,7 @@ pub fn populate_from_history(
                         // Replay: real timing is recovered from the
                         // session's per-entry `ts` deltas via
                         // `tool_durations`. A miss yields `None`,
-                        // rendered as `Took --`.
+                        // shown without a duration.
                         let duration = tool_durations.get(&call_id.to_string()).copied();
                         buf.push_tool_result_with_duration(
                             call_id.to_string(),
@@ -249,6 +243,7 @@ pub fn populate_from_history(
             Role::System => {}
         }
     }
+    buf.interrupt_running_tools();
 }
 
 /// True when `text` looks like the synthetic compaction-summary
@@ -268,10 +263,10 @@ fn first_text(msg: &Message) -> Option<String> {
     })
 }
 
-/// One-line summary of a tool's input shown in the folded header: the
+/// One-line summary of a tool's input: the
 /// [`crate::view::tool_view::describe`] target, such as the path for
 /// `read` or the command for `bash`.
-fn summarize_input(name: &str, input: &serde_json::Value) -> String {
+pub(crate) fn summarize_input(name: &str, input: &serde_json::Value) -> String {
     if matches!(input, serde_json::Value::Null) {
         return String::new();
     }
@@ -470,6 +465,192 @@ mod tests {
         }
     }
 
+    fn bash_output(text: &str, is_error: bool) -> ToolOutput {
+        ToolOutput {
+            is_error,
+            text: text.into(),
+            structured: None,
+            terminate: false,
+        }
+    }
+
+    #[test]
+    fn tool_events_walk_the_phases() {
+        let (buf, mut hooks) = fresh();
+        let cid = ToolCallId::new("c1");
+        let phase = |buf: &SharedBuffer| match &lock(buf).blocks()[0] {
+            Block::ToolCall { phase, .. } => *phase,
+            other => panic!("expected ToolCall, got {other:?}"),
+        };
+        hooks.on_event(&LoopEvent::ToolCallArgsDelta {
+            id: cid.clone(),
+            name: "bash".into(),
+            input_partial: json!({}),
+        });
+        assert_eq!(phase(&buf), ToolPhase::Streaming);
+        hooks.on_event(&LoopEvent::ToolCallStart {
+            id: cid.clone(),
+            name: "bash".into(),
+            input_partial: json!({"command": "make"}),
+        });
+        assert_eq!(phase(&buf), ToolPhase::Running);
+        hooks.on_event(&LoopEvent::ToolCallEnd {
+            id: cid,
+            output: bash_output("stderr:\nno\nexit: 2", true),
+        });
+        assert_eq!(phase(&buf), ToolPhase::Failed);
+    }
+
+    #[test]
+    fn tool_updates_show_while_running_and_the_result_replaces_them() {
+        let (buf, mut hooks) = fresh();
+        let cid = ToolCallId::new("c1");
+        hooks.on_event(&LoopEvent::ToolCallStart {
+            id: cid.clone(),
+            name: "bash".into(),
+            input_partial: json!({"command": "make"}),
+        });
+        for content in ["compiling a", "compiling a\ncompiling b"] {
+            hooks.on_event(&LoopEvent::ToolUpdate {
+                id: cid.clone(),
+                update: kage_core::ToolUpdate {
+                    content: content.into(),
+                    structured: None,
+                },
+            });
+        }
+        let rendered = |buf: &SharedBuffer| {
+            let mut buf = lock(buf);
+            let backend = ratatui::backend::TestBackend::new(60, 12);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            let input = crate::input::InputState::new();
+            terminal
+                .draw(|frame| {
+                    let regions = crate::layout::split(frame.area(), 1, 0);
+                    crate::view::render(
+                        frame,
+                        regions,
+                        &mut buf,
+                        &input,
+                        None,
+                        &crate::view::StatusCtx::default(),
+                        None,
+                        &mut std::collections::BTreeMap::new(),
+                        None,
+                        &[],
+                    );
+                })
+                .unwrap();
+            let screen = terminal.backend().buffer().clone();
+            (0..screen.area.height)
+                .map(|y| {
+                    (0..screen.area.width)
+                        .map(|x| screen[(x, y)].symbol().to_owned())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let live = rendered(&buf);
+        assert!(
+            live.contains("compiling a") && live.contains("compiling b"),
+            "{live}"
+        );
+        assert_eq!(
+            live.matches("compiling a").count(),
+            1,
+            "replaced, not appended: {live}"
+        );
+        hooks.on_event(&LoopEvent::ToolCallEnd {
+            id: cid,
+            output: bash_output("stdout:\nall done\nexit: 0", false),
+        });
+        let done = rendered(&buf);
+        assert!(
+            done.contains("all done") && !done.contains("compiling"),
+            "{done}"
+        );
+    }
+
+    #[test]
+    fn consecutive_provider_retries_replace_one_notice() {
+        let (buf, mut hooks) = fresh();
+        for attempt in 1..=3 {
+            hooks.on_event(&LoopEvent::ProviderRetry {
+                attempt,
+                max_attempts: 5,
+                wait_secs: 1,
+                requested_secs: None,
+                error: "overloaded".into(),
+            });
+        }
+        let buf = lock(&buf);
+        assert_eq!(buf.blocks().len(), 1);
+        assert!(matches!(
+            &buf.blocks()[0],
+            Block::Custom { text, .. } if text.contains("retrying 3/5")
+        ));
+    }
+
+    #[test]
+    fn text_after_thinking_finishes_the_thinking_block() {
+        let (buf, mut hooks) = fresh();
+        hooks.on_event(&LoopEvent::ThinkingDelta {
+            id: id(),
+            delta: "hmm".into(),
+        });
+        hooks.on_event(&LoopEvent::TextDelta {
+            id: id(),
+            delta: "ok".into(),
+        });
+        let buf = lock(&buf);
+        assert!(matches!(
+            buf.blocks()[0],
+            Block::Thinking {
+                live: false,
+                folded: true,
+                duration_ms: Some(_),
+                ..
+            }
+        ));
+        assert!(!buf.is_timed(0));
+    }
+
+    #[test]
+    fn replayed_thinking_has_no_timing_and_orphan_calls_are_interrupted() {
+        let mut buf = Buffer::new();
+        let history = vec![Message::new(
+            Role::Assistant,
+            vec![
+                Content::Thinking {
+                    text: "plan".into(),
+                },
+                Content::ToolCall {
+                    id: ToolCallId::new("c1"),
+                    name: "bash".into(),
+                    input: json!({"command": "ls"}),
+                },
+            ],
+            None,
+        )];
+        populate_from_history(&mut buf, &history, &HashMap::new());
+        assert!(matches!(
+            buf.blocks()[0],
+            Block::Thinking {
+                duration_ms: None,
+                folded: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            buf.blocks()[1],
+            Block::ToolCall {
+                phase: ToolPhase::Interrupted,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn compaction_pushes_custom_block_with_summary() {
         let (buf, mut hooks) = fresh();
@@ -522,7 +703,7 @@ mod tests {
         match &blocks[1] {
             Block::Custom { kind, text, .. } => {
                 assert_eq!(kind, "kage:notify");
-                assert_eq!(text, "interrupted");
+                assert_eq!(text, "Interrupted");
             }
             other => panic!("expected Custom, got {other:?}"),
         }

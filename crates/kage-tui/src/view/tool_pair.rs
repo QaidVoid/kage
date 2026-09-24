@@ -1,36 +1,29 @@
 //! `ToolPairBlockWidget`: per-block renderer for a paired tool call
-//! and its result (the merged "tool block" the user sees in the buffer).
-//!
-//! Calls into `tool_pair_to_lines` and its private helper cluster
-//! (`truncated_body`, `body_trim_for`, `highlight_read_body_if_applicable`,
-//! `input_recap_worth_showing`, `duration_footer`) which live in
-//! `view.rs` because they are shared with the bubble layout path.
+//! and its result (the merged tool row the user sees in the buffer).
 
-use std::time::Instant;
+use std::sync::Arc;
 
 use ratatui::text::Line;
+use serde_json::Value;
 
-use super::tool_pair_to_lines;
+use super::tool_view::ToolPhase;
 use super::widget::{BlockWidget, RenderCtx};
+use super::{ToolRow, tool_row_lines};
 use crate::buffer::Block;
 
 /// Renders one [`Block::ToolCall`] paired with its matching
-/// [`Block::ToolResult`] as the merged tool block (header + body
-/// preview + duration footer + tinted bubble).
+/// [`Block::ToolResult`] as a finished tool row: state bullet, verb,
+/// target, duration and a body chosen by the tool's kind.
 ///
-/// The widget owns enough data from both sides of the pair to
-/// reconstruct the synthetic blocks the existing `tool_pair_to_lines`
-/// helper expects. Unpaired tool calls (still running) and unpaired
-/// tool results stay on the standalone `block_to_lines` path.
+/// Unpaired tool calls (still running) and unpaired tool results stay
+/// on the standalone widgets.
 #[derive(Clone, Debug)]
 pub struct ToolPairBlockWidget {
-    call_id: String,
     name: String,
-    input_summary: String,
-    input_pretty: String,
+    input: Arc<Value>,
+    phase: ToolPhase,
     folded: bool,
     output: String,
-    is_error: bool,
     duration_ms: Option<u64>,
 }
 
@@ -41,85 +34,56 @@ impl ToolPairBlockWidget {
     /// who already verified the pair from `Buffer` should `unwrap()`.
     #[must_use]
     pub fn from_pair(call: &Block, result: &Block) -> Option<Self> {
-        let (call_id, name, input_summary, input_pretty, folded) = match call {
-            Block::ToolCall {
-                call_id,
-                name,
-                input_summary,
-                input_pretty,
-                folded,
-                ..
-            } => (
-                call_id.clone(),
-                name.clone(),
-                input_summary.clone(),
-                input_pretty.clone(),
-                *folded,
-            ),
-            _ => return None,
+        let Block::ToolCall {
+            name,
+            input,
+            phase,
+            folded,
+            ..
+        } = call
+        else {
+            return None;
         };
-        let (output, is_error, duration_ms) = match result {
-            Block::ToolResult {
-                output,
-                is_error,
-                duration_ms,
-                ..
-            } => (output.clone(), *is_error, *duration_ms),
-            _ => return None,
+        let Block::ToolResult {
+            output,
+            duration_ms,
+            ..
+        } = result
+        else {
+            return None;
         };
         Some(Self {
-            call_id,
-            name,
-            input_summary,
-            input_pretty,
-            folded,
-            output,
-            is_error,
-            duration_ms,
+            name: name.clone(),
+            input: Arc::clone(input),
+            phase: *phase,
+            folded: *folded,
+            output: output.clone(),
+            duration_ms: *duration_ms,
         })
-    }
-
-    fn synthetic_call(&self) -> Block {
-        Block::ToolCall {
-            call_id: self.call_id.clone(),
-            name: self.name.clone(),
-            input_summary: self.input_summary.clone(),
-            input_pretty: self.input_pretty.clone(),
-            folded: self.folded,
-            started_at: Instant::now(),
-        }
-    }
-
-    fn synthetic_result(&self) -> Block {
-        Block::ToolResult {
-            call_id: self.call_id.clone(),
-            name: self.name.clone(),
-            output: self.output.clone(),
-            is_error: self.is_error,
-            folded: self.folded,
-            duration_ms: self.duration_ms,
-        }
     }
 }
 
 impl BlockWidget for ToolPairBlockWidget {
     fn lines(&self, width: u16, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
-        tool_pair_to_lines(
-            &self.synthetic_call(),
-            &self.synthetic_result(),
-            width,
-            ctx.emphasis,
-            ctx.row_budget,
-        )
+        let row = ToolRow {
+            name: &self.name,
+            input: &self.input,
+            phase: self.phase,
+            folded: self.folded,
+            elapsed_ms: self.duration_ms,
+            output: &self.output,
+        };
+        tool_row_lines(&row, width, ctx.emphasis, ctx.row_budget)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use serde_json::json;
 
     use super::super::Emphasis;
     use super::*;
+    use crate::buffer::Buffer;
     use crate::theme::Theme;
 
     fn ctx(theme: &Theme) -> RenderCtx<'_> {
@@ -133,7 +97,7 @@ mod tests {
         }
     }
 
-    fn painted(lines: &[Line<'_>]) -> String {
+    fn rows_of(lines: &[Line<'_>]) -> Vec<String> {
         lines
             .iter()
             .map(|l| {
@@ -141,100 +105,140 @@ mod tests {
                     .iter()
                     .map(|s| s.content.as_ref())
                     .collect::<String>()
+                    .trim_end()
+                    .to_owned()
             })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .collect()
     }
 
-    fn pair(folded: bool, is_error: bool) -> (Block, Block) {
-        let call = Block::ToolCall {
-            call_id: "c1".into(),
-            name: "read".into(),
-            input_summary: "README.md".into(),
-            input_pretty: "{\"path\":\"README.md\"}".into(),
-            folded,
-            started_at: Instant::now(),
-        };
-        let result = Block::ToolResult {
-            call_id: "c1".into(),
-            name: "read".into(),
-            output: "line one\nline two\nline three".into(),
-            is_error,
-            folded,
-            duration_ms: Some(42),
-        };
-        (call, result)
+    fn widget(
+        name: &str,
+        input: Value,
+        output: &str,
+        is_error: bool,
+        folded: bool,
+    ) -> Vec<Line<'static>> {
+        let mut buf = Buffer::new();
+        buf.push_tool_call("c1", name, input);
+        buf.push_tool_result_with_duration("c1", output, is_error, Some(4900));
+        if !folded {
+            buf.toggle_fold(0);
+        }
+        let w = ToolPairBlockWidget::from_pair(&buf.blocks()[0], &buf.blocks()[1]).unwrap();
+        w.lines(80, &ctx(&Theme::default()))
+    }
+
+    fn rows(name: &str, input: Value, output: &str, is_error: bool) -> Vec<String> {
+        rows_of(&widget(name, input, output, is_error, true))
     }
 
     #[test]
     fn from_pair_rejects_non_tool_blocks() {
         let user = Block::User { text: "hi".into() };
-        let result = Block::ToolResult {
-            call_id: "c".into(),
-            name: "x".into(),
-            output: "y".into(),
-            is_error: false,
-            folded: true,
-            duration_ms: None,
-        };
-        assert!(ToolPairBlockWidget::from_pair(&user, &result).is_none());
+        assert!(ToolPairBlockWidget::from_pair(&user, &user).is_none());
     }
 
     #[test]
-    fn lines_paired_block_returns_at_least_header_row() {
-        let (call, result) = pair(true, false);
-        let w = ToolPairBlockWidget::from_pair(&call, &result).unwrap();
-        let theme = Theme::default();
-        assert!(!w.lines(60, &ctx(&theme)).is_empty());
+    fn read_row_is_one_verb_first_header_with_its_duration() {
+        let rows = rows(
+            "read",
+            json!({"path": "README.md"}),
+            "line one\nline two",
+            false,
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert!(rows[0].contains("\u{2022} Read README.md"), "{rows:?}");
+        assert!(rows[0].ends_with("4.9s"), "{rows:?}");
+        assert!(!rows[0].contains("line one"), "{rows:?}");
     }
 
     #[test]
-    fn folded_pair_lines_never_exceed_unfolded() {
-        let (cf, rf) = pair(true, false);
-        let (cu, ru) = pair(false, false);
-        let folded = ToolPairBlockWidget::from_pair(&cf, &rf).unwrap();
-        let unfolded = ToolPairBlockWidget::from_pair(&cu, &ru).unwrap();
-        let theme = Theme::default();
+    fn bash_rows_never_show_the_model_labels() {
+        let rows = rows(
+            "bash",
+            json!({"command": "echo hi"}),
+            "stdout:\nhi\nthere\n\nexit: 0",
+            false,
+        );
+        assert!(rows[0].contains("Ran echo hi"), "{rows:?}");
+        assert!(rows.iter().any(|r| r.ends_with("there")), "{rows:?}");
+        for row in &rows {
+            assert!(
+                !row.contains("stdout:") && !row.contains("exit: 0"),
+                "{rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn folded_bash_shows_the_last_five_lines() {
+        let out: Vec<String> = (1..=8).map(|i| format!("line {i}")).collect();
+        let text = format!("stdout:\n{}\nexit: 0", out.join("\n"));
+        let rows = rows("bash", json!({"command": "seq 8"}), &text, false);
+        assert!(rows[1].ends_with("... 3 earlier lines"), "{rows:?}");
         assert!(
-            unfolded.lines(60, &ctx(&theme)).len() >= folded.lines(60, &ctx(&theme)).len(),
-            "folding should not add rows"
+            rows[2].ends_with("line 4") && rows[6].ends_with("line 8"),
+            "{rows:?}"
         );
     }
 
     #[test]
-    fn lines_unfolded_pair_include_body_lines() {
-        let (call, result) = pair(false, false);
-        let w = ToolPairBlockWidget::from_pair(&call, &result).unwrap();
-        let theme = Theme::default();
-        let text = painted(&w.lines(60, &ctx(&theme)));
-        assert!(
-            text.contains("read"),
-            "expected tool name in rendered lines: {text:?}"
+    fn failed_bash_shows_its_exit_code() {
+        let rows = rows(
+            "bash",
+            json!({"command": "false"}),
+            "stderr:\nboom\nexit: 1",
+            true,
         );
+        assert!(rows[0].contains("\u{2717} Ran false"), "{rows:?}");
+        assert!(rows[0].ends_with("exit 1 \u{b7} 4.9s"), "{rows:?}");
+        assert!(rows[1].ends_with("boom"), "{rows:?}");
+    }
+
+    #[test]
+    fn edit_rows_show_counts_and_the_diff() {
+        let rows = rows(
+            "edit",
+            json!({"path": "a.rs", "old_str": "x", "new_str": "y"}),
+            "edited",
+            false,
+        );
+        assert!(rows[0].contains("Edited a.rs (+1 -1)"), "{rows:?}");
         assert!(
-            text.contains("line one"),
-            "expected body text in rendered lines: {text:?}"
+            rows[1].ends_with("- x") && rows[2].ends_with("+ y"),
+            "{rows:?}"
         );
     }
 
     #[test]
-    fn lines_folded_pair_keep_tool_name() {
-        let (call, result) = pair(true, false);
-        let w = ToolPairBlockWidget::from_pair(&call, &result).unwrap();
-        let theme = Theme::default();
-        let text = painted(&w.lines(60, &ctx(&theme)));
-        assert!(text.contains("read"), "expected tool name even when folded");
+    fn unknown_tools_name_themselves_once() {
+        let rows = rows("my_tool", json!({"foo": "bar"}), "done", false);
+        assert!(rows[0].contains("Called my_tool foo: bar"), "{rows:?}");
+        assert_eq!(rows[0].matches("my_tool").count(), 1, "{rows:?}");
+        assert!(rows[1].ends_with("done"), "{rows:?}");
     }
 
     #[test]
-    fn lines_error_pair_include_error_marker() {
-        let (call, result) = pair(false, true);
-        let w = ToolPairBlockWidget::from_pair(&call, &result).unwrap();
-        let theme = Theme::default();
-        let text = painted(&w.lines(60, &ctx(&theme)));
-        assert!(
-            text.contains("ERROR"),
-            "error pair should display ERROR marker, got: {text:?}"
+    fn a_read_error_is_not_syntax_highlighted() {
+        let lines = widget(
+            "read",
+            json!({"path": "main.rs"}),
+            "fn main() { let x = 1; }",
+            true,
+            false,
         );
+        let error_fg = crate::theme::current().tool_error_fg;
+        let body = &lines[1];
+        for span in body.spans.iter().filter(|s| s.content.contains("fn")) {
+            assert_eq!(span.style.fg, Some(error_fg), "{body:?}");
+        }
+    }
+
+    #[test]
+    fn unfolded_rows_never_have_fewer_lines_than_folded() {
+        let input = json!({"path": "README.md"});
+        let folded = widget("read", input.clone(), "a\nb\nc", false, true);
+        let unfolded = widget("read", input, "a\nb\nc", false, false);
+        assert!(unfolded.len() > folded.len());
     }
 }

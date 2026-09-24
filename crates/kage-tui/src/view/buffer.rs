@@ -22,26 +22,25 @@ pub(super) fn render_buffer(
     // The opaque base canvas is painted once for the whole frame in
     // `render`; blocks tint their own rows on top of it.
 
-    // Owned-key snapshots of the call/result topology. The pairing
-    // is cached on the buffer and rebuilt only when the block count
-    // changes, so steady-state frames share one `Arc` instead of
-    // cloning every call id twice per frame.
+    // The call/result pairing and read groups are cached on the
+    // buffer and rebuilt only when the block list or a fold changes,
+    // so steady-state frames share one `Arc` instead of cloning every
+    // call id twice per frame.
     let topology = buffer.tool_topology();
-    let result_by_call = &topology.result_by_call;
-    let consumed_results = &topology.consumed_results;
-    let call_idx_for_result = &topology.call_idx_for_result;
     let n = buffer.blocks().len();
 
     let registry = read(registry::global());
-    let focus = buffer.effective_focus();
+    // Emphasis follows the explicit focus only: the fallback target of
+    // fold gestures paints no rule.
     let explicit = buffer.focus();
+    let focus = explicit.map(|f| topology.display_idx(f));
     let user_moved = explicit != buffer.last_user_focus();
     buffer.set_last_user_focus(explicit);
 
     let mut heights: Vec<usize> = Vec::with_capacity(n);
     let mut total_rows = 0usize;
     for idx in 0..n {
-        if consumed_results.contains(&idx) {
+        if topology.is_hidden(idx) {
             heights.push(0);
             continue;
         }
@@ -52,7 +51,7 @@ pub(super) fn render_buffer(
                 buffer,
                 idx,
                 width,
-                result_by_call,
+                &topology,
                 Emphasis::None,
                 &registry,
                 Some(0),
@@ -84,21 +83,14 @@ pub(super) fn render_buffer(
     // streaming append. `user_moved` makes the scroll one-shot instead
     // of re-firing every frame while focus rests on a block the user
     // deliberately scrolled away.
-    if user_moved && let Some(focus_idx) = explicit {
-        let display_idx = if consumed_results.contains(&focus_idx) {
-            call_idx_for_result.get(&focus_idx).copied()
-        } else {
-            Some(focus_idx)
-        };
-        if let Some(di) = display_idx
-            && let Some(&rendered_height) = heights.get(di)
-        {
+    if user_moved && let Some(di) = focus {
+        if let Some(&rendered_height) = heights.get(di) {
             // A focus index past `heights` (host reset shrank the
             // buffer between frames) skips the follow-scroll
             // instead of panicking the render.
             let mut rendered_start = 0usize;
             for (i, h) in heights.iter().enumerate().take(di) {
-                if !consumed_results.contains(&i) {
+                if !topology.is_hidden(i) {
                     rendered_start = rendered_start.saturating_add(*h).saturating_add(1);
                 }
             }
@@ -162,7 +154,7 @@ pub(super) fn render_buffer(
     // handlers can translate a click row into a block.
     let mut block_layout: Vec<(usize, usize, usize)> = Vec::new();
     for (idx, h) in heights.iter().copied().enumerate() {
-        if consumed_results.contains(&idx) {
+        if topology.is_hidden(idx) {
             continue;
         }
         let block_top = acc;
@@ -185,31 +177,25 @@ pub(super) fn render_buffer(
             emitted_any = true;
             visible_top.saturating_sub(block_top)
         };
-        let emp = emphasis_for(
-            idx,
-            focus,
-            search_match_set,
-            consumed_results,
-            call_idx_for_result,
-        );
+        let emp = emphasis_for(idx, focus, search_match_set, &topology);
         let cached_owner;
         let built_owner;
         let take_rows = row_budget.saturating_sub(emitted_rows);
-        let block_lines: &[Line<'static>] =
-            if let Some(cached) = buffer.cached_render_lines(idx, width) {
-                cached_owner = cached;
-                cached_owner.as_slice()
-            } else {
-                let budget = Some(intra_block_skip.saturating_add(take_rows));
-                let built =
-                    build_block_lines(buffer, idx, width, result_by_call, emp, &registry, budget);
-                let measured = built.len();
-                let stored = u16::try_from(measured).unwrap_or(u16::MAX);
-                buffer.set_cached_height(idx, width, stored);
-                buffer.set_cached_render_lines(idx, width, std::sync::Arc::new(built.clone()));
-                built_owner = built;
-                built_owner.as_slice()
-            };
+        let block_lines: &[Line<'static>] = if let Some(cached) =
+            buffer.cached_render_lines(idx, width)
+        {
+            cached_owner = cached;
+            cached_owner.as_slice()
+        } else {
+            let budget = Some(intra_block_skip.saturating_add(take_rows));
+            let built = build_block_lines(buffer, idx, width, &topology, emp, &registry, budget);
+            let measured = built.len();
+            let stored = u16::try_from(measured).unwrap_or(u16::MAX);
+            buffer.set_cached_height(idx, width, stored);
+            buffer.set_cached_render_lines(idx, width, std::sync::Arc::new(built.clone()));
+            built_owner = built;
+            built_owner.as_slice()
+        };
         let (sliced, slice_offset) =
             slice_lines_for_window(block_lines, width, intra_block_skip, take_rows);
         // The first emitted block sets the paragraph-level scroll;
@@ -262,34 +248,22 @@ pub(super) fn render_buffer(
     buffer.set_last_drawn_focus(focus);
 }
 
-/// Compute the emphasis for the displayed block at `idx`. Merged
-/// tool pairs pick `max` across both halves so a focused result
-/// lights up the call's bubble too.
+/// Compute the emphasis for the displayed block at `idx`. `focus` is
+/// already mapped to its displayed block; a search hit in a merged
+/// result or a grouped call lights up the block that paints it.
 fn emphasis_for(
     idx: usize,
     focus: Option<usize>,
     search_match_set: Option<&[usize]>,
-    consumed_results: &std::collections::HashSet<usize>,
-    call_idx_for_result: &std::collections::HashMap<usize, usize>,
+    topology: &crate::buffer::ToolTopology,
 ) -> Emphasis {
-    let single = |i: usize| -> Emphasis {
-        if focus == Some(i) {
-            Emphasis::Focused
-        } else if search_match_set.is_some_and(|s| s.binary_search(&i).is_ok()) {
-            Emphasis::Match
-        } else {
-            Emphasis::None
-        }
-    };
-    let mut e = single(idx);
-    // Walk the result side of any merged pair this idx represents,
-    // picking up emphasis from the consumed half.
-    for (rid, cid) in call_idx_for_result {
-        if *cid == idx && consumed_results.contains(rid) {
-            e = e.max(single(*rid));
-        }
+    if focus == Some(idx) {
+        Emphasis::Focused
+    } else if search_match_set.is_some_and(|s| s.iter().any(|&m| topology.display_idx(m) == idx)) {
+        Emphasis::Match
+    } else {
+        Emphasis::None
     }
-    e
 }
 
 /// One captured cell from the rendered frame: the char that was
@@ -439,9 +413,10 @@ fn slice_lines_for_window(
 }
 
 /// Build the rendered lines for the block at `idx`, automatically
-/// merging a `ToolCall` with its paired `ToolResult` when one exists.
-/// Callers pass the `result_by_call` map (so lookups stay cheap inside
-/// the render loop) and the emphasis state for this idx.
+/// merging a `ToolCall` with its paired `ToolResult` when one exists
+/// and painting an `Explored` group from its head. Callers pass the
+/// cached topology (so lookups stay cheap inside the render loop) and
+/// the emphasis state for this idx.
 ///
 /// Routes through the [`registry::BlockRenderer`] so block rendering
 /// goes through the same widget dispatch plugins hook into via
@@ -450,7 +425,7 @@ fn build_block_lines(
     buffer: &Buffer,
     idx: usize,
     width: u16,
-    result_by_call: &std::collections::HashMap<String, usize>,
+    topology: &crate::buffer::ToolTopology,
     emphasis: Emphasis,
     registry: &registry::BlockRenderer,
     row_budget: Option<usize>,
@@ -466,8 +441,12 @@ fn build_block_lines(
         search_pattern: None,
         row_budget,
     };
+    if let Some(members) = topology.groups.get(&idx) {
+        let calls: Vec<&Block> = members.iter().map(|&m| &blocks[m]).collect();
+        return tool_group_lines(&calls, width, emphasis);
+    }
     if let Block::ToolCall { call_id, .. } = cur
-        && let Some(&result_idx) = result_by_call.get(call_id)
+        && let Some(&result_idx) = topology.result_by_call.get(call_id)
         && let Some(w) = registry.pair_widget_for(cur, &blocks[result_idx])
     {
         return w.lines(width, &ctx);

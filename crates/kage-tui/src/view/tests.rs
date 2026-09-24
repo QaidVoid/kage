@@ -3,6 +3,7 @@
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
+use serde_json::json;
 
 use super::*;
 use crate::buffer::Buffer;
@@ -212,17 +213,17 @@ fn snapshot_lines(buffer: &mut Buffer, input: &InputState, area: Rect) -> Vec<St
 }
 
 #[test]
-fn folded_thinking_renders_one_line() {
+fn finished_thinking_folds_to_a_timed_line() {
     let mut buffer = Buffer::new();
     buffer.append_thinking_delta("step 1\nstep 2");
     buffer.finish_streaming();
-    // Thinking starts unfolded; fold it so we can assert the body
-    // doesn't make it to the screen.
-    assert!(buffer.toggle_fold(0));
     let input = InputState::new();
     let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 40, 6));
-    assert!(lines.iter().any(|l| l.contains("[thinking]")));
-    assert!(!lines.iter().any(|l| l.contains("step 1")));
+    assert!(
+        lines.iter().any(|l| l.contains("Thought for 1s")),
+        "{lines:?}"
+    );
+    assert!(!lines.iter().any(|l| l.contains("step 1")), "{lines:?}");
 }
 
 #[test]
@@ -230,9 +231,9 @@ fn unfolded_thinking_includes_body() {
     let mut buffer = Buffer::new();
     buffer.append_thinking_delta("step 1\nstep 2");
     buffer.finish_streaming();
+    assert!(buffer.toggle_fold(0));
     let input = InputState::new();
     let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 40, 8));
-    assert!(lines.iter().any(|l| l.contains("[thinking]")));
     assert!(lines.iter().any(|l| l.contains("step 1")));
     assert!(lines.iter().any(|l| l.contains("step 2")));
 }
@@ -250,108 +251,259 @@ fn assistant_text_renders_without_header() {
 }
 
 #[test]
-fn user_block_renders_with_padded_bubble() {
+fn user_block_is_one_band_row_with_a_prompt_glyph() {
     let mut buffer = Buffer::new();
     buffer.push_user("hello");
     let input = InputState::new();
     let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 40, 8));
-    // Bubble keeps the prompt text intact; trailing whitespace is
-    // trimmed by the test's snapshot helper.
-    assert!(lines.iter().any(|l| l.contains("hello")));
-    assert!(!lines.iter().any(|l| l.contains("> hello")));
+    let band: Vec<&String> = lines.iter().filter(|l| l.starts_with('\u{258e}')).collect();
+    assert_eq!(band.len(), 1, "no pad rows: {lines:?}");
+    assert!(band[0].contains("> hello"), "{lines:?}");
 }
 
 #[test]
-fn folded_tool_call_renders_name_then_summary_without_brackets() {
+fn streaming_tool_call_reads_verb_first() {
     let mut buffer = Buffer::new();
-    buffer.push_tool_call("c1", "bash", "ls -la", "{\n  \"cmd\": \"ls -la\"\n}");
+    buffer.push_tool_call("c1", "bash", json!({"command": "ls -la"}));
     let input = InputState::new();
     let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 8));
     let header = lines
         .iter()
-        .find(|l| l.contains("bash"))
+        .find(|l| l.contains("ls -la"))
         .expect("tool header present");
-    assert!(header.contains("bash ls -la"));
-    assert!(!header.contains("[tool]"));
-    assert!(!header.contains('('));
-    assert!(!lines.iter().any(|l| l.contains("\"cmd\"")));
+    assert!(header.contains("\u{2022} Running ls -la"), "{header:?}");
+    assert!(
+        !header.contains('[') && !header.contains("bash"),
+        "{header:?}"
+    );
+    assert!(!lines.iter().any(|l| l.contains("\"command\"")));
 }
 
 #[test]
-fn unfolded_tool_call_shows_full_input_body() {
+fn unfolded_tool_call_without_output_shows_its_arguments() {
     let mut buffer = Buffer::new();
-    buffer.push_tool_call("c1", "bash", "ls -la", "{\n  \"cmd\": \"ls -la\"\n}");
+    buffer.push_tool_call("c1", "bash", json!({"command": "ls -la"}));
     assert!(buffer.toggle_fold(0));
     let input = InputState::new();
     let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 12));
-    assert!(lines.iter().any(|l| l.contains("bash")));
-    assert!(lines.iter().any(|l| l.contains("\"cmd\"")));
+    assert!(
+        lines.iter().any(|l| l.contains("command  ls -la")),
+        "{lines:?}"
+    );
 }
 
 #[test]
-fn folded_merged_pair_inlines_status_and_preview() {
+fn failed_bash_pair_shows_a_cross_and_the_exit_code() {
     let mut buffer = Buffer::new();
-    buffer.push_tool_call("c1", "bash", "false", "{}");
-    buffer.push_tool_result("c1", "exit 1", true);
+    buffer.push_tool_call("c1", "bash", json!({"command": "false"}));
+    buffer.push_tool_result("c1", "stderr:\nnope\nexit: 1", true);
     let input = InputState::new();
     let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 80, 12));
     let header = lines
         .iter()
-        .find(|l| l.contains("> bash"))
+        .find(|l| l.contains("Ran false"))
         .expect("merged tool header");
-    assert!(header.contains("ERROR"));
-    // Old standalone-result tag should be gone.
-    assert!(!lines.iter().any(|l| l.contains("[result]")));
+    assert!(header.contains("\u{2717} Ran false"), "{header:?}");
+    assert!(header.contains("exit 1"), "{header:?}");
+    assert!(
+        lines.iter().any(|l| l.trim_end().ends_with("nope")),
+        "{lines:?}"
+    );
+    assert!(!lines.iter().any(|l| l.contains("stderr:")), "{lines:?}");
 }
 
 #[test]
-fn folded_merged_pair_shows_size_pill_and_body_preview() {
+fn folded_read_pair_is_a_single_header_row() {
     let mut buffer = Buffer::new();
-    buffer.push_tool_call("c1", "read", "README.md", "{}");
-    buffer.push_tool_result("c1", "first line of file\nsecond line\nthird line", false);
+    buffer.push_tool_call("c1", "read", json!({"path": "README.md"}));
+    buffer.push_tool_result("c1", "first line of file\nsecond line", false);
     let input = InputState::new();
     let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 90, 12));
-    let header = lines
-        .iter()
-        .find(|l| l.contains("> read"))
-        .expect("merged folded read header");
-    assert!(header.contains(" B"), "expected size pill, got: {header}");
     assert!(
-        lines.iter().any(|l| l.contains("first line of file")),
-        "expected body preview line"
+        lines.iter().any(|l| l.contains("\u{2022} Read README.md")),
+        "{lines:?}"
     );
     assert!(
-        lines.iter().any(|l| l.contains("third line")),
-        "expected body preview line"
+        !lines.iter().any(|l| l.contains("first line of file")),
+        "{lines:?}"
     );
 }
 
 #[test]
-fn unfolded_merged_pair_shows_body_and_inline_status() {
+fn unfolded_pair_shows_its_output() {
     let mut buffer = Buffer::new();
-    buffer.push_tool_call("c1", "ls", ".", "{}");
-    buffer.push_tool_result("c1", "a.rs\nb.rs\nc.rs", false);
-    // Toggling either half flips both, so unfolding via the call
-    // (idx 0) leaves the merged renderer with full body visible.
+    buffer.push_tool_call("c1", "ls", json!({"path": "."}));
+    buffer.push_tool_result_with_duration("c1", "a.rs\nb.rs\nc.rs", false, Some(120));
     assert!(buffer.toggle_fold(0));
     let input = InputState::new();
     let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 16));
-    // Unfolded fold indicator is `v`.
     let header = lines
         .iter()
-        .find(|l| l.contains("v ls"))
+        .find(|l| l.contains("Listed ."))
         .expect("unfolded ls header");
-    // Header carries the size + Took inline.
-    assert!(header.contains(" B"), "expected size pill, got: {header}");
-    assert!(header.contains("Took"), "expected Took, got: {header}");
+    assert!(header.ends_with("0.1s"), "{header:?}");
     assert!(lines.iter().any(|l| l.contains("a.rs")));
     assert!(lines.iter().any(|l| l.contains("c.rs")));
+}
+
+fn push_read(buffer: &mut Buffer, id: &str, path: &str) {
+    buffer.push_tool_call(id, "read", json!({"path": path}));
+    buffer.push_tool_result(id, "contents", false);
+}
+
+#[test]
+fn consecutive_reads_render_as_one_explored_row() {
+    let mut buffer = Buffer::new();
+    push_read(&mut buffer, "r1", "a.rs");
+    push_read(&mut buffer, "r2", "b.rs");
+    push_read(&mut buffer, "r3", "c.rs");
+    buffer.push_tool_call("b1", "bash", json!({"command": "cargo test"}));
+    buffer.push_tool_result("b1", "stdout:\nok\nexit: 0", false);
+    let input = InputState::new();
+    let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 20));
+    let explored = lines
+        .iter()
+        .position(|l| l.contains("\u{2022} Explored 3 files"))
+        .unwrap_or_else(|| panic!("{lines:?}"));
+    assert!(
+        lines[explored + 1].contains("Read a.rs, b.rs, c.rs"),
+        "{lines:?}"
+    );
+    assert!(lines[explored + 3].contains("Ran cargo test"), "{lines:?}");
+    assert_eq!(lines.iter().filter(|l| l.contains("Read ")).count(), 1);
+
+    assert_eq!(buffer.block_virtual_rows(0), Some((0, 2)));
+    assert_eq!(buffer.block_virtual_rows(2), None, "members are hidden");
+    assert_eq!(buffer.block_virtual_rows(6), Some((3, 5)));
+
+    assert!(buffer.toggle_fold(0), "unfolding the head splits the group");
+    let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 30));
+    for path in ["a.rs", "b.rs", "c.rs"] {
+        assert!(
+            lines.iter().any(|l| l.contains(&format!("Read {path}"))),
+            "{lines:?}"
+        );
+    }
+    let rows: Vec<(usize, usize)> = [0, 2, 4, 6]
+        .iter()
+        .map(|&i| buffer.block_virtual_rows(i).expect("painted"))
+        .collect();
+    for pair in rows.windows(2) {
+        assert_eq!(pair[1].0, pair[0].1 + 1, "heights sum: {rows:?}");
+    }
+
+    assert!(buffer.toggle_fold(0), "folding the head regroups");
+    snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 20));
+    assert_eq!(buffer.block_virtual_rows(0), Some((0, 2)));
+    assert_eq!(buffer.block_virtual_rows(6), Some((3, 5)));
+}
+
+#[test]
+fn a_text_block_between_reads_prevents_grouping() {
+    let mut buffer = Buffer::new();
+    push_read(&mut buffer, "r1", "a.rs");
+    buffer.append_assistant_delta("now the next one");
+    buffer.finish_streaming();
+    push_read(&mut buffer, "r2", "b.rs");
+    let input = InputState::new();
+    let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 20));
+    assert!(!lines.iter().any(|l| l.contains("Explored")), "{lines:?}");
+    assert!(lines.iter().any(|l| l.contains("Read a.rs")));
+    assert!(lines.iter().any(|l| l.contains("Read b.rs")));
+}
+
+#[test]
+fn a_read_finishing_after_a_group_joins_it() {
+    let mut buffer = Buffer::new();
+    push_read(&mut buffer, "r1", "a.rs");
+    push_read(&mut buffer, "r2", "b.rs");
+    buffer.push_tool_call("r3", "read", json!({"path": "c.rs"}));
+    let input = InputState::new();
+    let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 20));
+    assert!(
+        lines.iter().any(|l| l.contains("Explored 2 files")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("Reading c.rs")),
+        "{lines:?}"
+    );
+    buffer.push_tool_result("r3", "contents", false);
+    let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 20));
+    assert!(
+        lines.iter().any(|l| l.contains("Explored 3 files")),
+        "{lines:?}"
+    );
+    assert_eq!(buffer.block_virtual_rows(0), Some((0, 2)));
+}
+
+#[test]
+fn no_rendered_row_carries_a_bracket_tag() {
+    let mut buffer = Buffer::new();
+    buffer.append_thinking_delta("hmm");
+    buffer.finish_streaming();
+    buffer.push_custom("kage:error", "boom", false);
+    buffer.push_custom("kage:shell", "$ ls\na.rs\n(exit code 0)", false);
+    buffer.push_custom(
+        "kage:truncated",
+        "reply hit the max output token limit",
+        false,
+    );
+    let input = InputState::new();
+    let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 20));
+    let text = lines.join("\n");
+    for tag in [
+        "[thinking]",
+        "[error]",
+        "[shell]",
+        "[truncated]",
+        "(exit code 0)",
+    ] {
+        assert!(!text.contains(tag), "{tag} in {lines:?}");
+    }
+    assert!(
+        text.contains("\u{2717} boom") && text.contains("$ ls"),
+        "{lines:?}"
+    );
+}
+
+#[test]
+fn fences_render_a_language_label_and_no_backticks() {
+    let mut buffer = Buffer::new();
+    buffer.append_assistant_delta("See:\n\n```rust\nlet x = 1;\n```\n");
+    buffer.finish_streaming();
+    let input = InputState::new();
+    let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 12));
+    assert!(lines.iter().any(|l| l.trim() == "rust"), "{lines:?}");
+    assert!(
+        lines.iter().any(|l| l.contains("    let x = 1;")),
+        "{lines:?}"
+    );
+    assert!(!lines.iter().any(|l| l.contains("```")), "{lines:?}");
+}
+
+#[test]
+fn the_fallback_focus_paints_no_rule() {
+    let mut buffer = Buffer::new();
+    buffer.append_assistant_delta("hello");
+    buffer.finish_streaming();
+    assert_eq!(buffer.focus(), None);
+    assert_eq!(buffer.effective_focus(), Some(0));
+    let input = InputState::new();
+    let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 40, 6));
+    let row = lines.iter().find(|l| l.contains("hello")).unwrap();
+    assert!(row.starts_with("  hello"), "{row:?}");
+
+    buffer.set_focus(Some(0));
+    let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 40, 6));
+    let row = lines.iter().find(|l| l.contains("hello")).unwrap();
+    assert!(row.starts_with(Emphasis::Focused.rule_glyph()), "{row:?}");
 }
 
 #[test]
 fn toggling_either_half_of_a_pair_flips_both() {
     let mut buffer = Buffer::new();
-    buffer.push_tool_call("c1", "ls", ".", "{}");
+    buffer.push_tool_call("c1", "ls", json!({"path": "."}));
     buffer.push_tool_result("c1", "a", false);
     assert!(matches!(
         buffer.blocks()[0],
@@ -374,51 +526,6 @@ fn toggling_either_half_of_a_pair_flips_both() {
 }
 
 #[test]
-fn small_tool_output_is_not_truncated() {
-    let style = Style::default();
-    let lines = super::truncated_body_lines("a\nb\nc", style);
-    assert_eq!(lines.len(), 3);
-}
-
-#[test]
-fn over_200_line_output_is_capped_with_marker() {
-    let style = Style::default();
-    let raw: String = (0..250)
-        .map(|i| format!("line{i}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let lines = super::truncated_body_lines(&raw, style);
-    // 200 capped lines + 1 marker.
-    assert_eq!(lines.len(), 201);
-    let last = format!("{}", lines.last().unwrap().spans[0].content);
-    assert!(last.contains("more lines"), "got: {last}");
-    assert!(last.contains("50"));
-}
-
-#[test]
-fn many_short_lines_past_byte_budget_are_capped() {
-    let style = Style::default();
-    // 5000 lines of 8 chars each = ~45 KB, exceeds the 16 KB cap.
-    let raw: String = (0..5000)
-        .map(|i| format!("line{i:04}"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let lines = super::truncated_body_lines(&raw, style);
-    // We hit MAX_BODY_BYTES well before MAX_BODY_LINES; the body
-    // ends with a "... (N more lines)" marker.
-    let last = format!("{}", lines.last().unwrap().spans[0].content);
-    assert!(last.contains("more lines"), "got: {last}");
-}
-
-#[test]
-fn human_size_formats_units() {
-    assert_eq!(super::human_size(512), "512 B");
-    assert_eq!(super::human_size(2048), "2.0 KB");
-    assert_eq!(super::human_size(1_500_000), "1.4 MB");
-    assert_eq!(super::human_size(3 * 1024 * 1024 * 1024), "3.0 GB");
-}
-
-#[test]
 fn token_counts_scale_to_k_m_b_trimmed() {
     assert_eq!(super::format_token_count(999), "999");
     assert_eq!(super::format_token_count(1_000), "1k");
@@ -429,19 +536,6 @@ fn token_counts_scale_to_k_m_b_trimmed() {
     assert_eq!(super::format_token_count(21_000_000), "21M");
     assert_eq!(super::format_token_count(200_000_000), "200M");
     assert_eq!(super::format_token_count(2_000_000_000), "2B");
-}
-
-#[test]
-fn first_line_preview_skips_empty_leading_lines_and_truncates() {
-    assert_eq!(
-        super::first_line_preview("\n\nhello world", 20).as_deref(),
-        Some("hello world")
-    );
-    assert_eq!(
-        super::first_line_preview(&"a".repeat(80), 20).as_deref(),
-        Some(&*format!("{}...", "a".repeat(17)))
-    );
-    assert_eq!(super::first_line_preview("\n\n  \n", 10), None);
 }
 
 /// Mirror what [`super::render_input`] does to derive the inner

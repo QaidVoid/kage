@@ -63,7 +63,9 @@ fn block_payload(block: &Block) -> serde_json::Value {
         Block::Assistant { text, live } => {
             serde_json::json!({ "kind": "assistant", "text": text, "live": live })
         }
-        Block::Thinking { text, folded, live } => serde_json::json!({
+        Block::Thinking {
+            text, folded, live, ..
+        } => serde_json::json!({
             "kind": "thinking", "text": text, "folded": folded, "live": live,
         }),
         Block::ToolCall {
@@ -129,7 +131,7 @@ impl BlockWidget for PluginBlockWidget {
             ))],
             Some(chrome) => super::chrome_lines_to_ratatui(&chrome, Style::default()),
         };
-        mark_emphasis(body, width, ctx.emphasis, None)
+        mark_emphasis(body, width, ctx.emphasis)
     }
 }
 

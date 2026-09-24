@@ -4,20 +4,28 @@
 use super::*;
 
 impl Buffer {
+    /// Append `block`, first finishing a live thinking block it
+    /// follows: a thinking stream ends when anything else begins.
+    fn push_block(&mut self, block: Block) {
+        if self.last_is_live_thinking() {
+            self.finish_streaming();
+        }
+        self.blocks.push(block);
+        self.push_block_caches();
+    }
+
     /// Push a fully-formed user prompt.
     pub fn push_user(&mut self, text: impl Into<String>) {
-        self.blocks.push(Block::User { text: text.into() });
-        self.push_block_caches();
+        self.push_block(Block::User { text: text.into() });
     }
 
     /// Begin a streaming assistant block. Subsequent deltas append to it
     /// via [`Self::append_assistant_delta`].
     pub fn begin_assistant(&mut self) {
-        self.blocks.push(Block::Assistant {
+        self.push_block(Block::Assistant {
             text: String::new(),
             live: true,
         });
-        self.push_block_caches();
     }
 
     /// Append text to the most recent assistant block. If no live
@@ -32,14 +40,17 @@ impl Buffer {
         self.mark_stream_dirty();
     }
 
-    /// Begin a streaming thinking block.
+    /// Begin a streaming thinking block. It starts folded, showing only
+    /// its last lines while it streams.
     pub fn begin_thinking(&mut self) {
-        self.blocks.push(Block::Thinking {
+        self.push_block(Block::Thinking {
             text: String::new(),
-            folded: false,
+            folded: true,
             live: true,
+            started_at: Instant::now(),
+            duration_ms: None,
+            pinned: false,
         });
-        self.push_block_caches();
     }
 
     /// Append text to the most recent thinking block.
@@ -53,6 +64,19 @@ impl Buffer {
         self.mark_stream_dirty();
     }
 
+    /// Push a finished, folded thinking block without timing, as
+    /// replayed from history.
+    pub fn push_thinking(&mut self, text: impl Into<String>) {
+        self.push_block(Block::Thinking {
+            text: text.into(),
+            folded: true,
+            live: false,
+            started_at: Instant::now(),
+            duration_ms: None,
+            pinned: false,
+        });
+    }
+
     /// Record that the live last block grew without dropping its
     /// render caches: the stale lines keep serving until
     /// [`STREAM_REPARSE_THROTTLE`] elapses, then the cache readers
@@ -63,95 +87,137 @@ impl Buffer {
         self.bump_version();
     }
 
-    /// Add a tool-call block to the buffer.
+    /// Add a tool-call block in [`ToolPhase::Streaming`]. The header
+    /// summary and the pretty-printed input are derived from `input`.
     pub fn push_tool_call(
         &mut self,
         call_id: impl Into<String>,
         name: impl Into<String>,
-        input_summary: impl Into<String>,
-        input_pretty: impl Into<String>,
+        input: serde_json::Value,
     ) {
-        self.blocks.push(Block::ToolCall {
+        let name = name.into();
+        self.push_block(Block::ToolCall {
             call_id: call_id.into(),
-            name: name.into(),
-            input_summary: input_summary.into(),
-            input_pretty: input_pretty.into(),
+            input_summary: crate::events::summarize_input(&name, &input),
+            input_pretty: pretty_input(&input),
+            name,
+            input: Arc::new(input),
             folded: true,
+            phase: ToolPhase::Streaming,
+            progress: String::new(),
             started_at: Instant::now(),
         });
-        self.push_block_caches();
     }
 
-    /// Insert a tool-call block, or refresh the existing one with the
-    /// same `call_id` in place. Used for progressive argument
-    /// streaming: the placeholder created from the first
+    /// Insert a tool-call block, or refresh the input of the existing
+    /// one with the same `call_id` in place. Used for progressive
+    /// argument streaming: the placeholder created from the first
     /// [`kage_core::LoopEvent::ToolCallArgsDelta`] is updated as more
     /// arguments arrive and finalized by the authoritative
-    /// [`kage_core::LoopEvent::ToolCallStart`]. The fold state and
-    /// start time of an existing block are preserved so the timer and
-    /// the user's expand/collapse choice survive each refresh.
+    /// [`kage_core::LoopEvent::ToolCallStart`]. The fold state, phase
+    /// and start time of an existing block are preserved.
     pub fn upsert_tool_call(
         &mut self,
         call_id: impl Into<String>,
         name: impl Into<String>,
-        input_summary: impl Into<String>,
-        input_pretty: impl Into<String>,
+        input: serde_json::Value,
     ) {
         let call_id = call_id.into();
         let name = name.into();
-        let input_summary = input_summary.into();
-        let input_pretty = input_pretty.into();
-        let mut found = false;
-        for block in &mut self.blocks {
-            if let Block::ToolCall {
-                call_id: cid,
-                name: n,
-                input_summary: s,
-                input_pretty: p,
-                ..
-            } = block
-                && *cid == call_id
+        let Some(Block::ToolCall {
+            name: n,
+            input_summary,
+            input_pretty,
+            input: i,
+            ..
+        }) = self.tool_call_mut(&call_id)
+        else {
+            self.push_tool_call(call_id, name, input);
+            return;
+        };
+        *input_summary = crate::events::summarize_input(&name, &input);
+        *input_pretty = pretty_input(&input);
+        *n = name;
+        *i = Arc::new(input);
+        self.invalidate_pair_height(&call_id);
+        self.bump_version();
+    }
+
+    /// Move the call `call_id` to `phase`. Entering
+    /// [`ToolPhase::Running`] restarts its timer. No-op for an unknown
+    /// id.
+    pub fn set_tool_phase(&mut self, call_id: &str, phase: ToolPhase) {
+        let Some(Block::ToolCall {
+            phase: p,
+            started_at,
+            ..
+        }) = self.tool_call_mut(call_id)
+        else {
+            return;
+        };
+        *p = phase;
+        if phase == ToolPhase::Running {
+            *started_at = Instant::now();
+        }
+        self.invalidate_pair_height(call_id);
+        self.bump_version();
+    }
+
+    /// Replace the progress text of the call `call_id` with the latest
+    /// tool update. No-op for an unknown id.
+    pub fn set_tool_progress(&mut self, call_id: &str, text: impl Into<String>) {
+        let Some(Block::ToolCall { progress, .. }) = self.tool_call_mut(call_id) else {
+            return;
+        };
+        *progress = text.into();
+        self.invalidate_pair_height(call_id);
+        self.bump_version();
+    }
+
+    /// Mark every call that has not finished as
+    /// [`ToolPhase::Interrupted`], so nothing keeps animating after a
+    /// run ends.
+    pub fn interrupt_running_tools(&mut self) {
+        let mut changed = Vec::new();
+        for (i, block) in self.blocks.iter_mut().enumerate() {
+            if let Block::ToolCall { phase, .. } = block
+                && matches!(
+                    phase,
+                    ToolPhase::Streaming | ToolPhase::Waiting | ToolPhase::Running
+                )
             {
-                n.clone_from(&name);
-                s.clone_from(&input_summary);
-                p.clone_from(&input_pretty);
-                found = true;
-                break;
+                *phase = ToolPhase::Interrupted;
+                changed.push(i);
             }
         }
-        if found {
-            self.invalidate_pair_height(&call_id);
-        } else {
-            self.push_tool_call(call_id, name, input_summary, input_pretty);
+        for i in changed {
+            self.invalidate_height(i);
         }
     }
 
+    fn tool_call_mut(&mut self, call_id: &str) -> Option<&mut Block> {
+        self.blocks
+            .iter_mut()
+            .rev()
+            .find(|b| matches!(b, Block::ToolCall { call_id: cid, .. } if cid == call_id))
+    }
+
     /// Add a tool-result block. Looks up the matching tool call (by id)
-    /// and copies its name into the result so the renderer can display
-    /// the output under the right header. Records the elapsed time
-    /// since the call was issued so the renderer can show `Took 12ms`.
+    /// to copy its name, record the time since the call started
+    /// running, and move it to [`ToolPhase::Done`] or
+    /// [`ToolPhase::Failed`]. A denied call keeps its phase.
     pub fn push_tool_result(
         &mut self,
         call_id: impl Into<String>,
         output: impl Into<String>,
         is_error: bool,
     ) {
-        let call_id_owned = call_id.into();
-        let mut duration_ms = None;
-        for block in self.blocks.iter().rev() {
-            if let Block::ToolCall {
-                call_id: cid,
-                started_at,
-                ..
-            } = block
-                && cid == &call_id_owned
-            {
-                duration_ms =
-                    Some(u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX));
-                break;
-            }
-        }
-        self.push_tool_result_with_duration(call_id_owned, output, is_error, duration_ms);
+        let call_id = call_id.into();
+        let duration_ms = match self.tool_call_mut(&call_id) {
+            Some(Block::ToolCall { started_at, .. }) => Some(elapsed_ms(*started_at)),
+            _ => None,
+        };
+        self.push_tool_result_with_duration(call_id, output, is_error, duration_ms);
     }
 
     /// Add a tool-result block with an explicit duration (or `None` if
@@ -165,18 +231,20 @@ impl Buffer {
         duration_ms: Option<u64>,
     ) {
         let call_id = call_id.into();
-        let name = self
-            .blocks
-            .iter()
-            .rev()
-            .find_map(|b| match b {
-                Block::ToolCall {
-                    call_id: cid, name, ..
-                } if cid == &call_id => Some(name.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        self.blocks.push(Block::ToolResult {
+        let name = match self.tool_call_mut(&call_id) {
+            Some(Block::ToolCall { name, phase, .. }) => {
+                if *phase != ToolPhase::Denied {
+                    *phase = if is_error {
+                        ToolPhase::Failed
+                    } else {
+                        ToolPhase::Done
+                    };
+                }
+                name.clone()
+            }
+            _ => String::new(),
+        };
+        self.push_block(Block::ToolResult {
             call_id: call_id.clone(),
             name,
             output: output.into(),
@@ -184,21 +252,34 @@ impl Buffer {
             folded: true,
             duration_ms,
         });
-        self.push_block_caches();
         // The matching ToolCall now renders as a merged composite, so
-        // its previously-cached unmerged height is wrong; invalidate
-        // both halves so the next layout pass remeasures.
+        // its previously-cached unmerged height is wrong.
         self.invalidate_pair_height(&call_id);
     }
 
     /// Add a plugin-defined custom block.
     pub fn push_custom(&mut self, kind: impl Into<String>, text: impl Into<String>, folded: bool) {
-        self.blocks.push(Block::Custom {
+        self.push_block(Block::Custom {
             kind: kind.into(),
             text: text.into(),
             folded,
         });
-        self.push_block_caches();
+    }
+
+    /// Replace the text of the last block when it is an unfolded
+    /// custom block of `kind`, otherwise push a new one. Keeps a burst
+    /// of status notices, such as provider retries, to one line.
+    pub fn replace_or_push_custom(&mut self, kind: &str, text: impl Into<String>) {
+        if let Some(Block::Custom {
+            kind: k, text: t, ..
+        }) = self.blocks.last_mut()
+            && k == kind
+        {
+            *t = text.into();
+            self.invalidate_last_block_caches();
+        } else {
+            self.push_custom(kind, text, false);
+        }
     }
 
     /// Mark the most recent live (assistant or thinking) block as
@@ -207,9 +288,8 @@ impl Buffer {
         if let Some(last) = self.blocks.last_mut() {
             last.finish();
         }
-        // The `live` flag doesn't currently change rendered height,
-        // but invalidate anyway so a future renderer change that
-        // styles "stream done" differently picks up cleanly.
+        // Finishing folds a thinking block and drops the live markdown
+        // renderer, so the cached lines are stale.
         self.invalidate_last_block_caches();
         self.stream_dirty_since = None;
     }
@@ -219,11 +299,18 @@ impl Buffer {
     /// the block is not foldable).
     ///
     /// When the toggled block is one half of a tool-call/result pair,
-    /// the matching half is set to the same fold state. This keeps the
-    /// merged renderer's view consistent with the user gesture: one
-    /// `zo` collapses or expands the visible composite, not just one
-    /// of its two source blocks.
+    /// the matching half is set to the same fold state, so one `zo`
+    /// collapses or expands the visible composite. A call grouped into
+    /// an `Explored` row toggles the row's first call: unfolding it
+    /// shows the group's calls individually, folding it groups them
+    /// again.
     pub fn toggle_fold(&mut self, index: usize) -> bool {
+        let index = self
+            .tool_topology()
+            .head_of_member
+            .get(&index)
+            .copied()
+            .unwrap_or(index);
         let Some(block) = self.blocks.get_mut(index) else {
             return false;
         };
@@ -232,34 +319,39 @@ impl Buffer {
         }
         block.toggle_fold();
         self.invalidate_height(index);
-        let pair_id = match &self.blocks[index] {
-            Block::ToolCall { call_id, .. } | Block::ToolResult { call_id, .. } => {
-                Some(call_id.clone())
-            }
-            _ => None,
-        };
-        let new_state = matches!(
-            &self.blocks[index],
-            Block::ToolCall { folded: true, .. } | Block::ToolResult { folded: true, .. }
-        );
-        if let Some(pid) = pair_id {
-            for (i, b) in self.blocks.iter_mut().enumerate() {
-                if i == index {
-                    continue;
-                }
-                match b {
-                    Block::ToolCall {
-                        call_id, folded, ..
-                    } if *call_id == pid => *folded = new_state,
-                    Block::ToolResult {
-                        call_id, folded, ..
-                    } if *call_id == pid => *folded = new_state,
-                    _ => {}
-                }
-            }
-            self.invalidate_pair_height(&pid);
+        if let Block::ToolCall {
+            call_id, folded, ..
         }
+        | Block::ToolResult {
+            call_id, folded, ..
+        } = &self.blocks[index]
+        {
+            let (call_id, folded) = (call_id.clone(), *folded);
+            self.set_call_folded(&call_id, folded);
+        }
+        self.bump_fold_generation();
         true
+    }
+
+    /// Fold or unfold both halves of the tool call `call_id`.
+    fn set_call_folded(&mut self, call_id: &str, folded: bool) {
+        for block in &mut self.blocks {
+            match block {
+                Block::ToolCall {
+                    call_id: cid,
+                    folded: f,
+                    ..
+                }
+                | Block::ToolResult {
+                    call_id: cid,
+                    folded: f,
+                    ..
+                } if cid == call_id => *f = folded,
+                _ => {}
+            }
+        }
+        self.invalidate_pair_height(call_id);
+        self.bump_version();
     }
 
     /// Set the fold state on every foldable block.
@@ -280,6 +372,11 @@ impl Buffer {
         for i in invalidated {
             self.invalidate_height(i);
         }
+        self.bump_fold_generation();
+    }
+
+    fn bump_fold_generation(&mut self) {
+        self.fold_generation = self.fold_generation.wrapping_add(1);
     }
 
     /// Drain the buffer's blocks, resetting scroll and focus to zero.
@@ -399,6 +496,11 @@ impl Buffer {
     pub(crate) fn last_is_live_thinking(&self) -> bool {
         matches!(self.blocks.last(), Some(Block::Thinking { live: true, .. }))
     }
+}
+
+/// Pretty-printed JSON for a tool input.
+fn pretty_input(input: &serde_json::Value) -> String {
+    serde_json::to_string_pretty(input).unwrap_or_else(|_| input.to_string())
 }
 
 /// Reindex a block-keyed row cache after `k` leading blocks were

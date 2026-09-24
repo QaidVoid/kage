@@ -1,18 +1,17 @@
 //! `UserBlockWidget`: per-block renderer for user prompts.
 //!
 //! The widget delegates row construction to the existing
-//! [`super::user_block_lines`] helper, which produces the tinted
-//! "chat bubble" rows (left-edge rule, top/bottom padding, inline
-//! emphasis).
+//! [`super::user_block_lines`] helper, which produces the tinted band
+//! rows (left-edge rule, `>` glyph, inline emphasis).
 
 use ratatui::text::Line;
 
 use super::user_block_lines;
 use super::widget::{BlockWidget, RenderCtx};
 
-/// Renders a [`crate::buffer::Block::User`] as the existing tinted
-/// "chat bubble" with a left-edge rule, top/bottom padding rows, and
-/// inline emphasis from [`RenderCtx::emphasis`].
+/// Renders a [`crate::buffer::Block::User`] as a tinted band with a
+/// left-edge rule, a `>` glyph before the prompt, and inline emphasis
+/// from [`RenderCtx::emphasis`].
 ///
 /// Owns the prompt text so the widget is `'static` and can sit behind
 /// `Box<dyn BlockWidget>` in the block registry.

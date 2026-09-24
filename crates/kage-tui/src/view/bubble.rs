@@ -3,28 +3,27 @@
 #[allow(clippy::wildcard_imports)] // free-fn split: shares the parent view module scope
 use super::*;
 
-/// Render a user prompt as a tinted full-width "chat bubble" with a
-/// thin themed left-edge rule and one row of padding above and below
-/// the text.
+/// Render a user prompt as a tinted full-width band with a thin themed
+/// left-edge rule and a `>` glyph before the first line.
 pub(crate) fn user_block_lines(text: &str, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
     let theme = crate::theme::current();
-    let mut content: Vec<Line<'static>> = Vec::new();
-    for raw in text.split('\n') {
-        content.push(Line::from(Span::styled(
-            raw.to_owned(),
-            Style::default()
-                .fg(theme.focus_color)
-                .add_modifier(Modifier::BOLD),
-        )));
-    }
-    wrap_in_bubble_focused(
-        content,
-        theme.user_rule,
-        theme.user_bg,
-        width,
-        emphasis,
-        None,
-    )
+    let style = Style::default()
+        .fg(theme.focus_color)
+        .add_modifier(Modifier::BOLD);
+    let glyph = Style::default()
+        .fg(theme.user_rule)
+        .add_modifier(DECORATION_MARKER);
+    let content = text
+        .split('\n')
+        .enumerate()
+        .map(|(i, raw)| {
+            Line::from(vec![
+                Span::styled(if i == 0 { "> " } else { "  " }, glyph),
+                Span::styled(raw.to_owned(), style),
+            ])
+        })
+        .collect();
+    wrap_in_bubble_focused(content, theme.user_rule, theme.user_bg, width, emphasis)
 }
 
 /// Width in cells of the focus-rule chrome reserved on
@@ -37,9 +36,10 @@ pub(crate) const FOCUS_RULE_WIDTH: usize = 2;
 /// already-built non-bubble block's render.
 ///
 /// The column is reserved unconditionally so toggling focus does
-/// not shift the body horizontally; the renderer additionally pre-wraps
-/// each logical line to `width - FOCUS_RULE_WIDTH` display columns
-/// so the rule prefix lands on **every** visual row, including
+/// not shift the body horizontally; the rule glyph only paints while
+/// the block is focused or matches a search. The renderer additionally
+/// pre-wraps each logical line to `width - FOCUS_RULE_WIDTH` display
+/// columns so the rule prefix lands on **every** visual row, including
 /// wrapped continuations. Without the pre-wrap, ratatui's
 /// `Paragraph::wrap` would only see one logical line with the
 /// prefix and fold the rest of the text below the rule. The
@@ -50,21 +50,12 @@ pub(crate) fn mark_emphasis(
     lines: Vec<Line<'static>>,
     width: u16,
     emphasis: Emphasis,
-    persistent_rule: Option<Color>,
 ) -> Vec<Line<'static>> {
     let prefix: Span<'static> = if emphasis == Emphasis::None {
-        match persistent_rule {
-            // A recessive always-on spine so the turn is anchored
-            // even when it is not the focus/search target.
-            Some(c) => Span::styled(
-                format!("{} ", emphasis.rule_glyph()),
-                Style::default().fg(c).add_modifier(DECORATION_MARKER),
-            ),
-            None => Span::styled(
-                " ".repeat(FOCUS_RULE_WIDTH),
-                Style::default().add_modifier(DECORATION_MARKER),
-            ),
-        }
+        Span::styled(
+            " ".repeat(FOCUS_RULE_WIDTH),
+            Style::default().add_modifier(DECORATION_MARKER),
+        )
     } else {
         let style = Style::default()
             .fg(emphasis.rule_color(crate::theme::current().focus_color))
@@ -72,31 +63,14 @@ pub(crate) fn mark_emphasis(
             .add_modifier(DECORATION_MARKER);
         Span::styled(format!("{} ", emphasis.rule_glyph()), style)
     };
-    let body_width = usize::from(width).saturating_sub(FOCUS_RULE_WIDTH).max(1);
-    let mut out: Vec<Line<'static>> =
-        Vec::with_capacity(lines.len() + widget::BlockPadding::BOTTOM);
-    for line in lines {
-        for row_spans in split_line_into_rows(line, body_width) {
-            let mut spans = Vec::with_capacity(row_spans.len() + 1);
-            spans.push(prefix.clone());
-            spans.extend(row_spans);
-            out.push(Line::from(spans));
-        }
-    }
-    // Trailing pad row(s) so non-bubble blocks have the same
-    // visual separation bubbles already get from their bottom pad.
-    // Carries the gutter so the rule reads as continuous.
-    for _ in 0..widget::BlockPadding::BOTTOM {
-        out.push(Line::from(vec![prefix.clone()]));
-    }
-    out
+    prefix_rows(lines, width, &prefix)
 }
 
 /// Like [`mark_emphasis`], but the unfocused gutter is empty so
 /// chrome-light custom blocks (system notices, errors) sit flush
 /// with the terminal edge. Focused or search-matched blocks still
-/// get the rule glyph, and the pre-wrap and bottom pad are kept so
-/// height measurement and separation behave identically.
+/// get the rule glyph, and the pre-wrap is kept so height measurement
+/// behaves identically.
 pub(crate) fn mark_emphasis_bare(
     lines: Vec<Line<'static>>,
     width: u16,
@@ -113,9 +87,18 @@ pub(crate) fn mark_emphasis_bare(
                 .add_modifier(DECORATION_MARKER),
         )
     };
+    prefix_rows(lines, width, &prefix)
+}
+
+/// Pre-wrap `lines` to the body width and start every visual row with
+/// `prefix`.
+fn prefix_rows(
+    lines: Vec<Line<'static>>,
+    width: u16,
+    prefix: &Span<'static>,
+) -> Vec<Line<'static>> {
     let body_width = usize::from(width).saturating_sub(FOCUS_RULE_WIDTH).max(1);
-    let mut out: Vec<Line<'static>> =
-        Vec::with_capacity(lines.len() + widget::BlockPadding::BOTTOM);
+    let mut out: Vec<Line<'static>> = Vec::with_capacity(lines.len());
     for line in lines {
         for row_spans in split_line_into_rows(line, body_width) {
             let mut spans = Vec::with_capacity(row_spans.len() + 1);
@@ -124,40 +107,33 @@ pub(crate) fn mark_emphasis_bare(
             out.push(Line::from(spans));
         }
     }
-    for _ in 0..widget::BlockPadding::BOTTOM {
-        out.push(Line::from(vec![prefix.clone()]));
-    }
     out
 }
 
-/// Wrap a vector of content lines in a full-width "bubble": each row
-/// starts with a colored left-edge rule, every cell is given the
-/// background color, and a one-row pad sits above and below.
-///
-/// Each input line is truncated to fit on exactly one visual row; if
-/// the content would have overflowed the buffer width and wrapped,
-/// the wrap would break the bubble's visual cohesion (the wrapped
-/// continuation has no leading rule and no trailing pad). Trade off:
-/// the user can expand the block to read the full content.
+/// Left rule plus the pads on either side of a band's content.
+const BUBBLE_CHROME: usize = 3;
+
+/// Content cells available on one row of a band `width` cells wide.
+pub(crate) fn bubble_content_width(width: u16) -> usize {
+    usize::from(width).saturating_sub(BUBBLE_CHROME).max(1)
+}
+
+/// Wrap a vector of content lines in a full-width band: each row
+/// starts with a colored left-edge rule and every cell is given the
+/// background color. Lines wider than the band wrap onto rows that
+/// carry the rule too.
 ///
 /// Spans inside `content` are reused as-is except their background is
-/// overridden with `bg` so the bubble reads as a uniform block.
+/// overridden with `bg` so the band reads as a uniform block.
 pub(crate) fn wrap_in_bubble_focused(
     content: Vec<Line<'static>>,
     rule_color: Color,
     bg: Color,
     width: u16,
     emphasis: Emphasis,
-    content_window: Option<(usize, usize)>,
 ) -> Vec<Line<'static>> {
-    const RULE_WIDTH: usize = 1;
-    const LEFT_PAD: usize = 1;
-    const RIGHT_PAD: usize = 1;
-    let total = usize::from(width);
-    let interior = total
-        .saturating_sub(RULE_WIDTH)
-        .max(LEFT_PAD + RIGHT_PAD + 1);
-    let max_content = interior.saturating_sub(LEFT_PAD + RIGHT_PAD);
+    let max_content = bubble_content_width(width);
+    let interior = max_content + BUBBLE_CHROME - 1;
     let rule_style = Style::default()
         .fg(emphasis.rule_color(rule_color))
         .bg(bg)
@@ -165,65 +141,27 @@ pub(crate) fn wrap_in_bubble_focused(
         .add_modifier(DECORATION_MARKER);
     let rule_glyph = emphasis.rule_glyph();
     let bg_only = Style::default().bg(bg).add_modifier(DECORATION_MARKER);
-    let pad_row = || -> Line<'static> {
-        Line::from(vec![
-            Span::styled(rule_glyph.to_owned(), rule_style),
-            Span::styled(" ".repeat(interior), bg_only),
-        ])
-    };
     let make_row = |visual_spans: Vec<Span<'static>>| -> Line<'static> {
         let used_width: usize = visual_spans.iter().map(|s| s.content.width()).sum();
         let mut spans: Vec<Span<'static>> = Vec::with_capacity(visual_spans.len() + 3);
         spans.push(Span::styled(rule_glyph.to_owned(), rule_style));
-        spans.push(Span::styled(" ".repeat(LEFT_PAD), bg_only));
+        spans.push(Span::styled(" ", bg_only));
         for s in visual_spans {
             spans.push(Span::styled(s.content, s.style.bg(bg)));
         }
-        let used = LEFT_PAD + used_width;
+        let used = 1 + used_width;
         if used < interior {
             spans.push(Span::styled(" ".repeat(interior - used), bg_only));
         }
         Line::from(spans)
     };
-
-    if let Some((skip_rows, take_rows)) = content_window {
-        let mut out: Vec<Line<'static>> = Vec::with_capacity(take_rows + 2);
-        out.push(pad_row());
-        let mut rows_produced = 0usize;
-        let mut rows_skipped = 0usize;
-        let target = skip_rows.saturating_add(take_rows);
-        for line in content {
-            if rows_produced >= take_rows {
-                break;
-            }
-            for visual_spans in split_line_into_rows(line, max_content) {
-                if rows_skipped < skip_rows {
-                    rows_skipped += 1;
-                    continue;
-                }
-                out.push(make_row(visual_spans));
-                rows_produced += 1;
-                if rows_produced >= take_rows {
-                    break;
-                }
-            }
-            if rows_skipped + rows_produced >= target {
-                break;
-            }
+    let mut out: Vec<Line<'static>> = Vec::with_capacity(content.len());
+    for line in content {
+        for visual_spans in split_line_into_rows(line, max_content) {
+            out.push(make_row(visual_spans));
         }
-        out.push(pad_row());
-        out
-    } else {
-        let mut out: Vec<Line<'static>> = Vec::with_capacity(content.len() + 2);
-        out.push(pad_row());
-        for line in content {
-            for visual_spans in split_line_into_rows(line, max_content) {
-                out.push(make_row(visual_spans));
-            }
-        }
-        out.push(pad_row());
-        out
     }
+    out
 }
 
 /// Split one logical line into one or more visual rows, each holding

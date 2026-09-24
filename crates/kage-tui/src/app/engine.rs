@@ -6,6 +6,21 @@ use super::*;
 
 use kage_core::protocol::{Envelope, Event, HostEvent, NoticeLevel, RequestId};
 
+use crate::view::tool_view::ToolPhase;
+
+/// A permission request waiting for, or shown in, the approval prompt.
+#[derive(Clone, Debug)]
+pub(crate) struct PendingApproval {
+    /// Id to answer with.
+    pub(crate) request_id: RequestId,
+    /// The gated tool call, whose row shows the approval state.
+    pub(crate) tool_call_id: Option<String>,
+    /// Tool name.
+    pub(crate) tool: String,
+    /// What the permission rules matched against.
+    pub(crate) subject: String,
+}
+
 impl App {
     /// Receive the engine events this App renders.
     pub fn set_engine_events(&mut self, rx: std::sync::mpsc::Receiver<Envelope>) {
@@ -110,15 +125,30 @@ impl App {
             }
             HostEvent::PermissionRequested {
                 request_id,
+                tool_call_id,
                 tool,
                 subject,
                 ..
-            } => self.permission_queue.push_back((request_id, tool, subject)),
+            } => {
+                let tool_call_id = tool_call_id.map(|id| id.to_string());
+                if let Some(id) = &tool_call_id {
+                    lock(&self.buffer).set_tool_phase(id, ToolPhase::Waiting);
+                }
+                self.permission_queue.push_back(PendingApproval {
+                    request_id,
+                    tool_call_id,
+                    tool,
+                    subject,
+                });
+            }
             HostEvent::PermissionResolved { request_id } => self.drop_permission(request_id),
             HostEvent::RunEnded { .. } => {
                 self.permission_queue.clear();
                 self.permission_overlay = None;
                 self.pending_permission = None;
+                let mut buf = lock(&self.buffer);
+                buf.finish_streaming();
+                buf.interrupt_running_tools();
             }
             HostEvent::RunStarted | HostEvent::TitleChanged { .. } => {}
         }
@@ -133,30 +163,60 @@ impl App {
         {
             return false;
         }
-        let Some((request_id, tool, subject)) = self.permission_queue.pop_front() else {
+        let Some(approval) = self.permission_queue.pop_front() else {
             return false;
         };
-        self.permission_overlay = Some(crate::overlay::PermissionOverlay::new(tool, subject));
-        self.pending_permission = Some(request_id);
+        self.permission_overlay = Some(crate::overlay::PermissionOverlay::new(
+            approval.tool.clone(),
+            approval.subject.clone(),
+        ));
+        self.pending_permission = Some(approval);
         true
     }
 
-    /// Forget a request that was answered elsewhere or abandoned.
+    /// Forget a request that was answered elsewhere or abandoned. Its
+    /// tool call goes on running.
     fn drop_permission(&mut self, request_id: RequestId) {
-        self.permission_queue.retain(|(id, _, _)| *id != request_id);
-        if self.pending_permission == Some(request_id) {
+        let mut dropped = Vec::new();
+        self.permission_queue.retain(|a| {
+            let keep = a.request_id != request_id;
+            if !keep {
+                dropped.push(a.tool_call_id.clone());
+            }
+            keep
+        });
+        if self
+            .pending_permission
+            .as_ref()
+            .is_some_and(|a| a.request_id == request_id)
+        {
             self.permission_overlay = None;
-            self.pending_permission = None;
+            dropped.extend(self.pending_permission.take().map(|a| a.tool_call_id));
+        }
+        let mut buf = lock(&self.buffer);
+        for id in dropped.into_iter().flatten() {
+            buf.set_tool_phase(&id, ToolPhase::Running);
         }
     }
 
-    /// Send the decision for the prompt on screen, then show the next one.
+    /// Send the decision for the prompt on screen, then show the next
+    /// one. The tool row moves to running, restarting its timer, or to
+    /// denied.
     pub(crate) fn answer_permission(&mut self, decision: PermissionDecision) {
-        if let Some(request_id) = self.pending_permission.take() {
-            let _ = self.send_request(RunRequest::ResolvePermission {
-                request_id,
-                decision,
-            });
+        let Some(approval) = self.pending_permission.take() else {
+            return;
+        };
+        let _ = self.send_request(RunRequest::ResolvePermission {
+            request_id: approval.request_id,
+            decision,
+        });
+        if let Some(id) = &approval.tool_call_id {
+            let phase = if decision == PermissionDecision::Deny {
+                ToolPhase::Denied
+            } else {
+                ToolPhase::Running
+            };
+            lock(&self.buffer).set_tool_phase(id, phase);
         }
     }
 }

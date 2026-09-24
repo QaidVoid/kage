@@ -1,5 +1,7 @@
 //! Tests for the conversation buffer.
 
+use serde_json::json;
+
 use super::*;
 
 #[test]
@@ -71,7 +73,7 @@ fn append_keeps_growing_block_cache_until_window_expires() {
 #[test]
 fn push_tool_result_invalidates_paired_call_height() {
     let mut buf = Buffer::new();
-    buf.push_tool_call("c1", "read", "summary", "{}");
+    buf.push_tool_call("c1", "read", json!({"path": "summary"}));
     buf.set_cached_height(0, 80, 4);
     assert_eq!(buf.cached_height(0, 80), Some(4));
     buf.push_tool_result("c1", "ok", false);
@@ -85,7 +87,7 @@ fn push_tool_result_invalidates_paired_call_height() {
 #[test]
 fn toggle_fold_invalidates_both_halves_of_pair() {
     let mut buf = Buffer::new();
-    buf.push_tool_call("c1", "read", "summary", "{}");
+    buf.push_tool_call("c1", "read", json!({"path": "summary"}));
     buf.push_tool_result("c1", "body", false);
     // After push_tool_result, the call's height was already
     // invalidated; reseat a value to verify toggle invalidates.
@@ -144,7 +146,7 @@ fn finish_streaming_marks_last_block_inert() {
 #[test]
 fn tool_call_starts_folded_then_toggles() {
     let mut buf = Buffer::new();
-    buf.push_tool_call("c1", "bash", "ls", "{\n  cmd: 'ls'\n}");
+    buf.push_tool_call("c1", "bash", json!({"command": "ls"}));
     assert_eq!(buf.total_lines(), 1, "folded contributes header line only");
     assert!(buf.toggle_fold(0));
     assert!(buf.total_lines() > 1, "unfolded shows body lines");
@@ -153,8 +155,8 @@ fn tool_call_starts_folded_then_toggles() {
 #[test]
 fn upsert_tool_call_refreshes_in_place_without_duplicates() {
     let mut buf = Buffer::new();
-    buf.upsert_tool_call("c1", "write", "write(a)", "{\"a\":1}");
-    buf.upsert_tool_call("c1", "write", "write(a,b)", "{\"a\":1,\"b\":2}");
+    buf.upsert_tool_call("c1", "write", json!({"path": "a"}));
+    buf.upsert_tool_call("c1", "write", json!({"path": "a.rs", "content": "x"}));
     let calls: Vec<&Block> = buf
         .blocks()
         .iter()
@@ -165,12 +167,12 @@ fn upsert_tool_call_refreshes_in_place_without_duplicates() {
         Block::ToolCall {
             name,
             input_summary,
-            input_pretty,
+            input,
             ..
         } => {
             assert_eq!(name, "write");
-            assert_eq!(input_summary, "write(a,b)");
-            assert_eq!(input_pretty, "{\"a\":1,\"b\":2}");
+            assert_eq!(input_summary, "a.rs");
+            assert_eq!(**input, json!({"path": "a.rs", "content": "x"}));
         }
         other => panic!("expected ToolCall, got {other:?}"),
     }
@@ -179,8 +181,8 @@ fn upsert_tool_call_refreshes_in_place_without_duplicates() {
 #[test]
 fn upsert_tool_call_appends_distinct_ids() {
     let mut buf = Buffer::new();
-    buf.upsert_tool_call("c1", "bash", "ls", "{}");
-    buf.upsert_tool_call("c2", "read", "read(x)", "{}");
+    buf.upsert_tool_call("c1", "bash", json!({"command": "ls"}));
+    buf.upsert_tool_call("c2", "read", json!({}));
     let calls = buf
         .blocks()
         .iter()
@@ -192,7 +194,7 @@ fn upsert_tool_call_appends_distinct_ids() {
 #[test]
 fn tool_result_inherits_name_from_matching_call() {
     let mut buf = Buffer::new();
-    buf.push_tool_call("c1", "bash", "ls", "{}");
+    buf.push_tool_call("c1", "bash", json!({"command": "ls"}));
     buf.push_tool_result("c1", "file1\nfile2\n", false);
     match &buf.blocks()[1] {
         Block::ToolResult { name, .. } => assert_eq!(name, "bash"),
@@ -222,7 +224,7 @@ fn set_all_folded_only_touches_foldable_blocks() {
     let mut buf = Buffer::new();
     buf.push_user("hi");
     buf.append_assistant_delta("ok");
-    buf.push_tool_call("c1", "bash", "ls", "{}");
+    buf.push_tool_call("c1", "bash", json!({}));
     buf.set_all_folded(false);
     assert_eq!(buf.total_lines(), 1 + 1 + 1 + 1);
 }
@@ -255,11 +257,11 @@ fn thinking_streams_separately_from_assistant() {
 fn focus_prev_next_walks_only_foldable_blocks() {
     let mut buf = Buffer::new();
     buf.push_user("hi"); // 0: not foldable
-    buf.push_tool_call("c1", "read", "a.rs", "{}"); // 1
+    buf.push_tool_call("c1", "read", json!({"path": "a.rs"})); // 1
     buf.push_tool_result("c1", "out", false); // 2: paired with 1, skipped
     buf.append_assistant_delta("ok"); // 3: not foldable
     buf.finish_streaming();
-    buf.push_tool_call("c2", "read", "b.rs", "{}"); // 4
+    buf.push_tool_call("c2", "read", json!({"path": "b.rs"})); // 4
     assert_eq!(buf.effective_focus(), Some(4));
     // Foldable-only walk: 4 -> 1 -> stop.
     assert!(buf.focus_prev());
@@ -273,11 +275,11 @@ fn focus_prev_next_walks_only_foldable_blocks() {
 fn focus_any_walks_every_block_skipping_merged_results() {
     let mut buf = Buffer::new();
     buf.push_user("hi"); // 0
-    buf.push_tool_call("c1", "read", "a.rs", "{}"); // 1
+    buf.push_tool_call("c1", "read", json!({"path": "a.rs"})); // 1
     buf.push_tool_result("c1", "out", false); // 2: skipped
     buf.append_assistant_delta("ok"); // 3
     buf.finish_streaming();
-    buf.push_tool_call("c2", "read", "b.rs", "{}"); // 4
+    buf.push_tool_call("c2", "read", json!({"path": "b.rs"})); // 4
     assert_eq!(buf.effective_focus(), Some(4));
     // 4 -> 3 -> 1 -> 0 (2 always skipped because merged with 1).
     assert!(buf.focus_prev_any());
@@ -293,7 +295,7 @@ fn focus_any_walks_every_block_skipping_merged_results() {
 fn set_focus_only_rejects_out_of_range() {
     let mut buf = Buffer::new();
     buf.push_user("hi");
-    buf.push_tool_call("c1", "ls", ".", "{}");
+    buf.push_tool_call("c1", "ls", json!({"path": "."}));
     buf.set_focus(Some(0));
     assert_eq!(buf.focus(), Some(0));
     buf.set_focus(Some(1));
@@ -306,7 +308,7 @@ fn set_focus_only_rejects_out_of_range() {
 fn clear_and_take_reset_focus_so_render_cannot_index_stale() {
     let mut buf = Buffer::new();
     buf.push_user("hi");
-    buf.push_tool_call("c1", "ls", ".", "{}");
+    buf.push_tool_call("c1", "ls", json!({"path": "."}));
     buf.set_focus(Some(1));
     buf.clear();
     assert_eq!(buf.focus(), None);
@@ -434,7 +436,7 @@ fn merge_render_state_skips_across_an_epoch_change() {
 fn push_tool_pairs(buf: &mut Buffer, start: usize, n: usize) {
     for i in start..start + n {
         let id = format!("c{i}");
-        buf.push_tool_call(&id, "bash", "ls", "{}");
+        buf.push_tool_call(&id, "bash", json!({"command": "ls"}));
         buf.push_tool_result_with_duration(&id, "out", false, None);
     }
 }
@@ -551,11 +553,11 @@ fn compact_drops_oldest_and_keeps_pairs_together() {
     buf.push_user("1");
     buf.push_user("2");
     buf.push_user("3");
-    buf.push_tool_call("A", "bash", "ls", "{}");
+    buf.push_tool_call("A", "bash", json!({"command": "ls"}));
     buf.push_tool_result("A", "out", false);
     buf.begin_thinking();
     buf.append_thinking_delta("hmm");
-    buf.push_tool_call("B", "bash", "ls", "{}");
+    buf.push_tool_call("B", "bash", json!({"command": "ls"}));
     buf.push_tool_result("B", "out", false);
     buf.push_user("4");
     buf.push_user("5");
@@ -574,7 +576,7 @@ fn compact_drops_oldest_and_keeps_pairs_together() {
 fn compact_frontier_extends_past_orphaned_results() {
     let mut buf = Buffer::new();
     buf.push_user("0");
-    buf.push_tool_call("A", "bash", "ls", "{}");
+    buf.push_tool_call("A", "bash", json!({"command": "ls"}));
     buf.begin_thinking();
     buf.append_thinking_delta("thinking");
     buf.push_tool_result("A", "out", false);
@@ -705,19 +707,30 @@ fn jump_targets_lists_messages_with_labels_not_thinking() {
     buf.append_thinking_delta("secret thoughts");
     buf.begin_assistant();
     buf.append_assistant_delta("the answer\nsecond line");
-    buf.push_tool_call("c1", "bash", "bash(\"ls\")", "{}");
+    buf.push_tool_call("c1", "bash", json!({"command": "ls"}));
     buf.push_tool_result_with_duration("c1", "ok", false, None);
 
     let targets = buf.jump_targets(80);
     let labels: Vec<&str> = targets.iter().map(|(_, l)| l.as_str()).collect();
     assert_eq!(
         labels,
-        vec!["you: hello there", "the answer", "tool bash: bash(\"ls\")"],
+        vec!["you: hello there", "the answer", "Ran ls"],
         "thinking and consumed results are skipped"
     );
     assert_eq!(targets[0].0, 0);
     assert_eq!(targets[1].0, 2);
     assert_eq!(targets[2].0, 3);
+}
+
+#[test]
+fn jump_targets_drop_markdown_and_welcome_notices() {
+    let mut buf = Buffer::new();
+    buf.push_custom("kage:help", "welcome to kage", false);
+    buf.push_custom("kage:notify", "Interrupted", false);
+    buf.append_assistant_delta("**Done**: see `main.rs`");
+    buf.finish_streaming();
+    let labels: Vec<String> = buf.jump_targets(80).into_iter().map(|(_, l)| l).collect();
+    assert_eq!(labels, ["Done: see main.rs"]);
 }
 
 #[test]

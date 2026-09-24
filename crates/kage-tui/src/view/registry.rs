@@ -102,7 +102,7 @@ impl BlockRenderer {
     /// Look up the widget for a single (non-paired) `block`. Tool
     /// calls and tool results that are part of a merged pair must go
     /// through [`Self::pair_widget_for`] instead; this method
-    /// renders them in their unpaired (running... / orphan-result)
+    /// renders them in their unpaired (in-flight / orphan-result)
     /// form.
     ///
     /// Custom blocks resolve via the per-kind registry first, falling
@@ -285,15 +285,7 @@ pub struct BuiltinThinkingFactory;
 
 impl BlockFactory for BuiltinThinkingFactory {
     fn make(&self, block: &Block) -> Option<Box<dyn BlockWidget>> {
-        if let Block::Thinking { text, folded, live } = block {
-            Some(Box::new(ThinkingBlockWidget::new(
-                text.clone(),
-                *folded,
-                *live,
-            )))
-        } else {
-            None
-        }
+        ThinkingBlockWidget::from_block(block).map(|w| Box::new(w) as Box<dyn BlockWidget>)
     }
 }
 
@@ -363,8 +355,6 @@ impl BlockFactory for BuiltinCompactionFactory {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
     use super::super::{Emphasis, widget::RenderCtx};
     use super::*;
     use crate::theme::Theme;
@@ -419,26 +409,17 @@ mod tests {
     #[test]
     fn builtins_registry_dispatches_thinking_blocks() {
         let r = BlockRenderer::with_builtins();
-        let block = Block::Thinking {
-            text: "thoughts".into(),
-            folded: false,
-            live: false,
-        };
-        assert!(r.widget_for(&block).is_some());
+        let mut buf = crate::buffer::Buffer::new();
+        buf.push_thinking("thoughts");
+        assert!(r.widget_for(&buf.blocks()[0]).is_some());
     }
 
     #[test]
     fn builtins_registry_dispatches_tool_call_alone() {
         let r = BlockRenderer::with_builtins();
-        let block = Block::ToolCall {
-            call_id: "c1".into(),
-            name: "read".into(),
-            input_summary: "x".into(),
-            input_pretty: "{}".into(),
-            folded: false,
-            started_at: Instant::now(),
-        };
-        assert!(r.widget_for(&block).is_some());
+        let mut buf = crate::buffer::Buffer::new();
+        buf.push_tool_call("c1", "read", serde_json::json!({"path": "x"}));
+        assert!(r.widget_for(&buf.blocks()[0]).is_some());
     }
 
     #[test]
@@ -458,23 +439,13 @@ mod tests {
     #[test]
     fn pair_widget_returns_widget_for_paired_blocks() {
         let r = BlockRenderer::with_builtins();
-        let call = Block::ToolCall {
-            call_id: "c1".into(),
-            name: "read".into(),
-            input_summary: "x".into(),
-            input_pretty: "{}".into(),
-            folded: false,
-            started_at: Instant::now(),
-        };
-        let result = Block::ToolResult {
-            call_id: "c1".into(),
-            name: "read".into(),
-            output: "x".into(),
-            is_error: false,
-            folded: false,
-            duration_ms: Some(1),
-        };
-        assert!(r.pair_widget_for(&call, &result).is_some());
+        let mut buf = crate::buffer::Buffer::new();
+        buf.push_tool_call("c1", "read", serde_json::json!({"path": "x"}));
+        buf.push_tool_result("c1", "x", false);
+        assert!(
+            r.pair_widget_for(&buf.blocks()[0], &buf.blocks()[1])
+                .is_some()
+        );
     }
 
     #[test]

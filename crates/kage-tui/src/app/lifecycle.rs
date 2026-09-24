@@ -71,13 +71,8 @@ impl App {
                 last_spinner_idx = crate::view::spinner_frame_index();
                 needs_redraw = false;
             }
-            // Wake periodically to repaint streaming tool-call
-            // timers ("running 1.2s") and to pick up worker-thread
-            // mutations that race ahead of any input event. While
-            // the agent is mid-turn we shorten the wake interval to
-            // ~one spinner frame so the modeline tick stays smooth
-            // even with no streaming deltas (e.g. waiting on a slow
-            // first token from the provider).
+            // Timers and the spinner tick with no input or deltas, so a
+            // run in flight wakes about once per spinner frame.
             // Computed once and reused for the redraw gate below;
             // `has_running_tool_call` locks the buffer and scans every
             // block, so calling it twice per iteration is wasteful.
@@ -247,25 +242,11 @@ impl App {
         &self.search_match_set
     }
 
-    /// True when there's at least one in-flight tool call (a
-    /// `ToolCall` block whose matching `ToolResult` hasn't arrived).
-    /// The renderer paints "running Xs" for these and we want it to
-    /// tick even on an otherwise idle event loop.
+    /// True when there's at least one in-flight tool call. The
+    /// renderer ticks its timer, so the loop repaints even when
+    /// otherwise idle.
     pub(crate) fn has_running_tool_call(&self) -> bool {
-        let buf = lock(&self.buffer);
-        let blocks = buf.blocks();
-        let mut pending: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for b in blocks {
-            if let crate::buffer::Block::ToolCall { call_id, .. } = b {
-                pending.insert(call_id.as_str());
-            }
-        }
-        for b in blocks {
-            if let crate::buffer::Block::ToolResult { call_id, .. } = b {
-                pending.remove(call_id.as_str());
-            }
-        }
-        !pending.is_empty()
+        lock(&self.buffer).has_running_tool_call()
     }
 
     /// Emit a DECSCUSR cursor-shape escape if the desired shape for

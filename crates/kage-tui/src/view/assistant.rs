@@ -6,8 +6,8 @@
 //! since running syntect over a half-written body 30 times a second
 //! is wasted work. Finished blocks run the full
 //! [`crate::markdown::render`], which adds syntect highlighting to
-//! code fences. Emphasis adds the left-edge marker via
-//! `mark_emphasis`.
+//! code fences. Focus or a search match adds the left-edge marker via
+//! `mark_emphasis`; an unfocused reply has no rule.
 
 use ratatui::text::Line;
 
@@ -44,12 +44,7 @@ impl AssistantBlockWidget {
         } else {
             crate::markdown::render(&self.text, assistant_style())
         };
-        mark_emphasis(
-            body,
-            width,
-            emphasis,
-            Some(crate::theme::current().assistant_rule),
-        )
+        mark_emphasis(body, width, emphasis)
     }
 }
 
@@ -128,10 +123,7 @@ mod tests {
         focused.emphasis = Emphasis::Focused;
         let rows = w.lines(20, &focused);
         assert!(rows.len() >= 6, "expected the long line to wrap");
-        // Every visual row of body content (everything before the
-        // trailing pad row) carries the focus rule glyph.
-        let body_rows = rows.len().saturating_sub(1);
-        for (y, row) in rows.iter().take(body_rows).enumerate() {
+        for (y, row) in rows.iter().enumerate() {
             let text = painted(std::slice::from_ref(row));
             assert!(
                 text.starts_with(Emphasis::Focused.rule_glyph()),

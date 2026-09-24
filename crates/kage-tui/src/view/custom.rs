@@ -2,12 +2,13 @@
 //! whose `kind` the core does not interpret.
 //!
 //! Internal `kage:*` kinds get purpose-built chrome instead of a
-//! raw `[kage:...]` label: informational kinds (help, notify, theme,
-//! image, plugin) render as quiet muted text with no header at all,
-//! errors get a red `error` tag, and operational kinds (shell, mcp,
-//! log, compaction, truncated) get a small muted tag. Unknown kinds - plugin blocks
-//! without a registered renderer - keep the `[kind]` header, which
-//! is the useful debugging view for plugin authors.
+//! raw `[kage:...]` label: informational kinds (help, notify, retry,
+//! theme, image, plugin, mcp, log) render as quiet muted lines, errors
+//! as a U+2717 line in the error color, shell output under its
+//! `$ command` header, and a truncated reply as a warning line.
+//! Unknown kinds - plugin blocks without a registered renderer - keep
+//! the `[kind]` header, which is the useful debugging view for plugin
+//! authors.
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -15,31 +16,32 @@ use ratatui::text::{Line, Span};
 use super::widget::{BlockWidget, RenderCtx};
 use super::{
     Emphasis, custom_style, fold_indicator, header_line, mark_emphasis, mark_emphasis_bare,
-    plain_lines,
+    plain_lines, tool_call_style,
 };
 use crate::buffer::Block;
 use crate::theme::current;
 
 /// The chrome a custom block gets, derived from its kind.
 enum Chrome {
-    /// No header, muted body: pure informational text.
+    /// Muted lines: pure informational text.
     Quiet,
-    /// A small muted tag above the body (`shell`, `error`, ...).
-    /// The bool marks the tag as an alarm (error styling).
-    Tag(&'static str, bool),
+    /// The message after a U+2717 glyph, in the error color.
+    Error,
+    /// A `$ command` header in the tool style above the output.
+    Shell,
+    /// One line in the warning color.
+    Warning,
     /// The plugin-debug view: `[kind]` header, custom accent body.
     Raw,
 }
 
 fn chrome_for(kind: &str) -> Chrome {
     match kind {
-        "kage:help" | "kage:notify" | "kage:theme" | "kage:image" | "kage:plugin" => Chrome::Quiet,
-        "kage:error" => Chrome::Tag("error", true),
-        "kage:shell" => Chrome::Tag("shell", false),
-        "kage:mcp" => Chrome::Tag("mcp", false),
-        "kage:compaction" => Chrome::Tag("compaction", false),
-        "kage:log" => Chrome::Tag("log", false),
-        "kage:truncated" => Chrome::Tag("truncated", false),
+        "kage:help" | "kage:notify" | "kage:retry" | "kage:theme" | "kage:image"
+        | "kage:plugin" | "kage:mcp" | "kage:log" => Chrome::Quiet,
+        "kage:error" => Chrome::Error,
+        "kage:shell" => Chrome::Shell,
+        "kage:truncated" => Chrome::Warning,
         _ => Chrome::Raw,
     }
 }
@@ -69,67 +71,66 @@ impl CustomBlockWidget {
         }
     }
 
+    /// The lines of the body, or only the first one when folded, so a
+    /// folded notice stays findable.
+    fn body(&self) -> &str {
+        if self.folded {
+            self.text.lines().next().unwrap_or_default()
+        } else {
+            &self.text
+        }
+    }
+
     fn lines_for(&self, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
-        let mut out = Vec::new();
-        let bare = match chrome_for(&self.kind) {
-            Chrome::Quiet => {
-                if self.folded {
-                    // A folded quiet block still needs one visible
-                    // row so it stays findable.
-                    let first = self.text.lines().next().unwrap_or_default().to_owned();
-                    out.push(Line::from(first).style(muted_style()));
-                } else {
-                    out.extend(plain_lines(&self.text, muted_style()));
+        let fg = |c| Style::default().fg(c);
+        let out = match chrome_for(&self.kind) {
+            Chrome::Quiet => plain_lines(self.body(), fg(current().muted_fg)),
+            Chrome::Warning => plain_lines(self.body(), fg(current().warning_fg)),
+            Chrome::Error => {
+                let style = fg(current().tool_error_fg);
+                let mut out = plain_lines(self.body(), style);
+                if let Some(first) = out.first_mut() {
+                    first.spans.insert(
+                        0,
+                        Span::styled("\u{2717} ", style.add_modifier(Modifier::BOLD)),
+                    );
                 }
-                true
+                out
             }
-            Chrome::Tag(tag, alarm) => {
-                let tag_style = if alarm {
-                    Style::default()
-                        .fg(current().tool_error_fg)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    muted_style().add_modifier(Modifier::BOLD)
-                };
-                // A bare bracketed tag: no fold chevron, no indent.
-                // These blocks are short enough that the chrome
-                // should not outweigh the text.
-                out.push(Line::from(Span::styled(format!("[{tag}]"), tag_style)));
+            Chrome::Shell => {
+                let mut lines = self.text.lines();
+                let header = lines.next().unwrap_or_default();
+                let mut out = vec![Line::from(Span::styled(
+                    header.to_owned(),
+                    tool_call_style().add_modifier(Modifier::BOLD),
+                ))];
                 if !self.folded {
-                    let body_style = if alarm {
-                        Style::default().fg(current().tool_error_fg)
-                    } else {
-                        Style::default().fg(current().assistant_fg)
+                    let body: Vec<&str> = lines.collect();
+                    let body = match body.split_last() {
+                        Some((&"(exit code 0)", rest)) => rest,
+                        _ => &body[..],
                     };
-                    out.extend(plain_lines(&self.text, body_style));
+                    out.extend(plain_lines(&body.join("\n"), fg(current().assistant_fg)));
                 }
-                true
+                out
             }
             Chrome::Raw => {
-                out.push(header_line(
+                let mut out = vec![header_line(
                     fold_indicator(self.folded),
                     &self.kind,
                     None,
                     custom_style(),
-                ));
+                )];
                 if !self.folded {
                     out.extend(plain_lines(&self.text, custom_style()));
                 }
-                false
+                return mark_emphasis(out, width, emphasis);
             }
         };
-        // Quiet and tag chrome skips the reserved rule column: the
-        // notice sits flush with the terminal edge.
-        if bare {
-            mark_emphasis_bare(out, width, emphasis)
-        } else {
-            mark_emphasis(out, width, emphasis, None)
-        }
+        // Notices skip the reserved rule column: they sit flush with
+        // the terminal edge.
+        mark_emphasis_bare(out, width, emphasis)
     }
-}
-
-fn muted_style() -> Style {
-    Style::default().fg(current().muted_fg)
 }
 
 impl BlockWidget for CustomBlockWidget {
@@ -213,38 +214,53 @@ mod tests {
         }
     }
 
-    #[test]
-    fn error_kind_gets_an_error_tag_not_the_raw_kind() {
+    fn rows(kind: &str, text: &str) -> Vec<String> {
         let block = Block::Custom {
-            kind: "kage:error".into(),
-            text: "model unavailable".into(),
+            kind: kind.into(),
+            text: text.into(),
             folded: false,
         };
         let w = CustomBlockWidget::from_block(&block).unwrap();
-        let text = painted(&w.lines(60, &ctx(&Theme::default())));
-        assert!(text.contains("error"), "{text:?}");
-        assert!(!text.contains("kage:error"), "{text:?}");
-        assert!(text.contains("model unavailable"), "{text:?}");
+        w.lines(60, &ctx(&Theme::default()))
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
     }
 
     #[test]
-    fn operational_kinds_get_friendly_tags() {
-        for (kind, tag) in [
-            ("kage:shell", "shell"),
-            ("kage:mcp", "mcp"),
-            ("kage:compaction", "compaction"),
-            ("kage:truncated", "truncated"),
+    fn notices_carry_no_bracket_tags() {
+        for kind in [
+            "kage:error",
+            "kage:shell",
+            "kage:mcp",
+            "kage:log",
+            "kage:truncated",
+            "kage:retry",
         ] {
-            let block = Block::Custom {
-                kind: kind.into(),
-                text: "body".into(),
-                folded: false,
-            };
-            let w = CustomBlockWidget::from_block(&block).unwrap();
-            let text = painted(&w.lines(60, &ctx(&Theme::default())));
-            assert!(text.contains(tag), "{kind}: {text:?}");
+            let text = rows(kind, "$ ls\nbody").join("\n");
+            assert!(!text.contains('['), "{kind}: {text:?}");
             assert!(!text.contains(kind), "{kind}: {text:?}");
         }
+    }
+
+    #[test]
+    fn errors_lead_with_a_cross() {
+        assert_eq!(
+            rows("kage:error", "model unavailable"),
+            ["\u{2717} model unavailable"]
+        );
+    }
+
+    #[test]
+    fn shell_blocks_drop_a_zero_exit_code() {
+        assert_eq!(
+            rows("kage:shell", "$ ls\na.rs\n(exit code 0)"),
+            ["$ ls", "a.rs"]
+        );
+        assert_eq!(
+            rows("kage:shell", "$ false\n\n(exit code 1)"),
+            ["$ false", "", "(exit code 1)"]
+        );
     }
 
     #[test]
@@ -258,31 +274,6 @@ mod tests {
         let text = painted(&w.lines(60, &ctx(&Theme::default())));
         assert!(text.contains("first line"), "{text:?}");
         assert!(!text.contains("second line"), "{text:?}");
-    }
-
-    #[test]
-    fn tag_blocks_have_no_chevron_indent_or_margin() {
-        let block = Block::Custom {
-            kind: "kage:error".into(),
-            text: "provider returned status 401".into(),
-            folded: false,
-        };
-        let w = CustomBlockWidget::from_block(&block).unwrap();
-        let lines = w.lines(60, &ctx(&Theme::default()));
-        let header = lines[0]
-            .spans
-            .iter()
-            .map(|s| s.content.as_ref())
-            .collect::<String>();
-        assert_eq!(header, "[error]", "bare tag, no chevron: {header:?}");
-        for line in &lines[1..] {
-            let text = line
-                .spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect::<String>();
-            assert!(!text.starts_with("  "), "no left margin: {text:?}");
-        }
     }
 
     #[test]
@@ -300,13 +291,5 @@ mod tests {
             .map(|s| s.content.as_ref())
             .collect::<String>();
         assert_eq!(text, "welcome to kage", "flush left, no prefix");
-        for line in lines.iter().skip(1) {
-            let pad = line
-                .spans
-                .iter()
-                .map(|s| s.content.as_ref())
-                .collect::<String>();
-            assert!(!pad.starts_with(' '), "pad rows stay blank: {pad:?}");
-        }
     }
 }

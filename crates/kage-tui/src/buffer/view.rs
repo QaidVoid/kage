@@ -76,9 +76,9 @@ impl Buffer {
     }
 
     /// What focus value the renderer painted last frame. The renderer
-    /// compares this to the current effective focus each frame; when
-    /// they differ, it invalidates the moved blocks' caches so
-    /// emphasis repaints.
+    /// compares this to the focus it paints each frame; when they
+    /// differ, it invalidates the moved blocks' caches so emphasis
+    /// repaints.
     #[must_use]
     pub fn last_drawn_focus(&self) -> Option<usize> {
         self.last_drawn_focus
@@ -125,43 +125,97 @@ impl Buffer {
         self.stream_dirty_since.is_some()
     }
 
-    /// Cached call/result block pairing for the current block
-    /// list, rebuilt here when the block count or structural epoch
-    /// changed since it was last built. The returned handle is
-    /// shared, so this runs at most once per block-list change rather
-    /// than per frame.
+    /// Cached call/result block pairing and `Explored` grouping for
+    /// the current block list, rebuilt here when the block count, the
+    /// structural epoch or the fold generation changed since it was
+    /// last built. A rebuild drops the render caches of every group
+    /// head whose members changed. The returned handle is shared, so
+    /// this runs at most once per change rather than per frame.
     pub(crate) fn tool_topology(&mut self) -> Arc<ToolTopology> {
-        let key = (self.epoch, self.blocks.len());
+        let key = self.topology_key();
         if let Some((built, topo)) = &self.tool_topology
             && *built == key
         {
             return Arc::clone(topo);
         }
         let topo = Arc::new(ToolTopology::build(&self.blocks));
+        let stale_heads: Vec<usize> = match &self.tool_topology {
+            Some(((epoch, ..), old)) if *epoch == self.epoch => old
+                .groups
+                .keys()
+                .chain(topo.groups.keys())
+                .filter(|head| old.groups.get(head) != topo.groups.get(head))
+                .copied()
+                .collect(),
+            _ => topo.groups.keys().copied().collect(),
+        };
+        for head in stale_heads {
+            self.clear_caches_at(head);
+        }
         self.tool_topology = Some((key, Arc::clone(&topo)));
         topo
+    }
+
+    fn topology_key(&self) -> TopologyKey {
+        (self.epoch, self.blocks.len(), self.fold_generation)
+    }
+
+    /// Whether block `idx` is a call folded into an `Explored` group
+    /// under another head, per the cached topology. A stale cache
+    /// answers `false`.
+    fn is_grouped_member(&self, idx: usize) -> bool {
+        self.tool_topology.as_ref().is_some_and(|(key, topo)| {
+            *key == self.topology_key() && topo.head_of_member.contains_key(&idx)
+        })
+    }
+
+    /// Whether block `idx` paints a ticking timer and so must be
+    /// rendered fresh each frame. The render caches never store such a
+    /// block; every change that starts a timer drops its caches.
+    #[must_use]
+    pub fn is_timed(&self, idx: usize) -> bool {
+        self.blocks.get(idx).is_some_and(Block::is_timed)
+    }
+
+    /// Whether any tool call is still in flight: streaming its
+    /// arguments, waiting for approval, or running.
+    #[must_use]
+    pub fn has_running_tool_call(&self) -> bool {
+        self.blocks.iter().any(|b| {
+            matches!(
+                b,
+                Block::ToolCall {
+                    phase: ToolPhase::Streaming | ToolPhase::Waiting | ToolPhase::Running,
+                    ..
+                }
+            )
+        })
     }
 
     /// Message-level jump targets for the F3 picker: `(block_idx,
     /// label)` pairs, one per user prompt, assistant reply, tool
     /// call, and notice block. Labels are single-line summaries
-    /// truncated to `label_width` characters. Thinking blocks and
-    /// standalone results are skipped (the first pair merges into
-    /// its call; the latter are noise).
+    /// without markdown emphasis, truncated to `label_width`
+    /// characters. Thinking blocks, standalone results, and help and
+    /// status notices are skipped.
     #[must_use]
     pub fn jump_targets(&self, label_width: usize) -> Vec<(usize, String)> {
         let mut out = Vec::new();
         for (idx, block) in self.blocks.iter().enumerate() {
             let label = match block {
-                Block::User { text } => Some(format!("you: {}", first_line(text))),
-                Block::Assistant { text, .. } | Block::Custom { text, .. } => {
-                    Some(first_line(text))
+                Block::User { text } => Some(format!("you: {}", plain_first_line(text))),
+                Block::Custom { kind, .. }
+                    if matches!(kind.as_str(), "kage:help" | "kage:notify") =>
+                {
+                    None
                 }
-                Block::ToolCall {
-                    name,
-                    input_summary,
-                    ..
-                } => Some(format!("tool {name}: {input_summary}")),
+                Block::Assistant { text, .. } | Block::Custom { text, .. } => {
+                    Some(plain_first_line(text))
+                }
+                Block::ToolCall { name, input, .. } => {
+                    let label = crate::view::tool_view::describe(name, input);
+                    Some(format!("{} {}", label.verb_done, label.target))
+                }
                 Block::Thinking { .. } | Block::ToolResult { .. } => None,
             };
             if let Some(label) = label
@@ -193,13 +247,17 @@ impl Buffer {
 
     /// Renderer hook: store the wrapped-row height it just measured
     /// for the block at `idx` at the given `width`. Subsequent frames
-    /// reuse this without rebuilding the block's [`Line`]s.
+    /// reuse this without rebuilding the block's [`Line`]s. A timed
+    /// block is never stored, so it rebuilds every frame.
     pub fn set_cached_height(&mut self, idx: usize, width: u16, height: u16) {
+        if idx + 1 == self.blocks.len() {
+            self.stream_dirty_since = None;
+        }
+        if self.is_timed(idx) {
+            return;
+        }
         if let Some(slot) = self.block_heights.get_mut(idx) {
             *slot = Some((width, height));
-            if idx + 1 == self.blocks.len() {
-                self.stream_dirty_since = None;
-            }
         }
     }
 
@@ -232,18 +290,21 @@ impl Buffer {
     /// Renderer hook: store the rendered lines it just built for the
     /// block at `idx`, paired with the width used. Held behind `Arc`
     /// so the renderer's emit pass can clone the handle without
-    /// duplicating the line vector.
+    /// duplicating the line vector. A timed block is never stored.
     pub fn set_cached_render_lines(
         &mut self,
         idx: usize,
         width: u16,
         lines: Arc<Vec<Line<'static>>>,
     ) {
+        if idx + 1 == self.blocks.len() {
+            self.stream_dirty_since = None;
+        }
+        if self.is_timed(idx) {
+            return;
+        }
         if let Some(slot) = self.block_render_lines.get_mut(idx) {
             *slot = Some((width, lines));
-            if idx + 1 == self.blocks.len() {
-                self.stream_dirty_since = None;
-            }
         }
     }
 
@@ -452,30 +513,31 @@ impl Buffer {
     }
 
     pub(crate) fn invalidate_height(&mut self, idx: usize) {
+        self.clear_caches_at(idx);
+        self.bump_version();
+    }
+
+    fn clear_caches_at(&mut self, idx: usize) {
         if let Some(slot) = self.block_heights.get_mut(idx) {
             *slot = None;
         }
         if let Some(slot) = self.block_render_lines.get_mut(idx) {
             *slot = None;
         }
-        self.bump_version();
     }
 
     pub(crate) fn invalidate_pair_height(&mut self, call_id: &str) {
-        for (i, b) in self.blocks.iter().enumerate() {
-            match b {
-                Block::ToolCall { call_id: cid, .. } | Block::ToolResult { call_id: cid, .. }
-                    if cid == call_id =>
-                {
-                    if let Some(slot) = self.block_heights.get_mut(i) {
-                        *slot = None;
-                    }
-                    if let Some(slot) = self.block_render_lines.get_mut(i) {
-                        *slot = None;
-                    }
-                }
-                _ => {}
-            }
+        let pair: Vec<usize> = self
+            .blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| {
+                matches!(b, Block::ToolCall { call_id: cid, .. } | Block::ToolResult { call_id: cid, .. } if cid == call_id)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        for i in pair {
+            self.clear_caches_at(i);
         }
     }
 
@@ -646,12 +708,14 @@ impl Buffer {
     /// block kind is selectable except a `ToolResult` whose matching
     /// `ToolCall` exists earlier in the buffer (the renderer merges
     /// the pair into one composite, so landing on the result would
-    /// look like a no-op visual).
+    /// look like a no-op visual) and a call grouped under another
+    /// `Explored` head.
     pub(crate) fn is_selectable(&self, idx: usize) -> bool {
         match self.blocks.get(idx) {
             Some(Block::ToolResult { call_id, .. }) => !self.blocks[..idx]
                 .iter()
                 .any(|b| matches!(b, Block::ToolCall { call_id: cid, .. } if cid == call_id)),
+            Some(Block::ToolCall { .. }) => !self.is_grouped_member(idx),
             Some(_) => true,
             None => false,
         }

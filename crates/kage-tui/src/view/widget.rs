@@ -87,10 +87,10 @@ pub trait BlockWidget: Send + Sync {
 /// mix of "tinted bubbles padded inside" and "naked assistant text
 /// crammed against its neighbours".
 ///
-/// The 1-row bottom padding gives non-bubble blocks the same vertical
-/// breathing room bubbles already had via their internal pad row,
-/// and the 2-col left padding aligns content with the bubble interior
-/// (1 col rule + 1 col internal pad).
+/// Blocks carry no vertical padding: the one blank row the renderer
+/// puts between blocks is the only separation, so every block reads
+/// with the same rhythm. The 2-col left padding aligns content with
+/// the bubble interior (1 col rule + 1 col internal pad).
 pub struct BlockPadding;
 
 impl BlockPadding {
@@ -98,10 +98,9 @@ impl BlockPadding {
     /// for both bubbles and non-bubbles; bumped only if a future
     /// design wants more headroom.
     pub const TOP: usize = 0;
-    /// Rows of blank space below the block's content. `1` for
-    /// non-bubble blocks (added by `mark_emphasis`) and matched by
-    /// the bubble's existing trailing pad row.
-    pub const BOTTOM: usize = 1;
+    /// Rows of blank space below the block's content. Currently `0`
+    /// for both bubbles and non-bubbles.
+    pub const BOTTOM: usize = 0;
     /// Left chrome cells reserved before content. `2` to match the
     /// focus-rule (1 col) plus its trailing space (1 col).
     pub const LEFT: usize = 2;

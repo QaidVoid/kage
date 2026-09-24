@@ -17,6 +17,8 @@ use std::collections::{HashMap, HashSet};
 
 pub(crate) use ratatui::text::Line;
 
+pub(crate) use crate::view::tool_view::ToolPhase;
+
 /// One renderable region of the conversation.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
@@ -37,10 +39,20 @@ pub enum Block {
     Thinking {
         /// Reassembled thinking text.
         text: String,
-        /// Whether the user has collapsed this block.
+        /// Whether the body is collapsed. A live folded block still
+        /// shows its last lines.
         folded: bool,
         /// Whether this block is still receiving deltas.
         live: bool,
+        /// When the block began.
+        started_at: Instant,
+        /// How long the model thought, recorded when the block
+        /// finished. `None` for a block replayed from history.
+        duration_ms: Option<u64>,
+        /// Whether the user toggled the fold while the block was live.
+        /// Finishing keeps a pinned block's fold state instead of
+        /// collapsing it.
+        pinned: bool,
     },
     /// One tool invocation by the assistant.
     ToolCall {
@@ -52,13 +64,21 @@ pub enum Block {
         /// One-line summary of the tool input shown in the folded
         /// header (e.g. `bash("ls -la")`).
         input_summary: String,
-        /// Pretty-printed full input shown when expanded.
+        /// Pretty-printed full input, for search and yank.
         input_pretty: String,
+        /// Parsed input, partial while the model streams it. Shared, so
+        /// the per-frame buffer snapshot does not copy it.
+        input: Arc<serde_json::Value>,
         /// Whether the user has collapsed the body.
         folded: bool,
-        /// Wall-clock instant when the call was registered. Used by
-        /// the renderer to compute and show duration once the matching
-        /// [`Block::ToolResult`] arrives.
+        /// Where the call is in its lifecycle.
+        phase: ToolPhase,
+        /// Latest progress text from the running tool. Each update
+        /// replaces it.
+        progress: String,
+        /// When the call entered its current phase. Entering
+        /// [`ToolPhase::Running`] resets it, so the duration shown
+        /// once the result arrives excludes any approval wait.
         started_at: Instant,
     },
     /// Output of a previously-issued tool call.
@@ -144,24 +164,67 @@ impl Block {
         )
     }
 
-    /// Toggle the fold state. No-op for non-foldable blocks.
+    /// Toggle the fold state. No-op for non-foldable blocks. Toggling a
+    /// live thinking block pins its fold state.
     pub fn toggle_fold(&mut self) {
         match self {
-            Self::Thinking { folded, .. }
-            | Self::ToolCall { folded, .. }
+            Self::Thinking {
+                folded,
+                live,
+                pinned,
+                ..
+            } => {
+                *folded = !*folded;
+                *pinned |= *live;
+            }
+            Self::ToolCall { folded, .. }
             | Self::ToolResult { folded, .. }
             | Self::Custom { folded, .. } => *folded = !*folded,
             _ => {}
         }
     }
 
-    /// Mark a streaming block as no longer accepting deltas.
+    /// Mark a streaming block as no longer accepting deltas. A live
+    /// thinking block records how long it ran and folds unless pinned.
     pub fn finish(&mut self) {
         match self {
-            Self::Assistant { live, .. } | Self::Thinking { live, .. } => *live = false,
+            Self::Assistant { live, .. } => *live = false,
+            Self::Thinking {
+                live: live @ true,
+                folded,
+                started_at,
+                duration_ms,
+                pinned,
+                ..
+            } => {
+                *live = false;
+                *duration_ms = Some(elapsed_ms(*started_at));
+                if !*pinned {
+                    *folded = true;
+                }
+            }
             _ => {}
         }
     }
+
+    /// Whether the block paints a ticking timer: live thinking or a
+    /// running tool call.
+    #[must_use]
+    pub fn is_timed(&self) -> bool {
+        matches!(
+            self,
+            Self::Thinking { live: true, .. }
+                | Self::ToolCall {
+                    phase: ToolPhase::Running,
+                    ..
+                }
+        )
+    }
+}
+
+/// Milliseconds since `start`, saturating.
+fn elapsed_ms(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// True if `haystack` contains `needle` ignoring ASCII case (a/A,
@@ -192,9 +255,14 @@ fn count_lines(text: &str) -> usize {
     text.split('\n').count()
 }
 
-/// First line of `text`, for single-line summaries.
-fn first_line(text: &str) -> String {
-    text.lines().next().unwrap_or_default().to_owned()
+/// First line of `text` without markdown bold markers and backticks,
+/// for single-line summaries.
+fn plain_first_line(text: &str) -> String {
+    text.lines()
+        .next()
+        .unwrap_or_default()
+        .replace("**", "")
+        .replace('`', "")
 }
 
 /// Trim `label` to at most `label_width` characters, appending an
@@ -211,11 +279,12 @@ fn truncate_label(label: &str, label_width: usize) -> Option<String> {
 }
 
 /// Call/result pairing for [`Block::ToolCall`] and
-/// [`Block::ToolResult`] blocks, derived from the block list and
-/// cached between frames. The renderer rebuilds it only when the
-/// block count or structural epoch changes; holding it behind an [`Arc`] lets buffer
-/// snapshots share it instead of copying a map of every call id per
-/// frame.
+/// [`Block::ToolResult`] blocks plus the `Explored` groups of
+/// read-only calls, derived from the block list and cached between
+/// frames. The renderer rebuilds it only when the block count, the
+/// structural epoch or the fold generation changes; holding it behind
+/// an [`Arc`] lets buffer snapshots share it instead of copying a map
+/// of every call id per frame.
 #[derive(Debug, Default)]
 pub struct ToolTopology {
     /// Result block index for each call id; the first result wins.
@@ -224,10 +293,15 @@ pub struct ToolTopology {
     pub(crate) consumed_results: HashSet<usize>,
     /// Result block index to its call block index.
     pub(crate) call_idx_for_result: HashMap<usize, usize>,
+    /// `Explored` group head to all of its member calls, head first.
+    pub(crate) groups: HashMap<usize, Vec<usize>>,
+    /// Grouped call index to its group head, for every member but the
+    /// head.
+    pub(crate) head_of_member: HashMap<usize, usize>,
 }
 
 impl ToolTopology {
-    /// Derive the pairing from an append-only block list.
+    /// Derive the pairing and grouping from an append-only block list.
     fn build(blocks: &[Block]) -> Self {
         let mut topo = Self::default();
         for (i, block) in blocks.iter().enumerate() {
@@ -243,7 +317,67 @@ impl ToolTopology {
                 topo.call_idx_for_result.insert(rid, i);
             }
         }
+        topo.group_read_only_runs(blocks);
         topo
+    }
+
+    /// Group every maximal run of at least two displayed blocks that
+    /// are finished, paired, read-only tool calls, unless the user
+    /// unfolded the run's first call, which shows the run's calls
+    /// individually.
+    fn group_read_only_runs(&mut self, blocks: &[Block]) {
+        let mut run = Vec::new();
+        for (i, block) in blocks.iter().enumerate() {
+            if self.consumed_results.contains(&i) {
+                continue;
+            }
+            if self.groupable(block) {
+                run.push(i);
+            } else {
+                self.close_run(&mut run, blocks);
+            }
+        }
+        self.close_run(&mut run, blocks);
+    }
+
+    fn groupable(&self, block: &Block) -> bool {
+        matches!(
+            block,
+            Block::ToolCall {
+                call_id,
+                name,
+                phase: ToolPhase::Done,
+                ..
+            } if crate::view::tool_view::is_read_only(name)
+                && self.result_by_call.contains_key(call_id)
+        )
+    }
+
+    fn close_run(&mut self, run: &mut Vec<usize>, blocks: &[Block]) {
+        let head_folded = run
+            .first()
+            .is_some_and(|&h| matches!(blocks[h], Block::ToolCall { folded: true, .. }));
+        if run.len() >= 2 && head_folded {
+            let head = run[0];
+            for &member in &run[1..] {
+                self.head_of_member.insert(member, head);
+            }
+            self.groups.insert(head, mem::take(run));
+        }
+        run.clear();
+    }
+
+    /// Whether block `idx` paints as part of another block: a result
+    /// merged into its call, or a call grouped under an `Explored`
+    /// head.
+    pub(crate) fn is_hidden(&self, idx: usize) -> bool {
+        self.consumed_results.contains(&idx) || self.head_of_member.contains_key(&idx)
+    }
+
+    /// The displayed block that paints block `idx`.
+    pub(crate) fn display_idx(&self, idx: usize) -> usize {
+        let call = self.call_idx_for_result.get(&idx).copied().unwrap_or(idx);
+        self.head_of_member.get(&call).copied().unwrap_or(call)
     }
 }
 
@@ -265,9 +399,9 @@ pub struct Buffer {
     /// foldable block in the buffer for fold-toggle gestures.
     focus: Option<usize>,
     /// The focus value the renderer last painted. The renderer
-    /// compares this to the current effective focus each frame; when
-    /// they differ, it invalidates the moved blocks' caches so
-    /// emphasis repaints.
+    /// compares this to the focus it paints each frame; when they
+    /// differ, it invalidates the moved blocks' caches so emphasis
+    /// repaints.
     last_drawn_focus: Option<usize>,
     /// The explicit focus the renderer last saw. Auto-scrolling a
     /// moved focus into view keys on this, not the effective focus:
@@ -294,10 +428,13 @@ pub struct Buffer {
     /// possibly-huge vector while the renderer is still using it.
     block_render_lines: Vec<Option<(u16, Arc<Vec<Line<'static>>>)>>,
     /// Cached call/result block pairing together with the
-    /// `(epoch, block count)` it was built at, shared behind an
-    /// [`Arc`]. See [`ToolTopology`]. `None` until the first render;
-    /// rebuilt by the renderer whenever either key changed since.
-    tool_topology: Option<((u64, usize), Arc<ToolTopology>)>,
+    /// [`TopologyKey`] it was built at, shared behind an [`Arc`]. See
+    /// [`ToolTopology`]. `None` until the first render; rebuilt
+    /// whenever the key changed since.
+    tool_topology: Option<(TopologyKey, Arc<ToolTopology>)>,
+    /// Bumped by every fold change, which can form or split
+    /// `Explored` groups. Streaming deltas leave it alone.
+    fold_generation: u64,
     /// Structural generation, bumped by every change that is not a
     /// pure append (`clear`, `take`, compaction). Block indices from
     /// one epoch mean nothing in another, so index-keyed caches built
@@ -348,6 +485,10 @@ pub struct Buffer {
     /// fresh lines and when the stream finishes.
     stream_dirty_since: Option<Instant>,
 }
+
+/// What a [`ToolTopology`] was built from: `(epoch, block count, fold
+/// generation)`.
+type TopologyKey = (u64, usize, u64);
 
 /// Minimum spacing between full markdown re-parses of a streaming
 /// block. Deltas inside the window update `text` but keep serving the

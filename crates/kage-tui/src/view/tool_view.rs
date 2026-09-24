@@ -160,10 +160,8 @@ pub enum BashExit {
 #[must_use]
 pub fn describe(name: &str, input: &Value) -> ToolLabel {
     let path = || field(input, "path").to_owned();
-    match name {
-        "read" => label("Reading", "Read", path(), read_range(input))
-            .read_only()
-            .body(ToolBody::Hidden),
+    let mut described = match name {
+        "read" => label("Reading", "Read", path(), read_range(input)).body(ToolBody::Hidden),
         "write" => {
             let lines = field(input, "content").lines().count();
             let stats = if lines == 0 {
@@ -191,12 +189,9 @@ pub fn describe(name: &str, input: &Value) -> ToolLabel {
         .body(ToolBody::Tail),
         "ls" => {
             let dir = input.get("path").and_then(Value::as_str).unwrap_or(".");
-            label("Listing", "Listed", dir.to_owned(), String::new())
-                .read_only()
-                .body(ToolBody::Hidden)
+            label("Listing", "Listed", dir.to_owned(), String::new()).body(ToolBody::Hidden)
         }
         "find" | "grep" => label("Searching", "Searched", search_target(input), String::new())
-            .read_only()
             .body(ToolBody::Hidden),
         "web_fetch" => label(
             "Fetching",
@@ -205,7 +200,16 @@ pub fn describe(name: &str, input: &Value) -> ToolLabel {
             String::new(),
         ),
         _ => label("Calling", "Called", display_name(name), arg_summary(input)),
-    }
+    };
+    described.read_only = is_read_only(name);
+    described
+}
+
+/// Whether tool `name` only reads local state, so its calls may be
+/// grouped into an `Explored` row.
+#[must_use]
+pub fn is_read_only(name: &str) -> bool {
+    matches!(name, "read" | "ls" | "find" | "grep")
 }
 
 /// The `-` and `+` lines of an `edit` call with their counts. Reads the
@@ -349,11 +353,6 @@ fn label(
 }
 
 impl ToolLabel {
-    fn read_only(mut self) -> Self {
-        self.read_only = true;
-        self
-    }
-
     fn body(mut self, body: ToolBody) -> Self {
         self.body = body;
         self

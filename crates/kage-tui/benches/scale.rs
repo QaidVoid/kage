@@ -76,8 +76,7 @@ fn scale_buffer() -> Buffer {
         buffer.push_tool_call(
             call_id.clone(),
             "bash",
-            "bash(\"cargo nextest run\")",
-            "{\n  \"command\": \"cargo nextest run\"\n}",
+            serde_json::json!({ "command": "cargo nextest run" }),
         );
         buffer.push_tool_result_with_duration(call_id, tool_output(turn), false, Some(420));
     }

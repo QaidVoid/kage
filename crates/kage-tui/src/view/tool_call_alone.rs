@@ -1,24 +1,29 @@
-//! Widget for an unpaired in-flight tool call (rendered as the
-//! "running..." pending bubble before its [`crate::buffer::Block::ToolResult`]
-//! arrives).
+//! Widget for an unpaired tool call: one whose arguments are still
+//! streaming, that waits for approval or runs, or that never got a
+//! result.
 
-use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use std::sync::Arc;
+use std::time::Instant;
 
+use ratatui::text::Line;
+use serde_json::Value;
+
+use super::tool_view::ToolPhase;
 use super::widget::{BlockWidget, RenderCtx};
-use super::{Emphasis, fold_indicator, plain_lines, tool_call_style, wrap_in_bubble_focused};
+use super::{ToolRow, tool_row_lines};
 use crate::buffer::Block;
 
-/// Renders the [`crate::buffer::Block::ToolCall`] standalone bubble:
-/// the agent has invoked a tool but we have not yet seen the
-/// matching result, so the body shows the pretty-printed input and
-/// a `running...` marker.
+/// Renders a [`crate::buffer::Block::ToolCall`] without a result as a
+/// tool row in its current phase. A running call shows its live
+/// elapsed time and the tail of its latest progress.
 #[derive(Clone, Debug)]
 pub struct ToolCallAloneBlockWidget {
     name: String,
-    input_summary: String,
-    input_pretty: String,
+    input: Arc<Value>,
+    phase: ToolPhase,
     folded: bool,
+    progress: String,
+    started_at: Instant,
 }
 
 impl ToolCallAloneBlockWidget {
@@ -28,104 +33,78 @@ impl ToolCallAloneBlockWidget {
         match block {
             Block::ToolCall {
                 name,
-                input_summary,
-                input_pretty,
+                input,
+                phase,
                 folded,
+                progress,
+                started_at,
                 ..
             } => Some(Self {
                 name: name.clone(),
-                input_summary: input_summary.clone(),
-                input_pretty: input_pretty.clone(),
+                input: Arc::clone(input),
+                phase: *phase,
                 folded: *folded,
+                progress: progress.clone(),
+                started_at: *started_at,
             }),
             _ => None,
         }
-    }
-
-    fn lines_for(&self, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
-        let dim = Style::default()
-            .fg(crate::theme::current().muted_fg)
-            .add_modifier(Modifier::DIM);
-        let style = tool_call_style();
-        let mut content: Vec<Line<'static>> = Vec::new();
-        let mut header_spans = vec![
-            Span::styled(
-                format!("{} ", fold_indicator(self.folded)),
-                style.add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(self.name.clone(), style.add_modifier(Modifier::BOLD)),
-        ];
-        if !self.input_summary.is_empty() {
-            header_spans.push(Span::raw(" "));
-            header_spans.push(Span::styled(self.input_summary.clone(), style));
-        }
-        header_spans.push(Span::raw("  "));
-        header_spans.push(Span::styled("running...".to_owned(), dim));
-        content.push(Line::from(header_spans));
-        if !self.folded {
-            content.push(Line::raw(""));
-            for body_line in plain_lines(&self.input_pretty, style) {
-                content.push(body_line);
-            }
-        }
-        let theme = crate::theme::current();
-        wrap_in_bubble_focused(
-            content,
-            theme.tool_pending_rule,
-            theme.tool_pending_bg,
-            width,
-            emphasis,
-            None,
-        )
     }
 }
 
 impl BlockWidget for ToolCallAloneBlockWidget {
     fn lines(&self, width: u16, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
-        self.lines_for(width, ctx.emphasis)
+        let elapsed = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let row = ToolRow {
+            name: &self.name,
+            input: &self.input,
+            phase: self.phase,
+            folded: self.folded,
+            elapsed_ms: (self.phase == ToolPhase::Running).then_some(elapsed),
+            output: &self.progress,
+        };
+        tool_row_lines(&row, width, ctx.emphasis, ctx.row_budget)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use serde_json::json;
 
+    use super::super::Emphasis;
     use super::*;
+    use crate::buffer::Buffer;
     use crate::theme::Theme;
 
-    fn ctx(theme: &Theme) -> RenderCtx<'_> {
-        RenderCtx {
-            theme,
+    fn header(buf: &Buffer) -> Vec<String> {
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            theme: &theme,
             focused: false,
             emphasis: Emphasis::None,
             selection: None,
             search_pattern: None,
             row_budget: None,
-        }
-    }
-
-    fn painted(lines: &[Line<'_>]) -> String {
-        lines
+        };
+        ToolCallAloneBlockWidget::from_block(&buf.blocks()[0])
+            .unwrap()
+            .lines(80, &ctx)
             .iter()
             .map(|l| {
                 l.spans
                     .iter()
                     .map(|s| s.content.as_ref())
                     .collect::<String>()
+                    .trim_end()
+                    .to_owned()
             })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .collect()
     }
 
-    fn pending_block() -> Block {
-        Block::ToolCall {
-            call_id: "c1".into(),
-            name: "bash".into(),
-            input_summary: "ls -la".into(),
-            input_pretty: "{\"cmd\":\"ls -la\"}".into(),
-            folded: false,
-            started_at: Instant::now(),
-        }
+    fn bash_call() -> Buffer {
+        let mut buf = Buffer::new();
+        buf.push_tool_call("c1", "bash", json!({"command": "cargo test"}));
+        buf
     }
 
     #[test]
@@ -135,11 +114,45 @@ mod tests {
     }
 
     #[test]
-    fn lines_paint_running_marker_and_tool_name() {
-        let w = ToolCallAloneBlockWidget::from_block(&pending_block()).unwrap();
-        let theme = Theme::default();
-        let text = painted(&w.lines(60, &ctx(&theme)));
-        assert!(text.contains("bash"), "got {text:?}");
-        assert!(text.contains("running"), "got {text:?}");
+    fn header_text_follows_the_phase() {
+        let mut buf = bash_call();
+        let rows = header(&buf);
+        assert!(rows[0].ends_with("\u{2022} Running cargo test"), "{rows:?}");
+
+        buf.set_tool_phase("c1", ToolPhase::Waiting);
+        let rows = header(&buf);
+        assert!(rows[0].contains("\u{2022} Running cargo test"), "{rows:?}");
+        assert!(rows[0].ends_with("waiting"), "{rows:?}");
+
+        buf.set_tool_phase("c1", ToolPhase::Running);
+        let rows = header(&buf);
+        assert!(rows[0].contains("Running cargo test"), "{rows:?}");
+        assert!(rows[0].ends_with("0.0s"), "{rows:?}");
+
+        buf.set_tool_phase("c1", ToolPhase::Denied);
+        let rows = header(&buf);
+        assert!(rows[0].contains("\u{2298} Ran cargo test"), "{rows:?}");
+        assert!(rows[0].ends_with("denied"), "{rows:?}");
+
+        buf.set_tool_phase("c1", ToolPhase::Interrupted);
+        assert!(header(&buf)[0].ends_with("interrupted"));
+    }
+
+    #[test]
+    fn a_running_bash_shows_its_progress_tail() {
+        let mut buf = bash_call();
+        buf.set_tool_phase("c1", ToolPhase::Running);
+        let progress: Vec<String> = (1..=7).map(|i| format!("step {i}")).collect();
+        buf.set_tool_progress("c1", progress.join("\n"));
+        let rows = header(&buf);
+        assert!(rows[1].ends_with("... 2 earlier lines"), "{rows:?}");
+        assert!(rows.last().unwrap().ends_with("step 7"), "{rows:?}");
+    }
+
+    #[test]
+    fn read_only_calls_show_live_verbs() {
+        let mut buf = Buffer::new();
+        buf.push_tool_call("c1", "read", json!({"path": "a.rs"}));
+        assert!(header(&buf)[0].ends_with("Reading a.rs"));
     }
 }

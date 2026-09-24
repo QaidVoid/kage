@@ -1,13 +1,10 @@
 //! Custom widget for `kage:compaction` blocks.
 //!
-//! Compaction events from the agent loop arrive as a custom
-//! block whose payload is `"[compacted: kept N, summarized M]\n<body>"`.
-//! The default custom widget renders that as a kind-tagged card with
-//! plain body text - readable but visually identical to other custom
-//! blocks. Compactions are load-bearing for long sessions, so this
-//! widget gives them a dedicated treatment: a small dim header chip
-//! with the kept/summarized counts, then the summary body rendered
-//! through the same markdown renderer assistant text uses.
+//! Compaction events from the agent loop arrive as a custom block whose
+//! payload is `"Compacted history (kept N, summarized M)\n<body>"`; a
+//! replayed session carries only the framed body. The widget shows one
+//! `Compacted history` line and, when unfolded, the summary rendered
+//! through the markdown renderer assistant text uses.
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -16,64 +13,51 @@ use super::widget::{BlockWidget, RenderCtx};
 use super::{Emphasis, mark_emphasis, prefix_line};
 use crate::buffer::Block;
 
+/// First line of a live compaction payload.
+const HEADER: &str = "Compacted history";
+
 /// Renders a `Block::Custom { kind: "kage:compaction", .. }` as a
-/// styled summary card.
+/// header line over a foldable summary.
 #[derive(Clone, Debug)]
 pub struct CompactionBlockWidget {
     text: String,
+    folded: bool,
 }
 
 impl CompactionBlockWidget {
     /// Build from a `Block::Custom`. Returns `None` for any other
     /// block kind (the registry only dispatches `kage:compaction`
     /// blocks here, but a defensive check keeps unrelated callers
-    /// safe). The block's `folded` flag is intentionally ignored:
-    /// compaction summaries are always rendered fully expanded.
+    /// safe).
     #[must_use]
     pub fn from_block(block: &Block) -> Option<Self> {
         match block {
-            Block::Custom { kind, text, .. } if kind == "kage:compaction" => {
-                Some(Self { text: text.clone() })
-            }
+            Block::Custom { kind, text, folded } if kind == "kage:compaction" => Some(Self {
+                text: text.clone(),
+                folded: *folded,
+            }),
             _ => None,
         }
     }
 
-    fn parse_counts(first_line: &str) -> Option<(u64, u64)> {
-        let inside = first_line.trim().strip_prefix('[')?.strip_suffix(']')?;
-        let kept = extract_count(inside, "kept ");
-        let summarized = extract_count(inside, "summarized ");
-        Some((kept?, summarized?))
-    }
-
     fn lines_for(&self, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
-        // Two on-the-wire shapes reach this widget:
-        //   live event: `[compacted: kept N, summarized M]\n<framed body>`
-        //   replayed:   `<framed body>` (no counts header)
-        // Strip the counts header when present, then unwrap the
-        // `<summary>...</summary>` framing.
-        let (counts_line, framed) = match self.text.lines().next() {
-            Some(first) if first.trim().starts_with('[') && first.contains("compacted") => {
-                let tail = self
-                    .text
-                    .get(first.len()..)
-                    .unwrap_or("")
-                    .trim_start_matches('\n');
-                (Some(first), tail)
-            }
-            _ => (None, self.text.as_str()),
+        let (header, framed) = match self.text.split_once('\n') {
+            Some((first, rest)) if first.starts_with(HEADER) => (first, rest),
+            _ if self.text.starts_with(HEADER) => (self.text.as_str(), ""),
+            _ => (HEADER, self.text.as_str()),
         };
-
-        let mut out: Vec<Line<'static>> = vec![header_line(counts_line)];
-        let unwrapped = strip_summary_framing(framed);
-        if !unwrapped.is_empty() {
-            let body_style = Style::default().fg(crate::theme::current().assistant_fg);
-            for line in crate::markdown::render(&unwrapped, body_style) {
+        let t = crate::theme::current();
+        let mut out = vec![Line::from(Span::styled(
+            header.to_owned(),
+            Style::default().fg(t.muted_fg).add_modifier(Modifier::BOLD),
+        ))];
+        if !self.folded {
+            let body_style = Style::default().fg(t.assistant_fg);
+            for line in crate::markdown::render(&strip_summary_framing(framed), body_style) {
                 out.push(prefix_line("  ", line));
             }
         }
-
-        mark_emphasis(out, width, emphasis, None)
+        mark_emphasis(out, width, emphasis)
     }
 }
 
@@ -81,38 +65,6 @@ impl BlockWidget for CompactionBlockWidget {
     fn lines(&self, width: u16, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         self.lines_for(width, ctx.emphasis)
     }
-}
-
-fn extract_count(text: &str, marker: &str) -> Option<u64> {
-    let idx = text.find(marker)?;
-    let after = &text[idx + marker.len()..];
-    after
-        .split(|c: char| c == ',' || c.is_whitespace())
-        .find(|s| !s.is_empty())
-        .and_then(|s| s.parse::<u64>().ok())
-}
-
-fn header_line(counts_source: Option<&str>) -> Line<'static> {
-    let t = crate::theme::current();
-    let label_style = Style::default()
-        .fg(t.warning_fg)
-        .add_modifier(Modifier::BOLD);
-    let dim = Style::default()
-        .fg(t.muted_fg)
-        .add_modifier(Modifier::DIM | Modifier::ITALIC);
-    let mut spans = vec![
-        Span::styled("\u{2261} ".to_owned(), label_style),
-        Span::styled("summary".to_owned(), label_style),
-    ];
-    if let Some(first) = counts_source
-        && let Some((kept, summarized)) = CompactionBlockWidget::parse_counts(first)
-    {
-        spans.push(Span::styled(
-            format!("  kept {kept}, summarized {summarized}"),
-            dim,
-        ));
-    }
-    Line::from(spans)
 }
 
 /// Drop the `<summary>...</summary>` framing and the prefix sentence
@@ -137,23 +89,34 @@ mod tests {
     use super::*;
     use crate::theme::Theme;
 
-    fn ctx(theme: &Theme) -> RenderCtx<'_> {
-        RenderCtx {
-            theme,
+    fn rows(text: &str, folded: bool) -> Vec<String> {
+        let block = Block::Custom {
+            kind: "kage:compaction".into(),
+            text: text.into(),
+            folded,
+        };
+        let theme = Theme::default();
+        let ctx = RenderCtx {
+            theme: &theme,
             focused: false,
             emphasis: Emphasis::None,
             selection: None,
             search_pattern: None,
             row_budget: None,
-        }
-    }
-
-    fn compaction_block(text: &str) -> Block {
-        Block::Custom {
-            kind: "kage:compaction".into(),
-            text: text.into(),
-            folded: false,
-        }
+        };
+        CompactionBlockWidget::from_block(&block)
+            .unwrap()
+            .lines(80, &ctx)
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+                    .trim()
+                    .to_owned()
+            })
+            .collect()
     }
 
     #[test]
@@ -167,45 +130,26 @@ mod tests {
     }
 
     #[test]
-    fn parse_counts_extracts_kept_and_summarized() {
-        let (k, s) = CompactionBlockWidget::parse_counts("[compacted: kept 4, summarized 12]")
-            .expect("should parse");
-        assert_eq!((k, s), (4, 12));
-    }
-
-    #[test]
-    fn parse_counts_handles_no_brackets() {
-        assert!(CompactionBlockWidget::parse_counts("nothing useful").is_none());
-    }
-
-    #[test]
-    fn header_includes_summary_chip_and_counts() {
-        let block = compaction_block("[compacted: kept 3, summarized 7]\n# summary\nbody");
-        let w = CompactionBlockWidget::from_block(&block).unwrap();
-        let lines = w.lines_for(80, Emphasis::None);
-        let header_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(header_text.contains("summary"), "got {header_text:?}");
-        assert!(header_text.contains("kept 3"), "got {header_text:?}");
-        assert!(header_text.contains("summarized 7"), "got {header_text:?}");
-    }
-
-    #[test]
-    fn folded_flag_is_ignored_always_renders_body() {
-        let mut block = compaction_block("[compacted: kept 1, summarized 2]\nbody");
-        if let Block::Custom { folded, .. } = &mut block {
-            *folded = true;
-        }
-        let folded_w = CompactionBlockWidget::from_block(&block).unwrap();
-        let unfolded_w = CompactionBlockWidget::from_block(&compaction_block(
-            "[compacted: kept 1, summarized 2]\nbody",
-        ))
-        .unwrap();
-        let theme = Theme::default();
+    fn folded_compaction_is_one_header_line() {
+        let text = "Compacted history (kept 3, summarized 7)\n<summary>\nbody\n</summary>";
         assert_eq!(
-            folded_w.lines(60, &ctx(&theme)).len(),
-            unfolded_w.lines(60, &ctx(&theme)).len(),
-            "compaction summary should not honour the folded flag"
+            rows(text, true),
+            ["Compacted history (kept 3, summarized 7)"]
         );
+    }
+
+    #[test]
+    fn unfolded_compaction_shows_the_summary_without_framing() {
+        let text = "Compacted history (kept 1, summarized 2)\n<summary>\nthe summary\n</summary>";
+        let rows = rows(text, false);
+        assert!(rows.iter().any(|r| r == "the summary"), "{rows:?}");
+        assert!(rows.iter().all(|r| !r.contains("<summary>")), "{rows:?}");
+    }
+
+    #[test]
+    fn replayed_compaction_gets_the_plain_header() {
+        let rows = rows("prefix\n\n<summary>\n# Title\n</summary>", true);
+        assert_eq!(rows, ["Compacted history"]);
     }
 
     #[test]
@@ -213,7 +157,6 @@ mod tests {
         let raw = "The conversation history before this point was compacted into the following summary:\n\n<summary>\n# Title\n- item\n</summary>";
         let stripped = strip_summary_framing(raw);
         assert!(stripped.starts_with("# Title"), "got {stripped:?}");
-        assert!(!stripped.contains("<summary>"), "got {stripped:?}");
         assert!(!stripped.contains("</summary>"), "got {stripped:?}");
     }
 
@@ -221,25 +164,5 @@ mod tests {
     fn strip_summary_framing_no_op_when_markers_missing() {
         let raw = "plain text with no wrapper";
         assert_eq!(strip_summary_framing(raw), raw);
-    }
-
-    #[test]
-    fn lines_paint_summary_chip_and_body() {
-        let block = compaction_block("[compacted: kept 1, summarized 2]\nthe summary");
-        let w = CompactionBlockWidget::from_block(&block).unwrap();
-        let theme = Theme::default();
-        let painted: String = w
-            .lines(80, &ctx(&theme))
-            .iter()
-            .map(|l| {
-                l.spans
-                    .iter()
-                    .map(|s| s.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(painted.contains("summary"), "got {painted:?}");
-        assert!(painted.contains("the summary"), "got {painted:?}");
     }
 }

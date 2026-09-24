@@ -2,7 +2,8 @@
 //!
 //! Walks a `pulldown_cmark::Parser` event stream and emits styled
 //! [`ratatui::text::Line`]s the assistant block widget paints. Fenced
-//! code blocks are passed through to [`crate::syntax::highlight_with_lang`]
+//! code blocks render as a dim language label over the indented code,
+//! which is passed through to [`crate::syntax::highlight_with_lang`]
 //! so syntect runs on languages we have grammars for; everything else
 //! is plain styled text.
 //!
@@ -41,6 +42,9 @@ pub fn render(text: &str, fallback: Style) -> Vec<Line<'static>> {
 pub fn render_streaming(text: &str, fallback: Style) -> Vec<Line<'static>> {
     render_with(text, fallback, false)
 }
+
+/// Indent of fenced code under its language label.
+const CODE_INDENT: &str = "  ";
 
 fn render_with(text: &str, fallback: Style, highlight_code: bool) -> Vec<Line<'static>> {
     let mut state = RenderState::new(fallback);
@@ -267,21 +271,18 @@ impl RenderState {
             TagEnd::CodeBlock => {
                 if let Some(lang) = self.in_code_block.take() {
                     let body = std::mem::take(&mut self.code_body);
-                    let fence_text = if lang.is_empty() {
-                        "```".to_owned()
-                    } else {
-                        format!("```{lang}")
-                    };
-                    self.emit_line(Line::from(Span::styled(fence_text, dim_style())));
+                    if !lang.is_empty() {
+                        self.emit_line(Line::from(Span::styled(lang.clone(), dim_style())));
+                    }
                     let body_lines = if self.highlight_code {
                         highlight_with_lang(&body, &lang, self.fallback)
                     } else {
                         plain_lines_styled(&body, dim_style())
                     };
-                    for line in body_lines {
+                    for mut line in body_lines {
+                        line.spans.insert(0, Span::raw(CODE_INDENT));
                         self.emit_line(line);
                     }
-                    self.emit_line(Line::from(Span::styled("```".to_owned(), dim_style())));
                 }
                 self.has_block_content = true;
                 self.emit_paragraph_break();
@@ -464,12 +465,12 @@ mod tests {
     }
 
     #[test]
-    fn fenced_code_block_includes_fence_markers_and_body() {
+    fn fenced_code_renders_a_language_label_and_no_backticks() {
         let lines = render("```rust\nfn main() {}\n```", Style::default());
-        assert!(spans_text(&lines[0]).contains("```rust"));
-        let has_body = lines.iter().any(|l| spans_text(l).contains("fn main()"));
-        assert!(has_body);
-        assert!(spans_text(lines.last().unwrap()).contains("```"));
+        assert_eq!(spans_text(&lines[0]), "rust");
+        let has_body = lines.iter().any(|l| spans_text(l) == "  fn main() {}");
+        assert!(has_body, "{lines:?}");
+        assert!(lines.iter().all(|l| !spans_text(l).contains("```")));
     }
 
     #[test]
@@ -500,8 +501,13 @@ mod tests {
         );
 
         let is_plain_dim = |l: &Line<'_>| {
-            !l.spans.is_empty()
-                && l.spans.iter().all(|s| {
+            let code: Vec<_> = l
+                .spans
+                .iter()
+                .filter(|s| !s.content.trim().is_empty())
+                .collect();
+            !code.is_empty()
+                && code.iter().all(|s| {
                     s.style.add_modifier.contains(Modifier::DIM)
                         && s.style.fg == Some(crate::theme::current().muted_fg)
                 })

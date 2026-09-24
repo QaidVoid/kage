@@ -813,10 +813,9 @@ pub struct App {
     /// sibling of [`Self::plugin_overlay`].
     permission_overlay: Option<crate::overlay::PermissionOverlay>,
     /// The request answered by [`Self::permission_overlay`].
-    pending_permission: Option<kage_core::protocol::RequestId>,
-    /// Permission requests waiting for the overlay: request id, tool,
-    /// subject.
-    permission_queue: std::collections::VecDeque<(kage_core::protocol::RequestId, String, String)>,
+    pending_permission: Option<engine::PendingApproval>,
+    /// Permission requests waiting for the overlay.
+    permission_queue: std::collections::VecDeque<engine::PendingApproval>,
 }
 
 mod actions;

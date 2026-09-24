@@ -340,8 +340,6 @@ pub(crate) use modeline::{
 
 // Internal helpers the test module exercises directly.
 #[cfg(test)]
-pub(crate) use blocks::{first_line_preview, human_size};
-#[cfg(test)]
 pub(crate) use bubble::split_line_into_rows;
 #[cfg(test)]
 pub(crate) use modeline::{format_token_count, input_visual_cursor};
@@ -349,12 +347,12 @@ pub(crate) use modeline::{format_token_count, input_visual_cursor};
 // Re-exports so sibling block widgets keep resolving `super::*` helpers
 // and the host (`app`) keeps its `view::*` entry points after the split.
 pub(crate) use blocks::{
-    assistant_style, custom_style, fold_indicator, header_line, prefix_line, thinking_style,
-    tool_call_style, tool_error_style, tool_pair_to_lines, tool_result_header_line,
-    tool_result_style, truncated_body_lines,
+    ToolRow, assistant_style, custom_style, fold_indicator, header_line, prefix_line,
+    thinking_style, tool_call_style, tool_group_lines, tool_row_lines,
 };
 pub(crate) use bubble::{
-    mark_emphasis, mark_emphasis_bare, plain_lines, user_block_lines, wrap_in_bubble_focused,
+    FOCUS_RULE_WIDTH, bubble_content_width, mark_emphasis, mark_emphasis_bare, plain_lines,
+    user_block_lines, wrap_in_bubble_focused,
 };
 pub use buffer::CapturedCell;
 pub(crate) use input::INPUT_GLYPH_WIDTH;

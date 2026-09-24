@@ -312,7 +312,7 @@ fn config_action_binding_wins_over_builtin_handler() {
         assert!(
             matches!(
                 buf.blocks()[0],
-                crate::buffer::Block::Thinking { folded: false, .. }
+                crate::buffer::Block::Thinking { folded: true, .. }
             ),
             "the builtin fold toggle did not run"
         );
@@ -672,6 +672,157 @@ fn permission_requests_open_a_prompt_and_answer_through_requests() {
             decision: PermissionDecision::AllowOnce
         })
     );
+}
+
+/// Feed `events` as one session's envelopes and drain them.
+fn feed(
+    app: &mut App,
+    events: &mpsc::Sender<kage_core::protocol::Envelope>,
+    batch: Vec<kage_core::protocol::Event>,
+) {
+    let session = app.active_session.unwrap_or_default();
+    for (seq, event) in batch.into_iter().enumerate() {
+        events
+            .send(envelope(session, seq as u64 + 1, event))
+            .unwrap();
+    }
+    app.drain_engine_events();
+}
+
+fn bash_start(id: &str) -> kage_core::protocol::Event {
+    kage_core::LoopEvent::ToolCallStart {
+        id: kage_core::ToolCallId::new(id),
+        name: "bash".into(),
+        input_partial: serde_json::json!({ "command": "ls" }),
+    }
+    .into()
+}
+
+fn permission_request(id: &str, request: u64) -> kage_core::protocol::Event {
+    kage_core::protocol::HostEvent::PermissionRequested {
+        request_id: kage_core::protocol::RequestId(request),
+        tool_call_id: Some(kage_core::ToolCallId::new(id)),
+        tool: "bash".into(),
+        subject: "ls".into(),
+        input: serde_json::json!({ "command": "ls" }),
+    }
+    .into()
+}
+
+fn tool_phase(app: &App, id: &str) -> crate::view::tool_view::ToolPhase {
+    let buf = app.buffer.lock().unwrap();
+    buf.blocks()
+        .iter()
+        .find_map(|b| match b {
+            crate::buffer::Block::ToolCall { call_id, phase, .. } if call_id == id => Some(*phase),
+            _ => None,
+        })
+        .expect("tool call present")
+}
+
+#[test]
+fn tool_timing_excludes_the_approval_wait() {
+    use crate::view::tool_view::ToolPhase;
+    let (mut app, _rx, events) = app_with_events();
+    feed(
+        &mut app,
+        &events,
+        vec![bash_start("c1"), permission_request("c1", 1)],
+    );
+    assert_eq!(tool_phase(&app, "c1"), ToolPhase::Waiting);
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    app.answer_permission(PermissionDecision::AllowOnce);
+    assert_eq!(tool_phase(&app, "c1"), ToolPhase::Running);
+    feed(
+        &mut app,
+        &events,
+        vec![
+            kage_core::LoopEvent::ToolCallEnd {
+                id: kage_core::ToolCallId::new("c1"),
+                output: kage_core::ToolOutput {
+                    is_error: false,
+                    text: "stdout:\na\nexit: 0".into(),
+                    structured: None,
+                    terminate: false,
+                },
+            }
+            .into(),
+        ],
+    );
+    assert_eq!(tool_phase(&app, "c1"), ToolPhase::Done);
+    let buf = app.buffer.lock().unwrap();
+    let duration = buf.blocks().iter().find_map(|b| match b {
+        crate::buffer::Block::ToolResult { duration_ms, .. } => *duration_ms,
+        _ => None,
+    });
+    assert!(duration.is_some_and(|ms| ms < 60), "{duration:?}");
+}
+
+#[test]
+fn a_denied_call_reads_denied_after_its_result() {
+    use crate::view::tool_view::ToolPhase;
+    let (mut app, _rx, events) = app_with_events();
+    feed(
+        &mut app,
+        &events,
+        vec![bash_start("c1"), permission_request("c1", 1)],
+    );
+    app.answer_permission(PermissionDecision::Deny);
+    assert_eq!(tool_phase(&app, "c1"), ToolPhase::Denied);
+    app.buffer
+        .lock()
+        .unwrap()
+        .push_tool_result("c1", "denied by the user", true);
+    assert_eq!(tool_phase(&app, "c1"), ToolPhase::Denied);
+}
+
+#[test]
+fn a_request_resolved_elsewhere_resumes_the_call() {
+    use crate::view::tool_view::ToolPhase;
+    let (mut app, _rx, events) = app_with_events();
+    feed(
+        &mut app,
+        &events,
+        vec![
+            bash_start("c1"),
+            bash_start("c2"),
+            permission_request("c1", 1),
+            permission_request("c2", 2),
+        ],
+    );
+    assert_eq!(tool_phase(&app, "c2"), ToolPhase::Waiting);
+    feed(
+        &mut app,
+        &events,
+        vec![
+            kage_core::protocol::HostEvent::PermissionResolved {
+                request_id: kage_core::protocol::RequestId(2),
+            }
+            .into(),
+        ],
+    );
+    assert_eq!(tool_phase(&app, "c2"), ToolPhase::Running);
+    assert_eq!(tool_phase(&app, "c1"), ToolPhase::Waiting);
+}
+
+#[test]
+fn run_ended_stops_every_running_tool() {
+    use crate::view::tool_view::ToolPhase;
+    let (mut app, _rx, events) = app_with_events();
+    feed(&mut app, &events, vec![bash_start("c1")]);
+    assert!(app.has_running_tool_call());
+    feed(
+        &mut app,
+        &events,
+        vec![
+            kage_core::protocol::HostEvent::RunEnded {
+                outcome: kage_core::protocol::RunOutcome::Cancelled,
+            }
+            .into(),
+        ],
+    );
+    assert!(!app.has_running_tool_call());
+    assert_eq!(tool_phase(&app, "c1"), ToolPhase::Interrupted);
 }
 
 #[test]

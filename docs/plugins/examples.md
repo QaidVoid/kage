@@ -96,17 +96,19 @@ kage.on("message_end", function(ev)
 end)
 
 kage.ui.set_slot("footer", {
-  left = { "working", "model", "context", "tokens", "thinking", "permission" },
+  left = { "hint" },
   right = {
+    "model", "permission", "context", "tokens",
     { events = { "message_end" }, hl = "TpsReadout", render = function() return last end },
   },
-  sep = " . ",
+  sep = " \u{B7} ",
 })
 ```
 
-`TpsReadout` is not a `Kage*` group, so it survives theme switches. A
-user who prefers another footer can replace it from `init.lua`, which
-loads after every plugin.
+The spec repeats kage's default footer and adds the readout at the
+end. `TpsReadout` is not a `Kage*` group, so it survives theme
+switches. A user who prefers another footer can replace it from
+`init.lua`, which loads after every plugin.
 
 ## keys and autocmds
 

@@ -25,8 +25,8 @@ theme = "default"
 mouse = true
 # prompt editing style: "modeless" or "vim".
 editor = "modeless"
-# input card sizing (content rows, before the 2-row border chrome).
-# the card grows with what you type, from input_min_lines up to
+# input box sizing (content rows, not counting its two rules).
+# the box grows with what you type, from input_min_lines up to
 # input_max_lines, then scrolls internally. raise the max for a
 # bigger composing area. min floored at 1, max capped at 64.
 input_min_lines = 1
@@ -34,6 +34,10 @@ input_max_lines = 8
 # default thinking level for new sessions: off, minimal, low,
 # medium, high, or xhigh. shift+tab still cycles it per session.
 # thinking_level = "medium"
+# what prints to the terminal after you quit the TUI: "full" (the
+# whole conversation as plain text), "last" (from your last prompt
+# on) or "none". the session file path follows when one was recorded.
+transcript_on_exit = "full"
 
 [plugins]
 # override the plugin directory (default ~/.config/kage/plugins/).

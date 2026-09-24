@@ -25,6 +25,7 @@ switch modes or panes.
 | `Ctrl+End`       | Snap to the bottom, re-arm auto-follow      |
 | `Ctrl+P`         | Open the model picker                       |
 | `Ctrl+S`         | Open the session picker                     |
+| `Ctrl+F`         | Search the conversation (Insert mode or modeless) |
 | `F3`             | Open the message jump picker (filter, Enter jumps) |
 | `Alt+P` / `Alt+N` | Jump to the previous / next block          |
 | `Ctrl+N`         | Jump to the next block                      |
@@ -49,7 +50,7 @@ in the input. When no paste is collapsed, it toggles the fold.
 | `?`             | Normal  | Open the keyboard reference         |
 | `:`             | Normal  | Open the `:` command line           |
 | `Ctrl+Q`        | any     | Quit                                |
-| `Ctrl+C`        | any     | Cancel current request              |
+| `Ctrl+C`        | any     | Clear the draft, else interrupt the run, else arm quit |
 
 In vim Insert mode, `Ctrl+W` kills the previous word instead (see
 [input editing](#input-editing)).
@@ -57,16 +58,17 @@ In vim Insert mode, `Ctrl+W` kills the previous word instead (see
 ## modeless mode
 
 In modeless mode the editor is always in an insert-like state.
-`Esc` cancels the in-flight turn instead of entering Normal. All
-Emacs/readline keys and the buffer navigation keys above work
-without any mode switching.
+`Esc` never enters Normal. It clears the draft or interrupts the run
+(see [esc and ctrl+c](#esc-and-ctrl-c)). All Emacs/readline keys and
+the buffer navigation keys above work without any mode switching.
 
 | Key  | Effect                          |
 | ---- | ------------------------------- |
-| `Enter` | Send the prompt |
+| `Enter` | Send the prompt, or steer it into the running turn |
+| `Tab` | Queue the prompt until the running turn ends |
 | `Shift+Enter` / `Alt+Enter` | Insert a newline |
-| `Esc` | Cancel the current turn |
-| `Ctrl+C` | Cancel the current turn |
+| `Esc` | Clear the draft, else interrupt the run |
+| `Ctrl+C` | Clear the draft, else interrupt the run, else arm quit |
 | `PageUp` / `PageDown` | Scroll the conversation buffer 10 lines |
 | `Ctrl+W` | Kill the previous word |
 | `Ctrl+G` | Edit the prompt draft in `$VISUAL`/`$EDITOR` |
@@ -80,19 +82,107 @@ The `?` (keys), `/` (command palette), and `!` (shell escape)
 prefixes all key off an empty prompt, so every surface stays one
 keystroke away without a mode switch. With text in the prompt they
 are typed as literal characters. In shell mode the placeholder reads
-`run a shell command... (Backspace to cancel)`: Enter runs the line
-with `sh`, and `Backspace` on the empty prompt leaves shell mode.
+`Run a shell command (Backspace leaves shell mode)`: Enter runs the
+line with `sh`, and `Backspace` on the empty prompt leaves shell mode.
+
+## esc and ctrl+c
+
+`Esc` in modeless mode and `Ctrl+C` in every mode step through the
+same escalation:
+
+1. With a draft in the prompt, they clear it. The draft goes to the
+   prompt history, so `Up` brings it back, and the footer reads
+   `draft cleared, up restores it`.
+2. With an empty draft while kage works, they interrupt the run. The
+   conversation shows `Interrupted`.
+3. Idle with an empty draft, `Esc` does nothing, and `Ctrl+C` arms
+   quit. The footer reads `ctrl+c again to quit`, and a second
+   `Ctrl+C` within 2 seconds quits.
+
+An open popup, such as the completion popup or the command palette,
+takes `Esc` first. In vim mode `Esc` keeps its vim meaning. While an
+overlay is open (a picker, a dialog, the `:` line, the search line or
+the approval panel), `Ctrl+C` only interrupts the run and leaves the
+draft alone.
+
+## sending while kage works
+
+The prompt stays editable during a run, and there are two ways to send
+what you type:
+
+- `Enter` steers. The prompt joins the running turn at the next turn
+  boundary, after the current tool call.
+- `Tab` queues. The prompt waits and starts a new run once the current
+  one ends. Idle, `Tab` does nothing, so a stray press never sends a
+  prompt.
+
+Prompts that were sent but not delivered yet show above the input,
+each with `after the current tool call` or `when this run ends`. Up to
+three rows show, then `+N more`. A row disappears when kage delivers
+its prompt. A prompt with an attached image always waits for the run
+to end.
+
+While kage works, the working row above the input shows what it is
+doing and for how long, such as
+`Running cargo test (14s, esc to interrupt)`.
+
+## approvals
+
+When a tool call needs your approval (see
+[permissions](/guide/permissions)), a panel replaces the input box.
+Its title names the action, such as `Run this command?` or
+`Edit src/lib.rs?`, and it shows the command, the diff or the
+arguments. Your draft is kept and comes back once no approval is left.
+
+| Key                   | Effect                                          |
+| --------------------- | ----------------------------------------------- |
+| `1` / `y`             | Yes, run this call                              |
+| `2` / `s`             | Yes, and allow the tool for the rest of the session |
+| `3` / `a`             | Yes, and always allow the tool (saved to `config.toml`) |
+| `4` / `n` / `Esc`     | No                                              |
+| `5` / `t`             | No, and tell kage what to do instead            |
+| `Up` / `Down`         | Move the selection                              |
+| `Enter`               | Confirm the selection. `Yes` starts selected.   |
+| `Ctrl+C`              | Interrupt the run, which denies the call        |
+
+Keys pressed in the first 400 ms after a panel opens are dropped, so
+typing meant for the prompt cannot answer it. Option 5 opens a
+one-line field: `Enter` denies the call and sends your text to the
+model, and `Esc` goes back to the options. When several calls wait,
+the title shows `1 of 3`.
+
+## search
+
+`Ctrl+F` (modeless mode and vim Insert) and `/` in vim Normal open the
+search line on the bottom row. Typing searches as you go and shows
+the match count, such as `match 2/5`. While the line is open, `Up` and
+`Down` walk the matches. `Enter` closes the line and keeps the
+pattern, so `n` and `N` in vim Normal mode walk it later. `Esc` closes
+the line and restores the previous pattern and view. `/noh` clears the
+highlighting.
+
+## mouse
+
+With mouse capture on (`/mouse on`, the default), the wheel scrolls
+the conversation. A click on a block focuses it, and a click on a
+block's first row folds or unfolds it. Dragging selects text, and
+dragging past the top or bottom edge scrolls. Releasing the button
+copies the selection to the clipboard and shows
+`copied N characters`. A right-click opens a menu for the block under
+the pointer. `/mouse off` hands selection back to the terminal.
 
 ## command pathways
 
 `/` on an empty prompt opens the command palette inline above the
-input card. It lists matching commands as you type. This works in
-modeless mode and in vim Insert mode.
+input box. It lists matching commands as you type, most used first,
+with the first row selected, so `/` then `Enter` opens the model
+picker. This works in modeless mode and in vim Insert mode.
 
-In vim mode there is also the `:` ex line on the status row, opened
+In vim mode there is also the `:` ex line on the bottom row, opened
 from Normal mode. It shares the palette's command registry, parser,
 completion, and dispatch, so `:model anthropic:claude-sonnet-4` and
-`/model anthropic:claude-sonnet-4` have identical effect.
+`/model anthropic:claude-sonnet-4` have identical effect. `/model`
+without an id opens the model picker, like `Ctrl+P`.
 
 | Key   | From                       | Effect                          |
 | ----- | -------------------------- | ------------------------------- |
@@ -114,7 +204,7 @@ Tab completion matches vim's `wildmode=longest:full,full`:
 | `Backspace`      | Delete previous character; on empty input, cancel   |
 | `Left` / `Right` | Move the cursor                                     |
 | `Home` / `End`   | Jump to start / end                                 |
-| `Ctrl+C`         | Interrupt the running turn; line stays open        |
+| `Ctrl+C`         | Interrupt the running turn. The line stays open.   |
 
 Completions are recomputed on every edit. The popup appears only after
 the first `Tab` step that does more than insert the LCP, so single-
@@ -126,7 +216,7 @@ Submitting an invalid command keeps the line open and surfaces an
 inline error below the row. Examples:
 
 - `/mouse maybe` shows ``argument `state` must be one of: on, off, toggle (got `maybe`)``
-- `/model` shows `` missing required argument `id` ``
+- `/theme set` shows `` missing required argument `name` ``
 - `/quut` shows `unknown command: quut (did you mean /quit?)`
 
 Editing the line clears the error.
@@ -152,8 +242,8 @@ Insert).
 | `v`       | Enter visual (cell selection)                |
 | `PageUp` / `PageDown` | Scroll buffer up / down 10 lines |
 
-The active thinking level shows as a `think:<level>` pill in the
-modeline (hidden when off), next to the running token cost.
+The active thinking level shows as `thinking <level>` on the right of
+the input's top rule, hidden when off.
 
 ## input editing
 
@@ -162,7 +252,8 @@ work in both vim Insert mode and modeless mode.
 
 | Key            | Effect                                            |
 | -------------- | ------------------------------------------------- |
-| `Enter`        | Send the prompt                                   |
+| `Enter`        | Send the prompt (steer it during a run)           |
+| `Tab`          | Queue the prompt until the run ends               |
 | `Shift+Enter`  | Insert a newline (`Alt+Enter` also works)         |
 | `Up` / `Down`  | Move between lines, then walk the prompt history  |
 | `Ctrl+A` / `Ctrl+E` | Start / end of the current line              |
@@ -180,10 +271,12 @@ work in both vim Insert mode and modeless mode.
 | `Ctrl+G`       | Edit the draft in `$VISUAL`/`$EDITOR`              |
 
 `Ctrl+W`, `Ctrl+U`, `Ctrl+K`, `Alt+Backspace`, and `Alt+D` feed a
-kill ring; `Ctrl+Y` yanks the most recent entry. A bracketed paste
-of 10 or more lines collapses to a `[paste #N: M lines]` placeholder
-so it does not flood the input; the full text is still sent on
-submit, and `Ctrl+O` expands it inline if you want to edit it first.
+kill ring, and `Ctrl+Y` yanks the most recent entry. A bracketed
+paste of 10 or more lines collapses to a `[paste #N: M lines]`
+placeholder so it does not flood the input. A paste of more than 1000
+characters on fewer lines collapses to `[paste #N: M chars]`. The full
+text is still sent on submit, and `Ctrl+O` expands it inline if you
+want to edit it first.
 
 ## vim normal-mode keys (input pane)
 
@@ -294,6 +387,7 @@ These action names work after `action:`:
 | misc       | `EnterVisual`          | start a visual selection          |
 | misc       | `AttachClipboardImage` | attach an image from the clipboard |
 | misc       | `CycleThinkingLevel`   | step the thinking level           |
+| misc       | `QueuePrompt`          | queue the prompt until the run ends (does nothing while idle) |
 
 Scrolling by a line count needs an argument, so it is only available
 from Lua as `kage.action.scroll(n)`.
@@ -305,9 +399,10 @@ The level a new TUI session starts on comes from
 
 ### quit and cancel hatches
 
-`Ctrl+Q` quits and `Ctrl+C` cancels the running turn from anywhere,
-even a stuck modal. They yield **only** to a mapping from `config.toml`
-or `init.lua` on the same key. Then your mapping wins, and quit stays
+`Ctrl+Q` quits and `Ctrl+C` escalates (see
+[esc and ctrl+c](#esc-and-ctrl-c)) from anywhere, even a stuck
+overlay. They yield **only** to a mapping from `config.toml` or
+`init.lua` on the same key. Then your mapping wins, and quit stays
 reachable through whatever key you mapped `quit` to. A plugin mapping
 on either key never fires and logs a warning.
 

@@ -20,8 +20,9 @@ word. See [lua config](/guide/lua-config).
 - open blocking dialogs (select, confirm, input, editor) with
   `kage.ui.*`, even from a command or keybinding handler
 - contribute status-bar widgets and transient status messages
-- fill the header, footer, input pill and start screen with built-in
-  and Lua components (`kage.ui.set_slot`, `set_header`, `set_footer`)
+- fill the header, working row, input rule, footer and start card
+  with built-in and Lua components (`kage.ui.set_slot`, `set_header`,
+  `set_footer`)
 - read and set options (`kage.opt`) and restyle highlight groups
   (`kage.api.hl_set`)
 - run callbacks later or on an interval (`kage.defer`, `kage.timer`)

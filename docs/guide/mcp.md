@@ -112,8 +112,8 @@ github = "allow"
 default = "ask"
 ```
 
-Choosing "always allow" in the TUI prompt writes such a per-tool
-entry. If you run MCP servers from `kage -p` scripts, add
+Choosing "Yes, and always allow" in the TUI approval panel writes
+such a per-tool entry. If you run MCP servers from `kage -p` scripts, add
 `[permissions.mcp]` entries for them, or their tools will be refused.
 See [permissions](/guide/permissions) for the full reference.
 

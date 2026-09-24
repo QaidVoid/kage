@@ -108,19 +108,19 @@ second column.
 | `selection_color` | `KageSelection` bg | visual selection |
 | `selection_fg` | `KageSelection` fg | selected text |
 | `focus_color` | `KageFocus` bg | focused block accent |
-| `status_bg` | `KageStatus` bg | status bar (header) fill |
-| `status_dim_fg` | `KageStatus` fg | status bar text |
-| `modeline_bg` | `KageModeline` bg | bottom modeline fill |
-| `modeline_fg` | `KageModeline` fg | bottom modeline text |
-| `input_border_normal` | `KageInputBorderNormal` fg | input card border, normal mode |
-| `input_border_insert` | `KageInputBorderInsert` fg | input card border, insert mode |
-| `input_border_visual` | `KageInputBorderVisual` fg | input card border, visual mode |
-| `input_pill_normal_bg`, `input_pill_normal_fg` | `KageInputPillNormal` | mode pill, normal mode |
-| `input_pill_insert_bg`, `input_pill_insert_fg` | `KageInputPillInsert` | mode pill, insert mode |
-| `input_pill_visual_bg`, `input_pill_visual_fg` | `KageInputPillVisual` | mode pill, visual mode |
+| `status_bg` | `KageStatus` bg | header row fill |
+| `status_dim_fg` | `KageStatus` fg | header row text |
+| `modeline_bg` | `KageModeline` bg | command palette, completion popup and toast fill |
+| `modeline_fg` | `KageModeline` fg | not painted by the built-in chrome |
+| `input_border_normal` | `KageInputBorderNormal` fg | input rules, normal mode |
+| `input_border_insert` | `KageInputBorderInsert` fg | input rules, insert mode and modeless |
+| `input_border_visual` | `KageInputBorderVisual` fg | input rules, visual mode |
+| `input_pill_normal_bg`, `input_pill_normal_fg` | `KageInputPillNormal` | emphasized text on the input rule, normal mode (fg only) |
+| `input_pill_insert_bg`, `input_pill_insert_fg` | `KageInputPillInsert` | emphasized text on the input rule, insert mode (fg only) |
+| `input_pill_visual_bg`, `input_pill_visual_fg` | `KageInputPillVisual` | emphasized text on the input rule, visual mode (fg only) |
 | `input_glyph_fg` | `KageInputGlyph` fg | prompt glyph |
 | `input_placeholder_fg` | `KageInputPlaceholder` fg | placeholder text |
-| `input_hint_fg` | `KageInputHint` fg | input hints |
+| `input_hint_fg` | `KageInputHint` fg | footer hint and start card change hints |
 | `overlay_fg` | `KageOverlay` fg | picker and dialog text |
 | `overlay_border` | `KageOverlayBorder` fg | picker and dialog border |
 | `overlay_selected_bg`, `overlay_selected_fg` | `KageOverlaySelected` | selected picker row |
@@ -139,8 +139,24 @@ has two. An entry takes `fg`, `bg`, `bold`, `italic`, `underline`,
 `dim`, `reverse` and `link`. A `link` follows another group and wins
 over the other fields.
 
-A `Kage*` name must be one of the groups in the table above, and a
-typo is an error. Any other name defines a group of your own, which
+Four chrome groups are not theme roles. Every theme links them to
+another group, and `[groups]` can replace them like any other:
+
+| Group | Default link | Colors |
+| --- | --- | --- |
+| `KageWorking` | `KageMuted` | the working row above the input |
+| `KageApproval` | `KageWarning` | approval panel rules, title and selected option, and the bullet of a tool call waiting for approval |
+| `KageDiffAdd` | `KageSuccess` | `+` lines in edit rows and approvals |
+| `KageDiffDelete` | `KageToolErrorRule` | `-` lines in edit rows and approvals |
+
+```toml
+[groups]
+KageApproval = { fg = "#e0af68", bold = true }
+KageDiffAdd = { fg = "#9ece6a" }
+```
+
+A `Kage*` name must be one of the groups in the two tables above, and
+a typo is an error. Any other name defines a group of your own, which
 plugin spans and slot components can use through `hl`. The built-in
 renderer reads only the colors of `Kage*` groups. Attributes such as
 `bold` show where a group is used by name.

@@ -81,7 +81,9 @@ missing function.
 ### `kage.log(level: string, message: string)`
 
 Record a structured log line. `level` is one of `"trace"`, `"debug"`,
-`"info"`, `"warn"`, `"error"`.
+`"info"`, `"warn"`, `"error"`. In the TUI the line also shows in the
+conversation, in order with the turn that logged it. Lines logged
+while kage starts show as `kage:log` blocks instead.
 
 ### `kage.config()`
 
@@ -143,12 +145,13 @@ Open a multi-line editor seeded with `prefill`. `Ctrl+S` submits,
 
 ### `kage.ui.set_header(fn | nil)` / `kage.ui.set_footer(fn | nil)`
 
-Take over the top status row (`set_header`) or the bottom modeline
-row (`set_footer`). kage calls `fn(width)` every 500 ms and when the
+Take over the top row (`set_header`) or the bottom row
+(`set_footer`). kage calls `fn(width)` every 500 ms and when the
 width changes, and paints the first line it returns in place of the
-built-in row. Passing `nil` restores the default row. The `:`
-command line and `/` search line still take priority over a custom
-header. Both are shorthands for [`kage.ui.set_slot`](#kage-ui-set-slot-name-spec-nil).
+built-in row. Passing `nil` restores the default row. The header row
+collapses while `fn` returns nothing. The `:` command line and `/`
+search line paint over the footer row, custom or not, while they are
+open. Both are shorthands for [`kage.ui.set_slot`](#kage-ui-set-slot-name-spec-nil).
 
 `fn(width)` returns one of: a plain string (one unstyled span), a
 span table, or an array of those, one line per element. An element
@@ -179,11 +182,15 @@ the previous output stays on screen.
 
 ### `kage.ui.set_slot(name, spec | nil)`
 
-**Since API 2.** Fill one of the chrome slots: `header`, `footer`,
-`input_pill` or `start`. A row slot takes
+**Since API 2.** Fill one of the chrome slots: `header`, `activity`
+(the working row above the input), `input_pill` (the input's top
+rule), `footer` or `start` (the start card). A row slot takes
 `{ left = items, right = items, sep = string? }` and `start` takes
-`{ lines = items }`. An item is a built-in component name (`"model"`,
-`"tokens"`, ...), a span table, or a Lua component
+`{ lines = items }`. An item is a built-in component name (`brand`,
+`title`, `model`, `widgets`, `search`, `session`, `working`,
+`activity`, `context`, `tokens`, `thinking`, `permission`, `mode`,
+`hint`, `cwd`, `version`, and in `start` also `sessions` and
+`notices`), a span table, or a Lua component
 `{ render = fn(ctx), events?, interval?, hl? }` whose output kage
 keeps and recomputes only when a listed event fires, the interval
 passes, the slot is set, `kage.api.redraw` is called or the width
@@ -192,15 +199,17 @@ and events raise.
 
 ```lua
 kage.ui.set_slot("header", {
-  left = { "brand", "model" },
-  right = { { events = { "turn_end" }, render = function(ctx)
+  left = { "brand", "title" },
+  right = { "widgets", "search", { events = { "turn_end" }, render = function(ctx)
     return ctx.working and "" or os.date("%H:%M ")
-  end }, "session" },
+  end } },
 })
 ```
 
-See [lua config](/guide/lua-config#slots) for the component list and
-the fields of `ctx`.
+The `header` and `activity` rows collapse while they paint nothing,
+so this header stays visible because `brand` always paints. See
+[lua config](/guide/lua-config#slots) for the defaults, what each
+component shows and the fields of `ctx`.
 
 ### `kage.register_block_renderer(kind, render | nil)`
 
@@ -418,9 +427,10 @@ Vim notation (`<C-S-x>`, `<F5>`) works too.
 
 A plugin mapping replaces a default mapping on the same key, and a
 mapping from `config.toml` or `init.lua` replaces the plugin one.
-Mappings never apply while a modal layer is open. `Ctrl+Q` and
-`Ctrl+C` stay with kage's quit and cancel hatches: a plugin mapping
-on them never fires and logs a warning. The handler runs through the
+Mappings never apply while a modal layer, such as a picker or the
+approval panel, is open. `Ctrl+Q` and `Ctrl+C` stay with kage's quit
+and escalation hatches, and a plugin mapping on them never fires and
+logs a warning. The handler runs through the
 coroutine bridge, so it too may open [`kage.ui.*`](#ui) dialogs, and a
 non-empty string return is shown as a conversation block.
 
@@ -431,7 +441,7 @@ non-empty string return is shown as a conversation block.
 Add a completion provider for the prompt input. Providers form a
 stack: the host consults them in reverse registration order (the
 most recently added wins) on each input change and shows the first
-non-empty result in a popup above the input card. Re-adding a
+non-empty result in a popup above the input box. Re-adding a
 provider with the same `name` replaces it in place.
 
 `complete(prefix, ctx)` is called with the run of non-whitespace
@@ -504,9 +514,10 @@ consumed".
 
 ### `kage.register_widget({ key, render })`
 
-Register a status-bar widget. `render(width)` returns a string painted
-on the right edge of the status bar. It follows the same retained
-output and render budget rules as `set_header`.
+Register a status widget. `render(width)` returns a string painted by
+the `widgets` component, on the right of the header row by default. It
+follows the same retained output and render budget rules as
+`set_header`.
 
 ```lua
 kage.register_widget({
@@ -519,8 +530,8 @@ kage.register_widget({
 
 ### `kage.set_status(key: string, text: string | nil)`
 
-Push or clear a transient status entry. Plain text only; the host
-paints the value on the status bar between widgets.
+Push or clear a transient status entry. It is plain text only, and
+the `widgets` component paints it after the widgets.
 
 ### `kage.clear_status(key: string)`
 

@@ -2,7 +2,7 @@
 
 `init.lua` is kage's Lua configuration file. It sets options, maps
 keys, reacts to events, restyles highlight groups and rearranges the
-header, footer, input pill and start screen. `config.toml` keeps
+header, working row, input rule, footer and start card. `config.toml` keeps
 working next to it. Its UI keys and `[keybindings]` table feed the
 same options and keymap table, and `init.lua` runs after it, so
 `init.lua` wins.
@@ -69,8 +69,8 @@ what another environment sees.
 Every load runs the same steps, and each step can override the ones
 before it. The last set wins.
 
-1. `_defaults.lua`, embedded in kage: the default keymaps and the
-   header, footer and input pill slots.
+1. `_defaults.lua`, embedded in kage: the default keymaps and every
+   slot (header, activity, input pill, footer and start card).
 2. Plugins, sorted by file name.
 3. `[keybindings] bindings` from `config.toml`.
 4. `init.lua`.
@@ -81,12 +81,13 @@ Options are seeded from `config.toml` and `KAGE_*` environment
 variables before step 1.
 
 kage watches the plugins directory, `init.lua` and `lua/` (recursively)
-and reloads when a Lua file changes. A reload clears keymaps,
-autocmds, slots, timers and everything plugins registered, then runs
-the steps above again. It does not revert options or highlight
-overrides: if you delete `opt.theme = "tokyo-night"` from `init.lua`,
-the theme stays until you restart kage. A `lua/` directory created
-while kage runs is watched from the next start.
+and reloads when a Lua file changes. A `lua/` directory created while
+kage runs is watched too. `/reload` reloads right away. A reload
+clears keymaps, autocmds, slots, timers and everything plugins
+registered, then runs the steps above again. It does not revert
+options or highlight overrides. If you delete
+`opt.theme = "tokyo-night"` from `init.lua`, the theme stays until you
+restart kage.
 
 ## options
 
@@ -111,9 +112,15 @@ value)` is the same as assigning.
 | `input_min_lines` | `ui.input_min_lines` | integer, 1 to 64 | `1` | immediately |
 | `input_max_lines` | `ui.input_max_lines` | integer, 1 to 64 | `8` | immediately |
 | `thinking_level` | `ui.thinking_level` | `""`, `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"` or `"xhigh"` | `""` | next session |
+| `transcript_on_exit` | `ui.transcript_on_exit` | `"full"`, `"last"` or `"none"` | `"full"` | at exit |
 | `compaction_threshold` | `loop.compaction_threshold` | number, 0 to 1 (0 turns compaction off) | `0.8` | next session |
 | `leader` | `keybindings.leader` | one key, such as `","` or `"<Space>"` | `"\\"` (backslash) | mappings set after it |
 | `timeoutlen` | `keybindings.timeoutlen` | integer milliseconds, 0 to 5000 | `1000` | immediately |
+
+`transcript_on_exit` picks what kage prints to the terminal after you
+quit: the whole conversation as plain text, only the part from your
+last prompt on, or nothing. The session file path follows when the
+session was recorded.
 
 `thinking_level` and `compaction_threshold` set in `init.lua` apply to
 the first session, because kage starts it after `init.lua` has run. An
@@ -152,7 +159,8 @@ A key is looked up in these modes, first match wins:
 | visual | `v`, `g` |
 
 Mappings never apply while an overlay (a picker, a dialog, the `:`
-line, the `/` search line, the slash palette) is open. While the
+line, the `/` search line, the slash palette, the approval panel) is
+open. While the
 autocomplete popup is open it sees its own keys first.
 
 ### notation
@@ -193,7 +201,12 @@ mapping in `i` or `g` would catch it while you type.
 `OpenCommandPalette`, `SearchNext`, `SearchPrev`, `YankFocusedBlock`,
 `CycleThinkingLevel`, `CyclePane`, `FocusPrev`, `FocusNext`,
 `OpenHelp`, `OpenJumpPicker`, `AttachClipboardImage`, `EnterVisual`,
-and the function `scroll(n)`.
+`QueuePrompt`, and the function `scroll(n)`.
+
+`QueuePrompt` sends the draft to run after the current run ends. While
+kage is idle it does nothing, so the default `<Tab>` mapping never
+sends a prompt by accident. The completion popup sees `Tab` before any
+mapping.
 
 `opts` takes `desc` and `group`. The `?` reference lists every mapping
 that has a `desc`, under its `group` (`other` when unset). Mappings
@@ -217,8 +230,9 @@ end, { desc = "compact", group = "mine" })
 ### sequences and timeoutlen
 
 A mapping can be several keys long. While the keys typed so far are
-the start of a longer mapping, kage waits for more, and the input
-pill shows the pending keys. When the keys stop matching, the longest
+the start of a longer mapping, kage waits for more, and the `hint`
+component (in the footer by default) shows the pending keys, such as
+`g ...`. When the keys stop matching, the longest
 mapping they complete fires and the rest are looked up again. If none
 fires, the keys go to the editor in order, so `gg` still moves to the
 start of the prompt in the input pane. A mapping that is also the
@@ -246,10 +260,11 @@ Esc, insert-mode Ctrl+O, Ctrl+G (external editor), the modeless `/`,
 pane. A mapping or `"<Nop>"` on one of these keys shadows it.
 `kage.keymap.del` cannot remove it.
 
-Ctrl+Q (quit) and Ctrl+C (cancel the turn) work above every layer,
-including overlays. They yield only to a mapping owned by `init.lua` or
-`config.toml`. A plugin mapping on them never fires and logs a
-warning.
+Ctrl+Q (quit) and Ctrl+C work above every layer, including overlays.
+Ctrl+C clears the draft, else interrupts the run, else arms quit (see
+[keybindings](/guide/keybindings#esc-and-ctrl-c)). Both yield only
+to a mapping owned by `init.lua` or `config.toml`. A plugin mapping on
+them never fires and logs a warning.
 
 `:keybindings` (alias `:keys`) lists the whole table per mode with the
 owner of each mapping: `defaults`, a plugin name, `config.toml` or
@@ -411,38 +426,74 @@ group, as its foreground or its background.
 | `KageMarkdownLink` | `md_link_fg` | |
 | `KageMarkdownCode` | `md_code_fg` | |
 
+Four more groups color parts of the chrome. They are not theme roles, and
+every theme links them to another group until you set them:
+
+| Group | Default link | Colors |
+| --- | --- | --- |
+| `KageWorking` | `KageMuted` | the working row |
+| `KageApproval` | `KageWarning` | approval panel rules, title and selected option, and the bullet of a tool call waiting for approval |
+| `KageDiffAdd` | `KageSuccess` | `+` lines in edit rows and approvals |
+| `KageDiffDelete` | `KageToolErrorRule` | `-` lines in edit rows and approvals |
+
 A theme file can also set groups in its `[groups]` table (see
 [themes](/guide/themes#groups)).
 
 ## slots
 
-Slots are the fixed chrome regions:
+Slots are the fixed chrome regions, from top to bottom:
 
 | Slot | Region | Spec |
 | --- | --- | --- |
-| `header` | the top row | `{ left, right, sep }` |
-| `footer` | the modeline row | `{ left, right, sep }` |
-| `input_pill` | the input card's top border | `{ left, right, sep }` |
-| `start` | the conversation area while it is empty | `{ lines }` |
+| `header` | the top row, collapsed while it paints nothing | `{ left, right, sep }` |
+| `start` | the start card above the input while the conversation is empty | `{ lines }` |
+| `activity` | the working row above the input, collapsed while it paints nothing | `{ left, right, sep }` |
+| `input_pill` | the input's top rule | `{ left, right, sep }` |
+| `footer` | the bottom row | `{ left, right, sep }` |
 
 `kage.ui.set_slot(name, spec)` replaces a slot's spec, and
 `kage.ui.set_slot(name, nil)` restores the one `_defaults.lua` set.
 `left` items paint from the left edge and `right` items against the
-right edge. `sep` goes between two items that both have output. In
-`start`, each item is one line, centered. The `:` command line and the
-`/` search line still paint over the header. When `start` has a spec,
-kage skips its welcome notice.
+right edge. `sep` goes between two items that both have output. The
+`:` command line and the `/` search line paint over the footer row
+while they are open.
+
+`start` paints while the conversation holds nothing but notices: no
+prompt, reply, thinking, tool call or shell command yet. Errors such
+as a broken `config.toml` stay above it. The card is bottom-aligned
+directly above the input, and each item is one line, indented. When
+the rows do not fit, the tip and other span or Lua lines go first,
+then the recent sessions, then notices past the first two.
+`{ lines = {} }` turns the card off.
 
 kage's defaults are:
 
 ```lua
-kage.ui.set_slot("header", { left = { "brand", "model" }, right = { "widgets", "search", "session" } })
+local dot = " \u{B7} "
+kage.ui.set_slot("header", { left = { "title" }, right = { "widgets", "search" } })
+kage.ui.set_slot("activity", { left = { "activity" } })
+kage.ui.set_slot("input_pill", { left = { "working", "mode" }, right = { "thinking" } })
 kage.ui.set_slot("footer", {
-  left = { "working", "model", "context", "tokens", "thinking", "permission" },
-  sep = " . ",
+  left = { "hint" },
+  right = { "model", "permission", "context", "tokens" },
+  sep = dot,
 })
-kage.ui.set_slot("input_pill", { left = { "mode" }, right = { "hint" } })
+
+local blank = { text = "" }
+kage.ui.set_slot("start", {
+  lines = {
+    "brand", blank,
+    "model", "cwd", "permission", "thinking", blank,
+    "sessions", "notices",
+    { text = "Tip: " .. tips[math.random(#tips)], hl = "KageMuted" },
+  },
+})
 ```
+
+`tips` is a list of short hints, and one is picked at random on each
+load. So the header row shows only once the session has a title (or a
+widget or a search is active), and the working row only while a run
+is in flight.
 
 An item is one of:
 
@@ -455,19 +506,34 @@ An item is one of:
 | Component | Shows |
 | --- | --- |
 | `brand` | `kage` |
-| `model` | the active model |
+| `title` | the session title, once there is one |
+| `model` | the active model, by its model picker name |
 | `widgets` | plugin widgets and `kage.set_status` entries |
-| `search` | the search match count while a search is active |
-| `session` | the session id |
-| `working` | a spinner while a turn runs |
-| `context` | context use against the window, such as `ctx 12k/200k (6%)` |
-| `tokens` | input and output tokens, plus the cost when known |
-| `thinking` | the thinking level, hidden when off |
-| `permission` | a session permission override, hidden when there is none |
-| `mode` | the editor mode glyph |
-| `hint` | keys of a pending mapping sequence |
+| `search` | the search match count while a search is active, such as `match 2/5` |
+| `session` | the session id, as `#<id>` |
+| `working` | a spinner while a run is in flight |
+| `activity` | what the run is doing and for how long, such as `Running cargo test (14s, esc to interrupt)`. The label is `Working`, `Thinking`, the running tool, or `Waiting for your approval`. |
+| `context` | context use against the window, such as `12% ctx` |
+| `tokens` | total tokens and the cost when known, such as `14k tok $0.02` |
+| `thinking` | the thinking level, such as `thinking high`, hidden when off |
+| `permission` | a session permission override, such as `ask mode`, hidden when there is none |
+| `mode` | `NORMAL`, `INSERT` or `VISUAL` in vim mode, `shell` while `!` shell mode is armed, nothing otherwise |
+| `hint` | what the next keys do: the pending keys of a mapping sequence, the approval panel's keys, `ctrl+c again to quit` or `draft cleared, up restores it`, else a hint for the current state such as `? for shortcuts` or `tab to queue` |
 | `cwd` | the working directory |
 | `version` | the kage version |
+| `sessions` | `start` only: the three most recent sessions with their times |
+| `notices` | `start` only: startup notices, such as a missing credential and the `/login` command that fixes it |
+
+Keys named in hints follow your mappings. Remapping
+`OpenModelPicker` changes the start card's `ctrl+p to change`, and
+remapping `QueuePrompt` changes the footer's `tab to queue`.
+
+In `start`, some components paint differently. `brand` adds the
+version. `model`, `cwd`, `permission` and `thinking` become labeled
+rows (`model`, `directory`, `permissions`, `thinking`) with a change
+hint against the right edge. `permission` there summarizes the
+configured rules when no override is active. `sessions` and `notices`
+paint nothing in a row slot.
 
 An unknown component name raises.
 
@@ -541,8 +607,8 @@ end, 60000)
 
 This `init.lua` uses every part of this page. It switches to vim mode
 with a space leader, adds a few mappings, logs shell calls, keeps a
-user bubble color across theme switches, adds a cost and a clock to the
-footer and fills the start screen.
+user bubble color across theme switches, puts a cost and a clock in the
+footer and trims the start card.
 
 ```lua
 -- ~/.config/kage/init.lua
@@ -555,6 +621,7 @@ opt.editor = "vim"
 opt.input_max_lines = 12
 opt.leader = " " -- set the leader before any <leader> mapping
 opt.timeoutlen = 600
+opt.transcript_on_exit = "last"
 
 -- Keymaps.
 map("n", "<leader>m", act.OpenModelPicker, { desc = "pick a model", group = "mine" })
@@ -603,8 +670,11 @@ api.hl_set("MyClock", { fg = "cyan", bold = true })
 
 -- Slots.
 kage.ui.set_slot("footer", {
-  left = { "working", "model", "context", "tokens", "thinking", "permission" },
+  left = { "hint" },
   right = {
+    "model",
+    "permission",
+    "context",
     {
       events = { "message_end", "model_select" },
       hl = "MyCost",
@@ -623,15 +693,19 @@ kage.ui.set_slot("footer", {
       end,
     },
   },
-  sep = " . ",
+  sep = " \u{B7} ",
 })
 
 kage.ui.set_slot("start", {
   lines = {
-    { text = "kage", hl = "KageMarkdownH1", bold = true },
-    "version",
+    "brand",
+    { text = "" },
+    "model",
     "cwd",
-    { text = "press <Space>m for the model picker", hl = "KageMuted" },
+    { text = "" },
+    "sessions",
+    "notices",
+    { text = "Press Space then m for the model picker.", hl = "KageMuted" },
   },
 })
 
@@ -652,6 +726,7 @@ The options above, written in `config.toml` instead:
 theme = "tokyo-night"
 editor = "vim"
 input_max_lines = 12
+transcript_on_exit = "last"
 
 [keybindings]
 leader = " "

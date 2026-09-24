@@ -11,7 +11,7 @@ use std::process::Command;
 use kage_core::keymap::{Lookup, Mode, Rhs};
 use kage_plugin::{
     BridgePrep, BridgeStep, CommandOutput, HostLog, LogLevel, PendingSessionOp, PluginRuntime,
-    SharedHostLog, SwitchTarget,
+    SharedHostLog, SlotItem, SlotName, SwitchTarget,
 };
 use serde_json::json;
 
@@ -532,10 +532,13 @@ fn ui_extras_registers_chrome_autocomplete_and_raw_input() {
     rt.eval(&source).expect("ui_extras.lua loads");
 
     // 1. Header / footer chrome both registered and renderable.
-    let header = rt.header_chrome().expect("header registered");
-    let footer = rt.footer_chrome().expect("footer registered");
-    assert!(!header.render(80).is_empty());
-    assert!(!footer.render(80).is_empty());
+    for slot in [SlotName::Header, SlotName::Footer] {
+        let spec = rt.slots().spec(slot).expect("slot set");
+        let Some(SlotItem::Lua(component)) = spec.left.first() else {
+            panic!("{slot:?} is not a takeover");
+        };
+        assert!(!component.lines().is_empty());
+    }
 
     // 2. Autocomplete provider answers only on a ":" trigger.
     let providers = rt.registered_autocomplete_providers();

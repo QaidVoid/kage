@@ -21,7 +21,12 @@ pub(crate) const INPUT_PLACEHOLDER_INSERT: &str =
     "Send a message...  (/ commands, ! shell, ? keys)";
 pub(crate) const INPUT_PLACEHOLDER_NORMAL: &str = "press i to type, ? for keys, / to search";
 
-pub(super) fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {
+pub(super) fn render_input(
+    frame: &mut Frame,
+    regions: Regions,
+    input: &InputState,
+    sources: &super::slot::Sources<'_>,
+) {
     let area = regions.input;
     if area.height == 0 || area.width == 0 {
         return;
@@ -43,16 +48,14 @@ pub(super) fn render_input(frame: &mut Frame, regions: Regions, input: &InputSta
         Style::default().fg(theme.muted_fg)
     };
 
-    // Attachments show inline in the prompt as editable
-    // `[image #N ...]` markers, so the top border stays just the
-    // mode pill.
-    let top_line: Vec<Span<'static>> =
-        vec![Span::styled(format!(" {} ", mode_glyph(mode)), pill_style)];
-
-    let block = RtBlock::default()
+    let (pill_left, pill_right) = super::slot::pill_titles(sources, pill_style);
+    let mut block = RtBlock::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
-        .title(Line::from(top_line));
+        .title(pill_left);
+    if let Some(right) = pill_right {
+        block = block.title(right);
+    }
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

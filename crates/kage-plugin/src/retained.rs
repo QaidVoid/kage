@@ -1,7 +1,6 @@
 //! Render output retained between frames.
 //!
-//! Render surfaces (status-bar widgets, header and footer chrome, block
-//! renderers) never call Lua on the caller's thread. They return the
+//! Status-bar widgets never call Lua on the caller's thread. They return the
 //! output of an earlier owner-thread job and queue a recompute when
 //! that output is stale. A recompute whose output differs sets the
 //! runtime's redraw flag (see [`crate::PluginRuntime::redraw_flag`]).
@@ -23,7 +22,7 @@ use crate::host::LuaHost;
 /// Longest a render waits for a first result on an idle owner thread.
 pub(crate) const COLD_WAIT: Duration = Duration::from_millis(50);
 
-/// Age after which widget and chrome output is recomputed even when
+/// Age after which widget output is recomputed even when
 /// the width is unchanged.
 pub(crate) const REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 

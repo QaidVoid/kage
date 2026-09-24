@@ -58,147 +58,12 @@ pub(crate) fn chrome_lines_to_ratatui(
         .collect()
 }
 
-/// Paint the bottom modeline. When the host has registered a
-/// [`SessionUsage`] handle, the row shows the active model, the
-/// running token totals (input / output) and the context-window
-/// fill. Otherwise the row is filled with the modeline background
-/// so the chrome reads as a coherent strip rather than an unstyled
-/// terminal row. Mode is intentionally absent here - the colored
-/// pill on the input border is the canonical mode display.
-pub(super) fn render_modeline(
-    frame: &mut Frame,
-    regions: Regions,
-    usage: Option<&SessionUsage>,
-    plugin_footer: &[kage_plugin::ChromeLine],
-) {
-    let area = regions.status_bottom;
-    if area.height == 0 || area.width == 0 {
-        return;
-    }
-    let theme = crate::theme::current();
-    let bg = Style::default().bg(theme.modeline_bg);
-    let fg = Style::default().fg(theme.modeline_fg).bg(theme.modeline_bg);
-    if !plugin_footer.is_empty() {
-        let lines = chrome_lines_to_ratatui(plugin_footer, fg);
-        let paragraph = Paragraph::new(lines).alignment(Alignment::Left).style(bg);
-        frame.render_widget(paragraph, area);
-        return;
-    }
-    // Blended into the canvas (no band): a `DIM` separator would
-    // vanish, so use the readable muted tier.
-    let dim = Style::default().fg(theme.muted_fg).bg(theme.modeline_bg);
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    if let Some(u) = usage
-        && (!u.model.is_empty() || u.total_tokens() > 0 || u.current_context > 0 || u.working)
-    {
-        spans.push(Span::styled(" ", bg));
-        push_working_indicator(&mut spans, u.working, bg, fg);
-        // Logical groups separated by a muted dot: model, context
-        // fill, cumulative io (+ cost), thinking level. Each is
-        // labelled so a field reads on its own; the dot only ever
-        // appears between groups, never trailing.
-        let mut prior_group = false;
-        let sep = |spans: &mut Vec<Span<'static>>, prior: &mut bool| {
-            if *prior {
-                spans.push(Span::styled(" . ", dim));
-            }
-            *prior = true;
-        };
-        if !u.model.is_empty() {
-            sep(&mut spans, &mut prior_group);
-            spans.push(Span::styled(
-                u.model.clone(),
-                fg.add_modifier(Modifier::BOLD),
-            ));
-        }
-        if u.context_window > 0 {
-            sep(&mut spans, &mut prior_group);
-            #[allow(clippy::cast_precision_loss)]
-            let pct =
-                (u.current_context as f64 / u.context_window as f64 * 100.0).clamp(0.0, 999.9);
-            spans.push(Span::styled(
-                format!(
-                    "ctx {}/{} ({:.0}%)",
-                    format_token_count(u.current_context),
-                    format_token_count(u.context_window),
-                    pct
-                ),
-                fg,
-            ));
-        } else if u.current_context > 0 {
-            sep(&mut spans, &mut prior_group);
-            spans.push(Span::styled(
-                format!("ctx {}", format_token_count(u.current_context)),
-                fg,
-            ));
-        }
-        // Cumulative session totals (what the user has been charged
-        // for since the session started), distinct from `ctx` above.
-        // Cost rides in the same group as the io it paid for.
-        sep(&mut spans, &mut prior_group);
-        spans.push(Span::styled(
-            format!(
-                "io {}+{}",
-                format_token_count(u.input_tokens),
-                format_token_count(u.output_tokens)
-            ),
-            fg,
-        ));
-        if u.total_cost > 0.0 {
-            spans.push(Span::styled(format!(" ${:.4}", u.total_cost), fg));
-        }
-        if let Some(level) = u.thinking_level
-            && !level.is_off()
-        {
-            sep(&mut spans, &mut prior_group);
-            spans.push(Span::styled(
-                format!("think:{}", level.label()),
-                fg.add_modifier(Modifier::BOLD),
-            ));
-        }
-        if let Some(mode) = u.permission_mode
-            && mode != kage_core::permissions::PermissionAction::Allow
-        {
-            sep(&mut spans, &mut prior_group);
-            spans.push(Span::styled(
-                format!("perm:{}", mode_label(mode)),
-                fg.add_modifier(Modifier::BOLD),
-            ));
-        }
-    }
-    let used: usize = spans.iter().map(Span::width).sum();
-    let pad = usize::from(area.width).saturating_sub(used);
-    if pad > 0 {
-        spans.push(Span::styled(" ".repeat(pad), bg));
-    }
-    let line = Paragraph::new(Line::from(spans))
-        .alignment(Alignment::Left)
-        .style(bg);
-    frame.render_widget(line, area);
-}
-
 /// Lowercase label for a permission override pill.
-fn mode_label(mode: kage_core::permissions::PermissionAction) -> &'static str {
+pub(super) fn mode_label(mode: kage_core::permissions::PermissionAction) -> &'static str {
     match mode {
         kage_core::permissions::PermissionAction::Allow => "allow",
         kage_core::permissions::PermissionAction::Ask => "ask",
         kage_core::permissions::PermissionAction::Deny => "deny",
-    }
-}
-
-/// Working spinner: a 10-frame braille ticker keyed off wall-clock
-/// time so it animates without a frame counter on the App. When
-/// idle, paint a single dim dot so the strip width stays stable
-/// across transitions.
-fn push_working_indicator(spans: &mut Vec<Span<'static>>, working: bool, bg: Style, fg: Style) {
-    if working {
-        let frame = spinner_frame();
-        spans.push(Span::styled(
-            format!("{frame} "),
-            fg.add_modifier(Modifier::BOLD),
-        ));
-    } else {
-        spans.push(Span::styled("  ", bg));
     }
 }
 
@@ -258,7 +123,7 @@ pub(crate) fn spinner_frame_index() -> usize {
     }
 }
 
-fn spinner_frame() -> &'static str {
+pub(super) fn spinner_frame() -> &'static str {
     SPINNER_FRAMES[spinner_frame_index()]
 }
 

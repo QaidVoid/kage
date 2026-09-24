@@ -77,14 +77,14 @@ pub struct StatusCtx<'a> {
     /// Painted alongside widgets on the right edge in key-sorted
     /// order. Empty when no plugins push status.
     pub plugin_status: &'a [(String, String)],
-    /// Pre-rendered styled lines from a plugin `kage.ui.set_header`
-    /// renderer. When non-empty the host paints these in place of the
-    /// built-in status bar; the `:` command line and `/` search line
-    /// still take priority.
-    pub plugin_header: &'a [kage_plugin::ChromeLine],
-    /// Pre-rendered styled lines from a plugin `kage.ui.set_footer`
-    /// renderer. When non-empty they replace the built-in modeline.
-    pub plugin_footer: &'a [kage_plugin::ChromeLine],
+    /// Slot specs for the header, footer, input pill and start screen.
+    /// The default paints kage's built-in chrome. The `:` command line
+    /// and `/` search line still paint over the header.
+    pub slots: kage_plugin::SlotSpecs,
+    /// Keys of a pending mapping sequence, for the `hint` component.
+    pub key_hint: Option<&'a str>,
+    /// Working directory, for the `cwd` component.
+    pub cwd: Option<&'a str>,
 }
 
 /// `Modifier` bit reserved as the per-cell "decoration" tag - the
@@ -172,7 +172,8 @@ pub fn render(
             full,
         );
     }
-    render_status(frame, regions, input, cmdline, status);
+    let sources = slot::Sources::new(status, session_usage, input.mode());
+    render_status(frame, regions, cmdline, status, &sources);
     render_buffer(
         frame,
         regions,
@@ -180,8 +181,11 @@ pub fn render(
         status.search_pattern,
         status.search_match_set,
     );
-    render_input(frame, regions, input);
-    render_modeline(frame, regions, session_usage, status.plugin_footer);
+    if buffer.blocks().is_empty() {
+        slot::render_start(frame, regions.buffer, &sources);
+    }
+    render_input(frame, regions, input, &sources);
+    slot::render_footer(frame, regions.status_bottom, &sources);
     if !toasts.is_empty() {
         let theme = crate::theme::current();
         render_toasts(frame, regions.buffer, toasts, &theme);
@@ -199,9 +203,9 @@ pub fn render(
 fn render_status(
     frame: &mut Frame,
     regions: Regions,
-    _input: &InputState,
     cmdline: Option<&CommandLine>,
     status: &StatusCtx<'_>,
+    sources: &slot::Sources<'_>,
 ) {
     let theme = crate::theme::current();
     if let Some(cl) = cmdline {
@@ -231,76 +235,7 @@ fn render_status(
         frame.render_widget(paragraph, regions.status);
         return;
     }
-
-    if !status.plugin_header.is_empty() {
-        let base = Style::default().fg(theme.status_dim_fg).bg(theme.status_bg);
-        let lines = chrome_lines_to_ratatui(status.plugin_header, base);
-        let paragraph = Paragraph::new(lines).alignment(Alignment::Left).style(base);
-        frame.render_widget(paragraph, regions.status);
-        return;
-    }
-
-    let bg_style = Style::default().bg(theme.status_bg);
-    // The bar blends into the canvas now (no band), so `DIM` grey on
-    // dark would be unreadable. Use the readable muted tier instead.
-    let muted = Style::default().fg(theme.muted_fg).bg(theme.status_bg);
-    // Quiet brand label: a recessive marker, not a headline. The
-    // model rides right next to it so the bar reads "kage <model>"
-    // as one tight unit instead of a spaced-out toolbar.
-    let mut left_spans = vec![Span::styled(" kage".to_owned(), muted)];
-    if let Some(model) = status.model
-        && !model.is_empty()
-    {
-        left_spans.push(Span::styled(" ".to_owned(), bg_style));
-        left_spans.push(Span::styled(model.to_owned(), muted));
-    }
-    let mut right_spans: Vec<Span<'static>> = Vec::new();
-    for text in status.plugin_widgets {
-        if text.is_empty() {
-            continue;
-        }
-        right_spans.push(Span::styled(format!("{text}  "), muted));
-    }
-    for (_key, text) in status.plugin_status {
-        if text.is_empty() {
-            continue;
-        }
-        right_spans.push(Span::styled(format!("{text}  "), muted));
-    }
-    if let Some((current, total)) = status.search_match_count {
-        let label = if total == 0 {
-            "no match".to_owned()
-        } else if current == 0 {
-            format!("match -/{total}")
-        } else {
-            format!("match {current}/{total}")
-        };
-        right_spans.push(Span::styled(
-            format!("{label}  "),
-            Style::default()
-                .fg(theme.match_color)
-                .bg(theme.status_bg)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    if let Some(sid) = status.session_id
-        && !sid.is_empty()
-    {
-        right_spans.push(Span::styled(format!("#{sid} "), muted));
-    }
-    let total = usize::from(regions.status.width);
-    let left_width: usize = left_spans.iter().map(|s| s.content.width()).sum();
-    let right_width: usize = right_spans.iter().map(|s| s.content.width()).sum();
-    let pad = total.saturating_sub(left_width + right_width);
-    let mut spans = left_spans;
-    if pad > 0 {
-        spans.push(Span::styled(" ".repeat(pad), bg_style));
-    }
-    spans.extend(right_spans);
-    let paragraph = Paragraph::new(Line::from(spans))
-        .alignment(Alignment::Left)
-        .style(bg_style);
-    frame.render_widget(paragraph, regions.status);
+    slot::render_header(frame, regions.status, sources);
 }
 
 /// Clip `s` to at most `max` display columns, appending `suffix`
@@ -384,6 +319,7 @@ mod buffer;
 mod cmdline;
 mod input;
 mod modeline;
+mod slot;
 
 // Render entry points the top-level `render` / `render_status` call.
 use buffer::{capture_and_overlay, render_buffer};
@@ -391,7 +327,6 @@ use cmdline::{
     place_cmdline_cursor, place_search_cursor, render_cmdline_error, render_cmdline_popup,
 };
 use input::render_input;
-use modeline::render_modeline;
 
 // Helpers shared across the split submodules, re-routed through the
 // parent so each submodule's `use super::*` keeps resolving them.

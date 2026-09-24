@@ -57,10 +57,7 @@ impl App {
             completion_workdir: None,
             themes_dir: None,
             terminal_hooks: None,
-            plugin_header: None,
-            plugin_footer: None,
-            plugin_header_lines: Vec::new(),
-            plugin_footer_lines: Vec::new(),
+            slots: None,
             search_line: None,
             search_pattern: None,
             search_match_set: Vec::new(),
@@ -332,19 +329,11 @@ impl App {
         self.refresh_highlights();
     }
 
-    /// Wire the header/footer chrome slots populated by
-    /// `kage.ui.set_header` / `kage.ui.set_footer`. Each redraw the
-    /// active renderer (if any) is called with the row width and its
-    /// styled lines replace the built-in status bar / modeline. Without
-    /// this the Lua calls still register a renderer but the host never
-    /// paints it.
-    pub fn set_plugin_chrome(
-        &mut self,
-        header: kage_plugin::SharedChrome,
-        footer: kage_plugin::SharedChrome,
-    ) {
-        self.plugin_header = Some(header);
-        self.plugin_footer = Some(footer);
+    /// Wire the slot specs `kage.ui.set_slot`, `set_header` and
+    /// `set_footer` fill. Without this the header, footer and input
+    /// pill paint the default chrome and the start screen stays empty.
+    pub fn set_slots(&mut self, slots: kage_plugin::Slots) {
+        self.slots = Some(slots);
     }
 
     /// Wire the autocomplete provider stack from
@@ -480,24 +469,29 @@ impl App {
         }
     }
 
+    /// Snapshot the slot specs for one frame and report the frame's
+    /// width and editor mode to the plugin runtime.
+    pub(crate) fn slot_frame(&self, width: u16) -> kage_plugin::SlotSpecs {
+        let Some(slots) = &self.slots else {
+            return kage_plugin::SlotSpecs::default();
+        };
+        slots.report(width, mode_label(self.input.mode()));
+        slots.specs()
+    }
+
+    /// The pending mapping sequence in Vim notation, if keys are
+    /// buffered.
+    pub(crate) fn key_hint(&self) -> Option<String> {
+        let keys = self.sequencer.pending();
+        (!keys.is_empty()).then(|| kage_core::keymap::display_keys(keys))
+    }
+
     pub(crate) fn refresh_plugin_widget_texts(&mut self, width: u16) {
         self.plugin_widget_texts = self
             .plugin_widgets
             .iter()
             .map(|w| w.render(width))
             .collect();
-        self.plugin_header_lines = self
-            .plugin_header
-            .as_ref()
-            .and_then(|slot| lock(slot).clone())
-            .map(|c| c.render(width))
-            .unwrap_or_default();
-        self.plugin_footer_lines = self
-            .plugin_footer
-            .as_ref()
-            .and_then(|slot| lock(slot).clone())
-            .map(|c| c.render(width))
-            .unwrap_or_default();
         self.plugin_status_cache.clear();
         if let Some(status) = self.plugin_status.as_ref() {
             let map = lock(status);

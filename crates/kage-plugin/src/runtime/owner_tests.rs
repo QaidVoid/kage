@@ -82,22 +82,6 @@ fn widget_render_returns_retained_text_while_a_lua_tool_runs() {
 }
 
 #[test]
-fn chrome_render_returns_retained_lines_while_a_lua_tool_runs() {
-    let rt = PluginRuntime::new().unwrap();
-    rt.eval(SLOW_TOOL).unwrap();
-    rt.eval("kage.ui.set_footer(function(width) return 'f' .. width end)")
-        .unwrap();
-    let footer = rt.footer_chrome().unwrap();
-    assert_eq!(footer.render(10)[0].spans[0].text, "f10");
-
-    let running = occupy_owner(&rt);
-    let start = Instant::now();
-    assert_eq!(footer.render(30)[0].spans[0].text, "f10");
-    assert!(start.elapsed() < Duration::from_millis(50));
-    running.join().unwrap();
-}
-
-#[test]
 fn block_render_never_waits_on_a_busy_owner() {
     let rt = PluginRuntime::new().unwrap();
     rt.eval(SLOW_TOOL).unwrap();

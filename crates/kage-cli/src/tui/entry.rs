@@ -169,7 +169,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     let mut plugin_fork_request: Option<kage_plugin::SharedForkRequest> = None;
     let mut plugin_switch_request: Option<kage_plugin::SharedSwitchRequest> = None;
     let mut plugin_highlights: Option<kage_plugin::SharedHighlights> = None;
-    let mut plugin_chrome: Option<(kage_plugin::SharedChrome, kage_plugin::SharedChrome)> = None;
+    let mut plugin_slots: Option<kage_plugin::Slots> = None;
     let mut plugin_terminal_hooks: Option<kage_plugin::RegisteredTerminalHooks> = None;
     if let Some(rt) = plugin_runtime.as_ref() {
         plugin_command_listing = support::snapshot_plugin_commands(rt);
@@ -183,7 +183,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         plugin_fork_request = Some(rt.shared_fork_request());
         plugin_switch_request = Some(rt.shared_switch_request());
         plugin_highlights = Some(rt.highlights());
-        plugin_chrome = Some((rt.shared_header(), rt.shared_footer()));
+        plugin_slots = Some(rt.slots());
         plugin_terminal_hooks = Some(rt.shared_terminal_hooks());
     }
     let (mcp_manager, mcp_errors) =
@@ -213,7 +213,10 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     let gate = crate::permissions::PermissionGate::new(app_config.permissions.clone())
         .with_mcp_servers(mcp_manager.server_names().map(str::to_owned).collect());
 
-    {
+    let start_screen = plugin_runtime
+        .as_ref()
+        .is_some_and(|rt| rt.slots().spec(kage_plugin::SlotName::Start).is_some());
+    if !start_screen {
         let mut buf = lock(&buffer);
         buf.push_custom(
             "kage:help",
@@ -238,6 +241,12 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     let session_id = planned
         .as_ref()
         .map_or_else(kage_core::SessionId::new, |(_, header)| header.session);
+    if let Some(rt) = plugin_runtime.as_ref() {
+        let ui = rt.slots().ui_state();
+        let mut ui = lock(&ui);
+        ui.session_id = session_id.to_string();
+        ui.cwd = workdir.display().to_string();
+    }
     let mirror = Arc::new(Mutex::new(host::Mirror::new(
         planned.as_ref().map(|(path, _)| path.clone()),
     )));
@@ -355,8 +364,8 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     if let Some(highlights) = plugin_highlights {
         app.set_highlights(highlights);
     }
-    if let Some((header, footer)) = plugin_chrome {
-        app.set_plugin_chrome(header, footer);
+    if let Some(slots) = plugin_slots {
+        app.set_slots(slots);
     }
     if let Some(hooks) = plugin_terminal_hooks {
         app.set_plugin_terminal_hooks(hooks);

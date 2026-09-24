@@ -207,6 +207,12 @@ impl Sequencer {
         self.deadline = None;
     }
 
+    /// Keys buffered while they are a prefix of a longer mapping.
+    #[must_use]
+    pub fn pending(&self) -> &[Key] {
+        &self.keys
+    }
+
     /// When the buffered keys resolve on their own, if any are
     /// buffered.
     #[must_use]

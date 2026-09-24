@@ -38,17 +38,34 @@ impl Mirror {
     }
 }
 
-/// A bus subscriber that keeps `mirror` current, records the last used
-/// model after a completed run, and refreshes the plugin view of the
-/// session file.
+/// A bus subscriber that keeps `mirror` and the UI state slot
+/// components read current, records the last used model after a
+/// completed run, and refreshes the plugin view of the session file.
 pub(crate) fn mirror(
     mirror: Arc<Mutex<Mirror>>,
     plugins: Option<Arc<PluginRuntime>>,
 ) -> impl FnMut(&Envelope) + Send {
+    let ui = plugins.as_ref().map(|rt| rt.slots().ui_state());
+    let update_ui = move |f: &dyn Fn(&mut kage_plugin::UiState)| {
+        if let Some(ui) = &ui {
+            f(&mut lock(ui));
+        }
+    };
     move |envelope| match &envelope.event {
-        Event::Host(HostEvent::StateChanged { state }) => lock(&mirror).state = state.clone(),
-        Event::Host(HostEvent::SessionChanged { path, .. }) => {
+        Event::Host(HostEvent::StateChanged { state }) => {
+            lock(&mirror).state = state.clone();
+            update_ui(&|ui| ui.state = state.clone());
+        }
+        Event::Host(HostEvent::UsageUpdated { usage }) => update_ui(&|ui| ui.usage = Some(*usage)),
+        Event::Host(HostEvent::TitleChanged { title }) => {
+            update_ui(&|ui| ui.session_title = Some(title.clone()));
+        }
+        Event::Host(HostEvent::SessionChanged { path, title, .. }) => {
             lock(&mirror).path = Some(path.clone());
+            update_ui(&|ui| {
+                ui.session_id = envelope.session.to_string();
+                ui.session_title.clone_from(title);
+            });
             refresh_session_entries(plugins.as_ref(), Some(path));
         }
         Event::Host(HostEvent::RunEnded { outcome }) => {
@@ -101,6 +118,15 @@ impl Host {
             text,
             transient: false,
         });
+    }
+
+    /// Apply a change to the UI state slot components read, before the
+    /// event announcing it dispatches, so a component recomputed on
+    /// that event sees it. The engine's `StateChanged` confirms it.
+    fn update_ui(&self, f: impl FnOnce(&mut kage_plugin::UiState)) {
+        if let Some(rt) = &self.plugins {
+            f(&mut lock(&rt.slots().ui_state()));
+        }
     }
 
     fn plugin_event(&self, name: &str, payload: &serde_json::Value) {
@@ -231,6 +257,7 @@ impl Host {
             model: model.to_owned(),
         });
         self.notify(format!("switched to {model}"));
+        self.update_ui(|ui| model.clone_into(&mut ui.state.model));
         self.plugin_event(
             "model_select",
             &serde_json::json!({ "prev": prev, "next": model, "source": "set" }),
@@ -244,6 +271,7 @@ impl Host {
         let prev = lock(&self.mirror).state.thinking;
         self.send(CommandKind::SetThinking { level });
         self.notify(format!("thinking level: {}", level.label()));
+        self.update_ui(|ui| ui.state.thinking = level);
         self.plugin_event(
             "thinking_level_select",
             &serde_json::json!({
@@ -266,6 +294,7 @@ impl Host {
             Some(_) => format!("permission mode: {}", label(mode)),
             None => "permission mode: default (configured rules)".to_owned(),
         });
+        self.update_ui(|ui| ui.state.permission_mode = mode);
         self.plugin_event(
             "permission_mode_select",
             &serde_json::json!({

@@ -157,8 +157,6 @@ impl PluginRuntimeBuilder {
         let session_ops_slot = shared_session_ops();
         let pending_messages_slot = shared_pending_messages();
         let bridge_slot = shared_bridge();
-        let header_slot = shared_chrome();
-        let footer_slot = shared_chrome();
         let block_renderer_map = shared_block_renderers();
         let autocomplete_registry = registered_autocomplete_providers();
         let terminal_hook_registry = registered_terminal_hooks();
@@ -251,13 +249,7 @@ impl PluginRuntimeBuilder {
         )?;
         messages::install_send_message(&lua, Arc::clone(&pending_messages_slot))?;
         theme::install_theme(&lua, &options)?;
-        chrome::install_chrome(
-            &lua,
-            weak_host.clone(),
-            self.sink.clone(),
-            &header_slot,
-            &footer_slot,
-        )?;
+        let slots = slots::install(&lua, &host, self.sink.clone(), Arc::clone(&current_plugin))?;
         block_renderers::install_block_renderers(
             &lua,
             weak_host.clone(),
@@ -318,8 +310,7 @@ impl PluginRuntimeBuilder {
             session_ops: session_ops_slot,
             pending_messages: pending_messages_slot,
             bridge: bridge_slot,
-            header: header_slot,
-            footer: footer_slot,
+            slots,
             block_renderers: block_renderer_map,
             autocomplete: autocomplete_registry,
             terminal_hooks: terminal_hook_registry,

@@ -316,6 +316,11 @@ impl App {
         let (mut buffer, buffer_version) = self.take_draw_snapshot();
         let cmdline = self.cmdline.as_ref();
         let model_snapshot = self.status_model.as_ref().map(|m| lock(m).clone());
+        let key_hint = self.key_hint();
+        let cwd = self
+            .completion_workdir
+            .as_ref()
+            .map(|dir| dir.display().to_string());
         let status = view::StatusCtx {
             model: model_snapshot.as_deref(),
             session_id: self.status_session_id.as_deref(),
@@ -325,8 +330,9 @@ impl App {
             search_match_count,
             plugin_widgets: &self.plugin_widget_texts,
             plugin_status: &self.plugin_status_cache,
-            plugin_header: &self.plugin_header_lines,
-            plugin_footer: &self.plugin_footer_lines,
+            slots: self.slot_frame(render_width),
+            key_hint: key_hint.as_deref(),
+            cwd: cwd.as_deref(),
         };
         let screen_selection = self.screen_selection;
         let mut captured_rows = std::mem::take(&mut self.captured_rows);

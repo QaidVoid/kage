@@ -349,7 +349,7 @@ fn plugin_replacing_a_kage_sub_table_function_stays_private() {
          assert(kage.json.encode({}) == '[]' or kage.json.encode({}) == '{}')",
     )
     .unwrap();
-    assert!(rt.header_chrome().is_some());
+    assert!(rt.slots().spec(crate::SlotName::Header).is_some());
     assert_eq!(rt.handler_count("agent_end"), 1);
     let v = rt
         .eval("return pcall(kage.ui.set_header, nil) and kage.api.autocmd_create ~= nil")

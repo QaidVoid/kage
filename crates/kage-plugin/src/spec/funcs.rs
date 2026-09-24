@@ -315,16 +315,17 @@ pub(super) const FUNCS: &[Func] = &[
     },
     Func {
         doc: &[
-            "Take over the top status row. `fn(width)` runs each redraw",
-            "and returns a string, a `kage.Span`, or an array of those",
-            "(one line each; an array of spans is one line). Pass nil to",
-            "restore the built-in status bar.",
+            "Take over the top status row. `fn(width)` returns a string,",
+            "a `kage.Span`, or an array of those (one line each; an",
+            "array of spans is one line), and is called again every",
+            "500 ms and on a width change. Pass nil to restore the",
+            "default header.",
         ],
         path: "kage.ui.set_header",
         since: 1,
         params: &[Field {
             name: "fn",
-            ty: "fun(width: integer): any|nil",
+            ty: "(fun(width: integer): any|nil)|nil",
             doc: "",
         }],
         ret: None,
@@ -335,9 +336,31 @@ pub(super) const FUNCS: &[Func] = &[
         since: 1,
         params: &[Field {
             name: "fn",
-            ty: "fun(width: integer): any|nil",
+            ty: "(fun(width: integer): any|nil)|nil",
             doc: "",
         }],
+        ret: None,
+    },
+    Func {
+        doc: &[
+            "Fill slot `name` with `spec`, replacing its current spec.",
+            "Pass nil to restore the spec `_defaults.lua` set. Same as",
+            "`kage.api.slot_set`.",
+        ],
+        path: "kage.ui.set_slot",
+        since: 2,
+        params: &[
+            Field {
+                name: "name",
+                ty: "kage.SlotName",
+                doc: "",
+            },
+            Field {
+                name: "spec",
+                ty: "kage.SlotSpec|nil",
+                doc: "",
+            },
+        ],
         ret: None,
     },
     Func {
@@ -1072,6 +1095,42 @@ pub(super) const FUNCS: &[Func] = &[
             },
         ],
         ret: Some("kage.HlSpec|nil"),
+    },
+    Func {
+        doc: &[
+            "Fill slot `name` with `spec` and compute its Lua components.",
+            "Unknown slots, components and events raise. Pass nil to",
+            "restore the spec `_defaults.lua` set.",
+        ],
+        path: "kage.api.slot_set",
+        since: 2,
+        params: &[
+            Field {
+                name: "name",
+                ty: "kage.SlotName",
+                doc: "",
+            },
+            Field {
+                name: "spec",
+                ty: "kage.SlotSpec|nil",
+                doc: "",
+            },
+        ],
+        ret: None,
+    },
+    Func {
+        doc: &[
+            "Recompute the Lua components of slot `name`, or of every",
+            "slot, and repaint.",
+        ],
+        path: "kage.api.redraw",
+        since: 2,
+        params: &[Field {
+            name: "name?",
+            ty: "kage.SlotName",
+            doc: "",
+        }],
+        ret: None,
     },
     Func {
         doc: &[

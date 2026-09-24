@@ -665,4 +665,117 @@ pub(super) const CLASSES: &[Class] = &[
         doc: &["A Rust action from `kage.action`, used as a mapping rhs."],
         fields: &[],
     },
+    Class {
+        name: "kage.SlotSpec",
+        doc: &[
+            "The layout of a slot. `header`, `footer` and `input_pill`",
+            "take `left`, `right` and `sep`; `start` takes `lines`. An",
+            "item is a built-in component name, a `kage.Span`, or a",
+            "`kage.SlotComponent`.",
+        ],
+        fields: &[
+            Field {
+                name: "left?",
+                ty: "(kage.Component|kage.Span|kage.SlotComponent)[]",
+                doc: "Painted from the left edge.",
+            },
+            Field {
+                name: "right?",
+                ty: "(kage.Component|kage.Span|kage.SlotComponent)[]",
+                doc: "Painted against the right edge.",
+            },
+            Field {
+                name: "sep?",
+                ty: "string",
+                doc: "Painted between two items that both have output.",
+            },
+            Field {
+                name: "lines?",
+                ty: "(kage.Component|kage.Span|kage.SlotComponent)[]",
+                doc: "One line per item, for `start`.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.SlotComponent",
+        doc: &[
+            "A slot component rendered by Lua. Its output is kept and",
+            "recomputed only when a listed event fires, its interval",
+            "elapses, `kage.api.redraw` is called, its slot is set, or",
+            "the terminal width changes.",
+        ],
+        fields: &[
+            Field {
+                name: "render",
+                ty: "fun(ctx: kage.SlotContext): any|nil",
+                doc: "Returns the same shape as a block renderer.",
+            },
+            Field {
+                name: "events?",
+                ty: "string[]",
+                doc: "Event names, each optionally followed by a space and a pattern.",
+            },
+            Field {
+                name: "interval?",
+                ty: "integer",
+                doc: "Recompute every this many milliseconds (at least 50).",
+            },
+            Field {
+                name: "hl?",
+                ty: "string",
+                doc: "Highlight group applied under the spans' own styles.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.SlotContext",
+        doc: &["What a `kage.SlotComponent` render receives."],
+        fields: &[
+            Field {
+                name: "width",
+                ty: "integer",
+                doc: "Terminal width in columns.",
+            },
+            Field {
+                name: "model",
+                ty: "string",
+                doc: "Active `provider:model` id.",
+            },
+            Field {
+                name: "thinking",
+                ty: "string",
+                doc: "Active thinking level.",
+            },
+            Field {
+                name: "permission_mode?",
+                ty: "string",
+                doc: "Session permission override, if any.",
+            },
+            Field {
+                name: "working",
+                ty: "boolean",
+                doc: "Whether a run is in flight.",
+            },
+            Field {
+                name: "usage?",
+                ty: "table",
+                doc: "`{ total = { input, output, cache_read, cache_write }, context_used, context_window, cost }`.",
+            },
+            Field {
+                name: "session",
+                ty: "{ id: string, title?: string }",
+                doc: "Active session.",
+            },
+            Field {
+                name: "cwd",
+                ty: "string",
+                doc: "Working directory.",
+            },
+            Field {
+                name: "mode",
+                ty: "string",
+                doc: "Editor mode: `normal`, `insert` or `visual`.",
+            },
+        ],
+    },
 ];

@@ -644,12 +644,10 @@ pub struct App {
     /// cadence by [`Self::refresh_plugin_widget_texts_if_due`].
     plugin_widget_texts: Vec<String>,
     /// Last time the plugin text caches were refreshed. Drives the
-    /// coarse refresh cadence: widget/chrome `render` calls each take
-    /// the runtime's Lua mutex, so refreshing every frame puts plugin
-    /// latency on the render path.
+    /// coarse refresh cadence for widget `render` calls.
     plugin_texts_refreshed_at: Option<Instant>,
     /// Width the plugin text caches were last rendered at. A width
-    /// change forces an immediate refresh so chrome doesn't paint at
+    /// change forces an immediate refresh so widgets do not paint at
     /// a stale width until the next tick.
     plugin_texts_width: u16,
     /// Set when plugin widgets are (re)registered; the next frame
@@ -699,9 +697,6 @@ pub struct App {
     /// Route for option sets from commands and dialogs. `None` sets
     /// [`Self::options`] directly.
     option_setter: Option<OptionSetter>,
-    /// Header-chrome slot populated by `kage.ui.set_header`. Snapshotted
-    /// per redraw; when a renderer is present its styled lines replace
-    /// the built-in status bar.
     /// Autocomplete providers from `kage.add_autocomplete_provider`,
     /// in registration order. Consulted in reverse (last registered
     /// wins) on each prompt-input change; the first provider that
@@ -722,18 +717,10 @@ pub struct App {
     /// and offered each key before any modal layer; a truthy return
     /// consumes the event. `None` until wired.
     terminal_hooks: Option<kage_plugin::RegisteredTerminalHooks>,
-    plugin_header: Option<kage_plugin::SharedChrome>,
-    /// Footer-chrome slot populated by `kage.ui.set_footer`. Replaces
-    /// the built-in modeline when a renderer is present.
-    plugin_footer: Option<kage_plugin::SharedChrome>,
-    /// Snapshot of the header renderer's output at the last refresh
-    /// tick. Lives on the App so [`view::StatusCtx`] can borrow it
-    /// without holding the chrome mutex; rebuilt by
-    /// [`Self::refresh_plugin_widget_texts`].
-    plugin_header_lines: Vec<kage_plugin::ChromeLine>,
-    /// Snapshot of the footer renderer's output at the last refresh
-    /// tick.
-    plugin_footer_lines: Vec<kage_plugin::ChromeLine>,
+    /// Slot specs from the plugin runtime, snapshotted per frame. Each
+    /// frame also reports the width and editor mode back. `None` paints
+    /// the default chrome.
+    slots: Option<kage_plugin::Slots>,
     /// Pending request to toggle terminal mouse capture, applied by
     /// `run` between iterations. `None` means leave the capture state
     /// as-is. The indirection exists because `run_command` can't

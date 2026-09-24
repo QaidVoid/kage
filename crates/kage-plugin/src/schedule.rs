@@ -147,11 +147,33 @@ fn add(
     Ok(id)
 }
 
+/// Run `callback` every `ms` milliseconds, at least [`MIN_INTERVAL_MS`],
+/// like `kage.timer`, for a host-side consumer. `kind` labels errors.
+/// Returns the id [`cancel`] takes.
+pub(crate) fn every(
+    lua: &Lua,
+    kind: &'static str,
+    ms: u64,
+    callback: Function,
+    current: &CurrentPlugin,
+) -> mlua::Result<i64> {
+    let ms = ms.max(MIN_INTERVAL_MS);
+    add(
+        lua,
+        kind,
+        callback,
+        ms,
+        Some(Duration::from_millis(ms)),
+        current,
+    )
+}
+
 fn stop_fn(lua: &Lua, id: i64) -> mlua::Result<Function> {
     lua.create_function(move |lua, ()| cancel(lua, id))
 }
 
-fn cancel(lua: &Lua, id: i64) -> mlua::Result<()> {
+/// Cancel the pending callback `id`. A stale id is ignored.
+pub(crate) fn cancel(lua: &Lua, id: i64) -> mlua::Result<()> {
     if let Some(mut timers) = lua.app_data_mut::<Timers>() {
         timers.live.remove(&id);
     }

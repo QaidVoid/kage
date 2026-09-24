@@ -54,7 +54,6 @@ pub(crate) use crate::block_renderers::{
 };
 pub(crate) use crate::bridge::{self, BridgeStep, SharedBridge, shared_bridge};
 pub(crate) use crate::capabilities::{self, CapabilityRegistry, CurrentPlugin};
-pub(crate) use crate::chrome::{self, LuaChrome, SharedChrome, shared_chrome};
 pub(crate) use crate::commands::{self, LuaCommand, RegisteredCommands, registered_commands};
 pub(crate) use crate::env;
 pub(crate) use crate::error::PluginError;
@@ -84,6 +83,7 @@ pub(crate) use crate::sessions::{
     self, PendingSessionOp, SharedForkRequest, SharedSessionList, SharedSessionOps,
     shared_fork_request, shared_session_list, shared_session_ops,
 };
+pub(crate) use crate::slots::{self, Slots};
 pub(crate) use crate::status::{self, SharedStatus, shared_status};
 pub(crate) use crate::stdlib;
 pub(crate) use crate::store;
@@ -127,8 +127,8 @@ pub struct PluginRuntime {
     session_ops: SharedSessionOps,
     pending_messages: SharedPendingMessages,
     bridge: SharedBridge,
-    header: SharedChrome,
-    footer: SharedChrome,
+    /// Slot specs and the UI state their Lua components read.
+    slots: Slots,
     block_renderers: SharedBlockRenderers,
     autocomplete: RegisteredAutocompleteProviders,
     terminal_hooks: RegisteredTerminalHooks,

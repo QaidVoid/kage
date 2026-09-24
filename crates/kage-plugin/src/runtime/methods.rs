@@ -49,7 +49,7 @@ impl PluginRuntime {
     }
 
     /// Flag the owner thread sets when retained render output (a
-    /// widget, a header or footer row, a block renderer) changed, or
+    /// widget, a slot component, a block renderer) changed, or
     /// when a render that found the owner busy can now be computed.
     /// Render calls return retained output at once and recompute in
     /// the background, so a host that wants fresh output promptly polls
@@ -501,22 +501,11 @@ impl PluginRuntime {
         Arc::clone(&self.options.highlights)
     }
 
-    /// Snapshot the renderer a plugin installed via
-    /// `kage.ui.set_header`, if any. The host calls
-    /// [`LuaChrome::render`] on it once per redraw to paint the top
-    /// chrome row; `None` means paint the built-in status bar.
+    /// Handle to the slot specs the host paints and the UI state their
+    /// Lua components read as `ctx`.
     #[must_use]
-    pub fn header_chrome(&self) -> Option<Arc<LuaChrome>> {
-        lock(&self.header).clone()
-    }
-
-    /// Snapshot the renderer a plugin installed via
-    /// `kage.ui.set_footer`, if any. The host calls
-    /// [`LuaChrome::render`] on it once per redraw to paint the bottom
-    /// chrome row; `None` means paint the built-in modeline.
-    #[must_use]
-    pub fn footer_chrome(&self) -> Option<Arc<LuaChrome>> {
-        lock(&self.footer).clone()
+    pub fn slots(&self) -> Slots {
+        self.slots.clone()
     }
 
     /// Snapshot the custom block renderers plugins installed via
@@ -526,22 +515,6 @@ impl PluginRuntime {
     #[must_use]
     pub fn registered_block_renderers(&self) -> Vec<Arc<LuaBlockRenderer>> {
         lock(&self.block_renderers).values().cloned().collect()
-    }
-
-    /// Cloneable handle to the header-chrome slot, for a host that
-    /// snapshots it per redraw (so a `kage.ui.set_header` call made
-    /// after startup, e.g. from a command, takes effect) rather than
-    /// reading a one-time [`Self::header_chrome`].
-    #[must_use]
-    pub fn shared_header(&self) -> SharedChrome {
-        Arc::clone(&self.header)
-    }
-
-    /// Cloneable handle to the footer-chrome slot. See
-    /// [`Self::shared_header`].
-    #[must_use]
-    pub fn shared_footer(&self) -> SharedChrome {
-        Arc::clone(&self.footer)
     }
 
     /// Snapshot the autocomplete providers registered via
@@ -692,7 +665,7 @@ impl PluginRuntime {
     }
 
     /// Drop every registration that came from Lua (autocmds and groups,
-    /// pending schedule, defer and timer callbacks, keymaps, tools,
+    /// pending schedule, defer and timer callbacks, keymaps, slots, tools,
     /// commands, providers, ACP/MCP declarations), then rerun the
     /// full load: `_defaults.lua`, every `*.lua` file in `plugins_dir`,
     /// the `[keybindings]` table, and the trusted `init.lua` when a
@@ -728,8 +701,7 @@ impl PluginRuntime {
         *lock(&self.compact_request) = None;
         *lock(&self.fork_request) = None;
         *lock(&self.switch_request) = None;
-        *lock(&self.header) = None;
-        *lock(&self.footer) = None;
+        self.slots.clear();
         lock(&self.block_renderers).clear();
         lock(&self.autocomplete).clear();
         lock(&self.terminal_hooks).clear();
@@ -739,6 +711,7 @@ impl PluginRuntime {
         self.host.call(move |lua| {
             schedule::clear(lua)?;
             autocmd::clear(lua)?;
+            slots::clear_hooks(lua);
             acp::clear_permission_handler(lua)?;
             eval.keymaps.clear(lua)?;
             *lock(&bridge) = None;

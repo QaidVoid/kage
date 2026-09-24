@@ -1,61 +1,20 @@
-//! `kage.ui.set_header` / `kage.ui.set_footer`: plugin-owned chrome
-//! rows.
+//! Styled lines returned by Lua render functions.
 //!
-//! A plugin installs a render function for the top status row
-//! (`set_header`) or the bottom modeline row (`set_footer`); the host
-//! paints the returned styled lines in place of the built-in chrome.
-//! Passing `nil` clears the slot and restores the built-in row.
-//!
-//! The host's render call never runs Lua: it returns the last lines
-//! computed on the Lua owner thread and queues a recompute when the
-//! width changed or the lines are older than half a second.
-//!
-//! The render function receives the row width and returns one of:
-//! a plain string (one unstyled span), a span table
-//! (`{ text = "x", hl = "KageMuted", fg = "red", bold = true }`), or an
-//! array of those (one line per element; an element that is itself an
-//! array becomes a multi-span line). A `nil` return or a non-conforming value yields no
-//! lines, so the host falls back to its built-in chrome. A Lua error
-//! logs to the host sink and keeps the previous lines.
+//! Slot components (see [`crate::slots`]), including the
+//! `kage.ui.set_header` and `kage.ui.set_footer` row takeovers, and
+//! block renderers return one of: a plain string (one unstyled span), a
+//! span table (`{ text = "x", hl = "KageMuted", fg = "red", bold = true }`),
+//! or an array of those (one line per element; an element that is
+//! itself an array becomes a multi-span line). A `nil` return or a
+//! non-conforming value yields no lines.
 //!
 //! Styles are passed through as strings and resolved by the host when
-//! it paints the row, so retained lines never depend on the theme.
-//! `hl` names a highlight group whose colors and attributes apply
-//! first. `fg` and `bg` take a group name (its fg or bg), a theme role
-//! name (`muted_fg`), or a color (`"red"`, `"#1f1f28"`).
+//! it paints, so retained lines never depend on the theme. `hl` names
+//! a highlight group whose colors and attributes apply first. `fg` and
+//! `bg` take a group name (its fg or bg), a theme role name
+//! (`muted_fg`), or a color (`"red"`, `"#1f1f28"`).
 
-use std::sync::{Arc, Mutex};
-
-use kage_core::sync::lock;
-
-use mlua::{Function, Lua, RegistryKey, Table, Value};
-
-use crate::api::{LogLevel, SharedHostLog};
-use crate::error::PluginError;
-use crate::host::{self, LuaHost, WeakHost};
-use crate::retained::Retained;
-use crate::watchdog;
-
-/// Which chrome row a [`LuaChrome`] paints. Used only to label render
-/// errors in the host log.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ChromeSlot {
-    /// Top status row.
-    Header,
-    /// Bottom modeline row.
-    Footer,
-}
-
-impl ChromeSlot {
-    /// Lowercase label used in host-log error messages.
-    #[must_use]
-    pub fn label(self) -> &'static str {
-        match self {
-            ChromeSlot::Header => "header",
-            ChromeSlot::Footer => "footer",
-        }
-    }
-}
+use mlua::{Table, Value};
 
 /// Text attributes for a [`ChromeSpan`], packed into a bitset so the
 /// span struct stays narrow and the host can map the whole set to
@@ -139,82 +98,9 @@ pub struct ChromeLine {
     pub spans: Vec<ChromeSpan>,
 }
 
-/// Shared single-slot handle to a plugin chrome renderer. The host
-/// clones the inner [`LuaChrome`] per redraw; `set_header` /
-/// `set_footer` overwrite it, and `nil` clears it.
-pub type SharedChrome = Arc<Mutex<Option<Arc<LuaChrome>>>>;
-
-/// Construct an empty chrome slot.
-#[must_use]
-pub fn shared_chrome() -> SharedChrome {
-    Arc::new(Mutex::new(None))
-}
-
-/// A chrome-row renderer defined in Lua.
-pub struct LuaChrome {
-    slot: ChromeSlot,
-    host: LuaHost,
-    sink: SharedHostLog,
-    handler_key: Arc<RegistryKey>,
-    output: Retained<Vec<ChromeLine>>,
-}
-
-impl std::fmt::Debug for LuaChrome {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LuaChrome")
-            .field("slot", &self.slot)
-            .finish_non_exhaustive()
-    }
-}
-
-impl LuaChrome {
-    /// Which row this renderer paints.
-    #[must_use]
-    pub fn slot(&self) -> ChromeSlot {
-        self.slot
-    }
-
-    /// The row's styled lines for a chrome area of `width` columns.
-    /// Returns the retained lines at once and queues a recompute when
-    /// they are stale. Before the first result lands the row is empty,
-    /// so the host paints its built-in chrome.
-    #[must_use]
-    pub fn render(&self, width: u16) -> Vec<ChromeLine> {
-        let slot = self.slot;
-        let sink = Arc::clone(&self.sink);
-        let handler = Arc::clone(&self.handler_key);
-        self.output.get(&self.host, width, move |lua, width| {
-            render_chrome(lua, slot, &sink, &handler, width)
-        })
-    }
-}
-
-fn render_chrome(
-    lua: &Lua,
-    slot: ChromeSlot,
-    sink: &SharedHostLog,
-    handler_key: &RegistryKey,
-    width: u16,
-) -> Option<Vec<ChromeLine>> {
-    let fail = |e: &dyn std::fmt::Display| {
-        let mut s = lock(sink);
-        s.log(LogLevel::Error, &format!("plugin {}: {e}", slot.label()));
-        None
-    };
-    let func: Function = match lua.registry_value(handler_key) {
-        Ok(f) => f,
-        Err(e) => return fail(&e),
-    };
-    match watchdog::run(lua, watchdog::RENDER_BUDGET, || func.call::<Value>(width)) {
-        Ok(value) => Some(parse_lines(&value)),
-        Err(e) => fail(&e),
-    }
-}
-
-/// Parse the value a chrome render function returned into a list of
-/// styled lines. See the module docs for the accepted shapes; anything
-/// else yields no lines. Shared with `block_renderers` so a Lua block
-/// renderer accepts the exact same return shape as `set_header`.
+/// Parse the value a render function returned into a list of styled
+/// lines. See the module docs for the accepted shapes; anything else
+/// yields no lines.
 pub(crate) fn parse_lines(value: &Value) -> Vec<ChromeLine> {
     match value {
         Value::String(s) => vec![ChromeLine {
@@ -278,7 +164,7 @@ fn parse_span(value: &Value) -> ChromeSpan {
 
 /// Parse a `{ text = ..., fg = ..., bold = ... }` span table. Missing
 /// or wrong-typed fields fall back to the span default.
-fn parse_span_table(t: &Table) -> ChromeSpan {
+pub(crate) fn parse_span_table(t: &Table) -> ChromeSpan {
     let opt_string = |key: &str| -> Option<String> {
         match t.get::<Value>(key) {
             Ok(Value::String(s)) => s.to_str().map(|s| s.to_owned()).ok(),
@@ -305,195 +191,5 @@ fn parse_span_table(t: &Table) -> ChromeSpan {
         fg: opt_string("fg"),
         bg: opt_string("bg"),
         attrs,
-    }
-}
-
-/// Install `kage.ui.set_header` and `kage.ui.set_footer` on the running
-/// Lua state. Each accepts a render function or `nil`; a function
-/// replaces the slot's renderer, `nil` clears it, and any other value
-/// errors.
-pub(crate) fn install_chrome(
-    lua: &Lua,
-    host: WeakHost,
-    sink: SharedHostLog,
-    header: &SharedChrome,
-    footer: &SharedChrome,
-) -> Result<(), PluginError> {
-    let kage: Table = lua.globals().get("kage")?;
-    let ui: Table = kage.get("ui")?;
-    ui.set(
-        "set_header",
-        make_setter(lua, ChromeSlot::Header, host.clone(), sink.clone(), header)?,
-    )?;
-    ui.set(
-        "set_footer",
-        make_setter(lua, ChromeSlot::Footer, host, sink, footer)?,
-    )?;
-    kage.set("ui", ui)?;
-    Ok(())
-}
-
-fn make_setter(
-    lua: &Lua,
-    slot: ChromeSlot,
-    host: WeakHost,
-    sink: SharedHostLog,
-    target: &SharedChrome,
-) -> Result<Function, PluginError> {
-    let target = Arc::downgrade(target);
-    let func = lua.create_function(move |lua, value: Value| {
-        let target = host::upgrade(&target)?;
-        let mut guard = target
-            .lock()
-            .map_err(|_| mlua::Error::external("plugin chrome slot poisoned"))?;
-        match value {
-            Value::Nil => {
-                *guard = None;
-                Ok(())
-            }
-            Value::Function(f) => {
-                let handler_key = lua.create_registry_value(f)?;
-                *guard = Some(Arc::new(LuaChrome {
-                    slot,
-                    host: host.upgrade()?,
-                    sink: sink.clone(),
-                    handler_key: Arc::new(handler_key),
-                    output: Retained::new(),
-                }));
-                Ok(())
-            }
-            _ => Err(mlua::Error::external(format!(
-                "kage.ui.set_{}: expected a function or nil",
-                slot.label()
-            ))),
-        }
-    })?;
-    Ok(func)
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::PluginRuntime;
-
-    #[test]
-    fn set_header_registers_a_renderer() {
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval("kage.ui.set_header(function(_w) return 'hi' end)")
-            .unwrap();
-        let chrome = rt.header_chrome().expect("header registered");
-        let lines = chrome.render(80);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].spans.len(), 1);
-        assert_eq!(lines[0].spans[0].text, "hi");
-    }
-
-    #[test]
-    fn set_header_nil_clears_the_slot() {
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval("kage.ui.set_header(function() return 'x' end)")
-            .unwrap();
-        assert!(rt.header_chrome().is_some());
-        rt.eval("kage.ui.set_header(nil)").unwrap();
-        assert!(rt.header_chrome().is_none());
-    }
-
-    #[test]
-    fn set_header_rejects_non_function() {
-        let rt = PluginRuntime::new().unwrap();
-        assert!(rt.eval("kage.ui.set_header(42)").is_err());
-        assert!(rt.header_chrome().is_none());
-    }
-
-    #[test]
-    fn header_and_footer_are_independent_slots() {
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval("kage.ui.set_footer(function() return 'foot' end)")
-            .unwrap();
-        assert!(rt.header_chrome().is_none());
-        let foot = rt.footer_chrome().expect("footer registered");
-        assert_eq!(foot.render(80)[0].spans[0].text, "foot");
-    }
-
-    #[test]
-    fn render_parses_a_span_table() {
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval(
-            "kage.ui.set_header(function()
-                 return { text = 'on', hl = 'KageMuted', fg = 'red', bold = true }
-             end)",
-        )
-        .unwrap();
-        let span = &rt.header_chrome().unwrap().render(80)[0].spans[0];
-        assert_eq!(span.text, "on");
-        assert_eq!(span.hl.as_deref(), Some("KageMuted"));
-        assert_eq!(span.fg.as_deref(), Some("red"));
-        assert!(span.attrs.bold());
-        assert!(!span.attrs.dim());
-    }
-
-    #[test]
-    fn render_parses_an_array_of_multi_span_lines() {
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval(
-            "kage.ui.set_footer(function()
-                 return {
-                     'plain',
-                     { { text = 'a' }, { text = 'b', dim = true } },
-                 }
-             end)",
-        )
-        .unwrap();
-        let lines = rt.footer_chrome().unwrap().render(80);
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].spans[0].text, "plain");
-        assert_eq!(lines[1].spans.len(), 2);
-        assert_eq!(lines[1].spans[1].text, "b");
-        assert!(lines[1].spans[1].attrs.dim());
-    }
-
-    #[test]
-    fn render_receives_width_argument() {
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval("kage.ui.set_header(function(w) return tostring(w) end)")
-            .unwrap();
-        assert_eq!(
-            rt.header_chrome().unwrap().render(123)[0].spans[0].text,
-            "123"
-        );
-    }
-
-    #[test]
-    fn render_error_yields_no_lines() {
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval("kage.ui.set_header(function() error('boom') end)")
-            .unwrap();
-        assert!(rt.header_chrome().unwrap().render(80).is_empty());
-    }
-
-    #[test]
-    fn looping_render_aborts_fast_and_keeps_previous_lines() {
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval(
-            "kage.ui.set_header(function(w)
-                 if w == 40 then while true do end end
-                 return 'ok'
-             end)",
-        )
-        .unwrap();
-        let chrome = rt.header_chrome().unwrap();
-        assert_eq!(chrome.render(80)[0].spans[0].text, "ok");
-        let start = std::time::Instant::now();
-        assert_eq!(chrome.render(40)[0].spans[0].text, "ok");
-        rt.eval("return 1").unwrap();
-        assert!(start.elapsed() < std::time::Duration::from_secs(1));
-        assert_eq!(chrome.render(40)[0].spans[0].text, "ok");
-    }
-
-    #[test]
-    fn render_nil_yields_no_lines() {
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval("kage.ui.set_header(function() return nil end)")
-            .unwrap();
-        assert!(rt.header_chrome().unwrap().render(80).is_empty());
     }
 }

@@ -880,7 +880,7 @@ fn plugin_header_replaces_builtin_status_bar() {
     let rt = kage_plugin::PluginRuntime::new().unwrap();
     rt.eval("kage.ui.set_header(function() return 'PLUGINHEADER' end)")
         .unwrap();
-    app.set_plugin_chrome(rt.shared_header(), rt.shared_footer());
+    app.set_slots(rt.slots());
     let backend = TestBackend::new(40, 8);
     let mut terminal = Terminal::new(backend).unwrap();
     app.render_into(&mut terminal).unwrap();
@@ -902,13 +902,131 @@ fn plugin_footer_replaces_builtin_modeline() {
     let rt = kage_plugin::PluginRuntime::new().unwrap();
     rt.eval("kage.ui.set_footer(function() return 'PLUGINFOOTER' end)")
         .unwrap();
-    app.set_plugin_chrome(rt.shared_header(), rt.shared_footer());
+    app.set_slots(rt.slots());
     let backend = TestBackend::new(40, 8);
     let mut terminal = Terminal::new(backend).unwrap();
     app.render_into(&mut terminal).unwrap();
     let rows = snapshot_rows(&terminal);
     let bottom = rows.last().unwrap();
     assert!(bottom.contains("PLUGINFOOTER"), "bottom row: {bottom:?}");
+}
+
+/// Render `app` into a fresh 60x10 terminal.
+fn render_app(app: &mut App) -> Terminal<TestBackend> {
+    let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+    app.render_into(&mut terminal).unwrap();
+    terminal
+}
+
+#[test]
+fn default_slot_specs_paint_exactly_the_built_in_chrome() {
+    let usage = crate::usage::SessionUsage {
+        model: "fake:m".into(),
+        input_tokens: 1200,
+        context_window: 200_000,
+        working: true,
+        thinking_level: Some(kage_core::ThinkingLevel::High),
+        ..crate::usage::SessionUsage::default()
+    };
+    let frame = |slots: Option<kage_plugin::Slots>| {
+        let buffer = shared_buffer();
+        lock(&buffer).push_user("hello");
+        let (tx, _rx) = mpsc::channel();
+        let mut app = app_with_defaults(buffer, tx);
+        app.set_status_model(Arc::new(Mutex::new("fake:m".to_owned())));
+        app.set_status_session_id("01abcdef".to_owned());
+        let shared = crate::usage::shared_session_usage();
+        *lock(&shared) = usage.clone();
+        app.set_session_usage(shared);
+        if let Some(slots) = slots {
+            app.set_slots(slots);
+        }
+        render_app(&mut app).backend().buffer().clone()
+    };
+    let rt = kage_plugin::PluginRuntime::new().unwrap();
+    kage_plugin::load_all(None, &rt).unwrap();
+    assert_eq!(frame(Some(rt.slots())), frame(None));
+}
+
+#[test]
+fn slot_components_recompute_on_events_and_never_on_frames() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer, tx);
+    app.set_session_usage(crate::usage::shared_session_usage());
+    let rt = kage_plugin::PluginRuntime::new().unwrap();
+    rt.eval(
+        "n = 0
+         kage.ui.set_slot('footer', { left = { {
+             events = { 'turn_end' },
+             render = function(ctx) n = n + 1 return 'N' .. n .. ' w' .. ctx.width end,
+         } } })",
+    )
+    .unwrap();
+    app.set_slots(rt.slots());
+    let count = || rt.eval("return n").unwrap().as_i64().unwrap();
+    let mut terminal = render_app(&mut app);
+    assert_eq!(count(), 2, "the new width recomputes once");
+    for _ in 0..5 {
+        app.render_into(&mut terminal).unwrap();
+    }
+    assert_eq!(count(), 2);
+    rt.dispatch_event("turn_end", &serde_json::json!({}))
+        .unwrap();
+    assert_eq!(count(), 3);
+    app.render_into(&mut terminal).unwrap();
+    let rows = snapshot_rows(&terminal);
+    assert!(rows.last().unwrap().contains("N3 w60"), "{rows:?}");
+}
+
+#[test]
+fn set_header_nil_restores_the_built_in_header() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer, tx);
+    let rt = kage_plugin::PluginRuntime::new().unwrap();
+    kage_plugin::load_all(None, &rt).unwrap();
+    app.set_slots(rt.slots());
+    rt.eval("kage.ui.set_header(function() return 'TAKEOVER' end)")
+        .unwrap();
+    assert!(snapshot_rows(&render_app(&mut app))[0].contains("TAKEOVER"));
+    rt.eval("kage.ui.set_header(nil)").unwrap();
+    let rows = snapshot_rows(&render_app(&mut app));
+    assert!(rows[0].starts_with(" kage"), "{:?}", rows[0]);
+}
+
+#[test]
+fn a_start_spec_paints_on_an_empty_buffer_only() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer.clone(), tx);
+    let rt = kage_plugin::PluginRuntime::new().unwrap();
+    rt.eval(
+        "kage.ui.set_slot('start', { lines = {
+             { text = 'HELLO START' },
+             { render = function() return 'from lua' end },
+         } })",
+    )
+    .unwrap();
+    app.set_slots(rt.slots());
+    let rows = snapshot_rows(&render_app(&mut app));
+    assert!(rows.iter().any(|r| r.contains("HELLO START")), "{rows:?}");
+    assert!(rows.iter().any(|r| r.contains("from lua")), "{rows:?}");
+    lock(&buffer).push_user("hi");
+    let rows = snapshot_rows(&render_app(&mut app));
+    assert!(!rows.iter().any(|r| r.contains("HELLO START")), "{rows:?}");
+}
+
+#[test]
+fn the_pill_hint_shows_a_pending_key_sequence() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer, tx);
+    app.handle_key(code(KeyCode::Esc));
+    app.handle_key(key('z'));
+    let rows = snapshot_rows(&render_app(&mut app));
+    let pill = rows.iter().find(|r| r.contains(" - ")).expect("pill row");
+    assert!(pill.trim_end().ends_with(" z \u{2510}"), "{pill:?}");
 }
 
 #[test]

@@ -1,14 +1,16 @@
 //! The embedded Lua stdlib and `_defaults.lua`.
 //!
 //! The stdlib modules under `crates/kage-plugin/lua/kage/` build the
-//! friendly `kage.*` surface (`kage.on` and `kage.keymap`) on top of the
+//! friendly `kage.*` surface (`kage.on`, `kage.keymap` and the
+//! `kage.ui` slot setters) on top of the
 //! Rust primitives in `kage.api`. They run once, in the global
 //! environment, before the shared tables are frozen. Each module chunk
 //! receives one private table of host internals as its argument, which
 //! plugins never see: `events` is the set of known event names, and
 //! `kage/init.lua` adds shared helpers for the modules after it.
 //!
-//! `_defaults.lua` holds kage's own defaults, today the default keymaps.
+//! `_defaults.lua` holds kage's own defaults: the default keymaps and
+//! the header, footer and input pill slot specs.
 //! The loader evaluates it in its own environment before any plugin, so
 //! every later layer can override what it sets.
 
@@ -22,6 +24,7 @@ const MODULES: &[(&str, &str)] = &[
     ("=kage/init.lua", include_str!("../lua/kage/init.lua")),
     ("=kage/on.lua", include_str!("../lua/kage/on.lua")),
     ("=kage/keymap.lua", include_str!("../lua/kage/keymap.lua")),
+    ("=kage/ui.lua", include_str!("../lua/kage/ui.lua")),
 ];
 
 /// Source of the embedded `_defaults.lua`.

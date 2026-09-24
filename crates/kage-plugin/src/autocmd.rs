@@ -27,6 +27,9 @@
 //! is an exact string or a list of them, and `*` matches everything.
 //! Events without a match key accept only `*`. A `once` autocmd is
 //! removed before its callback runs.
+//!
+//! Host-side consumers such as slot components (see [`crate::slots`])
+//! subscribe through [`add`], so they count as subscribers too.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -291,15 +294,65 @@ fn parse_patterns(event: &str, value: Value) -> mlua::Result<Vec<String>> {
             ));
         }
     };
+    check_patterns(event, patterns).map_err(|e| fail(format!("autocmd_create: {e}")))
+}
+
+/// Validate `event` and `patterns` for a subscription. A `*` among the
+/// patterns matches everything, so the result is then empty.
+pub(crate) fn check_patterns(event: &str, patterns: Vec<String>) -> Result<Vec<String>, String> {
+    if !is_known(event) {
+        return Err(format!("unknown event '{event}'"));
+    }
     if patterns.iter().any(|p| p == "*") {
         return Ok(Vec::new());
     }
     if !patterns.is_empty() && !has_match_key(event) {
-        return Err(fail(format!(
-            "autocmd_create: event '{event}' has no match key, so pattern must be '*'"
-        )));
+        return Err(format!(
+            "event '{event}' has no match key, so pattern must be '*'"
+        ));
     }
     Ok(patterns)
+}
+
+/// Subscribe `callback` to `event` for a host-side consumer. `patterns`
+/// must already have passed [`check_patterns`]. Returns the autocmd id.
+pub(crate) fn add(
+    lua: &Lua,
+    event: &str,
+    patterns: Vec<String>,
+    callback: Function,
+    origin: Arc<str>,
+) -> mlua::Result<i64> {
+    let Some(autocmds) = lua.app_data_ref::<SharedAutocmds>().map(|a| Arc::clone(&a)) else {
+        return Err(fail("autocmds are not installed".to_owned()));
+    };
+    let id = {
+        let mut autocmds = lock(&autocmds);
+        let id = autocmds.next_id();
+        autocmds
+            .by_event
+            .entry(event.to_owned())
+            .or_default()
+            .push(Autocmd {
+                id,
+                group: None,
+                patterns,
+                once: false,
+                origin,
+            });
+        id
+    };
+    let callbacks: Table = lua.named_registry_value(CALLBACKS_KEY)?;
+    callbacks.raw_set(id, callback)?;
+    Ok(id)
+}
+
+/// Remove the autocmd `id`. A missing id is ignored.
+pub(crate) fn remove(lua: &Lua, id: i64) -> mlua::Result<()> {
+    if let Some(autocmds) = lua.app_data_ref::<SharedAutocmds>() {
+        lock(&autocmds).remove(id);
+    }
+    drop_callbacks(lua, &[id])
 }
 
 fn origin(desc: Option<&str>, owner: Option<&str>) -> Arc<str> {

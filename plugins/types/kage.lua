@@ -41,6 +41,26 @@
 --- modeless editor, `v` visual, `g` any editing state.
 ---@alias kage.KeymapMode "n"|"b"|"i"|"v"|"g"
 
+--- A chrome region `kage.ui.set_slot` fills.
+---@alias kage.SlotName "header"|"footer"|"input_pill"|"start"
+
+--- A built-in slot component, painted by the host every frame.
+---@alias kage.Component
+---| "brand"
+---| "model"
+---| "widgets"
+---| "search"
+---| "session"
+---| "working"
+---| "context"
+---| "tokens"
+---| "thinking"
+---| "permission"
+---| "mode"
+---| "hint"
+---| "cwd"
+---| "version"
+
 --- Every event name `kage.on` and `kage.api.autocmd_create`
 --- accept. Notification events ignore the handler return;
 --- transform events chain it; predicate and session-op events
@@ -257,6 +277,38 @@
 --- A Rust action from `kage.action`, used as a mapping rhs.
 ---@class kage.Action
 
+--- The layout of a slot. `header`, `footer` and `input_pill`
+--- take `left`, `right` and `sep`; `start` takes `lines`. An
+--- item is a built-in component name, a `kage.Span`, or a
+--- `kage.SlotComponent`.
+---@class kage.SlotSpec
+---@field left? (kage.Component|kage.Span|kage.SlotComponent)[] Painted from the left edge.
+---@field right? (kage.Component|kage.Span|kage.SlotComponent)[] Painted against the right edge.
+---@field sep? string Painted between two items that both have output.
+---@field lines? (kage.Component|kage.Span|kage.SlotComponent)[] One line per item, for `start`.
+
+--- A slot component rendered by Lua. Its output is kept and
+--- recomputed only when a listed event fires, its interval
+--- elapses, `kage.api.redraw` is called, its slot is set, or
+--- the terminal width changes.
+---@class kage.SlotComponent
+---@field render fun(ctx: kage.SlotContext): any|nil Returns the same shape as a block renderer.
+---@field events? string[] Event names, each optionally followed by a space and a pattern.
+---@field interval? integer Recompute every this many milliseconds (at least 50).
+---@field hl? string Highlight group applied under the spans' own styles.
+
+--- What a `kage.SlotComponent` render receives.
+---@class kage.SlotContext
+---@field width integer Terminal width in columns.
+---@field model string Active `provider:model` id.
+---@field thinking string Active thinking level.
+---@field permission_mode? string Session permission override, if any.
+---@field working boolean Whether a run is in flight.
+---@field usage? table `{ total = { input, output, cache_read, cache_write }, context_used, context_window, cost }`.
+---@field session { id: string, title?: string } Active session.
+---@field cwd string Working directory.
+---@field mode string Editor mode: `normal`, `insert` or `visual`.
+
 --- Every option `kage.opt` reads and writes.
 ---@class kage.Options
 ---@field theme string Color theme, bundled or from the themes directory.
@@ -467,18 +519,27 @@ function kage.ui.input(title, placeholder) end
 ---@return string|nil
 function kage.ui.editor(title, prefill) end
 
---- Take over the top status row. `fn(width)` runs each redraw
---- and returns a string, a `kage.Span`, or an array of those
---- (one line each; an array of spans is one line). Pass nil to
---- restore the built-in status bar.
+--- Take over the top status row. `fn(width)` returns a string,
+--- a `kage.Span`, or an array of those (one line each; an
+--- array of spans is one line), and is called again every
+--- 500 ms and on a width change. Pass nil to restore the
+--- default header.
 --- Since API 1.
----@param fn fun(width: integer): any|nil
+---@param fn (fun(width: integer): any|nil)|nil
 function kage.ui.set_header(fn) end
 
 --- Take over the bottom modeline row. Same shape as set_header.
 --- Since API 1.
----@param fn fun(width: integer): any|nil
+---@param fn (fun(width: integer): any|nil)|nil
 function kage.ui.set_footer(fn) end
+
+--- Fill slot `name` with `spec`, replacing its current spec.
+--- Pass nil to restore the spec `_defaults.lua` set. Same as
+--- `kage.api.slot_set`.
+--- Since API 2.
+---@param name kage.SlotName
+---@param spec kage.SlotSpec|nil
+function kage.ui.set_slot(name, spec) end
 
 --- Register a tool the agent can call like a built-in.
 --- Since API 1.
@@ -828,6 +889,20 @@ function kage.api.hl_set(name, spec) end
 ---@param opts? { link?: boolean }
 ---@return kage.HlSpec|nil
 function kage.api.hl_get(name, opts) end
+
+--- Fill slot `name` with `spec` and compute its Lua components.
+--- Unknown slots, components and events raise. Pass nil to
+--- restore the spec `_defaults.lua` set.
+--- Since API 2.
+---@param name kage.SlotName
+---@param spec kage.SlotSpec|nil
+function kage.api.slot_set(name, spec) end
+
+--- Recompute the Lua components of slot `name`, or of every
+--- slot, and repaint.
+--- Since API 2.
+---@param name? kage.SlotName
+function kage.api.redraw(name) end
 
 --- Map `lhs` in one mode. See `kage.keymap.set`, which takes a
 --- list of modes.

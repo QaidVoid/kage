@@ -805,7 +805,9 @@ fn modeline_rows(usage: Option<&SessionUsage>, width: u16) -> Vec<String> {
     let regions = crate::layout::split(Rect::new(0, 0, width, 2), 1, 1);
     terminal
         .draw(|frame| {
-            modeline::render_modeline(frame, regions, usage, &[]);
+            let status = StatusCtx::default();
+            let sources = slot::Sources::new(&status, usage, Mode::Normal);
+            slot::render_footer(frame, regions.status_bottom, &sources);
         })
         .unwrap();
     terminal

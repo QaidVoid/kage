@@ -35,7 +35,7 @@ const HOOK_INTERVAL: u32 = 1_000_000;
 /// beyond any legitimate single handler call.
 pub const BUDGET: u64 = 1_000_000_000;
 
-/// Budget for render callbacks (chrome rows, widgets, block renderers).
+/// Budget for render callbacks (slot components, widgets, block renderers).
 /// Renders are small and frequent, so a looping one is cut off well
 /// under a second instead of burning the full [`BUDGET`].
 pub const RENDER_BUDGET: u64 = 10_000_000;

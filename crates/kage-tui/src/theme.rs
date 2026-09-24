@@ -185,6 +185,44 @@ pub struct Theme {
     pub success_fg: Color,
 }
 
+/// Expand `$m! { "role" => field, ... }` over every color role a
+/// theme TOML or a plugin span can name.
+macro_rules! with_roles {
+    ($m:ident) => {
+        $m! {
+            "bg" => bg, "user_bg" => user_bg, "assistant_rule" => assistant_rule,
+            "user_rule" => user_rule, "tool_bg" => tool_bg, "tool_error_bg" => tool_error_bg,
+            "tool_pending_bg" => tool_pending_bg, "tool_rule" => tool_rule,
+            "tool_error_rule" => tool_error_rule, "tool_pending_rule" => tool_pending_rule,
+            "assistant_fg" => assistant_fg, "thinking_fg" => thinking_fg,
+            "tool_result_fg" => tool_result_fg, "tool_error_fg" => tool_error_fg,
+            "custom_fg" => custom_fg, "status_bg" => status_bg,
+            "status_dim_fg" => status_dim_fg, "muted_fg" => muted_fg,
+            "match_color" => match_color, "selection_color" => selection_color,
+            "focus_color" => focus_color, "input_border_normal" => input_border_normal,
+            "input_border_insert" => input_border_insert,
+            "input_border_visual" => input_border_visual,
+            "input_pill_normal_bg" => input_pill_normal_bg,
+            "input_pill_normal_fg" => input_pill_normal_fg,
+            "input_pill_insert_bg" => input_pill_insert_bg,
+            "input_pill_insert_fg" => input_pill_insert_fg,
+            "input_pill_visual_bg" => input_pill_visual_bg,
+            "input_pill_visual_fg" => input_pill_visual_fg,
+            "input_glyph_fg" => input_glyph_fg,
+            "input_placeholder_fg" => input_placeholder_fg,
+            "input_hint_fg" => input_hint_fg, "modeline_bg" => modeline_bg,
+            "modeline_fg" => modeline_fg, "overlay_fg" => overlay_fg,
+            "overlay_border" => overlay_border,
+            "overlay_selected_bg" => overlay_selected_bg,
+            "overlay_selected_fg" => overlay_selected_fg,
+            "selection_fg" => selection_fg, "warning_fg" => warning_fg,
+            "md_h1_fg" => md_h1_fg, "md_h2_fg" => md_h2_fg,
+            "md_link_fg" => md_link_fg, "md_code_fg" => md_code_fg,
+            "success_fg" => success_fg,
+        }
+    };
+}
+
 impl Default for Theme {
     fn default() -> Self {
         Self::default_dark()
@@ -413,10 +451,25 @@ impl Theme {
         names
     }
 
+    /// Look up a color role by name (`"muted_fg"`, `"tool_error_fg"`).
+    /// `None` for anything that is not a role.
+    #[must_use]
+    pub fn role(&self, name: &str) -> Option<Color> {
+        macro_rules! get {
+            ($($n:literal => $f:ident),+ $(,)?) => {
+                match name {
+                    $($n => Some(self.$f),)+
+                    _ => None,
+                }
+            };
+        }
+        with_roles!(get)
+    }
+
     /// Override one role by name. Unknown roles error so a typo in a
     /// user theme is reported, not silently ignored.
     fn set_role(&mut self, role: &str, c: Color) -> Result<(), String> {
-        macro_rules! roles {
+        macro_rules! set {
             ($($n:literal => $f:ident),+ $(,)?) => {
                 match role {
                     $($n => self.$f = c,)+
@@ -424,37 +477,7 @@ impl Theme {
                 }
             };
         }
-        roles! {
-            "bg" => bg, "user_bg" => user_bg, "assistant_rule" => assistant_rule,
-            "user_rule" => user_rule, "tool_bg" => tool_bg, "tool_error_bg" => tool_error_bg,
-            "tool_pending_bg" => tool_pending_bg, "tool_rule" => tool_rule,
-            "tool_error_rule" => tool_error_rule, "tool_pending_rule" => tool_pending_rule,
-            "assistant_fg" => assistant_fg, "thinking_fg" => thinking_fg,
-            "tool_result_fg" => tool_result_fg, "tool_error_fg" => tool_error_fg,
-            "custom_fg" => custom_fg, "status_bg" => status_bg,
-            "status_dim_fg" => status_dim_fg, "muted_fg" => muted_fg,
-            "match_color" => match_color, "selection_color" => selection_color,
-            "focus_color" => focus_color, "input_border_normal" => input_border_normal,
-            "input_border_insert" => input_border_insert,
-            "input_border_visual" => input_border_visual,
-            "input_pill_normal_bg" => input_pill_normal_bg,
-            "input_pill_normal_fg" => input_pill_normal_fg,
-            "input_pill_insert_bg" => input_pill_insert_bg,
-            "input_pill_insert_fg" => input_pill_insert_fg,
-            "input_pill_visual_bg" => input_pill_visual_bg,
-            "input_pill_visual_fg" => input_pill_visual_fg,
-            "input_glyph_fg" => input_glyph_fg,
-            "input_placeholder_fg" => input_placeholder_fg,
-            "input_hint_fg" => input_hint_fg, "modeline_bg" => modeline_bg,
-            "modeline_fg" => modeline_fg, "overlay_fg" => overlay_fg,
-            "overlay_border" => overlay_border,
-            "overlay_selected_bg" => overlay_selected_bg,
-            "overlay_selected_fg" => overlay_selected_fg,
-            "selection_fg" => selection_fg, "warning_fg" => warning_fg,
-            "md_h1_fg" => md_h1_fg, "md_h2_fg" => md_h2_fg,
-            "md_link_fg" => md_link_fg, "md_code_fg" => md_code_fg,
-            "success_fg" => success_fg,
-        }
+        with_roles!(set);
         Ok(())
     }
 
@@ -653,6 +676,15 @@ mod tests {
         let t = Theme::from_toml("transparent = true").expect("valid");
         assert!(t.transparent);
         assert!(!Theme::default_dark().transparent);
+    }
+
+    #[test]
+    fn role_reads_what_set_role_writes() {
+        let mut t = Theme::default();
+        t.set_role("muted_fg", Color::Rgb(9, 8, 7)).unwrap();
+        assert_eq!(t.role("muted_fg"), Some(Color::Rgb(9, 8, 7)));
+        assert_eq!(t.role("tool_error_fg"), Some(t.tool_error_fg));
+        assert_eq!(t.role("red"), None);
     }
 
     #[test]

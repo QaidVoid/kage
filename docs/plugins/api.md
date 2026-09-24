@@ -4,6 +4,10 @@ Every function below is reachable as `kage.<name>` from inside a
 plugin script. Types are described in TypeScript-ish notation for
 readability; Lua is dynamically typed.
 
+Plugin files load in file-name order, so `a.lua` always runs before
+`b.lua`. Registrations that replace each other (a header, a block
+renderer for the same kind) end with the last file's value.
+
 ## host
 
 ### `kage.now_ms()`
@@ -85,10 +89,13 @@ header.
 `fn(width)` returns one of: a plain string (one unstyled span), a
 span table, or an array of those (one line per element; an element
 that is itself an array of spans is a multi-span line). A span table
-is `{ text, fg?, bg?, bold?, dim?, italic?, underline? }`; colors are
-strings the host resolves against the active theme (`"red"`,
-`"#1f1f28"`). A `nil` return, a non-conforming value, or an error
-logs and paints the built-in row instead (no silent failure).
+is `{ text, fg?, bg?, bold?, dim?, italic?, underline? }`. A color is a
+theme role name such as `"muted_fg"` or `"tool_error_fg"` (any key of
+a theme's `[colors]` table), which follows the active theme, or a
+fixed color (`"red"`, `"#1f1f28"`, `"42"`). An unknown color is
+ignored and the span keeps the row's default. A `nil` return, a
+non-conforming value, or an error logs and paints the built-in row
+instead (no silent failure).
 
 ```lua
 kage.ui.set_footer(function(width)
@@ -100,6 +107,9 @@ end)
 kage keeps the last output on screen and calls the render function
 again on a short cadence or when the width changes, so the screen never
 waits on Lua. Keep it cheap anyway: no blocking dialogs, no network.
+A render call gets a much smaller CPU budget than a tool or command. A
+render that runs away is aborted within a fraction of a second, logged,
+and the previous output stays on screen.
 
 ### `kage.register_block_renderer(kind, render | nil)`
 
@@ -144,6 +154,11 @@ Every payload also carries `kind` and `width`. `tool_call` /
 `tool_result` overrides only affect *unpaired* tool blocks; a merged
 call+result pair spans two blocks and is not overridable through this
 single-block path.
+
+While your output for a block is still being computed, an override of
+a built-in kind paints the built-in widget, so a streaming `assistant`
+block does not flicker. A custom kind shows a dim `...` until its
+output arrives.
 
 Same retained-output and cost rule as `set_header`. The picker a plugin needs for
 interactive UI is [`kage.ui.select`](#blocking-dialogs) - there is no
@@ -356,8 +371,9 @@ consumed".
 
 ### `kage.register_widget({ key, render })`
 
-Register a status-bar widget. `render(width)` runs once per redraw
-and returns a string painted on the right edge of the status bar.
+Register a status-bar widget. `render(width)` returns a string painted
+on the right edge of the status bar. It follows the same retained
+output and render budget rules as `set_header`.
 
 ```lua
 kage.register_widget({
@@ -379,11 +395,24 @@ Remove a status entry. Equivalent to `kage.set_status(key, nil)`.
 
 ## events
 
-### `kage.on(event: string, handler)`
+### `kage.on(event: string, handler)` -> off
 
 Subscribe to an event. Multiple handlers per event fire in
 registration order; a handler that raises is logged and skipped so
 one bad plugin does not silence the rest.
+
+The call returns an `off` function that removes this subscription.
+Calling `off` more than once does nothing. A handler may call `off`
+while it runs, for itself or another subscription; the change applies
+from the next dispatch.
+
+```lua
+local off
+off = kage.on("message_end", function(ev)
+  kage.ui.notify("first reply done")
+  off()
+end)
+```
 
 Plain notification events (the handler's return value is ignored):
 

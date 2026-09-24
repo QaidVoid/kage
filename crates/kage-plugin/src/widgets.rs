@@ -97,7 +97,9 @@ fn render_widget(
         Ok(f) => f,
         Err(e) => return fail(&e),
     };
-    match watchdog::run(lua, watchdog::BUDGET, || func.call::<mlua::Value>(width)) {
+    match watchdog::run(lua, watchdog::RENDER_BUDGET, || {
+        func.call::<mlua::Value>(width)
+    }) {
         Ok(mlua::Value::String(s)) => Some(s.to_str().map(|s| s.to_owned()).unwrap_or_default()),
         Ok(mlua::Value::Nil) => Some(String::new()),
         Ok(other) => Some(format!("{other:?}")),

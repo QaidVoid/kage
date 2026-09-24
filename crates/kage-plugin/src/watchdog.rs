@@ -35,6 +35,11 @@ const HOOK_INTERVAL: u32 = 1_000_000;
 /// beyond any legitimate single handler call.
 pub const BUDGET: u64 = 1_000_000_000;
 
+/// Budget for render callbacks (chrome rows, widgets, block renderers).
+/// Renders are small and frequent, so a looping one is cut off well
+/// under a second instead of burning the full [`BUDGET`].
+pub const RENDER_BUDGET: u64 = 10_000_000;
+
 /// Install the watchdog hook on the main Lua state, disarmed. Per-entry
 /// budgets are armed through [`run`].
 pub fn install(lua: &Lua) -> Result<(), PluginError> {

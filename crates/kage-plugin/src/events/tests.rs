@@ -38,6 +38,67 @@ fn handlers_run_in_registration_order() {
 }
 
 #[test]
+fn off_stops_delivery_and_is_idempotent() {
+    let lua = fresh_lua_with_kage();
+    lua.load(
+        r"
+            hits = 0
+            off = kage.on('agent_end', function() hits = hits + 1 end)
+            ",
+    )
+    .exec()
+    .unwrap();
+    let sink = default_host_log();
+    dispatch(&lua, "agent_end", &json!({}), &sink).unwrap();
+    lua.load("off(); off()").exec().unwrap();
+    dispatch(&lua, "agent_end", &json!({}), &sink).unwrap();
+    assert_eq!(lua.globals().get::<i64>("hits").unwrap(), 1);
+    assert_eq!(handler_count(&lua, "agent_end"), 0);
+}
+
+#[test]
+fn off_removes_only_its_own_subscription() {
+    let lua = fresh_lua_with_kage();
+    lua.load(
+        r"
+            hits = 0
+            local function bump() hits = hits + 1 end
+            local off_a = kage.on('agent_end', bump)
+            kage.on('agent_end', bump)
+            off_a()
+            off_a()
+            ",
+    )
+    .exec()
+    .unwrap();
+    dispatch(&lua, "agent_end", &json!({}), &default_host_log()).unwrap();
+    assert_eq!(lua.globals().get::<i64>("hits").unwrap(), 1);
+}
+
+#[test]
+fn off_inside_a_handler_is_safe() {
+    let lua = fresh_lua_with_kage();
+    lua.load(
+        r"
+            log = {}
+            local off_a
+            off_a = kage.on('agent_end', function()
+                log[#log + 1] = 'a'
+                off_a()
+            end)
+            kage.on('agent_end', function() log[#log + 1] = 'b' end)
+            ",
+    )
+    .exec()
+    .unwrap();
+    let sink = default_host_log();
+    dispatch(&lua, "agent_end", &json!({}), &sink).unwrap();
+    dispatch(&lua, "agent_end", &json!({}), &sink).unwrap();
+    let log: Vec<String> = lua.globals().get("log").unwrap();
+    assert_eq!(log, ["a", "b", "b"]);
+}
+
+#[test]
 fn unsubscribed_event_is_silent() {
     let lua = fresh_lua_with_kage();
     dispatch(&lua, "nobody_listens", &json!({}), &default_host_log()).unwrap();

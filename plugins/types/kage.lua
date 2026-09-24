@@ -406,8 +406,11 @@ function kage.clear_status(key) end
 --- order; a raising handler is logged and skipped.
 --- Notification events ignore the return; transform events
 --- chain it; predicate / session-op events interpret it.
+--- Returns `off`, which removes this subscription. Calling
+--- it again, or from inside a handler, is safe.
 ---@param event kage.Event
 ---@param handler fun(payload: any): any
+---@return fun()
 function kage.on(event, handler) end
 
 --- Register a new LLM provider implementation. Advanced; see

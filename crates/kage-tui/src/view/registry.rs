@@ -187,6 +187,20 @@ pub fn builtin_kind_from_name(name: &str) -> Option<BuiltinKind> {
     }
 }
 
+/// The built-in widget for a non-custom `block`, ignoring any plugin
+/// override. `None` for [`Block::Custom`]. A plugin override paints
+/// this while its own output is still pending.
+pub(crate) fn builtin_widget_for(block: &Block) -> Option<Box<dyn BlockWidget>> {
+    match block {
+        Block::User { .. } => BuiltinUserFactory.make(block),
+        Block::Assistant { .. } => BuiltinAssistantFactory.make(block),
+        Block::Thinking { .. } => BuiltinThinkingFactory.make(block),
+        Block::ToolCall { .. } => BuiltinToolCallAloneFactory.make(block),
+        Block::ToolResult { .. } => BuiltinToolResultAloneFactory.make(block),
+        Block::Custom { .. } => None,
+    }
+}
+
 /// Drop every plugin-registered custom renderer, restoring the
 /// builtin defaults. Called on plugin hot-reload so a removed
 /// renderer stops taking effect.

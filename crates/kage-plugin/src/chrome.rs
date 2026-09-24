@@ -201,7 +201,7 @@ fn render_chrome(
         Ok(f) => f,
         Err(e) => return fail(&e),
     };
-    match watchdog::run(lua, watchdog::BUDGET, || func.call::<Value>(width)) {
+    match watchdog::run(lua, watchdog::RENDER_BUDGET, || func.call::<Value>(width)) {
         Ok(value) => Some(parse_lines(&value)),
         Err(e) => fail(&e),
     }
@@ -462,6 +462,25 @@ mod tests {
         rt.eval("kage.ui.set_header(function() error('boom') end)")
             .unwrap();
         assert!(rt.header_chrome().unwrap().render(80).is_empty());
+    }
+
+    #[test]
+    fn looping_render_aborts_fast_and_keeps_previous_lines() {
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval(
+            "kage.ui.set_header(function(w)
+                 if w == 40 then while true do end end
+                 return 'ok'
+             end)",
+        )
+        .unwrap();
+        let chrome = rt.header_chrome().unwrap();
+        assert_eq!(chrome.render(80)[0].spans[0].text, "ok");
+        let start = std::time::Instant::now();
+        assert_eq!(chrome.render(40)[0].spans[0].text, "ok");
+        rt.eval("return 1").unwrap();
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(chrome.render(40)[0].spans[0].text, "ok");
     }
 
     #[test]

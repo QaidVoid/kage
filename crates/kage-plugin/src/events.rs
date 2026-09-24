@@ -1,9 +1,12 @@
 //! `kage.on(event, handler)` and host-driven event dispatch.
 //!
 //! Plugins call `kage.on("message_end", function(ev) ... end)` to subscribe
-//! to a named event. The host then calls [`dispatch`] (or one of the typed
-//! helpers added by future tasks) at the appropriate boundaries to fire
-//! every registered handler in registration order.
+//! to a named event. The call returns an `off` function that removes the
+//! subscription; calling it again does nothing. The host then calls
+//! [`dispatch`] (or one of the typed helpers) at the appropriate
+//! boundaries to fire every registered handler in registration order.
+//! Each dispatch iterates a snapshot of the handler list, so a handler
+//! may call `off` for itself or another subscription while it runs.
 //!
 //! Most host events fire at turn boundaries; the `message_*` events are the
 //! exception and fire mid-stream so plugins can react to partial output. The
@@ -171,6 +174,29 @@ pub const KNOWN_EVENTS: &[(&str, &str, &str)] = &[
 /// Lua-registry key under which subscribed handlers are stored.
 const HANDLERS_KEY: &str = "kage._handlers";
 
+/// Lua-registry key of the factory that builds the `off` closure
+/// returned by `kage.on`.
+const MAKE_OFF_KEY: &str = "kage._make_off";
+
+/// Builds `off` in Lua so a handler that captures its own `off` forms
+/// a cycle the Lua collector can reclaim.
+const MAKE_OFF: &str = r"
+local remove, rawequal = table.remove, rawequal
+return function(list, handler)
+    local done = false
+    return function()
+        if done then return end
+        done = true
+        for i = 1, #list do
+            if rawequal(list[i], handler) then
+                remove(list, i)
+                return
+            end
+        end
+    end
+end
+";
+
 /// Install `kage.on` on the running Lua state. Idempotent: calling twice
 /// rebinds the same handler table without losing previous subscriptions.
 pub fn install_subscriptions(lua: &Lua) -> Result<(), PluginError> {
@@ -178,22 +204,24 @@ pub fn install_subscriptions(lua: &Lua) -> Result<(), PluginError> {
         let table = lua.create_table()?;
         lua.set_named_registry_value(HANDLERS_KEY, table)?;
     }
+    let make_off: Function = lua.load(MAKE_OFF).set_name("=kage.on").eval()?;
+    lua.set_named_registry_value(MAKE_OFF_KEY, make_off)?;
 
     let kage: Table = lua.globals().get("kage")?;
     kage.set(
         "on",
         lua.create_function(|lua, (event, handler): (String, Function)| {
             let handlers: Table = lua.named_registry_value(HANDLERS_KEY)?;
-            let list_v: Value = handlers.get(event.clone())?;
-            let list = if let Value::Table(t) = list_v {
+            let list = if let Value::Table(t) = handlers.get::<Value>(event.as_str())? {
                 t
             } else {
                 let t = lua.create_table()?;
-                handlers.set(event.clone(), t.clone())?;
+                handlers.set(event, t.clone())?;
                 t
             };
-            list.push(handler)?;
-            Ok(())
+            list.push(handler.clone())?;
+            let make_off: Function = lua.named_registry_value(MAKE_OFF_KEY)?;
+            make_off.call::<Function>((list, handler))
         })?,
     )?;
     Ok(())
@@ -202,6 +230,20 @@ pub fn install_subscriptions(lua: &Lua) -> Result<(), PluginError> {
 fn has_handlers_table(lua: &Lua) -> Result<bool, PluginError> {
     let v: Value = lua.named_registry_value(HANDLERS_KEY)?;
     Ok(matches!(v, Value::Table(_)))
+}
+
+/// Snapshot of the handlers subscribed to `event_name`, in registration
+/// order. Dispatch iterates this copy so `off` during a call is safe.
+fn subscribers(lua: &Lua, event_name: &str) -> Result<Vec<Function>, PluginError> {
+    let Ok(handlers) = lua.named_registry_value::<Table>(HANDLERS_KEY) else {
+        return Ok(Vec::new());
+    };
+    let Value::Table(list) = handlers.get::<Value>(event_name)? else {
+        return Ok(Vec::new());
+    };
+    Ok(list
+        .sequence_values::<Function>()
+        .collect::<mlua::Result<_>>()?)
 }
 
 /// Fire every handler subscribed to `event_name`, passing `payload`
@@ -217,16 +259,12 @@ pub fn dispatch(
     payload: &serde_json::Value,
     sink: &SharedHostLog,
 ) -> Result<(), PluginError> {
-    let Ok(handlers) = lua.named_registry_value::<Table>(HANDLERS_KEY) else {
+    let funcs = subscribers(lua, event_name)?;
+    if funcs.is_empty() {
         return Ok(());
-    };
-    let list: Value = handlers.get(event_name)?;
-    let Value::Table(list) = list else {
-        return Ok(());
-    };
+    }
     let lua_payload = json_to_lua(lua, payload)?;
-    for pair in list.clone().sequence_values::<Function>() {
-        let func = pair?;
+    for func in funcs {
         if let Err(err) = func.call::<()>(lua_payload.clone()) {
             let mut s = lock(sink);
             s.log(
@@ -255,16 +293,8 @@ pub fn dispatch_transform(
     payload: serde_json::Value,
     sink: &SharedHostLog,
 ) -> Result<serde_json::Value, PluginError> {
-    let Ok(handlers) = lua.named_registry_value::<Table>(HANDLERS_KEY) else {
-        return Ok(payload);
-    };
-    let list: Value = handlers.get(event_name)?;
-    let Value::Table(list) = list else {
-        return Ok(payload);
-    };
     let mut current = payload;
-    for pair in list.clone().sequence_values::<Function>() {
-        let func = pair?;
+    for func in subscribers(lua, event_name)? {
         let lua_payload = json_to_lua(lua, &current)?;
         match func.call::<Value>(lua_payload) {
             Ok(Value::Nil) => {}
@@ -324,15 +354,7 @@ pub fn dispatch_resources_discover(
     sink: &SharedHostLog,
 ) -> Result<DiscoveryEntries, PluginError> {
     let mut entries = DiscoveryEntries::default();
-    let Ok(handlers) = lua.named_registry_value::<Table>(HANDLERS_KEY) else {
-        return Ok(entries);
-    };
-    let list: Value = handlers.get("resources_discover")?;
-    let Value::Table(list) = list else {
-        return Ok(entries);
-    };
-    for pair in list.clone().sequence_values::<Function>() {
-        let func = pair?;
+    for func in subscribers(lua, "resources_discover")? {
         match func.call::<Value>(()) {
             Ok(Value::Table(table)) => {
                 collect_paths(&table, "skills", &mut entries.skills);
@@ -401,16 +423,12 @@ pub fn dispatch_session_op(
     target: &str,
     sink: &SharedHostLog,
 ) -> Result<SessionOpDecision, PluginError> {
-    let Ok(handlers) = lua.named_registry_value::<Table>(HANDLERS_KEY) else {
+    let funcs = subscribers(lua, event_name)?;
+    if funcs.is_empty() {
         return Ok(SessionOpDecision::Proceed);
-    };
-    let list: Value = handlers.get(event_name)?;
-    let Value::Table(list) = list else {
-        return Ok(SessionOpDecision::Proceed);
-    };
+    }
     let lua_payload = lua.create_string(target)?;
-    for pair in list.clone().sequence_values::<Function>() {
-        let func = pair?;
+    for func in funcs {
         match func.call::<Value>(Value::String(lua_payload.clone())) {
             Ok(Value::Table(t)) => {
                 if let Ok(reason) = t.get::<String>("cancel") {
@@ -446,16 +464,12 @@ pub fn dispatch_predicate(
     payload: &serde_json::Value,
     sink: &SharedHostLog,
 ) -> Result<bool, PluginError> {
-    let Ok(handlers) = lua.named_registry_value::<Table>(HANDLERS_KEY) else {
+    let funcs = subscribers(lua, event_name)?;
+    if funcs.is_empty() {
         return Ok(false);
-    };
-    let list: Value = handlers.get(event_name)?;
-    let Value::Table(list) = list else {
-        return Ok(false);
-    };
+    }
     let lua_payload = json_to_lua(lua, payload)?;
-    for pair in list.clone().sequence_values::<Function>() {
-        let func = pair?;
+    for func in funcs {
         match func.call::<Value>(lua_payload.clone()) {
             Ok(Value::Boolean(true)) => return Ok(true),
             Ok(_) => {}

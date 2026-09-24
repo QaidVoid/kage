@@ -152,7 +152,7 @@ fn render_block(
         Ok(v) => v,
         Err(e) => return fail(&e),
     };
-    match watchdog::run(lua, watchdog::BUDGET, || func.call::<Value>(block)) {
+    match watchdog::run(lua, watchdog::RENDER_BUDGET, || func.call::<Value>(block)) {
         Ok(value) => parse_lines(&value),
         Err(e) => fail(&e),
     }

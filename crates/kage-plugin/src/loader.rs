@@ -1,7 +1,8 @@
 //! Discover and execute `*.lua` plugin files in a directory.
 //!
 //! [`load_dir`] reads every `*.lua` file in `dir` and evaluates it inside
-//! the given [`PluginRuntime`]. Each file is loaded independently: a
+//! the given [`PluginRuntime`], in file-name order. Each file is loaded
+//! independently: a
 //! broken plugin logs an error through the runtime's host log and is
 //! skipped while the next file proceeds. The function returns a summary
 //! the host can surface to the user.
@@ -43,8 +44,8 @@ impl LoadReport {
 /// * Evaluate as a Lua chunk (errors logged + recorded, file skipped).
 ///
 /// The whole directory loads as one job on the runtime's Lua owner
-/// thread. Files are processed in directory-iteration order; order
-/// between different filesystems is not stable.
+/// thread. Files are processed sorted by file name, so a plugin named
+/// `a.lua` always loads before `b.lua`.
 pub fn load_dir(dir: &Path, runtime: &PluginRuntime) -> Result<LoadReport, PluginError> {
     let eval = Arc::clone(&runtime.eval);
     let dir = dir.to_path_buf();
@@ -64,17 +65,22 @@ pub(crate) fn load_on(lua: &Lua, dir: &Path, eval: &EvalState) -> Result<LoadRep
         }
     };
 
-    let sink = eval.sink();
-    let mut report = LoadReport::default();
+    let mut paths = Vec::new();
     for entry in read_dir {
         let entry = entry.map_err(|err| PluginError::Io {
             path: dir.to_path_buf(),
             source: err,
         })?;
         let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("lua") {
-            continue;
+        if path.extension().and_then(|s| s.to_str()) == Some("lua") {
+            paths.push(path);
         }
+    }
+    paths.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+
+    let sink = eval.sink();
+    let mut report = LoadReport::default();
+    for path in paths {
         let name = path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -137,6 +143,22 @@ mod tests {
         assert_eq!(report.loaded.len(), 2);
         assert!(report.failed.is_empty());
         assert_eq!(rt.registered_commands().len(), 2);
+    }
+
+    #[test]
+    fn loads_files_sorted_by_name() {
+        let dir = tempdir().unwrap();
+        for name in ["z", "a", "m"] {
+            fs::write(dir.path().join(format!("{name}.lua")), "").unwrap();
+        }
+        let rt = PluginRuntime::new().unwrap();
+        let report = load_dir(dir.path(), &rt).unwrap();
+        let names: Vec<_> = report
+            .loaded
+            .iter()
+            .map(|p| p.file_stem().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, ["a", "m", "z"]);
     }
 
     #[test]

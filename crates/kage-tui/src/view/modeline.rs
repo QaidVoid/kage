@@ -3,22 +3,18 @@
 #[allow(clippy::wildcard_imports)] // free-fn split: shares the parent view module scope
 use super::*;
 
-/// Paint the bottom modeline. When the host has registered a
-/// [`SessionUsage`] handle, the row shows the active model, the
-/// running token totals (input / output) and the context-window
-/// fill. Otherwise the row is filled with the modeline background
-/// so the chrome reads as a coherent strip rather than an unstyled
-/// terminal row. Mode is intentionally absent here - the colored
-/// pill on the input border is the canonical mode display.
 /// Map plugin-supplied [`kage_plugin::ChromeLine`]s onto ratatui
 /// lines. `base` carries the row's default fg/bg; a span's `fg` / `bg`
-/// overrides it when the string parses, and the attribute bits map to
-/// terminal modifiers. An unparseable color is dropped so the span
-/// inherits `base` rather than failing the whole row.
+/// overrides it when the string resolves (see [`parse_chrome_color`]),
+/// and the attribute bits map to terminal modifiers. An unresolvable
+/// color is dropped so the span inherits `base` rather than failing
+/// the whole row.
 pub(crate) fn chrome_lines_to_ratatui(
     lines: &[kage_plugin::ChromeLine],
     base: Style,
 ) -> Vec<Line<'static>> {
+    let theme = crate::theme::current();
+    let color = |name: &str| parse_chrome_color(&theme, name);
     lines
         .iter()
         .map(|cl| {
@@ -27,10 +23,10 @@ pub(crate) fn chrome_lines_to_ratatui(
                 .iter()
                 .map(|sp| {
                     let mut style = base;
-                    if let Some(c) = sp.fg.as_deref().and_then(parse_chrome_color) {
+                    if let Some(c) = sp.fg.as_deref().and_then(color) {
                         style = style.fg(c);
                     }
-                    if let Some(c) = sp.bg.as_deref().and_then(parse_chrome_color) {
+                    if let Some(c) = sp.bg.as_deref().and_then(color) {
                         style = style.bg(c);
                     }
                     let a = sp.attrs;
@@ -54,13 +50,20 @@ pub(crate) fn chrome_lines_to_ratatui(
         .collect()
 }
 
-/// Resolve a plugin color string via ratatui's color grammar (named
-/// colors such as `red`, `#rrggbb` hex, or an indexed number).
-/// Unparseable input yields `None`.
-fn parse_chrome_color(name: &str) -> Option<Color> {
-    name.parse::<Color>().ok()
+/// Resolve a plugin color string: a theme role name (`muted_fg`) first,
+/// then ratatui's color grammar (named colors such as `red`, `#rrggbb`
+/// hex, or an indexed number). Unparseable input yields `None`.
+fn parse_chrome_color(theme: &crate::theme::Theme, name: &str) -> Option<Color> {
+    theme.role(name).or_else(|| name.parse::<Color>().ok())
 }
 
+/// Paint the bottom modeline. When the host has registered a
+/// [`SessionUsage`] handle, the row shows the active model, the
+/// running token totals (input / output) and the context-window
+/// fill. Otherwise the row is filled with the modeline background
+/// so the chrome reads as a coherent strip rather than an unstyled
+/// terminal row. Mode is intentionally absent here - the colored
+/// pill on the input border is the canonical mode display.
 pub(super) fn render_modeline(
     frame: &mut Frame,
     regions: Regions,
@@ -357,4 +360,39 @@ pub(crate) fn input_cursor_position(
     let cx = body_area.x.saturating_add(col).min(max_x);
     let cy = body_area.y.saturating_add(row_offset).min(max_y);
     Some((cx, cy))
+}
+
+#[cfg(test)]
+mod tests {
+    use kage_plugin::{ChromeLine, ChromeSpan};
+
+    use super::*;
+    use crate::theme::{self, Theme};
+
+    fn span(fg: &str) -> ChromeLine {
+        ChromeLine {
+            spans: vec![ChromeSpan {
+                text: "x".into(),
+                fg: Some(fg.into()),
+                ..ChromeSpan::default()
+            }],
+        }
+    }
+
+    #[test]
+    fn span_color_resolves_a_theme_role_then_ratatui_grammar() {
+        let _guard = theme::theme_test_lock();
+        theme::set_current(Theme {
+            muted_fg: Color::Rgb(1, 2, 3),
+            ..Theme::default()
+        });
+        let lines = chrome_lines_to_ratatui(
+            &[span("muted_fg"), span("red"), span("nope")],
+            Style::default(),
+        );
+        theme::reset_current_for_tests();
+        assert_eq!(lines[0].spans[0].style.fg, Some(Color::Rgb(1, 2, 3)));
+        assert_eq!(lines[1].spans[0].style.fg, Some(Color::Red));
+        assert_eq!(lines[2].spans[0].style.fg, None);
+    }
 }

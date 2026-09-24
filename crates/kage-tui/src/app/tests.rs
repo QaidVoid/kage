@@ -363,6 +363,7 @@ fn drain_plugin_refresh_reseeds_commands_and_widgets() {
             args: Vec::new(),
         }],
         widgets: Vec::new(),
+        models: Vec::new(),
     })
     .unwrap();
     assert!(app.drain_plugin_refresh(), "a queued snapshot applies");
@@ -2141,4 +2142,42 @@ fn paste_routes_to_the_active_overlay() {
     // Nothing open: the main input receives it verbatim.
     app.handle_paste("plain");
     assert_eq!(app.input().text(), "plain");
+}
+
+#[test]
+fn login_command_defers_to_the_run_loop_via_pending_login() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    app.set_login_runner(std::sync::Arc::new(|_| true));
+    let registry: Vec<&CommandSpec> = BUILTIN_COMMANDS.iter().collect();
+
+    let result = app.run_command_validated("login", &registry);
+    assert!(matches!(result, CommandResult::Done(None)));
+    assert_eq!(app.pending_login, Some(crate::app::PendingLogin::Picker));
+
+    let result = app.run_command_validated("login anthropic", &registry);
+    assert!(matches!(result, CommandResult::Done(None)));
+    assert_eq!(
+        app.pending_login,
+        Some(crate::app::PendingLogin::Provider("anthropic".to_owned()))
+    );
+}
+
+#[test]
+fn login_command_errors_without_a_runner() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = App::new(buffer.clone(), tx);
+    let registry: Vec<&CommandSpec> = BUILTIN_COMMANDS.iter().collect();
+
+    let result = app.run_command_validated("login", &registry);
+    assert!(matches!(result, CommandResult::Done(None)));
+    assert_eq!(app.pending_login, None, "no flow queued without a runner");
+    let buf = buffer.lock().unwrap();
+    let rendered = match buf.blocks().last() {
+        Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
+        other => panic!("expected a custom block, got {other:?}"),
+    };
+    assert!(rendered.contains("login: unavailable"), "{rendered}");
 }

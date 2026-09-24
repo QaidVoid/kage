@@ -95,6 +95,9 @@ impl App {
     /// remaining unparsed argument string. The match is on the
     /// primary name; aliases were already resolved by
     /// [`Self::run_command`].
+    // A flat dispatch table over every builtin command; the line
+    // count is the command list, not complexity.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn dispatch_builtin(&mut self, name: &str, rest: &str) -> Option<AppExit> {
         match name {
             "quit" => Some(AppExit::Quit),
@@ -162,6 +165,10 @@ impl App {
                 self.run_permission_command(rest);
                 None
             }
+            "login" => {
+                self.run_login_command(rest);
+                None
+            }
             "tree" => {
                 self.open_session_tree();
                 None
@@ -175,9 +182,11 @@ impl App {
                 None
             }
             "export" => {
-                let dest = match rest.trim() {
-                    "" => None,
-                    path => Some(std::path::PathBuf::from(path)),
+                let trimmed = rest.trim();
+                let dest = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(std::path::PathBuf::from(trimmed))
                 };
                 let _ = self.send_request(RunRequest::ExportSession(dest));
                 None
@@ -193,6 +202,21 @@ impl App {
             }
             _ => None,
         }
+    }
+
+    /// Handle `:login [provider]`: queue the login flow for the run
+    /// loop, which owns the terminal the flow suspends.
+    pub(crate) fn run_login_command(&mut self, rest: &str) {
+        let arg = rest.trim();
+        if self.login_runner.is_none() {
+            self.push_error("login: unavailable in this host");
+            return;
+        }
+        self.pending_login = Some(if arg.is_empty() {
+            PendingLogin::Picker
+        } else {
+            PendingLogin::Provider(arg.to_owned())
+        });
     }
 
     /// Handle `:permission [mode]`: dispatch the override request,

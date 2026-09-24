@@ -395,6 +395,18 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         subcommands: &[],
     },
     CommandSpec {
+        name: "login",
+        aliases: &[],
+        description: "add or update a provider credential (leaves the TUI briefly)",
+        category: CommandCategory::Both,
+        args: &[ArgSpec::Rest {
+            name: "provider",
+            optional: true,
+            hint: "[provider]",
+        }],
+        subcommands: &[],
+    },
+    CommandSpec {
         name: "permission",
         aliases: &["perm"],
         description: "show or set the session permission mode (allow|ask|deny|default)",
@@ -624,7 +636,7 @@ mod tests {
 
     #[test]
     fn builtin_registry_has_expected_command_count() {
-        assert_eq!(BUILTIN_COMMANDS.len(), 20);
+        assert_eq!(BUILTIN_COMMANDS.len(), 21);
     }
 
     #[test]

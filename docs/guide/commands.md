@@ -42,6 +42,7 @@ Editing clears the error.
 | `:compact`               | Run a compaction pass right now                 |
 | `:settings`              | Open the settings dialog (theme/model/mouse/thinking/..) |
 | `:permission [mode]` / `:perm` | Show or set the session permission mode (`allow\|ask\|deny\|default`) |
+| `:login [provider]` | Add or update a provider credential: suspends the TUI, runs the interactive login, then refreshes the model list in place |
 | `:tree`                  | Browse the session fork forest                  |
 | `:attach [path]` / `:img` | Attach an image to the next prompt: a file `path`, or the OS clipboard image when no path is given |
 | `:clear`                 | Clear the conversation buffer                   |

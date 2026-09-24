@@ -73,6 +73,8 @@ impl App {
             toasts: None,
             dialog_rx: None,
             plugin_refresh_rx: None,
+            login_runner: None,
+            pending_login: None,
             attach_tx,
             attach_rx,
             plugin_overlay: None,
@@ -491,6 +493,45 @@ impl App {
         self.plugin_refresh_rx = Some(rx);
     }
 
+    /// Wire the host hook [`App::run_login_flow`] uses to run an
+    /// interactive credential login in the real terminal. `:login`
+    /// is a no-op error without it.
+    pub fn set_login_runner(&mut self, runner: LoginRunner) {
+        self.login_runner = Some(runner);
+    }
+
+    /// Consume a pending `:login` (if any) and run its flow. Returns
+    /// whether anything ran so the caller repaints.
+    pub(crate) fn consume_pending_login(&mut self, tui: &mut Tui) -> bool {
+        let Some(request) = self.pending_login.take() else {
+            return false;
+        };
+        self.run_login_flow(tui, request);
+        true
+    }
+
+    /// Suspend the TUI, run the host login hook for the request (a
+    /// picker or a named provider), resume, and ask the worker to
+    /// rebuild the provider registry on success.
+    pub(crate) fn run_login_flow(&mut self, tui: &mut Tui, request: PendingLogin) {
+        let Some(runner) = self.login_runner.clone() else {
+            return;
+        };
+        let provider = match request {
+            PendingLogin::Picker => None,
+            PendingLogin::Provider(name) => Some(name),
+        };
+        tui.suspend();
+        let saved = runner(provider.as_deref());
+        tui.resume();
+        if saved {
+            self.notify("credentials updated");
+            let _ = self.send_request(RunRequest::RefreshProviders);
+        } else {
+            self.notify("login cancelled");
+        }
+    }
+
     pub(crate) fn refresh_plugin_widget_texts(&mut self, width: u16) {
         self.plugin_widget_texts = self
             .plugin_widgets
@@ -722,6 +763,9 @@ impl App {
         };
         self.set_plugin_commands(snapshot.commands);
         self.set_plugin_widgets(snapshot.widgets);
+        if !snapshot.models.is_empty() {
+            self.model_choices = snapshot.models;
+        }
         true
     }
 

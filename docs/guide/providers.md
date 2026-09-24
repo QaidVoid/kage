@@ -60,6 +60,9 @@ match wins:
 `kage auth login` with no argument opens a picker that also lists your
 custom providers; rows marked `*` already have a stored credential.
 `kage auth list` shows where each provider's key would come from.
+Inside the TUI, `:login [provider]` runs the same flow: the UI suspends,
+the credential prompt takes over the terminal, and the model list
+refreshes in place when a key is saved.
 
 ## overriding a provider
 

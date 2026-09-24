@@ -151,7 +151,7 @@ fn apply_thinking_level(
 pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let WorkerConfig {
-            registry,
+            mut registry,
             active_qualified,
             mut tools,
             mut mcp_manager,
@@ -652,6 +652,35 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         );
                     }
                 },
+                RunRequest::RefreshProviders => {
+                    let mut fresh = crate::build_provider_registry();
+                    if let Some(rt) = plugin_runtime.as_ref() {
+                        crate::plugins::merge_plugin_providers(rt, &mut fresh);
+                    }
+                    let active = lock(&active_qualified).clone();
+                    let active_ok = fresh.resolve(&active).is_ok();
+                    registry = Arc::new(fresh);
+                    let models = crate::tui::session_ops::available_model_items(&registry, &active);
+                    let _ = plugin_refresh_tx.send(PluginRefresh {
+                        commands: plugin_runtime
+                            .as_ref()
+                            .map(|rt| snapshot_plugin_commands(rt))
+                            .unwrap_or_default(),
+                        widgets: plugin_runtime
+                            .as_ref()
+                            .map(|rt| rt.registered_widgets())
+                            .unwrap_or_default(),
+                        models,
+                    });
+                    if active_ok {
+                        push_toast(&toasts, Toast::info("providers refreshed"));
+                    } else {
+                        push_toast(
+                            &toasts,
+                            Toast::info("providers refreshed; pick a model (:model)"),
+                        );
+                    }
+                }
                 RunRequest::ReloadPlugins => {
                     let Some(rt) = plugin_runtime.as_ref() else {
                         continue;
@@ -665,9 +694,14 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                     // snapshot holds (also on error, which leaves a
                     // partially-replayed runtime) so the `:` palette
                     // and status widgets track the reload.
+                    let models = crate::tui::session_ops::available_model_items(
+                        &registry,
+                        &lock(&active_qualified).clone(),
+                    );
                     let _ = plugin_refresh_tx.send(PluginRefresh {
                         commands: snapshot_plugin_commands(rt),
                         widgets: rt.registered_widgets(),
+                        models,
                     });
                     match reload {
                         Ok(report) => {

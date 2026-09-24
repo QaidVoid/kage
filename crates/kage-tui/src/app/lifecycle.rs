@@ -7,17 +7,15 @@ impl App {
     /// Drive the event loop until the user quits. Returns the exit
     /// reason. The caller is expected to drop the [`Tui`] (which
     /// restores the terminal) before printing anything to stdout.
+    /// Dispatch terminal-suspending chords, poll events, and drive
+    /// the worker. Long by nature: it is the whole event loop.
+    #[allow(clippy::too_many_lines)]
     pub fn run(&mut self, tui: &mut Tui) -> Result<AppExit, TuiError> {
-        // The plugin-read snapshots (theme list, session list) are
-        // rebuilt by scanning the filesystem. Refreshing them on every
-        // wake costs a directory read per loop iteration - 20/s while
-        // the agent streams, which is most of the idle/working CPU when
-        // a plugin registers for them. They feed picker-style APIs
-        // consumed at human timescale, so a coarse cadence is
-        // indistinguishable to the plugin and effectively free.
+        // Plugin-read snapshots rescan the filesystem; at human
+        // timescale a coarse cadence is indistinguishable and saves
+        // a directory read per wake.
         const PLUGIN_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(500);
-        // First frame is unconditional - we always paint once before
-        // entering the steady-state event loop.
+        // Always paint once before the steady-state loop.
         let mut last_buffer_version = self.buffer_version();
         let mut last_spinner_idx = crate::view::spinner_frame_index();
         let mut needs_redraw = true;
@@ -117,10 +115,8 @@ impl App {
                         Event::Key(key) if key.kind == KeyEventKind::Press => {
                             log_key_event(&key);
                             needs_redraw = true;
-                            // `Ctrl+G` hands the draft to an external
-                            // editor. Checked here, outside the key
-                            // dispatcher, because it must suspend and
-                            // resume the terminal this loop owns.
+                            // `Ctrl+G` suspends the terminal for an
+                            // external editor, so it bypasses dispatch.
                             if self.external_edit_key(key) {
                                 self.edit_in_external_editor(tui);
                             } else if let Some(exit) = self.dispatch_key(key) {
@@ -128,6 +124,11 @@ impl App {
                                     let _ = state.reply().send(None);
                                 }
                                 return Ok(exit);
+                            }
+                            // `:login` defers here: only this loop
+                            // owns the [`Tui`] it suspends.
+                            if self.consume_pending_login(tui) {
+                                needs_redraw = true;
                             }
                         }
                         Event::Paste(text) => {

@@ -207,6 +207,12 @@ pub enum RunRequest {
     /// the live context so the model sees the result on the next
     /// turn. Not recorded to the session file.
     RunShell(String),
+    /// Rebuild the provider registry from the auth store, env vars,
+    /// and plugin contributions after a `:login` changed credentials.
+    /// The worker republishes the model list through the plugin
+    /// refresh channel and keeps the active model if it still
+    /// resolves.
+    RefreshProviders,
     /// Set the session permission mode override from the `:permission`
     /// command. `Some(action)` forces every tool call through that
     /// action for the rest of the session; `None` (values `default`
@@ -328,7 +334,24 @@ pub struct PluginRefresh {
     pub commands: Vec<crate::command::PluginCommand>,
     /// Status-bar widgets registered in the reloaded runtime.
     pub widgets: Vec<Arc<kage_plugin::LuaWidget>>,
+    /// The full model list for the picker/autocomplete, recomputed
+    /// from the current provider registry (builtin + plugin
+    /// contributions). Empty only when no providers exist.
+    pub models: Vec<crate::picker::PickItem>,
 }
+
+/// A `:login` invocation waiting for the run loop to suspend the
+/// terminal. The enum distinguishes "open the provider picker"
+/// ([`PendingLogin::Picker`]) from "log in to this provider".
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum PendingLogin {
+    Picker,
+    Provider(String),
+}
+
+/// Host hook that runs an interactive credential login in the real
+/// terminal. Returns whether a credential was saved.
+pub(crate) type LoginRunner = std::sync::Arc<dyn Fn(Option<&str>) -> bool + Send + Sync>;
 
 /// A permission ask the worker's permission gate hands to the App.
 ///
@@ -576,6 +599,15 @@ pub struct App {
     /// Open `/` search line, if any. Reuses the [`CommandLine`]
     /// widget; painted with a `/` prefix instead of `:`.
     search_line: Option<CommandLine>,
+    /// Host hook that runs an interactive credential login for the
+    /// named provider (or a provider picker when [`PendingLogin::Picker`])
+    /// in the real terminal. Wired by kage-cli; `None` makes
+    /// `:login` a no-op. Returns whether a credential was saved.
+    login_runner: Option<LoginRunner>,
+    /// A `:login` invocation waiting for the run loop to suspend the
+    /// terminal. Set by the command handler (which has no terminal
+    /// access); consumed by the loop like the external-editor chord.
+    pending_login: Option<PendingLogin>,
     /// The most recently submitted search pattern. While set, blocks
     /// containing the pattern render with a Match emphasis and `n` /
     /// `N` walk between them.

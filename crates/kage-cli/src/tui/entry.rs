@@ -378,6 +378,15 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         app_config.ui.editor,
         kage_core::config::EditorMode::Modeless
     ));
+    // `:login` runs the interactive credential flow in the real
+    // terminal (the App suspends itself around the call) and then
+    // refreshes providers through the worker.
+    {
+        let config_for_login = app_config.clone();
+        app.set_login_runner(std::sync::Arc::new(move |provider| {
+            crate::auth::run_login(provider, &config_for_login) == ExitCode::SUCCESS
+        }));
+    }
     app.set_workdir(workdir.clone());
     if let Ok(dir) = crate::themes_dir() {
         app.set_themes_dir(dir);

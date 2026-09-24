@@ -30,7 +30,7 @@
 
 pub(crate) use std::collections::{BTreeMap, HashMap};
 pub(crate) use std::path::PathBuf;
-pub(crate) use std::sync::{Arc, Mutex, MutexGuard};
+pub(crate) use std::sync::{Arc, Mutex};
 
 use kage_core::sync::lock;
 
@@ -54,6 +54,7 @@ pub(crate) use crate::error::PluginError;
 pub(crate) use crate::events;
 pub(crate) use crate::exec;
 pub(crate) use crate::fs as plugin_fs;
+pub(crate) use crate::host::LuaHost;
 pub(crate) use crate::http;
 pub(crate) use crate::keybindings::{self, RegisteredKeybindings, registered_keybindings};
 pub(crate) use crate::lifecycle::{
@@ -84,15 +85,21 @@ pub(crate) use crate::ui;
 pub(crate) use crate::watchdog;
 pub(crate) use crate::widgets::{self, LuaWidget, RegisteredWidgets, registered_widgets};
 
-/// Shared, mutex-guarded handle to the Lua state. Plugin-defined tools
-/// hold one of these so they can call back into Lua from the host's tool
-/// dispatch path.
-pub type SharedLua = Arc<Mutex<Lua>>;
-
 /// A Lua VM with the dangerous standard-library bindings stripped and
 /// the `kage` API table installed.
+///
+/// The Lua state lives on a dedicated owner thread; this struct is a
+/// handle that sends it jobs. Methods that need Lua wait for the owner
+/// thread to answer, while render surfaces read retained output and
+/// never wait on a busy owner (see [`PluginRuntime::redraw_flag`]).
+///
+/// Known limitation: a long Lua tool or a Lua provider stream occupies
+/// the owner thread for its whole duration. Render output stays on
+/// screen meanwhile, but plugin commands, keybindings, and event
+/// dispatch queue behind it.
 pub struct PluginRuntime {
-    lua: SharedLua,
+    pub(crate) host: LuaHost,
+    pub(crate) eval: Arc<EvalState>,
     sink: SharedHostLog,
     tools: RegisteredTools,
     tool_overrides: RegisteredTools,
@@ -119,6 +126,18 @@ pub struct PluginRuntime {
     block_renderers: SharedBlockRenderers,
     autocomplete: RegisteredAutocompleteProviders,
     terminal_hooks: RegisteredTerminalHooks,
+    /// Host-maintained snapshot of the current session's entry
+    /// metadata, read by `session_write`'s `kage.session.entries`.
+    session_entries: SharedSessionEntries,
+    /// Pending `session_write` reseat request (`switch`/`fork_to`),
+    /// drained by the host.
+    switch_request: SharedSwitchRequest,
+}
+
+/// Plugin evaluation settings and per-plugin environments, shared with
+/// the owner thread so loading and hot reload run there as one job.
+pub(crate) struct EvalState {
+    sink: SharedHostLog,
     /// Per-plugin `_ENV` tables, keyed by plugin name, held in the Lua
     /// registry. Each plugin re-evaluates against its own environment
     /// so plugins cannot see or clobber one another; granted
@@ -127,12 +146,6 @@ pub struct PluginRuntime {
     /// Name of the plugin currently being evaluated, so
     /// `kage.request_capabilities` knows who is asking.
     current_plugin: CurrentPlugin,
-    /// Host-maintained snapshot of the current session's entry
-    /// metadata, read by `session_write`'s `kage.session.entries`.
-    session_entries: SharedSessionEntries,
-    /// Pending `session_write` reseat request (`switch`/`fork_to`),
-    /// drained by the host.
-    switch_request: SharedSwitchRequest,
     /// Load allowlist by plugin file stem. When non-empty, the loader
     /// evaluates only the listed plugins and skips the rest; empty means
     /// load every discovered plugin.
@@ -146,7 +159,57 @@ pub struct PluginRuntime {
     state_dir: Option<PathBuf>,
     /// VM instructions one host-driven plugin entry may execute before
     /// the watchdog aborts it. See [`crate::watchdog`].
-    script_budget: u64,
+    pub(crate) script_budget: u64,
+}
+
+impl EvalState {
+    pub(crate) fn sink(&self) -> &SharedHostLog {
+        &self.sink
+    }
+
+    pub(crate) fn is_enabled(&self, stem: &str) -> bool {
+        self.enabled.is_empty() || self.enabled.iter().any(|name| name == stem)
+    }
+
+    /// Evaluate `source` as plugin `name` in its own `_ENV`. See
+    /// [`PluginRuntime::eval_plugin`].
+    pub(crate) fn eval_plugin(
+        &self,
+        lua: &Lua,
+        name: &str,
+        source: &str,
+    ) -> Result<mlua::Value, PluginError> {
+        let store_path = self
+            .state_dir
+            .as_deref()
+            .map(|dir| store::store_path(dir, name));
+        let env = plugin_env(
+            lua,
+            name,
+            &self.plugin_envs,
+            self.plugin_config.get(name),
+            store_path,
+        )?;
+        *lock(&self.current_plugin) = Some(name.to_owned());
+        let result = watchdog::run(lua, self.script_budget, || {
+            lua.load(source)
+                .set_name(name)
+                .set_environment(env)
+                .eval::<mlua::Value>()
+        })?;
+        *lock(&self.current_plugin) = None;
+        Ok(result)
+    }
+
+    /// Drop every per-plugin environment so a reload is a clean slate:
+    /// stale plugin globals do not survive, and a capability revoked in
+    /// config is no longer attached to the old proxy.
+    pub(crate) fn reset(&self, lua: &Lua) {
+        for (_, key) in lock(&self.plugin_envs).drain() {
+            let _ = lua.remove_registry_value(key);
+        }
+        *lock(&self.current_plugin) = None;
+    }
 }
 
 impl std::fmt::Debug for PluginRuntime {
@@ -368,5 +431,7 @@ fn freeze_shared_tables(lua: &Lua) -> Result<(), PluginError> {
 mod builder;
 mod methods;
 
+#[cfg(test)]
+mod owner_tests;
 #[cfg(test)]
 mod tests;

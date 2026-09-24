@@ -29,7 +29,7 @@ use mlua::{Function, Lua, RegistryKey, Table};
 
 use crate::api::{LogLevel, SharedHostLog, json_to_lua, lua_to_json};
 use crate::error::PluginError;
-use crate::runtime::SharedLua;
+use crate::host::{self, LuaHost, WeakHost};
 use crate::watchdog;
 
 /// Owned argument schema for a plugin-registered slash command. Each
@@ -84,7 +84,7 @@ pub struct LuaCommand {
     aliases: Vec<String>,
     description: String,
     args: Vec<PluginArgSpec>,
-    lua: SharedLua,
+    host: LuaHost,
     sink: SharedHostLog,
     handler_key: Arc<RegistryKey>,
 }
@@ -139,42 +139,48 @@ impl LuaCommand {
         args: &str,
         ctx: &serde_json::Value,
     ) -> Result<CommandOutput, PluginError> {
-        let lua = lock(&self.lua);
-        let handler: Function = lua.registry_value(&self.handler_key)?;
-        let lua_ctx = json_to_lua(&lua, ctx)?;
-        let parsed_args = match build_parsed_args(&lua, args, &self.args) {
-            Ok(table) => table,
-            Err(err) => {
-                return Ok(CommandOutput {
-                    text: format!("{}: {err}", self.name),
-                    is_error: true,
-                    structured: None,
-                });
+        let name = self.name.clone();
+        let schema = self.args.clone();
+        let sink = Arc::clone(&self.sink);
+        let key = Arc::clone(&self.handler_key);
+        let args = args.to_owned();
+        let ctx = ctx.clone();
+        self.host.call(move |lua| {
+            let handler: Function = lua.registry_value(&key)?;
+            let lua_ctx = json_to_lua(lua, &ctx)?;
+            let parsed_args = match build_parsed_args(lua, &args, &schema) {
+                Ok(table) => table,
+                Err(err) => {
+                    return Ok(CommandOutput {
+                        text: format!("{name}: {err}"),
+                        is_error: true,
+                        structured: None,
+                    });
+                }
+            };
+            match watchdog::run(lua, watchdog::BUDGET, || {
+                handler.call::<mlua::Value>((args, lua_ctx, parsed_args))
+            }) {
+                Ok(v) => Ok(CommandOutput::from_value(v)),
+                Err(err) => {
+                    let mut s = lock(&sink);
+                    s.log(
+                        LogLevel::Error,
+                        &format!("plugin command '{name}' raised: {err}"),
+                    );
+                    Ok(CommandOutput {
+                        text: err.to_string(),
+                        is_error: true,
+                        structured: None,
+                    })
+                }
             }
-        };
-        match watchdog::run(&lua, watchdog::BUDGET, || {
-            handler.call::<mlua::Value>((args.to_owned(), lua_ctx, parsed_args))
-        }) {
-            Ok(v) => Ok(CommandOutput::from_value(v)),
-            Err(err) => {
-                let mut s = lock(&self.sink);
-                s.log(
-                    LogLevel::Error,
-                    &format!("plugin command '{}' raised: {err}", self.name),
-                );
-                Ok(CommandOutput {
-                    text: err.to_string(),
-                    is_error: true,
-                    structured: None,
-                })
-            }
-        }
+        })?
     }
 
     /// Prepare a bridged invocation: parse args against the schema and
-    /// fetch the handler, returning owned values that outlive the Lua
-    /// lock (so the caller can hand them to
-    /// [`crate::PluginRuntime::bridge_call`] without nesting locks).
+    /// fetch the handler on the owner thread, returning owned values the
+    /// caller hands to [`crate::PluginRuntime::bridge_call`].
     ///
     /// Unlike [`Self::invoke`], the handler runs inside a coroutine, so
     /// it may call blocking `kage.ui.*` APIs. Argument-parse failures
@@ -185,27 +191,29 @@ impl LuaCommand {
         raw: &str,
         ctx: &serde_json::Value,
     ) -> Result<BridgePrep, PluginError> {
-        let lua = lock(&self.lua);
-        let parsed = match build_parsed_args(&lua, raw, &self.args) {
-            Ok(table) => table,
-            Err(err) => {
-                return Ok(BridgePrep::ArgError(CommandOutput {
-                    text: format!("{}: {err}", self.name),
-                    is_error: true,
-                    structured: None,
-                }));
-            }
-        };
-        let parsed_json = lua_to_json(mlua::Value::Table(parsed))?;
-        let handler: Function = lua.registry_value(&self.handler_key)?;
-        Ok(BridgePrep::Ready(BridgeArgs {
-            handler,
-            args: vec![
-                serde_json::Value::String(raw.to_owned()),
-                ctx.clone(),
-                parsed_json,
-            ],
-        }))
+        let name = self.name.clone();
+        let schema = self.args.clone();
+        let key = Arc::clone(&self.handler_key);
+        let raw = raw.to_owned();
+        let ctx = ctx.clone();
+        self.host.call(move |lua| {
+            let parsed = match build_parsed_args(lua, &raw, &schema) {
+                Ok(table) => table,
+                Err(err) => {
+                    return Ok(BridgePrep::ArgError(CommandOutput {
+                        text: format!("{name}: {err}"),
+                        is_error: true,
+                        structured: None,
+                    }));
+                }
+            };
+            let parsed_json = lua_to_json(mlua::Value::Table(parsed))?;
+            let handler: Function = lua.registry_value(&key)?;
+            Ok(BridgePrep::Ready(BridgeArgs {
+                handler,
+                args: vec![serde_json::Value::String(raw), ctx, parsed_json],
+            }))
+        })?
     }
 }
 
@@ -481,11 +489,12 @@ pub fn registered_commands() -> RegisteredCommands {
 /// shadow a built-in and dispatch ahead of it).
 fn install_command_fn(
     lua: &Lua,
-    shared_lua: SharedLua,
+    host: WeakHost,
     sink: SharedHostLog,
-    registered: RegisteredCommands,
+    registered: &RegisteredCommands,
     fn_name: &'static str,
 ) -> Result<(), PluginError> {
+    let registered = Arc::downgrade(registered);
     let kage: Table = lua.globals().get("kage")?;
     kage.set(
         fn_name,
@@ -517,11 +526,11 @@ fn install_command_fn(
                 aliases,
                 description,
                 args,
-                lua: shared_lua.clone(),
+                host: host.upgrade()?,
                 sink: sink.clone(),
                 handler_key: Arc::new(key),
             };
-            registered
+            host::upgrade(&registered)?
                 .lock()
                 .map_err(|_| mlua::Error::external("plugin commands registry poisoned"))?
                 .push(Arc::new(cmd));
@@ -536,13 +545,13 @@ fn install_command_fn(
 /// # Errors
 ///
 /// Returns [`PluginError`] if the `kage` global is missing.
-pub fn install_register_command(
+pub(crate) fn install_register_command(
     lua: &Lua,
-    shared_lua: SharedLua,
+    host: WeakHost,
     sink: SharedHostLog,
-    registered: RegisteredCommands,
+    registered: &RegisteredCommands,
 ) -> Result<(), PluginError> {
-    install_command_fn(lua, shared_lua, sink, registered, "register_command")
+    install_command_fn(lua, host, sink, registered, "register_command")
 }
 
 /// Install `kage.override_command` on the running Lua state.
@@ -553,13 +562,13 @@ pub fn install_register_command(
 /// # Errors
 ///
 /// Returns [`PluginError`] if the `kage` global is missing.
-pub fn install_override_command(
+pub(crate) fn install_override_command(
     lua: &Lua,
-    shared_lua: SharedLua,
+    host: WeakHost,
     sink: SharedHostLog,
-    overrides: RegisteredCommands,
+    overrides: &RegisteredCommands,
 ) -> Result<(), PluginError> {
-    install_command_fn(lua, shared_lua, sink, overrides, "override_command")
+    install_command_fn(lua, host, sink, overrides, "override_command")
 }
 
 #[cfg(test)]

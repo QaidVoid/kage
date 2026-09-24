@@ -3,18 +3,20 @@
 //!
 //! A plugin installs a render function for the top status row
 //! (`set_header`) or the bottom modeline row (`set_footer`); the host
-//! calls it once per redraw, inside the same Lua mutex tool dispatch
-//! uses, and paints the returned styled lines in place of the built-in
-//! chrome. Passing `nil` clears the slot and restores the built-in
-//! row.
+//! paints the returned styled lines in place of the built-in chrome.
+//! Passing `nil` clears the slot and restores the built-in row.
+//!
+//! The host's render call never runs Lua: it returns the last lines
+//! computed on the Lua owner thread and queues a recompute when the
+//! width changed or the lines are older than half a second.
 //!
 //! The render function receives the row width and returns one of:
 //! a plain string (one unstyled span), a span table
 //! (`{ text = "x", fg = "red", bold = true }`), or an array of those
 //! (one line per element; an element that is itself an array becomes a
-//! multi-span line). A `nil` return, a non-conforming value, or a Lua
-//! error logs to the host sink and yields no lines, so the host falls
-//! back to its built-in chrome rather than failing silently.
+//! multi-span line). A `nil` return or a non-conforming value yields no
+//! lines, so the host falls back to its built-in chrome. A Lua error
+//! logs to the host sink and keeps the previous lines.
 //!
 //! Colors are passed through as strings (`"red"`, `"#1f1f28"`) and
 //! resolved by the host against the active theme; this crate does not
@@ -28,7 +30,8 @@ use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog};
 use crate::error::PluginError;
-use crate::runtime::SharedLua;
+use crate::host::{self, LuaHost, WeakHost};
+use crate::retained::Retained;
 use crate::watchdog;
 
 /// Which chrome row a [`LuaChrome`] paints. Used only to label render
@@ -146,17 +149,11 @@ pub fn shared_chrome() -> SharedChrome {
 /// A chrome-row renderer defined in Lua.
 pub struct LuaChrome {
     slot: ChromeSlot,
-    lua: SharedLua,
+    host: LuaHost,
     sink: SharedHostLog,
     handler_key: Arc<RegistryKey>,
-    /// Last successful render with a wall-clock timestamp. Replayed
-    /// only for sub-second contention so the host can fall through to
-    /// the built-in modeline (and its working spinner) when a long
-    /// provider call is keeping the Lua state busy.
-    cache: Mutex<(std::time::Instant, Vec<ChromeLine>)>,
+    output: Retained<Vec<ChromeLine>>,
 }
-
-const CACHE_STALE_AFTER: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl std::fmt::Debug for LuaChrome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -173,53 +170,40 @@ impl LuaChrome {
         self.slot
     }
 
-    /// Call into Lua to produce the row's styled lines for a chrome
-    /// area of `width` columns. Uses `try_lock` so the TUI render loop
-    /// is never blocked by an in-flight provider call. Brief contention
-    /// replays the last render; once the cache is older than
-    /// [`CACHE_STALE_AFTER`] the row goes empty so the host can paint
-    /// the built-in modeline (with its working spinner).
+    /// The row's styled lines for a chrome area of `width` columns.
+    /// Returns the retained lines at once and queues a recompute when
+    /// they are stale. Before the first result lands the row is empty,
+    /// so the host paints its built-in chrome.
     #[must_use]
     pub fn render(&self, width: u16) -> Vec<ChromeLine> {
-        let Ok(lua) = self.lua.try_lock() else {
-            return self.fresh_cached();
-        };
-        let func: Function = match lua.registry_value(&self.handler_key) {
-            Ok(f) => f,
-            Err(e) => {
-                self.log_error(&e);
-                return self.fresh_cached();
-            }
-        };
-        match watchdog::run(&lua, watchdog::BUDGET, || func.call::<Value>(width)) {
-            Ok(value) => {
-                let lines = parse_lines(&value);
-                let mut slot = lock(&self.cache);
-                *slot = (std::time::Instant::now(), lines.clone());
-                lines
-            }
-            Err(e) => {
-                self.log_error(&e);
-                self.fresh_cached()
-            }
-        }
+        let slot = self.slot;
+        let sink = Arc::clone(&self.sink);
+        let handler = Arc::clone(&self.handler_key);
+        self.output.get(&self.host, width, move |lua, width| {
+            render_chrome(lua, slot, &sink, &handler, width)
+        })
     }
+}
 
-    fn fresh_cached(&self) -> Vec<ChromeLine> {
-        let slot = lock(&self.cache);
-        if slot.0.elapsed() <= CACHE_STALE_AFTER {
-            slot.1.clone()
-        } else {
-            Vec::new()
-        }
-    }
-
-    fn log_error(&self, e: &dyn std::fmt::Display) {
-        let mut s = lock(&self.sink);
-        s.log(
-            LogLevel::Error,
-            &format!("plugin {}: {e}", self.slot.label()),
-        );
+fn render_chrome(
+    lua: &Lua,
+    slot: ChromeSlot,
+    sink: &SharedHostLog,
+    handler_key: &RegistryKey,
+    width: u16,
+) -> Option<Vec<ChromeLine>> {
+    let fail = |e: &dyn std::fmt::Display| {
+        let mut s = lock(sink);
+        s.log(LogLevel::Error, &format!("plugin {}: {e}", slot.label()));
+        None
+    };
+    let func: Function = match lua.registry_value(handler_key) {
+        Ok(f) => f,
+        Err(e) => return fail(&e),
+    };
+    match watchdog::run(lua, watchdog::BUDGET, || func.call::<Value>(width)) {
+        Ok(value) => Some(parse_lines(&value)),
+        Err(e) => fail(&e),
     }
 }
 
@@ -323,28 +307,22 @@ fn parse_span_table(t: &Table) -> ChromeSpan {
 /// Lua state. Each accepts a render function or `nil`; a function
 /// replaces the slot's renderer, `nil` clears it, and any other value
 /// errors.
-pub fn install_chrome(
+pub(crate) fn install_chrome(
     lua: &Lua,
-    shared_lua: SharedLua,
+    host: WeakHost,
     sink: SharedHostLog,
-    header: SharedChrome,
-    footer: SharedChrome,
+    header: &SharedChrome,
+    footer: &SharedChrome,
 ) -> Result<(), PluginError> {
     let kage: Table = lua.globals().get("kage")?;
     let ui: Table = kage.get("ui")?;
     ui.set(
         "set_header",
-        make_setter(
-            lua,
-            ChromeSlot::Header,
-            shared_lua.clone(),
-            sink.clone(),
-            header,
-        )?,
+        make_setter(lua, ChromeSlot::Header, host.clone(), sink.clone(), header)?,
     )?;
     ui.set(
         "set_footer",
-        make_setter(lua, ChromeSlot::Footer, shared_lua, sink, footer)?,
+        make_setter(lua, ChromeSlot::Footer, host, sink, footer)?,
     )?;
     kage.set("ui", ui)?;
     Ok(())
@@ -353,11 +331,13 @@ pub fn install_chrome(
 fn make_setter(
     lua: &Lua,
     slot: ChromeSlot,
-    shared_lua: SharedLua,
+    host: WeakHost,
     sink: SharedHostLog,
-    target: SharedChrome,
+    target: &SharedChrome,
 ) -> Result<Function, PluginError> {
+    let target = Arc::downgrade(target);
     let func = lua.create_function(move |lua, value: Value| {
+        let target = host::upgrade(&target)?;
         let mut guard = target
             .lock()
             .map_err(|_| mlua::Error::external("plugin chrome slot poisoned"))?;
@@ -370,10 +350,10 @@ fn make_setter(
                 let handler_key = lua.create_registry_value(f)?;
                 *guard = Some(Arc::new(LuaChrome {
                     slot,
-                    lua: shared_lua.clone(),
+                    host: host.upgrade()?,
                     sink: sink.clone(),
                     handler_key: Arc::new(handler_key),
-                    cache: Mutex::new((std::time::Instant::now(), Vec::new())),
+                    output: Retained::new(),
                 }));
                 Ok(())
             }

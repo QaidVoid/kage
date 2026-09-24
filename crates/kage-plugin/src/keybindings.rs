@@ -25,7 +25,7 @@ use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog};
 use crate::error::PluginError;
-use crate::runtime::SharedLua;
+use crate::host::{self, LuaHost, WeakHost};
 
 /// Canonical chords the host treats as load-bearing built-ins. Binding
 /// one still works (plugin wins) but emits a host-log warning.
@@ -74,7 +74,7 @@ pub const NAMED_KEYS: &[&str] = &[
 pub struct LuaKeybinding {
     chord: String,
     description: String,
-    lua: SharedLua,
+    host: LuaHost,
     handler_key: Arc<RegistryKey>,
 }
 
@@ -103,8 +103,8 @@ impl LuaKeybinding {
     /// runs it through [`crate::PluginRuntime::bridge_call`] with no
     /// arguments, so it may call blocking `kage.ui.*` dialogs.
     pub fn handler(&self) -> Result<Function, PluginError> {
-        let lua = lock(&self.lua);
-        Ok(lua.registry_value(&self.handler_key)?)
+        let key = Arc::clone(&self.handler_key);
+        Ok(self.host.call(move |lua| lua.registry_value(&key))??)
     }
 }
 
@@ -173,12 +173,13 @@ fn is_valid_key(key: &str) -> bool {
 }
 
 /// Install `kage.register_keybinding` on the running Lua state.
-pub fn install_register_keybinding(
+pub(crate) fn install_register_keybinding(
     lua: &Lua,
-    shared_lua: SharedLua,
+    host: WeakHost,
     sink: SharedHostLog,
-    registered: RegisteredKeybindings,
+    registered: &RegisteredKeybindings,
 ) -> Result<(), PluginError> {
+    let registered = Arc::downgrade(registered);
     let kage: Table = lua.globals().get("kage")?;
     kage.set(
         "register_keybinding",
@@ -223,13 +224,13 @@ pub fn install_register_keybinding(
                 );
             }
             let key = lua.create_registry_value(handler)?;
-            registered
+            host::upgrade(&registered)?
                 .lock()
                 .map_err(|_| mlua::Error::external("plugin keybindings registry poisoned"))?
                 .push(Arc::new(LuaKeybinding {
                     chord,
                     description,
-                    lua: shared_lua.clone(),
+                    host: host.upgrade()?,
                     handler_key: Arc::new(key),
                 }));
             Ok(())

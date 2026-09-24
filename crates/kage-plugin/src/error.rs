@@ -32,4 +32,8 @@ pub enum PluginError {
     /// named a capability that does not exist.
     #[error("plugin config error: {0}")]
     Config(String),
+    /// The Lua owner thread could not start, or is gone because the
+    /// runtime shut down.
+    #[error("plugin host error: {0}")]
+    Host(String),
 }

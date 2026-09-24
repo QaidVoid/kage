@@ -11,8 +11,9 @@
 //! })
 //! ```
 //! and the runtime stores a [`LuaTool`] that the host can hand to a
-//! `ToolRegistry`. Tool execution serializes through the runtime's Lua
-//! mutex.
+//! `ToolRegistry`. Tool execution runs on the runtime's Lua owner
+//! thread; the calling thread waits for the result and gives up as
+//! soon as the tool's cancel flag is set.
 
 use std::sync::{Arc, Mutex};
 
@@ -22,7 +23,7 @@ use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog, json_to_lua, lua_to_json};
 use crate::error::PluginError;
-use crate::runtime::SharedLua;
+use crate::host::{self, LuaHost, WeakHost};
 use crate::watchdog;
 
 /// Shared collection of tools registered by plugins. Cloned into the Lua
@@ -41,7 +42,7 @@ pub struct LuaTool {
     description: String,
     schema: serde_json::Value,
     risk: Risk,
-    lua: SharedLua,
+    host: LuaHost,
     sink: SharedHostLog,
     handler_key: Arc<RegistryKey>,
 }
@@ -80,30 +81,48 @@ impl Tool for LuaTool {
         if cx.is_cancelled() {
             return Err(ToolError::Cancelled);
         }
-        let lua = self
-            .lua
-            .lock()
-            .map_err(|_| ToolError::Other("plugin lua mutex poisoned".to_owned()))?;
-        let func: Function = lua
-            .registry_value(&self.handler_key)
-            .map_err(|e| ToolError::Other(format!("plugin tool '{}': {e}", self.name)))?;
-        let lua_input =
-            json_to_lua(&lua, &input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
-        match watchdog::run(&lua, watchdog::BUDGET, || func.call::<Value>(lua_input)) {
-            Ok(returned) => Ok(value_to_output(returned)),
-            Err(err) => {
-                let mut s = lock(&self.sink);
-                s.log(
-                    LogLevel::Error,
-                    &format!("plugin tool '{}' raised: {err}", self.name),
-                );
-                Ok(ToolOutput {
-                    is_error: true,
-                    text: err.to_string(),
-                    structured: None,
-                    terminate: false,
-                })
-            }
+        let name = self.name.clone();
+        let sink = Arc::clone(&self.sink);
+        let key = Arc::clone(&self.handler_key);
+        let reply = self.host.call_cancellable(cx.cancel_flag(), move |lua| {
+            run_tool(lua, &name, &sink, &key, &input)
+        });
+        match reply {
+            Ok(Some(result)) => result,
+            Ok(None) => Err(ToolError::Cancelled),
+            Err(e) => Err(ToolError::Other(format!(
+                "plugin tool '{}': {e}",
+                self.name
+            ))),
+        }
+    }
+}
+
+fn run_tool(
+    lua: &Lua,
+    name: &str,
+    sink: &SharedHostLog,
+    handler_key: &RegistryKey,
+    input: &serde_json::Value,
+) -> Result<ToolOutput, ToolError> {
+    let func: Function = lua
+        .registry_value(handler_key)
+        .map_err(|e| ToolError::Other(format!("plugin tool '{name}': {e}")))?;
+    let lua_input = json_to_lua(lua, input).map_err(|e| ToolError::InvalidInput(e.to_string()))?;
+    match watchdog::run(lua, watchdog::BUDGET, || func.call::<Value>(lua_input)) {
+        Ok(returned) => Ok(value_to_output(returned)),
+        Err(err) => {
+            let mut s = lock(sink);
+            s.log(
+                LogLevel::Error,
+                &format!("plugin tool '{name}' raised: {err}"),
+            );
+            Ok(ToolOutput {
+                is_error: true,
+                text: err.to_string(),
+                structured: None,
+                terminate: false,
+            })
         }
     }
 }
@@ -178,37 +197,39 @@ fn table_to_output(table: &Table) -> ToolOutput {
 
 /// Install `kage.register_tool` on the running Lua state. The closure
 /// pushes each registered [`LuaTool`] into `registered`, which the host
-/// later drains via [`PluginRuntime::registered_tools`].
-pub fn install_register_tool(
+/// later drains via [`crate::PluginRuntime::registered_tools`].
+pub(crate) fn install_register_tool(
     lua: &Lua,
-    shared_lua: SharedLua,
+    host: WeakHost,
     sink: SharedHostLog,
-    registered: RegisteredTools,
+    registered: &RegisteredTools,
 ) -> Result<(), PluginError> {
-    install_tool_fn(lua, shared_lua, sink, registered, "register_tool")
+    install_tool_fn(lua, host, sink, registered, "register_tool")
 }
 
 /// Install `kage.override_tool` on the running Lua state. Semantically
 /// identical to `register_tool` from the plugin's perspective; the host
-/// distinguishes overrides via [`PluginRuntime::registered_tool_overrides`]
-/// and replaces matching built-ins (logging a warning when no
-/// existing tool with the supplied name is present).
-pub fn install_override_tool(
+/// distinguishes overrides via
+/// [`crate::PluginRuntime::registered_tool_overrides`] and replaces
+/// matching built-ins (logging a warning when no existing tool with the
+/// supplied name is present).
+pub(crate) fn install_override_tool(
     lua: &Lua,
-    shared_lua: SharedLua,
+    host: WeakHost,
     sink: SharedHostLog,
-    overrides: RegisteredTools,
+    overrides: &RegisteredTools,
 ) -> Result<(), PluginError> {
-    install_tool_fn(lua, shared_lua, sink, overrides, "override_tool")
+    install_tool_fn(lua, host, sink, overrides, "override_tool")
 }
 
 fn install_tool_fn(
     lua: &Lua,
-    shared_lua: SharedLua,
+    host: WeakHost,
     sink: SharedHostLog,
-    bucket: RegisteredTools,
+    bucket: &RegisteredTools,
     fn_name: &'static str,
 ) -> Result<(), PluginError> {
+    let bucket = Arc::downgrade(bucket);
     let kage: Table = lua.globals().get("kage")?;
     kage.set(
         fn_name,
@@ -226,11 +247,11 @@ fn install_tool_fn(
                 description,
                 schema,
                 risk,
-                lua: shared_lua.clone(),
+                host: host.upgrade()?,
                 sink: sink.clone(),
                 handler_key: Arc::new(key),
             };
-            bucket
+            host::upgrade(&bucket)?
                 .lock()
                 .map_err(|_| mlua::Error::external("plugin tools registry poisoned"))?
                 .push(Arc::new(tool) as Arc<dyn Tool>);

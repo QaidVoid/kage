@@ -13,19 +13,36 @@
 //! This deliberately reuses [`ChromeLine`] / [`crate::chrome`]'s
 //! parser so authors learn one return shape for every plugin-drawn
 //! surface (header, footer, block).
+//!
+//! One renderer paints every block of its kind, so output is retained
+//! per distinct payload. The host's render call never runs Lua: a
+//! payload seen before returns its retained lines at once. A new
+//! payload is computed on the Lua owner thread, waiting briefly only
+//! when the owner is idle; while the owner is busy it yields no lines
+//! and the redraw flag is raised once the owner frees up. A renderer is
+//! a pure function of its payload, so retained lines are never
+//! refreshed on a timer.
 
-use std::collections::BTreeMap;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use kage_core::sync::lock;
 
-use mlua::{Function, Lua, Table, Value};
+use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog, json_to_lua};
 use crate::chrome::{ChromeLine, parse_lines};
 use crate::error::PluginError;
-use crate::runtime::SharedLua;
+use crate::host::{self, LuaHost, WeakHost};
+use crate::retained::COLD_WAIT;
 use crate::watchdog;
+
+/// Payloads retained per generation. Two generations are kept, so a
+/// renderer holds at most twice this many outputs.
+const GENERATION: usize = 256;
 
 /// Shared map of custom block kind -> its Lua renderer. The host
 /// snapshots this after load and registers each into the TUI's
@@ -41,9 +58,10 @@ pub fn shared_block_renderers() -> SharedBlockRenderers {
 /// A custom-block renderer defined in Lua.
 pub struct LuaBlockRenderer {
     kind: String,
-    lua: SharedLua,
+    host: LuaHost,
     sink: SharedHostLog,
-    handler_key: Arc<mlua::RegistryKey>,
+    handler_key: Arc<RegistryKey>,
+    cache: Arc<Mutex<BlockCache>>,
 }
 
 impl std::fmt::Debug for LuaBlockRenderer {
@@ -61,47 +79,114 @@ impl LuaBlockRenderer {
         &self.kind
     }
 
-    /// Call into Lua with a host-built `block` payload (a JSON object
-    /// the host shapes per block variant: always `kind` + `width`,
-    /// plus `text` / `name` / `output` / `folded` / ... as relevant).
-    /// A Lua error, poisoned mutex, or non-conforming return logs to
-    /// the sink and yields no lines; the host then paints the
-    /// built-in block so a broken renderer never blanks the
-    /// conversation silently.
+    /// Styled lines for a host-built `block` payload (a JSON object the
+    /// host shapes per block variant: always `kind` + `width`, plus
+    /// `text` / `name` / `output` / `folded` / ... as relevant).
+    ///
+    /// Returns retained lines for a payload rendered before. Empty
+    /// output means the payload is not computed yet (the owner thread
+    /// is busy), the Lua renderer raised (logged to the sink), or it
+    /// returned a non-conforming value; the host then paints its
+    /// fallback so a broken renderer never blanks the conversation
+    /// silently.
     #[must_use]
     pub fn render(&self, payload: &serde_json::Value) -> Vec<ChromeLine> {
-        let Ok(lua) = self.lua.try_lock() else {
+        let key = payload_key(payload);
+        let mut cache = lock(&self.cache);
+        if let Some(lines) = cache.get(key) {
+            return lines;
+        }
+        if cache.pending.contains(&key) {
+            return Vec::new();
+        }
+        if !self.host.is_idle() {
+            self.host.note_missed_render();
+            return Vec::new();
+        }
+        cache.pending.insert(key);
+        drop(cache);
+
+        let target = Arc::clone(&self.cache);
+        let redraw = self.host.redraw_flag();
+        let kind = self.kind.clone();
+        let sink = Arc::clone(&self.sink);
+        let handler = Arc::clone(&self.handler_key);
+        let payload = payload.clone();
+        let queued = self.host.queue(move |lua| {
+            let lines = render_block(lua, &kind, &sink, &handler, &payload);
+            let mut cache = lock(&target);
+            cache.pending.remove(&key);
+            cache.insert(key, lines);
+            redraw.store(true, Ordering::SeqCst);
+        });
+        let Ok(done) = queued else {
+            lock(&self.cache).pending.remove(&key);
             return Vec::new();
         };
-        let func: Function = match lua.registry_value(&self.handler_key) {
-            Ok(f) => f,
-            Err(e) => {
-                self.log_error(&e);
-                return Vec::new();
-            }
-        };
-        let block = match json_to_lua(&lua, payload) {
-            Ok(v) => v,
-            Err(e) => {
-                self.log_error(&e);
-                return Vec::new();
-            }
-        };
-        match watchdog::run(&lua, watchdog::BUDGET, || func.call::<Value>(block)) {
-            Ok(value) => parse_lines(&value),
-            Err(e) => {
-                self.log_error(&e);
-                Vec::new()
-            }
-        }
+        let _ = done.recv_timeout(COLD_WAIT);
+        lock(&self.cache).get(key).unwrap_or_default()
     }
+}
 
-    fn log_error(&self, e: &dyn std::fmt::Display) {
-        let mut s = lock(&self.sink);
+fn render_block(
+    lua: &Lua,
+    kind: &str,
+    sink: &SharedHostLog,
+    handler_key: &RegistryKey,
+    payload: &serde_json::Value,
+) -> Vec<ChromeLine> {
+    let fail = |e: &dyn std::fmt::Display| {
+        let mut s = lock(sink);
         s.log(
             LogLevel::Error,
-            &format!("plugin block renderer `{}`: {e}", self.kind),
+            &format!("plugin block renderer `{kind}`: {e}"),
         );
+        Vec::new()
+    };
+    let func: Function = match lua.registry_value(handler_key) {
+        Ok(f) => f,
+        Err(e) => return fail(&e),
+    };
+    let block = match json_to_lua(lua, payload) {
+        Ok(v) => v,
+        Err(e) => return fail(&e),
+    };
+    match watchdog::run(lua, watchdog::BUDGET, || func.call::<Value>(block)) {
+        Ok(value) => parse_lines(&value),
+        Err(e) => fail(&e),
+    }
+}
+
+fn payload_key(payload: &serde_json::Value) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    payload.to_string().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Retained lines by payload hash, bounded by dropping the older of two
+/// generations when the current one fills up.
+#[derive(Default)]
+struct BlockCache {
+    current: HashMap<u64, Vec<ChromeLine>>,
+    previous: HashMap<u64, Vec<ChromeLine>>,
+    pending: HashSet<u64>,
+}
+
+impl BlockCache {
+    fn get(&mut self, key: u64) -> Option<Vec<ChromeLine>> {
+        if let Some(lines) = self.current.get(&key) {
+            return Some(lines.clone());
+        }
+        let lines = self.previous.remove(&key)?;
+        self.insert(key, lines.clone());
+        Some(lines)
+    }
+
+    fn insert(&mut self, key: u64, lines: Vec<ChromeLine>) {
+        if self.current.len() >= GENERATION {
+            self.previous = std::mem::take(&mut self.current);
+        }
+        self.current.insert(key, lines);
     }
 }
 
@@ -112,12 +197,13 @@ impl LuaBlockRenderer {
 /// # Errors
 ///
 /// Returns [`PluginError`] if the `kage` global is missing.
-pub fn install_block_renderers(
+pub(crate) fn install_block_renderers(
     lua: &Lua,
-    shared_lua: SharedLua,
+    host: WeakHost,
     sink: SharedHostLog,
-    registered: SharedBlockRenderers,
+    registered: &SharedBlockRenderers,
 ) -> Result<(), PluginError> {
+    let registered = Arc::downgrade(registered);
     let kage: Table = lua.globals().get("kage")?;
     kage.set(
         "register_block_renderer",
@@ -127,6 +213,7 @@ pub fn install_block_renderers(
                     "kage.register_block_renderer: `kind` is required",
                 ));
             }
+            let registered = host::upgrade(&registered)?;
             let mut map = registered
                 .lock()
                 .map_err(|_| mlua::Error::external("plugin block renderers map poisoned"))?;
@@ -141,9 +228,10 @@ pub fn install_block_renderers(
                         kind.clone(),
                         Arc::new(LuaBlockRenderer {
                             kind,
-                            lua: shared_lua.clone(),
+                            host: host.upgrade()?,
                             sink: sink.clone(),
                             handler_key: Arc::new(key),
+                            cache: Arc::default(),
                         }),
                     );
                     Ok(())

@@ -16,11 +16,15 @@
 //! ```
 //! The host pulls the provider stack via
 //! [`crate::PluginRuntime::registered_autocomplete_providers`] and, on
-//! each input change, calls [`LuaAutocompleteProvider::complete`] inside
-//! the same Lua mutex tool dispatch uses (synchronous, like
-//! [`crate::widgets::LuaWidget`]). Providers are consulted in reverse
-//! registration order so the most recently added one wins; this is the
-//! foundation for `@file`-style references.
+//! each input change, calls [`LuaAutocompleteProvider::complete`], which
+//! runs the provider on the Lua owner thread. Providers are consulted in
+//! reverse registration order so the most recently added one wins; this
+//! is the foundation for `@file`-style references.
+//!
+//! The host calls `complete` from its input path, so it never waits on
+//! a busy owner thread: while other plugin work is queued or running
+//! it yields no items, and an idle owner gets [`COMPLETE_DEADLINE`] to
+//! answer.
 //!
 //! `complete` returns an array of item tables. `value` is the only
 //! required field (an item missing it is dropped). `label` defaults to
@@ -31,6 +35,7 @@
 //! error logs to the host sink and yields no items.
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use kage_core::sync::lock;
 
@@ -38,8 +43,12 @@ use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog};
 use crate::error::PluginError;
-use crate::runtime::SharedLua;
+use crate::host::{self, LuaHost, WeakHost};
 use crate::watchdog;
+
+/// Longest the input path waits for an idle owner thread to answer a
+/// completion request.
+pub const COMPLETE_DEADLINE: Duration = Duration::from_millis(100);
 
 /// One completion candidate a provider produced.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -69,7 +78,7 @@ pub fn registered_autocomplete_providers() -> RegisteredAutocompleteProviders {
 /// A completion provider defined in Lua.
 pub struct LuaAutocompleteProvider {
     name: String,
-    lua: SharedLua,
+    host: LuaHost,
     sink: SharedHostLog,
     handler_key: Arc<RegistryKey>,
 }
@@ -92,54 +101,64 @@ impl LuaAutocompleteProvider {
 
     /// Call into Lua to produce completions for `prefix`, passing the
     /// full input `text` and the `cursor` byte offset as a context
-    /// table. A Lua error, a poisoned Lua mutex, or a non-conforming
-    /// return logs to the sink and yields no items, so a broken
-    /// provider degrades to "no suggestions" rather than failing the
-    /// input.
+    /// table. A Lua error or a non-conforming return logs to the sink
+    /// and yields no items, so a broken provider degrades to "no
+    /// suggestions" rather than failing the input. A busy owner thread
+    /// or no answer within [`COMPLETE_DEADLINE`] also yields no items.
     #[must_use]
     pub fn complete(&self, prefix: &str, text: &str, cursor: usize) -> Vec<AutocompleteItem> {
-        let Ok(lua) = self.lua.try_lock() else {
-            return Vec::new();
-        };
-        let func: Function = match lua.registry_value(&self.handler_key) {
-            Ok(f) => f,
-            Err(e) => {
-                self.log_error(&e);
-                return Vec::new();
-            }
-        };
-        let ctx = match lua.create_table() {
-            Ok(t) => t,
-            Err(e) => {
-                self.log_error(&e);
-                return Vec::new();
-            }
-        };
-        if let Err(e) = ctx
-            .set("text", text)
-            .and_then(|()| ctx.set("cursor", cursor))
-        {
-            self.log_error(&e);
+        if !self.host.is_idle() {
             return Vec::new();
         }
-        match watchdog::run(&lua, watchdog::BUDGET, || {
-            func.call::<Value>((prefix.to_owned(), ctx))
-        }) {
-            Ok(Value::Table(items)) => parse_items(&items),
-            Ok(_) => Vec::new(),
-            Err(e) => {
-                self.log_error(&e);
-                Vec::new()
-            }
-        }
+        let name = self.name.clone();
+        let sink = Arc::clone(&self.sink);
+        let handler = Arc::clone(&self.handler_key);
+        let (prefix, text) = (prefix.to_owned(), text.to_owned());
+        self.host
+            .call_within(COMPLETE_DEADLINE, move |lua| {
+                complete_on(lua, &name, &sink, &handler, &prefix, &text, cursor)
+            })
+            .unwrap_or_default()
     }
+}
 
-    fn log_error(&self, e: &dyn std::fmt::Display) {
-        let mut s = lock(&self.sink);
+fn complete_on(
+    lua: &Lua,
+    name: &str,
+    sink: &SharedHostLog,
+    handler_key: &RegistryKey,
+    prefix: &str,
+    text: &str,
+    cursor: usize,
+) -> Vec<AutocompleteItem> {
+    let fail = |e: &dyn std::fmt::Display| {
+        let mut s = lock(sink);
         s.log(
             LogLevel::Error,
-            &format!("plugin autocomplete '{}': {e}", self.name),
+            &format!("plugin autocomplete '{name}': {e}"),
         );
+        Vec::new()
+    };
+    let func: Function = match lua.registry_value(handler_key) {
+        Ok(f) => f,
+        Err(e) => return fail(&e),
+    };
+    let ctx = match lua.create_table() {
+        Ok(t) => t,
+        Err(e) => return fail(&e),
+    };
+    if let Err(e) = ctx
+        .set("text", text)
+        .and_then(|()| ctx.set("cursor", cursor))
+    {
+        return fail(&e);
+    }
+    match watchdog::run(lua, watchdog::BUDGET, || {
+        func.call::<Value>((prefix.to_owned(), ctx))
+    }) {
+        Ok(Value::Table(items)) => parse_items(&items),
+        Ok(_) => Vec::new(),
+        Err(e) => fail(&e),
     }
 }
 
@@ -206,12 +225,13 @@ fn parse_range(t: &Table) -> Option<(usize, usize)> {
 /// re-adding a provider with the same `name` replaces the existing one
 /// in place so a plugin can hot-reload its definition without changing
 /// stack order.
-pub fn install_add_autocomplete_provider(
+pub(crate) fn install_add_autocomplete_provider(
     lua: &Lua,
-    shared_lua: SharedLua,
+    host: WeakHost,
     sink: SharedHostLog,
-    registered: RegisteredAutocompleteProviders,
+    registered: &RegisteredAutocompleteProviders,
 ) -> Result<(), PluginError> {
+    let registered = Arc::downgrade(registered);
     let kage: Table = lua.globals().get("kage")?;
     kage.set(
         "add_autocomplete_provider",
@@ -221,10 +241,11 @@ pub fn install_add_autocomplete_provider(
             let handler_key = lua.create_registry_value(complete)?;
             let provider = Arc::new(LuaAutocompleteProvider {
                 name: name.clone(),
-                lua: shared_lua.clone(),
+                host: host.upgrade()?,
                 sink: sink.clone(),
                 handler_key: Arc::new(handler_key),
             });
+            let registered = host::upgrade(&registered)?;
             let mut list = registered
                 .lock()
                 .map_err(|_| mlua::Error::external("plugin autocomplete registry poisoned"))?;

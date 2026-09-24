@@ -11,8 +11,9 @@ fn sandbox_strips_dangerous_globals() {
         } else {
             format!("return {path} == nil or {path}.{key} == nil")
         };
-        let lua = rt.lock_lua();
-        let v: bool = lua.load(&chunk).eval().unwrap_or(false);
+        let v = rt
+            .with_lua(move |lua| lua.load(&chunk).eval::<bool>().unwrap_or(false))
+            .unwrap();
         assert!(v, "sandbox failed to remove {path}.{key}");
     }
 }
@@ -20,28 +21,23 @@ fn sandbox_strips_dangerous_globals() {
 #[test]
 fn benign_library_functions_still_work() {
     let rt = PluginRuntime::new().unwrap();
-    let lua = rt.lock_lua();
-    let v: i64 = lua.load("return string.len('hello')").eval().unwrap();
-    assert_eq!(v, 5);
-    let v: f64 = lua.load("return math.sqrt(81)").eval().unwrap();
-    assert!((v - 9.0).abs() < 1e-9);
+    let v = rt.eval("return string.len('hello')").unwrap();
+    assert_eq!(v.as_integer(), Some(5));
+    let v = rt.eval("return math.sqrt(81)").unwrap();
+    assert!((v.as_number().unwrap() - 9.0).abs() < 1e-9);
 }
 
 #[test]
 fn os_execute_call_errors_after_sandboxing() {
     let rt = PluginRuntime::new().unwrap();
-    let lua = rt.lock_lua();
-    let res: Result<mlua::Value, _> = lua.load("return os.execute('echo hi')").eval();
-    assert!(res.is_err());
+    assert!(rt.eval("return os.execute('echo hi')").is_err());
 }
 
 #[test]
 fn dofile_and_loadfile_are_unreachable() {
     let rt = PluginRuntime::new().unwrap();
-    let lua = rt.lock_lua();
     for chunk in ["dofile('/etc/passwd')", "loadfile('/etc/passwd')"] {
-        let res: Result<mlua::Value, _> = lua.load(chunk).eval();
-        assert!(res.is_err(), "expected error from {chunk}");
+        assert!(rt.eval(chunk).is_err(), "expected error from {chunk}");
     }
 }
 

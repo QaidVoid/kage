@@ -15,9 +15,13 @@
 //! unusable, so the host still honors its hard `ctrl+q` quit hatch
 //! ahead of these hooks.
 //!
-//! Handlers run synchronously inside the shared Lua mutex (like
-//! [`crate::widgets::LuaWidget`]); a handler error or non-boolean
-//! return logs to the host sink and is treated as "not consumed".
+//! Handlers run on the Lua owner thread while the host waits up to
+//! [`INPUT_DEADLINE`] for the verdict. If none arrives in time (the
+//! owner is busy with a long Lua tool, or the hook itself is slow), the
+//! key passes through unexamined and a one-time warning goes to the
+//! host log. A handler error or
+//! non-boolean return logs to the host sink and is treated as "not
+//! consumed".
 //!
 //! The handler receives a key descriptor table:
 //! ```lua
@@ -28,8 +32,9 @@
 //!   ctrl = false, alt = false, shift = false }
 //! ```
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use kage_core::sync::lock;
 
@@ -37,8 +42,12 @@ use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog, json_to_lua};
 use crate::error::PluginError;
-use crate::runtime::SharedLua;
+use crate::host::{self, LuaHost, WeakHost};
 use crate::watchdog;
+
+/// Longest the host waits for a hook's verdict before passing the key
+/// through.
+pub const INPUT_DEADLINE: Duration = Duration::from_millis(20);
 
 /// Shared list of active terminal-input hooks, in registration order.
 /// The host snapshots it per keystroke so an `off` (or a hook
@@ -54,9 +63,10 @@ pub fn registered_terminal_hooks() -> RegisteredTerminalHooks {
 /// A raw terminal-input handler defined in Lua.
 pub struct LuaTerminalHook {
     id: u64,
-    lua: SharedLua,
+    host: LuaHost,
     sink: SharedHostLog,
     handler_key: Arc<RegistryKey>,
+    warned: AtomicBool,
 }
 
 impl std::fmt::Debug for LuaTerminalHook {
@@ -77,56 +87,76 @@ impl LuaTerminalHook {
 
     /// Offer a key descriptor to the handler. Returns `true` only when
     /// the handler explicitly returned a truthy value, meaning the
-    /// host should consume the event. A poisoned mutex, a Lua error,
-    /// or a non-boolean return logs and yields `false` so a broken
-    /// hook cannot silently eat every keystroke.
+    /// host should consume the event. A Lua error or a non-boolean
+    /// return logs and yields `false` so a broken hook cannot silently
+    /// eat every keystroke. No verdict within [`INPUT_DEADLINE`] also
+    /// yields `false`; the first such timeout logs a warning.
     #[must_use]
     pub fn handle(&self, event: &serde_json::Value) -> bool {
-        let Ok(lua) = self.lua.try_lock() else {
-            return false;
-        };
-        let func: Function = match lua.registry_value(&self.handler_key) {
-            Ok(f) => f,
-            Err(e) => {
-                self.log_error(&e);
-                return false;
+        let id = self.id;
+        let sink = Arc::clone(&self.sink);
+        let handler = Arc::clone(&self.handler_key);
+        let event = event.clone();
+        let verdict = self.host.call_within(INPUT_DEADLINE, move |lua| {
+            run_hook(lua, id, &sink, &handler, &event)
+        });
+        verdict.unwrap_or_else(|| {
+            if !self.warned.swap(true, Ordering::SeqCst) {
+                let mut s = lock(&self.sink);
+                s.log(
+                    LogLevel::Warn,
+                    &format!(
+                        "plugin on_terminal_input #{id}: no verdict within {} ms \
+                         (Lua thread busy or hook too slow); passing keys through",
+                        INPUT_DEADLINE.as_millis()
+                    ),
+                );
             }
-        };
-        let payload = match json_to_lua(&lua, event) {
-            Ok(v) => v,
-            Err(e) => {
-                self.log_error(&e);
-                return false;
-            }
-        };
-        match watchdog::run(&lua, watchdog::BUDGET, || func.call::<Value>(payload)) {
-            Ok(Value::Boolean(b)) => b,
-            Ok(_) => false,
-            Err(e) => {
-                self.log_error(&e);
-                false
-            }
-        }
+            false
+        })
     }
+}
 
-    fn log_error(&self, e: &dyn std::fmt::Display) {
-        let mut s = lock(&self.sink);
+fn run_hook(
+    lua: &Lua,
+    id: u64,
+    sink: &SharedHostLog,
+    handler_key: &RegistryKey,
+    event: &serde_json::Value,
+) -> bool {
+    let fail = |e: &dyn std::fmt::Display| {
+        let mut s = lock(sink);
         s.log(
             LogLevel::Error,
-            &format!("plugin on_terminal_input #{}: {e}", self.id),
+            &format!("plugin on_terminal_input #{id}: {e}"),
         );
+        false
+    };
+    let func: Function = match lua.registry_value(handler_key) {
+        Ok(f) => f,
+        Err(e) => return fail(&e),
+    };
+    let payload = match json_to_lua(lua, event) {
+        Ok(v) => v,
+        Err(e) => return fail(&e),
+    };
+    match watchdog::run(lua, watchdog::BUDGET, || func.call::<Value>(payload)) {
+        Ok(Value::Boolean(b)) => b,
+        Ok(_) => false,
+        Err(e) => fail(&e),
     }
 }
 
 /// Install `kage.on_terminal_input` on the running Lua state. Each
 /// call registers a handler and returns an `off` function that removes
 /// exactly that handler when invoked (calling it twice is harmless).
-pub fn install_on_terminal_input(
+pub(crate) fn install_on_terminal_input(
     lua: &Lua,
-    shared_lua: SharedLua,
+    host: WeakHost,
     sink: SharedHostLog,
-    registered: RegisteredTerminalHooks,
+    registered: &RegisteredTerminalHooks,
 ) -> Result<(), PluginError> {
+    let registered = Arc::downgrade(registered);
     let kage: Table = lua.globals().get("kage")?;
     let next_id = Arc::new(AtomicU64::new(0));
     kage.set(
@@ -136,18 +166,20 @@ pub fn install_on_terminal_input(
             let handler_key = lua.create_registry_value(handler)?;
             let hook = Arc::new(LuaTerminalHook {
                 id,
-                lua: shared_lua.clone(),
+                host: host.upgrade()?,
                 sink: sink.clone(),
                 handler_key: Arc::new(handler_key),
+                warned: AtomicBool::new(false),
             });
-            registered
+            host::upgrade(&registered)?
                 .lock()
                 .map_err(|_| mlua::Error::external("plugin terminal-hook registry poisoned"))?
                 .push(hook);
-            let off_registry = Arc::clone(&registered);
+            let off_registry = registered.clone();
             let off = lua.create_function(move |_, ()| {
-                let mut list = lock(&off_registry);
-                list.retain(|h| h.id != id);
+                if let Some(list) = off_registry.upgrade() {
+                    lock(&list).retain(|h| h.id != id);
+                }
                 Ok(())
             })?;
             Ok(off)

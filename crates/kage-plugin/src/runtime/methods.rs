@@ -1,5 +1,7 @@
 //! `PluginRuntime` inherent methods: eval, dispatch, registration snapshots, reload.
 
+use std::sync::atomic::AtomicBool;
+
 use kage_core::sync::lock;
 
 #[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
@@ -28,18 +30,29 @@ impl PluginRuntime {
         }
     }
 
-    /// Lock the underlying Lua state. Held only as long as the returned
-    /// guard is alive; the Tool dispatch path uses this same lock so
-    /// plugin-defined tools serialize against runtime calls.
-    pub fn lock_lua(&self) -> MutexGuard<'_, Lua> {
-        lock(&self.lua)
+    /// Run `f` against the Lua state on its owner thread and wait for
+    /// the result. The state is never reachable from any other thread;
+    /// this is the escape hatch for hosts and tests that need raw Lua.
+    /// `f` must not call back into this runtime, or the owner thread
+    /// would wait on itself.
+    pub fn with_lua<R: Send + 'static>(
+        &self,
+        f: impl FnOnce(&Lua) -> R + Send + 'static,
+    ) -> Result<R, PluginError> {
+        self.host.call(f)
     }
 
-    /// Cloneable handle to the shared Lua state, for tool implementations
-    /// that need to live independently of the runtime borrow.
+    /// Flag the owner thread sets when retained render output (a
+    /// widget, a header or footer row, a block renderer) changed, or
+    /// when a render that found the owner busy can now be computed.
+    /// Render calls return retained output at once and recompute in
+    /// the background, so a host that wants fresh output promptly polls
+    /// this on its tick with `swap(false, ..)` and redraws when it was
+    /// set. Ignoring it is safe: output then refreshes on the host's own
+    /// redraw cadence.
     #[must_use]
-    pub fn shared_lua(&self) -> SharedLua {
-        Arc::clone(&self.lua)
+    pub fn redraw_flag(&self) -> Arc<AtomicBool> {
+        self.host.redraw_flag()
     }
 
     /// Cloneable handle to the host log sink.
@@ -54,7 +67,7 @@ impl PluginRuntime {
     /// lists `[plugins] enabled = ["trusted"]` loads nothing else.
     #[must_use]
     pub fn is_plugin_enabled(&self, stem: &str) -> bool {
-        self.enabled.is_empty() || self.enabled.iter().any(|name| name == stem)
+        self.eval.is_enabled(stem)
     }
 
     /// Execute a chunk of Lua source against the shared globals.
@@ -63,10 +76,11 @@ impl PluginRuntime {
     /// files are loaded through [`eval_plugin`](Self::eval_plugin)
     /// instead, so their top-level definitions stay private.
     pub fn eval(&self, source: &str) -> Result<mlua::Value, PluginError> {
-        let lua = self.lock_lua();
-        watchdog::run(&lua, self.script_budget, || {
-            lua.load(source).eval::<mlua::Value>()
-        })
+        let source = source.to_owned();
+        let budget = self.eval.script_budget;
+        self.host.call(move |lua| {
+            watchdog::run(lua, budget, || lua.load(&source).eval::<mlua::Value>())
+        })?
     }
 
     /// Evaluate a plugin source chunk in its own `_ENV`.
@@ -79,45 +93,32 @@ impl PluginRuntime {
     /// this for every `*.lua` file with the file stem as `name`; the
     /// environment is created once per name and reused.
     pub fn eval_plugin(&self, name: &str, source: &str) -> Result<mlua::Value, PluginError> {
-        let lua = self.lock_lua();
-        let store_path = self
-            .state_dir
-            .as_deref()
-            .map(|dir| store::store_path(dir, name));
-        let env = plugin_env(
-            &lua,
-            name,
-            &self.plugin_envs,
-            self.plugin_config.get(name),
-            store_path,
-        )?;
-        {
-            let mut cur = lock(&self.current_plugin);
-            *cur = Some(name.to_owned());
-        }
-        let result = watchdog::run(&lua, self.script_budget, || {
-            lua.load(source)
-                .set_name(name)
-                .set_environment(env)
-                .eval::<mlua::Value>()
-        })?;
-        {
-            let mut cur = lock(&self.current_plugin);
-            *cur = None;
-        }
-        Ok(result)
+        let eval = Arc::clone(&self.eval);
+        let name = name.to_owned();
+        let source = source.to_owned();
+        self.host
+            .call(move |lua| eval.eval_plugin(lua, &name, &source))?
     }
 
     /// Fire every handler subscribed to `event_name` with `payload`.
+    ///
+    /// Synchronous: it returns once every handler ran. Callers read the
+    /// handlers' side effects right after (queued messages, session
+    /// ops, compact or fork requests, host-log lines) and surface the
+    /// returned error, so a fire-and-forget dispatch would race them.
+    /// Dispatches from one thread run in call order.
     pub fn dispatch_event(
         &self,
         event_name: &str,
         payload: &serde_json::Value,
     ) -> Result<(), PluginError> {
-        let lua = self.lock_lua();
-        watchdog::run(&lua, self.script_budget, || {
-            events::dispatch(&lua, event_name, payload, &self.sink)
-        })
+        let (name, payload) = (event_name.to_owned(), payload.clone());
+        let (sink, budget) = (self.sink(), self.eval.script_budget);
+        self.host.call(move |lua| {
+            watchdog::run(lua, budget, || {
+                events::dispatch(lua, &name, &payload, &sink)
+            })
+        })?
     }
 
     /// Chain every handler subscribed to `event_name` and return the
@@ -128,10 +129,13 @@ impl PluginRuntime {
         event_name: &str,
         payload: serde_json::Value,
     ) -> Result<serde_json::Value, PluginError> {
-        let lua = self.lock_lua();
-        watchdog::run(&lua, self.script_budget, || {
-            events::dispatch_transform(&lua, event_name, payload, &self.sink)
-        })
+        let name = event_name.to_owned();
+        let (sink, budget) = (self.sink(), self.eval.script_budget);
+        self.host.call(move |lua| {
+            watchdog::run(lua, budget, || {
+                events::dispatch_transform(lua, &name, payload, &sink)
+            })
+        })?
     }
 
     /// Poll handlers subscribed to `event_name`; return `true` as soon as
@@ -141,10 +145,13 @@ impl PluginRuntime {
         event_name: &str,
         payload: &serde_json::Value,
     ) -> Result<bool, PluginError> {
-        let lua = self.lock_lua();
-        watchdog::run(&lua, self.script_budget, || {
-            events::dispatch_predicate(&lua, event_name, payload, &self.sink)
-        })
+        let (name, payload) = (event_name.to_owned(), payload.clone());
+        let (sink, budget) = (self.sink(), self.eval.script_budget);
+        self.host.call(move |lua| {
+            watchdog::run(lua, budget, || {
+                events::dispatch_predicate(lua, &name, &payload, &sink)
+            })
+        })?
     }
 
     /// Consult handlers subscribed to a session-op event. The first
@@ -155,26 +162,33 @@ impl PluginRuntime {
         event_name: &str,
         target: &str,
     ) -> Result<events::SessionOpDecision, PluginError> {
-        let lua = self.lock_lua();
-        watchdog::run(&lua, self.script_budget, || {
-            events::dispatch_session_op(&lua, event_name, target, &self.sink)
-        })
+        let (name, target) = (event_name.to_owned(), target.to_owned());
+        let (sink, budget) = (self.sink(), self.eval.script_budget);
+        self.host.call(move |lua| {
+            watchdog::run(lua, budget, || {
+                events::dispatch_session_op(lua, &name, &target, &sink)
+            })
+        })?
     }
 
     /// Fire every `resources_discover` handler and collect the aggregated
     /// directory paths. See [`events::dispatch_resources_discover`].
     pub fn discover_resources(&self) -> Result<events::DiscoveryEntries, PluginError> {
-        let lua = self.lock_lua();
-        watchdog::run(&lua, self.script_budget, || {
-            events::dispatch_resources_discover(&lua, &self.sink)
-        })
+        let (sink, budget) = (self.sink(), self.eval.script_budget);
+        self.host.call(move |lua| {
+            watchdog::run(lua, budget, || {
+                events::dispatch_resources_discover(lua, &sink)
+            })
+        })?
     }
 
     /// Number of handlers subscribed to `event_name`.
     #[must_use]
     pub fn handler_count(&self, event_name: &str) -> usize {
-        let lua = self.lock_lua();
-        events::handler_count(&lua, event_name)
+        let name = event_name.to_owned();
+        self.host
+            .call(move |lua| events::handler_count(lua, &name))
+            .unwrap_or(0)
     }
 
     /// Snapshot the tools registered by plugins so far. Each call returns
@@ -259,11 +273,16 @@ impl PluginRuntime {
     /// A watchdog overrun denies, like any other handler error.
     #[must_use]
     pub fn acp_permission(&self, payload: &serde_json::Value) -> Option<bool> {
-        let lua = self.lock_lua();
-        watchdog::run(&lua, self.script_budget, || {
-            Ok::<_, PluginError>(acp::decide(&lua, payload))
-        })
-        .unwrap_or(Some(false))
+        let payload = payload.clone();
+        let budget = self.eval.script_budget;
+        self.host
+            .call(move |lua| {
+                watchdog::run(lua, budget, || {
+                    Ok::<_, PluginError>(acp::decide(lua, &payload))
+                })
+            })
+            .and_then(|decision| decision)
+            .unwrap_or(Some(false))
     }
 
     /// Snapshot the status-bar widgets registered by plugins so far.
@@ -513,50 +532,57 @@ impl PluginRuntime {
     /// parked until [`Self::bridge_resume`] / [`Self::bridge_cancel`] /
     /// [`Self::bridge_abort`].
     ///
-    /// Fails with [`PluginError::BridgeBusy`] if another coroutine is
-    /// already parked. The caller must not hold [`Self::lock_lua`] when
-    /// calling this; the bridge takes the lock itself.
+    /// Every step runs on the owner thread; the owner is free while the
+    /// coroutine is parked. Fails with [`PluginError::BridgeBusy`] if
+    /// another coroutine is already parked.
     pub fn bridge_call(
         &self,
         func: &mlua::Function,
         args: &[serde_json::Value],
     ) -> Result<BridgeStep, PluginError> {
-        let mut slot = lock(&self.bridge);
-        if slot.is_some() {
-            return Err(PluginError::BridgeBusy);
-        }
-        let lua = self.lock_lua();
-        let thread = lua.create_thread(func.clone())?;
-        watchdog::install_on_thread(&thread)?;
-        let resume_args = bridge::args_to_multi(&lua, args)?;
-        watchdog::run(&lua, self.script_budget, || {
-            bridge::step(thread, resume_args, &mut slot)
-        })
+        let func = func.clone();
+        let args = args.to_vec();
+        let bridge = Arc::clone(&self.bridge);
+        let budget = self.eval.script_budget;
+        self.host.call(move |lua| {
+            let mut slot = lock(&bridge);
+            if slot.is_some() {
+                return Err(PluginError::BridgeBusy);
+            }
+            let thread = lua.create_thread(func)?;
+            watchdog::install_on_thread(&thread)?;
+            let resume_args = bridge::args_to_multi(lua, &args)?;
+            watchdog::run(lua, budget, || bridge::step(thread, resume_args, &mut slot))
+        })?
     }
 
     /// Resume the parked coroutine, delivering `result` as the return
     /// value of the blocking call that suspended it. Returns the next
     /// step (done or suspended again).
     pub fn bridge_resume(&self, result: &serde_json::Value) -> Result<BridgeStep, PluginError> {
-        let mut slot = lock(&self.bridge);
-        let thread = slot.take().ok_or(PluginError::BridgeIdle)?;
-        let lua = self.lock_lua();
-        let resume_args = bridge::args_to_multi(&lua, std::slice::from_ref(result))?;
-        watchdog::run(&lua, self.script_budget, || {
-            bridge::step(thread, resume_args, &mut slot)
-        })
+        let result = result.clone();
+        self.bridge_step(move |lua| bridge::args_to_multi(lua, std::slice::from_ref(&result)))
     }
 
     /// Resume the parked coroutine signalling the host action was
     /// cancelled. The blocking call returns `nil` to the plugin (the
     /// `kage.ui.*` dialog contract for "user dismissed").
     pub fn bridge_cancel(&self) -> Result<BridgeStep, PluginError> {
-        let mut slot = lock(&self.bridge);
-        let thread = slot.take().ok_or(PluginError::BridgeIdle)?;
-        let lua = self.lock_lua();
-        watchdog::run(&lua, self.script_budget, || {
-            bridge::step(thread, mlua::MultiValue::new(), &mut slot)
-        })
+        self.bridge_step(|_| Ok(mlua::MultiValue::new()))
+    }
+
+    fn bridge_step(
+        &self,
+        resume_args: impl FnOnce(&Lua) -> Result<mlua::MultiValue, PluginError> + Send + 'static,
+    ) -> Result<BridgeStep, PluginError> {
+        let bridge = Arc::clone(&self.bridge);
+        let budget = self.eval.script_budget;
+        self.host.call(move |lua| {
+            let mut slot = lock(&bridge);
+            let thread = slot.take().ok_or(PluginError::BridgeIdle)?;
+            let resume_args = resume_args(lua)?;
+            watchdog::run(lua, budget, || bridge::step(thread, resume_args, &mut slot))
+        })?
     }
 
     /// Abandon the parked coroutine without resuming it (hard cancel,
@@ -565,7 +591,10 @@ impl PluginRuntime {
     #[must_use = "the boolean reports whether a coroutine was dropped; \
                   discard with `let _ =` if only the side effect matters"]
     pub fn bridge_abort(&self) -> bool {
-        lock(&self.bridge).take().is_some()
+        let bridge = Arc::clone(&self.bridge);
+        self.host
+            .call(move |_| lock(&bridge).take().is_some())
+            .unwrap_or(false)
     }
 
     /// `true` while a bridged coroutine is parked awaiting a host
@@ -581,6 +610,11 @@ impl PluginRuntime {
     /// turns: a stale plugin snapshot does not survive after this
     /// call.
     ///
+    /// The Lua side of the reload (clearing handlers, dropping plugin
+    /// environments, evaluating every file) runs as one job on the
+    /// owner thread, so no other plugin call observes a half-loaded
+    /// plugin set.
+    ///
     /// Tools, commands, and providers that the host has already handed
     /// to other registries via [`Self::registered_tools`] etc. continue
     /// to exist; this method only clears the runtime's own snapshot.
@@ -589,12 +623,6 @@ impl PluginRuntime {
         &self,
         dir: &std::path::Path,
     ) -> Result<crate::loader::LoadReport, PluginError> {
-        {
-            let lua = self.lock_lua();
-            let handlers: mlua::Table = lua.named_registry_value("kage._handlers")?;
-            handlers.clear()?;
-            acp::clear_permission_handler(&lua)?;
-        }
         lock(&self.tools).clear();
         lock(&self.tool_overrides).clear();
         lock(&self.widgets).clear();
@@ -606,48 +634,27 @@ impl PluginRuntime {
         lock(&self.acp_agents).clear();
         lock(&self.mcp_servers).clear();
         lock(&self.mcp_restart).clear();
-        {
-            let mut q = lock(&self.pending_messages);
-            q.clear();
-            let mut q = lock(&self.session_ops);
-            q.clear();
-            let mut parked = lock(&self.bridge);
-            *parked = None;
-            let mut slot = lock(&self.theme_request);
-            *slot = None;
-            let mut slot = lock(&self.compact_request);
-            *slot = None;
-            let mut slot = lock(&self.fork_request);
-            *slot = None;
-            let mut slot = lock(&self.switch_request);
-            *slot = None;
-            let mut slot = lock(&self.header);
-            *slot = None;
-            let mut slot = lock(&self.footer);
-            *slot = None;
-            let mut map = lock(&self.block_renderers);
-            map.clear();
-        }
+        lock(&self.pending_messages).clear();
+        lock(&self.session_ops).clear();
+        *lock(&self.theme_request) = None;
+        *lock(&self.compact_request) = None;
+        *lock(&self.fork_request) = None;
+        *lock(&self.switch_request) = None;
+        *lock(&self.header) = None;
+        *lock(&self.footer) = None;
+        lock(&self.block_renderers).clear();
         lock(&self.autocomplete).clear();
         lock(&self.terminal_hooks).clear();
-        // Drop every per-plugin environment so a reload is a clean
-        // slate: stale plugin globals do not survive, and a capability
-        // revoked in config is no longer attached to the old proxy.
-        // Lock lua before plugin_envs to match `eval_plugin`'s order.
-        {
-            let lua = self.lock_lua();
-            let mut envs = lock(&self.plugin_envs);
-            for (_, key) in envs.drain() {
-                let _ = lua.remove_registry_value(key);
-            }
-        }
-        {
-            let mut cur = lock(&self.current_plugin);
-            *cur = None;
-        }
-        // No guard from the clears above may still be held here:
-        // `load_dir` re-enters `eval_plugin`, which re-locks
-        // `current_plugin` and the registration targets.
-        crate::loader::load_dir(dir, self)
+        let eval = Arc::clone(&self.eval);
+        let bridge = Arc::clone(&self.bridge);
+        let dir = dir.to_path_buf();
+        self.host.call(move |lua| {
+            let handlers: mlua::Table = lua.named_registry_value("kage._handlers")?;
+            handlers.clear()?;
+            acp::clear_permission_handler(lua)?;
+            *lock(&bridge) = None;
+            eval.reset(lua);
+            crate::loader::load_on(lua, &dir, &eval)
+        })?
     }
 }

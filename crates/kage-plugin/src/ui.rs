@@ -289,8 +289,10 @@ mod tests {
     use crate::bridge::{BridgeStep, SuspendRequest};
 
     fn func(rt: &PluginRuntime, src: &str) -> mlua::Function {
-        let lua = rt.lock_lua();
-        lua.load(src).eval::<mlua::Function>().unwrap()
+        let src = src.to_owned();
+        rt.with_lua(move |lua| lua.load(&src).eval::<mlua::Function>())
+            .unwrap()
+            .unwrap()
     }
 
     #[test]

@@ -17,10 +17,12 @@
 //! drained after the handler returns. The host registers each
 //! [`LuaProvider`] with its `ProviderRegistry` so the agent loop can
 //! route `provider:model` strings into Lua.
+//!
+//! The handler runs as one job on the runtime's Lua owner thread and
+//! occupies it for the whole stream; see [`crate::PluginRuntime`].
 
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::thread;
 
 use kage_core::{CancelFlag, sync::lock};
 use kage_provider::{
@@ -31,7 +33,7 @@ use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog, json_to_lua, lua_to_json};
 use crate::error::PluginError;
-use crate::runtime::SharedLua;
+use crate::host::{self, LuaHost, WeakHost};
 use crate::watchdog;
 
 /// `Provider` whose `stream` runs inside the plugin runtime's Lua state.
@@ -39,7 +41,7 @@ pub struct LuaProvider {
     metadata: ProviderMetadata,
     models: Vec<ProviderModel>,
     preserves_thinking: bool,
-    lua: SharedLua,
+    host: LuaHost,
     sink: SharedHostLog,
     handler_key: Arc<RegistryKey>,
 }
@@ -65,16 +67,20 @@ impl Provider for LuaProvider {
         let req_value = serde_json::to_value(&req)
             .map_err(|e| ProviderError::Decode(format!("plugin provider: encode request: {e}")))?;
         let (tx, rx) = mpsc::channel::<Result<ProviderEvent, ProviderError>>();
-        let lua = self.lua.clone();
         let handler_key = self.handler_key.clone();
         let sink = self.sink.clone();
         let worker_cancel = cancel.clone();
-        thread::spawn(move || {
-            let tx_err = tx.clone();
-            if let Err(e) = run_handler(&lua, &handler_key, &sink, &req_value, &worker_cancel, tx) {
-                let _ = tx_err.send(Err(ProviderError::Decode(format!("plugin provider: {e}"))));
-            }
-        });
+        self.host
+            .submit(move |lua| {
+                let tx_err = tx.clone();
+                if let Err(e) =
+                    run_handler(lua, &handler_key, &sink, &req_value, &worker_cancel, tx)
+                {
+                    let _ =
+                        tx_err.send(Err(ProviderError::Decode(format!("plugin provider: {e}"))));
+                }
+            })
+            .map_err(|e| ProviderError::Decode(format!("plugin provider: {e}")))?;
         Ok(make_cancelable(
             Box::new(ChannelStream { rx }),
             cancel.clone(),
@@ -91,8 +97,8 @@ impl Provider for LuaProvider {
 }
 
 /// Channel-backed iterator returned from [`LuaProvider::stream`]. The
-/// receiver blocks on `recv()` until the worker thread either sends an
-/// event or drops the sender (which fuses the iterator).
+/// receiver blocks on `recv()` until the owner-thread job either sends
+/// an event or drops the sender (which fuses the iterator).
 struct ChannelStream {
     rx: mpsc::Receiver<Result<ProviderEvent, ProviderError>>,
 }
@@ -105,7 +111,7 @@ impl Iterator for ChannelStream {
     }
 }
 
-/// Worker-thread body: lock the Lua state, install an `emit` callback
+/// Owner-thread job body: install an `emit` callback
 /// that forwards each event onto `tx`, then call the registered Lua
 /// handler. A plugin that calls `emit` streams; one that returns a
 /// table or iterator function is drained after the handler returns.
@@ -118,18 +124,18 @@ impl Iterator for ChannelStream {
 /// the flag is set so a streaming handler unwinds, and the table and
 /// iterator drain loops break. The foreground iterator already returns
 /// `Cancelled` promptly through [`make_cancelable`]; this bounds the
-/// worker so it does not run on after the turn is abandoned.
+/// job so it does not hold the owner thread after the turn is
+/// abandoned.
 fn run_handler(
-    lua: &SharedLua,
+    lua: &Lua,
     handler_key: &Arc<RegistryKey>,
     sink: &SharedHostLog,
     req: &serde_json::Value,
     cancel: &CancelFlag,
     tx: mpsc::Sender<Result<ProviderEvent, ProviderError>>,
 ) -> Result<(), PluginError> {
-    let lua = lock(lua);
     let handler: Function = lua.registry_value(handler_key)?;
-    let lua_req = json_to_lua(&lua, req)?;
+    let lua_req = json_to_lua(lua, req)?;
 
     let tx = Arc::new(tx);
     let emit_tx = Arc::downgrade(&tx);
@@ -145,7 +151,7 @@ fn run_handler(
         Ok(())
     })?;
 
-    watchdog::run(&lua, watchdog::BUDGET, || {
+    watchdog::run(lua, watchdog::BUDGET, || {
         let result: Value = handler.call((lua_req, emit))?;
         match result {
             Value::Table(t) => {
@@ -249,12 +255,13 @@ pub fn registered_providers() -> RegisteredProviders {
 }
 
 /// Install `kage.register_provider` on the running Lua state.
-pub fn install_register_provider(
+pub(crate) fn install_register_provider(
     lua: &Lua,
-    shared_lua: SharedLua,
+    host: WeakHost,
     sink: SharedHostLog,
-    registered: RegisteredProviders,
+    registered: &RegisteredProviders,
 ) -> Result<(), PluginError> {
+    let registered = Arc::downgrade(registered);
     let kage: Table = lua.globals().get("kage")?;
     kage.set(
         "register_provider",
@@ -279,11 +286,11 @@ pub fn install_register_provider(
                 metadata,
                 models,
                 preserves_thinking,
-                lua: shared_lua.clone(),
+                host: host.upgrade()?,
                 sink: sink.clone(),
                 handler_key: Arc::new(key),
             };
-            registered
+            host::upgrade(&registered)?
                 .lock()
                 .map_err(|_| mlua::Error::external("plugin providers registry poisoned"))?
                 .push(Arc::new(provider));

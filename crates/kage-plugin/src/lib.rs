@@ -4,7 +4,9 @@
 //!
 //! Plugins extend kage at runtime in Lua. The host loads a [`PluginRuntime`]
 //! per process, evaluates plugin scripts against it, and dispatches loop
-//! events through the runtime so plugins can react.
+//! events through the runtime so plugins can react. The Lua state lives
+//! on one owner thread; render surfaces read retained output and never
+//! wait on it (see [`PluginRuntime::redraw_flag`]).
 
 pub mod acp;
 pub mod api;
@@ -19,6 +21,7 @@ pub mod error;
 pub mod events;
 pub(crate) mod exec;
 pub mod fs;
+pub(crate) mod host;
 pub mod http;
 pub mod keybindings;
 pub mod lifecycle;
@@ -26,6 +29,7 @@ pub mod loader;
 pub mod mcp;
 pub mod messages;
 pub mod providers;
+pub(crate) mod retained;
 pub mod runtime;
 pub(crate) mod session_write;
 pub mod sessions;
@@ -55,7 +59,7 @@ pub use lifecycle::{SharedCompactRequest, SharedUsage};
 pub use loader::{LoadReport, load_dir};
 pub use messages::{PendingMessage, PendingRole, SharedPendingMessages};
 pub use providers::LuaProvider;
-pub use runtime::{PluginRuntime, PluginRuntimeBuilder, SANDBOX_REMOVALS, SharedLua};
+pub use runtime::{PluginRuntime, PluginRuntimeBuilder, SANDBOX_REMOVALS};
 pub use session_write::{SharedSessionEntries, SharedSwitchRequest, SwitchTarget};
 pub use sessions::{PendingSessionOp, SharedForkRequest, SharedSessionList, SharedSessionOps};
 pub use status::SharedStatus;

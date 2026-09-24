@@ -172,8 +172,10 @@ fn parse_suspend(value: Value) -> Result<SuspendRequest, PluginError> {
 
 #[cfg(test)]
 fn function_from(rt: &crate::PluginRuntime, src: &str) -> mlua::Function {
-    let lua = rt.lock_lua();
-    lua.load(src).eval::<mlua::Function>().unwrap()
+    let src = src.to_owned();
+    rt.with_lua(move |lua| lua.load(&src).eval::<mlua::Function>())
+        .unwrap()
+        .unwrap()
 }
 
 #[cfg(test)]

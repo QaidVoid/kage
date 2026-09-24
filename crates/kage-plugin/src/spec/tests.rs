@@ -10,28 +10,37 @@ use crate::PluginRuntime;
 #[test]
 fn every_declared_func_resolves_in_a_built_runtime() {
     let rt = PluginRuntime::new().expect("runtime builds");
-    let lua = rt.lock_lua();
-    for f in surface().funcs {
-        let mut segments = f.path.split('.');
-        let root = segments.next().expect("path has a root");
-        let mut value: mlua::Value = lua
-            .globals()
-            .get(root)
-            .unwrap_or_else(|e| panic!("global `{root}` missing: {e}"));
-        for seg in segments {
-            let table = match value {
-                mlua::Value::Table(t) => t,
-                other => panic!("{}: `{seg}` parent is {other:?}, not a table", f.path),
-            };
-            value = table
-                .get(seg)
-                .unwrap_or_else(|e| panic!("{}: segment `{seg}` missing: {e}", f.path));
-        }
-        assert!(
-            matches!(value, mlua::Value::Function(_)),
-            "{} resolved to {value:?}, expected a function",
-            f.path
-        );
+    let paths: Vec<&'static str> = surface().funcs.iter().map(|f| f.path).collect();
+    let failures = rt
+        .with_lua(move |lua| {
+            paths
+                .into_iter()
+                .filter_map(|path| resolve_function(lua, path).err())
+                .collect::<Vec<_>>()
+        })
+        .unwrap();
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+fn resolve_function(lua: &mlua::Lua, path: &str) -> Result<(), String> {
+    let mut segments = path.split('.');
+    let root = segments.next().expect("path has a root");
+    let mut value: mlua::Value = lua
+        .globals()
+        .get(root)
+        .map_err(|e| format!("global `{root}` missing: {e}"))?;
+    for seg in segments {
+        let table = match value {
+            mlua::Value::Table(t) => t,
+            other => return Err(format!("{path}: `{seg}` parent is {other:?}, not a table")),
+        };
+        value = table
+            .get(seg)
+            .map_err(|e| format!("{path}: segment `{seg}` missing: {e}"))?;
+    }
+    match value {
+        mlua::Value::Function(_) => Ok(()),
+        other => Err(format!("{path} resolved to {other:?}, expected a function")),
     }
 }
 

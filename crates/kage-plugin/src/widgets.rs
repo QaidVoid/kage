@@ -9,14 +9,16 @@
 //! })
 //! ```
 //! and the host pulls a list of [`LuaWidget`]s via
-//! [`crate::PluginRuntime::registered_widgets`]. Each widget runs once
-//! per redraw inside the same Lua mutex the tool dispatch uses, so the
-//! host serializes widget calls against any in-flight tool.
+//! [`crate::PluginRuntime::registered_widgets`].
 //!
 //! `render(width)` returns a string that the TUI paints onto the
 //! status bar. The width hint lets a widget abbreviate (`main *`
 //! when room is tight, `branch: main (dirty)` when there's space).
 //! Anything other than a string is coerced to an empty render.
+//!
+//! The host's render call never runs Lua: it returns the last output
+//! computed on the Lua owner thread and queues a recompute when the
+//! width changed or the output is older than half a second.
 
 use std::sync::{Arc, Mutex};
 
@@ -26,28 +28,27 @@ use mlua::{Function, Lua, RegistryKey, Table};
 
 use crate::api::{LogLevel, SharedHostLog};
 use crate::error::PluginError;
-use crate::runtime::SharedLua;
+use crate::host::{self, LuaHost, WeakHost};
+use crate::retained::Retained;
 use crate::watchdog;
 
 /// Shared collection of widgets registered by plugins.
-pub type RegisteredWidgets = Arc<std::sync::Mutex<Vec<Arc<LuaWidget>>>>;
+pub type RegisteredWidgets = Arc<Mutex<Vec<Arc<LuaWidget>>>>;
 
 /// Construct an empty widget collection.
 #[must_use]
 pub fn registered_widgets() -> RegisteredWidgets {
-    Arc::new(std::sync::Mutex::new(Vec::new()))
+    Arc::new(Mutex::new(Vec::new()))
 }
 
 /// A status-bar widget defined in Lua.
 pub struct LuaWidget {
     key: String,
-    lua: SharedLua,
+    host: LuaHost,
     sink: SharedHostLog,
     handler_key: Arc<RegistryKey>,
-    cache: Mutex<(std::time::Instant, String)>,
+    output: Retained<String>,
 }
-
-const CACHE_STALE_AFTER: std::time::Duration = std::time::Duration::from_millis(500);
 
 impl std::fmt::Debug for LuaWidget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -65,51 +66,42 @@ impl LuaWidget {
         &self.key
     }
 
-    /// Call into Lua to produce the widget's painted text for a status
-    /// bar of `width` columns. `try_lock` keeps the render loop
-    /// non-blocking; on contention or a Lua error, the last successful
-    /// text is replayed until it exceeds [`CACHE_STALE_AFTER`].
+    /// The widget's painted text for a status bar of `width` columns.
+    /// Returns the retained text at once and queues a recompute when it
+    /// is stale; a Lua error is logged and keeps the previous text.
+    /// Before the first result lands the text is empty.
     #[must_use]
     pub fn render(&self, width: u16) -> String {
-        let Ok(lua) = self.lua.try_lock() else {
-            return self.fresh_cached();
-        };
-        let func: Function = match lua.registry_value(&self.handler_key) {
-            Ok(f) => f,
-            Err(e) => {
-                let mut s = lock(&self.sink);
-                s.log(
-                    LogLevel::Error,
-                    &format!("plugin widget '{}': {e}", self.key),
-                );
-                return self.fresh_cached();
-            }
-        };
-        let text = match watchdog::run(&lua, watchdog::BUDGET, || func.call::<mlua::Value>(width)) {
-            Ok(mlua::Value::String(s)) => s.to_str().map(|s| s.to_owned()).unwrap_or_default(),
-            Ok(mlua::Value::Nil) => String::new(),
-            Ok(other) => format!("{other:?}"),
-            Err(e) => {
-                let mut s = lock(&self.sink);
-                s.log(
-                    LogLevel::Error,
-                    &format!("plugin widget '{}': {e}", self.key),
-                );
-                return self.fresh_cached();
-            }
-        };
-        let mut slot = lock(&self.cache);
-        *slot = (std::time::Instant::now(), text.clone());
-        text
+        let key = self.key.clone();
+        let sink = Arc::clone(&self.sink);
+        let handler = Arc::clone(&self.handler_key);
+        self.output.get(&self.host, width, move |lua, width| {
+            render_widget(lua, &key, &sink, &handler, width)
+        })
     }
+}
 
-    fn fresh_cached(&self) -> String {
-        let slot = lock(&self.cache);
-        if slot.0.elapsed() <= CACHE_STALE_AFTER {
-            slot.1.clone()
-        } else {
-            String::new()
-        }
+fn render_widget(
+    lua: &Lua,
+    key: &str,
+    sink: &SharedHostLog,
+    handler_key: &RegistryKey,
+    width: u16,
+) -> Option<String> {
+    let fail = |e: &dyn std::fmt::Display| {
+        let mut s = lock(sink);
+        s.log(LogLevel::Error, &format!("plugin widget '{key}': {e}"));
+        None
+    };
+    let func: Function = match lua.registry_value(handler_key) {
+        Ok(f) => f,
+        Err(e) => return fail(&e),
+    };
+    match watchdog::run(lua, watchdog::BUDGET, || func.call::<mlua::Value>(width)) {
+        Ok(mlua::Value::String(s)) => Some(s.to_str().map(|s| s.to_owned()).unwrap_or_default()),
+        Ok(mlua::Value::Nil) => Some(String::new()),
+        Ok(other) => Some(format!("{other:?}")),
+        Err(e) => fail(&e),
     }
 }
 
@@ -117,12 +109,13 @@ impl LuaWidget {
 /// pushes a [`LuaWidget`] into `registered`; later registrations with
 /// the same `key` replace earlier ones in place so a plugin can
 /// hot-reload its widget definition.
-pub fn install_register_widget(
+pub(crate) fn install_register_widget(
     lua: &Lua,
-    shared_lua: SharedLua,
+    host: WeakHost,
     sink: SharedHostLog,
-    registered: RegisteredWidgets,
+    registered: &RegisteredWidgets,
 ) -> Result<(), PluginError> {
+    let registered = Arc::downgrade(registered);
     let kage: Table = lua.globals().get("kage")?;
     kage.set(
         "register_widget",
@@ -132,11 +125,12 @@ pub fn install_register_widget(
             let handler_key = lua.create_registry_value(render)?;
             let widget = Arc::new(LuaWidget {
                 key: key.clone(),
-                lua: shared_lua.clone(),
+                host: host.upgrade()?,
                 sink: sink.clone(),
-                cache: Mutex::new((std::time::Instant::now(), String::new())),
                 handler_key: Arc::new(handler_key),
+                output: Retained::new(),
             });
+            let registered = host::upgrade(&registered)?;
             let mut list = registered
                 .lock()
                 .map_err(|_| mlua::Error::external("plugin widgets registry poisoned"))?;

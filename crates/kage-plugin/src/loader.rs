@@ -7,12 +7,14 @@
 //! the host can surface to the user.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use kage_core::sync::lock;
+use mlua::Lua;
 
 use crate::api::LogLevel;
 use crate::error::PluginError;
-use crate::runtime::PluginRuntime;
+use crate::runtime::{EvalState, PluginRuntime};
 
 /// Outcome of [`load_dir`]: paths that loaded cleanly and ones that did not.
 #[derive(Debug, Default)]
@@ -40,9 +42,17 @@ impl LoadReport {
 /// * Read the file from disk (errors logged + recorded, file skipped).
 /// * Evaluate as a Lua chunk (errors logged + recorded, file skipped).
 ///
-/// Files are processed in directory-iteration order; order between
-/// different filesystems is not stable.
+/// The whole directory loads as one job on the runtime's Lua owner
+/// thread. Files are processed in directory-iteration order; order
+/// between different filesystems is not stable.
 pub fn load_dir(dir: &Path, runtime: &PluginRuntime) -> Result<LoadReport, PluginError> {
+    let eval = Arc::clone(&runtime.eval);
+    let dir = dir.to_path_buf();
+    runtime.host.call(move |lua| load_on(lua, &dir, &eval))?
+}
+
+/// Body of [`load_dir`], run on the owner thread.
+pub(crate) fn load_on(lua: &Lua, dir: &Path, eval: &EvalState) -> Result<LoadReport, PluginError> {
     let read_dir = match std::fs::read_dir(dir) {
         Ok(d) => d,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(LoadReport::default()),
@@ -54,7 +64,7 @@ pub fn load_dir(dir: &Path, runtime: &PluginRuntime) -> Result<LoadReport, Plugi
         }
     };
 
-    let sink = runtime.sink();
+    let sink = eval.sink();
     let mut report = LoadReport::default();
     for entry in read_dir {
         let entry = entry.map_err(|err| PluginError::Io {
@@ -69,8 +79,8 @@ pub fn load_dir(dir: &Path, runtime: &PluginRuntime) -> Result<LoadReport, Plugi
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("plugin");
-        if !runtime.is_plugin_enabled(name) {
-            let mut s = lock(&sink);
+        if !eval.is_enabled(name) {
+            let mut s = lock(sink);
             s.log(
                 LogLevel::Info,
                 &format!("plugin '{name}' not in [plugins] enabled allowlist; skipped"),
@@ -79,18 +89,18 @@ pub fn load_dir(dir: &Path, runtime: &PluginRuntime) -> Result<LoadReport, Plugi
             continue;
         }
         match std::fs::read_to_string(&path) {
-            Ok(source) => match runtime.eval_plugin(name, &source) {
+            Ok(source) => match eval.eval_plugin(lua, name, &source) {
                 Ok(_) => report.loaded.push(path),
                 Err(err) => {
                     let msg = format!("plugin '{}': {err}", path.display());
-                    let mut s = lock(&sink);
+                    let mut s = lock(sink);
                     s.log(LogLevel::Error, &msg);
                     report.failed.push((path, err.to_string()));
                 }
             },
             Err(err) => {
                 let msg = format!("plugin '{}': read failed: {err}", path.display());
-                let mut s = lock(&sink);
+                let mut s = lock(sink);
                 s.log(LogLevel::Error, &msg);
                 report.failed.push((path, err.to_string()));
             }

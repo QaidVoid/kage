@@ -1,7 +1,5 @@
 //! `PluginRuntimeBuilder`: configuration setters and `build`.
 
-use kage_core::sync::lock;
-
 #[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
 
@@ -77,7 +75,8 @@ impl PluginRuntimeBuilder {
     /// Finalize the runtime: build the Lua state, apply sandbox removals,
     /// install the `kage` API table, wire `kage.on`,
     /// `kage.register_tool`, `kage.register_command`,
-    /// `kage.register_provider`, and `kage.fs.*`.
+    /// `kage.register_provider`, and `kage.fs.*`, then hand the state
+    /// to its owner thread.
     #[allow(clippy::too_many_lines)]
     pub fn build(self) -> Result<PluginRuntime, PluginError> {
         let lua = Lua::new();
@@ -88,7 +87,8 @@ impl PluginRuntimeBuilder {
         plugin_fs::install_fs(&lua, self.workdir.clone())?;
         http::install_http(&lua)?;
         store::install_base(&lua)?;
-        let shared_lua: SharedLua = Arc::new(Mutex::new(lua));
+        let (host, owner) = LuaHost::new();
+        let weak_host = host.downgrade();
         let tool_registry = registered_tools();
         let tool_override_registry = registered_tools();
         let command_registry = registered_commands();
@@ -129,115 +129,110 @@ impl PluginRuntimeBuilder {
         exec::register(&cap_registry, self.workdir.clone());
         env::register(&cap_registry);
         http::register(&cap_registry);
-        {
-            let lua_guard = lock(&shared_lua);
-            bridge::install_suspend(&lua_guard)?;
-            capabilities::install_request_capabilities(
-                &lua_guard,
-                Arc::clone(&current_plugin),
-                Arc::clone(&grants),
-                Arc::clone(&plugin_envs),
-                Arc::clone(&cap_registry),
-            )?;
-            ui::install_ui(&lua_guard)?;
-            keybindings::install_register_keybinding(
-                &lua_guard,
-                Arc::clone(&shared_lua),
-                self.sink.clone(),
-                Arc::clone(&keybinding_registry),
-            )?;
-            tools::install_register_tool(
-                &lua_guard,
-                Arc::clone(&shared_lua),
-                self.sink.clone(),
-                Arc::clone(&tool_registry),
-            )?;
-            tools::install_override_tool(
-                &lua_guard,
-                Arc::clone(&shared_lua),
-                self.sink.clone(),
-                Arc::clone(&tool_override_registry),
-            )?;
-            commands::install_register_command(
-                &lua_guard,
-                Arc::clone(&shared_lua),
-                self.sink.clone(),
-                Arc::clone(&command_registry),
-            )?;
-            commands::install_override_command(
-                &lua_guard,
-                Arc::clone(&shared_lua),
-                self.sink.clone(),
-                Arc::clone(&command_override_registry),
-            )?;
-            providers::install_register_provider(
-                &lua_guard,
-                Arc::clone(&shared_lua),
-                self.sink.clone(),
-                Arc::clone(&provider_registry),
-            )?;
-            widgets::install_register_widget(
-                &lua_guard,
-                Arc::clone(&shared_lua),
-                self.sink.clone(),
-                Arc::clone(&widget_registry),
-            )?;
-            status::install_status(&lua_guard, Arc::clone(&status_map))?;
-            acp::install_acp(&lua_guard, Arc::clone(&acp_agents))?;
-            mcp::install_mcp(
-                &lua_guard,
-                Arc::clone(&mcp_servers),
-                Arc::clone(&mcp_restart),
-            )?;
-            lifecycle::install_lifecycle(
-                &lua_guard,
-                Arc::clone(&usage_snapshot),
-                Arc::clone(&compact_slot),
-            )?;
-            sessions::install_sessions(
-                &lua_guard,
-                Arc::clone(&session_list_slot),
-                Arc::clone(&fork_slot),
-                Arc::clone(&session_ops_slot),
-            )?;
-            messages::install_send_message(&lua_guard, Arc::clone(&pending_messages_slot))?;
-            theme::install_theme(
-                &lua_guard,
-                Arc::clone(&theme_state_slot),
-                Arc::clone(&theme_request_slot),
-            )?;
-            chrome::install_chrome(
-                &lua_guard,
-                Arc::clone(&shared_lua),
-                self.sink.clone(),
-                Arc::clone(&header_slot),
-                Arc::clone(&footer_slot),
-            )?;
-            block_renderers::install_block_renderers(
-                &lua_guard,
-                Arc::clone(&shared_lua),
-                self.sink.clone(),
-                Arc::clone(&block_renderer_map),
-            )?;
-            autocomplete::install_add_autocomplete_provider(
-                &lua_guard,
-                Arc::clone(&shared_lua),
-                self.sink.clone(),
-                Arc::clone(&autocomplete_registry),
-            )?;
-            terminal_input::install_on_terminal_input(
-                &lua_guard,
-                Arc::clone(&shared_lua),
-                self.sink.clone(),
-                Arc::clone(&terminal_hook_registry),
-            )?;
-            // Last: lock down the shared tables. Everything above runs
-            // build-time writes through plain `Table::set`, which would
-            // trip the read-only `__newindex` guards.
-            freeze_shared_tables(&lua_guard)?;
-        }
+        bridge::install_suspend(&lua)?;
+        capabilities::install_request_capabilities(
+            &lua,
+            Arc::clone(&current_plugin),
+            Arc::clone(&grants),
+            Arc::clone(&plugin_envs),
+            Arc::clone(&cap_registry),
+        )?;
+        ui::install_ui(&lua)?;
+        keybindings::install_register_keybinding(
+            &lua,
+            weak_host.clone(),
+            self.sink.clone(),
+            &keybinding_registry,
+        )?;
+        tools::install_register_tool(&lua, weak_host.clone(), self.sink.clone(), &tool_registry)?;
+        tools::install_override_tool(
+            &lua,
+            weak_host.clone(),
+            self.sink.clone(),
+            &tool_override_registry,
+        )?;
+        commands::install_register_command(
+            &lua,
+            weak_host.clone(),
+            self.sink.clone(),
+            &command_registry,
+        )?;
+        commands::install_override_command(
+            &lua,
+            weak_host.clone(),
+            self.sink.clone(),
+            &command_override_registry,
+        )?;
+        providers::install_register_provider(
+            &lua,
+            weak_host.clone(),
+            self.sink.clone(),
+            &provider_registry,
+        )?;
+        widgets::install_register_widget(
+            &lua,
+            weak_host.clone(),
+            self.sink.clone(),
+            &widget_registry,
+        )?;
+        status::install_status(&lua, Arc::clone(&status_map))?;
+        acp::install_acp(&lua, Arc::clone(&acp_agents))?;
+        mcp::install_mcp(&lua, Arc::clone(&mcp_servers), Arc::clone(&mcp_restart))?;
+        lifecycle::install_lifecycle(&lua, Arc::clone(&usage_snapshot), Arc::clone(&compact_slot))?;
+        sessions::install_sessions(
+            &lua,
+            Arc::clone(&session_list_slot),
+            Arc::clone(&fork_slot),
+            Arc::clone(&session_ops_slot),
+        )?;
+        messages::install_send_message(&lua, Arc::clone(&pending_messages_slot))?;
+        theme::install_theme(
+            &lua,
+            Arc::clone(&theme_state_slot),
+            Arc::clone(&theme_request_slot),
+        )?;
+        chrome::install_chrome(
+            &lua,
+            weak_host.clone(),
+            self.sink.clone(),
+            &header_slot,
+            &footer_slot,
+        )?;
+        block_renderers::install_block_renderers(
+            &lua,
+            weak_host.clone(),
+            self.sink.clone(),
+            &block_renderer_map,
+        )?;
+        autocomplete::install_add_autocomplete_provider(
+            &lua,
+            weak_host.clone(),
+            self.sink.clone(),
+            &autocomplete_registry,
+        )?;
+        terminal_input::install_on_terminal_input(
+            &lua,
+            weak_host,
+            self.sink.clone(),
+            &terminal_hook_registry,
+        )?;
+        // Last: lock down the shared tables. Everything above runs
+        // build-time writes through plain `Table::set`, which would
+        // trip the read-only `__newindex` guards.
+        freeze_shared_tables(&lua)?;
+        owner.spawn(lua)?;
+        let eval = Arc::new(EvalState {
+            sink: self.sink.clone(),
+            plugin_envs,
+            current_plugin,
+            enabled: self.enabled,
+            plugin_config: self.plugin_config,
+            state_dir: self.state_dir,
+            script_budget: self.script_budget,
+        });
         Ok(PluginRuntime {
-            lua: shared_lua,
+            host,
+            eval,
             sink: self.sink,
             tools: tool_registry,
             tool_overrides: tool_override_registry,
@@ -264,14 +259,8 @@ impl PluginRuntimeBuilder {
             block_renderers: block_renderer_map,
             autocomplete: autocomplete_registry,
             terminal_hooks: terminal_hook_registry,
-            plugin_envs,
-            current_plugin,
             session_entries,
             switch_request,
-            enabled: self.enabled,
-            plugin_config: self.plugin_config,
-            state_dir: self.state_dir,
-            script_budget: self.script_budget,
         })
     }
 }

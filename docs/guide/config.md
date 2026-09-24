@@ -76,25 +76,41 @@ API keys are read from environment variables:
 | `GEMINI_API_KEY`        | Google Gemini                                 |
 | `ZAI_API_KEY`           | Z.AI                                          |
 | `ZAI_CODING_API_KEY`    | Z.AI Coding                                   |
+| `DEEPSEEK_API_KEY`      | DeepSeek                                      |
+| `GROQ_API_KEY`          | Groq                                          |
+| `MISTRAL_API_KEY`       | Mistral                                       |
+| `CEREBRAS_API_KEY`      | Cerebras                                      |
+| `XAI_API_KEY`           | xAI                                           |
+| `OPENROUTER_API_KEY`    | OpenRouter                                    |
+| `FIREWORKS_API_KEY`     | Fireworks AI                                  |
+| `MOONSHOT_API_KEY`      | Moonshot                                      |
+| `KIMI_API_KEY`          | Kimi for Coding                               |
+| `XIAOMI_API_KEY`        | Xiaomi / Xiaomi Token Plan                    |
 
 If multiple keys are present, the model id you pass with `-m` or
 configure as `provider.default_model` picks the provider.
 
+See [providers](/guide/providers) for the full provider list, custom
+endpoints, and per-provider overrides (base URL, headers, key env var).
+
 ## directories
 
-| Path                            | Contents                            |
-| ------------------------------- | ----------------------------------- |
-| `~/.config/kage/config.toml`    | user config                         |
-| `<workdir>/.kage/config.toml`   | project-local config overlay        |
-| `~/.config/kage/themes/`        | user theme TOML files               |
-| `~/.config/kage/plugins/`       | Lua plugin scripts                  |
-| `~/.config/kage/skills/`        | `SKILL.md` skill directories        |
-| `~/.config/kage/templates/`     | prompt template `.md` files         |
-| `~/.local/share/kage/sessions/` | append-only session JSONL files     |
-| `~/.local/share/kage/auth.json` | saved provider credentials (`0600`) |
+| Path                                | Contents                                                       |
+| ----------------------------------- | -------------------------------------------------------------- |
+| `~/.config/kage/config.toml`        | user config                                                    |
+| `<workdir>/.kage/config.toml`       | project-local config overlay                                   |
+| `~/.config/kage/themes/`            | user theme TOML files                                          |
+| `~/.config/kage/plugins/`           | Lua plugin scripts                                             |
+| `~/.config/kage/skills/`            | `SKILL.md` skill directories                                   |
+| `~/.config/kage/templates/`         | prompt template `.md` files                                    |
+| `~/.local/share/kage/sessions/`     | append-only session JSONL files                                |
+| `~/.local/share/kage/auth.json`     | saved provider credentials (`0600`)                            |
+| `~/.local/share/kage/plugin-state/` | per-plugin `kage.store` JSON files                             |
+| `~/.local/state/kage/`              | session state (`state.json`) and input history (`history.txt`) |
 
-`XDG_CONFIG_HOME` / `XDG_DATA_HOME` override the `~/.config` and
-`~/.local/share` roots. Skills and templates are also discovered
+`XDG_CONFIG_HOME` / `XDG_DATA_HOME` / `XDG_STATE_HOME` override the
+`~/.config`, `~/.local/share`, and `~/.local/state` roots. Skills and
+templates are also discovered
 under the project-local `<workdir>/.kage/skills/` and
 `<workdir>/.kage/templates/`, plus any directory a plugin
 contributes via the `resources_discover` event.

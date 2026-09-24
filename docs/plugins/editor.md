@@ -47,7 +47,9 @@ hand-edit `~/.local/share/kage/types/kage.lua`).
 If you skipped `kage init`, or keep plugins outside the default
 directory, add the library path yourself. The stub lives in the kage
 repo at `plugins/types/kage.lua`; copy it anywhere stable, or
-reference the repo path directly.
+reference the repo path directly. It is generated from the plugin API
+spec and CI-gated (`gen-lua-types --check` in
+`.github/workflows/ci.yml`), so hand-edits would fail CI.
 
 `.luarc.json` next to your plugins:
 

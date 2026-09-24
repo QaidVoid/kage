@@ -240,7 +240,7 @@ fn popup_area(regions: Regions, total: usize, selected: usize) -> Option<Rect> {
     })
 }
 
-/// Truncate to `width`, then right-pad to exactly `width` — indicator
+/// Truncate to `width`, then right-pad to exactly `width`; indicator
 /// rows must fill the full card width or the bubble edge tears.
 fn pad(s: &str, width: usize) -> String {
     pad_to_width(&truncate_to_width(s, width, ""), width)

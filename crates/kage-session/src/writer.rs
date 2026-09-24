@@ -7,7 +7,7 @@
 //! disk.
 //!
 //! Writers hold an advisory exclusive lock (`flock`) on the file for their
-//! lifetime, so a second appender — say, a `kage -r` in another terminal —
+//! lifetime, so a second appender (say, a `kage -r` in another terminal)
 //! fails instead of interleaving two JSONL streams into one file. On
 //! filesystems where `flock` is unsupported the lock is skipped.
 //!
@@ -187,7 +187,7 @@ fn check_version(file: &File, path: &Path) -> Result<(), SessionError> {
 /// Scans for the final `\n`; if the file does not end with one, the bytes
 /// after it are a torn write from a crashed appender and are truncated
 /// away. The reader would have skipped those bytes anyway, so truncation
-/// changes nothing it could see — it only keeps the next append from being
+/// changes nothing it could see; it only keeps the next append from being
 /// glued onto the fragment.
 fn repair_torn_tail(file: &mut File) -> std::io::Result<()> {
     file.rewind()?;

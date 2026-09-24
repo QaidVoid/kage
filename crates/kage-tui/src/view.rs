@@ -344,7 +344,7 @@ pub(crate) fn pad_to_width(s: &str, width: usize) -> String {
 /// First-item offset for a popup list of `total` entries with at most
 /// `max_visible` rows, keeping `selected` in view. Anchors to the top
 /// while the selection fits, then scrolls only once it passes the
-/// bottom — the early rows of a list stay put while cycling through
+/// bottom: the early rows of a list stay put while cycling through
 /// them. Returns `(offset, window)` with `window <= max_visible`.
 pub(crate) fn popup_scroll_window(
     selected: Option<usize>,

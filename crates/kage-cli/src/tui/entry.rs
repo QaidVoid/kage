@@ -258,6 +258,18 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     };
 
     let active_qualified = Arc::new(Mutex::new(qualified_model.clone()));
+    // One quiet discoverability hint at the top of every fresh
+    // session: the two entry points (? keys, : commands) are all a
+    // new user needs. Transcript-only; never recorded to the session
+    // file.
+    {
+        let mut buf = lock(&buffer);
+        buf.push_custom(
+            "kage:help",
+            "welcome to kage - ? for keys, : for commands, :settings to theme",
+            false,
+        );
+    }
     let model_choices = available_model_items(&registry, &qualified_model);
     if let Err(err) = crate::state::record_last_model(&qualified_model) {
         let mut buf = lock(&buffer);

@@ -481,32 +481,6 @@ fn leak_str(s: &str) -> &'static str {
     Box::leak(s.to_owned().into_boxed_str())
 }
 
-/// Recursive help renderer: pushes one line per command, then recurses
-/// into each subcommand with an indented prefix so nested commands
-/// appear under their parent.
-fn help_render_spec(lines: &mut Vec<String>, spec: &CommandSpec, prefix: &str, depth: usize) {
-    let aliases = if spec.aliases.is_empty() {
-        String::new()
-    } else {
-        format!(" ({})", spec.aliases.join(", "))
-    };
-    let hints = crate::command::arg_hints_text(spec.args);
-    let arg_hint = if hints.is_empty() {
-        String::new()
-    } else {
-        format!(" {hints}")
-    };
-    let indent = "  ".repeat(depth + 1);
-    lines.push(format!(
-        "{indent}{prefix}{name}{aliases}{arg_hint}   {desc}",
-        name = spec.name,
-        desc = spec.description,
-    ));
-    for sub in spec.subcommands {
-        help_render_spec(lines, sub, &format!("{prefix}{} ", spec.name), depth + 1);
-    }
-}
-
 /// [`Resolver`] backed by the live App state: model choices and
 /// plugin-registered commands the user has imported, plus the bundled
 /// theme list and any session lister the host provided. Paths return
@@ -573,6 +547,9 @@ pub struct App {
     /// Open `:tree` session-forest browser, a modal sibling of the
     /// picker. On resolve it dispatches resume / fork / delete.
     session_tree: Option<SessionTreeOverlay>,
+    /// Open `?` / `:help` keyboard reference, a modal sibling of the
+    /// picker. Scroll-only; every key either scrolls or closes.
+    help_overlay: Option<crate::overlay::HelpOverlay>,
     /// Open right-click context menu, if any. A light modal layer:
     /// while present it owns the keyboard and intercepts mouse clicks
     /// (a click on a row runs its action, a click off it dismisses).

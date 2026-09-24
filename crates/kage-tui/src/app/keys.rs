@@ -122,6 +122,13 @@ impl App {
             return self.dispatch_session_tree_key(key);
         }
 
+        // The help reference is a scroll-only modal sibling: any key
+        // it does not scroll with closes it.
+        if self.help_overlay.is_some() {
+            self.dispatch_help_key(key);
+            return None;
+        }
+
         // The slash palette is its own modal layer, taking precedence
         // over the cmdline and search line.
         if self.slash_palette.is_some() {
@@ -169,6 +176,17 @@ impl App {
             .map(|(_, chord)| chord.clone())
         {
             let _ = self.send_request(RunRequest::InvokePluginKeybinding { chord });
+            return None;
+        }
+
+        // `?` in normal mode opens the keyboard reference. Insert and
+        // visual keep the literal character; modeless editing never
+        // enters normal mode, so it reaches help via `:help`.
+        if self.input.mode() == Mode::Normal
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('?'))
+        {
+            self.open_help();
             return None;
         }
 

@@ -320,6 +320,26 @@ impl App {
         None
     }
 
+    /// Open the `?` keyboard reference. Scroll-only: closing is the
+    /// only outcome.
+    pub(crate) fn open_help(&mut self) {
+        self.help_overlay = Some(crate::overlay::HelpOverlay::new());
+    }
+
+    /// Drive the help reference. `Close` and `Resolve` both dismiss:
+    /// there is nothing to resolve.
+    pub(crate) fn dispatch_help_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        let Some(overlay) = self.help_overlay.as_mut() else {
+            return;
+        };
+        match crate::overlay::OverlayWidget::handle_key(overlay, key) {
+            crate::overlay::OverlayAction::Close | crate::overlay::OverlayAction::Resolve(_) => {
+                self.help_overlay = None;
+            }
+            crate::overlay::OverlayAction::Stay | crate::overlay::OverlayAction::PropagateKey => {}
+        }
+    }
+
     /// Open the `:settings` dialog, seeding it from the loaded
     /// user/project config plus live state (active theme/model).
     pub(crate) fn open_settings(&mut self) {

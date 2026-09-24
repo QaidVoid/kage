@@ -27,6 +27,7 @@ switch modes or panes.
 | `Ctrl+O`         | Toggle fold on the focused block            |
 | `Shift+Tab`      | Cycle the thinking level                    |
 | `Ctrl+V`         | Attach an image from the clipboard          |
+| `?`              | Open the keyboard reference (Normal mode)   |
 
 `Ctrl+O` also expands a collapsed bracketed paste if one is present
 in the input. When no paste is collapsed, it toggles the fold.

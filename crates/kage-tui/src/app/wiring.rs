@@ -19,6 +19,7 @@ impl App {
             session_scope_all: false,
             settings_overlay: None,
             session_tree: None,
+            help_overlay: None,
             session_tree_source: None,
             session_lister: None,
             cmdline: None,

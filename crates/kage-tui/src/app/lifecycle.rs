@@ -321,10 +321,12 @@ impl App {
             && self.settings_overlay.is_none()
             && self.session_tree.is_none()
             && self.permission_overlay.is_none()
+            && self.help_overlay.is_none()
             && self.plugin_overlay.is_none();
         let picker = self.picker.as_mut();
         let settings_overlay = self.settings_overlay.as_mut();
         let session_tree = self.session_tree.as_mut();
+        let help_overlay = self.help_overlay.as_mut();
         let plugin_overlay = self.plugin_overlay.as_mut();
         let permission_overlay = self.permission_overlay.as_mut();
         let slash_palette = self.slash_palette.as_ref();
@@ -367,6 +369,16 @@ impl App {
             }
             if let Some(tree) = session_tree {
                 tree.render(frame, frame.area());
+            }
+            if let Some(help) = help_overlay {
+                let modal = crate::overlay::OverlayWidget::measure(help, frame.area());
+                frame.render_widget(crate::opaque::OpaqueClear, modal);
+                let theme = crate::theme::current();
+                let ctx = crate::overlay::OverlayCtx {
+                    theme: &theme,
+                    viewport: frame.area(),
+                };
+                crate::overlay::OverlayWidget::render(help, modal, frame.buffer_mut(), &ctx);
             }
             if let Some(palette) = slash_palette {
                 palette.render(frame, regions);

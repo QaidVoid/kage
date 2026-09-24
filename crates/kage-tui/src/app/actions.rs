@@ -135,7 +135,7 @@ impl App {
                 None
             }
             "help" => {
-                self.push_help();
+                self.open_help();
                 None
             }
             "keybindings" => {
@@ -514,16 +514,6 @@ impl App {
             out.push_str(slice.trim_end());
         }
         out
-    }
-
-    pub(crate) fn push_help(&mut self) {
-        let mut lines = vec!["available commands:".to_owned()];
-        for spec in crate::command::BUILTIN_COMMANDS {
-            help_render_spec(&mut lines, spec, ":", 0);
-        }
-        let body = lines.join("\n");
-        let mut buf = lock(&self.buffer);
-        buf.push_custom("kage:help", body, false);
     }
 
     /// Render the active key bindings: user `[keybindings]` config

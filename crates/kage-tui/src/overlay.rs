@@ -16,6 +16,7 @@ pub mod completion;
 pub mod confirm;
 pub mod context_menu;
 pub mod editor;
+pub mod help;
 pub mod input;
 pub mod permission;
 pub mod picker;
@@ -28,6 +29,7 @@ pub use completion::{CompletionAction, InputCompletion, file_completions, prefix
 pub use confirm::{Choice, ConfirmOverlay};
 pub use context_menu::{ContextAction, ContextMenu, ContextMenuOutcome};
 pub use editor::EditorOverlay;
+pub use help::HelpOverlay;
 pub use input::InputOverlay;
 pub use permission::{PermissionChoice, PermissionOverlay};
 pub use picker::OverlayPicker;

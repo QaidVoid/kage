@@ -36,7 +36,7 @@ Editing clears the error.
 | `:theme set <name>`      | Switch theme                                    |
 | `:theme current`         | Print the active theme name                     |
 | `:mouse on|off|toggle`   | Control terminal mouse capture                  |
-| `:help`                  | List every command in a readable form           |
+| `:help`                  | Open the keyboard reference overlay             |
 | `:keybindings` / `:keys` | List active key bindings (config/plugin/reserved) |
 | `:events`                | List events plugins can hook with `kage.on`     |
 | `:compact`               | Run a compaction pass right now                 |

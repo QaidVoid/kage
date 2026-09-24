@@ -352,6 +352,11 @@ impl App {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
             editor_modeless: matches!(cfg.ui.editor, kage_core::config::EditorMode::Modeless),
+            thinking_level: cfg
+                .ui
+                .thinking_level
+                .clone()
+                .unwrap_or_else(|| "off".into()),
         };
         self.settings_overlay = Some(SettingsOverlay::new(init));
     }
@@ -361,6 +366,17 @@ impl App {
     /// file (comment-preserving). A persistence failure is surfaced,
     /// not swallowed. An empty resolve means nothing changed.
     pub(crate) fn apply_settings(&mut self, value: &serde_json::Value) {
+        self.apply_settings_at(value, kage_core::config::Config::default_path());
+    }
+
+    /// [`Self::apply_settings`] against an explicit config path
+    /// (`None` skips persistence). Lets tests pin the file instead
+    /// of the process environment.
+    pub(crate) fn apply_settings_at(
+        &mut self,
+        value: &serde_json::Value,
+        path: Option<std::path::PathBuf>,
+    ) {
         if value.as_object().is_some_and(serde_json::Map::is_empty) {
             self.notify("settings: nothing changed");
             return;
@@ -376,6 +392,13 @@ impl App {
         let editor_modeless = match value.get("editor").and_then(|v| v.as_str()) {
             Some("modeless") => Some(true),
             Some("vim") => Some(false),
+            _ => None,
+        };
+        // `None` when the key is absent or not a ladder string; the
+        // worker parses the same six names, so anything else is
+        // refused here and can never reach the config or the session.
+        let thinking_level = match value.get("thinking_level").and_then(|v| v.as_str()) {
+            Some(level @ ("off" | "minimal" | "low" | "medium" | "high" | "xhigh")) => Some(level),
             _ => None,
         };
 
@@ -394,7 +417,7 @@ impl App {
             let _ = self.send_request(RunRequest::SwitchModel(model.to_owned()));
         }
 
-        let Some(path) = kage_core::config::Config::default_path() else {
+        let Some(path) = path else {
             self.push_error("settings: no home directory; not persisted");
             return;
         };
@@ -427,8 +450,18 @@ impl App {
                 kage_core::config::EditorMode::Vim
             };
         }
+        if let Some(level) = thinking_level {
+            cfg.ui.thinking_level = Some(level.to_owned());
+        }
         match cfg.save(&path) {
-            Ok(()) => self.notify("settings saved"),
+            Ok(()) => {
+                self.notify("settings saved");
+                if let Some(level) = thinking_level {
+                    // Follows the save: the live session only adopts
+                    // a change that actually stuck.
+                    let _ = self.send_request(RunRequest::SetThinkingLevel(level.to_owned()));
+                }
+            }
             Err(e) => self.push_error(format!("settings: save failed: {e}")),
         }
     }

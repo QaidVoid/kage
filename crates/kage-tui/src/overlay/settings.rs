@@ -1,14 +1,16 @@
 //! `:settings` multi-tab overlay.
 //!
-//! A modal [`OverlayWidget`] with five sections: Theme, Model, Mouse,
-//! Autocompaction, and a read-only Keybindings list. `Tab`/`BackTab`
-//! cycle sections; within a section the arrow keys change the value;
-//! `Enter` or `Ctrl+S` resolves the values that changed as JSON and
-//! `Esc` cancels. The host applies the result live (theme, mouse,
-//! model) and persists it comment-preserving via `Config::save`.
+//! A modal [`OverlayWidget`] with seven sections: Theme, Model,
+//! Mouse, Autocompaction, a read-only Keybindings list, Editor, and
+//! Thinking. `Tab`/`BackTab` cycle sections; within a section the
+//! arrow keys change the value; `Enter` or `Ctrl+S` resolves the
+//! values that changed as JSON and `Esc` cancels. The host applies
+//! the result live (theme, mouse, model, thinking level) and
+//! persists it comment-preserving via `Config::save`.
 //!
-//! Scope is intentionally config-backed only: thinking level is
-//! session state (already `Shift+Tab`) and is not shown here.
+//! The Thinking tab edits the persisted default level for new
+//! sessions; the live session level stays on the `Shift+Tab` cycle
+//! and follows when the host applies a resolved change.
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
@@ -35,7 +37,13 @@ const TABS: &[&str] = &[
     "Autocompaction",
     "Keybindings",
     "Editor",
+    "Thinking",
 ];
+
+/// Thinking-level ladder, mirroring the `kage_provider::ThinkingLevel`
+/// wire strings. kage-tui is provider-free, so the ladder is spelled
+/// here and the host's worker parses the resolved string.
+const LADDER: [&str; 6] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 
 /// Inputs the host gathers (from the loaded config + live state) to
 /// seed the dialog.
@@ -57,6 +65,9 @@ pub struct SettingsInit {
     pub keybindings: Vec<(String, String)>,
     /// Whether the prompt input is non-modal (`editor = "modeless"`).
     pub editor_modeless: bool,
+    /// Persisted thinking level the dialog starts from, one of the
+    /// [`LADDER`] strings; unknown strings fall back to `"off"`.
+    pub thinking_level: String,
 }
 
 /// The `:settings` overlay.
@@ -71,6 +82,7 @@ pub struct SettingsOverlay {
     threshold: f32,
     keybindings: Vec<(String, String)>,
     editor_modeless: bool,
+    thinking_idx: usize,
     /// The values the dialog opened with. `result_json` resolves only
     /// fields that differ from these, so a value inherited from the
     /// project config layer is never stamped into the user file.
@@ -93,6 +105,10 @@ impl SettingsOverlay {
             .iter()
             .position(|m| *m == init.model)
             .unwrap_or(0);
+        let thinking_idx = LADDER
+            .iter()
+            .position(|l| *l == init.thinking_level)
+            .unwrap_or(0);
         Self {
             tab: 0,
             seed: init.clone(),
@@ -104,6 +120,7 @@ impl SettingsOverlay {
             threshold: init.threshold.clamp(THRESHOLD_MIN, THRESHOLD_MAX),
             keybindings: init.keybindings,
             editor_modeless: init.editor_modeless,
+            thinking_idx,
             list_scroll: 0,
         }
     }
@@ -130,6 +147,12 @@ impl SettingsOverlay {
     #[must_use]
     pub fn threshold(&self) -> f32 {
         self.threshold
+    }
+
+    /// Selected thinking level, a [`LADDER`] wire string.
+    #[must_use]
+    pub fn selected_thinking_level(&self) -> &'static str {
+        LADDER[self.thinking_idx]
     }
 
     /// The edited settings as the JSON the host applies on resolve.
@@ -169,6 +192,12 @@ impl SettingsOverlay {
         if editor != seed_editor {
             out.insert("editor".into(), serde_json::json!(editor));
         }
+        if self.selected_thinking_level() != self.seed.thinking_level {
+            out.insert(
+                "thinking_level".into(),
+                serde_json::json!(self.selected_thinking_level()),
+            );
+        }
         serde_json::Value::Object(out)
     }
 
@@ -207,6 +236,7 @@ impl SettingsOverlay {
                 }
             }
             5 => self.editor_modeless = !self.editor_modeless,
+            6 => self.thinking_idx = step_index(self.thinking_idx, LADDER.len(), delta),
             _ => {}
         }
     }
@@ -412,6 +442,28 @@ impl SettingsOverlay {
                     area.width,
                 );
             }
+            6 => {
+                buf.set_line(
+                    area.x,
+                    area.y,
+                    &Line::from(Span::styled(
+                        format!("  thinking level: {}", self.selected_thinking_level()),
+                        Style::default()
+                            .fg(ctx.theme.assistant_fg)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    area.width,
+                );
+                buf.set_line(
+                    area.x,
+                    area.y + 1,
+                    &Line::from(Span::styled(
+                        "  default for new sessions; shift+tab cycles this session",
+                        Style::default().fg(ctx.theme.status_dim_fg),
+                    )),
+                    area.width,
+                );
+            }
             _ => {}
         }
     }
@@ -508,6 +560,7 @@ mod tests {
             threshold: 0.8,
             keybindings: vec![("ctrl+x".into(), "compact".into())],
             editor_modeless: false,
+            thinking_level: "off".into(),
         })
     }
 
@@ -557,11 +610,11 @@ mod tests {
     #[test]
     fn editor_tab_toggles_and_resolves_modeless() {
         let mut s = sample();
-        // Editor is the last tab.
-        for _ in 0..(TABS.len() - 1) {
+        // Editor is the second-to-last tab; Thinking follows it.
+        for _ in 0..(TABS.len() - 2) {
             s.handle_key(key(KeyCode::Tab));
         }
-        assert_eq!(s.tab, TABS.len() - 1);
+        assert_eq!(s.tab, TABS.len() - 2);
         // Default sample is vim (false); Space flips to modeless.
         s.handle_key(key(KeyCode::Char(' ')));
         match s.handle_key(key(KeyCode::Enter)) {
@@ -617,6 +670,57 @@ mod tests {
             }
             other => panic!("expected Resolve, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn thinking_tab_cycles_ladder_and_wraps() {
+        let mut s = sample();
+        for _ in 0..(TABS.len() - 1) {
+            s.handle_key(key(KeyCode::Tab));
+        }
+        assert_eq!(s.tab, TABS.len() - 1);
+        assert_eq!(s.selected_thinking_level(), "off");
+        s.handle_key(key(KeyCode::Down));
+        assert_eq!(s.selected_thinking_level(), "minimal");
+        for _ in 0..4 {
+            s.handle_key(key(KeyCode::Down));
+        }
+        assert_eq!(s.selected_thinking_level(), "xhigh");
+        // Both ladder ends wrap.
+        s.handle_key(key(KeyCode::Down));
+        assert_eq!(s.selected_thinking_level(), "off");
+        s.handle_key(key(KeyCode::Up));
+        assert_eq!(s.selected_thinking_level(), "xhigh");
+        s.handle_key(key(KeyCode::Up));
+        assert_eq!(s.selected_thinking_level(), "high");
+    }
+
+    #[test]
+    fn thinking_level_resolves_only_when_changed() {
+        let s = sample();
+        assert!(s.result_json().get("thinking_level").is_none());
+        let mut s = sample();
+        for _ in 0..(TABS.len() - 1) {
+            s.handle_key(key(KeyCode::Tab));
+        }
+        s.handle_key(key(KeyCode::Down)); // off -> minimal
+        match s.handle_key(key(KeyCode::Enter)) {
+            OverlayAction::Resolve(v) => {
+                assert_eq!(v["thinking_level"], serde_json::json!("minimal"));
+                assert_eq!(v.as_object().unwrap().len(), 1, "only the edit resolves");
+            }
+            other => panic!("expected Resolve, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_thinking_seed_falls_back_to_off() {
+        let init = SettingsInit {
+            thinking_level: "maximum".into(),
+            ..SettingsInit::default()
+        };
+        let s = SettingsOverlay::new(init);
+        assert_eq!(s.selected_thinking_level(), "off");
     }
 
     #[test]

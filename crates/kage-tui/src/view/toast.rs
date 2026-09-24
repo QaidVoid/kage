@@ -13,7 +13,7 @@
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::Block as RtBlock;
+use ratatui::widgets::{Block as RtBlock, Clear};
 use unicode_width::UnicodeWidthStr;
 
 use super::DECORATION_MARKER;
@@ -103,9 +103,8 @@ fn paint_toast(frame: &mut Frame, area: Rect, toast: &Toast, theme: &Theme) {
     let text_fg = theme.assistant_fg;
     let chrome_style = Style::default().bg(card_bg).add_modifier(DECORATION_MARKER);
 
-    // Background fill so the toast occludes whatever buffer content
-    // sits below it. Carries the decoration marker so cell-based
-    // selection skips the overlay.
+    // The decoration marker makes cell-based selection skip the card.
+    frame.render_widget(Clear, area);
     frame.render_widget(RtBlock::default().style(chrome_style), area);
 
     let accent_style = Style::default()
@@ -250,6 +249,26 @@ mod tests {
             "row 3 should still have accent bar, got {:?}",
             rows[3]
         );
+    }
+
+    #[test]
+    fn toast_hides_the_text_below_it() {
+        let backend = TestBackend::new(40, 6);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let theme = Theme::default();
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 40, 6);
+                for y in 0..6 {
+                    f.buffer_mut()
+                        .set_string(0, y, "x".repeat(40), Style::default());
+                }
+                render_toasts(f, area, &[Toast::info("hi")], &theme);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let toast_cells = (20..38).map(|x| buf[(x, 1)].symbol()).collect::<String>();
+        assert!(!toast_cells.contains('x'), "{toast_cells:?}");
     }
 
     #[test]

@@ -794,6 +794,30 @@ fn the_footer_row_holds_the_hint_and_the_session_facts() {
 }
 
 #[test]
+fn a_long_hint_is_clipped_before_the_session_facts() {
+    let usage = SessionUsage {
+        model: "fake:m".into(),
+        ..SessionUsage::default()
+    };
+    let status = StatusCtx {
+        model: Some("Fake"),
+        hint: Some("1-5 or y s a n t \u{B7} up/down \u{B7} enter to confirm \u{B7} esc for no"),
+        ..StatusCtx::default()
+    };
+    let rows = snapshot_frame(
+        &mut Buffer::new(),
+        &InputState::new(),
+        None,
+        &status,
+        Some(&usage),
+        Rect::new(0, 0, 40, 6),
+    );
+    let footer = rows.last().unwrap();
+    assert!(footer.ends_with("... Fake"), "{footer:?}");
+    assert_eq!(footer.width(), 40, "{footer:?}");
+}
+
+#[test]
 fn the_colon_and_search_lines_paint_on_the_footer_row() {
     let area = Rect::new(0, 0, 40, 8);
     let empty = crate::cmdparse::Completions::default();

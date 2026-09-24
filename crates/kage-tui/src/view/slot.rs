@@ -441,9 +441,14 @@ fn paint_row(frame: &mut Frame, area: Rect, spec: &SlotSpec, src: &Sources<'_>, 
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let mut spans = row_spans(&spec.left, &spec.sep, src, styles);
     let right = row_spans(&spec.right, &spec.sep, src, styles);
-    let used: usize = spans.iter().chain(&right).map(Span::width).sum();
+    let right_width: usize = right.iter().map(Span::width).sum();
+    let left_budget = match right_width {
+        0 => usize::from(area.width),
+        w => usize::from(area.width).saturating_sub(w + 1),
+    };
+    let mut spans = clip_spans(row_spans(&spec.left, &spec.sep, src, styles), left_budget);
+    let used: usize = spans.iter().map(Span::width).sum::<usize>() + right_width;
     let pad = usize::from(area.width).saturating_sub(used);
     if pad > 0 {
         spans.push(Span::styled(" ".repeat(pad), styles.pad));
@@ -453,6 +458,30 @@ fn paint_row(frame: &mut Frame, area: Rect, spec: &SlotSpec, src: &Sources<'_>, 
         .alignment(Alignment::Left)
         .style(styles.pad);
     frame.render_widget(paragraph, area);
+}
+
+/// Drop what does not fit in `max` columns, ending on `...` when
+/// anything was cut.
+fn clip_spans(spans: Vec<Span<'static>>, max: usize) -> Vec<Span<'static>> {
+    if spans.iter().map(Span::width).sum::<usize>() <= max {
+        return spans;
+    }
+    let mut out = Vec::new();
+    let mut left = max;
+    for span in spans {
+        let width = span.width();
+        if width + 3 <= left {
+            left -= width;
+            out.push(span);
+            continue;
+        }
+        if left >= 3 {
+            let kept = truncate_to_width(&span.content, left - 3, "");
+            out.push(Span::styled(format!("{kept}..."), span.style));
+        }
+        break;
+    }
+    out
 }
 
 fn row_spans(

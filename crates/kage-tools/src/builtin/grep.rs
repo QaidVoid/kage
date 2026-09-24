@@ -1,4 +1,4 @@
-//! `grep` tool: regex search through workspace files honoring `.gitignore`
+//! `grep` tool: recursive regex search over files honoring `.gitignore`
 //! and `.kageignore`.
 //!
 //! Uses the `grep` and `ignore` crates from the ripgrep family. Does not

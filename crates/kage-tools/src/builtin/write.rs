@@ -26,7 +26,7 @@ struct WriteInput {
     overwrite: bool,
 }
 
-/// Atomically write a file inside the workspace.
+/// Atomically write a file.
 #[derive(Debug, Default)]
 pub struct WriteTool;
 

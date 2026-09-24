@@ -56,7 +56,7 @@ impl PluginRuntimeBuilder {
         self
     }
 
-    /// Set the directory backing `kage.store`. Each plugin persists to
+    /// Set the store directory backing `kage.store`. Each plugin persists to
     /// `<dir>/<stem>.json`. Unset, `kage.store` raises rather than
     /// silently dropping writes.
     #[must_use]

@@ -1,9 +1,9 @@
 //! `kage.store`: per-plugin persistent key-value state.
 //!
-//! Each plugin gets a private JSON file under the host state dir,
+//! Each plugin gets a private JSON file under the host store directory,
 //! addressed by its file stem, so checkpoints, counters, and caches
 //! survive a reload or a restart. A plugin sees only its own store; the
-//! base surface (host eval, or a runtime built without a state dir)
+//! base surface (host eval, or a runtime built without a store directory)
 //! exposes stubs that raise, so the binding resolves but no state can
 //! leak between plugins.
 //!
@@ -25,7 +25,7 @@ use crate::error::PluginError;
 type StoreMap = BTreeMap<String, serde_json::Value>;
 
 const BASE_ERR: &str =
-    "kage.store is available only to a loaded plugin when the host configures a state dir";
+    "kage.store is available only to a loaded plugin when the host configures a store directory";
 
 /// Install a base `kage.store` whose operations raise [`BASE_ERR`].
 ///

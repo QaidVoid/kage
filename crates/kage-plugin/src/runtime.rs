@@ -140,7 +140,7 @@ pub struct PluginRuntime {
     /// Per-plugin settings by file stem, surfaced to the named plugin
     /// through `kage.plugin_config()`. Each plugin sees only its slice.
     plugin_config: BTreeMap<String, serde_json::Value>,
-    /// Directory backing `kage.store`. When set, each plugin gets a
+    /// Store directory backing `kage.store`. When set, each plugin gets a
     /// private `<state_dir>/<stem>.json` persisted across runs; when
     /// `None`, `kage.store` raises so misconfiguration is not silent.
     state_dir: Option<PathBuf>,

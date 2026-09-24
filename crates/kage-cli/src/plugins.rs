@@ -57,13 +57,14 @@ pub fn setup_runtime_with_sink(
             kage_core::config::PluginsConfig::default()
         }
     };
+    migrate_plugin_store_dir();
     let runtime = PluginRuntime::builder()
         .sink(sink)
         .workdir(workdir.to_path_buf())
         .capabilities(plugins_cfg.capabilities)
         .enabled(plugins_cfg.enabled)
         .plugin_config(plugins_cfg.config)
-        .state_dir(crate::state_root().ok().map(|r| r.join("plugin-state")))
+        .state_dir(crate::data_root().ok().map(|r| r.join("plugin-state")))
         .config(json!({
             "model": model,
             "cwd": workdir.display().to_string(),
@@ -92,6 +93,69 @@ pub fn setup_runtime_with_sink(
         plugins_dir.display(),
     );
     Ok(Some(Arc::new(runtime)))
+}
+
+/// Move the plugin store from its legacy location under the state root
+/// (`$XDG_STATE_HOME/kage/plugin-state`) to the data root
+/// (`$XDG_DATA_HOME/kage/plugin-state`). A legacy dir is migrated only
+/// when the new location does not exist yet, so already-migrated
+/// installs are left untouched. Loading never fails on migration: the
+/// outcome is logged as a single line.
+fn migrate_plugin_store_dir() {
+    let (Ok(old_root), Ok(new_root)) = (crate::state_root(), crate::data_root()) else {
+        return;
+    };
+    let old = old_root.join("plugin-state");
+    let new = new_root.join("plugin-state");
+    match migrate_store_dir(&old, &new) {
+        Ok(true) => {
+            eprintln!(
+                "kage: migrated plugin store from {} to {}",
+                old.display(),
+                new.display()
+            );
+        }
+        Ok(false) => {}
+        Err(e) => eprintln!("kage: plugin store migration failed: {e}"),
+    }
+}
+
+/// Rename `old` to `new` when `old` exists and `new` does not, returning
+/// whether a migration ran. When the two locations sit on different
+/// filesystems and `rename` reports `EXDEV`, fall back to a recursive
+/// copy of `old` followed by its removal.
+fn migrate_store_dir(old: &Path, new: &Path) -> std::io::Result<bool> {
+    if !old.is_dir() || new.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = new.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::rename(old, new) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
+            copy_dir_recursive(old, new)?;
+            std::fs::remove_dir_all(old)?;
+            Ok(true)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Copy every file and subdirectory of `src` into `dst`, creating `dst`
+/// as needed.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let target = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
 }
 
 /// Register every provider a plugin contributed via
@@ -419,6 +483,7 @@ impl<H: Hooks> PluginEventHooks<H> {
 mod tests {
     use kage_loop::NoopHooks;
     use kage_plugin::PluginRuntime;
+    use tempfile::tempdir;
 
     use super::*;
 
@@ -514,5 +579,75 @@ mod tests {
         assert_eq!(hooks.get_steering(), Some("first".to_owned()));
         assert_eq!(hooks.get_steering(), Some("second".to_owned()));
         assert_eq!(hooks.get_steering(), None);
+    }
+
+    #[test]
+    fn store_migration_is_noop_without_legacy_dir() {
+        let root = tempdir().unwrap();
+        let old = root.path().join("state/plugin-state");
+        let new = root.path().join("data/plugin-state");
+        assert!(!migrate_store_dir(&old, &new).unwrap());
+        assert!(!new.exists());
+    }
+
+    #[test]
+    fn store_migration_moves_legacy_dir_with_content_intact() {
+        let root = tempdir().unwrap();
+        let old = root.path().join("state/plugin-state");
+        let new = root.path().join("data/plugin-state");
+        std::fs::create_dir_all(old.join("nested")).unwrap();
+        std::fs::write(old.join("a.json"), "{\"count\":1}").unwrap();
+        std::fs::write(old.join("nested/b.json"), "{}").unwrap();
+        assert!(migrate_store_dir(&old, &new).unwrap());
+        assert!(!old.exists());
+        assert_eq!(
+            std::fs::read_to_string(new.join("a.json")).unwrap(),
+            "{\"count\":1}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(new.join("nested/b.json")).unwrap(),
+            "{}"
+        );
+    }
+
+    #[test]
+    fn store_migration_skips_when_new_location_exists() {
+        let root = tempdir().unwrap();
+        let old = root.path().join("state/plugin-state");
+        let new = root.path().join("data/plugin-state");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join("a.json"), "{}").unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(new.join("b.json"), "{}").unwrap();
+        assert!(!migrate_store_dir(&old, &new).unwrap());
+        assert!(old.join("a.json").exists());
+        assert!(new.join("b.json").exists());
+        assert!(!new.join("a.json").exists());
+    }
+
+    #[test]
+    fn store_copy_fallback_reproduces_tree_across_distinct_roots() {
+        // Two separate tempdirs stand in for the cross-device case where
+        // `rename` fails with `EXDEV`; the copy helper is exercised
+        // directly and the source tree removed afterwards, matching
+        // `migrate_store_dir`'s fallback sequence.
+        let src_root = tempdir().unwrap();
+        let dst_root = tempdir().unwrap();
+        let old = src_root.path().join("plugin-state");
+        let new = dst_root.path().join("plugin-state");
+        std::fs::create_dir_all(old.join("nested")).unwrap();
+        std::fs::write(old.join("a.json"), "{\"count\":1}").unwrap();
+        std::fs::write(old.join("nested/b.json"), "{}").unwrap();
+        copy_dir_recursive(&old, &new).unwrap();
+        std::fs::remove_dir_all(&old).unwrap();
+        assert!(!old.exists());
+        assert_eq!(
+            std::fs::read_to_string(new.join("a.json")).unwrap(),
+            "{\"count\":1}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(new.join("nested/b.json")).unwrap(),
+            "{}"
+        );
     }
 }

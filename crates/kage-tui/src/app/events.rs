@@ -4,47 +4,19 @@
 use super::*;
 
 impl App {
-    /// Resolve an `InputAction::Submit`: paint the user block, then
-    /// either push onto the steering queue (text-only mid-run with a
-    /// queue attached) or dispatch as a `RunRequest::Submit` over the
-    /// worker channel. Image-bearing submits always take the channel
-    /// path because the steering hook only carries text.
-    ///
-    /// The queue-vs-channel decision reads the in-flight flag while
-    /// holding the steering lock, the same order the worker's
-    /// end-of-run flush takes (queue, then usage flag). A submit
-    /// racing the end of a run therefore either queues before that
-    /// flush drains it, or sees the run over and takes the channel
-    /// path; it can never strand a prompt between the two.
+    /// Resolve an `InputAction::Submit`: send the prompt and its images
+    /// to the engine. The user block appears when the engine delivers the
+    /// prompt, which is the next turn boundary when a run is in flight.
     pub(crate) fn handle_submit(&mut self, text: String) {
         let images = self.input.take_attached();
-        {
-            let mut buf = lock(&self.buffer);
-            buf.push_user(text.clone());
-            for img in &images {
-                buf.push_custom("kage:image", img.placeholder(), false);
-            }
-        }
-        // Clone the Arc so the guard below cannot borrow `self`
-        // across the `&mut self` calls that follow.
-        if images.is_empty()
-            && let Some(queue) = self.steering.clone()
-        {
-            let mut q = lock(&queue);
-            if self.is_run_in_flight() {
-                q.push_back(text);
-                drop(q);
-                self.notify("queued for next turn");
-                return;
-            }
-        }
+        let queued = self.is_run_in_flight();
         if self
             .send_request(RunRequest::Submit { text, images })
             .is_err()
         {
-            // The user block above is already painted; a dead worker
-            // must not leave it looking delivered.
             self.push_error("submit failed: agent worker has stopped");
+        } else if queued {
+            self.notify("queued for the next turn");
         }
     }
 

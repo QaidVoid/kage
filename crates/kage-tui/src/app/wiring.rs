@@ -70,8 +70,6 @@ impl App {
             captured_rows: std::collections::BTreeMap::new(),
             last_cursor_style: None,
             session_usage: None,
-            cancel_flag: None,
-            steering: None,
             toasts: None,
             dialog_rx: None,
             plugin_refresh_rx: None,
@@ -82,9 +80,11 @@ impl App {
             plugin_overlay: None,
             active_dialog: None,
             pending_tree_delete: None,
-            permission_rx: None,
+            engine_rx: None,
+            active_session: None,
             permission_overlay: None,
             pending_permission: None,
+            permission_queue: std::collections::VecDeque::new(),
         }
     }
 
@@ -97,29 +97,8 @@ impl App {
         self.session_usage = Some(usage);
     }
 
-    /// Register the host's cancellation flag so [`InputAction::Cancel`]
-    /// and `:cancel` can flip it directly on the event-loop thread,
-    /// bypassing the worker request queue. Without this, cancellation
-    /// of an in-flight turn does not take effect until the turn ends
-    /// naturally because the worker thread is blocked inside the
-    /// agent loop and cannot drain its request channel.
-    pub fn set_cancel_flag(&mut self, flag: CancelFlag) {
-        self.cancel_flag = Some(flag);
-    }
-
-    /// Register a steering queue. With one set, a text-only `Submit`
-    /// issued while [`Self::is_run_in_flight`] is true pushes into the
-    /// queue and shows a toast; the agent loop's `get_steering` hook
-    /// drains it at the next turn boundary. Without one, every
-    /// `Submit` goes through the normal worker channel.
-    pub fn set_steering_queue(&mut self, queue: crate::events::SharedSteering) {
-        self.steering = Some(queue);
-    }
-
-    /// Whether the host worker is currently inside `run_with_hooks`.
-    /// Reads the shared session-usage `working` flag the worker
-    /// flips on entry and exit. Returns `false` when no usage
-    /// snapshot is registered (the host opted out of the modeline).
+    /// Whether a run is in flight, from the engine's last reported
+    /// session state. `false` when no usage snapshot is registered.
     pub(crate) fn is_run_in_flight(&self) -> bool {
         self.session_usage.as_ref().is_some_and(|u| lock(u).working)
     }
@@ -154,15 +133,8 @@ impl App {
         q.iter().map(|t| t.expires_at).min()
     }
 
-    /// Trip the registered cancel flag if any, then forward a
-    /// `RunRequest::Cancel` to the worker for any extra cleanup that
-    /// arm performs (currently it just calls `.cancel()` again, which
-    /// is idempotent - the channel send is a fallback for hosts that
-    /// have not registered a flag via [`Self::set_cancel_flag`]).
+    /// Ask the engine to cancel the in-flight run.
     pub(crate) fn trip_cancel(&mut self) {
-        if let Some(flag) = &self.cancel_flag {
-            flag.cancel();
-        }
         let _ = self.send_request(RunRequest::Cancel);
     }
 
@@ -793,38 +765,5 @@ impl App {
             .collect();
         let mut s = lock(slot);
         *s = entries;
-    }
-
-    /// Wire the channel the worker pushes blocking [`PermissionAsk`]
-    /// requests onto (a tool configured `ask` under
-    /// `[permissions.tools.<name>]`). Without this the gate's send
-    /// fails, which it treats as a denial.
-    pub fn set_permission_channel(&mut self, rx: std::sync::mpsc::Receiver<PermissionAsk>) {
-        self.permission_rx = Some(rx);
-    }
-
-    /// Drain one pending [`PermissionAsk`] and open its overlay.
-    /// Skipped while another modal overlay is up: the worker stays
-    /// parked and the ask is taken on a later tick once the screen is
-    /// free (the gate is single-slot, so at most one is queued).
-    pub(crate) fn drain_permission(&mut self) -> bool {
-        if self.picker.is_some()
-            || self.plugin_overlay.is_some()
-            || self.permission_overlay.is_some()
-        {
-            return false;
-        }
-        let Some(rx) = self.permission_rx.as_ref() else {
-            return false;
-        };
-        let Ok(ask) = rx.try_recv() else {
-            return false;
-        };
-        self.permission_overlay = Some(crate::overlay::PermissionOverlay::new(
-            ask.tool.clone(),
-            ask.subject.clone(),
-        ));
-        self.pending_permission = Some(ask);
-        true
     }
 }

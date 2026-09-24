@@ -3,92 +3,6 @@
 #[allow(clippy::wildcard_imports)] // tui split: shares the parent module scope
 use super::*;
 
-/// First text block of a message, if any. Used to pull the first
-/// assistant reply out of history for the title prompt.
-pub(crate) fn first_text_of(m: &Message) -> Option<String> {
-    m.content.iter().find_map(|c| match c {
-        Content::Text { text } => Some(text.clone()),
-        _ => None,
-    })
-}
-
-/// Generate a session title from the first exchange and append it as
-/// a [`kage_session::SessionEntry::Title`]. A file error is surfaced
-/// in the buffer, never swallowed; a model failure already degraded
-/// to the heuristic inside [`crate::title::generate`].
-pub(crate) fn write_session_title(
-    provider: &dyn kage_provider::Provider,
-    model: &str,
-    path: &std::path::Path,
-    user_text: &str,
-    assistant_text: &str,
-    cancel: &CancelFlag,
-    buffer: &SharedBuffer,
-) {
-    let title = crate::title::generate(provider, model, user_text, assistant_text, cancel);
-    let entry = kage_session::SessionEntry::Title(kage_session::SessionTitle {
-        id: kage_session::EntryId::new(),
-        ts: chrono::Utc::now(),
-        title,
-    });
-    match SessionWriter::open(path) {
-        Ok(mut w) => {
-            if let Err(e) = w.append(&entry) {
-                let mut buf = lock(buffer);
-                buf.push_custom("kage:error", format!("session title: {e}"), false);
-            }
-        }
-        Err(e) => {
-            let mut buf = lock(buffer);
-            buf.push_custom("kage:error", format!("session title: {e}"), false);
-        }
-    }
-}
-
-/// Open or create the session file for the duration of one turn.
-///
-/// The TUI plans a session id+path at startup but defers writing the
-/// header file until the first prompt actually lands. If the path
-/// already exists (resumed session, or this is a follow-up turn) we
-/// open it in append mode. If not, we consume the planned header,
-/// create the file with it, and let subsequent turns hit the open
-/// branch.
-pub(crate) fn open_writer_for_turn(
-    session_path: Option<&Arc<Mutex<PathBuf>>>,
-    session_header: Option<&Arc<Mutex<Option<kage_session::Header>>>>,
-    buffer: &SharedBuffer,
-) -> Option<SessionWriter> {
-    let path_arc = session_path?;
-    let path = lock(path_arc).clone();
-    if !path.exists() {
-        let header = session_header.and_then(|h| lock(h).take())?;
-        return match SessionWriter::create(path.clone(), header) {
-            Ok(w) => Some(w),
-            Err(e) => {
-                let mut buf = lock(buffer);
-                buf.push_custom(
-                    "kage:error",
-                    format!("session: create {}: {e}", path.display()),
-                    false,
-                );
-                None
-            }
-        };
-    }
-    match SessionWriter::open(&path) {
-        Ok(w) => Some(w),
-        Err(e) => {
-            let mut buf = lock(buffer);
-            buf.push_custom(
-                "kage:error",
-                format!("session: open {}: {e}", path.display()),
-                false,
-            );
-            None
-        }
-    }
-}
-
 /// Run a plugin command through the coroutine bridge so its handler
 /// may call blocking `kage.ui.*` dialogs. Drives the suspend/resume
 /// loop to completion and returns the command's output (an error
@@ -99,7 +13,7 @@ pub(crate) fn run_bridged_command(
     cmd: &kage_plugin::LuaCommand,
     raw: &str,
     dialog_tx: &mpsc::Sender<PluginDialog>,
-    buffer: &SharedBuffer,
+    commander: &Commander,
 ) -> Option<CommandOutput> {
     let label = format!("command {}", cmd.name());
     let prep = match cmd.prepare_bridge(raw, &serde_json::Value::Null) {
@@ -114,7 +28,7 @@ pub(crate) fn run_bridged_command(
         Ok(step) => step,
         Err(e) => return Some(error_output(&label, &e.to_string())),
     };
-    drive_bridge(rt, &label, step, dialog_tx, buffer)
+    drive_bridge(rt, &label, step, dialog_tx, commander)
 }
 
 /// Run a plugin keybinding's handler through the coroutine bridge,
@@ -125,7 +39,7 @@ pub(crate) fn run_bridged_keybinding(
     rt: &PluginRuntime,
     kb: &kage_plugin::LuaKeybinding,
     dialog_tx: &mpsc::Sender<PluginDialog>,
-    buffer: &SharedBuffer,
+    commander: &Commander,
 ) -> Option<CommandOutput> {
     let label = format!("keybinding {}", kb.chord());
     let handler = match kb.handler() {
@@ -136,7 +50,7 @@ pub(crate) fn run_bridged_keybinding(
         Ok(step) => step,
         Err(e) => return Some(error_output(&label, &e.to_string())),
     };
-    drive_bridge(rt, &label, step, dialog_tx, buffer)
+    drive_bridge(rt, &label, step, dialog_tx, commander)
 }
 
 /// Drive a started bridge call to completion: service each suspend
@@ -148,13 +62,13 @@ pub(crate) fn drive_bridge(
     label: &str,
     mut step: BridgeStep,
     dialog_tx: &mpsc::Sender<PluginDialog>,
-    buffer: &SharedBuffer,
+    commander: &Commander,
 ) -> Option<CommandOutput> {
     loop {
         match step {
             BridgeStep::Done(value) => return Some(CommandOutput::from_json(&value)),
             BridgeStep::Suspended(req) => {
-                let resumed = match service_dialog(&req, dialog_tx, buffer) {
+                let resumed = match service_dialog(&req, dialog_tx, commander) {
                     Some(value) => rt.bridge_resume(&value),
                     None => rt.bridge_cancel(),
                 };
@@ -178,7 +92,7 @@ pub(crate) fn drive_bridge(
 pub(crate) fn service_dialog(
     req: &kage_plugin::SuspendRequest,
     dialog_tx: &mpsc::Sender<PluginDialog>,
-    buffer: &SharedBuffer,
+    commander: &Commander,
 ) -> Option<serde_json::Value> {
     let (reply_tx, reply_rx) = mpsc::channel();
     let dialog = match req.kind.as_str() {
@@ -189,7 +103,7 @@ pub(crate) fn service_dialog(
                 reply: reply_tx,
             },
             Err(e) => {
-                push_error(buffer, &format!("ui.select: {e}"));
+                dialog_error(commander, format!("ui.select: {e}"));
                 return None;
             }
         },
@@ -200,7 +114,7 @@ pub(crate) fn service_dialog(
                 reply: reply_tx,
             },
             Err(e) => {
-                push_error(buffer, &format!("ui.confirm: {e}"));
+                dialog_error(commander, format!("ui.confirm: {e}"));
                 return None;
             }
         },
@@ -211,7 +125,7 @@ pub(crate) fn service_dialog(
                 reply: reply_tx,
             },
             Err(e) => {
-                push_error(buffer, &format!("ui.input: {e}"));
+                dialog_error(commander, format!("ui.input: {e}"));
                 return None;
             }
         },
@@ -222,12 +136,12 @@ pub(crate) fn service_dialog(
                 reply: reply_tx,
             },
             Err(e) => {
-                push_error(buffer, &format!("ui.editor: {e}"));
+                dialog_error(commander, format!("ui.editor: {e}"));
                 return None;
             }
         },
         other => {
-            push_error(buffer, &format!("unsupported plugin dialog: {other}"));
+            dialog_error(commander, format!("unsupported plugin dialog: {other}"));
             return None;
         }
     };
@@ -237,6 +151,14 @@ pub(crate) fn service_dialog(
     reply_rx.recv().unwrap_or(None)
 }
 
+fn dialog_error(commander: &Commander, text: String) {
+    commander.publish(kage_core::protocol::HostEvent::Notice {
+        level: kage_core::protocol::NoticeLevel::Error,
+        text,
+        transient: false,
+    });
+}
+
 /// Build a one-line error [`CommandOutput`] for a failed plugin
 /// invocation. `label` reads like `command foo` or `keybinding ctrl+g`.
 pub(crate) fn error_output(label: &str, msg: &str) -> CommandOutput {
@@ -244,177 +166,6 @@ pub(crate) fn error_output(label: &str, msg: &str) -> CommandOutput {
         text: format!("plugin {label}: {msg}"),
         is_error: true,
         structured: None,
-    }
-}
-
-/// Push a `kage:error` block into the conversation buffer.
-pub(crate) fn push_error(buffer: &SharedBuffer, msg: &str) {
-    let mut buf = lock(buffer);
-    buf.push_custom("kage:error", msg.to_owned(), false);
-}
-
-/// Consult plugin handlers for a session-op event before running an
-/// action. Returns the (possibly patched) target string if the action
-/// should proceed, or `None` if a plugin vetoed.
-///
-/// On veto, this also pushes a toast plus an inline error block so the
-/// user sees the reason without diving into logs. With no plugin runtime
-/// or no subscribers, returns `Some(target.to_owned())` immediately.
-pub(crate) fn consult_session_op(
-    runtime: Option<&Arc<PluginRuntime>>,
-    event: &str,
-    target: &str,
-    buffer: &SharedBuffer,
-    toasts: &SharedToasts,
-) -> Option<String> {
-    let Some(rt) = runtime else {
-        return Some(target.to_owned());
-    };
-    if rt.handler_count(event) == 0 {
-        return Some(target.to_owned());
-    }
-    match rt.dispatch_session_op(event, target) {
-        Ok(kage_plugin::SessionOpDecision::Proceed) => Some(target.to_owned()),
-        Ok(kage_plugin::SessionOpDecision::Patch(next)) => Some(next),
-        Ok(kage_plugin::SessionOpDecision::Cancel { reason }) => {
-            {
-                let mut buf = lock(buffer);
-                buf.push_custom("kage:error", format!("{event}: {reason}"), false);
-            }
-            push_toast(
-                toasts,
-                Toast::info(format!("session op cancelled: {reason}")),
-            );
-            None
-        }
-        Err(err) => {
-            let mut buf = lock(buffer);
-            buf.push_custom(
-                "kage:error",
-                format!("{event}: plugin dispatch failed: {err}"),
-                false,
-            );
-            Some(target.to_owned())
-        }
-    }
-}
-
-/// Extract the first text block from a user message, joined with newlines
-/// if there are multiple. Returns an empty string when the message carries
-/// no text (image-only, tool-result-only, etc.).
-pub(crate) fn first_user_text(msg: &Message) -> String {
-    let mut out = String::new();
-    for block in &msg.content {
-        if let Content::Text { text } = block {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(text);
-        }
-    }
-    out
-}
-
-/// Run the agent loop with the right hook chain: permission gate
-/// innermost, TUI display over it, optional session recording in the
-/// middle, optional plugin dispatch outermost, plus the
-/// [`UsageHooks`] wrapper at the very edge so the modeline updates
-/// every `MessageEnd`. Returns whether the loop completed
-/// successfully so the caller knows whether to bump `last_model`
-/// state.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_with_hooks(
-    provider: &dyn kage_provider::Provider,
-    tools: &ToolRegistry,
-    cx: &mut AgentContext,
-    loop_cfg: LoopConfig,
-    cancel: &CancelFlag,
-    gate: crate::permissions::PermissionGate,
-    buffer: &SharedBuffer,
-    plugin_runtime: Option<&Arc<PluginRuntime>>,
-    writer: Option<SessionWriter>,
-    user_msg: &Message,
-    session_usage: SharedSessionUsage,
-    qualified_model: String,
-    context_window: u64,
-    steering: kage_tui::SharedSteering,
-) -> bool {
-    use crate::usage_hooks::UsageHooks;
-    let tui_hooks = TuiHooks::new(gate, buffer.clone()).with_steering(steering);
-    match (writer, plugin_runtime) {
-        (Some(w), Some(rt)) => {
-            let mut recorded =
-                SessionRecordingHooks::new(tui_hooks, w).with_plugin_runtime(Arc::clone(rt));
-            recorded.record_user_message(user_msg);
-            let plugin_hooks = PluginEventHooks::new(recorded, Arc::clone(rt));
-            plugin_hooks.dispatch_before_agent_start(&cx.system_prompt, &first_user_text(user_msg));
-            plugin_hooks.dispatch_agent_start();
-            let mut wrapped =
-                UsageHooks::new(plugin_hooks, session_usage, qualified_model, context_window);
-            let res = run(provider, tools, cx, loop_cfg, &mut wrapped, cancel, |_| {});
-            wrapped.into_inner().dispatch_agent_end(res.is_ok());
-            res.is_ok()
-        }
-        (Some(w), None) => {
-            let mut recorded = SessionRecordingHooks::new(tui_hooks, w);
-            recorded.record_user_message(user_msg);
-            let mut wrapped =
-                UsageHooks::new(recorded, session_usage, qualified_model, context_window);
-            run(provider, tools, cx, loop_cfg, &mut wrapped, cancel, |_| {}).is_ok()
-        }
-        (None, Some(rt)) => {
-            let plugin_hooks = PluginEventHooks::new(tui_hooks, Arc::clone(rt));
-            plugin_hooks.dispatch_before_agent_start(&cx.system_prompt, &first_user_text(user_msg));
-            plugin_hooks.dispatch_agent_start();
-            let mut wrapped =
-                UsageHooks::new(plugin_hooks, session_usage, qualified_model, context_window);
-            let res = run(provider, tools, cx, loop_cfg, &mut wrapped, cancel, |_| {});
-            wrapped.into_inner().dispatch_agent_end(res.is_ok());
-            res.is_ok()
-        }
-        (None, None) => {
-            let mut wrapped =
-                UsageHooks::new(tui_hooks, session_usage, qualified_model, context_window);
-            run(provider, tools, cx, loop_cfg, &mut wrapped, cancel, |_| {}).is_ok()
-        }
-    }
-}
-
-/// Run an unconditional compaction pass through the same hook stack
-/// `run_with_hooks` uses, so the resulting `LoopEvent::Compaction`
-/// is mirrored to the buffer and recorded to the session file. The
-/// usage hook is intentionally skipped: compaction does not change
-/// the active model or window, just the saved budget.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn run_compact_with_hooks(
-    provider: &dyn kage_provider::Provider,
-    cx: &mut AgentContext,
-    cancel: &CancelFlag,
-    gate: crate::permissions::PermissionGate,
-    buffer: &SharedBuffer,
-    plugin_runtime: Option<&Arc<PluginRuntime>>,
-    writer: Option<SessionWriter>,
-) -> Result<bool, kage_core::LoopError> {
-    let tui_hooks = TuiHooks::new(gate, buffer.clone());
-    match (writer, plugin_runtime) {
-        (Some(w), Some(rt)) => {
-            let recorded =
-                SessionRecordingHooks::new(tui_hooks, w).with_plugin_runtime(Arc::clone(rt));
-            let mut plugin_hooks = PluginEventHooks::new(recorded, Arc::clone(rt));
-            force_compact(cx, provider, cancel, &mut plugin_hooks, &mut |_| {})
-        }
-        (Some(w), None) => {
-            let mut recorded = SessionRecordingHooks::new(tui_hooks, w);
-            force_compact(cx, provider, cancel, &mut recorded, &mut |_| {})
-        }
-        (None, Some(rt)) => {
-            let mut plugin_hooks = PluginEventHooks::new(tui_hooks, Arc::clone(rt));
-            force_compact(cx, provider, cancel, &mut plugin_hooks, &mut |_| {})
-        }
-        (None, None) => {
-            let mut hooks = tui_hooks;
-            force_compact(cx, provider, cancel, &mut hooks, &mut |_| {})
-        }
     }
 }
 
@@ -457,16 +208,15 @@ pub(crate) fn list_session_choices(
 /// whichever file the runtime is currently writing as the active one.
 pub(crate) fn list_session_nodes(
     dir: &std::path::Path,
-    session_path: Option<&Arc<Mutex<PathBuf>>>,
+    current: Option<&std::path::Path>,
 ) -> Vec<kage_tui::SessionNode> {
-    let current = session_path.map(|sp| lock(sp).clone());
     let Ok(summaries) = kage_session::list(dir) else {
         return Vec::new();
     };
     summaries
         .into_iter()
         .map(|s| {
-            let is_current = current.as_deref() == Some(s.path.as_path());
+            let is_current = current == Some(s.path.as_path());
             kage_tui::SessionNode {
                 id: s.id.to_string(),
                 path: s.path.to_string_lossy().into_owned(),
@@ -577,32 +327,6 @@ pub(crate) fn snapshot_plugin_commands(
     listing
 }
 
-/// Replay `path` into the live TUI: clear the buffer, replace
-/// `cx.history` with the recorded one, point the worker at this file
-/// for future appends, and repopulate the buffer so the user sees the
-/// prior conversation rendered with the current TUI styling.
-///
-/// If the session's recorded model is no longer resolvable (provider
-/// not authed in this run, model removed from the catalog), the
-/// resume keeps the currently active model rather than failing. The
-/// replay history still loads so the substitute model continues with
-/// full context; a toast flags the substitution.
-/// Read the JSONL session at `path` and return the id of its final
-/// non-header entry, or `None` if the file holds only a header.
-pub(crate) fn find_last_entry(
-    path: &std::path::Path,
-) -> Result<Option<kage_session::EntryId>, kage_session::SessionError> {
-    let reader = SessionReader::iter(path)?;
-    let mut last = None;
-    for item in reader {
-        let entry = item?;
-        if !matches!(entry, kage_session::SessionEntry::Header(_)) {
-            last = Some(entry.id());
-        }
-    }
-    Ok(last)
-}
-
 /// Resolve a `kage.session.switch` argument to a session file path.
 /// Accepts either a path string (as handed out by
 /// `kage.session.list()`) or a session-id prefix, which is matched
@@ -635,16 +359,12 @@ pub(crate) fn resolve_switch_target(target: &str) -> Result<PathBuf, String> {
 /// missing file (no turn yet) clears the snapshot.
 pub(crate) fn refresh_session_entries(
     plugin_runtime: Option<&Arc<PluginRuntime>>,
-    session_path: Option<&Arc<Mutex<PathBuf>>>,
+    session_path: Option<&std::path::Path>,
 ) {
-    let Some(rt) = plugin_runtime else {
+    let (Some(rt), Some(path)) = (plugin_runtime, session_path) else {
         return;
     };
-    let Some(sp) = session_path else {
-        return;
-    };
-    let path = lock(sp).clone();
-    let Ok(reader) = SessionReader::iter(&path) else {
+    let Ok(reader) = SessionReader::iter(path) else {
         rt.set_session_entries(Vec::new());
         return;
     };
@@ -694,4 +414,52 @@ pub(crate) fn entry_kind(entry: &kage_session::SessionEntry) -> &'static str {
         E::Title(_) => "title",
         E::Custom(_) => "custom",
     }
+}
+
+/// Build the picker rows the App offers when the user hits `Ctrl+P`.
+/// Iterates registered providers and pulls each one's catalog model
+/// list; when the catalog has no entry for a provider (e.g. plugin-
+/// registered providers), falls back to the live `Provider::models()`
+/// list. The active model is marked with `*`.
+pub(crate) fn available_model_items(
+    registry: &ProviderRegistry,
+    active: &str,
+) -> Vec<kage_tui::PickItem> {
+    let mut items: Vec<kage_tui::PickItem> = Vec::new();
+    let mut provider_ids: Vec<&str> = registry.ids().collect();
+    provider_ids.sort_unstable();
+    for provider_id in provider_ids {
+        let catalog_provider = kage_provider::catalog::provider(provider_id);
+        let catalog_models = catalog_provider.map_or::<&[_], _>(&[], |p| p.models);
+        if !catalog_models.is_empty() {
+            let display_name = catalog_provider.map_or(provider_id, |p| p.name);
+            for model in catalog_models {
+                let value = format!("{provider_id}:{}", model.id);
+                let badge = if value == active { '*' } else { ' ' };
+                items.push(
+                    kage_tui::PickItem::simple(value)
+                        .with_label(model.name)
+                        .with_badge(badge)
+                        .with_group(display_name),
+                );
+            }
+            continue;
+        }
+        let Some(provider) = registry.get(provider_id) else {
+            continue;
+        };
+        let metadata = provider.metadata();
+        let display_name = metadata.display_name.as_str();
+        for model in provider.models() {
+            let value = format!("{provider_id}:{}", model.id);
+            let badge = if value == active { '*' } else { ' ' };
+            items.push(
+                kage_tui::PickItem::simple(value)
+                    .with_label(&model.name)
+                    .with_badge(badge)
+                    .with_group(display_name),
+            );
+        }
+    }
+    items
 }

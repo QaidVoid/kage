@@ -173,6 +173,36 @@ pub fn merge_plugin_providers(runtime: &PluginRuntime, registry: &mut ProviderRe
     }
 }
 
+/// Fire `before_agent_start` and `agent_start` before a run's first turn,
+/// with the system prompt and first user message in scope.
+pub(crate) fn dispatch_run_start(
+    rt: &PluginRuntime,
+    system_prompt: &str,
+    first_user_message: &str,
+) {
+    let payload = json!({
+        "system_prompt": system_prompt,
+        "first_user_message": first_user_message,
+    });
+    for (event, payload) in [("before_agent_start", payload), ("agent_start", json!({}))] {
+        if let Err(err) = rt.dispatch_event(event, &payload) {
+            log_plugin_error(rt, format_args!("{event} dispatch: {err}"));
+        }
+    }
+}
+
+/// Fire `agent_end` after a run returns.
+pub(crate) fn dispatch_run_end(rt: &PluginRuntime, ok: bool) {
+    if let Err(err) = rt.dispatch_event("agent_end", &json!({ "ok": ok })) {
+        log_plugin_error(rt, format_args!("agent_end dispatch: {err}"));
+    }
+}
+
+fn log_plugin_error(rt: &PluginRuntime, args: std::fmt::Arguments<'_>) {
+    let sink = rt.sink();
+    lock(&sink).log(LogLevel::Error, &args.to_string());
+}
+
 /// Hooks adapter that forwards loop events to plugin event handlers.
 ///
 /// The host wraps another `Hooks` (typically the session recorder) so
@@ -201,38 +231,8 @@ impl<H: Hooks> PluginEventHooks<H> {
         }
     }
 
-    /// Synthesize the `before_agent_start` event before the loop's first
-    /// turn. Fires with the system prompt and the first user message text
-    /// in scope so plugins can observe the inputs to the upcoming run.
-    pub fn dispatch_before_agent_start(&self, system_prompt: &str, first_user_message: &str) {
-        let payload = json!({
-            "system_prompt": system_prompt,
-            "first_user_message": first_user_message,
-        });
-        if let Err(err) = self.runtime.dispatch_event("before_agent_start", &payload) {
-            self.log_error(format_args!("before_agent_start dispatch: {err}"));
-        }
-    }
-
-    /// Synthesize the `agent_start` event before the loop's first turn.
-    pub fn dispatch_agent_start(&self) {
-        if let Err(err) = self.runtime.dispatch_event("agent_start", &json!({})) {
-            self.log_error(format_args!("agent_start dispatch: {err}"));
-        }
-    }
-
-    /// Synthesize the `agent_end` event after the loop returns.
-    pub fn dispatch_agent_end(&self, ok: bool) {
-        let payload = json!({ "ok": ok });
-        if let Err(err) = self.runtime.dispatch_event("agent_end", &payload) {
-            self.log_error(format_args!("agent_end dispatch: {err}"));
-        }
-    }
-
     fn log_error(&self, args: std::fmt::Arguments<'_>) {
-        let sink = self.runtime.sink();
-        let mut sink = lock(&sink);
-        sink.log(LogLevel::Error, &args.to_string());
+        log_plugin_error(&self.runtime, args);
     }
 }
 

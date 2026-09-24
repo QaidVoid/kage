@@ -203,6 +203,7 @@ impl CliAcpAgent {
             plugins,
             mcp: Some(mcp),
             interactive: true,
+            title: true,
         })
     }
 }

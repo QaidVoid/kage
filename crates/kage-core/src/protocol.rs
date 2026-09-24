@@ -132,21 +132,6 @@ pub enum HostEvent {
         /// Id of the answered request.
         request_id: RequestId,
     },
-    /// A plugin opened a blocking dialog. Answer with
-    /// [`CommandKind::ResolveDialog`]. Durable.
-    DialogRequested {
-        /// Id to answer with.
-        request_id: RequestId,
-        /// Dialog kind, such as `select`, `confirm`, `input`, or `editor`.
-        kind: String,
-        /// Kind-specific arguments.
-        payload: serde_json::Value,
-    },
-    /// A dialog was answered or abandoned. Durable.
-    DialogResolved {
-        /// Id of the answered request.
-        request_id: RequestId,
-    },
     /// A message for the user that is not part of the conversation.
     /// Never recorded. Live.
     Notice {
@@ -173,6 +158,16 @@ pub enum HostEvent {
     TitleChanged {
         /// New title.
         title: String,
+    },
+    /// A user shell command finished. Its output is shared with the model
+    /// on the next turn but is not part of the recorded conversation.
+    ShellFinished {
+        /// Command line that ran.
+        command: String,
+        /// Combined, truncated stdout and stderr.
+        output: String,
+        /// Exit code, or `None` when a signal ended the command.
+        exit_code: Option<i32>,
     },
 }
 
@@ -308,14 +303,6 @@ pub enum CommandKind {
         /// The decision.
         decision: PermissionDecision,
     },
-    /// Answer a [`HostEvent::DialogRequested`]. `None` means cancelled.
-    ResolveDialog {
-        /// Request being answered.
-        request_id: RequestId,
-        /// Dialog result.
-        #[serde(default)]
-        value: Option<serde_json::Value>,
-    },
     /// Use a different provider-qualified model from the next run on.
     SetModel {
         /// Provider-qualified model id.
@@ -348,12 +335,14 @@ pub enum CommandKind {
         /// Session file.
         path: PathBuf,
     },
-    /// Copy the active session up to an entry into a new session file,
-    /// leaving the active session in place.
+    /// Copy the active session up to an entry into a new session file.
     Fork {
         /// Entry id prefix to stop at. `None` means the latest entry.
         #[serde(default)]
         at: Option<String>,
+        /// Continue on the copy instead of leaving it as a snapshot.
+        #[serde(default)]
+        switch: bool,
     },
     /// Fork the session stored at `path` at its latest entry.
     ForkFile {
@@ -373,23 +362,6 @@ pub enum CommandKind {
         #[serde(default)]
         path: Option<PathBuf>,
     },
-    /// Run a plugin command.
-    RunPluginCommand {
-        /// Command name without the leading `/`.
-        name: String,
-        /// Raw argument string.
-        #[serde(default)]
-        args: String,
-    },
-    /// Run the plugin keybinding bound to `chord`.
-    RunPluginKeybinding {
-        /// Canonical chord, such as `ctrl+shift+x`.
-        chord: String,
-    },
-    /// Rebuild the provider registry after credentials changed.
-    RefreshProviders,
-    /// Reload plugins from disk.
-    ReloadPlugins,
     /// Cancel every run and stop the engine.
     Shutdown,
 }
@@ -482,16 +454,6 @@ mod tests {
                 request_id: RequestId(3),
             }
             .into(),
-            HostEvent::DialogRequested {
-                request_id: RequestId(4),
-                kind: "confirm".into(),
-                payload: serde_json::json!({ "title": "t" }),
-            }
-            .into(),
-            HostEvent::DialogResolved {
-                request_id: RequestId(4),
-            }
-            .into(),
             HostEvent::Notice {
                 level: NoticeLevel::Error,
                 text: "boom".into(),
@@ -505,6 +467,12 @@ mod tests {
             }
             .into(),
             HostEvent::TitleChanged { title: "t".into() }.into(),
+            HostEvent::ShellFinished {
+                command: "ls".into(),
+                output: "a".into(),
+                exit_code: Some(0),
+            }
+            .into(),
         ];
         for event in events {
             let value = roundtrip(&envelope(event.clone()));

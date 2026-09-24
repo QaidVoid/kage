@@ -3,16 +3,17 @@
 //! [`App::run`] owns the [`Tui`] and a [`SharedBuffer`], polls crossterm
 //! key events, drives [`InputState`], applies [`InputAction`]s to the
 //! buffer, and redraws the screen ~30 times a second. Submitting a
-//! prompt fires a `RunRequest` through the provided sink; the host is
-//! responsible for spawning the agent loop on a worker thread and
-//! pushing its events into the same `SharedBuffer` via [`TuiHooks`].
+//! prompt fires a `RunRequest` through the provided sink; the host turns
+//! requests into engine commands and feeds the engine's
+//! [`kage_core::protocol::Envelope`]s back through
+//! [`App::set_engine_events`].
 
 pub(crate) use std::io::Write;
 pub(crate) use std::sync::mpsc::{Sender, TrySendError};
 pub(crate) use std::sync::{Arc, Mutex};
 pub(crate) use std::time::{Duration, Instant};
 
-pub(crate) use kage_core::{CancelFlag, sync::lock};
+pub(crate) use kage_core::sync::lock;
 pub(crate) use ratatui::crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
 
 pub(crate) use crate::toast::{self, SharedToasts, Toast, ToastKind};
@@ -246,6 +247,13 @@ pub enum RunRequest {
     /// `session_before_switch` veto, then reseats the runtime onto the
     /// target so subsequent turns continue there.
     SwitchSession(kage_plugin::SwitchTarget),
+    /// Answer a permission request the engine raised.
+    ResolvePermission {
+        /// Request being answered.
+        request_id: kage_core::protocol::RequestId,
+        /// The user's decision.
+        decision: PermissionDecision,
+    },
     /// A plugin file changed on disk. The worker re-evaluates every
     /// `.lua` in the plugins directory and toasts the outcome. Chrome
     /// (`set_header`/`set_footer`), status, autocomplete, terminal
@@ -354,23 +362,6 @@ pub(crate) enum PendingLogin {
 /// Host hook that runs an interactive credential login in the real
 /// terminal. Returns whether a credential was saved.
 pub(crate) type LoginRunner = std::sync::Arc<dyn Fn(Option<&str>) -> bool + Send + Sync>;
-
-/// A permission ask the worker's permission gate hands to the App.
-///
-/// A tool configured `ask` under `[permissions.tools.<name>]` suspends
-/// the agent loop on the worker thread; the gate forwards this over a
-/// channel and parks on the carried `reply`. The App hosts the
-/// matching [`crate::overlay::PermissionOverlay`], then sends the
-/// decision back and the worker resumes the loop with it.
-pub struct PermissionAsk {
-    /// Tool name the model invoked.
-    pub tool: String,
-    /// Subject preview: the command line or compact JSON the rules
-    /// matched against.
-    pub subject: String,
-    /// Channel the App answers on.
-    pub reply: std::sync::mpsc::Sender<PermissionDecision>,
-}
 
 pub use kage_core::protocol::PermissionDecision;
 
@@ -790,22 +781,6 @@ pub struct App {
     /// `model :: in/out :: total/window (pct)`. Updated by the host
     /// worker thread after every turn.
     session_usage: Option<crate::usage::SharedSessionUsage>,
-    /// Optional handle on the host's cancellation flag. When set,
-    /// `Cancel` actions (Ctrl-C, `:cancel`) flip it synchronously on
-    /// the foreground event-loop thread instead of going through
-    /// the worker request channel - which is essential because the
-    /// worker is busy inside `run_with_hooks` while the in-flight
-    /// turn is what we want to cancel, so a queued `RunRequest::Cancel`
-    /// would not fire until *after* the turn finishes naturally.
-    cancel_flag: Option<CancelFlag>,
-    /// Shared FIFO of user prompts queued while a run is in flight. A
-    /// text-only `Submit` issued mid-run lands here so the agent loop
-    /// picks it up at the next turn boundary via `Hooks::get_steering`,
-    /// instead of buffering behind the next `RunRequest` and only
-    /// firing after the whole run completes. `None` until the host
-    /// registers a queue, in which case mid-run submits fall back to
-    /// the channel path (today's behavior).
-    steering: Option<crate::events::SharedSteering>,
     /// Shared queue of ephemeral toast notifications painted as a
     /// top-right overlay over the conversation buffer. The handle is
     /// cloned to whatever sinks need to push (the App's own
@@ -838,22 +813,25 @@ pub struct App {
     /// Session file staged for deletion while the confirm dialog in
     /// [`Self::plugin_overlay`] asks; cleared when the answer arrives.
     pending_tree_delete: Option<std::path::PathBuf>,
-    /// Channel the worker pushes blocking [`PermissionAsk`] requests
-    /// onto (`[permissions.tools.<name>] default = "ask"`). Drained
-    /// between event polls; while the overlay is open the worker
-    /// thread is parked awaiting the decision.
-    permission_rx: Option<std::sync::mpsc::Receiver<PermissionAsk>>,
+    /// Engine events for the sessions this App shows. Drained between
+    /// event polls.
+    engine_rx: Option<std::sync::mpsc::Receiver<kage_core::protocol::Envelope>>,
+    /// The session whose events the App renders. Learned from the first
+    /// envelope and moved by `SessionChanged`.
+    active_session: Option<kage_core::SessionId>,
     /// The permission prompt currently on screen, if any. A modal
-    /// sibling of [`Self::plugin_overlay`] with the same hosting
-    /// shape: overlay plus the parked ask it must answer.
+    /// sibling of [`Self::plugin_overlay`].
     permission_overlay: Option<crate::overlay::PermissionOverlay>,
-    /// The ask whose overlay is in [`Self::permission_overlay`]:
-    /// where to send the decision once the user picks one.
-    pending_permission: Option<PermissionAsk>,
+    /// The request answered by [`Self::permission_overlay`].
+    pending_permission: Option<kage_core::protocol::RequestId>,
+    /// Permission requests waiting for the overlay: request id, tool,
+    /// subject.
+    permission_queue: std::collections::VecDeque<(kage_core::protocol::RequestId, String, String)>,
 }
 
 mod actions;
 mod editor;
+mod engine;
 mod events;
 mod keys;
 mod lifecycle;

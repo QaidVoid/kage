@@ -10,8 +10,10 @@
 mod bus;
 mod recorder;
 mod runner;
+mod sessions;
 
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -32,9 +34,11 @@ use kage_tools::ToolRegistry;
 
 pub(crate) use bus::Subscriber;
 pub(crate) use recorder::Recorder;
+#[cfg(test)]
+pub(crate) use sessions::render_session_markdown;
 
 use bus::Bus;
-use runner::{Finished, Run, Steering};
+use runner::{Finished, Run, Steering, Work};
 
 use crate::permissions::{Asker, PermissionGate, PermissionPrompt};
 
@@ -55,6 +59,8 @@ pub(crate) struct SessionSpec {
     /// Whether a client answers permission requests. Without one, `ask`
     /// verdicts are refused.
     pub interactive: bool,
+    /// Generate and record a title after the first completed exchange.
+    pub title: bool,
 }
 
 /// Handle to a running engine. Dropping it shuts the engine down.
@@ -72,12 +78,34 @@ impl Commander {
     pub(crate) fn send(&self, command: Command) {
         let _ = self.0.send(Input::Command(command));
     }
+
+    /// Publish a host event, such as a notice, on the active session.
+    pub(crate) fn publish(&self, event: HostEvent) {
+        let _ = self.0.send(Input::Publish(event));
+    }
+
+    /// Resolve models against `registry` from the next run on.
+    pub(crate) fn set_registry(&self, registry: Arc<ProviderRegistry>) {
+        let _ = self.0.send(Input::SetRegistry(registry));
+    }
 }
 
 enum Input {
     Command(Command),
     Open(Box<SessionSpec>),
     Finished(Box<Finished>),
+    ShellDone {
+        session: SessionId,
+        command: String,
+        output: String,
+        exit_code: Option<i32>,
+    },
+    Title {
+        session: SessionId,
+        title: String,
+    },
+    Publish(HostEvent),
+    SetRegistry(Arc<ProviderRegistry>),
 }
 
 impl Engine {
@@ -154,6 +182,14 @@ struct Session {
     loop_cfg: LoopConfig,
     mcp: Option<McpManager>,
     interactive: bool,
+    /// Session file, when the session is recorded.
+    path: Option<PathBuf>,
+    workdir: PathBuf,
+    /// Messages to add to history before the next run, such as shell
+    /// output that arrived while a run was in flight.
+    pending_history: Vec<Message>,
+    title: bool,
+    title_pending: bool,
 }
 
 /// What a session holds while no run owns it.
@@ -182,6 +218,19 @@ impl Dispatcher {
                 Input::Command(command) => self.command(command),
                 Input::Open(spec) => self.open(*spec),
                 Input::Finished(finished) => self.finish(*finished),
+                Input::ShellDone {
+                    session,
+                    command,
+                    output,
+                    exit_code,
+                } => self.shell_done(session, command, output, exit_code),
+                Input::Title { session, title } => self.record_title(session, title),
+                Input::Publish(event) => {
+                    if let Some(id) = self.active {
+                        self.bus.publish(id, event);
+                    }
+                }
+                Input::SetRegistry(registry) => self.registry = registry,
             }
             if self.shutting_down && self.sessions.values().all(|s| s.idle.is_some()) {
                 return;
@@ -201,18 +250,9 @@ impl Dispatcher {
             loop_cfg,
             mcp,
             interactive,
+            title,
         } = spec;
-        let usage = Usage {
-            total: TokenUsage {
-                input: cx.budget.used_input,
-                output: cx.budget.used_output,
-                cache_read: cx.budget.used_cache_read,
-                cache_write: cx.budget.used_cache_write,
-            },
-            context_used: cx.budget.current_context,
-            context_window: cx.context_window,
-            cost: 0.0,
-        };
+        let usage = usage_of(&cx);
         let state = SessionState {
             model,
             thinking: cx.thinking_level.unwrap_or_default(),
@@ -226,6 +266,9 @@ impl Dispatcher {
             },
         );
         self.bus.publish(id, HostEvent::UsageUpdated { usage });
+        let path = recorder.as_ref().map(|r| r.path().to_path_buf());
+        let workdir = cx.workdir.clone();
+        let title_pending = title && !has_reply(&cx);
         self.sessions.insert(
             id,
             Session {
@@ -242,6 +285,11 @@ impl Dispatcher {
                 loop_cfg,
                 mcp,
                 interactive,
+                path,
+                workdir,
+                pending_history: Vec::new(),
+                title,
+                title_pending,
             },
         );
         self.active.get_or_insert(id);
@@ -280,22 +328,123 @@ impl Dispatcher {
         match command.kind {
             CommandKind::Prompt { content, delivery } => self.prompt(id, content, delivery),
             CommandKind::Cancel => self.sessions[&id].cancel.cancel(),
+            CommandKind::Compact => {
+                if self.ensure_idle(id, "compact") {
+                    self.start_run(id, Work::Compact);
+                }
+            }
+            CommandKind::Shell { command } => self.shell(id, command),
+            CommandKind::NewSession => self.new_session(id),
+            CommandKind::LoadSession { path } => self.load_session(id, &path),
+            CommandKind::Fork { at, switch } => self.fork(id, at.as_deref(), switch),
+            CommandKind::ForkFile { path } => self.fork_file(id, &path),
+            CommandKind::Clone => self.clone_session(id),
+            CommandKind::DeleteSession { path } => self.delete_session(id, &path),
+            CommandKind::Export { path } => self.export(id, path),
             CommandKind::SetModel { model } => self.update_state(id, |s| s.state.model = model),
-            CommandKind::SetThinking { level } => self.update_state(id, |s| {
-                s.state.thinking = level;
-                s.thinking = Some(level);
-            }),
+            CommandKind::SetThinking { level } => self.set_thinking(id, level),
             CommandKind::SetPermissionMode { mode } => self.update_state(id, |s| {
                 s.gate.set_mode(mode);
                 s.state.permission_mode = mode;
             }),
-            other => notice(
-                &self.bus,
-                id,
-                NoticeLevel::Error,
-                format!("command not supported here: {other:?}"),
-            ),
+            CommandKind::Shutdown | CommandKind::ResolvePermission { .. } => {}
         }
+    }
+
+    /// Record and apply a thinking level now when idle, or at the next
+    /// run start otherwise.
+    fn set_thinking(&mut self, id: SessionId, level: ThinkingLevel) {
+        let session = self.sessions.get_mut(&id).expect("session checked");
+        session.state.thinking = level;
+        match session.idle.as_mut() {
+            Some(idle) => {
+                idle.cx.thinking_level = Some(level);
+                if let Some(recorder) = idle.recorder.as_mut()
+                    && let Err(err) = recorder.append(&thinking_entry(level))
+                {
+                    notice(
+                        &self.bus,
+                        id,
+                        NoticeLevel::Error,
+                        format!("session write failed: {err}"),
+                    );
+                }
+            }
+            None => session.thinking = Some(level),
+        }
+        let state = session.state.clone();
+        self.bus.publish(id, HostEvent::StateChanged { state });
+    }
+
+    fn shell(&self, id: SessionId, command: String) {
+        let workdir = self.sessions[&id].workdir.clone();
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let (exit_code, output) = run_shell(&command, &workdir);
+            let _ = tx.send(Input::ShellDone {
+                session: id,
+                command,
+                output,
+                exit_code,
+            });
+        });
+    }
+
+    /// Show a finished shell command and share its output with the model
+    /// on the next turn. The output is not recorded to the session file.
+    fn shell_done(
+        &mut self,
+        id: SessionId,
+        command: String,
+        output: String,
+        exit_code: Option<i32>,
+    ) {
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        let exit = exit_code.map_or_else(|| "signal".to_owned(), |c| c.to_string());
+        let text = format!(
+            "[shell] ran `{command}` in the session working directory; exit code {exit}:\n{}",
+            output.trim_end()
+        );
+        let message = Message::new(Role::User, vec![Content::Text { text }], None);
+        match session.idle.as_mut() {
+            Some(idle) => {
+                let parent = idle.cx.history.last().map(|m| m.id);
+                idle.cx.history.push(Message { parent, ..message });
+            }
+            None => session.pending_history.push(message),
+        }
+        self.bus.publish(
+            id,
+            HostEvent::ShellFinished {
+                command,
+                output,
+                exit_code,
+            },
+        );
+    }
+
+    fn record_title(&mut self, id: SessionId, title: String) {
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        if let Some(recorder) = session.idle.as_mut().and_then(|i| i.recorder.as_mut()) {
+            let entry = kage_session::SessionEntry::Title(kage_session::SessionTitle {
+                id: kage_session::EntryId::new(),
+                ts: chrono::Utc::now(),
+                title: title.clone(),
+            });
+            if let Err(err) = recorder.append(&entry) {
+                notice(
+                    &self.bus,
+                    id,
+                    NoticeLevel::Error,
+                    format!("session title: {err}"),
+                );
+            }
+        }
+        self.bus.publish(id, HostEvent::TitleChanged { title });
     }
 
     fn resolve_permission(
@@ -323,7 +472,8 @@ impl Dispatcher {
     fn prompt(&mut self, id: SessionId, content: Vec<Content>, delivery: Delivery) {
         let session = self.sessions.get_mut(&id).expect("session checked");
         if session.idle.is_some() {
-            self.start_run(id, content);
+            let prompt = Message::new(Role::User, content, None);
+            self.start_run(id, Work::Prompt(prompt));
             return;
         }
         match (delivery, text_only(&content)) {
@@ -332,7 +482,7 @@ impl Dispatcher {
         }
     }
 
-    fn start_run(&mut self, id: SessionId, content: Vec<Content>) {
+    fn start_run(&mut self, id: SessionId, work: Work) {
         let session = self.sessions.get_mut(&id).expect("session checked");
         let model = session.state.model.clone();
         let (provider, bare_model) = match self.registry.resolve(&model) {
@@ -351,7 +501,11 @@ impl Dispatcher {
                 return;
             }
         };
-        let Some(Idle { mut cx, recorder }) = session.idle.take() else {
+        let Some(Idle {
+            mut cx,
+            mut recorder,
+        }) = session.idle.take()
+        else {
             return;
         };
         cx.model = bare_model;
@@ -359,8 +513,19 @@ impl Dispatcher {
             cx.context_window = window;
         }
         cx.max_output_tokens = crate::runtime_env::max_output_tokens_for(&self.registry, &model);
-        if let Some(level) = session.thinking {
+        cx.history.append(&mut session.pending_history);
+        if let Some(level) = session.thinking.take() {
             cx.thinking_level = Some(level);
+            if let Some(recorder) = recorder.as_mut()
+                && let Err(err) = recorder.append(&thinking_entry(level))
+            {
+                notice(
+                    &self.bus,
+                    id,
+                    NoticeLevel::Error,
+                    format!("session write failed: {err}"),
+                );
+            }
         }
         refresh_mcp(&self.bus, id, session);
 
@@ -371,9 +536,16 @@ impl Dispatcher {
         if session.interactive {
             gate = gate.with_asker(asker(&self.bus, &self.asks, &self.next_request, id));
         }
+        let work = match work {
+            Work::Prompt(prompt) => Work::Prompt(Message {
+                parent: cx.history.last().map(|m| m.id),
+                ..prompt
+            }),
+            Work::Compact => Work::Compact,
+        };
         let run = Run {
             session: id,
-            prompt: Message::new(Role::User, content, cx.history.last().map(|m| m.id)),
+            work,
             provider,
             model,
             tools: session.tools.clone(),
@@ -395,10 +567,20 @@ impl Dispatcher {
     fn finish(&mut self, finished: Finished) {
         let Finished {
             session: id,
-            cx,
+            mut cx,
             recorder,
             usage,
+            outcome,
         } = finished;
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        cx.history.append(&mut session.pending_history);
+        if outcome == RunOutcome::Completed && session.title_pending {
+            session.title_pending = false;
+            let model = session.state.model.clone();
+            self.generate_title(id, &cx, &model);
+        }
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
@@ -415,10 +597,40 @@ impl Dispatcher {
         } else {
             session.queued.pop_front()
         };
+        self.bus.publish(id, HostEvent::RunEnded { outcome });
         self.bus.publish(id, HostEvent::StateChanged { state });
         if let Some(content) = next {
-            self.start_run(id, content);
+            self.start_run(id, Work::Prompt(Message::new(Role::User, content, None)));
         }
+    }
+
+    /// Ask the model for a short title for the session's first exchange,
+    /// off the dispatcher thread.
+    fn generate_title(&self, id: SessionId, cx: &AgentContext, model: &str) {
+        let Ok(resolved) = self.registry.resolve(model) else {
+            return;
+        };
+        let provider = Arc::clone(resolved.provider);
+        let bare_model = resolved.model;
+        let first_text = |role: Role| {
+            cx.history
+                .iter()
+                .find(|m| m.role == role)
+                .map(crate::cli_loop_run::first_user_text)
+                .unwrap_or_default()
+        };
+        let (user, reply) = (first_text(Role::User), first_text(Role::Assistant));
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let title = crate::title::generate(
+                provider.as_ref(),
+                &bare_model,
+                &user,
+                &reply,
+                &CancelFlag::new(),
+            );
+            let _ = tx.send(Input::Title { session: id, title });
+        });
     }
 }
 
@@ -487,6 +699,64 @@ fn notice(bus: &Bus, id: SessionId, level: NoticeLevel, text: String) {
             transient: false,
         },
     );
+}
+
+/// Usage totals carried by a context's token budget.
+fn usage_of(cx: &AgentContext) -> Usage {
+    Usage {
+        total: TokenUsage {
+            input: cx.budget.used_input,
+            output: cx.budget.used_output,
+            cache_read: cx.budget.used_cache_read,
+            cache_write: cx.budget.used_cache_write,
+        },
+        context_used: cx.budget.current_context,
+        context_window: cx.context_window,
+        cost: 0.0,
+    }
+}
+
+/// Whether the conversation already has an assistant reply.
+fn has_reply(cx: &AgentContext) -> bool {
+    cx.history.iter().any(|m| m.role == Role::Assistant)
+}
+
+fn thinking_entry(level: ThinkingLevel) -> kage_session::SessionEntry {
+    kage_session::SessionEntry::ThinkingLevelChange(kage_session::ThinkingLevelChange {
+        id: kage_session::EntryId::new(),
+        ts: chrono::Utc::now(),
+        level: level.as_str().to_owned(),
+    })
+}
+
+/// Run `command` with `sh -c` in `workdir` and capture stdout and stderr
+/// together, truncated so a chatty command cannot flood the context.
+/// Returns the exit code (`None` when a signal ended the command or it
+/// failed to spawn) and the output.
+pub(crate) fn run_shell(command: &str, workdir: &std::path::Path) -> (Option<i32>, String) {
+    const OUTPUT_CAP: usize = 8 * 1024;
+    let output = match std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(workdir)
+        .output()
+    {
+        Ok(output) => output,
+        Err(err) => return (None, format!("failed to run: {err}")),
+    };
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.trim().is_empty() {
+        if !combined.is_empty() && !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+        combined.push_str(&stderr);
+    }
+    if combined.chars().count() > OUTPUT_CAP {
+        let cut: String = combined.chars().take(OUTPUT_CAP).collect();
+        combined = format!("{cut}\n... (output truncated)");
+    }
+    (output.status.code(), combined)
 }
 
 /// The session id encoded in a session file name, `<id>.jsonl`.

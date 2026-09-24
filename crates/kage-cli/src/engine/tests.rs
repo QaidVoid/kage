@@ -134,6 +134,7 @@ impl Harness {
             loop_cfg: LoopConfig::default(),
             mcp: None,
             interactive: true,
+            title: false,
         });
     }
 }
@@ -200,11 +201,9 @@ fn is_tool_start(envelope: &Envelope) -> bool {
     matches!(envelope.event, Event::Loop(LoopEvent::ToolCallStart { .. }))
 }
 
-#[test]
-fn prompt_runs_and_records_the_history() {
-    let dir = tempfile::tempdir().unwrap();
-    let id = SessionId::new();
-    let path = dir.path().join(format!("{id}.jsonl"));
+/// A recorder writing `<dir>/<id>.jsonl`.
+fn recorder_in(dir: &std::path::Path, id: SessionId) -> (Recorder, std::path::PathBuf) {
+    let path = dir.join(format!("{id}.jsonl"));
     let writer = SessionWriter::create(
         &path,
         Header {
@@ -220,8 +219,47 @@ fn prompt_runs_and_records_the_history() {
         },
     )
     .unwrap();
+    (Recorder::new(writer, None), path)
+}
+
+fn host_events(events: &[Envelope]) -> Vec<&HostEvent> {
+    events
+        .iter()
+        .filter_map(|e| match &e.event {
+            Event::Host(host) => Some(host),
+            Event::Loop(_) => None,
+        })
+        .collect()
+}
+
+fn notices(events: &[Envelope]) -> Vec<String> {
+    host_events(events)
+        .into_iter()
+        .filter_map(|e| match e {
+            HostEvent::Notice { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn is_notice(envelope: &Envelope) -> bool {
+    matches!(envelope.event, Event::Host(HostEvent::Notice { .. }))
+}
+
+fn is_session_changed(envelope: &Envelope) -> bool {
+    matches!(
+        envelope.event,
+        Event::Host(HostEvent::SessionChanged { .. })
+    )
+}
+
+#[test]
+fn prompt_runs_and_records_the_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = SessionId::new();
+    let (recorder, path) = recorder_in(dir.path(), id);
     let h = harness(MockProvider::replaying(text_turn("hello")));
-    h.open(id, Some(Recorder::new(writer, None)));
+    h.open(id, Some(recorder));
     prompt(&h.engine, id, "hi", Delivery::Steer);
     let events = until_runs_end(&h.events, 1);
     h.engine.shutdown();
@@ -429,4 +467,232 @@ fn denied_permission_refuses_the_tool() {
         _ => None,
     });
     assert!(output.unwrap().is_error);
+}
+
+#[test]
+fn run_shell_capture_combines_streams_and_exit_code() {
+    let dir = std::env::temp_dir();
+    let (code, out) = run_shell("echo out; echo err >&2", &dir);
+    assert_eq!(code, Some(0));
+    assert!(out.contains("out"), "{out}");
+    assert!(out.contains("err"), "{out}");
+}
+
+#[test]
+fn run_shell_capture_reports_failure_and_signal() {
+    let dir = std::env::temp_dir();
+    let (code, out) = run_shell("exit 3", &dir);
+    assert_eq!(code, Some(3));
+    assert_eq!(out, "");
+    let (code, _) = run_shell("kill -9 $$", &dir);
+    assert_eq!(code, None);
+}
+
+#[test]
+fn run_shell_capture_truncates_large_output() {
+    let dir = std::env::temp_dir();
+    let (_, out) = run_shell("yes | head -c 100000", &dir);
+    assert!(
+        out.chars().count() <= 8 * 1024 + 64,
+        "truncated, len {}",
+        out.chars().count()
+    );
+    assert!(
+        out.contains("output truncated"),
+        "{:?}",
+        &out[..out.len().min(200)]
+    );
+}
+
+#[test]
+fn run_shell_capture_runs_in_the_given_workdir() {
+    let dir = std::env::temp_dir();
+    let (_, out) = run_shell("pwd", &dir);
+    assert!(out.trim().starts_with(dir.to_str().unwrap()), "{out}");
+}
+
+/// A session with one recorded exchange in `dir`.
+fn recorded_session(h: &Harness, dir: &std::path::Path) -> (SessionId, std::path::PathBuf) {
+    let id = SessionId::new();
+    let (recorder, path) = recorder_in(dir, id);
+    h.open(id, Some(recorder));
+    prompt(&h.engine, id, "hi", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+    (id, path)
+}
+
+#[test]
+fn load_session_switches_to_the_stored_conversation() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = harness(MockProvider::replaying(text_turn("hello")));
+    let (_, path) = recorded_session(&first, dir.path());
+    first.engine.shutdown();
+
+    let h = harness(MockProvider::replaying(text_turn("hello")));
+    let id = SessionId::new();
+    h.open(id, None);
+    h.engine.send(Command::to(
+        id,
+        CommandKind::LoadSession { path: path.clone() },
+    ));
+    let seen = wait_for(&h.events, is_session_changed);
+    match &seen.last().unwrap().event {
+        Event::Host(HostEvent::SessionChanged {
+            messages, path: p, ..
+        }) => {
+            assert_eq!(p, &path);
+            assert_eq!(messages.len(), 2);
+        }
+        _ => unreachable!(),
+    }
+    prompt(
+        &h.engine,
+        seen.last().unwrap().session,
+        "more",
+        Delivery::Steer,
+    );
+    until_runs_end(&h.events, 1);
+    assert_eq!(kage_session::replay(&path).unwrap().history.len(), 4);
+}
+
+#[test]
+fn clone_continues_on_a_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::replaying(text_turn("hello")));
+    let (id, path) = recorded_session(&h, dir.path());
+
+    h.engine.send(Command::to(id, CommandKind::Clone));
+    let seen = wait_for(&h.events, is_session_changed);
+    let Event::Host(HostEvent::SessionChanged {
+        path: copy,
+        messages,
+        ..
+    }) = &seen.last().unwrap().event
+    else {
+        unreachable!()
+    };
+    assert_ne!(copy, &path);
+    assert!(copy.exists());
+    assert_eq!(messages.len(), 2);
+}
+
+#[test]
+fn fork_export_and_delete_report_through_notices() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::replaying(text_turn("hello")));
+    let (id, path) = recorded_session(&h, dir.path());
+
+    h.engine.send(Command::to(
+        id,
+        CommandKind::Fork {
+            at: None,
+            switch: false,
+        },
+    ));
+    let fork = wait_for(&h.events, is_notice);
+    assert!(notices(&fork)[0].starts_with("forked session: "));
+
+    let out = dir.path().join("out.md");
+    h.engine.send(Command::to(
+        id,
+        CommandKind::Export {
+            path: Some(out.clone()),
+        },
+    ));
+    wait_for(&h.events, is_notice);
+    assert!(
+        std::fs::read_to_string(&out)
+            .unwrap()
+            .contains("## Assistant")
+    );
+
+    h.engine.send(Command::to(
+        id,
+        CommandKind::DeleteSession { path: path.clone() },
+    ));
+    let refused = wait_for(&h.events, is_notice);
+    assert_eq!(notices(&refused), ["cannot delete an open session"]);
+    assert!(path.exists());
+}
+
+#[test]
+fn shell_output_reaches_the_next_request() {
+    let mock = MockProvider::replaying(text_turn("ok"));
+    let h = harness(mock.clone());
+    let id = SessionId::new();
+    h.open(id, None);
+    h.engine.send(Command::to(
+        id,
+        CommandKind::Shell {
+            command: "echo from-shell".into(),
+        },
+    ));
+    let seen = wait_for(&h.events, |e| {
+        matches!(e.event, Event::Host(HostEvent::ShellFinished { .. }))
+    });
+    let Event::Host(HostEvent::ShellFinished {
+        output, exit_code, ..
+    }) = &seen.last().unwrap().event
+    else {
+        unreachable!()
+    };
+    assert_eq!(output.trim(), "from-shell");
+    assert_eq!(*exit_code, Some(0));
+
+    prompt(&h.engine, id, "what did it print?", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+    let request = mock.requests().pop().unwrap();
+    let texts: Vec<String> = request
+        .messages
+        .iter()
+        .map(crate::cli_loop_run::first_user_text)
+        .collect();
+    assert!(
+        texts
+            .iter()
+            .any(|t| t.contains("[shell] ran `echo from-shell`"))
+    );
+}
+
+#[test]
+fn compact_without_history_is_a_no_op() {
+    let h = harness(MockProvider::replaying(text_turn("ok")));
+    let id = SessionId::new();
+    h.open(id, None);
+    h.engine.send(Command::to(id, CommandKind::Compact));
+    let events = until_runs_end(&h.events, 1);
+    assert_eq!(outcomes(&events), [RunOutcome::Completed]);
+    assert!(notices(&events).contains(&"compact: not enough history yet".to_owned()));
+}
+
+#[test]
+fn first_exchange_records_a_title() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::replaying(text_turn("hello")));
+    let id = SessionId::new();
+    let (recorder, path) = recorder_in(dir.path(), id);
+    h.engine.open(SessionSpec {
+        id,
+        model: "mock:m".into(),
+        cx: AgentContext::new("m", "").with_workdir("/tmp"),
+        recorder: Some(recorder),
+        tools: h.tools.clone(),
+        plugins: None,
+        gate: PermissionGate::new(PermissionsConfig::default()),
+        loop_cfg: LoopConfig::default(),
+        mcp: None,
+        interactive: true,
+        title: true,
+    });
+    prompt(&h.engine, id, "hi", Delivery::Steer);
+    let seen = wait_for(&h.events, |e| {
+        matches!(e.event, Event::Host(HostEvent::TitleChanged { .. }))
+    });
+    let Event::Host(HostEvent::TitleChanged { title }) = &seen.last().unwrap().event else {
+        unreachable!()
+    };
+    assert_eq!(title, "hello");
+    h.engine.shutdown();
+    let file = std::fs::read_to_string(&path).unwrap();
+    assert!(file.contains("\"type\":\"title\""), "{file}");
 }

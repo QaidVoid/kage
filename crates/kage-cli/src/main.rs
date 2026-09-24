@@ -19,11 +19,9 @@ mod permissions;
 mod plugins;
 mod rpc;
 mod runtime_env;
-mod session;
 mod state;
 mod title;
 mod tui;
-mod usage_hooks;
 
 pub(crate) use std::io::{self, Write};
 pub(crate) use std::path::PathBuf;

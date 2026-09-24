@@ -1,74 +1,13 @@
 //! Tests for the TUI host glue.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use chrono::Utc;
-use kage_session::{
-    EntryId, FORMAT_VERSION, Header, MessageEntry, SessionEntry, SessionId, SessionReader,
-    SessionWriter,
-};
+use kage_session::{EntryId, FORMAT_VERSION, Header, SessionId};
+
+use kage_core::{Message, Role};
 
 use super::*;
-
-fn write_session(dir: &Path, name: &str) -> PathBuf {
-    let path = dir.join(name);
-    let header = Header {
-        version: FORMAT_VERSION,
-        session: SessionId::new(),
-        id: EntryId::new(),
-        ts: Utc::now(),
-        cwd: PathBuf::from("/work"),
-        model: "anthropic:claude".into(),
-        system_prompt: "be helpful".into(),
-        parent_session: None,
-        parent_entry: None,
-    };
-    let mut writer = SessionWriter::create(&path, header).unwrap();
-    writer
-        .append(&SessionEntry::Message(MessageEntry {
-            id: EntryId::new(),
-            ts: Utc::now(),
-            message: Message::new(
-                Role::User,
-                vec![Content::Text {
-                    text: "hello".to_owned(),
-                }],
-                None,
-            ),
-            usage: None,
-        }))
-        .unwrap();
-    path
-}
-
-fn session_id_of(path: &Path) -> SessionId {
-    let mut reader = SessionReader::iter(path).unwrap();
-    match reader.next().unwrap().unwrap() {
-        SessionEntry::Header(h) => h.session,
-        other => panic!("expected header, got {other:?}"),
-    }
-}
-
-#[test]
-fn delete_session_removes_the_file() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = write_session(dir.path(), "doomed.jsonl");
-    let buffer = shared_buffer();
-    let toasts = shared_toasts();
-    handle_delete_session(&path, None, &buffer, &toasts);
-    assert!(!path.exists());
-}
-
-#[test]
-fn delete_session_refuses_the_active_session() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = write_session(dir.path(), "live.jsonl");
-    let active = Arc::new(Mutex::new(path.clone()));
-    let buffer = shared_buffer();
-    let toasts = shared_toasts();
-    handle_delete_session(&path, Some(&active), &buffer, &toasts);
-    assert!(path.exists(), "active session must not be deleted");
-}
 
 #[test]
 fn render_session_markdown_covers_roles_and_blocks() {
@@ -136,44 +75,6 @@ fn render_session_markdown_covers_roles_and_blocks() {
     assert!(md.contains("**tool call: `read`**"));
     assert!(md.contains("```json"));
     assert!(md.contains("file body"));
-}
-
-#[test]
-fn handle_export_writes_markdown_to_the_given_path() {
-    let dir = tempfile::tempdir().unwrap();
-    let src = write_session(dir.path(), "s.jsonl");
-    let active = Arc::new(Mutex::new(src.clone()));
-    let out = dir.path().join("out.md");
-    let buffer = shared_buffer();
-    let toasts = shared_toasts();
-    handle_export(Some(&active), Some(out.clone()), &buffer, &toasts);
-    assert!(out.exists());
-    let body = std::fs::read_to_string(&out).unwrap();
-    assert!(body.contains("# kage session "));
-    assert!(body.contains("## User"));
-    assert!(body.contains("hello"));
-}
-
-#[test]
-fn fork_file_creates_a_parent_linked_session() {
-    let dir = tempfile::tempdir().unwrap();
-    let src = write_session(dir.path(), "src.jsonl");
-    let src_id = session_id_of(&src);
-    let buffer = shared_buffer();
-    let toasts = shared_toasts();
-    handle_fork_file(&src, &buffer, &toasts);
-
-    let forked = std::fs::read_dir(dir.path())
-        .unwrap()
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .find(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl") && *p != src)
-        .expect("a new session file should exist");
-    let mut reader = SessionReader::iter(&forked).unwrap();
-    match reader.next().unwrap().unwrap() {
-        SessionEntry::Header(h) => assert_eq!(h.parent_session, Some(src_id)),
-        other => panic!("expected header, got {other:?}"),
-    }
 }
 
 fn summary(title: Option<&str>, prompt: Option<&str>) -> SessionSummary {

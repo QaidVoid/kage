@@ -80,6 +80,7 @@ pub(crate) fn execute_print_run(
         },
         mcp,
         interactive: false,
+        title: false,
     });
     engine.send(Command::active(CommandKind::Prompt {
         content: vec![Content::Text { text: prompt }],

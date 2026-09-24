@@ -613,35 +613,25 @@ impl App {
     }
 
     /// Drive the active permission prompt. The overlay resolves on
-    /// every dismissal path (Esc denies), so the parked worker always
-    /// gets an answer; the decision is mapped from the resolved string
-    /// and sent through [`Self::pending_permission`].
+    /// every dismissal path (Esc denies), so the waiting run always gets
+    /// an answer.
     pub(crate) fn dispatch_permission_key(
         &mut self,
         key: ratatui::crossterm::event::KeyEvent,
     ) -> Option<AppExit> {
         let overlay = self.permission_overlay.as_mut()?;
         let action = crate::overlay::OverlayWidget::handle_key(overlay, key);
-        let decision = match action {
-            OverlayAction::Stay | OverlayAction::PropagateKey => None,
-            OverlayAction::Close | OverlayAction::Resolve(_) => {
-                self.permission_overlay = None;
-                let value = match action {
-                    OverlayAction::Resolve(value) => value,
-                    _ => serde_json::Value::String("deny".to_owned()),
-                };
-                Some(match value.as_str() {
-                    Some("allow_once") => PermissionDecision::AllowOnce,
-                    Some("allow_always") => PermissionDecision::AllowAlways,
-                    _ => PermissionDecision::Deny,
-                })
-            }
+        let value = match action {
+            OverlayAction::Stay | OverlayAction::PropagateKey => return None,
+            OverlayAction::Resolve(value) => value,
+            OverlayAction::Close => serde_json::Value::String("deny".to_owned()),
         };
-        if let Some(decision) = decision
-            && let Some(ask) = self.pending_permission.take()
-        {
-            let _ = ask.reply.send(decision);
-        }
+        self.permission_overlay = None;
+        self.answer_permission(match value.as_str() {
+            Some("allow_once") => PermissionDecision::AllowOnce,
+            Some("allow_always") => PermissionDecision::AllowAlways,
+            _ => PermissionDecision::Deny,
+        });
         None
     }
 }

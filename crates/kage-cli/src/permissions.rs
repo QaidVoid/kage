@@ -10,7 +10,7 @@
 //! answer, or, when there is none (print mode), denies with a message
 //! pointing at the config.
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -20,7 +20,6 @@ use kage_core::protocol::PermissionDecision;
 use kage_core::sync::lock;
 use kage_core::{CancelFlag, ToolCallId, ToolOutput};
 use kage_loop::Hooks;
-use kage_tui::PermissionAsk;
 
 /// How long to wait between cancel-flag checks while parked on an
 /// ask. Same cadence the loop's cancelable sleeps use.
@@ -73,7 +72,7 @@ impl PermissionGate {
     /// channel (print mode): an `ask` verdict denies with a
     /// non-interactive explanation. Attach the host's cancel flag
     /// with [`Self::with_cancel`] and the TUI channel with
-    /// [`Self::with_ask`].
+    /// [`Self::with_asker`].
     pub(crate) fn new(rules: PermissionsConfig) -> Self {
         Self {
             rules: Arc::new(Mutex::new(rules)),
@@ -97,23 +96,6 @@ impl PermissionGate {
     #[must_use]
     pub(crate) fn mode(&self) -> Option<PermissionAction> {
         *lock(&self.mode)
-    }
-
-    /// Attach the channel a TUI host listens on. While set, an `ask`
-    /// verdict parks the worker on the host's decision instead of
-    /// denying.
-    #[must_use]
-    pub(crate) fn with_ask(self, ask: Sender<PermissionAsk>) -> Self {
-        self.with_asker(Arc::new(move |prompt: PermissionPrompt| {
-            let (reply, answer) = std::sync::mpsc::channel();
-            ask.send(PermissionAsk {
-                tool: prompt.tool,
-                subject: prompt.subject,
-                reply,
-            })
-            .ok()
-            .map(|()| answer)
-        }))
     }
 
     /// Route `ask` verdicts to `asker` instead of denying them.
@@ -347,6 +329,28 @@ mod tests {
 
     use super::*;
 
+    struct Ask {
+        tool: String,
+        subject: String,
+        reply: mpsc::Sender<PermissionDecision>,
+    }
+
+    /// An asker that hands each prompt to the test over a channel.
+    fn channel_asker() -> (Asker, mpsc::Receiver<Ask>) {
+        let (tx, rx) = mpsc::channel();
+        let asker: Asker = Arc::new(move |prompt: PermissionPrompt| {
+            let (reply, answer) = mpsc::channel();
+            tx.send(Ask {
+                tool: prompt.tool,
+                subject: prompt.subject,
+                reply,
+            })
+            .ok()
+            .map(|()| answer)
+        });
+        (asker, rx)
+    }
+
     fn rules_for(default: PermissionAction) -> PermissionsConfig {
         PermissionsConfig {
             confine_paths: false,
@@ -403,8 +407,8 @@ mod tests {
 
     #[test]
     fn mode_ask_overrides_allow_rules_and_uses_channel() {
-        let (ask_tx, ask_rx) = mpsc::channel::<PermissionAsk>();
-        let gate = PermissionGate::new(rules_for(PermissionAction::Allow)).with_ask(ask_tx);
+        let (ask_tx, ask_rx) = channel_asker();
+        let gate = PermissionGate::new(rules_for(PermissionAction::Allow)).with_asker(ask_tx);
         gate.set_mode(Some(PermissionAction::Ask));
         let (done_tx, done_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
@@ -462,8 +466,8 @@ mod tests {
 
     #[test]
     fn ask_with_channel_returns_allow_once() {
-        let (ask_tx, ask_rx) = mpsc::channel::<PermissionAsk>();
-        let gate = PermissionGate::new(rules_for(PermissionAction::Ask)).with_ask(ask_tx);
+        let (ask_tx, ask_rx) = channel_asker();
+        let gate = PermissionGate::new(rules_for(PermissionAction::Ask)).with_asker(ask_tx);
         let (done_tx, done_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
             let mut gate = gate;
@@ -481,8 +485,8 @@ mod tests {
 
     #[test]
     fn ask_with_channel_returns_user_deny() {
-        let (ask_tx, ask_rx) = mpsc::channel::<PermissionAsk>();
-        let gate = PermissionGate::new(rules_for(PermissionAction::Ask)).with_ask(ask_tx);
+        let (ask_tx, ask_rx) = channel_asker();
+        let gate = PermissionGate::new(rules_for(PermissionAction::Ask)).with_asker(ask_tx);
         let (done_tx, done_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
             let mut gate = gate;
@@ -504,9 +508,9 @@ mod tests {
     fn ask_with_channel_allow_always_flips_shared_rules_and_persists() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let (ask_tx, ask_rx) = mpsc::channel::<PermissionAsk>();
+        let (ask_tx, ask_rx) = channel_asker();
         let gate = PermissionGate::new(rules_for(PermissionAction::Ask))
-            .with_ask(ask_tx)
+            .with_asker(ask_tx)
             .with_persist_path(path.clone());
         let gate2 = gate.clone();
         let (done_tx, done_rx) = mpsc::channel();
@@ -542,10 +546,10 @@ mod tests {
 
     #[test]
     fn cancel_during_ask_denies() {
-        let (ask_tx, ask_rx) = mpsc::channel::<PermissionAsk>();
+        let (ask_tx, ask_rx) = channel_asker();
         let cancel = CancelFlag::new();
         let gate = PermissionGate::new(rules_for(PermissionAction::Ask))
-            .with_ask(ask_tx)
+            .with_asker(ask_tx)
             .with_cancel(cancel.clone());
         let (done_tx, done_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
@@ -569,8 +573,8 @@ mod tests {
 
     #[test]
     fn dropped_host_denies() {
-        let (ask_tx, ask_rx) = mpsc::channel::<PermissionAsk>();
-        let gate = PermissionGate::new(rules_for(PermissionAction::Ask)).with_ask(ask_tx);
+        let (ask_tx, ask_rx) = channel_asker();
+        let gate = PermissionGate::new(rules_for(PermissionAction::Ask)).with_asker(ask_tx);
         let (done_tx, done_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
             let mut gate = gate;

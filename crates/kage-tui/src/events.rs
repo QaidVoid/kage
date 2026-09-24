@@ -1,24 +1,19 @@
-//! Hooks adapter: drain agent-loop events into the conversation buffer.
+//! Engine events applied to the conversation buffer.
 //!
-//! [`TuiHooks`] reassembles streamed [`kage_core::LoopEvent`]s into the
-//! buffer's block model. The renderer reads from the same buffer each
+//! [`apply_loop_event`] folds streamed [`kage_core::LoopEvent`]s into the
+//! buffer's block model and [`populate_from_history`] rebuilds a buffer
+//! from a stored conversation. The renderer reads the same buffer each
 //! frame, so painting is decoupled from event arrival.
-//!
-//! Buffer access is mediated by an `Arc<Mutex<Buffer>>` so the agent
-//! loop's worker thread can push events while the main thread renders.
-//! The lock is held only as long as one event takes to apply, never
-//! during `Hooks` re-entry.
 
-use std::collections::VecDeque;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use kage_core::{Content, LoopError, LoopEvent, Message, Role, StopReason, ToolOutput, sync::lock};
-use kage_loop::Hooks;
+use kage_core::{Content, LoopError, LoopEvent, Message, Role, StopReason};
 
 use crate::buffer::Buffer;
 
-/// Cloneable handle to the conversation buffer shared between the agent
-/// loop's worker thread and the TUI renderer.
+/// Cloneable handle to the conversation buffer shared between the App
+/// and its renderer.
 pub type SharedBuffer = Arc<Mutex<Buffer>>;
 
 /// Construct an empty shared buffer.
@@ -27,121 +22,14 @@ pub fn shared_buffer() -> SharedBuffer {
     Arc::new(Mutex::new(Buffer::new()))
 }
 
-/// FIFO of user prompts queued while an agent run is in flight.
-///
-/// The TUI pushes from the input thread when the user submits a text
-/// prompt mid-run; the agent loop drains via [`Hooks::get_steering`]
-/// at every turn boundary so the queued message lands as a user turn
-/// before the next provider call instead of after the whole run.
-pub type SharedSteering = Arc<Mutex<VecDeque<String>>>;
-
-/// Construct an empty steering queue.
-#[must_use]
-pub fn shared_steering() -> SharedSteering {
-    Arc::new(Mutex::new(VecDeque::new()))
-}
-
-/// Hooks impl that mirrors [`LoopEvent`]s into the [`SharedBuffer`].
-///
-/// Wraps another `Hooks` so a host can chain (TUI display + session
-/// recording + plugin dispatch) without interleaving wrappers manually.
-pub struct TuiHooks<H: Hooks> {
-    inner: H,
-    buffer: SharedBuffer,
-    steering: Option<SharedSteering>,
-}
-
-impl<H: Hooks> TuiHooks<H> {
-    /// Wrap `inner` so its `on_event` flow also paints into `buffer`.
-    pub fn new(inner: H, buffer: SharedBuffer) -> Self {
-        Self {
-            inner,
-            buffer,
-            steering: None,
-        }
-    }
-
-    /// Attach a steering queue. While set, `get_steering` pops the
-    /// oldest queued prompt and returns it to the loop; without one,
-    /// steering falls through to the inner hook.
-    #[must_use]
-    pub fn with_steering(mut self, queue: SharedSteering) -> Self {
-        self.steering = Some(queue);
-        self
-    }
-
-    /// Append a user-typed prompt to the buffer. The agent loop never
-    /// emits user messages as events, so the host calls this directly.
-    pub fn record_user_input(&self, text: impl Into<String>) {
-        let mut buf = lock(&self.buffer);
-        buf.push_user(text);
-    }
-}
-
-impl<H: Hooks> Hooks for TuiHooks<H> {
-    fn before_tool_call(
-        &mut self,
-        id: &kage_core::ToolCallId,
-        name: &str,
-        input: &serde_json::Value,
-    ) -> Option<ToolOutput> {
-        self.inner.before_tool_call(id, name, input)
-    }
-
-    fn after_tool_call(&mut self, name: &str, output: ToolOutput) -> ToolOutput {
-        self.inner.after_tool_call(name, output)
-    }
-
-    fn on_event(&mut self, event: &LoopEvent) {
-        let mut buf = lock(&self.buffer);
-        apply_event(&mut buf, event);
-        self.inner.on_event(event);
-    }
-
-    fn transform_context(&mut self, messages: &mut Vec<kage_core::Message>) -> Result<(), String> {
-        self.inner.transform_context(messages)
-    }
-
-    fn transform_provider_request(
-        &mut self,
-        req: &mut kage_loop::StreamRequest,
-    ) -> Result<(), String> {
-        self.inner.transform_provider_request(req)
-    }
-
-    fn on_turn_start(&mut self, index: u32) {
-        self.inner.on_turn_start(index);
-    }
-
-    fn on_turn_end(&mut self, index: u32, had_tool_calls: bool) {
-        self.inner.on_turn_end(index, had_tool_calls);
-    }
-
-    fn should_stop_after_turn(&mut self, summary: &kage_loop::TurnSummary) -> bool {
-        self.inner.should_stop_after_turn(summary)
-    }
-
-    fn get_steering(&mut self) -> Option<String> {
-        if let Some(q) = &self.steering {
-            let mut g = lock(q);
-            if let Some(text) = g.pop_front() {
-                return Some(text);
-            }
-        }
-        self.inner.get_steering()
-    }
-
-    fn get_followup(&mut self) -> Option<String> {
-        self.inner.get_followup()
-    }
-
-    fn on_user_message(&mut self, message: &Message) {
-        self.inner.on_user_message(message);
-    }
-}
-
-fn apply_event(buf: &mut Buffer, event: &LoopEvent) {
+/// Fold one loop event into `buf`. User prompts arrive as
+/// [`LoopEvent::MessageAppended`], so a steered prompt appears when the
+/// agent actually receives it.
+pub fn apply_loop_event(buf: &mut Buffer, event: &LoopEvent) {
     match event {
+        LoopEvent::MessageAppended { message } if message.role == Role::User => {
+            push_user_message(buf, message);
+        }
         LoopEvent::MessageStart { .. }
         | LoopEvent::ToolUpdate { .. }
         | LoopEvent::MessageAppended { .. }
@@ -236,6 +124,53 @@ fn apply_event(buf: &mut Buffer, event: &LoopEvent) {
     }
 }
 
+/// Paint a user prompt: its text as a user bubble, then one placeholder
+/// per attached image.
+fn push_user_message(buf: &mut Buffer, message: &Message) {
+    let text: Vec<&str> = message
+        .content
+        .iter()
+        .filter_map(|c| match c {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    if !text.is_empty() {
+        buf.push_user(text.join("\n"));
+    }
+    for block in &message.content {
+        if let Content::Image { mime, .. } = block {
+            buf.push_custom("kage:image", format!("[image: {mime}]"), false);
+        }
+    }
+}
+
+/// How long each tool call took, keyed by call id, recovered from the
+/// timestamps of the assistant message that made the call and the
+/// message carrying its result.
+#[must_use]
+pub fn tool_durations(messages: &[Message]) -> HashMap<String, u64> {
+    let mut started = HashMap::new();
+    let mut durations = HashMap::new();
+    for message in messages {
+        for block in &message.content {
+            match block {
+                Content::ToolCall { id, .. } => {
+                    started.insert(id.to_string(), message.ts);
+                }
+                Content::ToolResultBlock { call_id, .. } => {
+                    if let Some(start) = started.get(&call_id.to_string()) {
+                        let ms = (message.ts - *start).num_milliseconds();
+                        durations.insert(call_id.to_string(), u64::try_from(ms).unwrap_or(0));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    durations
+}
+
 /// Pour a replayed `Vec<Message>` into a fresh [`Buffer`] so the user
 /// sees the prior conversation rendered with the current TUI styling.
 ///
@@ -249,7 +184,7 @@ fn apply_event(buf: &mut Buffer, event: &LoopEvent) {
 pub fn populate_from_history(
     buf: &mut Buffer,
     messages: &[Message],
-    tool_durations: &std::collections::HashMap<String, u64>,
+    tool_durations: &HashMap<String, u64>,
 ) {
     for msg in messages {
         match msg.role {
@@ -382,37 +317,24 @@ fn grep_summary(input: &serde_json::Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use kage_core::{LoopError, MessageId, StopReason, TokenUsage, ToolCallId};
-    use kage_loop::NoopHooks;
+    use kage_core::sync::lock;
+    use kage_core::{LoopError, MessageId, StopReason, TokenUsage, ToolCallId, ToolOutput};
     use serde_json::json;
 
     use super::*;
     use crate::buffer::Block;
 
-    fn fresh() -> (SharedBuffer, TuiHooks<NoopHooks>) {
-        let buf = shared_buffer();
-        (buf.clone(), TuiHooks::new(NoopHooks, buf))
+    struct Apply(SharedBuffer);
+
+    impl Apply {
+        fn on_event(&mut self, event: &LoopEvent) {
+            apply_loop_event(&mut lock(&self.0), event);
+        }
     }
 
-    #[test]
-    fn with_steering_pops_queued_text_before_inner() {
+    fn fresh() -> (SharedBuffer, Apply) {
         let buf = shared_buffer();
-        let queue = shared_steering();
-        queue.lock().unwrap().push_back("first".into());
-        queue.lock().unwrap().push_back("second".into());
-        let mut hooks = TuiHooks::new(NoopHooks, buf).with_steering(queue.clone());
-        assert_eq!(hooks.get_steering().as_deref(), Some("first"));
-        assert_eq!(hooks.get_steering().as_deref(), Some("second"));
-        // Empty queue falls through to inner (NoopHooks => None).
-        assert!(hooks.get_steering().is_none());
-    }
-
-    #[test]
-    fn no_steering_queue_falls_through_to_inner() {
-        let (_buf, mut hooks) = fresh();
-        // NoopHooks::get_steering is None; without with_steering the
-        // wrapper must agree.
-        assert!(hooks.get_steering().is_none());
+        (buf.clone(), Apply(buf))
     }
 
     fn id() -> MessageId {
@@ -765,13 +687,52 @@ mod tests {
     }
 
     #[test]
-    fn record_user_input_pushes_user_block() {
-        let (buf, hooks) = fresh();
-        hooks.record_user_input("hello");
+    fn appended_user_messages_paint_text_then_images() {
+        let (buf, mut hooks) = fresh();
+        hooks.on_event(&LoopEvent::MessageAppended {
+            message: Message::new(
+                Role::User,
+                vec![
+                    Content::Text {
+                        text: "hello".into(),
+                    },
+                    Content::Image {
+                        source: kage_core::ImageSource::Base64 { data: "AA".into() },
+                        mime: "image/png".into(),
+                    },
+                ],
+                None,
+            ),
+        });
+        hooks.on_event(&LoopEvent::MessageAppended {
+            message: Message::new(Role::Assistant, Vec::new(), None),
+        });
         let buf = buf.lock().unwrap();
-        match &buf.blocks()[0] {
-            Block::User { text } => assert_eq!(text, "hello"),
-            _ => panic!(),
-        }
+        assert_eq!(buf.blocks().len(), 2);
+        assert!(matches!(&buf.blocks()[0], Block::User { text } if text == "hello"));
+    }
+
+    #[test]
+    fn tool_durations_come_from_message_timestamps() {
+        let call = Message::new(
+            Role::Assistant,
+            vec![Content::ToolCall {
+                id: ToolCallId::new("c1"),
+                name: "bash".into(),
+                input: json!({}),
+            }],
+            None,
+        );
+        let mut result = Message::new(
+            Role::ToolResult,
+            vec![Content::ToolResultBlock {
+                call_id: ToolCallId::new("c1"),
+                output: String::new(),
+                is_error: false,
+            }],
+            None,
+        );
+        result.ts = call.ts + chrono::Duration::milliseconds(250);
+        assert_eq!(tool_durations(&[call, result])["c1"], 250);
     }
 }

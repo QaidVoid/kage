@@ -426,7 +426,7 @@ fn events_command_lists_known_hooks_by_kind() {
 }
 
 #[test]
-fn submitting_a_prompt_pushes_user_block_and_request() {
+fn submitting_a_prompt_sends_it_without_painting() {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();
     let mut app = App::new(buffer.clone(), tx);
@@ -443,69 +443,41 @@ fn submitting_a_prompt_pushes_user_block_and_request() {
             images: Vec::new()
         }
     );
-    let buf = buffer.lock().unwrap();
-    assert!(matches!(
-        buf.blocks().last(),
-        Some(crate::buffer::Block::User { text }) if text == "hi"
-    ));
+    assert!(
+        !buffer
+            .lock()
+            .unwrap()
+            .blocks()
+            .iter()
+            .any(|b| matches!(b, crate::buffer::Block::User { .. })),
+        "the user block appears when the engine delivers the prompt"
+    );
     assert_eq!(app.input().mode(), Mode::Insert);
 }
 
 #[test]
-fn steering_submit_while_run_in_flight_queues_and_holds_channel() {
-    let buffer = shared_buffer();
+fn submit_while_a_run_is_in_flight_is_still_sent() {
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
-    let steering = crate::events::shared_steering();
+    let mut app = App::new(shared_buffer(), tx);
     let usage = crate::usage::shared_session_usage();
     usage.lock().unwrap().working = true;
-    app.set_steering_queue(steering.clone());
     app.set_session_usage(usage);
 
     app.handle_submit("later".into());
 
     assert_eq!(
-        steering.lock().unwrap().pop_front().as_deref(),
-        Some("later"),
-        "mid-run text submit must land in the steering queue"
-    );
-    assert!(
-        rx.recv_timeout(Duration::from_millis(100)).is_err(),
-        "nothing may be sent on the worker channel while queued"
-    );
-}
-
-#[test]
-fn steering_submit_when_idle_takes_channel_path() {
-    let buffer = shared_buffer();
-    let (tx, rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
-    let steering = crate::events::shared_steering();
-    app.set_steering_queue(steering.clone());
-    app.set_session_usage(crate::usage::shared_session_usage());
-
-    app.handle_submit("now".into());
-
-    match rx.recv_timeout(Duration::from_millis(100)).unwrap() {
-        RunRequest::Submit { text, images } => {
-            assert_eq!(text, "now");
-            assert!(images.is_empty());
+        rx.recv_timeout(Duration::from_millis(100)).unwrap(),
+        RunRequest::Submit {
+            text: "later".into(),
+            images: Vec::new()
         }
-        other => panic!("expected Submit, got {other:?}"),
-    }
-    assert!(steering.lock().unwrap().is_empty());
+    );
 }
 
 #[test]
-fn steering_submit_with_images_takes_channel_even_mid_run() {
-    let buffer = shared_buffer();
+fn submit_carries_attached_images() {
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
-    let steering = crate::events::shared_steering();
-    let usage = crate::usage::shared_session_usage();
-    usage.lock().unwrap().working = true;
-    app.set_steering_queue(steering.clone());
-    app.set_session_usage(usage);
+    let mut app = App::new(shared_buffer(), tx);
     app.input.attach_image(crate::image::AttachedImage {
         source: kage_core::ImageSource::Base64 {
             data: "AAAA".into(),
@@ -524,66 +496,155 @@ fn steering_submit_with_images_takes_channel_even_mid_run() {
         }
         other => panic!("expected Submit with images, got {other:?}"),
     }
-    assert!(steering.lock().unwrap().is_empty());
+}
+
+fn envelope(
+    session: kage_core::SessionId,
+    seq: u64,
+    event: impl Into<kage_core::protocol::Event>,
+) -> kage_core::protocol::Envelope {
+    kage_core::protocol::Envelope {
+        session,
+        seq,
+        event: event.into(),
+    }
+}
+
+/// An App fed by an engine event channel.
+fn app_with_events() -> (
+    App,
+    mpsc::Receiver<RunRequest>,
+    mpsc::Sender<kage_core::protocol::Envelope>,
+) {
+    let (tx, rx) = mpsc::channel();
+    let mut app = App::new(shared_buffer(), tx);
+    let (events_tx, events_rx) = mpsc::channel();
+    app.set_engine_events(events_rx);
+    app.set_session_usage(crate::usage::shared_session_usage());
+    (app, rx, events_tx)
 }
 
 #[test]
-fn drain_clipboard_attach_attaches_completed_result() {
-    let buffer = shared_buffer();
-    let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
-    app.attach_tx
-        .send(Ok(crate::image::AttachedImage {
-            source: kage_core::ImageSource::Base64 {
-                data: "AAAA".into(),
+fn delivered_prompts_paint_user_blocks() {
+    let (mut app, _rx, events) = app_with_events();
+    let session = kage_core::SessionId::new();
+    let message = kage_core::Message::new(
+        kage_core::Role::User,
+        vec![kage_core::Content::Text { text: "hi".into() }],
+        None,
+    );
+    events
+        .send(envelope(
+            session,
+            1,
+            kage_core::LoopEvent::MessageAppended { message },
+        ))
+        .unwrap();
+    assert!(app.drain_engine_events());
+    assert!(matches!(
+        app.buffer.lock().unwrap().blocks().last(),
+        Some(crate::buffer::Block::User { text }) if text == "hi"
+    ));
+}
+
+#[test]
+fn events_from_other_sessions_are_ignored() {
+    let (mut app, _rx, events) = app_with_events();
+    let (mine, other) = (kage_core::SessionId::new(), kage_core::SessionId::new());
+    let notice = |text: &str| kage_core::protocol::HostEvent::Notice {
+        level: kage_core::protocol::NoticeLevel::Error,
+        text: text.into(),
+        transient: false,
+    };
+    events.send(envelope(mine, 1, notice("mine"))).unwrap();
+    events.send(envelope(other, 1, notice("other"))).unwrap();
+    app.drain_engine_events();
+    let count = app.buffer.lock().unwrap().blocks().len();
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn permission_requests_open_a_prompt_and_answer_through_requests() {
+    let (mut app, rx, events) = app_with_events();
+    let request_id = kage_core::protocol::RequestId(7);
+    events
+        .send(envelope(
+            kage_core::SessionId::new(),
+            1,
+            kage_core::protocol::HostEvent::PermissionRequested {
+                request_id,
+                tool_call_id: None,
+                tool: "bash".into(),
+                subject: "ls".into(),
+                input: serde_json::json!({ "command": "ls" }),
             },
-            mime: "image/png".into(),
-            label: "shot.png".into(),
-            bytes: 3,
-        }))
+        ))
         .unwrap();
+    assert!(app.drain_engine_events());
+    assert!(app.permission_overlay.is_some());
 
-    app.drain_clipboard_attach();
-
-    let attached = app.input().attached();
-    assert_eq!(attached.len(), 1, "async attach landed on the input");
-    assert_eq!(attached[0].1.label, "shot.png");
+    app.answer_permission(PermissionDecision::AllowOnce);
+    assert_eq!(
+        rx.try_recv(),
+        Ok(RunRequest::ResolvePermission {
+            request_id,
+            decision: PermissionDecision::AllowOnce
+        })
+    );
 }
 
 #[test]
-fn drain_clipboard_attach_surfaces_errors_inline() {
-    let buffer = shared_buffer();
-    let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer.clone(), tx);
-    app.attach_tx
-        .send(Err("no image on the clipboard".into()))
+fn session_changed_rebuilds_the_transcript() {
+    let (mut app, _rx, events) = app_with_events();
+    app.buffer.lock().unwrap().push_user("stale");
+    let message = kage_core::Message::new(
+        kage_core::Role::User,
+        vec![kage_core::Content::Text {
+            text: "restored".into(),
+        }],
+        None,
+    );
+    events
+        .send(envelope(
+            kage_core::SessionId::new(),
+            1,
+            kage_core::protocol::HostEvent::SessionChanged {
+                path: "/tmp/s.jsonl".into(),
+                title: None,
+                messages: vec![message],
+            },
+        ))
         .unwrap();
-
-    app.drain_clipboard_attach();
-
-    let buf = buffer.lock().unwrap();
-    let rendered = match buf.blocks().last() {
-        Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
-        other => panic!("expected an error block, got {other:?}"),
-    };
-    assert!(rendered.contains("no image on the clipboard"), "{rendered}");
+    app.drain_engine_events();
+    let buf = app.buffer.lock().unwrap();
+    assert_eq!(buf.blocks().len(), 1);
+    assert!(matches!(
+        buf.blocks().first(),
+        Some(crate::buffer::Block::User { text }) if text == "restored"
+    ));
 }
 
 #[test]
-fn submit_after_worker_drop_paints_error_block() {
-    let buffer = shared_buffer();
-    let (tx, rx) = mpsc::channel::<RunRequest>();
-    let mut app = App::new(buffer.clone(), tx);
-    drop(rx);
-
-    app.handle_submit("lost".into());
-
-    let buf = buffer.lock().unwrap();
-    let rendered = match buf.blocks().last() {
-        Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
-        other => panic!("expected an error block, got {other:?}"),
-    };
-    assert!(rendered.contains("worker has stopped"), "{rendered}");
+fn state_changes_update_the_modeline() {
+    let (mut app, _rx, events) = app_with_events();
+    events
+        .send(envelope(
+            kage_core::SessionId::new(),
+            1,
+            kage_core::protocol::HostEvent::StateChanged {
+                state: kage_core::protocol::SessionState {
+                    model: "mock:m".into(),
+                    working: true,
+                    ..Default::default()
+                },
+            },
+        ))
+        .unwrap();
+    app.drain_engine_events();
+    let usage = app.session_usage_snapshot().unwrap();
+    assert_eq!(usage.model, "mock:m");
+    assert!(usage.working);
+    assert!(app.is_run_in_flight());
 }
 
 #[test]
@@ -625,39 +686,16 @@ fn ctrl_c_interrupts_over_an_open_cmdline() {
 }
 
 #[test]
-fn ctrl_c_flips_registered_cancel_flag_synchronously() {
-    let buffer = shared_buffer();
-    let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
-    // Switch to Normal first; default is Insert.
-    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-    let flag = CancelFlag::new();
-    app.set_cancel_flag(flag.clone());
-    assert!(!flag.is_cancelled());
-    app.handle_key(ctrl('c'));
-    assert!(
-        flag.is_cancelled(),
-        "Ctrl-C should flip the cancel flag on the foreground thread"
-    );
-}
-
-#[test]
-fn cancel_command_flips_registered_cancel_flag_synchronously() {
-    let buffer = shared_buffer();
-    let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
-    let flag = CancelFlag::new();
-    app.set_cancel_flag(flag.clone());
+fn cancel_command_sends_a_cancel_request() {
+    let (tx, rx) = mpsc::channel();
+    let mut app = App::new(shared_buffer(), tx);
     let registry: Vec<&CommandSpec> = BUILTIN_COMMANDS.iter().collect();
     let result = app.run_command_validated("cancel", &registry);
     assert!(
         matches!(result, CommandResult::Done(None)),
         "expected Done(None), got {result:?}"
     );
-    assert!(
-        flag.is_cancelled(),
-        ":cancel should flip the cancel flag on the foreground thread"
-    );
+    assert_eq!(rx.try_recv(), Ok(RunRequest::Cancel));
 }
 
 #[test]

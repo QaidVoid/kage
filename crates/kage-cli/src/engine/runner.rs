@@ -24,11 +24,19 @@ use crate::plugins::PluginEventHooks;
 /// boundary.
 pub(super) type Steering = Arc<Mutex<VecDeque<String>>>;
 
+/// What a run does.
+pub(super) enum Work {
+    /// Answer a user prompt.
+    Prompt(Message),
+    /// Summarize older turns now.
+    Compact,
+}
+
 /// Everything one run needs. The run owns the context and recorder until
 /// it hands them back in [`Finished`].
 pub(super) struct Run {
     pub session: SessionId,
-    pub prompt: Message,
+    pub work: Work,
     pub provider: Arc<dyn Provider>,
     pub model: String,
     pub tools: ToolRegistry,
@@ -43,12 +51,15 @@ pub(super) struct Run {
     pub bus: Arc<Bus>,
 }
 
-/// State a finished run returns to its session.
+/// State a finished run returns to its session. The dispatcher publishes
+/// `RunEnded` once the session is idle again, so a client reacting to it
+/// never finds the session busy.
 pub(super) struct Finished {
     pub session: SessionId,
     pub cx: AgentContext,
     pub recorder: Option<Recorder>,
     pub usage: Usage,
+    pub outcome: RunOutcome,
 }
 
 impl Run {
@@ -62,7 +73,7 @@ impl Run {
     fn execute(self) -> Finished {
         let Self {
             session,
-            prompt,
+            work,
             provider,
             model,
             tools,
@@ -78,21 +89,11 @@ impl Run {
         } = self;
 
         bus.publish(session, HostEvent::RunStarted);
-        let first_text = crate::cli_loop_run::first_user_text(&prompt);
-        cx.history.push(prompt.clone());
-
         let mut emit = |event: LoopEvent| {
             if let Some(rec) = recorder.as_mut()
                 && let Err(err) = rec.observe(&event)
             {
-                bus.publish(
-                    session,
-                    HostEvent::Notice {
-                        level: NoticeLevel::Error,
-                        text: format!("session write failed: {err}"),
-                        transient: false,
-                    },
-                );
+                notice(&bus, session, format!("session write failed: {err}"));
             }
             let turn_usage = match &event {
                 LoopEvent::MessageEnd { usage, .. } => Some(*usage),
@@ -104,35 +105,49 @@ impl Run {
                 bus.publish(session, HostEvent::UsageUpdated { usage });
             }
         };
-        emit(LoopEvent::MessageAppended { message: prompt });
 
         let base = RunHooks { gate, steering };
-        let result = if let Some(rt) = plugins {
-            let mut hooks = PluginEventHooks::new(base, rt);
-            hooks.dispatch_before_agent_start(&cx.system_prompt, &first_text);
-            hooks.dispatch_agent_start();
-            let result = kage_loop::run(
-                provider.as_ref(),
-                &tools,
-                &mut cx,
-                loop_cfg,
-                &mut hooks,
-                &cancel,
-                &mut emit,
-            );
-            hooks.dispatch_agent_end(result.is_ok());
-            result
-        } else {
-            let mut hooks = base;
-            kage_loop::run(
-                provider.as_ref(),
-                &tools,
-                &mut cx,
-                loop_cfg,
-                &mut hooks,
-                &cancel,
-                &mut emit,
-            )
+        let mut hooks: Box<dyn Hooks> = match &plugins {
+            Some(rt) => Box::new(PluginEventHooks::new(base, Arc::clone(rt))),
+            None => Box::new(base),
+        };
+        let result = match work {
+            Work::Prompt(prompt) => {
+                let first_text = crate::cli_loop_run::first_user_text(&prompt);
+                cx.history.push(prompt.clone());
+                emit(LoopEvent::MessageAppended { message: prompt });
+                if let Some(rt) = &plugins {
+                    crate::plugins::dispatch_run_start(rt, &cx.system_prompt, &first_text);
+                }
+                let result = kage_loop::run(
+                    provider.as_ref(),
+                    &tools,
+                    &mut cx,
+                    loop_cfg,
+                    hooks.as_mut(),
+                    &cancel,
+                    &mut emit,
+                );
+                if let Some(rt) = &plugins {
+                    crate::plugins::dispatch_run_end(rt, result.is_ok());
+                }
+                result
+            }
+            Work::Compact => {
+                match kage_loop::force_compact(
+                    &mut cx,
+                    provider.as_ref(),
+                    &cancel,
+                    hooks.as_mut(),
+                    &mut emit,
+                ) {
+                    Ok(false) => {
+                        notice(&bus, session, "compact: not enough history yet".to_owned());
+                        Ok(())
+                    }
+                    other => other.map(|_| ()),
+                }
+            }
         };
 
         let outcome = match result {
@@ -140,14 +155,25 @@ impl Run {
             Err(LoopError::Cancelled) => RunOutcome::Cancelled,
             Err(error) => RunOutcome::Failed { error },
         };
-        bus.publish(session, HostEvent::RunEnded { outcome });
         Finished {
             session,
             cx,
             recorder,
             usage,
+            outcome,
         }
     }
+}
+
+fn notice(bus: &Bus, session: SessionId, text: String) {
+    bus.publish(
+        session,
+        HostEvent::Notice {
+            level: NoticeLevel::Error,
+            text,
+            transient: false,
+        },
+    );
 }
 
 /// Fold one turn's usage into the session totals.

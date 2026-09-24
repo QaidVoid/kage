@@ -26,8 +26,7 @@ pub mod usage;
 pub mod view;
 
 pub use app::{
-    App, AppExit, PermissionAsk, PermissionDecision, PluginDialog, PluginRefresh, RunRequest,
-    SessionLister,
+    App, AppExit, PermissionDecision, PluginDialog, PluginRefresh, RunRequest, SessionLister,
 };
 pub use buffer::{Block, Buffer};
 pub use chord::Chord;
@@ -39,8 +38,9 @@ pub use command::{
     ArgSource, ArgSpec, ArgValue, CommandCategory, CommandSpec, ParsedArgs, find_builtin_command,
 };
 pub use error::TuiError;
-pub use events::populate_from_history;
-pub use events::{SharedBuffer, SharedSteering, TuiHooks, shared_buffer, shared_steering};
+pub use events::{
+    SharedBuffer, apply_loop_event, populate_from_history, shared_buffer, tool_durations,
+};
 pub use hostlog::buffer_host_log;
 pub use input::{HISTORY_MAX, InputAction, InputState, Mode, Pane};
 pub use layout::{

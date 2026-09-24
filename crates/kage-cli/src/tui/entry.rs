@@ -220,23 +220,19 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         let mut buf = lock(&buffer);
         buf.push_custom("kage:error", format!("mcp `{server}`: {err}"), false);
     }
-    let cancel = CancelFlag::new();
-    let mut initial_cx = AgentContext::new(bare_model, system).with_workdir(&workdir);
+    let mut cx = AgentContext::new(bare_model, system).with_workdir(&workdir);
     if app_config.permissions.confine_paths {
-        initial_cx = initial_cx.with_confine_paths();
+        cx = cx.with_confine_paths();
     }
     if let Some(window) = crate::runtime_env::context_window_for(&registry, &qualified_model) {
-        initial_cx = initial_cx.with_context_window(window);
+        cx = cx.with_context_window(window);
     }
     if let Some(out) = crate::runtime_env::max_output_tokens_for(&registry, &qualified_model) {
-        initial_cx = initial_cx.with_max_output_tokens(out);
+        cx = cx.with_max_output_tokens(out);
     }
-    // `[ui] thinking_level` seeds new sessions; a bad value is
-    // surfaced as an error line and ignored rather than refusing to
-    // start. Shift+Tab still cycles it per session.
     if let Some(level) = app_config.ui.thinking_level.as_deref() {
         if let Some(parsed) = kage_provider::ThinkingLevel::parse(level) {
-            initial_cx = initial_cx.with_thinking_level(parsed);
+            cx = cx.with_thinking_level(parsed);
         } else {
             let mut buf = lock(&buffer);
             buf.push_custom(
@@ -246,48 +242,13 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
             );
         }
     }
-    let cx = Arc::new(Mutex::new(initial_cx));
     let (tx, rx) = mpsc::channel::<RunRequest>();
-    // The worker keeps its own sender so it can re-queue any user
-    // prompts left in the steering queue after a run finishes (e.g.
-    // because the model emitted text without tool calls, exiting the
-    // inner loop before the next steering drain could pick them up).
-    let tx_worker = tx.clone();
-    // The watcher thread (spawned below) holds its own clone so a
-    // plugin file change wakes the worker even when the user is idle.
     let tx_watcher = tx.clone();
-    let steering = kage_tui::shared_steering();
     let (dialog_tx, dialog_rx) = mpsc::channel::<PluginDialog>();
     let (plugin_refresh_tx, plugin_refresh_rx) = mpsc::channel::<PluginRefresh>();
-    // Permission asks: the worker's gate parks on the reply while the
-    // App hosts the overlay. One gate per TUI session, cloned into
-    // every hook stack the worker builds; the shared rules make an
-    // "always allow" stick for the whole session.
-    let (permission_tx, permission_rx) = mpsc::channel::<kage_tui::PermissionAsk>();
-    let permission_gate = crate::permissions::PermissionGate::new(app_config.permissions.clone())
-        .with_mcp_servers(mcp_manager.server_names().map(str::to_owned).collect())
-        .with_ask(permission_tx)
-        .with_cancel(cancel.clone());
+    let gate = crate::permissions::PermissionGate::new(app_config.permissions.clone())
+        .with_mcp_servers(mcp_manager.server_names().map(str::to_owned).collect());
 
-    // Plan a session up-front but defer creating the file until the
-    // first prompt actually lands. Otherwise quitting or resuming
-    // immediately would leave an empty header-only stub on disk.
-    let (session_path, session_header) = match crate::plan_session(&qualified_model, system) {
-        Ok((path, header)) => (
-            Some(Arc::new(Mutex::new(path))),
-            Some(Arc::new(Mutex::new(Some(header)))),
-        ),
-        Err(e) => {
-            let mut buf = lock(&buffer);
-            buf.push_custom("kage:error", format!("session: {e}"), false);
-            (None, None)
-        }
-    };
-
-    let active_qualified = Arc::new(Mutex::new(qualified_model.clone()));
-    // One quiet discoverability hint at the top of every fresh
-    // session: the entry points (? keys, / commands) are all a new
-    // user needs. Transcript-only; never recorded to the session file.
     {
         let mut buf = lock(&buffer);
         buf.push_custom(
@@ -302,47 +263,61 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         buf.push_custom("kage:error", format!("state: {err}"), false);
     }
 
-    let session_usage = shared_session_usage();
-    // Seed initial usage snapshot so the modeline shows the model
-    // and the catalog-reported context window before any turn runs.
-    {
-        let mut snap = lock(&session_usage);
-        let cx_guard = lock(&cx);
-        snap.model.clone_from(&qualified_model);
-        snap.context_window = cx_guard.context_window;
-        snap.thinking_level = cx_guard.thinking_level;
-    }
-    let has_plugin_runtime = plugin_runtime.is_some();
-    let worker = spawn_worker(WorkerConfig {
-        registry: Arc::clone(&registry),
-        active_qualified: Arc::clone(&active_qualified),
+    let planned = match crate::plan_session(&qualified_model, system) {
+        Ok(planned) => Some(planned),
+        Err(e) => {
+            let mut buf = lock(&buffer);
+            buf.push_custom("kage:error", format!("session: {e}"), false);
+            None
+        }
+    };
+    let session_id = planned
+        .as_ref()
+        .map_or_else(kage_core::SessionId::new, |(_, header)| header.session);
+    let mirror = Arc::new(Mutex::new(host::Mirror::new(
+        planned.as_ref().map(|(path, _)| path.clone()),
+    )));
+    let engine = crate::engine::Engine::start(Arc::clone(&registry));
+    let (events_tx, events_rx) = mpsc::channel();
+    engine.subscribe(Box::new(move |envelope| {
+        let _ = events_tx.send(envelope.clone());
+    }));
+    engine.subscribe(Box::new(host::mirror(
+        Arc::clone(&mirror),
+        plugin_runtime.clone(),
+    )));
+    engine.open(crate::engine::SessionSpec {
+        id: session_id,
+        model: qualified_model.clone(),
+        cx,
+        recorder: planned.map(|(path, header)| {
+            crate::engine::Recorder::planned(path, header, plugin_runtime.clone())
+        }),
         tools,
-        mcp_manager,
-        cx: Arc::clone(&cx),
-        buffer: buffer.clone(),
-        cancel: cancel.clone(),
-        plugin_runtime,
-        rx,
-        session_path: session_path.clone(),
-        session_header: session_header.clone(),
-        session_usage: session_usage.clone(),
-        toasts: toasts.clone(),
+        plugins: plugin_runtime.clone(),
+        gate,
+        loop_cfg,
+        mcp: Some(mcp_manager),
+        interactive: true,
+        title: true,
+    });
+    host::Host {
+        commander: engine.commander(),
+        registry: Arc::clone(&registry),
+        plugins: plugin_runtime.clone(),
+        plugins_dir: plugins_dir_path.clone(),
         dialog_tx,
         plugin_refresh_tx,
-        loop_cfg,
-        steering: steering.clone(),
-        tx_self: tx_worker,
-        plugins_dir: plugins_dir_path.clone(),
-        permission_gate,
-    });
+        mirror: Arc::clone(&mirror),
+    }
+    .spawn(rx);
 
-    // Hot-reload watcher: a small thread owns the FS watcher, polls it
-    // every 150ms, and fires `ReloadPlugins` through the worker channel
-    // when a `.lua` file under the plugins dir changes. The thread exits
-    // when its `send` fails (channel disconnected at TUI shutdown).
-    if has_plugin_runtime && let Some(dir) = plugins_dir_path.as_ref() {
+    // Hot-reload watcher: polls the plugins dir every 150ms and asks
+    // for a reload when a `.lua` file changes. It ends with the process.
+    if plugin_runtime.is_some()
+        && let Some(dir) = plugins_dir_path.as_ref()
+    {
         let dir = dir.clone();
-        let tx = tx_watcher;
         let buf = buffer.clone();
         thread::spawn(move || {
             let watcher = match kage_plugin::PluginWatcher::new(dir) {
@@ -355,15 +330,11 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
             };
             loop {
                 thread::sleep(std::time::Duration::from_millis(150));
-                if watcher.poll() && tx.send(RunRequest::ReloadPlugins).is_err() {
+                if watcher.poll() && tx_watcher.send(RunRequest::ReloadPlugins).is_err() {
                     return;
                 }
             }
         });
-    } else {
-        // `tx_watcher` is unused when there is no plugin runtime; drop
-        // it explicitly so the channel still closes when the App exits.
-        drop(tx_watcher);
     }
 
     let mut tui = match Tui::enter() {
@@ -376,7 +347,8 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     let mut app = App::new(buffer.clone(), tx);
     app.set_model_choices(model_choices);
     app.set_history(crate::history::load());
-    app.set_status_model(Arc::clone(&active_qualified));
+    app.set_status_model(Arc::new(Mutex::new(qualified_model.clone())));
+    app.set_engine_events(events_rx);
     app.set_plugin_commands(plugin_command_listing);
     app.set_plugin_widgets(plugin_widgets);
     app.set_plugin_autocomplete(plugin_autocomplete);
@@ -432,7 +404,6 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     app.set_plugin_dialog(dialog_rx);
     app.set_plugin_refresh(plugin_refresh_rx);
     app.set_plugin_keybindings(plugin_keybinding_chords);
-    app.set_permission_channel(permission_rx);
     let keybinding_errors = app.set_config_keybindings(
         app_config
             .keybindings
@@ -445,31 +416,24 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         let mut buf = lock(&buffer);
         buf.push_custom("kage:error", err, false);
     }
-    app.set_cancel_flag(cancel.clone());
     app.set_toasts(toasts.clone());
-    app.set_session_usage(session_usage);
-    app.set_steering_queue(steering.clone());
-    if let Some(p) = session_path.as_ref() {
-        let path = lock(p).clone();
-        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            app.set_status_session_id(stem.chars().take(8).collect());
-        }
-    }
+    app.set_session_usage(shared_session_usage());
+    app.set_status_session_id(session_id.to_string().chars().take(8).collect());
     if let Ok(dir) = crate::sessions_dir() {
         let tree_dir = dir.clone();
-        let tree_sp = session_path.clone();
+        let tree_mirror = Arc::clone(&mirror);
         let lister_workdir = workdir.clone();
         app.set_session_lister(Box::new(move |all| {
             list_session_choices(&dir, &lister_workdir, all)
         }));
         app.set_session_tree_source(Box::new(move || {
-            list_session_nodes(&tree_dir, tree_sp.as_ref())
+            list_session_nodes(&tree_dir, lock(&tree_mirror).path())
         }));
     }
     let result = app.run(&mut tui);
     drop(tui);
     drop(app);
-    let _ = worker.join();
+    engine.shutdown();
 
     match result {
         Ok(_) => ExitCode::SUCCESS,

@@ -40,7 +40,7 @@ impl App {
             if self.drain_plugin_dialog() {
                 needs_redraw = true;
             }
-            if self.drain_permission() {
+            if self.drain_engine_events() {
                 needs_redraw = true;
             }
             if self.drain_plugin_theme() {

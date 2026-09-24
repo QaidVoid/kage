@@ -268,51 +268,15 @@ fn first_text(msg: &Message) -> Option<String> {
     })
 }
 
-/// One-line summary of a tool's input shown in the folded header.
-///
-/// Built-in tools each get a tailored projection of their JSON input
-/// (the path for `read`/`write`/`edit`, the pattern for `find`/`grep`,
-/// the command for `bash`, the URL for `web_fetch`, etc.) so the header
-/// reads like `read README.md` instead of `read({"path":"README.md"})`.
-/// Unknown tools fall back to the previous compact-JSON representation.
+/// One-line summary of a tool's input shown in the folded header: the
+/// [`crate::view::tool_view::describe`] target, such as the path for
+/// `read` or the command for `bash`.
 fn summarize_input(name: &str, input: &serde_json::Value) -> String {
     if matches!(input, serde_json::Value::Null) {
         return String::new();
     }
-    let summary = match name {
-        "read" | "view" | "write" | "ls" => string_field(input, "path"),
-        "edit" => edit_summary(input),
-        "find" | "glob" => string_field(input, "pattern"),
-        "grep" => grep_summary(input),
-        "bash" | "shell" => string_field(input, "cmd").or_else(|| string_field(input, "command")),
-        "web_fetch" | "fetch" => string_field(input, "url"),
-        _ => None,
-    };
-    let raw = summary.unwrap_or_else(|| input.to_string());
-    crate::view::truncate_to_width(&raw, 60, "...")
-}
-
-fn string_field(input: &serde_json::Value, key: &str) -> Option<String> {
-    input.get(key)?.as_str().map(str::to_owned)
-}
-
-fn edit_summary(input: &serde_json::Value) -> Option<String> {
-    let path = string_field(input, "path")?;
-    if let (Some(start), Some(end)) = (
-        input.get("start_line").and_then(serde_json::Value::as_i64),
-        input.get("end_line").and_then(serde_json::Value::as_i64),
-    ) {
-        return Some(format!("{path}:{start}-{end}"));
-    }
-    Some(path)
-}
-
-fn grep_summary(input: &serde_json::Value) -> Option<String> {
-    let pattern = string_field(input, "pattern")?;
-    match string_field(input, "path") {
-        Some(path) if path != "." => Some(format!("{pattern} in {path}")),
-        _ => Some(pattern),
-    }
+    let target = crate::view::tool_view::describe(name, input).target;
+    crate::view::truncate_to_width(&target, 60, "...")
 }
 
 #[cfg(test)]
@@ -350,17 +314,10 @@ mod tests {
     }
 
     #[test]
-    fn summarize_edit_includes_line_range_when_present() {
+    fn summarize_edit_is_the_path() {
         assert_eq!(
-            summarize_input(
-                "edit",
-                &json!({"path": "src/lib.rs", "start_line": 10, "end_line": 20})
-            ),
-            "src/lib.rs:10-20"
-        );
-        assert_eq!(
-            summarize_input("edit", &json!({"path": "src/lib.rs"})),
-            "src/lib.rs"
+            summarize_input("edit", &json!({"path":"a.rs","old_str":"x","new_str":"y"})),
+            "a.rs"
         );
     }
 
@@ -368,17 +325,16 @@ mod tests {
     fn summarize_grep_combines_pattern_and_path() {
         assert_eq!(
             summarize_input("grep", &json!({"pattern": "foo", "path": "src"})),
-            "foo in src"
+            "\"foo\" in src"
         );
         assert_eq!(
             summarize_input("grep", &json!({"pattern": "foo", "path": "."})),
-            "foo"
+            "\"foo\""
         );
     }
 
     #[test]
     fn summarize_bash_uses_command_field() {
-        assert_eq!(summarize_input("bash", &json!({"cmd": "ls -la"})), "ls -la");
         assert_eq!(
             summarize_input("bash", &json!({"command": "ls -la"})),
             "ls -la"
@@ -386,10 +342,10 @@ mod tests {
     }
 
     #[test]
-    fn summarize_unknown_tool_falls_back_to_compact_json() {
+    fn summarize_unknown_tool_is_its_name() {
         assert_eq!(
             summarize_input("custom_tool", &json!({"foo": "bar"})),
-            "{\"foo\":\"bar\"}"
+            "custom_tool"
         );
     }
 

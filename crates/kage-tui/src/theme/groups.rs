@@ -83,6 +83,16 @@ pub const ROLE_GROUPS: [(&str, &str, Slot); 46] = [
     ("md_code_fg", "KageMarkdownCode", Slot::Fg),
 ];
 
+/// Chrome groups that are not theme roles, as `(group, default link)`.
+/// Every theme gets them as links, and a theme file may replace them
+/// under `[groups]`.
+pub const EXTRA_GROUPS: [(&str, &str); 4] = [
+    ("KageWorking", "KageMuted"),
+    ("KageApproval", "KageWarning"),
+    ("KageDiffAdd", "KageSuccess"),
+    ("KageDiffDelete", "KageToolErrorRule"),
+];
+
 /// The base groups of one theme, ready for [`Highlights::set_base`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ThemeGroups {
@@ -93,13 +103,21 @@ pub struct ThemeGroups {
 }
 
 impl ThemeGroups {
-    /// The groups that compile back to exactly `theme`.
+    /// The groups that compile back to exactly `theme`, plus the
+    /// [`EXTRA_GROUPS`] links.
     #[must_use]
     pub fn from_theme(theme: &Theme) -> Self {
         let mut groups = BTreeMap::<String, HlSpec>::new();
         for (role, group, slot) in ROLE_GROUPS {
             let color = theme.role(role).and_then(color_string);
             *slot_mut(groups.entry(group.to_owned()).or_default(), slot) = color;
+        }
+        for (group, link) in EXTRA_GROUPS {
+            let spec = HlSpec {
+                link: Some(link.to_owned()),
+                ..HlSpec::default()
+            };
+            groups.insert(group.to_owned(), spec);
         }
         Self {
             transparent: theme.transparent,
@@ -277,7 +295,9 @@ pub(super) fn parse_theme_file(toml: &str) -> Result<(String, ThemeGroups), Stri
         *slot_mut(out.groups.entry((*group).to_owned()).or_default(), *slot) = color;
     }
     for (name, spec) in file.groups {
-        if name.starts_with("Kage") && !ROLE_GROUPS.iter().any(|(_, g, _)| *g == name) {
+        let known = ROLE_GROUPS.iter().any(|(_, g, _)| *g == name)
+            || EXTRA_GROUPS.iter().any(|(g, _)| *g == name);
+        if name.starts_with("Kage") && !known {
             return Err(format!("unknown highlight group `{name}`"));
         }
         spec.validate()
@@ -453,6 +473,41 @@ mod tests {
         let spec = &groups.groups["KageSelection"];
         assert_eq!(spec.fg.as_deref(), Some("#010203"));
         assert!(spec.bg.is_some());
+    }
+
+    #[test]
+    fn bundled_themes_link_the_extra_groups() {
+        for name in Theme::bundled_names() {
+            let groups = groups_for(name, None).expect("bundled");
+            let theme = Theme::from_groups(&groups.clone().into_highlights(name));
+            for (group, link) in EXTRA_GROUPS {
+                assert_eq!(
+                    groups.groups[group].link.as_deref(),
+                    Some(link),
+                    "{name} {group}"
+                );
+                assert_eq!(
+                    theme.group_style(group),
+                    theme.group_style(link),
+                    "{name} {group}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn user_theme_overrides_an_extra_group() {
+        let (_, groups) =
+            parse_theme_file("[groups]\nKageDiffAdd = { fg = \"#010203\" }").expect("ok");
+        let theme = Theme::from_groups(&groups.into_highlights("default"));
+        assert_eq!(
+            theme.group_style("KageDiffAdd"),
+            Style::default().fg(Color::Rgb(1, 2, 3))
+        );
+        assert_eq!(
+            theme.group_style("KageDiffDelete"),
+            theme.group_style("KageToolErrorRule")
+        );
     }
 
     #[test]

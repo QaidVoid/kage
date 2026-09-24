@@ -19,6 +19,7 @@ pub mod toast;
 pub mod tool_call_alone;
 pub mod tool_pair;
 pub mod tool_result_alone;
+pub mod tool_view;
 pub mod user;
 pub mod widget;
 

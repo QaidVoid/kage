@@ -3,8 +3,13 @@
 #[allow(clippy::wildcard_imports)] // tui split: shares the parent module scope
 use super::*;
 
+use std::sync::OnceLock;
+
 use kage_core::ThinkingLevel;
 use kage_core::options::{OptionStore, OptionValue};
+use kage_core::protocol::{HostEvent, NoticeLevel};
+use kage_plugin::LogLevel;
+use kage_tui::hostlog::LogPublisher;
 
 /// Drop into the interactive TUI. Returns the appropriate process exit
 /// code once the user quits.
@@ -81,6 +86,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         }
     };
     let user_dir = crate::config_dir().ok();
+    let log_publisher: Arc<OnceLock<LogPublisher>> = Arc::default();
     let plugin_runtime = match setup_tui_runtime(
         plugins_dir_path.as_deref(),
         user_dir.as_deref(),
@@ -90,7 +96,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         &workdir,
         &provisional_model,
         &bare_prompt,
-        buffer_host_log(buffer.clone(), toasts.clone()),
+        buffer_host_log(buffer.clone(), toasts.clone(), Arc::clone(&log_publisher)),
     ) {
         Ok(rt) => Some(rt),
         Err(e) => {
@@ -274,6 +280,18 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         interactive: true,
         title: true,
     });
+    let log_commander = engine.commander();
+    let _ = log_publisher.set(Box::new(move |level, message| {
+        let level = match level {
+            LogLevel::Error => NoticeLevel::Error,
+            _ => NoticeLevel::Info,
+        };
+        log_commander.publish(HostEvent::Notice {
+            level,
+            text: message.to_owned(),
+            transient: false,
+        });
+    }));
     host::Host {
         commander: engine.commander(),
         registry: Arc::clone(&registry),

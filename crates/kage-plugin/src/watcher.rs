@@ -78,8 +78,9 @@ impl PluginWatcher {
 
     /// Watch the plugins directory, when given, plus the trusted user
     /// config in `user_dir`: its `init.lua` and, recursively, its `lua/`
-    /// directory. Directories that do not exist yet are skipped, so a
-    /// `lua/` directory created later is watched from the next start.
+    /// directory. `user_dir` is watched recursively as a whole, so a
+    /// `lua/` directory created later is seen. Directories that do not
+    /// exist yet are skipped.
     pub fn for_config(
         plugins_dir: Option<PathBuf>,
         user_dir: Option<PathBuf>,
@@ -90,12 +91,16 @@ impl PluginWatcher {
         let scope = Scope {
             plugins: plugins_dir.clone(),
             init: user_dir.as_ref().map(|dir| dir.join("init.lua")),
-            modules: modules.clone(),
+            modules,
         };
+        let plugins_root = plugins_dir.filter(|dir| {
+            !user_dir
+                .as_deref()
+                .is_some_and(|user| dir.starts_with(user))
+        });
         let roots: Vec<_> = [
-            (plugins_dir, RecursiveMode::NonRecursive),
-            (user_dir, RecursiveMode::NonRecursive),
-            (modules, RecursiveMode::Recursive),
+            (plugins_root, RecursiveMode::NonRecursive),
+            (user_dir, RecursiveMode::Recursive),
         ]
         .into_iter()
         .filter_map(|(dir, mode)| dir.filter(|d| d.is_dir()).map(|d| (d, mode)))
@@ -240,6 +245,36 @@ mod tests {
         let _ = w.poll();
         fs::write(user.path().join("other.lua"), "-- not init").unwrap();
         fs::write(user.path().join("lua/a/notes.txt"), "x").unwrap();
+        assert!(!wait_for_change(&w, Duration::from_millis(300)));
+    }
+
+    #[test]
+    fn detects_modules_in_a_lua_dir_created_later() {
+        let user = tempdir().unwrap();
+        let w = PluginWatcher::for_config(None, Some(user.path().to_path_buf())).unwrap();
+        fs::create_dir(user.path().join("lua")).unwrap();
+        sleep(Duration::from_millis(200));
+        let _ = w.poll();
+        fs::write(user.path().join("lua/x.lua"), "return 1").unwrap();
+        assert!(wait_for_change(&w, Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn detects_plugins_inside_the_user_dir() {
+        let user = tempdir().unwrap();
+        let plugins = user.path().join("plugins");
+        fs::create_dir(&plugins).unwrap();
+        let w = PluginWatcher::for_config(Some(plugins.clone()), Some(user.path().to_path_buf()))
+            .unwrap();
+        let _ = wait_for_change(&w, Duration::from_millis(50));
+        fs::write(plugins.join("p.lua"), "-- hi").unwrap();
+        assert!(wait_for_change(&w, Duration::from_secs(2)));
+        sleep(Duration::from_millis(200));
+        let _ = w.poll();
+        fs::create_dir(plugins.join("nested")).unwrap();
+        sleep(Duration::from_millis(200));
+        let _ = w.poll();
+        fs::write(plugins.join("nested/q.lua"), "-- nested").unwrap();
         assert!(!wait_for_change(&w, Duration::from_millis(300)));
     }
 

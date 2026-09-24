@@ -233,7 +233,11 @@ pub enum NoticeLevel {
 pub enum PermissionDecision {
     /// Run this one call. The next identical call asks again.
     AllowOnce,
-    /// Run this call and persist an allow rule for the tool.
+    /// Run this call and allow the tool for the rest of the session
+    /// without persisting anything.
+    AllowSession,
+    /// Run this call, allow the tool for the rest of the session, and
+    /// persist an allow rule for it.
     AllowAlways,
     /// Refuse the call.
     Deny,

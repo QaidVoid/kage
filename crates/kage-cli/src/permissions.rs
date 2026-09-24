@@ -8,7 +8,9 @@
 //! default, ask for editor sessions). Deny synthesizes an error output, allow
 //! passes through, and ask blocks the run until an [`Asker`] delivers the
 //! answer, or, when there is none (print mode), denies with a message
-//! pointing at the config.
+//! pointing at the config. Tools approved for the session skip every
+//! check except a deny mode.
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -61,6 +63,9 @@ pub(crate) struct PermissionGate {
     /// evaluates the configured rules, which default to allow. Never
     /// persisted: it lives and dies with this session.
     mode: Arc<Mutex<Option<PermissionAction>>>,
+    /// Tools the user allowed for this session. Checked after a deny
+    /// mode and before an ask mode and the rules. Never persisted.
+    session_allowed: Arc<Mutex<BTreeSet<String>>>,
     /// Where "always allow" decisions are written. `None` (every
     /// production construction) resolves [`Config::default_path`] at
     /// write time; tests point it at a tempdir.
@@ -81,6 +86,7 @@ impl PermissionGate {
             mcp_servers: Arc::from([]),
             cancel: CancelFlag::new(),
             mode: Arc::new(Mutex::new(None)),
+            session_allowed: Arc::new(Mutex::new(BTreeSet::new())),
             config_path: None,
         }
     }
@@ -168,7 +174,12 @@ impl PermissionGate {
         loop {
             match reply_rx.recv_timeout(ASK_POLL) {
                 Ok(PermissionDecision::AllowOnce) => return None,
+                Ok(PermissionDecision::AllowSession) => {
+                    self.allow_for_session(tool);
+                    return None;
+                }
                 Ok(PermissionDecision::AllowAlways) => {
+                    self.allow_for_session(tool);
                     self.persist_allow_always(tool);
                     return None;
                 }
@@ -188,6 +199,10 @@ impl PermissionGate {
                 }
             }
         }
+    }
+
+    fn allow_for_session(&self, tool: &str) {
+        lock(&self.session_allowed).insert(tool.to_owned());
     }
 
     /// Record an "always allow" for `tool`: flip the shared rules so
@@ -241,8 +256,12 @@ impl Hooks for PermissionGate {
         name: &str,
         input: &serde_json::Value,
     ) -> Option<ToolOutput> {
+        let mode = self.mode();
+        if mode != Some(PermissionAction::Deny) && lock(&self.session_allowed).contains(name) {
+            return None;
+        }
         let subject = PermissionsConfig::subject_for(input);
-        let (action, rule) = if let Some(mode) = self.mode() {
+        let (action, rule) = if let Some(mode) = mode {
             (mode, Rule::Mode)
         } else {
             let rules = lock(&self.rules);
@@ -542,6 +561,72 @@ mod tests {
             saved.permissions.check("bash", "anything"),
             PermissionAction::Allow
         );
+    }
+
+    /// Run one bash call on `gate` under ask mode, answer the ask with
+    /// `decision`, and return whether the call was allowed.
+    fn answer_ask(gate: &PermissionGate, decision: PermissionDecision) -> bool {
+        let (ask_tx, ask_rx) = channel_asker();
+        let mut gate = gate.clone().with_asker(ask_tx);
+        gate.set_mode(Some(PermissionAction::Ask));
+        let handle = std::thread::spawn(move || {
+            gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+                .is_none()
+        });
+        let ask = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        ask.reply.send(decision).unwrap();
+        handle.join().unwrap()
+    }
+
+    fn panicking_asker() -> Asker {
+        Arc::new(|_| panic!("a session-allowed tool must not ask"))
+    }
+
+    #[test]
+    fn allow_session_stops_asking_under_ask_mode_and_persists_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let gate =
+            PermissionGate::new(rules_for(PermissionAction::Ask)).with_persist_path(path.clone());
+        assert!(answer_ask(&gate, PermissionDecision::AllowSession));
+        let mut gate = gate.with_asker(panicking_asker());
+        assert!(
+            gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+                .is_none()
+        );
+        assert_eq!(lock(&gate.rules).check("bash", "ls"), PermissionAction::Ask);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn allow_always_stops_asking_under_ask_mode_and_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let gate =
+            PermissionGate::new(rules_for(PermissionAction::Ask)).with_persist_path(path.clone());
+        assert!(answer_ask(&gate, PermissionDecision::AllowAlways));
+        let mut gate = gate.with_asker(panicking_asker());
+        assert!(
+            gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+                .is_none()
+        );
+        let saved = Config::load(&path).unwrap();
+        assert_eq!(
+            saved.permissions.check("bash", "anything"),
+            PermissionAction::Allow
+        );
+    }
+
+    #[test]
+    fn deny_mode_denies_a_session_allowed_tool() {
+        let gate = PermissionGate::new(rules_for(PermissionAction::Ask));
+        assert!(answer_ask(&gate, PermissionDecision::AllowSession));
+        let mut gate = gate;
+        gate.set_mode(Some(PermissionAction::Deny));
+        let out = gate
+            .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+            .unwrap();
+        assert!(out.text.contains("permission mode is deny"), "{}", out.text);
     }
 
     #[test]

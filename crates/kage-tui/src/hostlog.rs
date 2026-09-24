@@ -10,7 +10,11 @@
 //! `notify` lands as an ephemeral toast (top-right overlay, auto-
 //! expires) so plugin chatter does not pollute the conversation
 //! pane. `log` (especially error level) keeps the inline path because
-//! the user wants to scroll back and review.
+//! the user wants to scroll back and review. Once the engine runs, `log`
+//! goes through a [`LogPublisher`] instead, so a line lands after the
+//! engine events already published (the prompt, the tool call).
+
+use std::sync::{Arc, Mutex, OnceLock};
 
 use kage_core::sync::lock;
 use kage_plugin::{HostLog, LogLevel, SharedHostLog};
@@ -18,19 +22,29 @@ use kage_plugin::{HostLog, LogLevel, SharedHostLog};
 use crate::events::SharedBuffer;
 use crate::toast::{self, SharedToasts, Toast, ToastKind};
 
+/// Publishes a plugin log line as an engine event.
+pub type LogPublisher = Box<dyn Fn(LogLevel, &str) + Send + Sync>;
+
 /// Build a [`SharedHostLog`] that pushes plugin `notify` calls onto
-/// `toasts` and `log` calls into `buffer` as `kage:log` custom blocks.
+/// `toasts`. `log` calls go to `publisher` once it is set, and into
+/// `buffer` as `kage:log` custom blocks before that.
 #[must_use]
-pub fn buffer_host_log(buffer: SharedBuffer, toasts: SharedToasts) -> SharedHostLog {
-    use std::sync::{Arc, Mutex};
-    Arc::new(Mutex::new(
-        Box::new(BufferHostLog { buffer, toasts }) as Box<dyn HostLog + Send>
-    ))
+pub fn buffer_host_log(
+    buffer: SharedBuffer,
+    toasts: SharedToasts,
+    publisher: Arc<OnceLock<LogPublisher>>,
+) -> SharedHostLog {
+    Arc::new(Mutex::new(Box::new(BufferHostLog {
+        buffer,
+        toasts,
+        publisher,
+    }) as Box<dyn HostLog + Send>))
 }
 
 struct BufferHostLog {
     buffer: SharedBuffer,
     toasts: SharedToasts,
+    publisher: Arc<OnceLock<LogPublisher>>,
 }
 
 impl HostLog for BufferHostLog {
@@ -45,12 +59,16 @@ impl HostLog for BufferHostLog {
         );
     }
     fn log(&mut self, level: LogLevel, message: &str) {
-        let mut buf = lock(&self.buffer);
-        buf.push_custom(
-            "kage:log",
-            format!("[{level:?}] {message}"),
-            level != LogLevel::Error,
-        );
+        if let Some(publish) = self.publisher.get() {
+            publish(level, message);
+            return;
+        }
+        let text = if level == LogLevel::Info {
+            message.to_owned()
+        } else {
+            format!("[{level:?}] {message}")
+        };
+        lock(&self.buffer).push_custom("kage:log", text, level != LogLevel::Error);
     }
 }
 
@@ -65,7 +83,7 @@ mod tests {
     fn notify_pushes_a_toast_and_does_not_touch_the_buffer() {
         let buffer = shared_buffer();
         let toasts = shared_toasts();
-        let sink = buffer_host_log(buffer.clone(), toasts.clone());
+        let sink = buffer_host_log(buffer.clone(), toasts.clone(), Arc::default());
         sink.lock().unwrap().notify("plugin loaded");
         assert!(
             buffer.lock().unwrap().blocks().is_empty(),
@@ -80,7 +98,7 @@ mod tests {
     fn log_error_block_is_unfolded_so_failures_are_visible() {
         let buffer = shared_buffer();
         let toasts = shared_toasts();
-        let sink = buffer_host_log(buffer.clone(), toasts);
+        let sink = buffer_host_log(buffer.clone(), toasts, Arc::default());
         sink.lock().unwrap().log(LogLevel::Error, "boom");
         let buf = buffer.lock().unwrap();
         match &buf.blocks()[0] {
@@ -96,12 +114,91 @@ mod tests {
     fn log_info_block_is_folded_to_keep_chrome_quiet() {
         let buffer = shared_buffer();
         let toasts = shared_toasts();
-        let sink = buffer_host_log(buffer.clone(), toasts);
+        let sink = buffer_host_log(buffer.clone(), toasts, Arc::default());
         sink.lock().unwrap().log(LogLevel::Info, "ok");
         let buf = buffer.lock().unwrap();
         match &buf.blocks()[0] {
-            Block::Custom { folded, .. } => assert!(folded),
+            Block::Custom { text, folded, .. } => {
+                assert_eq!(text, "ok");
+                assert!(folded);
+            }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn log_goes_to_the_buffer_before_the_publisher_is_set_and_to_it_after() {
+        let buffer = shared_buffer();
+        let publisher: Arc<OnceLock<LogPublisher>> = Arc::default();
+        let sink = buffer_host_log(buffer.clone(), shared_toasts(), Arc::clone(&publisher));
+        sink.lock().unwrap().log(LogLevel::Warn, "early");
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&calls);
+        assert!(
+            publisher
+                .set(Box::new(move |level, message| {
+                    seen.lock().unwrap().push((level, message.to_owned()));
+                }))
+                .is_ok()
+        );
+        sink.lock().unwrap().log(LogLevel::Error, "late");
+        let buf = buffer.lock().unwrap();
+        assert_eq!(buf.blocks().len(), 1);
+        assert!(matches!(
+            &buf.blocks()[0],
+            Block::Custom { text, .. } if text == "[Warn] early"
+        ));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![(LogLevel::Error, "late".to_owned())]
+        );
+    }
+
+    #[test]
+    fn published_notice_lands_below_the_user_block() {
+        use kage_core::protocol::{Envelope, HostEvent, NoticeLevel};
+        use kage_core::{Content, LoopEvent, Message, Role, SessionId};
+
+        let buffer = shared_buffer();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = crate::App::new(buffer.clone(), tx);
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        app.set_engine_events(events_rx);
+        let session = SessionId::new();
+        let message = Message::new(Role::User, vec![Content::Text { text: "hi".into() }], None);
+        events_tx
+            .send(Envelope {
+                session,
+                seq: 1,
+                event: LoopEvent::MessageAppended { message }.into(),
+            })
+            .unwrap();
+        let publisher: Arc<OnceLock<LogPublisher>> = Arc::default();
+        assert!(
+            publisher
+                .set(Box::new(move |_, message| {
+                    let _ = events_tx.send(Envelope {
+                        session,
+                        seq: 2,
+                        event: HostEvent::Notice {
+                            level: NoticeLevel::Info,
+                            text: message.to_owned(),
+                            transient: false,
+                        }
+                        .into(),
+                    });
+                }))
+                .is_ok()
+        );
+        let sink = buffer_host_log(buffer.clone(), shared_toasts(), publisher);
+        sink.lock().unwrap().log(LogLevel::Info, "plugin says hi");
+        assert!(app.drain_engine_events());
+        let buf = buffer.lock().unwrap();
+        let blocks = buf.blocks();
+        assert!(matches!(&blocks[0], Block::User { text } if text == "hi"));
+        assert!(matches!(
+            &blocks[1],
+            Block::Custom { text, .. } if text == "plugin says hi"
+        ));
     }
 }

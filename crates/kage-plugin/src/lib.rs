@@ -26,7 +26,7 @@ pub(crate) mod exec;
 pub mod fs;
 pub(crate) mod host;
 pub mod http;
-pub mod keybindings;
+pub mod keymap;
 pub mod lifecycle;
 pub mod loader;
 pub mod mcp;
@@ -61,7 +61,7 @@ pub use chrome::{ChromeAttrs, ChromeLine, ChromeSlot, ChromeSpan, LuaChrome, Sha
 pub use commands::{BridgeArgs, BridgePrep, CommandOutput, LuaCommand, PluginArgSpec};
 pub use error::PluginError;
 pub use events::{DiscoveryEntries, KNOWN_EVENTS, SessionOpDecision};
-pub use keybindings::LuaKeybinding;
+pub use keymap::SharedKeymap;
 pub use lifecycle::{SharedCompactRequest, SharedUsage};
 pub use loader::{LoadReport, load_all, load_dir};
 pub use messages::{PendingMessage, PendingRole, SharedPendingMessages};

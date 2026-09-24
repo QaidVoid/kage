@@ -4,13 +4,30 @@
 use super::*;
 
 impl App {
-    /// True when the user bound `key` explicitly in `[keybindings]`.
-    /// Config is authoritative over the global hatches and the
-    /// builtin handling alike.
-    pub(crate) fn user_bound(&self, key: &ratatui::crossterm::event::KeyEvent) -> bool {
-        self.config_keybindings
-            .iter()
-            .any(|(matcher, _, _)| matcher.matches(key))
+    /// The editing state keys resolve in, which selects the keymap
+    /// modes to search.
+    pub(crate) fn edit_state(&self) -> EditState {
+        match (self.input.is_modeless(), self.input.mode()) {
+            (true, _) | (false, Mode::Insert) => EditState::Insert,
+            (false, Mode::Visual) => EditState::Visual,
+            (false, Mode::Normal) if self.input.focused_pane() == Pane::Buffer => {
+                EditState::NormalBuffer
+            }
+            (false, Mode::Normal) => EditState::NormalInput,
+        }
+    }
+
+    /// Whether `init.lua` or `config.toml` mapped `key` alone in the
+    /// current editing state. The global hatches and the external
+    /// editor key yield to such a mapping.
+    pub(crate) fn user_mapped(&self, key: &ratatui::crossterm::event::KeyEvent) -> bool {
+        let Some(key) = key_from_event(key) else {
+            return false;
+        };
+        match lock(&self.keymap).lookup(self.edit_state().modes(), &[key]) {
+            Lookup::Exact(m) | Lookup::Prefix { exact: Some(m) } => m.user_owned(),
+            _ => false,
+        }
     }
 
     /// Whether a raw plugin terminal-input hook consumed `key`. See
@@ -28,56 +45,24 @@ impl App {
         snapshot.iter().any(|hook| hook.handle(&descriptor))
     }
 
-    /// The parsed target of the `[keybindings]` entry bound to `key`,
-    /// or `None` when no config binding matches.
-    fn config_binding_for(
-        &self,
-        key: &ratatui::crossterm::event::KeyEvent,
-    ) -> Option<BindingTarget> {
-        self.config_keybindings
-            .iter()
-            .find(|(matcher, _, _)| matcher.matches(key))
-            .map(|(_, _, target)| target.clone())
-    }
-
-    /// Execute a config binding target: a command string through the
-    /// same executor as the `:` cmdline, an `action:` target as its
-    /// builtin action.
-    fn run_config_binding(&mut self, target: BindingTarget) -> Option<AppExit> {
-        match target {
-            BindingTarget::Command(command) => {
-                let registry = cmdline_registry(&self.plugin_command_specs);
-                match self.run_command_validated(&command, &registry) {
-                    CommandResult::Done(exit) => exit,
-                    CommandResult::ValidationError(msg) => {
-                        self.push_error(format!("keybinding `{command}`: {msg}"));
-                        None
-                    }
-                }
-            }
-            BindingTarget::Action(action) => self.apply(action),
-        }
-    }
-
-    /// Dispatch one key event through the modal layers, config
-    /// bindings, and input handlers. Grows with every modal; the
-    /// line count is layer plumbing, not complexity.
-    #[allow(clippy::too_many_lines)]
+    /// Dispatch one key event through the modal layers, the keymap,
+    /// and the editor grammar. Grows with every modal; the line count
+    /// is layer plumbing, not complexity.
     pub(crate) fn dispatch_key(
         &mut self,
         key: ratatui::crossterm::event::KeyEvent,
     ) -> Option<AppExit> {
         // Global escape hatches before any modal layer: ctrl+q quits,
         // ctrl+c interrupts the in-flight turn from every mode
-        // (insert, modeless, any open overlay). Both yield when the
-        // user explicitly bound the chord in `[keybindings]` - their
-        // config wins, and `quit` / `:cancel` stay reachable via
-        // whatever they mapped instead.
+        // (insert, modeless, any open overlay). Both yield to a
+        // mapping from `init.lua` or `config.toml` on the chord, so
+        // `quit` and `:cancel` stay reachable through whatever the
+        // user mapped instead.
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
-                KeyCode::Char('q') if !self.user_bound(&key) => return Some(AppExit::Quit),
-                KeyCode::Char('c') if !self.user_bound(&key) => {
+                KeyCode::Char('q') if !self.user_mapped(&key) => return Some(AppExit::Quit),
+                KeyCode::Char('c') if !self.user_mapped(&key) => {
                     let _ = self.apply(InputAction::Cancel);
                     return None;
                 }
@@ -149,54 +134,10 @@ impl App {
             return self.dispatch_search_key(key);
         }
 
-        // `[keybindings]` config is user-authoritative: checked before
-        // plugin and builtin handling so a user can always reclaim a
-        // key. A bound command string runs through the same executor
-        // as the `:` cmdline, so `quit`, plugin commands, everything
-        // works; a bound `action:` target applies its builtin action
-        // directly instead.
-        if let Some(target) = self.config_binding_for(&key) {
-            return self.run_config_binding(target);
-        }
-
-        // Ctrl+V: attach an image from the OS clipboard. Terminals
-        // with an image-only clipboard send the literal key (no
-        // bracketed paste / no text), so this is the reliable
-        // trigger; a text clipboard arrives as `Event::Paste`
-        // instead and never reaches here. Honored after `[keybindings]`
-        // so a user can still rebind ctrl+v.
-        if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('v')) {
-            self.request_clipboard_attach();
-            return None;
-        }
-
-        // Plugin keybindings win over builtin Normal/Insert handling
-        // (last writer wins), but never over an open modal layer
-        // above, the global quit hatch, or user config above.
-        if let Some(chord) = self
-            .plugin_keybindings
-            .iter()
-            .find(|(matcher, _)| matcher.matches(&key))
-            .map(|(_, chord)| chord.clone())
-        {
-            let _ = self.send_request(RunRequest::InvokePluginKeybinding { chord });
-            return None;
-        }
-
-        // `?` in normal mode opens the keyboard reference. Insert and
-        // visual keep the literal character; modeless editing never
-        // enters normal mode, so it reaches help via `:help`.
-        if self.input.mode() == Mode::Normal
-            && !key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('?'))
-        {
-            self.open_help();
-            return None;
-        }
-
         // The autocomplete popup is non-modal: it only consumes its
-        // own navigation/accept/dismiss keys. Anything else falls
-        // through to normal editing and then re-queries the stack.
+        // own navigation/accept/dismiss keys, before any mapping.
+        // Anything else falls through to the keymap and the editor
+        // and then re-queries the stack.
         if self.input_completion.is_some() {
             let action = self
                 .input_completion
@@ -217,55 +158,153 @@ impl App {
             }
         }
 
-        // Modeless `?` on an empty prompt opens the keyboard
-        // reference, matching the welcome hint. With text present (or
-        // the shell escape armed) `?` is a literal character.
-        if self.modeless_help_chord(&key) {
-            self.open_help();
-            return None;
+        let routed = self.route_editor_key(key, Instant::now());
+        let exit = self.apply_routed(routed);
+        if exit.is_none() {
+            self.refresh_input_completion();
         }
+        exit
+    }
 
-        // F3 opens the message jump picker from any editing state;
-        // the modal layers above already own the keyboard when open.
-        if Self::jump_picker_chord(&key) {
-            self.open_jump_picker();
-            return None;
-        }
-
-        let actions = self.input.handle_key(key);
-        for action in actions {
-            if let Some(exit) = self.apply(action) {
-                return Some(exit);
+    /// Resolve a key in the editing state: through the keymap
+    /// sequencer, then the editor grammar for keys no mapping takes.
+    /// A key that finishes a grammar command (after `g`, `z`, an
+    /// operator or `r`) goes straight to the grammar.
+    pub(crate) fn route_editor_key(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+        now: Instant,
+    ) -> Vec<Routed> {
+        let mapped = if self.input.is_pending() {
+            None
+        } else {
+            key_from_event(&key)
+        };
+        let Some(mapped) = mapped else {
+            return self.grammar(key);
+        };
+        let modes = self.edit_state().modes();
+        let keymap = lock(&self.keymap);
+        // With nothing buffered, a key that is not a prefix resolves
+        // on its own, without the sequencer's buffers. Typing hits
+        // this path on every key.
+        if self.sequencer.deadline().is_none() {
+            match keymap.lookup(modes, &[mapped]) {
+                Lookup::None => {
+                    drop(keymap);
+                    return self.grammar(key);
+                }
+                Lookup::Exact(mapping) => {
+                    let rhs = mapping.rhs.clone();
+                    drop(keymap);
+                    let mut routed = Vec::new();
+                    Self::resolve_rhs(rhs, &mut routed);
+                    return routed;
+                }
+                Lookup::Prefix { .. } => {}
             }
         }
-        self.refresh_input_completion();
+        let steps = self.sequencer.feed(&keymap, modes, mapped, now);
+        drop(keymap);
+        self.resolve_steps(steps)
+    }
+
+    fn grammar(&mut self, key: ratatui::crossterm::event::KeyEvent) -> Vec<Routed> {
+        self.input
+            .handle_key(key)
+            .into_iter()
+            .map(Routed::Input)
+            .collect()
+    }
+
+    /// Resolve a pending key sequence whose timeout passed. A modal
+    /// layer that opened meanwhile drops it instead.
+    pub(crate) fn tick_keymap(&mut self, now: Instant) -> Vec<Routed> {
+        if self.sequencer.deadline().is_none() {
+            return Vec::new();
+        }
+        if self.keyboard_modal_open() {
+            self.sequencer.clear();
+            return Vec::new();
+        }
+        let modes = self.edit_state().modes();
+        let steps = {
+            let keymap = lock(&self.keymap);
+            self.sequencer.tick(&keymap, modes, now)
+        };
+        self.resolve_steps(steps)
+    }
+
+    /// When a pending key sequence resolves on its own, if one is
+    /// buffered.
+    pub(crate) fn keymap_deadline(&self) -> Option<Instant> {
+        self.sequencer.deadline()
+    }
+
+    fn resolve_rhs(rhs: Rhs, routed: &mut Vec<Routed>) {
+        match rhs {
+            Rhs::Action { name, arg } => {
+                routed.extend(keymap::action(name, arg).map(Routed::Input));
+            }
+            Rhs::Command(command) => routed.push(Routed::Command(command)),
+            Rhs::Lua(id) => routed.push(Routed::Lua(id)),
+            Rhs::Nop => {}
+        }
+    }
+
+    fn resolve_steps(&mut self, steps: Vec<Step>) -> Vec<Routed> {
+        let mut routed = Vec::new();
+        for step in steps {
+            match step {
+                Step::Fire(rhs) => Self::resolve_rhs(rhs, &mut routed),
+                Step::Pending { .. } => {}
+                Step::Replay(keys) => {
+                    for key in keys {
+                        let actions = self.input.handle_key(event_from_key(key));
+                        routed.extend(actions.into_iter().map(Routed::Input));
+                    }
+                }
+            }
+        }
+        routed
+    }
+
+    /// Carry out resolved keys in order. Stops at the first that
+    /// exits.
+    pub(crate) fn apply_routed(&mut self, routed: Vec<Routed>) -> Option<AppExit> {
+        for item in routed {
+            let exit = match item {
+                Routed::Input(action) => self.apply(action),
+                Routed::Command(command) => self.run_mapped_command(&command),
+                Routed::Lua(id) => {
+                    let _ = self.send_request(RunRequest::InvokeKeymap { id });
+                    None
+                }
+            };
+            if exit.is_some() {
+                return exit;
+            }
+        }
         None
+    }
+
+    /// Run a mapping's command line through the same executor as the
+    /// `:` cmdline, so `quit`, plugin commands, everything works.
+    fn run_mapped_command(&mut self, command: &str) -> Option<AppExit> {
+        let registry = cmdline_registry(&self.plugin_command_specs);
+        match self.run_command_validated(command, &registry) {
+            CommandResult::Done(exit) => exit,
+            CommandResult::ValidationError(msg) => {
+                self.push_error(format!("mapping `:{command}`: {msg}"));
+                None
+            }
+        }
     }
 
     /// Re-query the autocomplete provider stack from the current
     /// prompt text and rebuild the popup. A no-op (and closes any open
     /// popup) unless plugins registered providers and the user is
     /// actively typing in the input pane.
-    /// Modeless `?` chord: an empty prompt (shell escape disarmed)
-    /// with a bare `?` opens the keyboard reference.
-    fn modeless_help_chord(&self, key: &ratatui::crossterm::event::KeyEvent) -> bool {
-        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
-        self.input.is_modeless()
-            && self.input.text().is_empty()
-            && !self.input.shell_armed()
-            && !key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('?'))
-    }
-
-    /// F3 with no modifiers opens the message jump picker.
-    fn jump_picker_chord(key: &ratatui::crossterm::event::KeyEvent) -> bool {
-        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
-        matches!(key.code, KeyCode::F(3))
-            && !key
-                .modifiers
-                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT)
-    }
-
     pub(crate) fn refresh_input_completion(&mut self) {
         let has_sources =
             !self.autocomplete_providers.is_empty() || self.completion_workdir.is_some();

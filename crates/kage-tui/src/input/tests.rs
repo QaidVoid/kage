@@ -217,21 +217,6 @@ fn alt_enter_also_inserts_a_newline_for_terminals_that_remap_shift_enter() {
 }
 
 #[test]
-fn jk_scroll_in_normal_when_buffer_focused() {
-    let mut state = InputState::new();
-    state.force_normal();
-    state.set_focused_pane(Pane::Buffer);
-    assert_eq!(
-        state.handle_key(key(KeyCode::Char('j'))),
-        vec![InputAction::Scroll(1)]
-    );
-    assert_eq!(
-        state.handle_key(key(KeyCode::Char('k'))),
-        vec![InputAction::Scroll(-1)]
-    );
-}
-
-#[test]
 fn jk_move_input_cursor_when_input_focused() {
     let mut state = InputState::new();
     state.paste("first\nsecond");
@@ -241,19 +226,6 @@ fn jk_move_input_cursor_when_input_focused() {
     let acts = state.handle_key(key(KeyCode::Char('k')));
     assert!(acts.is_empty());
     assert_eq!(state.cursor(), 5);
-}
-
-#[test]
-fn gg_scrolls_to_top_when_buffer_focused() {
-    let mut state = InputState::new();
-    state.force_normal();
-    state.set_focused_pane(Pane::Buffer);
-    let first = state.handle_key(key(KeyCode::Char('g')));
-    assert!(first.is_empty());
-    assert!(state.has_pending());
-    let second = state.handle_key(key(KeyCode::Char('g')));
-    assert_eq!(second, vec![InputAction::ScrollToTop]);
-    assert!(!state.has_pending());
 }
 
 #[test]
@@ -269,17 +241,6 @@ fn gg_jumps_input_cursor_to_start_when_input_focused() {
 }
 
 #[test]
-fn capital_g_scrolls_to_bottom_when_buffer_focused() {
-    let mut state = InputState::new();
-    state.force_normal();
-    state.set_focused_pane(Pane::Buffer);
-    assert_eq!(
-        state.handle_key(key(KeyCode::Char('G'))),
-        vec![InputAction::ScrollToBottom]
-    );
-}
-
-#[test]
 fn capital_g_jumps_input_cursor_to_end_when_input_focused() {
     let mut state = InputState::new();
     state.paste("hello world");
@@ -291,49 +252,10 @@ fn capital_g_jumps_input_cursor_to_end_when_input_focused() {
 }
 
 #[test]
-fn z_prefix_handles_fold_keys() {
-    let mut state = InputState::new();
-    state.force_normal();
-    for (suffix, expected) in [
-        ('o', InputAction::ToggleFold),
-        ('c', InputAction::ToggleFold),
-        ('R', InputAction::UnfoldAll),
-        ('M', InputAction::FoldAll),
-    ] {
-        state.handle_key(key(KeyCode::Char('z')));
-        let acts = state.handle_key(key(KeyCode::Char(suffix)));
-        assert_eq!(acts, vec![expected.clone()]);
-    }
-}
-
-#[test]
-fn colon_and_slash_open_command_and_search() {
-    let mut state = InputState::new();
-    state.force_normal();
-    assert_eq!(
-        state.handle_key(key(KeyCode::Char(':'))),
-        vec![InputAction::BeginCommand]
-    );
-    assert_eq!(
-        state.handle_key(key(KeyCode::Char('/'))),
-        vec![InputAction::BeginSearch]
-    );
-}
-
-#[test]
 fn ctrl_c_in_normal_emits_cancel() {
     let mut state = InputState::new();
     state.force_normal();
     assert_eq!(state.handle_key(ctrl('c')), vec![InputAction::Cancel]);
-}
-
-#[test]
-fn normal_y_emits_yank_when_buffer_focused() {
-    let mut state = InputState::new();
-    state.force_normal();
-    state.set_focused_pane(Pane::Buffer);
-    let acts = state.handle_key(key(KeyCode::Char('y')));
-    assert_eq!(acts, vec![InputAction::Yank]);
 }
 
 #[test]
@@ -524,14 +446,6 @@ fn default_pane_focus_is_input() {
 }
 
 #[test]
-fn ctrl_w_in_normal_emits_cycle_pane() {
-    let mut state = InputState::new();
-    state.force_normal();
-    let acts = state.handle_key(ctrl('w'));
-    assert_eq!(acts, vec![InputAction::CyclePane]);
-}
-
-#[test]
 fn toggle_focused_pane_round_trips() {
     let mut state = InputState::new();
     assert!(state.toggle_focused_pane());
@@ -546,21 +460,6 @@ fn set_focused_pane_reports_changes() {
     assert!(!state.set_focused_pane(Pane::Input));
     assert!(state.set_focused_pane(Pane::Buffer));
     assert!(!state.set_focused_pane(Pane::Buffer));
-}
-
-#[test]
-fn backtab_in_insert_emits_cycle_thinking_level() {
-    let mut state = InputState::new();
-    let acts = state.handle_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
-    assert_eq!(acts, vec![InputAction::CycleThinkingLevel]);
-}
-
-#[test]
-fn shift_tab_in_normal_emits_cycle_thinking_level() {
-    let mut state = InputState::new();
-    state.force_normal();
-    let acts = state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
-    assert_eq!(acts, vec![InputAction::CycleThinkingLevel]);
 }
 
 #[test]
@@ -1019,31 +918,6 @@ fn p_pastes_linewise_register_below() {
 }
 
 #[test]
-fn ctrl_s_in_buffer_pane_opens_session_picker() {
-    let mut state = InputState::new();
-    state.force_normal();
-    state.set_focused_pane(Pane::Buffer);
-    let acts = state.handle_key(ctrl('s'));
-    assert_eq!(acts, vec![InputAction::OpenSessionPicker]);
-}
-
-#[test]
-fn ctrl_s_in_insert_mode_opens_session_picker() {
-    let mut state = InputState::new();
-    // Default mode is Insert.
-    let acts = state.handle_key(ctrl('s'));
-    assert_eq!(acts, vec![InputAction::OpenSessionPicker]);
-}
-
-#[test]
-fn ctrl_s_in_normal_input_opens_session_picker() {
-    let mut state = InputState::new();
-    state.force_normal();
-    let acts = state.handle_key(ctrl('s'));
-    assert_eq!(acts, vec![InputAction::OpenSessionPicker]);
-}
-
-#[test]
 fn d_then_esc_cancels_operator() {
     let mut state = InputState::new();
     state.paste("hello");
@@ -1053,15 +927,6 @@ fn d_then_esc_cancels_operator() {
     state.handle_key(key(KeyCode::Esc));
     assert!(state.pending_op.is_none());
     assert_eq!(state.text(), "hello");
-}
-
-#[test]
-fn gw_in_normal_emits_cycle_pane() {
-    let mut state = InputState::new();
-    state.force_normal();
-    state.handle_key(key(KeyCode::Char('g')));
-    let acts = state.handle_key(key(KeyCode::Char('w')));
-    assert_eq!(acts, vec![InputAction::CyclePane]);
 }
 
 #[test]
@@ -1228,20 +1093,6 @@ fn modeless_esc_cancels_turn_and_stays_insert() {
 }
 
 #[test]
-fn modeless_pageup_pagedown_scroll_the_buffer() {
-    let mut state = InputState::new();
-    state.set_modeless(true);
-    assert_eq!(
-        state.handle_key(key(KeyCode::PageUp)),
-        vec![InputAction::Scroll(-10)]
-    );
-    assert_eq!(
-        state.handle_key(key(KeyCode::PageDown)),
-        vec![InputAction::Scroll(10)]
-    );
-}
-
-#[test]
 fn modeless_slash_on_empty_opens_command_palette() {
     let mut state = InputState::new();
     state.set_modeless(true);
@@ -1288,37 +1139,6 @@ fn ctrl_arrow(code: KeyCode) -> KeyEvent {
 }
 
 #[test]
-fn ctrl_up_down_in_insert_scrolls_buffer() {
-    let mut state = InputState::new();
-    let acts = state.handle_key(ctrl_arrow(KeyCode::Down));
-    assert_eq!(acts, vec![InputAction::Scroll(1)]);
-    let acts = state.handle_key(ctrl_arrow(KeyCode::Up));
-    assert_eq!(acts, vec![InputAction::Scroll(-1)]);
-}
-
-#[test]
-fn ctrl_home_end_in_insert_snaps_to_top_bottom() {
-    let mut state = InputState::new();
-    let acts = state.handle_key(ctrl_arrow(KeyCode::Home));
-    assert_eq!(acts, vec![InputAction::ScrollToTop]);
-    let acts = state.handle_key(ctrl_arrow(KeyCode::End));
-    assert_eq!(acts, vec![InputAction::ScrollToBottom]);
-}
-
-#[test]
-fn ctrl_p_in_insert_opens_model_picker_alt_p_n_focus() {
-    let mut state = InputState::new();
-    let acts = state.handle_key(ctrl('p'));
-    assert_eq!(acts, vec![InputAction::OpenModelPicker]);
-    let acts = state.handle_key(ctrl('n'));
-    assert_eq!(acts, vec![InputAction::FocusNext]);
-    let acts = state.handle_key(alt('p'));
-    assert_eq!(acts, vec![InputAction::FocusPrev]);
-    let acts = state.handle_key(alt('n'));
-    assert_eq!(acts, vec![InputAction::FocusNext]);
-}
-
-#[test]
 fn ctrl_arrows_do_not_insert_text() {
     let mut state = InputState::new();
     state.handle_key(ctrl_arrow(KeyCode::Down));
@@ -1326,40 +1146,6 @@ fn ctrl_arrows_do_not_insert_text() {
     state.handle_key(ctrl_arrow(KeyCode::Home));
     state.handle_key(ctrl_arrow(KeyCode::End));
     assert_eq!(state.text(), "", "ctrl+arrows must not insert characters");
-}
-
-#[test]
-fn modeless_ctrl_up_down_scrolls_buffer() {
-    let mut state = InputState::new();
-    state.set_modeless(true);
-    let acts = state.handle_key(ctrl_arrow(KeyCode::Down));
-    assert_eq!(acts, vec![InputAction::Scroll(1)]);
-    let acts = state.handle_key(ctrl_arrow(KeyCode::Up));
-    assert_eq!(acts, vec![InputAction::Scroll(-1)]);
-}
-
-#[test]
-fn modeless_ctrl_home_end_snaps_to_top_bottom() {
-    let mut state = InputState::new();
-    state.set_modeless(true);
-    let acts = state.handle_key(ctrl_arrow(KeyCode::Home));
-    assert_eq!(acts, vec![InputAction::ScrollToTop]);
-    let acts = state.handle_key(ctrl_arrow(KeyCode::End));
-    assert_eq!(acts, vec![InputAction::ScrollToBottom]);
-}
-
-#[test]
-fn modeless_ctrl_p_opens_model_picker_alt_p_n_focuses() {
-    let mut state = InputState::new();
-    state.set_modeless(true);
-    let acts = state.handle_key(ctrl('p'));
-    assert_eq!(acts, vec![InputAction::OpenModelPicker]);
-    let acts = state.handle_key(ctrl('n'));
-    assert_eq!(acts, vec![InputAction::FocusNext]);
-    let acts = state.handle_key(alt('p'));
-    assert_eq!(acts, vec![InputAction::FocusPrev]);
-    let acts = state.handle_key(alt('n'));
-    assert_eq!(acts, vec![InputAction::FocusNext]);
 }
 
 #[test]
@@ -1470,4 +1256,62 @@ fn shell_mode_submit_does_not_feed_prompt_history() {
         !s.history().contains(&"ls".to_owned()),
         "shell commands stay out of the prompt history"
     );
+}
+
+#[test]
+fn z_prefix_swallows_the_next_key() {
+    let mut state = InputState::new();
+    state.paste("hello");
+    state.handle_key(key(KeyCode::Esc));
+    assert!(state.handle_key(key(KeyCode::Char('z'))).is_empty());
+    assert!(state.is_pending());
+    assert!(state.handle_key(key(KeyCode::Char('x'))).is_empty());
+    assert_eq!(state.text(), "hello");
+    assert!(!state.is_pending());
+}
+
+#[test]
+fn operators_and_replace_are_pending_but_counts_are_not() {
+    let mut state = InputState::new();
+    state.paste("hello");
+    state.handle_key(key(KeyCode::Esc));
+    state.handle_key(key(KeyCode::Char('0')));
+    state.handle_key(key(KeyCode::Char('3')));
+    assert!(!state.is_pending());
+    state.handle_key(key(KeyCode::Char('d')));
+    assert!(state.is_pending());
+    state.handle_key(key(KeyCode::Esc));
+    state.handle_key(key(KeyCode::Char('r')));
+    assert!(state.is_pending());
+    state.handle_key(key(KeyCode::Char(':')));
+    assert!(!state.is_pending());
+    assert_eq!(state.text(), ":ello");
+}
+
+#[test]
+fn unmapped_ctrl_chords_do_not_type_their_letter() {
+    let mut state = InputState::new();
+    for c in ['s', 't', 'p'] {
+        assert!(state.handle_key(ctrl(c)).is_empty());
+    }
+    assert_eq!(state.text(), "");
+    let altgr = KeyEvent::new(
+        KeyCode::Char('@'),
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+    );
+    state.handle_key(altgr);
+    assert_eq!(state.text(), "@");
+}
+
+#[test]
+fn modeless_question_mark_opens_help_only_on_an_empty_prompt() {
+    let mut state = InputState::new();
+    state.set_modeless(true);
+    assert_eq!(
+        state.handle_key(key(KeyCode::Char('?'))),
+        vec![InputAction::OpenHelp]
+    );
+    state.handle_key(key(KeyCode::Char('a')));
+    assert!(state.handle_key(key(KeyCode::Char('?'))).is_empty());
+    assert_eq!(state.text(), "a?");
 }

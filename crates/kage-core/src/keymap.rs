@@ -526,6 +526,13 @@ impl Rhs {
     }
 }
 
+/// Owner of the mappings in the embedded `_defaults.lua`.
+pub const OWNER_DEFAULTS: &str = "defaults";
+/// Owner of the mappings from `[keybindings] bindings` in `config.toml`.
+pub const OWNER_TOML: &str = "config.toml";
+/// Owner of the mappings set by the trusted `init.lua`.
+pub const OWNER_USER: &str = "init.lua";
+
 /// One mapping in the table.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mapping {
@@ -537,6 +544,14 @@ pub struct Mapping {
     pub group: Option<String>,
     /// Who set it: `defaults`, a plugin stem, `config.toml` or `init.lua`.
     pub owner: String,
+}
+
+impl Mapping {
+    /// Whether the user set it, in `init.lua` or `config.toml`.
+    #[must_use]
+    pub fn user_owned(&self) -> bool {
+        self.owner == OWNER_USER || self.owner == OWNER_TOML
+    }
 }
 
 /// Result of [`Keymap::lookup`].
@@ -586,23 +601,24 @@ impl Keymap {
         Self::default()
     }
 
-    /// Map `lhs` in `mode`, replacing any existing mapping. A replaced
-    /// mapping keeps its position in [`Self::entries`].
-    pub fn set(&mut self, mode: Mode, lhs: Vec<Key>, mapping: Mapping) {
+    /// Map `lhs` in `mode`, replacing any existing mapping, which is
+    /// returned. A replaced mapping keeps its position in
+    /// [`Self::entries`].
+    pub fn set(&mut self, mode: Mode, lhs: Vec<Key>, mapping: Mapping) -> Option<Mapping> {
         let map = &mut self.modes[mode as usize];
-        if let Some(slot) = map.get_mut(&lhs) {
-            slot.mapping = mapping;
-        } else {
-            map.insert(
-                lhs,
-                Slot {
-                    order: self.next_order,
-                    mapping,
-                },
-            );
-            self.next_order += 1;
-        }
         self.generation += 1;
+        if let Some(slot) = map.get_mut(&lhs) {
+            return Some(std::mem::replace(&mut slot.mapping, mapping));
+        }
+        map.insert(
+            lhs,
+            Slot {
+                order: self.next_order,
+                mapping,
+            },
+        );
+        self.next_order += 1;
+        None
     }
 
     /// Remove the mapping for `lhs` in `mode`.
@@ -873,7 +889,8 @@ mod tests {
             km.lookup(&[Mode::Insert, Mode::Global], &keys("<C-p>")),
             Lookup::Exact(m) if m.owner == "insert"
         ));
-        km.set(Mode::Insert, keys("<C-p>"), map("user"));
+        let replaced = km.set(Mode::Insert, keys("<C-p>"), map("user"));
+        assert_eq!(replaced.map(|m| m.owner), Some("insert".to_owned()));
         assert!(matches!(
             km.lookup(&[Mode::Insert], &keys("<C-p>")),
             Lookup::Exact(m) if m.owner == "user"

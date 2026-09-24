@@ -508,6 +508,11 @@ pub struct KeybindingsConfig {
     /// in milliseconds.
     #[serde(skip_serializing_if = "is_default_timeoutlen")]
     pub timeoutlen: u32,
+    /// Keys in the table other than the ones above, such as a chord
+    /// written directly under `[keybindings]`. Kept so the loader can
+    /// report them instead of dropping them silently.
+    #[serde(flatten, skip_serializing)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
 const DEFAULT_LEADER: &str = "\\";
@@ -528,6 +533,7 @@ impl Default for KeybindingsConfig {
             bindings: BTreeMap::new(),
             leader: DEFAULT_LEADER.to_owned(),
             timeoutlen: DEFAULT_TIMEOUTLEN,
+            unknown: BTreeMap::new(),
         }
     }
 }
@@ -972,6 +978,31 @@ mod tests {
             assert_eq!(cfg.keybindings.leader, "<Space>");
             assert_eq!(cfg.keybindings.timeoutlen, 250);
             assert!(cfg.keybindings.bindings.is_empty());
+            assert!(cfg.keybindings.unknown.is_empty());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn keybindings_keep_unknown_keys_for_reporting() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.toml",
+                r#"
+                [keybindings]
+                "ctrl+t" = "theme set tokyo-night"
+                bindings = { "ctrl+k" = "compact" }
+                "#,
+            )?;
+            let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
+            assert_eq!(cfg.keybindings.bindings.len(), 1);
+            assert_eq!(
+                cfg.keybindings.unknown.keys().collect::<Vec<_>>(),
+                ["ctrl+t"]
+            );
+            let body = toml::to_string(&cfg).unwrap();
+            assert!(!body.contains("ctrl+t"), "{body}");
             Ok(())
         });
     }

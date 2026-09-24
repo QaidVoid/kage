@@ -32,6 +32,7 @@ impl PluginRuntime {
             user_dir: None,
             options: SharedOptions::default(),
             theme_names: None,
+            keybindings: kage_core::config::KeybindingsConfig::default(),
         }
     }
 
@@ -308,12 +309,19 @@ impl PluginRuntime {
         lock(&self.command_overrides).clone()
     }
 
-    /// Snapshot the keybindings registered by plugins so far. Each
-    /// entry pairs a canonical chord with a bridged handler; the host
-    /// matches chords against terminal key events.
+    /// Cloneable handle to the keymap table every layer writes. The
+    /// host resolves keys against it without a round trip to Lua.
     #[must_use]
-    pub fn registered_keybindings(&self) -> Vec<Arc<crate::keybindings::LuaKeybinding>> {
-        lock(&self.keybindings).clone()
+    pub fn keymap(&self) -> keymap::SharedKeymap {
+        Arc::clone(&self.eval.keymaps.table)
+    }
+
+    /// Fetch the Lua function a mapping with [`kage_core::keymap::Rhs::Lua`]
+    /// runs. The host calls it through [`Self::bridge_call`] with no
+    /// arguments, so it may open `kage.ui.*` dialogs. Fails when the
+    /// mapping was replaced or a reload dropped it.
+    pub fn keymap_handler(&self, id: u64) -> Result<mlua::Function, PluginError> {
+        Ok(self.host.call(move |lua| keymap::handler(lua, id))??)
     }
 
     /// Snapshot the providers registered by plugins so far.
@@ -700,10 +708,11 @@ impl PluginRuntime {
     }
 
     /// Drop every registration that came from Lua (autocmds and groups,
-    /// pending schedule, defer and timer callbacks, tools, commands,
-    /// providers, ACP/MCP declarations), then rerun the
+    /// pending schedule, defer and timer callbacks, keymaps, tools,
+    /// commands, providers, ACP/MCP declarations), then rerun the
     /// full load: `_defaults.lua`, every `*.lua` file in `plugins_dir`,
-    /// and the trusted `init.lua` when a user dir is configured.
+    /// the `[keybindings]` table, and the trusted `init.lua` when a
+    /// user dir is configured.
     /// Designed for hot reload between turns: a stale plugin snapshot
     /// does not survive after this call.
     ///
@@ -727,7 +736,6 @@ impl PluginRuntime {
         lock(&self.commands).clear();
         lock(&self.command_overrides).clear();
         lock(&self.providers).clear();
-        lock(&self.keybindings).clear();
         lock(&self.acp_agents).clear();
         lock(&self.mcp_servers).clear();
         lock(&self.mcp_restart).clear();
@@ -749,6 +757,7 @@ impl PluginRuntime {
             schedule::clear(lua)?;
             autocmd::clear(lua)?;
             acp::clear_permission_handler(lua)?;
+            eval.keymaps.clear(lua)?;
             *lock(&bridge) = None;
             eval.reset(lua);
             crate::loader::load_on(lua, dir.as_deref(), &eval)

@@ -33,20 +33,6 @@ impl InputState {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
 
-        if ctrl {
-            match key.code {
-                KeyCode::Up => return vec![InputAction::Scroll(-1)],
-                KeyCode::Down => return vec![InputAction::Scroll(1)],
-                KeyCode::Home => return vec![InputAction::ScrollToTop],
-                KeyCode::End => return vec![InputAction::ScrollToBottom],
-                // Ctrl+P opens the model picker in every mode, like
-                // normal mode; Ctrl+S below opens the session picker.
-                KeyCode::Char('p') => return vec![InputAction::OpenModelPicker],
-                KeyCode::Char('n') => return vec![InputAction::FocusNext],
-                _ => {}
-            }
-        }
-
         // Readline / Emacs-style word and line edits. Match shells
         // (bash, zsh, fish): Ctrl+W deletes back to whitespace
         // ("unix-word-rubout"), Alt+Backspace deletes back to the
@@ -59,9 +45,6 @@ impl InputState {
         // a large paste is collapsed, expands it inline).
         if ctrl && !alt {
             match key.code {
-                KeyCode::Char('s') => {
-                    return vec![InputAction::OpenSessionPicker];
-                }
                 KeyCode::Char('w') => {
                     self.reset_history_navigation();
                     let to = unix_word_rubout_start(&self.text, self.cursor);
@@ -130,10 +113,6 @@ impl InputState {
                     self.cursor = forward_word_end(&self.text, self.cursor);
                     return Vec::new();
                 }
-                // Alt+P / Alt+N move conversation-block focus, the
-                // insert-mode counterpart of normal-mode [ and ].
-                KeyCode::Char('p') => return vec![InputAction::FocusPrev],
-                KeyCode::Char('n') => return vec![InputAction::FocusNext],
                 _ => {}
             }
         }
@@ -240,6 +219,10 @@ impl InputState {
                 self.shell = true;
                 Vec::new()
             }
+            // An unmapped Ctrl chord does not type its letter. Ctrl
+            // with Alt stays text, since some terminals report AltGr
+            // characters that way.
+            KeyCode::Char(_) if ctrl && !alt => Vec::new(),
             KeyCode::Char(c) => {
                 self.reset_history_navigation();
                 self.insert_char(c);

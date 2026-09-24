@@ -5,9 +5,6 @@ use super::*;
 
 impl InputState {
     pub(crate) fn handle_visual(&mut self, key: KeyEvent) -> Vec<InputAction> {
-        if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('s')) {
-            return vec![InputAction::OpenSessionPicker];
-        }
         if self.visual_anchor.is_some() {
             return self.handle_visual_input(key);
         }

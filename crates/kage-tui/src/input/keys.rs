@@ -6,16 +6,6 @@ use super::*;
 impl InputState {
     /// Drive the state machine forward by one key.
     pub fn handle_key(&mut self, key: KeyEvent) -> Vec<InputAction> {
-        // Shift+Tab cycles the thinking level regardless of mode or
-        // focused pane. Different terminals report it as either
-        // `BackTab` (xterm/wezterm/kitty in default mode) or
-        // `Tab + SHIFT` (some emulators with the kitty keyboard
-        // protocol enabled); accept both.
-        if matches!(key.code, KeyCode::BackTab)
-            || (matches!(key.code, KeyCode::Tab) && key.modifiers.contains(KeyModifiers::SHIFT))
-        {
-            return vec![InputAction::CycleThinkingLevel];
-        }
         if self.modeless {
             return self.handle_modeless(key);
         }
@@ -27,24 +17,28 @@ impl InputState {
     }
 
     /// Non-modal dispatch. The editor is always insert-like: `Esc`
-    /// cancels the in-flight turn (never enters Normal), `PageUp` /
-    /// `PageDown` scroll the conversation buffer (there is no buffer
-    /// pane to focus), and every other key goes through the insert
-    /// handler. The insert handler's only mode transition is its own
-    /// `Esc` arm, which is intercepted here, so the editor can never
-    /// leave the insert state.
+    /// cancels the in-flight turn (never enters Normal) and every
+    /// other key goes through the insert handler. The insert handler's
+    /// only mode transition is its own `Esc` arm, which is intercepted
+    /// here, so the editor can never leave the insert state.
     ///
-    /// On an empty prompt, `/` and `!` act as command prefixes (the
-    /// command palette and the shell escape) instead of literal text,
-    /// keeping every command reachable without a mode switch.
+    /// On an empty prompt, `/`, `!` and `?` act as command prefixes
+    /// (the command palette, the shell escape and the keyboard
+    /// reference) instead of literal text, keeping every command
+    /// reachable without a mode switch.
     pub(crate) fn handle_modeless(&mut self, key: KeyEvent) -> Vec<InputAction> {
         match key.code {
             KeyCode::Esc => {
                 self.reset_history_navigation();
                 vec![InputAction::Cancel]
             }
-            KeyCode::PageUp => vec![InputAction::Scroll(-10)],
-            KeyCode::PageDown => vec![InputAction::Scroll(10)],
+            KeyCode::Char('?')
+                if self.text.is_empty()
+                    && !self.shell
+                    && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                vec![InputAction::OpenHelp]
+            }
             _ => self.handle_insert(key),
         }
     }
@@ -77,22 +71,15 @@ impl InputState {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
         // Cross-pane keys: behaviour is identical regardless of which
-        // pane has window focus.
+        // pane has window focus. `g` and `z` wait for the next key:
+        // the host's keymap resolves `gg`, `gw` and the `z` fold keys
+        // first and replays the keys here when nothing matched.
         match key.code {
             KeyCode::Esc => {
                 self.pending_count = None;
                 return vec![InputAction::ClearSelection];
             }
-            KeyCode::Char(':') => return vec![InputAction::BeginCommand],
-            KeyCode::Char('/') => return vec![InputAction::BeginSearch],
-            KeyCode::Char('o') if ctrl => return vec![InputAction::ToggleFold],
-            KeyCode::Char('w') if ctrl => return vec![InputAction::CyclePane],
             KeyCode::Char('c') if ctrl => return vec![InputAction::Cancel],
-            KeyCode::Char('p') if ctrl => return vec![InputAction::OpenModelPicker],
-            KeyCode::Char('[') => return vec![InputAction::FocusPrev],
-            KeyCode::Char(']') => return vec![InputAction::FocusNext],
-            KeyCode::Char('n') => return vec![InputAction::SearchNext],
-            KeyCode::Char('N') => return vec![InputAction::SearchPrev],
             KeyCode::Char('g') => {
                 self.pending = Some('g');
                 return Vec::new();
@@ -154,37 +141,21 @@ impl InputState {
         Vec::new()
     }
 
-    /// Normal-mode keys that act on the conversation buffer (scroll,
-    /// fold, yank-selection, enter buffer-cell visual). Insert-mode
-    /// entry from here auto-switches focus to the input pane so the
-    /// user lands in a typable card.
+    /// Normal-mode keys the grammar handles in the conversation pane:
+    /// insert-mode entry, which switches focus to the input pane so
+    /// the user lands in a typable card, and the horizontal keys,
+    /// which only re-anchor the scroll. Scrolling, yanking and visual
+    /// selection there are keymaps.
     pub(crate) fn handle_normal_buffer(&mut self, key: KeyEvent) -> Vec<InputAction> {
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        if ctrl && matches!(key.code, KeyCode::Char('s')) {
-            return vec![InputAction::OpenSessionPicker];
-        }
         match key.code {
             KeyCode::Char('i' | 'a') => {
                 self.focused_pane = Pane::Input;
                 self.snapshot_for_undo();
                 self.enter_mode(Mode::Insert)
             }
-            KeyCode::Char('v') => vec![InputAction::EnterVisual],
-            // Both yank raw block source (not the rendered cells):
-            // `y` copies the active selection's blocks, or the
-            // focused block when there is no selection; `Y` always
-            // copies the focused block, vim's "yank line" adapted to
-            // our block-stream layout.
-            KeyCode::Char('y') => vec![InputAction::Yank],
-            KeyCode::Char('Y') => vec![InputAction::YankFocusedBlock],
-            KeyCode::Char('j') | KeyCode::Down => vec![InputAction::Scroll(1)],
-            KeyCode::Char('k') | KeyCode::Up => vec![InputAction::Scroll(-1)],
             KeyCode::Char('h' | 'l') | KeyCode::Left | KeyCode::Right => {
                 vec![InputAction::Scroll(0)]
             }
-            KeyCode::PageDown => vec![InputAction::Scroll(10)],
-            KeyCode::PageUp => vec![InputAction::Scroll(-10)],
-            KeyCode::Char('G') => vec![InputAction::ScrollToBottom],
             _ => Vec::new(),
         }
     }
@@ -203,9 +174,6 @@ impl InputState {
         if ctrl && matches!(key.code, KeyCode::Char('r')) {
             self.redo();
             return Vec::new();
-        }
-        if ctrl && matches!(key.code, KeyCode::Char('s')) {
-            return vec![InputAction::OpenSessionPicker];
         }
 
         // Count prefix: digits 1-9 always, `0` only after a count has
@@ -385,8 +353,6 @@ impl InputState {
                 self.visual_anchor = Some(self.cursor);
                 self.enter_mode(Mode::Visual)
             }
-            KeyCode::PageDown => vec![InputAction::Scroll(10)],
-            KeyCode::PageUp => vec![InputAction::Scroll(-10)],
             _ => Vec::new(),
         }
     }

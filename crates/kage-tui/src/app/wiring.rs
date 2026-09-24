@@ -31,8 +31,8 @@ impl App {
             plugin_command_overrides: Vec::new(),
             plugin_command_specs: Vec::new(),
             plugin_commands_leaked: Vec::new(),
-            plugin_keybindings: Vec::new(),
-            config_keybindings: Vec::new(),
+            keymap: kage_plugin::SharedKeymap::default(),
+            sequencer: Sequencer::new(Duration::from_secs(1)),
             plugin_widgets: Vec::new(),
             plugin_widget_texts: Vec::new(),
             plugin_texts_refreshed_at: None,
@@ -394,7 +394,8 @@ impl App {
 
     /// Share the option store with the plugin runtime and apply its
     /// current values: theme (a bad name surfaces inline), mouse,
-    /// editor and input bounds. Changes queued before this call are
+    /// editor, input bounds and the key sequence timeout. Changes
+    /// queued before this call are
     /// covered by those values and dropped. `setter` routes later sets
     /// through the runtime. Call after [`Self::set_themes_dir`] so
     /// user themes resolve.
@@ -408,7 +409,7 @@ impl App {
         let current: Vec<(&str, Option<OptionValue>)> = {
             let mut store = lock(&self.options);
             store.take_changes();
-            ["theme", "mouse", "editor", "input_min_lines"]
+            ["theme", "mouse", "editor", "input_min_lines", "timeoutlen"]
                 .into_iter()
                 .map(|name| (name, store.get(name).cloned()))
                 .collect()
@@ -420,55 +421,12 @@ impl App {
         }
     }
 
-    /// Register the plugin keybindings the App should dispatch.
-    /// `chords` are canonical strings from the plugin runtime; an
-    /// entry that fails to parse is dropped (the runtime already
-    /// validated the grammar, so this only guards internal drift).
-    pub fn set_plugin_keybindings(&mut self, chords: Vec<String>) {
-        self.plugin_keybindings = chords
-            .into_iter()
-            .filter_map(|c| Chord::parse(&c).map(|m| (m, c)))
-            .collect();
-    }
-
-    /// Register `[keybindings]` config entries: `chord -> command
-    /// line`, or `chord -> "action:<name>"` to bind a builtin
-    /// [`InputAction`] directly. A command binding runs through the
-    /// cmdline executor, so anything `:` can do (including `quit`
-    /// and plugin commands) is bindable; an action binding applies
-    /// the action directly and never reaches the command executor.
-    /// Returns one message per entry whose chord did not parse or
-    /// whose action name is unknown so the caller can surface it; a
-    /// bad entry is dropped, never silently "sort of" applied.
-    #[must_use]
-    pub fn set_config_keybindings(&mut self, entries: Vec<(String, String)>) -> Vec<String> {
-        let mut errors = Vec::new();
-        self.config_keybindings = entries
-            .into_iter()
-            .filter_map(|(chord, value)| {
-                let Some(matcher) = Chord::parse(&chord) else {
-                    errors.push(format!(
-                        "keybindings: cannot parse chord `{chord}` (bound to `{value}`)"
-                    ));
-                    return None;
-                };
-                let target = if let Some(name) = value.strip_prefix("action:") {
-                    let Some(action) = InputAction::parse_rebindable(name) else {
-                        errors.push(format!(
-                            "keybindings: unknown action name in `{value}` (the `action:` \
-                             form takes one of the rebindable action names; see \
-                             docs/guide/keybindings.md)"
-                        ));
-                        return None;
-                    };
-                    BindingTarget::Action(action)
-                } else {
-                    BindingTarget::Command(value)
-                };
-                Some((matcher, chord, target))
-            })
-            .collect();
-        errors
+    /// Share the keymap table the plugin runtime fills. Until this is
+    /// called the table is empty, so only the editor grammar handles
+    /// keys.
+    pub fn set_keymap(&mut self, keymap: kage_plugin::SharedKeymap) {
+        self.keymap = keymap;
+        self.sequencer.clear();
     }
 
     /// Wire the channel the worker pushes blocking [`PluginDialog`]
@@ -782,7 +740,6 @@ impl App {
         };
         self.set_plugin_commands(snapshot.commands);
         self.set_plugin_widgets(snapshot.widgets);
-        self.set_plugin_keybindings(snapshot.keybindings);
         self.set_plugin_autocomplete(snapshot.autocomplete);
         lock(&self.buffer).invalidate_all_heights();
         if !snapshot.models.is_empty() {

@@ -13,6 +13,9 @@
 //!   the app now skips by parking and reusing the drawn snapshot.
 //! - `scale/warm`: primed caches, steady-state per-frame cost.
 //! - `scale/scroll`: warm caches with a moving viewport.
+//! - `scale/key`: one typed character, one backspace and a scroll key
+//!   up and down, dispatched through the App over the scaled buffer
+//!   with the embedded default keymap.
 //!
 //! Run with `cargo bench -p kage-tui --bench scale`. The buffers are
 //! large; a reduced sample keeps wall time sane:
@@ -22,9 +25,10 @@ use std::collections::BTreeMap;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use kage_tui::view::{self, CapturedCell, StatusCtx};
-use kage_tui::{Buffer, InputState, input_height_for, split};
+use kage_tui::{App, Buffer, InputState, input_height_for, shared_buffer, split};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Viewport width used for every render benchmark.
 const TERM_WIDTH: u16 = 120;
@@ -146,6 +150,27 @@ fn bench_scale(c: &mut Criterion) {
             at = (at + 97) % span;
             buffer.set_scroll(at);
             draw(&mut terminal, &mut buffer);
+        });
+    });
+
+    group.bench_function("key", |b| {
+        let buffer = shared_buffer();
+        *buffer.lock().expect("buffer") = scale_buffer();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(buffer, tx);
+        let runtime = kage_plugin::PluginRuntime::new().expect("plugin runtime");
+        kage_plugin::load_all(None, &runtime).expect("default keymap");
+        app.set_keymap(runtime.keymap());
+        let keys = [
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL),
+        ];
+        b.iter(|| {
+            for key in keys {
+                std::hint::black_box(app.handle_key(key));
+            }
         });
     });
 

@@ -105,6 +105,8 @@ pub fn render() -> String {
 
     s.push('\n');
     render_options(&mut s, surface.options);
+    s.push('\n');
+    render_actions(&mut s, surface.actions);
 
     // Declare `kage` as a GLOBAL, not a `local` module. The host
     // injects `kage` as a global into every plugin; modelling it as a
@@ -119,6 +121,11 @@ pub fn render() -> String {
          --- source and fires `option_set`.\n\
          ---@type kage.Options\n\
          kage.opt = {}\n",
+    );
+    s.push_str(
+        "\n--- Rust actions to use as a mapping rhs.\n\
+         ---@type kage.Actions\n\
+         kage.action = {}\n",
     );
 
     // Base functions, then capability-gated ones. Gated functions are
@@ -155,6 +162,24 @@ fn render_options(s: &mut String, options: &[spec::OptionDef]) {
             spec::OptionKind::Str { .. } | spec::OptionKind::Key { .. } => "string".to_owned(),
         };
         let _ = writeln!(s, "---@field {} {ty} {}", def.name, def.doc);
+    }
+}
+
+/// Render the `kage.Actions` class from the action list. An action
+/// that takes an argument is a function under its lowercase name.
+fn render_actions(s: &mut String, actions: &[spec::ActionDef]) {
+    s.push_str("--- Every action `kage.action` holds.\n---@class kage.Actions\n");
+    for def in actions {
+        if def.arg {
+            let _ = writeln!(
+                s,
+                "---@field {} fun(n: integer): kage.Action {}",
+                def.name.to_ascii_lowercase(),
+                def.doc
+            );
+        } else {
+            let _ = writeln!(s, "---@field {} kage.Action {}", def.name, def.doc);
+        }
     }
 }
 
@@ -286,6 +311,14 @@ mod tests {
         assert!(s.contains("---@field editor \"vim\"|\"modeless\" "));
         assert!(s.contains("---@field mouse boolean "));
         assert!(s.contains("---@type kage.Options\nkage.opt = {}\n"));
+    }
+
+    #[test]
+    fn actions_class_is_generated_from_the_action_list() {
+        let s = render();
+        assert!(s.contains("---@class kage.Actions\n---@field Cancel kage.Action "));
+        assert!(s.contains("---@field scroll fun(n: integer): kage.Action "));
+        assert!(s.contains("---@type kage.Actions\nkage.action = {}\n"));
     }
 
     #[test]

@@ -416,9 +416,12 @@ pub(super) const FUNCS: &[Func] = &[
     },
     Func {
         doc: &[
-            "Bind a chord to a handler. `spec` is a chord string or",
-            "`{ key, description? }`. The handler runs through the",
-            "coroutine bridge, so it may open `kage.ui.*` dialogs.",
+            "Bind a chord to a handler in mode `g`. `spec` is a chord",
+            "string or `{ key, description? }`. The handler runs through",
+            "the coroutine bridge, so it may open `kage.ui.*` dialogs.",
+            "Returns an `off` function that removes the mapping while it",
+            "is still this one (idempotent). Same table as",
+            "`kage.keymap.set`.",
         ],
         path: "kage.register_keybinding",
         since: 1,
@@ -431,6 +434,63 @@ pub(super) const FUNCS: &[Func] = &[
             Field {
                 name: "handler",
                 ty: "fun(): string?",
+                doc: "",
+            },
+        ],
+        ret: Some("fun()"),
+    },
+    Func {
+        doc: &[
+            "Map `lhs` in each of `mode` (a letter or a list). `lhs` is",
+            "Vim notation (`<C-l>`, `gg`, `<leader>m`) or a chord",
+            "(`ctrl+shift+x`); `<leader>` expands with `kage.opt.leader`",
+            "now. `rhs` is a `kage.action` value, a `\":command\"` string,",
+            "a function (run through the coroutine bridge) or",
+            "`\"<Nop>\"`. The last set wins.",
+        ],
+        path: "kage.keymap.set",
+        since: 2,
+        params: &[
+            Field {
+                name: "mode",
+                ty: "kage.KeymapMode|kage.KeymapMode[]",
+                doc: "",
+            },
+            Field {
+                name: "lhs",
+                ty: "string",
+                doc: "",
+            },
+            Field {
+                name: "rhs",
+                ty: "kage.Action|string|fun(): string?",
+                doc: "",
+            },
+            Field {
+                name: "opts?",
+                ty: "kage.KeymapOpts",
+                doc: "",
+            },
+        ],
+        ret: None,
+    },
+    Func {
+        doc: &[
+            "Remove the mapping for `lhs` in each of `mode`. Raises when",
+            "there is none. Keys the built-in editor handles are not",
+            "mappings: shadow them with `\"<Nop>\"` instead.",
+        ],
+        path: "kage.keymap.del",
+        since: 2,
+        params: &[
+            Field {
+                name: "mode",
+                ty: "kage.KeymapMode|kage.KeymapMode[]",
+                doc: "",
+            },
+            Field {
+                name: "lhs",
+                ty: "string",
                 doc: "",
             },
         ],
@@ -960,6 +1020,55 @@ pub(super) const FUNCS: &[Func] = &[
             Field {
                 name: "value",
                 ty: "any",
+                doc: "",
+            },
+        ],
+        ret: None,
+    },
+    Func {
+        doc: &[
+            "Map `lhs` in one mode. See `kage.keymap.set`, which takes a",
+            "list of modes.",
+        ],
+        path: "kage.api.keymap_set",
+        since: 2,
+        params: &[
+            Field {
+                name: "mode",
+                ty: "kage.KeymapMode",
+                doc: "",
+            },
+            Field {
+                name: "lhs",
+                ty: "string",
+                doc: "",
+            },
+            Field {
+                name: "rhs",
+                ty: "kage.Action|string|fun(): string?",
+                doc: "",
+            },
+            Field {
+                name: "opts?",
+                ty: "kage.KeymapOpts",
+                doc: "",
+            },
+        ],
+        ret: None,
+    },
+    Func {
+        doc: &["Remove the mapping for `lhs` in one mode. Raises when there is none."],
+        path: "kage.api.keymap_del",
+        since: 2,
+        params: &[
+            Field {
+                name: "mode",
+                ty: "kage.KeymapMode",
+                doc: "",
+            },
+            Field {
+                name: "lhs",
+                ty: "string",
                 doc: "",
             },
         ],

@@ -63,7 +63,7 @@ pub(crate) use crate::exec;
 pub(crate) use crate::fs as plugin_fs;
 pub(crate) use crate::host::LuaHost;
 pub(crate) use crate::http;
-pub(crate) use crate::keybindings::{self, RegisteredKeybindings, registered_keybindings};
+pub(crate) use crate::keymap::{self, Keymaps};
 pub(crate) use crate::lifecycle::{
     self, SharedCompactRequest, SharedUsage, shared_compact_request, shared_usage,
 };
@@ -128,7 +128,6 @@ pub struct PluginRuntime {
     session_ops: SharedSessionOps,
     pending_messages: SharedPendingMessages,
     bridge: SharedBridge,
-    keybindings: RegisteredKeybindings,
     theme_state: SharedThemeState,
     theme_request: SharedThemeRequest,
     header: SharedChrome,
@@ -181,6 +180,11 @@ pub(crate) struct EvalState {
     pub(crate) user_dir: Option<PathBuf>,
     /// Capability installers, attached in full to the user environment.
     pub(crate) capabilities: CapabilityRegistry,
+    /// The keymap table and what setting a mapping needs.
+    pub(crate) keymaps: Keymaps,
+    /// `[keybindings]` from `config.toml`, applied after the plugins on
+    /// every load.
+    pub(crate) keybindings: kage_core::config::KeybindingsConfig,
 }
 
 impl EvalState {
@@ -279,6 +283,7 @@ pub struct PluginRuntimeBuilder {
     user_dir: Option<PathBuf>,
     options: SharedOptions,
     theme_names: Option<ThemeNames>,
+    keybindings: kage_core::config::KeybindingsConfig,
 }
 
 impl std::fmt::Debug for PluginRuntimeBuilder {

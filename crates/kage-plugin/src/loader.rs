@@ -3,13 +3,15 @@
 //! [`load_all`] first evaluates the embedded `_defaults.lua` in its own
 //! environment, then reads every `*.lua` file in the plugins directory
 //! and evaluates it inside the given [`PluginRuntime`], in file-name
-//! order, and finally evaluates the trusted `init.lua` when the runtime
-//! has a user dir (see [`crate::user`]). Each later layer overrides the
-//! earlier ones. Each file is loaded independently: a broken plugin or
-//! `init.lua` logs an error through the runtime's host log and the load
-//! proceeds. The function returns a summary the host can surface to the
-//! user. File stems starting with `@` are reserved for kage's own
-//! environments and are rejected.
+//! order, then applies the `[keybindings]` table from `config.toml`
+//! (see [`crate::PluginRuntimeBuilder::keybindings`]), and finally
+//! evaluates the trusted `init.lua` when the runtime has a user dir
+//! (see [`crate::user`]). Each later layer overrides the earlier ones.
+//! Each file is loaded independently: a broken plugin, a bad
+//! `[keybindings]` entry or a broken `init.lua` logs an error through
+//! the runtime's host log and the load proceeds. The function returns a
+//! summary the host can surface to the user. File stems starting with
+//! `@` are reserved for kage's own environments and are rejected.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -34,13 +36,18 @@ pub struct LoadReport {
     /// Outcome of the trusted `init.lua`, or `None` when there was none
     /// to load.
     pub init: Option<Result<(), String>>,
+    /// One message per `[keybindings]` entry that could not be applied.
+    pub keymap_errors: Vec<String>,
 }
 
 impl LoadReport {
-    /// True if every plugin file and `init.lua` loaded successfully.
+    /// True if every plugin file, every `[keybindings]` entry and
+    /// `init.lua` loaded successfully.
     #[must_use]
     pub fn all_ok(&self) -> bool {
-        self.failed.is_empty() && !matches!(self.init, Some(Err(_)))
+        self.failed.is_empty()
+            && self.keymap_errors.is_empty()
+            && !matches!(self.init, Some(Err(_)))
     }
 }
 
@@ -58,8 +65,9 @@ pub fn load_dir(dir: &Path, runtime: &PluginRuntime) -> Result<LoadReport, Plugi
 }
 
 /// Run the full load against `runtime`: `_defaults.lua`, the plugins in
-/// `plugins_dir` as [`load_dir`] does, then the trusted `init.lua` when
-/// the runtime has a user dir. `None` loads no plugins.
+/// `plugins_dir` as [`load_dir`] does, the `[keybindings]` table, then
+/// the trusted `init.lua` when the runtime has a user dir. `None` loads
+/// no plugins.
 pub fn load_all(
     plugins_dir: Option<&Path>,
     runtime: &PluginRuntime,
@@ -84,6 +92,10 @@ pub(crate) fn load_on(
         Some(dir) => load_plugins(lua, dir, eval)?,
         None => LoadReport::default(),
     };
+    report.keymap_errors = eval.keymaps.apply_toml(lua, &eval.keybindings)?;
+    for err in &report.keymap_errors {
+        lock(eval.sink()).log(LogLevel::Error, err);
+    }
     report.init = crate::user::load(lua, eval);
     Ok(report)
 }

@@ -121,6 +121,9 @@ impl App {
             InputAction::CycleThinkingLevel => {
                 let _ = self.send_request(RunRequest::CycleThinkingLevel);
             }
+            InputAction::OpenHelp => self.open_help(),
+            InputAction::OpenJumpPicker => self.open_jump_picker(),
+            InputAction::AttachClipboardImage => self.request_clipboard_attach(),
         }
         None
     }

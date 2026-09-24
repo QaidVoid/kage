@@ -7,7 +7,7 @@
 //! (idempotent).
 //!
 //! This is a deliberately sharp tool. Prefer
-//! [`kage.register_keybinding`](crate::keybindings) for "run X on
+//! [`kage.keymap.set`](crate::keymap) for "run X on
 //! chord Y": it is declarative, shows up in help, and cannot wedge
 //! the UI. Reach for `on_terminal_input` only when you must observe
 //! or swallow arbitrary keys (a modal vi layer, a key logger for a

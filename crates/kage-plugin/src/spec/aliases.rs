@@ -37,6 +37,15 @@ pub(super) const ALIASES: &[Alias] = &[
         variants: &["default", "toml", "lua", "runtime"],
     },
     Alias {
+        name: "kage.KeymapMode",
+        doc: &[
+            "A keymap mode: `n` vim normal (both panes), `b` vim normal",
+            "with the conversation pane focused, `i` insert and the",
+            "modeless editor, `v` visual, `g` any editing state.",
+        ],
+        variants: &["n", "b", "i", "v", "g"],
+    },
+    Alias {
         name: "kage.Event",
         doc: &[
             "Every event name `kage.on` and `kage.api.autocmd_create`",

@@ -496,7 +496,7 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "keybindings",
         aliases: &["keys"],
-        description: "list active key bindings (config, plugin, reserved)",
+        description: "list key mappings per mode with their owners",
         category: CommandCategory::Both,
         args: &[],
         subcommands: &[],

@@ -38,7 +38,7 @@ pub(crate) use entry::startup_options;
 
 pub(crate) use support::{
     available_model_items, list_session_choices, list_session_nodes, refresh_session_entries,
-    resolve_switch_target, run_bridged_command, run_bridged_keybinding, snapshot_plugin_commands,
+    resolve_switch_target, run_bridged_command, run_bridged_keymap, snapshot_plugin_commands,
 };
 
 #[cfg(test)]

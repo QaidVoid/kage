@@ -240,23 +240,13 @@ impl InputState {
         }
     }
 
+    /// Resolve the key after a `g` or `z` prefix. Only `gg` in the
+    /// input pane is grammar; every other pair is swallowed.
     pub(crate) fn handle_pending(&mut self, prev: char, key: KeyEvent) -> Vec<InputAction> {
-        match (prev, key.code) {
-            ('g', KeyCode::Char('g')) => match self.focused_pane {
-                Pane::Buffer => vec![InputAction::ScrollToTop],
-                Pane::Input => {
-                    self.cursor = 0;
-                    Vec::new()
-                }
-            },
-            // `gw` is an ergonomic alternative to `<C-w>` for users
-            // who'd rather not press a modifier; both toggle pane.
-            ('g', KeyCode::Char('w')) => vec![InputAction::CyclePane],
-            ('z', KeyCode::Char('o' | 'c')) => vec![InputAction::ToggleFold],
-            ('z', KeyCode::Char('R')) => vec![InputAction::UnfoldAll],
-            ('z', KeyCode::Char('M')) => vec![InputAction::FoldAll],
-            _ => Vec::new(),
+        if prev == 'g' && key.code == KeyCode::Char('g') && self.focused_pane == Pane::Input {
+            self.cursor = 0;
         }
+        Vec::new()
     }
 }
 

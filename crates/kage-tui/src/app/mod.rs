@@ -19,7 +19,8 @@ pub(crate) use ratatui::crossterm::event::{self, Event, KeyEventKind, MouseEvent
 
 pub(crate) use crate::toast::{self, SharedToasts, Toast, ToastKind};
 
-pub(crate) use crate::chord::Chord;
+pub(crate) use kage_core::keymap::{Lookup, Rhs};
+
 pub(crate) use crate::cmdline::{CommandLine, CommandLineEvent};
 pub(crate) use crate::cmdparse::{EmptyResolver, Resolver};
 pub(crate) use crate::command::{
@@ -28,6 +29,9 @@ pub(crate) use crate::command::{
 pub(crate) use crate::error::TuiError;
 pub(crate) use crate::events::SharedBuffer;
 pub(crate) use crate::input::{InputAction, InputState, Mode, Pane};
+pub(crate) use crate::keymap::{
+    self, EditState, Sequencer, Step, event_from_key, help_groups, key_from_event,
+};
 pub(crate) use crate::layout::{input_height_for, split};
 pub(crate) use crate::overlay::{
     CompletionAction, ContextAction, ContextMenu, ContextMenuOutcome, InputCompletion,
@@ -53,30 +57,16 @@ pub(crate) enum CommandResult {
     ValidationError(String),
 }
 
-/// What a `[keybindings]` entry runs when its chord fires. Values are
-/// either a `:` command line (the default form) or a builtin
-/// [`InputAction`] bound through the `action:` form.
+/// What a key resolved to once the keymap and the editor grammar saw
+/// it, in the order to carry it out.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum BindingTarget {
-    /// Run this string through the same executor as the `:` cmdline.
+pub(crate) enum Routed {
+    /// An input action from a mapping or the grammar.
+    Input(InputAction),
+    /// A mapping's command line, run like the `:` cmdline.
     Command(String),
-    /// Apply this builtin input action directly.
-    Action(InputAction),
-}
-
-impl BindingTarget {
-    /// Render the target the way `:keybindings` echoes it back: the
-    /// original config value for either form.
-    #[must_use]
-    pub(crate) fn echo(&self) -> String {
-        match self {
-            Self::Command(command) => format!(":{command}"),
-            Self::Action(action) => match action.rebindable_name() {
-                Some(name) => format!("action:{name}"),
-                None => "action:<non-rebindable>".to_owned(),
-            },
-        }
-    }
+    /// A mapping's Lua handler, run by the worker.
+    Lua(u64),
 }
 
 /// When `KAGE_DEBUG_KEYS` is set to a non-empty value, every press is
@@ -223,13 +213,13 @@ pub enum RunRequest {
     /// the gate, updates the modeline state, and fires
     /// `permission_mode_select`.
     SetPermissionMode(Option<kage_core::permissions::PermissionAction>),
-    /// Run the plugin keybinding whose canonical chord is `chord`. The
-    /// worker invokes its handler through the coroutine bridge (so it
-    /// may open `kage.ui.*` dialogs), like a plugin command.
-    InvokePluginKeybinding {
-        /// Canonical chord (e.g. `ctrl+shift+x`) identifying the
-        /// registered binding.
-        chord: String,
+    /// Run the Lua handler of a key mapping. The worker fetches it
+    /// with `PluginRuntime::keymap_handler` and runs it through the
+    /// coroutine bridge (so it may open `kage.ui.*` dialogs), like a
+    /// plugin command.
+    InvokeKeymap {
+        /// Handler id from the mapping's `Rhs::Lua`.
+        id: u64,
     },
     /// Fork the session file at the given path at its last entry into
     /// a fresh session, without reseating the runtime. Issued by the
@@ -259,9 +249,9 @@ pub enum RunRequest {
     /// `.lua` in the plugins directory and toasts the outcome. Chrome
     /// (`set_header`/`set_footer`), status, autocomplete, terminal
     /// hooks, and block renderers reattach automatically because they
-    /// live in shared slots the runtime overwrites during load.
-    /// Commands and keybindings the App cached at startup do not pick
-    /// up new/removed entries until the next launch.
+    /// live in shared slots the runtime overwrites during load, and
+    /// so does the keymap. Commands arrive through a fresh
+    /// [`PluginRefresh`].
     ReloadPlugins,
 }
 
@@ -345,8 +335,6 @@ pub struct PluginRefresh {
     pub commands: Vec<crate::command::PluginCommand>,
     /// Status-bar widgets registered in the reloaded runtime.
     pub widgets: Vec<Arc<kage_plugin::LuaWidget>>,
-    /// Canonical chords of the reloaded runtime's keybindings.
-    pub keybindings: Vec<String>,
     /// Autocomplete providers registered in the reloaded runtime.
     pub autocomplete: Vec<Arc<kage_plugin::LuaAutocompleteProvider>>,
     /// The full model list for the picker/autocomplete, recomputed
@@ -639,18 +627,13 @@ pub struct App {
     /// command is equal, so repeated hot reloads of an unchanged
     /// plugin set do not grow the leak.
     plugin_commands_leaked: Vec<(PluginCommand, &'static CommandSpec)>,
-    /// Parsed plugin keybindings: `(matcher, canonical chord)`. A key
-    /// matching one dispatches [`RunRequest::InvokePluginKeybinding`].
-    /// Checked after modal layers but before builtin key handling so a
-    /// plugin chord wins over the builtin binding for that key.
-    plugin_keybindings: Vec<(Chord, String)>,
-    /// Parsed `[keybindings]` config: `(matcher, chord text,
-    /// target)`. A matching key either runs the command string
-    /// through the same executor as the `:` cmdline or applies a
-    /// bound builtin [`InputAction`] directly. Checked before
-    /// plugin keybindings so user config is authoritative. The
-    /// chord text is kept for `:keybindings` to echo back.
-    config_keybindings: Vec<(Chord, String, BindingTarget)>,
+    /// Keymap table shared with the plugin runtime, which fills it
+    /// from `_defaults.lua`, plugins, `config.toml` and `init.lua`.
+    /// Keys resolve against it after the modal layers and before the
+    /// editor grammar.
+    keymap: kage_plugin::SharedKeymap,
+    /// Pending key sequence state over [`Self::keymap`].
+    sequencer: Sequencer,
     /// Status-bar widgets supplied by plugins via
     /// `kage.register_widget`. Each entry's `render(width)` runs on
     /// the plugin-refresh cadence and the resulting string is painted

@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
 
+use kage_core::keymap::{Lookup, Mode, Rhs};
 use kage_plugin::{
     BridgePrep, BridgeStep, CommandOutput, HostLog, LogLevel, PendingSessionOp, PluginRuntime,
     SharedHostLog, SwitchTarget,
@@ -495,14 +496,17 @@ fn select_demo_keybinding_drives_a_dialog() {
     let (rec, sink) = forwarding_sink();
     let rt = load_select_demo(sink);
 
-    let bindings = rt.registered_keybindings();
-    let kb = bindings
-        .iter()
-        .find(|kb| kb.chord() == "ctrl+alt+k")
-        .expect("ctrl+alt+k registered");
-    assert_eq!(kb.description(), "Quick color pick");
+    let keys = kage_core::keymap::parse_keys("ctrl+alt+k", "\\").unwrap();
+    let (id, desc) = match rt.keymap().lock().unwrap().lookup(&[Mode::Global], &keys) {
+        Lookup::Exact(m) => match m.rhs {
+            Rhs::Lua(id) => (id, m.desc.clone()),
+            ref other => panic!("expected a Lua rhs, got {other:?}"),
+        },
+        _ => panic!("ctrl+alt+k not mapped"),
+    };
+    assert_eq!(desc.as_deref(), Some("Quick color pick"));
 
-    let handler = kb.handler().unwrap();
+    let handler = rt.keymap_handler(id).unwrap();
     match rt.bridge_call(&handler, &[]).unwrap() {
         BridgeStep::Suspended(req) => assert_eq!(req.kind, "ui.select"),
         BridgeStep::Done(v) => panic!("expected suspend, got Done({v})"),

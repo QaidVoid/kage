@@ -544,4 +544,25 @@ pub(super) const CLASSES: &[Class] = &[
             },
         ],
     },
+    Class {
+        name: "kage.KeymapOpts",
+        doc: &["Options for `kage.keymap.set` and `kage.api.keymap_set`."],
+        fields: &[
+            Field {
+                name: "desc?",
+                ty: "string",
+                doc: "Shown in `?` help. Mappings without one are hidden there.",
+            },
+            Field {
+                name: "group?",
+                ty: "string",
+                doc: "Help section. Defaults to `other`.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.Action",
+        doc: &["A Rust action from `kage.action`, used as a mapping rhs."],
+        fields: &[],
+    },
 ];

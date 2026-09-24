@@ -1,12 +1,15 @@
 //! Keymap dispatch for the editor: crossterm key conversion, the
 //! modes that apply to an editing state, the pending-sequence state
-//! machine and the help rows built from the live table.
+//! machine, the action names and the help rows built from the live
+//! table.
 
 use std::time::{Duration, Instant};
 
 use kage_core::config::EditorMode;
 use kage_core::keymap::{Key, KeyCode, Keymap, Lookup, Mode, Mods, Rhs, display_keys};
 use ratatui::crossterm::event::{KeyCode as CtKeyCode, KeyEvent, KeyModifiers};
+
+use crate::input::InputAction;
 
 /// Convert a crossterm key event into a keymap [`Key`]. Shift folds
 /// into characters as in [`Key::new`], an uppercase character implies
@@ -49,6 +52,84 @@ pub fn key_from_event(event: &KeyEvent) -> Option<Key> {
         _ => return None,
     };
     Some(Key::new(code, mods))
+}
+
+/// Convert a keymap [`Key`] back into a crossterm key event, so keys
+/// the keymap replays reach the editor grammar as they arrived.
+#[must_use]
+pub fn event_from_key(key: Key) -> KeyEvent {
+    let mods = key.mods();
+    let mut modifiers = KeyModifiers::NONE;
+    for (m, flag) in [
+        (Mods::CTRL, KeyModifiers::CONTROL),
+        (Mods::ALT, KeyModifiers::ALT),
+        (Mods::SHIFT, KeyModifiers::SHIFT),
+        (Mods::SUPER, KeyModifiers::SUPER),
+    ] {
+        if mods.contains(m) {
+            modifiers |= flag;
+        }
+    }
+    let code = match key.code() {
+        KeyCode::Char(c) => CtKeyCode::Char(c),
+        KeyCode::Enter => CtKeyCode::Enter,
+        KeyCode::Esc => CtKeyCode::Esc,
+        KeyCode::Tab if mods.contains(Mods::SHIFT) => CtKeyCode::BackTab,
+        KeyCode::Tab => CtKeyCode::Tab,
+        KeyCode::Backspace => CtKeyCode::Backspace,
+        KeyCode::Delete => CtKeyCode::Delete,
+        KeyCode::Up => CtKeyCode::Up,
+        KeyCode::Down => CtKeyCode::Down,
+        KeyCode::Left => CtKeyCode::Left,
+        KeyCode::Right => CtKeyCode::Right,
+        KeyCode::Home => CtKeyCode::Home,
+        KeyCode::End => CtKeyCode::End,
+        KeyCode::PageUp => CtKeyCode::PageUp,
+        KeyCode::PageDown => CtKeyCode::PageDown,
+        KeyCode::Insert => CtKeyCode::Insert,
+        KeyCode::F(n) => CtKeyCode::F(n),
+    };
+    KeyEvent::new(code, modifiers)
+}
+
+/// The input action a `kage.action` name runs, or `None` for a name
+/// not in [`kage_core::keymap::ACTIONS`]. `arg` is the line count of
+/// `Scroll`, saturated to `i32`.
+#[must_use]
+pub fn action(name: &str, arg: Option<i64>) -> Option<InputAction> {
+    Some(match name {
+        "Cancel" => InputAction::Cancel,
+        "BeginCommand" => InputAction::BeginCommand,
+        "BeginSearch" => InputAction::BeginSearch,
+        "ScrollToTop" => InputAction::ScrollToTop,
+        "ScrollToBottom" => InputAction::ScrollToBottom,
+        "ToggleFold" => InputAction::ToggleFold,
+        "UnfoldAll" => InputAction::UnfoldAll,
+        "FoldAll" => InputAction::FoldAll,
+        "Yank" => InputAction::Yank,
+        "ClearSelection" => InputAction::ClearSelection,
+        "OpenModelPicker" => InputAction::OpenModelPicker,
+        "OpenSessionPicker" => InputAction::OpenSessionPicker,
+        "OpenCommandPalette" => InputAction::OpenCommandPalette,
+        "SearchNext" => InputAction::SearchNext,
+        "SearchPrev" => InputAction::SearchPrev,
+        "YankFocusedBlock" => InputAction::YankFocusedBlock,
+        "CycleThinkingLevel" => InputAction::CycleThinkingLevel,
+        "CyclePane" => InputAction::CyclePane,
+        "FocusPrev" => InputAction::FocusPrev,
+        "FocusNext" => InputAction::FocusNext,
+        "Scroll" => {
+            let lines = arg
+                .unwrap_or(0)
+                .clamp(i64::from(i32::MIN), i64::from(i32::MAX));
+            InputAction::Scroll(i32::try_from(lines).unwrap_or_default())
+        }
+        "OpenHelp" => InputAction::OpenHelp,
+        "OpenJumpPicker" => InputAction::OpenJumpPicker,
+        "AttachClipboardImage" => InputAction::AttachClipboardImage,
+        "EnterVisual" => InputAction::EnterVisual,
+        _ => return None,
+    })
 }
 
 /// The editing state a key arrives in, which selects the keymap modes
@@ -118,6 +199,12 @@ impl Sequencer {
     /// its value.
     pub fn set_timeout(&mut self, timeout: Duration) {
         self.timeout = timeout;
+    }
+
+    /// Drop any buffered keys.
+    pub fn clear(&mut self) {
+        self.keys.clear();
+        self.deadline = None;
     }
 
     /// When the buffered keys resolve on their own, if any are
@@ -323,6 +410,49 @@ mod tests {
         assert_eq!(ev(CtKeyCode::F(5), none), Some(key("<F5>")));
         assert_eq!(ev(CtKeyCode::F(13), none), None);
         assert_eq!(ev(CtKeyCode::CapsLock, none), None);
+    }
+
+    #[test]
+    fn replayed_keys_round_trip_to_events() {
+        for notation in [
+            "g", "G", "<C-l>", "<C-S-l>", "<S-Tab>", "<M-CR>", "<Space>", "<F5>", "<C-Up>", "<D-k>",
+        ] {
+            let k = key(notation);
+            assert_eq!(key_from_event(&event_from_key(k)), Some(k), "{notation}");
+        }
+        assert_eq!(event_from_key(key("<S-Tab>")).code, CtKeyCode::BackTab);
+    }
+
+    #[test]
+    fn every_action_name_maps_to_an_input_action() {
+        for def in kage_core::keymap::ACTIONS {
+            let arg = def.arg.then_some(-3);
+            assert!(
+                action(def.name, arg).is_some(),
+                "{} has no action",
+                def.name
+            );
+        }
+        assert_eq!(action("Scroll", Some(-10)), Some(InputAction::Scroll(-10)));
+        assert_eq!(
+            action("Scroll", Some(i64::MAX)),
+            Some(InputAction::Scroll(i32::MAX))
+        );
+        assert_eq!(action("Nope", None), None);
+    }
+
+    #[test]
+    fn clear_drops_buffered_keys() {
+        let km = table(&[(Mode::Normal, "gw", "pane")]);
+        let modes = EditState::NormalInput.modes();
+        let mut seq = Sequencer::new(TIMEOUT);
+        seq.feed(&km, modes, key("g"), Instant::now());
+        seq.clear();
+        assert_eq!(seq.deadline(), None);
+        assert_eq!(
+            seq.feed(&km, modes, key("w"), Instant::now()),
+            [Step::Replay(keys("w"))]
+        );
     }
 
     #[test]

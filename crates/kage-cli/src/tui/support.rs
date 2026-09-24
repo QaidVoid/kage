@@ -31,32 +31,32 @@ pub(crate) fn run_bridged_command(
     drive_bridge(rt, &label, step, dialog_tx, commander)
 }
 
-/// Run a plugin keybinding's handler through the coroutine bridge,
+/// Run a key mapping's Lua handler through the coroutine bridge,
 /// same servicing path as a command (so the handler may open
 /// `kage.ui.*` dialogs). A non-empty return value is surfaced as a
 /// conversation block, just like a command's output.
-pub(crate) fn run_bridged_keybinding(
+pub(crate) fn run_bridged_keymap(
     rt: &PluginRuntime,
-    kb: &kage_plugin::LuaKeybinding,
+    id: u64,
     dialog_tx: &mpsc::Sender<PluginDialog>,
     commander: &Commander,
 ) -> Option<CommandOutput> {
-    let label = format!("keybinding {}", kb.chord());
-    let handler = match kb.handler() {
+    let label = "key mapping";
+    let handler = match rt.keymap_handler(id) {
         Ok(handler) => handler,
-        Err(e) => return Some(error_output(&label, &e.to_string())),
+        Err(e) => return Some(error_output(label, &e.to_string())),
     };
     let step = match rt.bridge_call(&handler, &[]) {
         Ok(step) => step,
-        Err(e) => return Some(error_output(&label, &e.to_string())),
+        Err(e) => return Some(error_output(label, &e.to_string())),
     };
-    drive_bridge(rt, &label, step, dialog_tx, commander)
+    drive_bridge(rt, label, step, dialog_tx, commander)
 }
 
 /// Drive a started bridge call to completion: service each suspend
 /// through the App's dialog channel, resume/cancel, and on a terminal
 /// `Done` map the value to a [`CommandOutput`]. Shared by the command
-/// and keybinding paths.
+/// and key mapping paths.
 pub(crate) fn drive_bridge(
     rt: &PluginRuntime,
     label: &str,
@@ -160,7 +160,7 @@ fn dialog_error(commander: &Commander, text: String) {
 }
 
 /// Build a one-line error [`CommandOutput`] for a failed plugin
-/// invocation. `label` reads like `command foo` or `keybinding ctrl+g`.
+/// invocation. `label` reads like `command foo` or `key mapping`.
 pub(crate) fn error_output(label: &str, msg: &str) -> CommandOutput {
     CommandOutput {
         text: format!("plugin {label}: {msg}"),

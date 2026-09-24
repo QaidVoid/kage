@@ -34,14 +34,14 @@ pub(crate) fn normalize_edited_text(text: &str) -> String {
 
 impl super::App {
     /// Whether `key` is the external-editor chord and no modal layer
-    /// would otherwise own the keyboard. An explicit `[keybindings]`
-    /// binding on the chord wins, mirroring the `Ctrl+C`/`Ctrl+Q`
-    /// hatches.
+    /// would otherwise own the keyboard. A mapping on the chord from
+    /// `init.lua` or `config.toml` wins, mirroring the
+    /// `Ctrl+C`/`Ctrl+Q` hatches.
     pub(crate) fn external_edit_key(&self, key: ratatui::crossterm::event::KeyEvent) -> bool {
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
         if !key.modifiers.contains(KeyModifiers::CONTROL)
             || !matches!(key.code, KeyCode::Char('g'))
-            || self.user_bound(&key)
+            || self.user_mapped(&key)
         {
             return false;
         }

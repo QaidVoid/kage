@@ -209,18 +209,12 @@ impl Host {
                     None => self.error(format!("no plugin command: {name}")),
                 }
             }
-            RunRequest::InvokePluginKeybinding { chord } => {
+            RunRequest::InvokeKeymap { id } => {
                 let Some(rt) = self.plugins.clone() else {
                     return;
                 };
-                if let Some(kb) = rt
-                    .registered_keybindings()
-                    .into_iter()
-                    .find(|kb| kb.chord() == chord)
-                {
-                    let output = run_bridged_keybinding(&rt, &kb, &self.dialog_tx, &self.commander);
-                    self.show_plugin_output(output);
-                }
+                let output = run_bridged_keymap(&rt, id, &self.dialog_tx, &self.commander);
+                self.show_plugin_output(output);
             }
             RunRequest::RefreshProviders => self.refresh_providers(),
             RunRequest::ReloadPlugins => self.reload_plugins(),
@@ -345,7 +339,8 @@ impl Host {
 
     /// Re-read plugins and `init.lua` from disk and republish everything
     /// they contribute: tools, block renderers, providers, commands,
-    /// widgets, keybindings, and autocomplete.
+    /// widgets, and autocomplete. Keymaps live in the table the App
+    /// shares with the runtime, so the reload updates them in place.
     fn reload_plugins(&mut self) {
         let Some(rt) = self.plugins.clone() else {
             return;
@@ -368,6 +363,9 @@ impl Host {
             Some(Err(_)) => ", init.lua failed",
             None => "",
         };
+        for err in &report.keymap_errors {
+            self.error(err.clone());
+        }
         if report.failed.is_empty() {
             self.notify(format!(
                 "plugins reloaded ({} loaded{init})",
@@ -393,14 +391,6 @@ impl Host {
                 .map(|rt| snapshot_plugin_commands(rt))
                 .unwrap_or_default(),
             widgets: rt.map(|rt| rt.registered_widgets()).unwrap_or_default(),
-            keybindings: rt
-                .map(|rt| {
-                    rt.registered_keybindings()
-                        .iter()
-                        .map(|kb| kb.chord().to_owned())
-                        .collect()
-                })
-                .unwrap_or_default(),
             autocomplete: rt
                 .map(|rt| rt.registered_autocomplete_providers())
                 .unwrap_or_default(),

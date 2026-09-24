@@ -6,6 +6,9 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use kage_core::config::KeybindingsConfig;
+use kage_core::keymap::Keymap;
+
 use super::*;
 use crate::events::shared_buffer;
 
@@ -17,11 +20,89 @@ fn ctrl(c: char) -> KeyEvent {
     KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
 }
 
+fn code(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+/// The keymap the embedded `_defaults.lua` builds, loaded once.
+fn default_keymap() -> Keymap {
+    static DEFAULTS: std::sync::OnceLock<Keymap> = std::sync::OnceLock::new();
+    DEFAULTS
+        .get_or_init(|| {
+            let rt = kage_plugin::PluginRuntime::new().expect("runtime builds");
+            let report = kage_plugin::load_all(None, &rt).expect("defaults load");
+            assert!(report.all_ok(), "{report:?}");
+            lock(&rt.keymap()).clone()
+        })
+        .clone()
+}
+
+/// An App whose keymap holds the embedded defaults, as the TUI builds
+/// it with no plugins and no user config.
+fn app_with_defaults(buffer: SharedBuffer, tx: Sender<RunRequest>) -> App {
+    let mut app = App::new(buffer, tx);
+    app.set_keymap(Arc::new(Mutex::new(default_keymap())));
+    app
+}
+
+/// An App whose keymap comes from a full load: the defaults, then
+/// `bindings` as `[keybindings] bindings`, then `init` as `init.lua`.
+fn app_with_config(
+    init: &str,
+    bindings: &[(&str, &str)],
+) -> (App, mpsc::Receiver<RunRequest>, SharedBuffer) {
+    let user = tempfile::tempdir().unwrap();
+    std::fs::write(user.path().join("init.lua"), init).unwrap();
+    let keybindings = KeybindingsConfig {
+        bindings: bindings
+            .iter()
+            .map(|(lhs, rhs)| ((*lhs).to_owned(), (*rhs).to_owned()))
+            .collect(),
+        ..KeybindingsConfig::default()
+    };
+    let rt = kage_plugin::PluginRuntime::builder()
+        .user_dir(Some(user.path().to_path_buf()))
+        .keybindings(keybindings)
+        .build()
+        .unwrap();
+    let report = kage_plugin::load_all(None, &rt).unwrap();
+    assert!(report.all_ok(), "{report:?}");
+    let buffer = shared_buffer();
+    let (tx, rx) = mpsc::channel();
+    let mut app = App::new(buffer.clone(), tx);
+    app.set_keymap(rt.keymap());
+    (app, rx, buffer)
+}
+
+/// Resolve `key` through the keymap and the editor grammar without
+/// carrying it out.
+fn routes(app: &mut App, key: KeyEvent) -> Vec<Routed> {
+    app.route_editor_key(key, Instant::now())
+}
+
+fn input(action: InputAction) -> Vec<Routed> {
+    vec![Routed::Input(action)]
+}
+
+/// Put the App in vim normal mode with `pane` focused.
+fn normal(app: &mut App, pane: Pane) {
+    app.handle_key(code(KeyCode::Esc));
+    app.input.set_focused_pane(pane);
+    assert_eq!(app.input.mode(), Mode::Normal);
+}
+
+fn last_block_text(buffer: &SharedBuffer) -> String {
+    match buffer.lock().unwrap().blocks().last() {
+        Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
+        other => panic!("expected a custom block, got {other:?}"),
+    }
+}
+
 #[test]
 fn partial_selection_copies_only_highlighted_cells_not_whole_block() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer.clone(), tx);
+    let mut app = app_with_defaults(buffer.clone(), tx);
     {
         let mut buf = buffer.lock().unwrap();
         buf.begin_thinking();
@@ -64,7 +145,7 @@ fn partial_selection_copies_only_highlighted_cells_not_whole_block() {
 fn right_click_opens_context_menu_on_the_block_then_esc_and_no_block_close_it() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer.clone(), tx);
+    let mut app = app_with_defaults(buffer.clone(), tx);
     {
         let mut buf = buffer.lock().unwrap();
         buf.push_user("hello there");
@@ -109,30 +190,23 @@ fn right_click_opens_context_menu_on_the_block_then_esc_and_no_block_close_it() 
 fn ctrl_q_exits_immediately() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let exit = app.handle_key(ctrl('q'));
     assert_eq!(exit, Some(AppExit::Quit));
 }
 
 #[test]
 fn config_keybinding_runs_bound_command() {
-    let buffer = shared_buffer();
-    let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
-    let errs = app.set_config_keybindings(vec![("ctrl+g".into(), "quit".into())]);
-    assert!(errs.is_empty(), "{errs:?}");
+    let (mut app, _rx, _) = app_with_config("", &[("ctrl+g", "quit")]);
     assert_eq!(app.handle_key(ctrl('g')), Some(AppExit::Quit));
 }
 
 #[test]
 fn config_can_reclaim_ctrl_q_from_the_quit_hatch() {
-    let buffer = shared_buffer();
-    let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer.clone(), tx);
+    let (mut app, _rx, buffer) = app_with_config("", &[("ctrl+q", "clear")]);
     if let Ok(mut buf) = buffer.lock() {
         buf.push_custom("note", "x", false);
     }
-    let _ = app.set_config_keybindings(vec![("ctrl+q".into(), "clear".into())]);
     // ctrl+q no longer quits: it runs the bound `clear` instead.
     assert_eq!(app.handle_key(ctrl('q')), None);
     assert!(
@@ -142,43 +216,77 @@ fn config_can_reclaim_ctrl_q_from_the_quit_hatch() {
 }
 
 #[test]
-fn set_config_keybindings_reports_unparseable_chord() {
+fn ctrl_q_yields_only_to_a_user_owned_mapping() {
+    let mut km = default_keymap();
+    let lhs = kage_core::keymap::parse_keys("<C-q>", "\\").unwrap();
+    let mapping = |owner: &str| kage_core::keymap::Mapping {
+        rhs: Rhs::Command("clear".into()),
+        desc: None,
+        group: None,
+        owner: owner.to_owned(),
+    };
+    km.set(
+        kage_core::keymap::Mode::Global,
+        lhs.clone(),
+        mapping("plugin"),
+    );
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
     let mut app = App::new(buffer, tx);
-    let errs = app.set_config_keybindings(vec![
-        ("totally bogus chord".into(), "quit".into()),
-        ("ctrl+g".into(), "help".into()),
-    ]);
-    assert_eq!(errs.len(), 1);
-    assert!(errs[0].contains("totally bogus chord"), "{}", errs[0]);
-    assert_eq!(app.config_keybindings.len(), 1, "good binding kept");
+    let shared = Arc::new(Mutex::new(km));
+    app.set_keymap(Arc::clone(&shared));
+    assert_eq!(app.handle_key(ctrl('q')), Some(AppExit::Quit));
+    lock(&shared).set(kage_core::keymap::Mode::Global, lhs, mapping("init.lua"));
+    assert_eq!(app.handle_key(ctrl('q')), None);
 }
 
 #[test]
-fn keybindings_command_lists_config_and_reserved() {
-    let buffer = shared_buffer();
-    let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer.clone(), tx);
-    let _ = app.set_config_keybindings(vec![("ctrl+t".into(), "theme set tokyo-night".into())]);
+fn init_lua_can_reclaim_ctrl_c_in_one_mode() {
+    let (mut app, rx, _) = app_with_config("kage.keymap.set('i', '<C-c>', ':clear')", &[]);
+    app.handle_key(ctrl('c'));
+    assert!(rx.try_recv().is_err(), "insert mode ran the mapping");
+    normal(&mut app, Pane::Input);
+    app.handle_key(ctrl('c'));
+    assert_eq!(
+        rx.try_recv(),
+        Ok(RunRequest::Cancel),
+        "normal mode kept the hatch"
+    );
+}
+
+#[test]
+fn keybindings_command_lists_the_table_per_mode_with_owners() {
+    let (mut app, _rx, buffer) = app_with_config(
+        "kage.keymap.set('b', '<PageDown>', kage.action.scroll(20))",
+        &[
+            ("ctrl+t", "theme set tokyo-night"),
+            ("ctrl+g", "action:BeginCommand"),
+        ],
+    );
     app.push_keybindings();
-    let buf = buffer.lock().unwrap();
-    let rendered = match buf.blocks().last() {
-        Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
-        other => panic!("expected a custom block, got {other:?}"),
-    };
-    assert!(rendered.contains("ctrl+t"), "{rendered}");
-    assert!(rendered.contains("theme set tokyo-night"), "{rendered}");
-    assert!(rendered.contains("reserved"), "{rendered}");
+    let rendered = last_block_text(&buffer);
+    for wanted in [
+        "g: any editing state",
+        "<C-t>",
+        ":theme set tokyo-night",
+        "action:BeginCommand",
+        "config.toml",
+        "b: vim normal mode, conversation pane",
+        "action:Scroll(20)",
+        "init.lua",
+        "action:OpenModelPicker",
+        "defaults",
+        "built in (editor grammar",
+        "<C-q>        quit",
+    ] {
+        assert!(rendered.contains(wanted), "missing {wanted}: {rendered}");
+    }
+    assert!(!rendered.contains("reserved"), "{rendered}");
 }
 
 #[test]
 fn config_action_binding_fires_builtin_action() {
-    let buffer = shared_buffer();
-    let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
-    let errs = app.set_config_keybindings(vec![("ctrl+g".into(), "action:BeginCommand".into())]);
-    assert!(errs.is_empty(), "{errs:?}");
+    let (mut app, _rx, _) = app_with_config("", &[("ctrl+g", "action:BeginCommand")]);
     assert_eq!(app.handle_key(ctrl('g')), None);
     assert!(
         app.cmdline.is_some(),
@@ -190,34 +298,14 @@ fn config_action_binding_fires_builtin_action() {
 }
 
 #[test]
-fn set_config_keybindings_reports_unknown_action_name() {
-    let buffer = shared_buffer();
-    let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
-    let errs = app.set_config_keybindings(vec![
-        ("ctrl+g".into(), "action:Nonsense".into()),
-        ("ctrl+h".into(), "action:".into()),
-        ("ctrl+i".into(), "quit".into()),
-    ]);
-    assert_eq!(errs.len(), 2, "{errs:?}");
-    assert!(errs[0].contains("action:Nonsense"), "{}", errs[0]);
-    assert!(errs[0].contains("action:"), "{}", errs[0]);
-    assert!(errs[1].contains("`action:`"), "{}", errs[1]);
-    assert_eq!(app.config_keybindings.len(), 1, "good binding kept");
-}
-
-#[test]
 fn config_action_binding_wins_over_builtin_handler() {
-    let buffer = shared_buffer();
+    let (mut app, _rx, buffer) = app_with_config("", &[("ctrl+o", "action:BeginCommand")]);
     if let Ok(mut buf) = buffer.lock() {
         buf.append_thinking_delta("step one");
         buf.finish_streaming();
     }
-    let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer.clone(), tx);
-    // ctrl+o builtin is ToggleFold on the focused block; the binding
-    // must take the action path instead.
-    let _ = app.set_config_keybindings(vec![("ctrl+o".into(), "action:BeginCommand".into())]);
+    // ctrl+o in insert is the grammar's fold toggle; the binding must
+    // take the action path instead.
     assert_eq!(app.handle_key(ctrl('o')), None);
     assert!(app.cmdline.is_some(), "the bound action ran");
     if let Ok(buf) = buffer.lock() {
@@ -232,26 +320,18 @@ fn config_action_binding_wins_over_builtin_handler() {
 }
 
 #[test]
-fn keybindings_command_lists_action_bindings() {
-    let buffer = shared_buffer();
-    let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer.clone(), tx);
-    let _ = app.set_config_keybindings(vec![("ctrl+g".into(), "action:BeginCommand".into())]);
-    app.push_keybindings();
-    let buf = buffer.lock().unwrap();
-    let rendered = match buf.blocks().last() {
-        Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
-        other => panic!("expected a custom block, got {other:?}"),
-    };
-    assert!(rendered.contains("ctrl+g"), "{rendered}");
-    assert!(rendered.contains("action:BeginCommand"), "{rendered}");
+fn a_bad_mapped_command_reports_inline() {
+    let (mut app, _rx, buffer) = app_with_config("", &[("ctrl+g", "nosuchcommand")]);
+    assert_eq!(app.handle_key(ctrl('g')), None);
+    let text = format!("{:?}", buffer.lock().unwrap().blocks().last());
+    assert!(text.contains("mapping `:nosuchcommand`"), "{text}");
 }
 
 #[test]
 fn plugin_command_alias_resolves_to_canonical_invoke() {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.set_plugin_commands(vec![PluginCommand {
         name: "git-status".into(),
         aliases: vec!["gst".into(), "gs".into()],
@@ -275,7 +355,7 @@ fn plugin_command_alias_resolves_to_canonical_invoke() {
 fn plugin_command_alias_shadowing_builtin_is_dropped() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.set_plugin_commands(vec![PluginCommand {
         name: "mycmd".into(),
         aliases: vec!["help".into()],
@@ -293,7 +373,7 @@ fn plugin_command_alias_shadowing_builtin_is_dropped() {
 fn set_plugin_commands_reuses_leaked_specs_on_unchanged_reload() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let cmd = || PluginCommand {
         name: "greet".into(),
         aliases: vec!["hi".into()],
@@ -338,10 +418,10 @@ fn set_plugin_commands_reuses_leaked_specs_on_unchanged_reload() {
 }
 
 #[test]
-fn drain_plugin_refresh_reseeds_commands_widgets_and_keys() {
+fn drain_plugin_refresh_reseeds_commands_and_widgets() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let (rtx, rrx) = mpsc::channel();
     app.set_plugin_refresh(rrx);
 
@@ -363,23 +443,11 @@ fn drain_plugin_refresh_reseeds_commands_widgets_and_keys() {
             args: Vec::new(),
         }],
         widgets: Vec::new(),
-        keybindings: vec!["ctrl+g".into()],
         autocomplete: Vec::new(),
         models: Vec::new(),
     })
     .unwrap();
-    app.set_plugin_keybindings(vec!["ctrl+x".into()]);
     assert!(app.drain_plugin_refresh(), "a queued snapshot applies");
-    let chords: Vec<&str> = app
-        .plugin_keybindings
-        .iter()
-        .map(|(_, chord)| chord.as_str())
-        .collect();
-    assert_eq!(
-        chords,
-        ["ctrl+g"],
-        "keybindings re-seeded from the snapshot"
-    );
     assert!(
         !std::ptr::eq(app.plugin_command_specs[0], pre),
         "commands re-seeded from the snapshot"
@@ -397,7 +465,7 @@ fn drain_plugin_refresh_reseeds_commands_widgets_and_keys() {
 fn override_command_shadows_builtin_and_dispatches_first() {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.set_plugin_commands(vec![PluginCommand {
         name: "help".into(),
         aliases: Vec::new(),
@@ -425,7 +493,7 @@ fn override_command_shadows_builtin_and_dispatches_first() {
 fn events_command_lists_known_hooks_by_kind() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer.clone(), tx);
+    let mut app = app_with_defaults(buffer.clone(), tx);
     app.push_events();
     let buf = buffer.lock().unwrap();
     let rendered = match buf.blocks().last() {
@@ -442,7 +510,7 @@ fn events_command_lists_known_hooks_by_kind() {
 fn submitting_a_prompt_sends_it_without_painting() {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(buffer.clone(), tx);
+    let mut app = app_with_defaults(buffer.clone(), tx);
     // Default mode is Insert; type "hi" and press Enter.
     app.handle_key(key('h'));
     app.handle_key(key('i'));
@@ -471,7 +539,7 @@ fn submitting_a_prompt_sends_it_without_painting() {
 #[test]
 fn submit_while_a_run_is_in_flight_is_still_sent() {
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(shared_buffer(), tx);
+    let mut app = app_with_defaults(shared_buffer(), tx);
     let usage = crate::usage::shared_session_usage();
     usage.lock().unwrap().working = true;
     app.set_session_usage(usage);
@@ -490,7 +558,7 @@ fn submit_while_a_run_is_in_flight_is_still_sent() {
 #[test]
 fn submit_carries_attached_images() {
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(shared_buffer(), tx);
+    let mut app = app_with_defaults(shared_buffer(), tx);
     app.input.attach_image(crate::image::AttachedImage {
         source: kage_core::ImageSource::Base64 {
             data: "AAAA".into(),
@@ -530,7 +598,7 @@ fn app_with_events() -> (
     mpsc::Sender<kage_core::protocol::Envelope>,
 ) {
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(shared_buffer(), tx);
+    let mut app = app_with_defaults(shared_buffer(), tx);
     let (events_tx, events_rx) = mpsc::channel();
     app.set_engine_events(events_rx);
     app.set_session_usage(crate::usage::shared_session_usage());
@@ -664,7 +732,7 @@ fn state_changes_update_the_modeline() {
 fn ctrl_c_in_normal_emits_cancel_request() {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     // Switch to Normal first; default is Insert.
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     app.handle_key(ctrl('c'));
@@ -675,7 +743,7 @@ fn ctrl_c_in_normal_emits_cancel_request() {
 fn ctrl_c_in_insert_cancels_instead_of_typing_c() {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.handle_key(key('x')); // default mode is Insert
     app.handle_key(ctrl('c'));
     assert_eq!(rx.try_recv(), Ok(RunRequest::Cancel));
@@ -686,7 +754,7 @@ fn ctrl_c_in_insert_cancels_instead_of_typing_c() {
 fn ctrl_c_interrupts_over_an_open_cmdline() {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     app.handle_key(key(':'));
     assert!(app.cmdline.is_some(), "cmdline should be open");
@@ -701,7 +769,7 @@ fn ctrl_c_interrupts_over_an_open_cmdline() {
 #[test]
 fn cancel_command_sends_a_cancel_request() {
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(shared_buffer(), tx);
+    let mut app = app_with_defaults(shared_buffer(), tx);
     let registry: Vec<&CommandSpec> = BUILTIN_COMMANDS.iter().collect();
     let result = app.run_command_validated("cancel", &registry);
     assert!(
@@ -715,7 +783,7 @@ fn cancel_command_sends_a_cancel_request() {
 fn permission_command_dispatches_mode_override() {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let registry: Vec<&CommandSpec> = BUILTIN_COMMANDS.iter().collect();
 
     let result = app.run_command_validated("permission ask", &registry);
@@ -746,7 +814,7 @@ fn permission_command_dispatches_mode_override() {
 fn permission_command_rejects_unknown_mode_without_request() {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(buffer.clone(), tx);
+    let mut app = app_with_defaults(buffer.clone(), tx);
     let registry: Vec<&CommandSpec> = BUILTIN_COMMANDS.iter().collect();
 
     let result = app.run_command_validated("permission bogus", &registry);
@@ -764,7 +832,7 @@ fn permission_command_rejects_unknown_mode_without_request() {
 fn permission_command_without_arg_reports_current_mode() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer.clone(), tx);
+    let mut app = app_with_defaults(buffer.clone(), tx);
     let registry: Vec<&CommandSpec> = BUILTIN_COMMANDS.iter().collect();
 
     let result = app.run_command_validated("permission", &registry);
@@ -784,7 +852,7 @@ fn render_into_paints_status_and_buffer() {
         buf.push_user("hello");
     }
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let backend = TestBackend::new(40, 8);
     let mut terminal = Terminal::new(backend).unwrap();
     app.render_into(&mut terminal).unwrap();
@@ -808,7 +876,7 @@ fn render_into_paints_status_and_buffer() {
 fn plugin_header_replaces_builtin_status_bar() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let rt = kage_plugin::PluginRuntime::new().unwrap();
     rt.eval("kage.ui.set_header(function() return 'PLUGINHEADER' end)")
         .unwrap();
@@ -829,7 +897,7 @@ fn plugin_header_replaces_builtin_status_bar() {
 fn plugin_footer_replaces_builtin_modeline() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.set_session_usage(crate::usage::shared_session_usage());
     let rt = kage_plugin::PluginRuntime::new().unwrap();
     rt.eval("kage.ui.set_footer(function() return 'PLUGINFOOTER' end)")
@@ -847,7 +915,7 @@ fn plugin_footer_replaces_builtin_modeline() {
 fn autocomplete_popup_opens_and_tab_accepts() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let rt = kage_plugin::PluginRuntime::new().unwrap();
     rt.eval(
         r"
@@ -874,7 +942,7 @@ fn autocomplete_popup_opens_and_tab_accepts() {
 fn autocomplete_respects_explicit_range() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let rt = kage_plugin::PluginRuntime::new().unwrap();
     rt.eval(
         r"
@@ -901,7 +969,7 @@ fn builtin_at_file_completion_without_plugins() {
     std::fs::write(dir.path().join("README.md"), "x").unwrap();
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.set_workdir(dir.path().to_path_buf());
     app.handle_key(key('@'));
     assert!(app.input_completion.is_some(), "@ opens file completion");
@@ -913,7 +981,7 @@ fn builtin_at_file_completion_without_plugins() {
 fn terminal_input_hook_consumes_matching_key() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let rt = kage_plugin::PluginRuntime::new().unwrap();
     rt.eval(
         r"
@@ -934,7 +1002,7 @@ fn terminal_input_hook_consumes_matching_key() {
 fn terminal_input_hook_cannot_block_ctrl_q() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let rt = kage_plugin::PluginRuntime::new().unwrap();
     rt.eval("kage.on_terminal_input(function() return true end)")
         .unwrap();
@@ -946,7 +1014,7 @@ fn terminal_input_hook_cannot_block_ctrl_q() {
 fn terminal_input_off_stops_consuming() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let rt = kage_plugin::PluginRuntime::new().unwrap();
     rt.eval(
         r"
@@ -966,7 +1034,7 @@ fn terminal_input_off_stops_consuming() {
 fn autocomplete_inert_without_providers() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.handle_key(key('h'));
     app.handle_key(key('i'));
     assert!(app.input_completion.is_none());
@@ -977,7 +1045,7 @@ fn autocomplete_inert_without_providers() {
 fn tree_command_without_source_reports_unavailable() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer.clone(), tx);
+    let mut app = app_with_defaults(buffer.clone(), tx);
     assert!(
         app.dispatch_builtin("tree", "", &crate::command::ParsedArgs::new())
             .is_none()
@@ -994,7 +1062,7 @@ fn tree_command_without_source_reports_unavailable() {
 fn tree_command_opens_and_enter_dispatches_resume() {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.set_session_tree_source(Box::new(|| {
         vec![
             crate::overlay::SessionNode {
@@ -1034,7 +1102,7 @@ fn tree_command_opens_and_enter_dispatches_resume() {
 fn tree_delete_fixture() -> (App, mpsc::Receiver<RunRequest>) {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.set_session_tree_source(Box::new(|| {
         vec![crate::overlay::SessionNode {
             id: "only".into(),
@@ -1092,7 +1160,7 @@ fn tree_delete_confirm_esc_cancels_without_deleting() {
 fn set_editor_modeless_flips_the_input_editor() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     // Default is vim-modal: Esc enters Normal.
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert_eq!(app.input().mode(), Mode::Normal);
@@ -1109,7 +1177,7 @@ fn set_editor_modeless_flips_the_input_editor() {
 fn lua_option_sets_apply_on_the_next_tick() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let store = kage_plugin::SharedOptions::default();
     let rt = Arc::new(
         kage_plugin::PluginRuntime::builder()
@@ -1152,7 +1220,7 @@ fn lua_option_sets_apply_on_the_next_tick() {
 fn modeless_question_mark_on_empty_prompt_opens_help() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.set_editor_modeless(true);
     assert!(app.dispatch_key(key('?')).is_none());
     assert!(app.help_overlay.is_some(), "`?` opens the keys reference");
@@ -1162,7 +1230,7 @@ fn modeless_question_mark_on_empty_prompt_opens_help() {
 fn modeless_question_mark_with_text_types_literally() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.set_editor_modeless(true);
     app.dispatch_key(key('h'));
     app.dispatch_key(key('?'));
@@ -1174,7 +1242,7 @@ fn modeless_question_mark_with_text_types_literally() {
 fn settings_command_opens_overlay_and_esc_closes_it() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     // `:settings` opens the modal (reads config read-only; never
     // writes, so this is safe in a test).
     assert!(
@@ -1194,7 +1262,7 @@ fn settings_thinking_level_persists_and_sets_the_live_level() {
     let path = dir.path().join("config.toml");
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.apply_settings_at(
         &serde_json::json!({ "thinking_level": "high" }),
         Some(path.clone()),
@@ -1213,7 +1281,7 @@ fn settings_thinking_level_ignores_unknown_values() {
     let path = dir.path().join("config.toml");
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.apply_settings_at(
         &serde_json::json!({ "thinking_level": "maximum" }),
         Some(path.clone()),
@@ -1240,7 +1308,7 @@ fn snapshot_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
 fn pasted_text_lands_in_input_area_with_newline_preserved() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.handle_key(key('i'));
     app.input.paste("first\nsecond");
     let backend = TestBackend::new(40, 8);
@@ -1260,7 +1328,7 @@ fn scrolling_up_freezes_viewport_when_more_content_arrives() {
         }
     }
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer.clone(), tx);
+    let mut app = app_with_defaults(buffer.clone(), tx);
     // Prime the renderer so `last_virtual_top` reflects a real frame;
     // the scroll anchor derives from it while following.
     let backend = TestBackend::new(40, 8);
@@ -1302,7 +1370,7 @@ fn focusing_an_offscreen_block_scrolls_it_into_view() {
         }
     }
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer.clone(), tx);
+    let mut app = app_with_defaults(buffer.clone(), tx);
     let backend = TestBackend::new(40, 8);
     let mut terminal = Terminal::new(backend).unwrap();
     app.render_into(&mut terminal).unwrap();
@@ -1328,7 +1396,7 @@ fn focusing_an_offscreen_block_scrolls_it_into_view() {
 fn history_walk_replaces_input_text() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.set_history(vec!["older".into(), "newer".into()]);
     // Default mode is Insert; no need to press 'i'.
     app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
@@ -1347,7 +1415,7 @@ fn fold_all_then_unfold_all_toggles_folds() {
         buf.finish_streaming();
     }
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer.clone(), tx);
+    let mut app = app_with_defaults(buffer.clone(), tx);
     // Default mode is Insert; switch to Normal for zM/zR.
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     // zM folds all
@@ -1380,7 +1448,7 @@ fn builtin_registry() -> Vec<&'static CommandSpec> {
 fn validated_unknown_command_returns_error_with_suggestion() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let registry = builtin_registry();
     let result = app.run_command_validated("quut", &registry);
     match result {
@@ -1401,7 +1469,7 @@ fn validated_unknown_command_returns_error_with_suggestion() {
 fn validated_invalid_choice_returns_error() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let registry = builtin_registry();
     // "mouse mayb" is invalid: "mayb" is not in [on, off, toggle]
     let result = app.run_command_validated("mouse mayb", &registry);
@@ -1422,7 +1490,7 @@ fn validated_invalid_choice_returns_error() {
 fn validated_missing_required_arg_returns_error() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let registry = builtin_registry();
     // "model" without a required <id> argument
     let result = app.run_command_validated("model", &registry);
@@ -1443,7 +1511,7 @@ fn validated_missing_required_arg_returns_error() {
 fn validated_valid_command_returns_done() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let registry = builtin_registry();
     let result = app.run_command_validated("help", &registry);
     assert!(
@@ -1456,7 +1524,7 @@ fn validated_valid_command_returns_done() {
 fn validated_quit_returns_done_with_exit() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let registry = builtin_registry();
     let result = app.run_command_validated("quit", &registry);
     assert!(
@@ -1469,7 +1537,7 @@ fn validated_quit_returns_done_with_exit() {
 fn validated_subcommand_validates_against_leaf_spec() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let registry = builtin_registry();
     // "theme set" without required <name> arg should error
     let result = app.run_command_validated("theme set", &registry);
@@ -1490,7 +1558,7 @@ fn validated_subcommand_validates_against_leaf_spec() {
 fn validated_empty_input_returns_done_none() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let registry = builtin_registry();
     let result = app.run_command_validated("", &registry);
     assert!(
@@ -1503,7 +1571,7 @@ fn validated_empty_input_returns_done_none() {
 fn validated_optional_arg_missing_is_ok() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let registry = builtin_registry();
     // "mouse" without arg is valid (optional arg)
     let result = app.run_command_validated("mouse", &registry);
@@ -1530,7 +1598,7 @@ fn type_str(app: &mut App, s: &str) {
 fn colon_keystrokes_dispatch_quit_handler() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     // Default mode is Insert; switch to Normal so `:` is bound.
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     let exit = app.handle_key(key(':'));
@@ -1546,7 +1614,7 @@ fn colon_keystrokes_dispatch_quit_handler() {
 fn slash_keystrokes_dispatch_quit_handler() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     // Default mode is Insert. `/` only opens the palette when the
     // input buffer is empty; that is the case for a fresh App.
     let exit = app.handle_key(key('/'));
@@ -1568,7 +1636,7 @@ fn slash_keystrokes_dispatch_quit_handler() {
 fn colon_tab_completes_to_lcp_and_opens_popup() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     app.handle_key(key(':'));
     app.handle_key(key('m'));
@@ -1583,7 +1651,7 @@ fn colon_tab_completes_to_lcp_and_opens_popup() {
 fn slash_tab_completes_to_lcp_and_opens_popup() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.handle_key(key('/'));
     app.handle_key(key('m'));
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
@@ -1597,7 +1665,7 @@ fn slash_tab_completes_to_lcp_and_opens_popup() {
 fn colon_bad_arg_keeps_cmdline_open_with_error() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     app.handle_key(key(':'));
     type_str(&mut app, "mouse mayb");
@@ -1611,7 +1679,7 @@ fn colon_bad_arg_keeps_cmdline_open_with_error() {
 fn slash_bad_arg_keeps_palette_open_with_error() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.handle_key(key('/'));
     type_str(&mut app, "mouse mayb");
     let exit = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -1638,7 +1706,7 @@ fn select_item(label: &str, value: serde_json::Value) -> kage_plugin::SelectItem
 fn plugin_dialog_pick_sends_selected_item_value() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let (dtx, drx) = mpsc::channel();
     app.set_plugin_dialog(drx);
     let (reply_tx, reply_rx) = mpsc::channel();
@@ -1668,7 +1736,7 @@ fn plugin_dialog_pick_sends_selected_item_value() {
 fn plugin_dialog_cancel_sends_none() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let (dtx, drx) = mpsc::channel();
     app.set_plugin_dialog(drx);
     let (reply_tx, reply_rx) = mpsc::channel();
@@ -1691,7 +1759,7 @@ fn plugin_dialog_cancel_sends_none() {
 fn plugin_dialog_empty_items_resolves_to_none_without_a_picker() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let (dtx, drx) = mpsc::channel();
     app.set_plugin_dialog(drx);
     let (reply_tx, reply_rx) = mpsc::channel();
@@ -1712,7 +1780,7 @@ fn plugin_dialog_empty_items_resolves_to_none_without_a_picker() {
 fn plugin_dialog_not_drained_while_another_overlay_is_open() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let (dtx, drx) = mpsc::channel();
     app.set_plugin_dialog(drx);
     app.picker = Some(OverlayPicker::new("busy", vec![PickItem::simple("x")]));
@@ -1751,7 +1819,7 @@ fn open_confirm(app: &mut App) -> std::sync::mpsc::Receiver<Option<serde_json::V
 fn plugin_confirm_yes_resumes_with_true() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let reply_rx = open_confirm(&mut app);
 
     app.handle_key(key('y'));
@@ -1765,7 +1833,7 @@ fn plugin_confirm_yes_resumes_with_true() {
 fn plugin_confirm_no_resumes_with_false() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let reply_rx = open_confirm(&mut app);
 
     app.handle_key(key('n'));
@@ -1777,7 +1845,7 @@ fn plugin_confirm_no_resumes_with_false() {
 fn plugin_confirm_cancel_resumes_with_false() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let reply_rx = open_confirm(&mut app);
 
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -1806,7 +1874,7 @@ fn open_input(app: &mut App) -> std::sync::mpsc::Receiver<Option<serde_json::Val
 fn plugin_input_submit_resumes_with_text() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let reply_rx = open_input(&mut app);
 
     app.handle_key(key('A'));
@@ -1823,7 +1891,7 @@ fn plugin_input_submit_resumes_with_text() {
 fn plugin_input_cancel_resumes_with_nil() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let reply_rx = open_input(&mut app);
 
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -1852,7 +1920,7 @@ fn open_editor(app: &mut App) -> std::sync::mpsc::Receiver<Option<serde_json::Va
 fn plugin_editor_ctrl_s_resumes_with_buffer() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let reply_rx = open_editor(&mut app);
 
     app.handle_key(key('!'));
@@ -1867,7 +1935,7 @@ fn plugin_editor_ctrl_s_resumes_with_buffer() {
 fn plugin_editor_cancel_resumes_with_nil() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let reply_rx = open_editor(&mut app);
 
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -1878,47 +1946,32 @@ fn plugin_editor_cancel_resumes_with_nil() {
 }
 
 #[test]
-fn plugin_keybinding_dispatches_invoke_request() {
-    let buffer = shared_buffer();
-    let (tx, rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
-    app.set_plugin_keybindings(vec!["ctrl+g".to_owned()]);
-
-    app.handle_key(ctrl('g'));
-
-    assert_eq!(
-        rx.try_recv(),
-        Ok(RunRequest::InvokePluginKeybinding {
-            chord: "ctrl+g".to_owned()
-        })
+fn lua_mapping_dispatches_invoke_request() {
+    let (mut app, rx, _) = app_with_config(
+        "kage.register_keybinding('ctrl+t', function() end)
+         kage.keymap.set('i', '<C-l>', function() end)",
+        &[],
     );
-}
-
-#[test]
-fn unbound_chord_does_not_dispatch_keybinding() {
-    let buffer = shared_buffer();
-    let (tx, rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
-    app.set_plugin_keybindings(vec!["ctrl+g".to_owned()]);
-
+    app.handle_key(ctrl('t'));
+    let Ok(RunRequest::InvokeKeymap { id: first }) = rx.try_recv() else {
+        panic!("expected an InvokeKeymap request");
+    };
+    app.handle_key(ctrl('l'));
+    let Ok(RunRequest::InvokeKeymap { id: second }) = rx.try_recv() else {
+        panic!("expected an InvokeKeymap request");
+    };
+    assert_ne!(first, second);
     app.handle_key(ctrl('h'));
-
-    assert!(!matches!(
-        rx.try_recv(),
-        Ok(RunRequest::InvokePluginKeybinding { .. })
-    ));
+    assert!(rx.try_recv().is_err(), "an unmapped chord sends nothing");
 }
 
 #[test]
-fn open_overlay_suppresses_plugin_keybinding() {
-    let buffer = shared_buffer();
-    let (tx, rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
-    app.set_plugin_keybindings(vec!["ctrl+g".to_owned()]);
+fn open_overlay_suppresses_mappings() {
+    let (mut app, rx, _) = app_with_config("kage.keymap.set('g', '<C-t>', function() end)", &[]);
     app.picker = Some(OverlayPicker::new("busy", vec![PickItem::simple("x")]));
     app.picker_kind = Some(PickerKind::Model);
 
-    app.handle_key(ctrl('g'));
+    app.handle_key(ctrl('t'));
 
     assert!(rx.try_recv().is_err(), "picker should swallow the chord");
 }
@@ -1928,7 +1981,7 @@ fn plugin_theme_drain_applies_request_and_refresh_populates_snapshot() {
     let _guard = crate::theme::theme_test_lock();
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let state: kage_plugin::SharedThemeState =
         std::sync::Arc::new(std::sync::Mutex::new(kage_plugin::ThemeState::default()));
     let request: kage_plugin::SharedThemeRequest = std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -1960,7 +2013,7 @@ fn plugin_theme_drain_applies_request_and_refresh_populates_snapshot() {
 fn pasting_an_image_path_attaches_instead_of_inserting_text() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let dir = std::env::temp_dir().join(format!("kage-paste-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let png = dir.join("shot.png");
@@ -1992,7 +2045,7 @@ fn pasting_an_image_path_attaches_instead_of_inserting_text() {
 fn session_picker_defaults_to_cwd_and_ctrl_a_toggles_all() {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     // cwd scope -> only "here"; all scope -> "here" + "elsewhere".
     app.set_session_lister(Box::new(|all| {
         if all {
@@ -2040,7 +2093,7 @@ fn session_picker_defaults_to_cwd_and_ctrl_a_toggles_all() {
 fn search_fixture() -> (App, SharedBuffer) {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let app = App::new(buffer.clone(), tx);
+    let app = app_with_defaults(buffer.clone(), tx);
     {
         let mut buf = buffer.lock().unwrap();
         for text in ["alpha", "needle one", "gamma", "needle two"] {
@@ -2156,7 +2209,7 @@ fn mouse_event(
 fn modal_open_reflects_every_modal_field() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     assert!(!app.modal_open());
 
     app.cmdline = Some(CommandLine::new());
@@ -2212,7 +2265,7 @@ fn mouse_events_are_swallowed_while_modal_is_open() {
 
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer.clone(), tx);
+    let mut app = app_with_defaults(buffer.clone(), tx);
     app.set_scroll(4);
     assert_eq!(buffer.lock().unwrap().scroll(), Some(4));
 
@@ -2242,7 +2295,7 @@ fn mouse_events_are_swallowed_while_modal_is_open() {
 fn paste_routes_to_the_active_overlay() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
 
     // Cmdline open: the paste lands in the command line.
     app.cmdline = Some(CommandLine::new());
@@ -2265,7 +2318,7 @@ fn paste_routes_to_the_active_overlay() {
 
     // Search line open: the paste lands there.
     let (tx2, _rx2) = mpsc::channel();
-    let mut app2 = App::new(shared_buffer(), tx2);
+    let mut app2 = app_with_defaults(shared_buffer(), tx2);
     app2.search_line = Some(CommandLine::new());
     app2.handle_paste("pat");
     assert_eq!(app2.search_line.as_ref().unwrap().text(), "pat");
@@ -2279,7 +2332,7 @@ fn paste_routes_to_the_active_overlay() {
 fn login_command_defers_to_the_run_loop_via_pending_login() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.set_login_runner(std::sync::Arc::new(|_| true));
     let registry: Vec<&CommandSpec> = BUILTIN_COMMANDS.iter().collect();
 
@@ -2299,7 +2352,7 @@ fn login_command_defers_to_the_run_loop_via_pending_login() {
 fn login_command_errors_without_a_runner() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer.clone(), tx);
+    let mut app = app_with_defaults(buffer.clone(), tx);
     let registry: Vec<&CommandSpec> = BUILTIN_COMMANDS.iter().collect();
 
     let result = app.run_command_validated("login", &registry);
@@ -2317,7 +2370,7 @@ fn login_command_errors_without_a_runner() {
 fn draw_snapshot_is_reused_while_the_buffer_is_unchanged() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
 
     // First take: no resident snapshot yet, so this is a fresh clone.
     let (snap, version) = app.take_draw_snapshot();
@@ -2339,7 +2392,7 @@ fn draw_snapshot_is_reused_while_the_buffer_is_unchanged() {
 fn f3_opens_the_jump_picker_and_resolve_focuses_the_block() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     {
         let mut buf = app.buffer.lock().unwrap();
         buf.push_user("find me");
@@ -2361,7 +2414,7 @@ fn f3_opens_the_jump_picker_and_resolve_focuses_the_block() {
 fn shell_submit_sends_run_shell_without_a_user_block() {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(buffer.clone(), tx);
+    let mut app = app_with_defaults(buffer.clone(), tx);
     app.input.set_modeless(true);
     for c in "!ls".chars() {
         app.dispatch_key(key(c));
@@ -2386,7 +2439,7 @@ fn shell_submit_sends_run_shell_without_a_user_block() {
 fn export_uses_the_unquoted_parsed_path() {
     let buffer = shared_buffer();
     let (tx, rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     let res = app.run_command_validated("export \"a b.md\"", &builtin_registry());
     assert!(matches!(res, CommandResult::Done(None)));
     match rx.recv_timeout(Duration::from_millis(100)).unwrap() {
@@ -2401,7 +2454,7 @@ fn export_uses_the_unquoted_parsed_path() {
 fn jump_picker_lists_the_newest_target_first() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     {
         let mut buf = app.buffer.lock().unwrap();
         buf.push_user("aaa oldest");
@@ -2418,7 +2471,7 @@ fn jump_picker_lists_the_newest_target_first() {
 fn model_picker_with_no_models_explains_how_to_connect() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
-    let mut app = App::new(buffer, tx);
+    let mut app = app_with_defaults(buffer, tx);
     app.set_toasts(crate::toast::shared_toasts());
     let _ = app.apply(InputAction::OpenModelPicker);
     assert!(app.picker.is_none());
@@ -2428,4 +2481,353 @@ fn model_picker_with_no_models_explains_how_to_connect() {
             .any(|t| t.text.contains("Run /login")),
         "empty model list must explain itself"
     );
+}
+
+// Keys that moved from the editor grammar to `_defaults.lua`, resolved
+// through an App holding the embedded defaults.
+
+fn defaults_app() -> App {
+    let (tx, _rx) = mpsc::channel();
+    app_with_defaults(shared_buffer(), tx)
+}
+
+fn alt(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)
+}
+
+fn ctrl_code(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::CONTROL)
+}
+
+#[test]
+fn jk_arrows_and_capital_g_scroll_in_the_buffer_pane() {
+    let mut app = defaults_app();
+    normal(&mut app, Pane::Buffer);
+    for (k, action) in [
+        (key('j'), InputAction::Scroll(1)),
+        (code(KeyCode::Down), InputAction::Scroll(1)),
+        (key('k'), InputAction::Scroll(-1)),
+        (code(KeyCode::Up), InputAction::Scroll(-1)),
+        (key('G'), InputAction::ScrollToBottom),
+        (key('y'), InputAction::Yank),
+        (key('Y'), InputAction::YankFocusedBlock),
+        (key('v'), InputAction::EnterVisual),
+    ] {
+        assert_eq!(routes(&mut app, k), input(action), "{k:?}");
+    }
+}
+
+#[test]
+fn jk_and_capital_g_stay_grammar_in_the_input_pane() {
+    let mut app = defaults_app();
+    app.input.paste("first\nsecond");
+    normal(&mut app, Pane::Input);
+    assert!(routes(&mut app, key('k')).is_empty());
+    assert!(app.input().cursor() < 6);
+    assert!(routes(&mut app, key('G')).is_empty());
+    assert_eq!(app.input().cursor(), 12);
+}
+
+#[test]
+fn gg_scrolls_to_top_in_the_buffer_pane_and_moves_the_cursor_in_the_input_pane() {
+    let mut app = defaults_app();
+    normal(&mut app, Pane::Buffer);
+    assert!(routes(&mut app, key('g')).is_empty());
+    assert!(app.keymap_deadline().is_some(), "g waits for more");
+    assert_eq!(routes(&mut app, key('g')), input(InputAction::ScrollToTop));
+    assert!(app.keymap_deadline().is_none());
+
+    let mut app = defaults_app();
+    app.input.paste("hello");
+    normal(&mut app, Pane::Input);
+    assert_eq!(app.input().cursor(), 5);
+    assert!(routes(&mut app, key('g')).is_empty());
+    assert!(routes(&mut app, key('g')).is_empty());
+    assert_eq!(app.input().cursor(), 0);
+}
+
+#[test]
+fn a_lone_g_times_out_into_the_grammar() {
+    let mut app = defaults_app();
+    app.input.paste("hello");
+    normal(&mut app, Pane::Input);
+    let start = Instant::now();
+    app.route_editor_key(key('g'), start);
+    assert!(
+        app.tick_keymap(start + Duration::from_millis(999))
+            .is_empty()
+    );
+    assert!(!app.input.has_pending());
+    app.tick_keymap(start + Duration::from_secs(1));
+    assert!(app.input.has_pending(), "g replayed into the grammar");
+    assert!(routes(&mut app, key('g')).is_empty());
+    assert_eq!(app.input().cursor(), 0);
+}
+
+#[test]
+fn z_then_x_does_nothing() {
+    let mut app = defaults_app();
+    app.input.paste("hello");
+    normal(&mut app, Pane::Input);
+    routes(&mut app, key('0'));
+    assert!(routes(&mut app, key('z')).is_empty());
+    assert!(routes(&mut app, key('x')).is_empty());
+    assert_eq!(app.input().text(), "hello");
+    assert!(routes(&mut app, key('x')).is_empty());
+    assert_eq!(app.input().text(), "ello", "a later x is a delete again");
+}
+
+#[test]
+fn z_prefix_fold_keys_in_normal_mode() {
+    for pane in [Pane::Input, Pane::Buffer] {
+        let mut app = defaults_app();
+        normal(&mut app, pane);
+        for (suffix, action) in [
+            ('o', InputAction::ToggleFold),
+            ('c', InputAction::ToggleFold),
+            ('R', InputAction::UnfoldAll),
+            ('M', InputAction::FoldAll),
+        ] {
+            assert!(routes(&mut app, key('z')).is_empty());
+            assert_eq!(routes(&mut app, key(suffix)), input(action));
+        }
+    }
+}
+
+#[test]
+fn normal_mode_command_keys_in_both_panes() {
+    for pane in [Pane::Input, Pane::Buffer] {
+        let mut app = defaults_app();
+        normal(&mut app, pane);
+        for (k, action) in [
+            (key(':'), InputAction::BeginCommand),
+            (key('/'), InputAction::BeginSearch),
+            (key('?'), InputAction::OpenHelp),
+            (key('['), InputAction::FocusPrev),
+            (key(']'), InputAction::FocusNext),
+            (key('n'), InputAction::SearchNext),
+            (key('N'), InputAction::SearchPrev),
+            (ctrl('o'), InputAction::ToggleFold),
+            (ctrl('w'), InputAction::CyclePane),
+            (code(KeyCode::PageUp), InputAction::Scroll(-10)),
+            (code(KeyCode::PageDown), InputAction::Scroll(10)),
+        ] {
+            assert_eq!(routes(&mut app, k), input(action), "{pane:?} {k:?}");
+        }
+        assert!(routes(&mut app, key('g')).is_empty());
+        assert_eq!(routes(&mut app, key('w')), input(InputAction::CyclePane));
+    }
+}
+
+#[test]
+fn shift_tab_cycles_thinking_in_every_editing_state() {
+    let backtab = code(KeyCode::BackTab);
+    let shift_tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT);
+    let mut app = defaults_app();
+    assert_eq!(
+        routes(&mut app, backtab),
+        input(InputAction::CycleThinkingLevel)
+    );
+    normal(&mut app, Pane::Input);
+    assert_eq!(
+        routes(&mut app, shift_tab),
+        input(InputAction::CycleThinkingLevel)
+    );
+    app.input.set_modeless(true);
+    assert_eq!(
+        routes(&mut app, backtab),
+        input(InputAction::CycleThinkingLevel)
+    );
+    let tab = routes(&mut app, code(KeyCode::Tab));
+    assert!(!tab.contains(&Routed::Input(InputAction::CycleThinkingLevel)));
+}
+
+#[test]
+fn ctrl_s_opens_the_session_picker_in_every_editing_state() {
+    let mut app = defaults_app();
+    let picker = input(InputAction::OpenSessionPicker);
+    assert_eq!(routes(&mut app, ctrl('s')), picker);
+    normal(&mut app, Pane::Input);
+    assert_eq!(routes(&mut app, ctrl('s')), picker);
+    app.input.set_focused_pane(Pane::Buffer);
+    assert_eq!(routes(&mut app, ctrl('s')), picker);
+    app.input.set_modeless(true);
+    assert_eq!(routes(&mut app, ctrl('s')), picker);
+}
+
+#[test]
+fn deleting_the_default_ctrl_s_lets_it_reach_the_grammar() {
+    let (mut app, _rx, _) = app_with_config("kage.keymap.del('g', '<C-s>')", &[]);
+    assert!(routes(&mut app, ctrl('s')).is_empty());
+    assert_eq!(app.handle_key(ctrl('s')), None);
+    assert!(app.picker.is_none());
+    assert_eq!(app.input().text(), "");
+    assert_eq!(
+        routes(&mut app, ctrl('p')),
+        input(InputAction::OpenModelPicker)
+    );
+}
+
+#[test]
+fn a_nop_mapping_swallows_a_grammar_key() {
+    let (mut app, _rx, _) = app_with_config("kage.keymap.set('i', 'x', '<Nop>')", &[]);
+    assert!(routes(&mut app, key('x')).is_empty());
+    assert!(routes(&mut app, key('y')).is_empty());
+    assert_eq!(app.input().text(), "y");
+}
+
+#[test]
+fn insert_and_modeless_scroll_and_focus_keys() {
+    for modeless in [false, true] {
+        let mut app = defaults_app();
+        app.input.set_modeless(modeless);
+        for (k, action) in [
+            (ctrl_code(KeyCode::Down), InputAction::Scroll(1)),
+            (ctrl_code(KeyCode::Up), InputAction::Scroll(-1)),
+            (ctrl_code(KeyCode::Home), InputAction::ScrollToTop),
+            (ctrl_code(KeyCode::End), InputAction::ScrollToBottom),
+            (code(KeyCode::PageUp), InputAction::Scroll(-10)),
+            (code(KeyCode::PageDown), InputAction::Scroll(10)),
+            (ctrl('p'), InputAction::OpenModelPicker),
+            (ctrl('n'), InputAction::FocusNext),
+            (alt('p'), InputAction::FocusPrev),
+            (alt('n'), InputAction::FocusNext),
+            (code(KeyCode::F(3)), InputAction::OpenJumpPicker),
+            (ctrl('v'), InputAction::AttachClipboardImage),
+        ] {
+            assert_eq!(routes(&mut app, k), input(action), "{modeless} {k:?}");
+        }
+        assert_eq!(app.input().text(), "", "no mapped key typed text");
+    }
+}
+
+#[test]
+fn a_pending_leader_fires_its_exact_match_after_timeoutlen() {
+    let (mut app, _rx, _) = app_with_config(
+        "kage.keymap.set('n', '<leader>', kage.action.OpenHelp)
+         kage.keymap.set('n', '<leader>m', kage.action.OpenModelPicker)",
+        &[],
+    );
+    normal(&mut app, Pane::Input);
+    let start = Instant::now();
+    assert!(app.route_editor_key(key('\\'), start).is_empty());
+    assert_eq!(app.keymap_deadline(), Some(start + Duration::from_secs(1)));
+    assert!(
+        app.tick_keymap(start + Duration::from_millis(999))
+            .is_empty()
+    );
+    assert_eq!(
+        app.tick_keymap(start + Duration::from_secs(1)),
+        input(InputAction::OpenHelp)
+    );
+
+    assert!(app.route_editor_key(key('\\'), start).is_empty());
+    assert_eq!(
+        app.route_editor_key(key('m'), start),
+        input(InputAction::OpenModelPicker)
+    );
+
+    app.apply_option("timeoutlen", &OptionValue::Int(200), false);
+    app.route_editor_key(key('\\'), start);
+    assert_eq!(
+        app.keymap_deadline(),
+        Some(start + Duration::from_millis(200))
+    );
+}
+
+#[test]
+fn a_pending_sequence_is_dropped_when_a_modal_opens() {
+    let (mut app, _rx, _) = app_with_config("kage.keymap.set('n', '<leader>', ':quit')", &[]);
+    normal(&mut app, Pane::Input);
+    let start = Instant::now();
+    app.route_editor_key(key('\\'), start);
+    app.open_help();
+    assert!(app.tick_keymap(start + Duration::from_secs(2)).is_empty());
+    assert!(app.keymap_deadline().is_none());
+}
+
+#[test]
+fn completion_keeps_ctrl_n_while_open() {
+    let (mut app, _rx, buffer) = app_with_config("kage.keymap.set('i', '<C-n>', ':clear')", &[]);
+    buffer.lock().unwrap().push_custom("note", "x", false);
+    let rt = kage_plugin::PluginRuntime::new().unwrap();
+    rt.eval(
+        "kage.add_autocomplete_provider({
+           name = 'two',
+           complete = function(prefix)
+             if prefix == '' then return {} end
+             return { { value = prefix .. '1' }, { value = prefix .. '2' } }
+           end,
+         })",
+    )
+    .unwrap();
+    app.set_plugin_autocomplete(rt.registered_autocomplete_providers());
+    app.handle_key(key('f'));
+    assert_eq!(
+        app.input_completion
+            .as_ref()
+            .map(InputCompletion::selected_index),
+        Some(0)
+    );
+    app.handle_key(ctrl('n'));
+    assert_eq!(
+        app.input_completion
+            .as_ref()
+            .map(InputCompletion::selected_index),
+        Some(1),
+        "the popup took ctrl+n"
+    );
+    assert_eq!(
+        buffer.lock().unwrap().blocks().len(),
+        1,
+        "the mapping did not run"
+    );
+    app.handle_key(code(KeyCode::Esc));
+    assert!(app.input_completion.is_none());
+    app.handle_key(ctrl('n'));
+    assert!(
+        buffer.lock().unwrap().blocks().is_empty(),
+        "closed, the mapping runs"
+    );
+}
+
+#[test]
+fn help_rows_come_from_the_live_keymap() {
+    fn help_descs(app: &App) -> std::collections::BTreeSet<String> {
+        app.help_overlay
+            .as_ref()
+            .expect("help open")
+            .mapped_rows()
+            .into_iter()
+            .map(|(_, desc)| desc.to_owned())
+            .collect()
+    }
+    let defaults = default_keymap();
+    let descs = |modes: &[kage_core::keymap::Mode]| -> std::collections::BTreeSet<String> {
+        defaults
+            .entries()
+            .iter()
+            .filter(|e| modes.is_empty() || modes.contains(&e.mode))
+            .filter_map(|e| e.mapping.desc.clone())
+            .collect()
+    };
+
+    let mut app = defaults_app();
+    app.open_help();
+    assert_eq!(help_descs(&app), descs(&[]));
+
+    let mut app = defaults_app();
+    app.input.set_modeless(true);
+    app.open_help();
+    assert_eq!(help_descs(&app), descs(EditState::Insert.modes()));
+
+    let (mut app, _rx, _) = app_with_config(
+        "kage.keymap.set('g', '<C-t>', ':theme set dark', { desc = 'dark theme' })
+         kage.keymap.del('g', '<C-s>')",
+        &[],
+    );
+    app.open_help();
+    let rows = app.help_overlay.as_ref().unwrap().mapped_rows();
+    assert!(rows.contains(&("<C-t>", "dark theme")), "{rows:?}");
+    assert!(!rows.iter().any(|(lhs, _)| *lhs == "<C-s>"), "{rows:?}");
 }

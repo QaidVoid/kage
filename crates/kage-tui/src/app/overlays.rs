@@ -80,6 +80,10 @@ impl App {
             ("theme", OptionValue::Str(theme)) => self.apply_theme_resolved(theme, announce),
             ("mouse", OptionValue::Bool(on)) => self.pending_mouse_capture = Some(*on),
             ("editor", OptionValue::Str(editor)) => self.input.set_modeless(editor == "modeless"),
+            ("timeoutlen", OptionValue::Int(ms)) => {
+                let ms = u64::try_from(*ms).unwrap_or_default();
+                self.sequencer.set_timeout(Duration::from_millis(ms));
+            }
             ("input_min_lines" | "input_max_lines", _) => {
                 let (min, max) = {
                     let store = lock(&self.options);
@@ -403,10 +407,18 @@ impl App {
         None
     }
 
-    /// Open the `?` keyboard reference. Scroll-only: closing is the
-    /// only outcome.
+    /// Open the `?` keyboard reference, built from the live keymap for
+    /// the active editor style. Scroll-only: closing is the only
+    /// outcome.
     pub(crate) fn open_help(&mut self) {
-        self.help_overlay = Some(crate::overlay::HelpOverlay::new(self.input.is_modeless()));
+        let modeless = self.input.is_modeless();
+        let editor = if modeless {
+            kage_core::config::EditorMode::Modeless
+        } else {
+            kage_core::config::EditorMode::Vim
+        };
+        let groups = help_groups(&lock(&self.keymap), editor);
+        self.help_overlay = Some(crate::overlay::HelpOverlay::new(&groups, modeless));
     }
 
     /// Drive the help reference. `Close` and `Resolve` both dismiss:

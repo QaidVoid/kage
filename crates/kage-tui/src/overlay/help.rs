@@ -1,8 +1,9 @@
 //! Scrollable keyboard-reference overlay (`?` / `/help`).
 //!
-//! [`HelpOverlay`] is the in-TUI shortcut reference: static grouped
-//! rows (group header, key column, description), one set per editor
-//! style, with plain scrolling.
+//! [`HelpOverlay`] is the in-TUI shortcut reference: the live keymap
+//! groups (group header, key column, description), then a static
+//! "editing (built in)" section for the keys the Rust editor grammar
+//! handles, one set per editor style, with plain scrolling.
 //! It is a reading surface, not a command surface: every key either
 //! scrolls or closes, so it never swallows something the user meant
 //! for the session underneath.
@@ -14,103 +15,83 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget, Wrap};
 
+use crate::keymap::HelpGroup;
 use crate::overlay::widget::{OverlayAction, OverlayCtx, OverlayWidget};
+
+/// Title of the static section listing the editor grammar keys.
+pub const BUILTIN_SECTION: &str = "editing (built in)";
 
 /// One rendered row of the reference: a group header or a key/desc
 /// pair.
 #[derive(Debug)]
 enum Row {
     /// Bold section header.
-    Header(&'static str),
-    /// A chord (left column) and what it does (right column).
-    Key(&'static str, &'static str),
+    Header(String),
+    /// Keys (left column) and what they do (right column).
+    Key(String, String),
 }
 
-/// Reference for the modeless editor: always insert-like, with Esc
+/// Grammar keys of the modeless editor: always insert-like, with Esc
 /// cancelling the turn and `/`, `!`, `?` as empty-prompt prefixes.
-fn modeless_rows() -> Vec<Row> {
-    use Row::{Header, Key};
-    vec![
-        Header("prompt editing"),
-        Key("Enter", "send the prompt"),
-        Key("Shift+Enter", "insert a newline (Alt+Enter also works)"),
-        Key("Ctrl+A / Ctrl+E", "line start / end"),
-        Key("Ctrl+K / Ctrl+U", "kill to end / start of line"),
-        Key("Ctrl+W", "kill previous word"),
-        Key("Ctrl+Y", "yank last kill"),
-        Key("Ctrl+/", "undo last edit"),
-        Key("Up / Down", "previous / next prompt from history"),
-        Key("Ctrl+G", "edit the prompt in $VISUAL or $EDITOR"),
-        Key("Ctrl+V", "attach image from clipboard"),
-        Header("empty prompt"),
-        Key("/", "command palette"),
-        Key("!", "run a shell command"),
-        Key("?", "this reference"),
-        Header("conversation"),
-        Key("PageUp / PageDown", "scroll ten lines"),
-        Key("Ctrl+Up / Down", "scroll one line"),
-        Key("Ctrl+Home / End", "jump to top / bottom"),
-        Key("Alt+P / Alt+N", "focus previous / next block"),
-        Key("Ctrl+O", "fold / unfold the focused block"),
-        Key("F3", "jump to a message"),
-        Header("pickers & overlays"),
-        Key("Ctrl+P", "model picker"),
-        Key("Ctrl+S", "session picker"),
-        Key("Shift+Tab", "cycle thinking level"),
-        Key("/settings", "theme, model, mouse, thinking"),
-        Header("during a turn"),
-        Key("Esc / Ctrl+C", "cancel the running turn"),
-        Key("/compact", "compact history now"),
-        Header("leave"),
-        Key("Ctrl+Q", "quit kage (cancels a running turn)"),
-        Key("/quit", "quit kage"),
-    ]
-}
+const MODELESS_BUILTIN: &[(&str, &str)] = &[
+    ("Enter", "send the prompt"),
+    ("Shift+Enter", "insert a newline (Alt+Enter also works)"),
+    ("Up / Down", "previous / next prompt from history"),
+    ("Ctrl+A / Ctrl+E", "line start / end"),
+    ("Ctrl+K / Ctrl+U", "kill to end / start of line"),
+    ("Ctrl+W / Alt+BS", "kill previous word"),
+    ("Ctrl+Y", "yank last kill"),
+    ("Ctrl+/", "undo last edit"),
+    (
+        "Ctrl+O",
+        "expand a collapsed paste, or fold the focused block",
+    ),
+    ("Ctrl+G", "edit the prompt in $VISUAL or $EDITOR"),
+    ("/ (empty prompt)", "command palette"),
+    ("! (empty prompt)", "run a shell command"),
+    ("? (empty prompt)", "this reference"),
+    ("Esc / Ctrl+C", "cancel the running turn"),
+    ("Ctrl+Q", "quit kage (cancels a running turn)"),
+];
 
-/// Reference for the vim-style modal editor.
-fn vim_rows() -> Vec<Row> {
-    use Row::{Header, Key};
-    vec![
-        Header("modes"),
-        Key("i", "edit the prompt (from normal mode)"),
-        Key("Esc", "normal mode / close popups / cancel turn"),
-        Key("Ctrl+W (normal)", "cycle pane focus (input / buffer)"),
-        Key("?", "this reference (normal mode)"),
-        Header("buffer (normal mode)"),
-        Key("j / k", "scroll one line"),
-        Key("gg / G", "jump to top / bottom"),
-        Key("[ / ]", "focus previous / next block"),
-        Key("Ctrl+O", "fold / unfold the focused block"),
-        Key("zM / zR", "fold all / unfold all"),
-        Key("/ (normal)", "search the buffer (n / N walk matches)"),
-        Key("y / v", "yank selection / start visual select"),
-        Header("prompt editing"),
-        Key("Enter", "submit"),
-        Key("Shift+Enter", "insert a newline (Alt+Enter also works)"),
-        Key("Ctrl+A / Ctrl+E", "line start / end"),
-        Key("Ctrl+K / Ctrl+U", "kill to end / start of line"),
-        Key("Ctrl+W (insert)", "kill previous word"),
-        Key("Ctrl+Y", "yank last kill"),
-        Key("Ctrl+/", "undo last edit"),
-        Key("Ctrl+G", "edit the prompt in $VISUAL or $EDITOR"),
-        Key("/ (empty prompt)", "command palette"),
-        Key("! (empty prompt)", "run a shell command"),
-        Header("pickers & overlays"),
-        Key("F3", "jump to a message"),
-        Key("Ctrl+P", "model picker"),
-        Key("Ctrl+S", "session picker"),
-        Key("Shift+Tab", "cycle thinking level"),
-        Key(":", "command line (normal mode)"),
-        Key(":settings", "theme, model, mouse, thinking"),
-        Key("Ctrl+V", "attach image from clipboard"),
-        Header("during a turn"),
-        Key("Ctrl+C", "cancel the running turn"),
-        Key(":compact", "compact history now"),
-        Header("leave"),
-        Key("Ctrl+Q", "quit kage"),
-        Key(":q", "quit kage"),
-    ]
-}
+/// Grammar keys of the vim-style modal editor.
+const VIM_BUILTIN: &[(&str, &str)] = &[
+    (
+        "i / a / I / A",
+        "insert mode (from the conversation: focus input)",
+    ),
+    ("Esc", "normal mode, clear the selection"),
+    ("h j k l w b e", "move in the prompt (normal mode)"),
+    ("0 $ ^ gg G", "line start / end, prompt start / end"),
+    (
+        "d c y + motion",
+        "operators, doubled for lines (dd), counts (3dw)",
+    ),
+    ("x X r D C o O", "single-character and line edits"),
+    ("p P u Ctrl+R", "paste, undo, redo"),
+    ("v", "visual select in the prompt"),
+    ("Enter", "submit"),
+    ("Shift+Enter", "insert a newline (Alt+Enter also works)"),
+    ("Up / Down", "prompt history (insert mode)"),
+    ("Ctrl+A / Ctrl+E", "line start / end (insert mode)"),
+    (
+        "Ctrl+K / Ctrl+U",
+        "kill to end / start of line (insert mode)",
+    ),
+    (
+        "Ctrl+W / Ctrl+Y",
+        "kill previous word / yank it back (insert mode)",
+    ),
+    (
+        "Ctrl+O (insert)",
+        "expand a collapsed paste, or fold the focused block",
+    ),
+    ("Ctrl+G", "edit the prompt in $VISUAL or $EDITOR"),
+    ("/ (empty prompt)", "command palette (insert mode)"),
+    ("! (empty prompt)", "run a shell command (insert mode)"),
+    ("Ctrl+C", "cancel the running turn"),
+    ("Ctrl+Q", "quit kage"),
+];
 
 /// The `?` keyboard reference modal.
 #[derive(Debug)]
@@ -125,20 +106,47 @@ pub struct HelpOverlay {
 }
 
 impl HelpOverlay {
-    /// Build the reference for the active editor style: the modeless
-    /// set when `modeless` is true, the vim set otherwise.
+    /// Build the reference from `groups`, the live keymap rows for the
+    /// active editor style, followed by the built-in editing keys of
+    /// that style: the modeless set when `modeless` is true, the vim
+    /// set otherwise.
     #[must_use]
-    pub fn new(modeless: bool) -> Self {
+    pub fn new(groups: &[HelpGroup], modeless: bool) -> Self {
+        let mut rows = Vec::new();
+        for group in groups {
+            rows.push(Row::Header(group.name.clone()));
+            for row in &group.rows {
+                rows.push(Row::Key(row.lhs.clone(), row.desc.clone()));
+            }
+        }
+        rows.push(Row::Header(BUILTIN_SECTION.to_owned()));
+        let builtin = if modeless {
+            MODELESS_BUILTIN
+        } else {
+            VIM_BUILTIN
+        };
+        for (keys, desc) in builtin {
+            rows.push(Row::Key((*keys).to_owned(), (*desc).to_owned()));
+        }
         Self {
             title: " keyboard shortcuts ".to_owned(),
-            rows: if modeless {
-                modeless_rows()
-            } else {
-                vim_rows()
-            },
+            rows,
             scroll: 0,
             viewport_rows: 1,
         }
+    }
+
+    /// The `(keys, desc)` rows above the built-in section.
+    #[cfg(test)]
+    pub(crate) fn mapped_rows(&self) -> Vec<(&str, &str)> {
+        self.rows
+            .iter()
+            .take_while(|row| !matches!(row, Row::Header(name) if name == BUILTIN_SECTION))
+            .filter_map(|row| match row {
+                Row::Key(keys, desc) => Some((keys.as_str(), desc.as_str())),
+                Row::Header(_) => None,
+            })
+            .collect()
     }
 
     /// Clamp the scroll offset so the last row stays visible.
@@ -193,10 +201,10 @@ impl OverlayWidget for HelpOverlay {
             .rows
             .iter()
             .map(|row| match row {
-                Row::Header(title) => Line::from(Span::styled((*title).to_owned(), header_style)),
+                Row::Header(title) => Line::from(Span::styled(title.clone(), header_style)),
                 Row::Key(keys, desc) => Line::from(vec![
                     Span::styled(format!("  {keys:<18}"), key_style),
-                    Span::styled((*desc).to_owned(), desc_style),
+                    Span::styled(desc.clone(), desc_style),
                 ]),
             })
             .collect();
@@ -266,6 +274,7 @@ impl OverlayWidget for HelpOverlay {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keymap::HelpRow;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -274,14 +283,14 @@ mod tests {
     #[test]
     fn esc_enter_and_q_close() {
         for code in [KeyCode::Esc, KeyCode::Enter, KeyCode::Char('q')] {
-            let mut h = HelpOverlay::new(false);
+            let mut h = HelpOverlay::new(&[], false);
             assert_eq!(h.handle_key(key(code)), OverlayAction::Close);
         }
     }
 
     #[test]
     fn scrolling_clamps_at_both_ends() {
-        let mut h = HelpOverlay::new(false);
+        let mut h = HelpOverlay::new(&[], false);
         let bottom = h.rows.len();
         for _ in 0..(bottom + 50) {
             h.handle_key(key(KeyCode::Down));
@@ -300,7 +309,7 @@ mod tests {
 
     #[test]
     fn page_down_jumps_by_viewport() {
-        let mut h = HelpOverlay::new(false);
+        let mut h = HelpOverlay::new(&[], false);
         h.viewport_rows = 10;
         h.handle_key(key(KeyCode::PageDown));
         assert_eq!(h.scroll, 9);
@@ -310,7 +319,7 @@ mod tests {
 
     #[test]
     fn measure_centers_and_caps_height() {
-        let h = HelpOverlay::new(false);
+        let h = HelpOverlay::new(&[], false);
         let area = Rect::new(0, 0, 200, 100);
         let m = h.measure(area);
         assert!(m.width < area.width, "must not span the full width");
@@ -323,43 +332,60 @@ mod tests {
 
     #[test]
     fn other_keys_propagate() {
-        let mut h = HelpOverlay::new(false);
+        let mut h = HelpOverlay::new(&[], false);
         assert_eq!(
             h.handle_key(key(KeyCode::Char('x'))),
             OverlayAction::PropagateKey
         );
     }
 
-    fn key_labels(rows: &[Row]) -> Vec<&'static str> {
+    fn key_labels(rows: &[Row]) -> Vec<&str> {
         rows.iter()
             .filter_map(|row| match row {
-                Row::Key(keys, _) => Some(*keys),
+                Row::Key(keys, _) => Some(keys.as_str()),
                 Row::Header(_) => None,
             })
             .collect()
     }
 
     #[test]
-    fn modeless_rows_cover_modeless_keys_and_skip_vim_motions() {
-        let labels = key_labels(&modeless_rows());
-        for wanted in ["Shift+Enter", "!", "Ctrl+G", "Shift+Tab"] {
-            assert!(labels.contains(&wanted), "missing {wanted}");
-        }
-        assert!(!labels.contains(&"gg / G"));
+    fn live_groups_come_first_then_the_builtin_section() {
+        let groups = [HelpGroup {
+            name: "general".to_owned(),
+            rows: vec![HelpRow {
+                lhs: "<C-p>".to_owned(),
+                desc: "model picker".to_owned(),
+            }],
+        }];
+        let h = HelpOverlay::new(&groups, true);
+        assert!(matches!(&h.rows[0], Row::Header(name) if name == "general"));
+        assert!(
+            matches!(&h.rows[1], Row::Key(keys, desc) if keys == "<C-p>" && desc == "model picker")
+        );
+        assert!(matches!(&h.rows[2], Row::Header(name) if name == BUILTIN_SECTION));
+        assert_eq!(h.rows.len(), 3 + MODELESS_BUILTIN.len());
     }
 
     #[test]
-    fn key_labels_are_unique_in_both_sets() {
-        for rows in [modeless_rows(), vim_rows()] {
-            let labels = key_labels(&rows);
-            let mut deduped = labels.clone();
-            deduped.sort_unstable();
-            deduped.dedup();
-            assert_eq!(
-                deduped.len(),
-                labels.len(),
-                "duplicate key label in {labels:?}"
-            );
+    fn builtin_sections_cover_each_style() {
+        let modeless = HelpOverlay::new(&[], true);
+        let labels = key_labels(&modeless.rows);
+        for wanted in ["Shift+Enter", "! (empty prompt)", "Ctrl+G", "Ctrl+Q"] {
+            assert!(labels.contains(&wanted), "missing {wanted}");
+        }
+        assert!(!labels.iter().any(|l| l.contains("gg")));
+        let vim = HelpOverlay::new(&[], false);
+        assert!(key_labels(&vim.rows).contains(&"0 $ ^ gg G"));
+    }
+
+    #[test]
+    fn builtin_labels_are_unique_in_both_sets() {
+        for rows in [MODELESS_BUILTIN, VIM_BUILTIN] {
+            let mut labels: Vec<&str> = rows.iter().map(|(keys, _)| *keys).collect();
+            let count = labels.len();
+            labels.sort_unstable();
+            labels.dedup();
+            assert_eq!(labels.len(), count, "duplicate key label in {rows:?}");
         }
     }
 }

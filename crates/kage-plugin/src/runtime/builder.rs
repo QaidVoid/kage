@@ -100,6 +100,17 @@ impl PluginRuntimeBuilder {
         self
     }
 
+    /// Set the `[keybindings]` table from `config.toml`. Its `bindings`
+    /// map in mode `g` after the plugins and before `init.lua` on every
+    /// load, and every entry that cannot be applied, including keys
+    /// written directly under the table, lands in
+    /// [`crate::LoadReport::keymap_errors`].
+    #[must_use]
+    pub fn keybindings(mut self, keybindings: kage_core::config::KeybindingsConfig) -> Self {
+        self.keybindings = keybindings;
+        self
+    }
+
     /// Replace the embedded `_defaults.lua` source.
     #[cfg(test)]
     #[must_use]
@@ -111,7 +122,7 @@ impl PluginRuntimeBuilder {
     /// Finalize the runtime: build the Lua state, apply sandbox removals,
     /// install the `kage` API table with its `kage.api` primitives, wire
     /// `kage.register_tool`, `kage.register_command`,
-    /// `kage.register_provider`, `kage.fs.*`, `kage.opt`, and
+    /// `kage.register_provider`, `kage.fs.*`, `kage.opt`, `kage.action`, and
     /// `kage.schedule`, `kage.defer` and `kage.timer`, evaluate the embedded stdlib
     /// (which defines `kage.on`), freeze the shared tables, then hand
     /// the state to its owner thread.
@@ -143,7 +154,6 @@ impl PluginRuntimeBuilder {
         let session_ops_slot = shared_session_ops();
         let pending_messages_slot = shared_pending_messages();
         let bridge_slot = shared_bridge();
-        let keybinding_registry = registered_keybindings();
         let theme_state_slot = shared_theme_state();
         let theme_request_slot = shared_theme_request();
         let header_slot = shared_chrome();
@@ -161,6 +171,12 @@ impl PluginRuntimeBuilder {
             Arc::clone(&current_plugin),
             self.script_budget,
         )?;
+        let keymaps = Keymaps::new(
+            Arc::clone(&self.options),
+            Arc::clone(&current_plugin),
+            self.sink.clone(),
+        );
+        keymap::install(&lua, &keymaps)?;
         let options = Options {
             store: self.options,
             themes: self.theme_names,
@@ -188,12 +204,6 @@ impl PluginRuntimeBuilder {
             Arc::clone(&cap_registry),
         )?;
         ui::install_ui(&lua)?;
-        keybindings::install_register_keybinding(
-            &lua,
-            weak_host.clone(),
-            self.sink.clone(),
-            &keybinding_registry,
-        )?;
         tools::install_register_tool(&lua, weak_host.clone(), self.sink.clone(), &tool_registry)?;
         tools::install_override_tool(
             &lua,
@@ -283,6 +293,8 @@ impl PluginRuntimeBuilder {
             defaults: self.defaults,
             user_dir: self.user_dir,
             capabilities: cap_registry,
+            keymaps,
+            keybindings: self.keybindings,
         });
         Ok(PluginRuntime {
             host,
@@ -305,7 +317,6 @@ impl PluginRuntimeBuilder {
             session_ops: session_ops_slot,
             pending_messages: pending_messages_slot,
             bridge: bridge_slot,
-            keybindings: keybinding_registry,
             theme_state: theme_state_slot,
             theme_request: theme_request_slot,
             header: header_slot,

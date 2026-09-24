@@ -14,6 +14,7 @@
 //! with the Rust bindings. Keeping the description in this crate makes
 //! adding a binding a single edit instead of two.
 
+pub use kage_core::keymap::ActionDef;
 pub use kage_core::options::{OptionDef, OptionKind};
 
 /// One `---@param` (on a function) or `---@field` (on a class).
@@ -109,6 +110,9 @@ pub struct Surface {
     /// The option registry behind `kage.opt`, rendered as the
     /// `kage.Options` class.
     pub options: &'static [OptionDef],
+    /// The actions behind `kage.action`, rendered as the
+    /// `kage.Actions` class.
+    pub actions: &'static [ActionDef],
 }
 
 /// The single source of truth: the full `kage` plugin surface.
@@ -121,6 +125,7 @@ pub fn surface() -> Surface {
         funcs: funcs::FUNCS,
         gated: gated::GATED,
         options: kage_core::options::OPTIONS,
+        actions: kage_core::keymap::ACTIONS,
     }
 }
 

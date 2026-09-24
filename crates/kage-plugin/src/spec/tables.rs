@@ -40,6 +40,10 @@ pub(super) const TABLES: &[Table] = &[
         class_doc: "Theme inspection and switching.",
     },
     Table {
+        path: "kage.keymap",
+        class_doc: "Key mappings, one table with last set wins.",
+    },
+    Table {
         path: "kage.api",
         class_doc: "Low-level primitives the stdlib builds on.",
     },

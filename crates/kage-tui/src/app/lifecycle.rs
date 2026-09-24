@@ -49,6 +49,18 @@ impl App {
             if self.drain_plugin_theme() {
                 needs_redraw = true;
             }
+            let now = Instant::now();
+            if self.keymap_deadline().is_some_and(|at| at <= now) {
+                needs_redraw = true;
+                let routed = self.tick_keymap(now);
+                if let Some(exit) = self.apply_routed(routed) {
+                    if let Some(state) = self.active_dialog.take() {
+                        let _ = state.reply().send(None);
+                    }
+                    return Ok(exit);
+                }
+                self.refresh_input_completion();
+            }
             if last_plugin_snapshot.is_none_or(|t| t.elapsed() >= PLUGIN_SNAPSHOT_INTERVAL) {
                 self.refresh_plugin_theme_state();
                 self.refresh_plugin_session_list();
@@ -103,6 +115,11 @@ impl App {
                     deadline = toast_deadline;
                 }
                 needs_redraw = true;
+            }
+            // A pending key sequence resolves at its timeout even when
+            // no further key arrives.
+            if let Some(keymap_deadline) = self.keymap_deadline() {
+                deadline = deadline.min(keymap_deadline);
             }
             while Instant::now() < deadline {
                 let remaining = deadline

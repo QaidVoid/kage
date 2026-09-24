@@ -35,6 +35,15 @@ impl InputState {
         }
     }
 
+    /// Whether the grammar is waiting for the rest of a command: a
+    /// `g` or `z` prefix, an operator, or the character after `r`.
+    /// The host then passes the next key straight to
+    /// [`Self::handle_key`] instead of looking it up as a keymap.
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        self.pending.is_some() || self.pending_op.is_some() || self.awaiting_replace
+    }
+
     /// Whether the editor is in non-modal mode.
     #[must_use]
     pub fn is_modeless(&self) -> bool {

@@ -545,52 +545,67 @@ impl App {
         out
     }
 
-    /// Render the active key bindings: user `[keybindings]` config
-    /// first (authoritative), then plugin-registered chords, then the
-    /// fixed reserved keys the TUI handles itself. Honest about the
-    /// last group rather than pretending everything is rebindable.
+    /// Render the live keymap per mode with the owner of each mapping,
+    /// then the keys the editor grammar handles and the two hatches.
     pub(crate) fn push_keybindings(&mut self) {
-        let mut lines = vec!["key bindings (first match wins, top to bottom):".to_owned()];
-
-        lines.push(String::new());
-        lines.push("[keybindings] config:".to_owned());
-        if self.config_keybindings.is_empty() {
-            lines.push("  (none; add a [keybindings] table to config.toml)".to_owned());
-        } else {
-            for (_, chord, target) in &self.config_keybindings {
-                lines.push(format!("  {chord:<16} {}", target.echo()));
+        use kage_core::keymap::{Mode as KeymapMode, display_keys};
+        let mut lines = vec!["key mappings (last set wins):".to_owned()];
+        {
+            let keymap = lock(&self.keymap);
+            let entries = keymap.entries();
+            for (mode, what) in [
+                (KeymapMode::Global, "any editing state"),
+                (KeymapMode::Insert, "insert and the modeless editor"),
+                (KeymapMode::Normal, "vim normal mode"),
+                (KeymapMode::Buffer, "vim normal mode, conversation pane"),
+                (KeymapMode::Visual, "visual mode"),
+            ] {
+                let rows: Vec<String> = entries
+                    .iter()
+                    .filter(|e| e.mode == mode)
+                    .map(|e| {
+                        let rhs = match &e.mapping.rhs {
+                            Rhs::Action {
+                                name,
+                                arg: Some(arg),
+                            } => format!("action:{name}({arg})"),
+                            Rhs::Action { name, arg: None } => format!("action:{name}"),
+                            Rhs::Command(command) => format!(":{command}"),
+                            Rhs::Lua(_) => "lua function".to_owned(),
+                            Rhs::Nop => "<Nop>".to_owned(),
+                        };
+                        let lhs = display_keys(e.lhs);
+                        format!("  {lhs:<12} {rhs:<32} {}", e.mapping.owner)
+                    })
+                    .collect();
+                if rows.is_empty() {
+                    continue;
+                }
+                lines.push(String::new());
+                lines.push(format!("{mode}: {what}"));
+                lines.extend(rows);
             }
         }
-
         lines.push(String::new());
-        lines.push("plugin (kage.register_keybinding):".to_owned());
-        if self.plugin_keybindings.is_empty() {
-            lines.push("  (none)".to_owned());
-        } else {
-            for (_, chord) in &self.plugin_keybindings {
-                lines.push(format!("  {chord:<16} plugin handler"));
-            }
-        }
-
-        lines.push(String::new());
-        lines.push("reserved (handled by the TUI):".to_owned());
-        for (chord, what) in [
-            ("ctrl+q", "quit (yields to an explicit ctrl+q binding)"),
-            ("ctrl+c", "interrupt (yields to an explicit ctrl+c binding)"),
-            ("ctrl+v", "attach image from the clipboard"),
-            ("shift+tab", "cycle thinking level"),
-            ("ctrl+p", "model picker"),
-            ("ctrl+s", "session picker"),
-            ("ctrl+o", "fold / unfold the focused block"),
-            ("ctrl+w", "cycle pane focus (normal mode)"),
-            ("[ / ]", "focus prev / next block (normal mode)"),
-            ("alt+p / alt+n", "focus prev / next block (insert mode)"),
-            (":", "command line"),
-            ("/", "search"),
-            ("esc", "leave a mode / close an overlay"),
+        lines.push(
+            "built in (editor grammar; a mapping or <Nop> shadows these, del cannot remove them):"
+                .to_owned(),
+        );
+        for row in [
+            "vim motions, operators, counts, registers, r, undo, redo",
+            "readline edits and the kill ring (<C-a/e/w/u/k/y>, <C-/>, <M-b/f/d>, <M-BS>)",
+            "<CR> submit, <S-CR> and <M-CR> newline, <Up> and <Down> history",
+            "<Esc>, insert <C-o> (expand a paste or fold), <C-g> external editor",
+            "modeless empty-prompt /, ! and ?, conversation pane i and a",
         ] {
-            lines.push(format!("  {chord:<16} {what}"));
+            lines.push(format!("  {row}"));
         }
+        lines.push(String::new());
+        lines.push(
+            "hatches (above every layer; they yield only to init.lua or config.toml):".to_owned(),
+        );
+        lines.push("  <C-q>        quit".to_owned());
+        lines.push("  <C-c>        interrupt the running turn".to_owned());
 
         let body = lines.join("\n");
         let mut buf = lock(&self.buffer);

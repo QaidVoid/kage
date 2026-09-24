@@ -36,6 +36,11 @@
 --- Where the current value of an option came from.
 ---@alias kage.OptionSource "default"|"toml"|"lua"|"runtime"
 
+--- A keymap mode: `n` vim normal (both panes), `b` vim normal
+--- with the conversation pane focused, `i` insert and the
+--- modeless editor, `v` visual, `g` any editing state.
+---@alias kage.KeymapMode "n"|"b"|"i"|"v"|"g"
+
 --- Every event name `kage.on` and `kage.api.autocmd_create`
 --- accept. Notification events ignore the handler return;
 --- transform events chain it; predicate and session-op events
@@ -217,6 +222,14 @@
 ---@field group? integer Group id.
 ---@field data any Event payload.
 
+--- Options for `kage.keymap.set` and `kage.api.keymap_set`.
+---@class kage.KeymapOpts
+---@field desc? string Shown in `?` help. Mappings without one are hidden there.
+---@field group? string Help section. Defaults to `other`.
+
+--- A Rust action from `kage.action`, used as a mapping rhs.
+---@class kage.Action
+
 --- Every option `kage.opt` reads and writes.
 ---@class kage.Options
 ---@field theme string Color theme, bundled or from the themes directory.
@@ -229,6 +242,34 @@
 ---@field leader string The key `<leader>` expands to when a mapping is set.
 ---@field timeoutlen integer Milliseconds a mapping that is also a prefix waits for more keys.
 
+--- Every action `kage.action` holds.
+---@class kage.Actions
+---@field Cancel kage.Action Cancel the in-flight turn.
+---@field BeginCommand kage.Action Open the `:` command line.
+---@field BeginSearch kage.Action Open the `/` search line.
+---@field ScrollToTop kage.Action Scroll the conversation to the top.
+---@field ScrollToBottom kage.Action Scroll the conversation to the bottom.
+---@field ToggleFold kage.Action Toggle the fold of the focused block.
+---@field UnfoldAll kage.Action Open every foldable block.
+---@field FoldAll kage.Action Close every foldable block.
+---@field Yank kage.Action Copy the active selection to the clipboard.
+---@field ClearSelection kage.Action Drop the active selection.
+---@field OpenModelPicker kage.Action Open the model picker.
+---@field OpenSessionPicker kage.Action Open the session picker.
+---@field OpenCommandPalette kage.Action Open the slash command palette.
+---@field SearchNext kage.Action Focus the next search match.
+---@field SearchPrev kage.Action Focus the previous search match.
+---@field YankFocusedBlock kage.Action Copy the focused block.
+---@field CycleThinkingLevel kage.Action Cycle the thinking level.
+---@field CyclePane kage.Action Toggle focus between the input and the conversation.
+---@field FocusPrev kage.Action Focus the previous foldable block.
+---@field FocusNext kage.Action Focus the next foldable block.
+---@field scroll fun(n: integer): kage.Action Scroll the conversation by a line count (negative scrolls up).
+---@field OpenHelp kage.Action Open the keyboard reference.
+---@field OpenJumpPicker kage.Action Open the jump-to-message picker.
+---@field AttachClipboardImage kage.Action Attach an image from the clipboard.
+---@field EnterVisual kage.Action Enter visual selection.
+
 ---@class kage
 kage = {}
 
@@ -236,6 +277,10 @@ kage = {}
 --- source and fires `option_set`.
 ---@type kage.Options
 kage.opt = {}
+
+--- Rust actions to use as a mapping rhs.
+---@type kage.Actions
+kage.action = {}
 
 --- Wall-clock milliseconds since the Unix epoch.
 --- Since API 1.
@@ -440,13 +485,42 @@ function kage.override_command(spec) end
 ---@param render fun(block: table): any|nil Gets { kind, text, width }; nil unregisters.
 function kage.register_block_renderer(kind, render) end
 
---- Bind a chord to a handler. `spec` is a chord string or
---- `{ key, description? }`. The handler runs through the
---- coroutine bridge, so it may open `kage.ui.*` dialogs.
+--- Bind a chord to a handler in mode `g`. `spec` is a chord
+--- string or `{ key, description? }`. The handler runs through
+--- the coroutine bridge, so it may open `kage.ui.*` dialogs.
+--- Returns an `off` function that removes the mapping while it
+--- is still this one (idempotent). Same table as
+--- `kage.keymap.set`.
 --- Since API 1.
 ---@param spec string|{ key: string, description?: string }
 ---@param handler fun(): string?
+---@return fun()
 function kage.register_keybinding(spec, handler) end
+
+--- Key mappings, one table with last set wins.
+---@class kage.keymap
+kage.keymap = {}
+
+--- Map `lhs` in each of `mode` (a letter or a list). `lhs` is
+--- Vim notation (`<C-l>`, `gg`, `<leader>m`) or a chord
+--- (`ctrl+shift+x`); `<leader>` expands with `kage.opt.leader`
+--- now. `rhs` is a `kage.action` value, a `":command"` string,
+--- a function (run through the coroutine bridge) or
+--- `"<Nop>"`. The last set wins.
+--- Since API 2.
+---@param mode kage.KeymapMode|kage.KeymapMode[]
+---@param lhs string
+---@param rhs kage.Action|string|fun(): string?
+---@param opts? kage.KeymapOpts
+function kage.keymap.set(mode, lhs, rhs, opts) end
+
+--- Remove the mapping for `lhs` in each of `mode`. Raises when
+--- there is none. Keys the built-in editor handles are not
+--- mappings: shadow them with `"<Nop>"` instead.
+--- Since API 2.
+---@param mode kage.KeymapMode|kage.KeymapMode[]
+---@param lhs string
+function kage.keymap.del(mode, lhs) end
 
 --- Add a prompt-input autocomplete provider. Providers form a
 --- stack; the most recently added wins. Runs synchronously on
@@ -706,6 +780,21 @@ function kage.api.option_get(name) end
 ---@param name string
 ---@param value any
 function kage.api.option_set(name, value) end
+
+--- Map `lhs` in one mode. See `kage.keymap.set`, which takes a
+--- list of modes.
+--- Since API 2.
+---@param mode kage.KeymapMode
+---@param lhs string
+---@param rhs kage.Action|string|fun(): string?
+---@param opts? kage.KeymapOpts
+function kage.api.keymap_set(mode, lhs, rhs, opts) end
+
+--- Remove the mapping for `lhs` in one mode. Raises when there is none.
+--- Since API 2.
+---@param mode kage.KeymapMode
+---@param lhs string
+function kage.api.keymap_del(mode, lhs) end
 
 --- Metadata for every entry in the current session, in
 --- order, each `{ id, kind, role?, ts }`. Use it to find

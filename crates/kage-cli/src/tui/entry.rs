@@ -85,6 +85,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         plugins_dir_path.as_deref(),
         user_dir.as_deref(),
         app_config.plugins.clone(),
+        app_config.keybindings.clone(),
         Arc::clone(&options),
         &workdir,
         &provisional_model,
@@ -173,7 +174,6 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     )> = None;
     let mut plugin_chrome: Option<(kage_plugin::SharedChrome, kage_plugin::SharedChrome)> = None;
     let mut plugin_terminal_hooks: Option<kage_plugin::RegisteredTerminalHooks> = None;
-    let mut plugin_keybinding_chords: Vec<String> = Vec::new();
     if let Some(rt) = plugin_runtime.as_ref() {
         plugin_command_listing = support::snapshot_plugin_commands(rt);
         support::register_block_renderers(rt);
@@ -188,11 +188,6 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         plugin_theme = Some((rt.shared_theme_state(), rt.shared_theme_request()));
         plugin_chrome = Some((rt.shared_header(), rt.shared_footer()));
         plugin_terminal_hooks = Some(rt.shared_terminal_hooks());
-        plugin_keybinding_chords = rt
-            .registered_keybindings()
-            .iter()
-            .map(|kb| kb.chord().to_owned())
-            .collect();
     }
     let (mcp_manager, mcp_errors) =
         crate::mcp::spawn_and_register(&mut tools, &workdir, plugin_runtime.as_deref());
@@ -371,22 +366,10 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     }
     if let Some(rt) = plugin_runtime.as_ref() {
         app.set_plugin_redraw(rt.redraw_flag(), rt.blocks_flag());
+        app.set_keymap(rt.keymap());
     }
     app.set_plugin_dialog(dialog_rx);
     app.set_plugin_refresh(plugin_refresh_rx);
-    app.set_plugin_keybindings(plugin_keybinding_chords);
-    let keybinding_errors = app.set_config_keybindings(
-        app_config
-            .keybindings
-            .bindings
-            .iter()
-            .map(|(chord, command)| (chord.clone(), command.clone()))
-            .collect(),
-    );
-    for err in keybinding_errors {
-        let mut buf = lock(&buffer);
-        buf.push_custom("kage:error", err, false);
-    }
     app.set_toasts(toasts.clone());
     app.set_session_usage(shared_session_usage());
     app.set_status_session_id(session_id.to_string().chars().take(8).collect());

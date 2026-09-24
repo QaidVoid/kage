@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use kage_core::config::PluginsConfig;
+use kage_core::config::{KeybindingsConfig, PluginsConfig};
 use kage_core::{LoopEvent, Message, ToolOutput, sync::lock};
 use kage_loop::{CompactionPrep, Hooks, StreamRequest, TurnSummary};
 use kage_plugin::{
@@ -66,17 +66,19 @@ pub fn setup_runtime(
 
 /// Build the TUI's runtime. Unlike [`setup_runtime`] it always returns a
 /// runtime, even with no plugins, so the embedded defaults have a Lua
-/// state. It loads the plugins in `plugins_dir` and then the trusted
-/// `<user_dir>/init.lua`. `plugins_cfg` is the already loaded
-/// `[plugins]` table, `options` the store seeded from the same config,
-/// and `sink` receives plugin output, so nothing is written to stderr
-/// while the TUI owns the screen. The `theme` option accepts the
-/// bundled themes and those in the user themes dir.
+/// state. It loads the plugins in `plugins_dir`, the `[keybindings]`
+/// table, and then the trusted `<user_dir>/init.lua`. `plugins_cfg` and
+/// `keybindings` are the already loaded config tables, `options` the
+/// store seeded from the same config, and `sink` receives plugin
+/// output, so nothing is written to stderr while the TUI owns the
+/// screen. The `theme` option accepts the bundled themes and those in
+/// the user themes dir.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn setup_tui_runtime(
     plugins_dir: Option<&Path>,
     user_dir: Option<&Path>,
     plugins_cfg: PluginsConfig,
+    keybindings: KeybindingsConfig,
     options: SharedOptions,
     workdir: &Path,
     model: &str,
@@ -89,6 +91,7 @@ pub(crate) fn setup_tui_runtime(
         .sink(sink)
         .state_dir(crate::data_root().ok().map(|r| r.join("plugin-state")))
         .user_dir(user_dir.map(Path::to_path_buf))
+        .keybindings(keybindings)
         .options(options)
         .theme_names(Arc::new(move || {
             kage_tui::theme::Theme::available_names(themes_dir.as_deref())

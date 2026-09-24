@@ -7,10 +7,11 @@ use std::fmt::Write as _;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use kage_core::{Risk, ToolOutput};
+use kage_core::{Risk, ToolOutput, ToolUpdate, sync::lock};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -19,6 +20,38 @@ use crate::{ExecMode, Tool, ToolContext, ToolError, resolve, schema_for};
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_STREAM_BYTES: usize = 100_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+const TAIL_BYTES: usize = 4_096;
+const TAIL_LINES: usize = 10;
+
+/// The most recent output of both streams, reported as progress while the
+/// command runs.
+#[derive(Default)]
+struct Tail {
+    bytes: Vec<u8>,
+    changed: bool,
+}
+
+impl Tail {
+    fn push(&mut self, chunk: &[u8]) {
+        self.bytes.extend_from_slice(chunk);
+        if self.bytes.len() > TAIL_BYTES {
+            let excess = self.bytes.len() - TAIL_BYTES;
+            self.bytes.drain(..excess);
+        }
+        self.changed = true;
+    }
+
+    /// The last [`TAIL_LINES`] lines, if output arrived since the last call.
+    fn take_update(&mut self) -> Option<String> {
+        if !std::mem::take(&mut self.changed) {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&self.bytes);
+        let lines: Vec<&str> = text.lines().collect();
+        Some(lines[lines.len().saturating_sub(TAIL_LINES)..].join("\n"))
+    }
+}
 
 /// Input shape for the `bash` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -99,10 +132,14 @@ fn run_command(
     let mut stdout = child.stdout.take().expect("piped stdout");
     let mut stderr = child.stderr.take().expect("piped stderr");
 
-    let stdout_handle = thread::spawn(move || read_capped(&mut stdout));
-    let stderr_handle = thread::spawn(move || read_capped(&mut stderr));
+    let tail = Arc::new(Mutex::new(Tail::default()));
+    let stdout_tail = Arc::clone(&tail);
+    let stderr_tail = Arc::clone(&tail);
+    let stdout_handle = thread::spawn(move || read_capped(&mut stdout, &stdout_tail));
+    let stderr_handle = thread::spawn(move || read_capped(&mut stderr, &stderr_tail));
 
     let start = Instant::now();
+    let mut last_progress = start;
     let status = loop {
         if cx.is_cancelled() {
             kill_process_group(&mut child);
@@ -119,6 +156,15 @@ fn run_command(
                 name: "bash".into(),
                 millis: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
             });
+        }
+        if last_progress.elapsed() >= PROGRESS_INTERVAL {
+            last_progress = Instant::now();
+            if let Some(content) = lock(&tail).take_update() {
+                cx.update(ToolUpdate {
+                    content,
+                    structured: None,
+                });
+            }
         }
         thread::sleep(POLL_INTERVAL);
     };
@@ -196,13 +242,24 @@ fn kill_process_group(child: &mut std::process::Child) {
     let _ = child.kill();
 }
 
-fn read_capped<R: Read>(reader: &mut R) -> (Vec<u8>, bool) {
+/// Read `reader` to EOF, keeping at most [`MAX_STREAM_BYTES`] and feeding
+/// every chunk to `tail`. Reading continues past the cap so the command
+/// never blocks on a full pipe.
+fn read_capped<R: Read>(reader: &mut R, tail: &Mutex<Tail>) -> (Vec<u8>, bool) {
     let mut buf = Vec::with_capacity(4_096);
-    let mut taken = reader.take((MAX_STREAM_BYTES as u64) + 1);
-    let _ = taken.read_to_end(&mut buf);
-    let truncated = buf.len() > MAX_STREAM_BYTES;
-    if truncated {
-        buf.truncate(MAX_STREAM_BYTES);
+    let mut chunk = [0u8; 8_192];
+    let mut truncated = false;
+    loop {
+        let n = match reader.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        lock(tail).push(&chunk[..n]);
+        let room = MAX_STREAM_BYTES - buf.len();
+        if n > room {
+            truncated = true;
+        }
+        buf.extend_from_slice(&chunk[..n.min(room)]);
     }
     (buf, truncated)
 }
@@ -245,6 +302,35 @@ mod tests {
         let out = run(dir.path(), serde_json::json!({"command":"echo oops 1>&2"})).unwrap();
         assert!(out.text.contains("stderr:"));
         assert!(out.text.contains("oops"));
+    }
+
+    #[derive(Default)]
+    struct Collect(Mutex<Vec<String>>);
+
+    impl crate::ProgressSink for Collect {
+        fn emit(&self, update: ToolUpdate) {
+            lock(&self.0).push(update.content);
+        }
+    }
+
+    #[test]
+    fn streams_output_while_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = CancelFlag::new();
+        let sink = Arc::new(Collect::default());
+        let cx = ToolContext::new(dir.path(), &cancel).with_progress(sink.clone());
+        let out = BashTool
+            .execute(
+                serde_json::json!({"command":"echo first; sleep 0.4; echo second"}),
+                &cx,
+            )
+            .unwrap();
+        assert!(out.text.contains("second"));
+        let updates = lock(&sink.0);
+        assert!(
+            updates.iter().any(|u| u == "first"),
+            "expected a progress update before the command finished: {updates:?}"
+        );
     }
 
     #[test]

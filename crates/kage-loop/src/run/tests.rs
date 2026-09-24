@@ -1320,28 +1320,93 @@ fn end_to_end_event_ordering_and_hook_callbacks() {
         .expect("after fired");
     assert!(before_pos < after_pos, "before must precede after");
 
-    // Event order: MessageStart, TextDelta, ToolCallArgsDelta (the
-    // early UI hint at provider tool-call start), ToolCallStart
-    // (authoritative, at provider tool-call end), MessageEnd
-    // (turn 1), ToolCallEnd, TextDelta (turn 2), MessageEnd.
     let event_seq: Vec<&str> = order
         .iter()
         .filter_map(|s| s.strip_prefix("event:"))
         .collect();
-    assert!(event_seq.starts_with(&[
-        "message_start",
-        "text_delta",
-        "tool_call_args_delta",
-        "tool_call_start",
-    ]));
-    assert!(event_seq.contains(&"tool_call_end"));
-    assert!(event_seq.last() == Some(&"message_end"));
+    assert_eq!(
+        event_seq,
+        [
+            "turn_started",
+            "message_start",
+            "text_delta",
+            "tool_call_args_delta",
+            "tool_call_start",
+            "message_end",
+            "message_appended",
+            "turn_ended",
+            "tool_call_end",
+            "message_appended",
+            "turn_started",
+            "message_start",
+            "text_delta",
+            "message_end",
+            "message_appended",
+            "turn_ended",
+        ]
+    );
     // The before/after hook must bracket the tool_call_end event.
     let tcend = order
         .iter()
         .position(|s| *s == "event:tool_call_end")
         .unwrap();
     assert!(before_pos < tcend && tcend == after_pos + 1);
+}
+
+#[test]
+fn message_appended_events_mirror_history() {
+    let call_id = kage_core::ToolCallId::new("call_1");
+    let mock = MockProvider::sequence(vec![
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::ToolCallStart {
+                id: call_id.clone(),
+                name: "static".into(),
+            }),
+            Ok(ProviderEvent::ToolCallEnd {
+                id: call_id,
+                input: serde_json::json!({}),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::ToolUse,
+                usage: TokenUsage::default(),
+            }),
+        ],
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::TextDelta {
+                delta: "done".into(),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        ],
+    ]);
+    let registry = ToolRegistry::new().with(std::sync::Arc::new(StaticTool));
+    let mut cx = AgentContext::new("mock:m", "").with_workdir("/tmp");
+    cx.history.push(user_msg("go"));
+    let mut appended = Vec::new();
+
+    run(
+        &mock,
+        &registry,
+        &mut cx,
+        LoopConfig::default(),
+        &mut NoopHooks,
+        &CancelFlag::new(),
+        |ev| {
+            if let LoopEvent::MessageAppended { message } = ev {
+                appended.push(message);
+            }
+        },
+    )
+    .unwrap();
+
+    assert_eq!(appended, cx.history[1..]);
+    for pair in cx.history.windows(2) {
+        assert_eq!(pair[1].parent, Some(pair[0].id));
+    }
 }
 
 #[test]

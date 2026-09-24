@@ -101,6 +101,50 @@ impl Tool for ProgressTool {
     }
 }
 
+/// Emits one update, then waits until the dispatcher has forwarded it.
+/// Fails if updates are only delivered after the tool returns.
+#[derive(Debug)]
+struct WaitsForDeliveryTool {
+    delivered: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl Tool for WaitsForDeliveryTool {
+    fn name(&self) -> &'static str {
+        "waits"
+    }
+    fn description(&self) -> &'static str {
+        "blocks until its progress update was emitted"
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn risk(&self) -> Risk {
+        Risk::Read
+    }
+    fn execute(
+        &self,
+        _input: serde_json::Value,
+        cx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        cx.update(ToolUpdate {
+            content: "working".into(),
+            structured: None,
+        });
+        let delivered = self
+            .delivered
+            .lock()
+            .unwrap()
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .is_ok();
+        Ok(ToolOutput {
+            is_error: !delivered,
+            text: if delivered { "live" } else { "buffered" }.into(),
+            structured: None,
+            terminate: false,
+        })
+    }
+}
+
 fn registry_with_echo() -> ToolRegistry {
     ToolRegistry::new()
         .with(Arc::new(EchoTool))
@@ -157,6 +201,39 @@ fn tool_updates_are_emitted_before_tool_call_end() {
         update_idx < end_idx,
         "ToolUpdate must fire before ToolCallEnd"
     );
+}
+
+#[test]
+fn tool_updates_are_emitted_while_the_tool_runs() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let tools = ToolRegistry::new().with(Arc::new(WaitsForDeliveryTool {
+        delivered: std::sync::Mutex::new(rx),
+    }));
+    let cancel = CancelFlag::new();
+    let mut hooks = NoopHooks;
+
+    let outcome = dispatch_tool_calls(
+        vec![pending("waits", serde_json::json!({}))],
+        &tools,
+        std::path::Path::new("/tmp"),
+        &cancel,
+        false,
+        MessageId::new(),
+        &mut hooks,
+        &mut |ev| {
+            if matches!(ev, LoopEvent::ToolUpdate { .. }) {
+                let _ = tx.send(());
+            }
+        },
+    );
+
+    assert!(matches!(
+        outcome.results[0].content[0],
+        Content::ToolResultBlock {
+            is_error: false,
+            ..
+        }
+    ));
 }
 
 #[test]

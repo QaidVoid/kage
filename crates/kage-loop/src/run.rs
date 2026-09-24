@@ -14,9 +14,6 @@
 //!   else                    -> break outer
 //! }
 //! ```
-//!
-//! T4.2 wires only the shell. Real provider-event translation lands in T4.3,
-//! tool dispatch in T4.4.
 
 use std::time::Duration;
 
@@ -35,7 +32,9 @@ use crate::{AgentContext, Hooks, LoopConfig, SteeringMode};
 /// `cx` carries the conversation forward: the caller is expected to push the
 /// initiating user message into `cx.history` before calling this. On return,
 /// `cx.history` reflects every message produced during the run, and
-/// `cx.budget` is updated from provider-reported usage.
+/// `cx.budget` is updated from provider-reported usage. Every message the
+/// loop appends is announced with [`LoopEvent::MessageAppended`]; the
+/// initiating message is the caller's to announce.
 ///
 /// Streaming events are delivered to `emit` in order. The same events also
 /// flow through `hooks.on_event`, which fires first.
@@ -76,13 +75,7 @@ where
             }
 
             if let Some(text) = drain_messages(config.steering_mode, || hooks.get_steering()) {
-                let msg = kage_core::Message::new(
-                    kage_core::Role::User,
-                    vec![kage_core::Content::Text { text }],
-                    cx.history.last().map(|m| m.id),
-                );
-                hooks.on_user_message(&msg);
-                cx.history.push(msg);
+                push_user_text(cx, hooks, &mut emit, text);
             }
 
             if let Err(kind) = maybe_compact(cx, config, provider, cancel, hooks, &mut emit) {
@@ -91,6 +84,11 @@ where
             }
 
             hooks.on_turn_start(turn_index);
+            emit_one(
+                hooks,
+                &mut emit,
+                LoopEvent::TurnStarted { index: turn_index },
+            );
 
             if let Err(message) = hooks.transform_context(&mut cx.history) {
                 let kind = LoopError::HookFailed {
@@ -175,10 +173,18 @@ where
             let turn_usage = turn.usage;
             let assistant_id = turn.message.id;
             let pending = turn.tool_calls.clone();
-            cx.history.push(turn.message);
+            append(cx, hooks, &mut emit, turn.message);
 
             let had_tool_calls = !pending.is_empty();
             hooks.on_turn_end(turn_index, had_tool_calls);
+            emit_one(
+                hooks,
+                &mut emit,
+                LoopEvent::TurnEnded {
+                    index: turn_index,
+                    had_tool_calls,
+                },
+            );
             let summary = crate::hooks::TurnSummary {
                 index: turn_index,
                 had_tool_calls,
@@ -222,7 +228,7 @@ where
                 // Every tool_use in the assistant message now has an answer
                 // in `outcome.results`; append them so in-memory history and
                 // the persisted session never carry a dangling tool_use.
-                cx.history.extend(outcome.results);
+                append_all(cx, hooks, &mut emit, outcome.results);
                 emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
                 return Err(kind);
             }
@@ -231,7 +237,7 @@ where
             // results and exit the run cleanly. The loop never asks the
             // model for another turn, never dequeues a follow-up.
             if outcome.all_terminate {
-                cx.history.extend(results);
+                append_all(cx, hooks, &mut emit, results);
                 return Ok(());
             }
 
@@ -247,28 +253,16 @@ where
                     steering = Some(msg);
                 }
             }
-            cx.history.extend(results);
+            append_all(cx, hooks, &mut emit, results);
             if let Some(text) = steering {
-                let msg = kage_core::Message::new(
-                    kage_core::Role::User,
-                    vec![kage_core::Content::Text { text }],
-                    cx.history.last().map(|m| m.id),
-                );
-                hooks.on_user_message(&msg);
-                cx.history.push(msg);
+                push_user_text(cx, hooks, &mut emit, text);
             }
         }
 
         let Some(text) = drain_messages(config.followup_mode, || hooks.get_followup()) else {
             return Ok(());
         };
-        let followup = kage_core::Message::new(
-            kage_core::Role::User,
-            vec![kage_core::Content::Text { text }],
-            cx.history.last().map(|m| m.id),
-        );
-        hooks.on_user_message(&followup);
-        cx.history.push(followup);
+        push_user_text(cx, hooks, &mut emit, text);
     }
 }
 
@@ -289,6 +283,46 @@ fn drain_messages<F: FnMut() -> Option<String>>(mode: SteeringMode, mut poll: F)
         out.push_str(&next);
     }
     Some(out)
+}
+
+/// Append `message` to history and announce it with
+/// [`LoopEvent::MessageAppended`].
+fn append<F: FnMut(LoopEvent)>(
+    cx: &mut AgentContext,
+    hooks: &mut dyn Hooks,
+    emit: &mut F,
+    message: Message,
+) {
+    cx.history.push(message.clone());
+    emit_one(hooks, emit, LoopEvent::MessageAppended { message });
+}
+
+fn append_all<F: FnMut(LoopEvent)>(
+    cx: &mut AgentContext,
+    hooks: &mut dyn Hooks,
+    emit: &mut F,
+    messages: Vec<Message>,
+) {
+    for message in messages {
+        append(cx, hooks, emit, message);
+    }
+}
+
+/// Append a user text message that the loop injected (steering, follow-up,
+/// or a doom-loop nudge).
+fn push_user_text<F: FnMut(LoopEvent)>(
+    cx: &mut AgentContext,
+    hooks: &mut dyn Hooks,
+    emit: &mut F,
+    text: String,
+) {
+    let message = Message::new(
+        kage_core::Role::User,
+        vec![Content::Text { text }],
+        cx.history.last().map(|m| m.id),
+    );
+    hooks.on_user_message(&message);
+    append(cx, hooks, emit, message);
 }
 
 /// Emit one event to both the host's `Hooks::on_event` and the user emit

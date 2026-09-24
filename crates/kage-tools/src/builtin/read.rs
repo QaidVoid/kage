@@ -36,7 +36,7 @@ impl Tool for ReadTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read a file from the workspace. Optional `start_line` and `end_line` limit \
+        "Read a file. Optional `start_line` and `end_line` limit \
          the returned range (1-indexed, inclusive). Files larger than 2MB are truncated."
     }
 

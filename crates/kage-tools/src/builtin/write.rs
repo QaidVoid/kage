@@ -36,8 +36,8 @@ impl Tool for WriteTool {
     }
 
     fn description(&self) -> &'static str {
-        "Atomically write `content` to `path` inside the workspace. Refuses to \
-         overwrite an existing file unless `overwrite: true` is set. The parent \
+        "Atomically write `content` to `path`. Refuses to overwrite an \
+         existing file unless `overwrite: true` is set. The parent \
          directory must exist."
     }
 

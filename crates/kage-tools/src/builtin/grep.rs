@@ -43,7 +43,7 @@ impl Tool for GrepTool {
     }
 
     fn description(&self) -> &'static str {
-        "Recursively search workspace files for a regex pattern. Honors \
+        "Recursively search files for a regex pattern. Honors \
          `.gitignore` and `.kageignore`. Returns lines as `path:line:text`. \
          Capped at 1000 matches by default."
     }

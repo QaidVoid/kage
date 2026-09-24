@@ -38,7 +38,7 @@ impl Tool for FindTool {
     }
 
     fn description(&self) -> &'static str {
-        "Find paths in the workspace matching a glob pattern. Honors `.gitignore` \
+        "Find paths matching a glob pattern. Honors `.gitignore` \
          and `.kageignore`. Optional `type` filters by `f` (files) or `d` \
          (directories). Output is capped at 5000 entries."
     }

@@ -158,6 +158,10 @@ impl App {
                 self.open_settings();
                 None
             }
+            "permission" => {
+                self.run_permission_command(rest);
+                None
+            }
             "tree" => {
                 self.open_session_tree();
                 None
@@ -189,6 +193,39 @@ impl App {
             }
             _ => None,
         }
+    }
+
+    /// Handle `:permission [mode]`: dispatch the override request,
+    /// or report the current mode when called with no argument.
+    pub(crate) fn run_permission_command(&mut self, rest: &str) {
+        let arg = rest.trim();
+        let parsed = match arg {
+            "" => None,
+            "allow" | "default" => Some(None),
+            "ask" => Some(Some(kage_core::permissions::PermissionAction::Ask)),
+            "deny" => Some(Some(kage_core::permissions::PermissionAction::Deny)),
+            other => {
+                self.push_error(format!(
+                    "permission: unknown mode `{other}` (allow|ask|deny|default)"
+                ));
+                return;
+            }
+        };
+        let Some(mode) = parsed else {
+            let current = self
+                .session_usage
+                .as_ref()
+                .and_then(|u| lock(u).permission_mode);
+            let label = match current {
+                Some(kage_core::permissions::PermissionAction::Ask) => "ask".to_owned(),
+                Some(kage_core::permissions::PermissionAction::Deny) => "deny".to_owned(),
+                _ => "default (configured rules)".to_owned(),
+            };
+            let mut buf = lock(&self.buffer);
+            buf.push_custom("kage:help", format!("permission mode: {label}"), false);
+            return;
+        };
+        let _ = self.send_request(RunRequest::SetPermissionMode(mode));
     }
 
     pub(crate) fn push_error(&mut self, msg: impl Into<String>) {

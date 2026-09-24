@@ -58,6 +58,63 @@ fn end_run_span(
     lock(session_usage).working = false;
 }
 
+/// Apply a resolved thinking level to the live session: swap the
+/// agent context level, sync the modeline snapshot, toast the label,
+/// fire `thinking_level_select` with `source`, and persist a
+/// `ThinkingLevelChange` session entry. Shared by the `Shift+Tab`
+/// cycle (`source = "cycle"`) and the `:settings` dialog (`source =
+/// "settings"`).
+#[allow(clippy::too_many_arguments)]
+fn apply_thinking_level(
+    level: kage_provider::ThinkingLevel,
+    source: &str,
+    cx: &Arc<Mutex<AgentContext>>,
+    session_usage: &SharedSessionUsage,
+    toasts: &SharedToasts,
+    plugin_runtime: Option<&Arc<PluginRuntime>>,
+    session_path: Option<&Arc<Mutex<PathBuf>>>,
+    session_header: Option<&Arc<Mutex<Option<kage_session::Header>>>>,
+    buffer: &SharedBuffer,
+) {
+    let prev = {
+        let mut cx_guard = lock(cx);
+        let prev = cx_guard.thinking_level.unwrap_or_default();
+        cx_guard.thinking_level = Some(level);
+        prev
+    };
+    lock(session_usage).thinking_level = Some(level);
+    push_toast(
+        toasts,
+        Toast::info(format!("thinking level: {}", level.label())),
+    );
+    if let Some(rt) = plugin_runtime {
+        let _ = rt.dispatch_event(
+            "thinking_level_select",
+            &serde_json::json!({
+                "prev": prev.as_str(),
+                "next": level.as_str(),
+                "source": source,
+            }),
+        );
+    }
+    if let Some(mut writer) = open_writer_for_turn(session_path, session_header, buffer)
+        && let Err(err) = writer.append(&kage_session::SessionEntry::ThinkingLevelChange(
+            kage_session::ThinkingLevelChange {
+                id: kage_session::EntryId::new(),
+                ts: chrono::Utc::now(),
+                level: level.as_str().to_owned(),
+            },
+        ))
+    {
+        let mut buf = lock(buffer);
+        buf.push_custom(
+            "kage:error",
+            format!("session: append thinking_level: {err}"),
+            false,
+        );
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
     thread::spawn(move || {
@@ -376,44 +433,69 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                     }
                 }
                 RunRequest::CycleThinkingLevel => {
-                    let mut cx_guard = lock(&cx);
-                    let prev = cx_guard.thinking_level.unwrap_or_default();
-                    let next = prev.cycle();
-                    cx_guard.thinking_level = Some(next);
-                    drop(cx_guard);
-                    lock(&session_usage).thinking_level = Some(next);
-                    push_toast(
+                    let next = lock(&cx).thinking_level.unwrap_or_default().cycle();
+                    apply_thinking_level(
+                        next,
+                        "cycle",
+                        &cx,
+                        &session_usage,
                         &toasts,
-                        Toast::info(format!("thinking level: {}", next.label())),
-                    );
-                    if let Some(rt) = plugin_runtime.as_ref() {
-                        let _ = rt.dispatch_event(
-                            "thinking_level_select",
-                            &serde_json::json!({
-                                "prev": prev.as_str(),
-                                "next": next.as_str(),
-                                "source": "cycle",
-                            }),
-                        );
-                    }
-                    if let Some(mut writer) = open_writer_for_turn(
+                        plugin_runtime.as_ref(),
                         session_path.as_ref(),
                         session_header.as_ref(),
                         &buffer,
-                    ) && let Err(err) =
-                        writer.append(&kage_session::SessionEntry::ThinkingLevelChange(
-                            kage_session::ThinkingLevelChange {
-                                id: kage_session::EntryId::new(),
-                                ts: chrono::Utc::now(),
-                                level: next.as_str().to_owned(),
-                            },
-                        ))
-                    {
+                    );
+                }
+                RunRequest::SetThinkingLevel(value) => {
+                    if let Some(level) = kage_provider::ThinkingLevel::parse(&value) {
+                        apply_thinking_level(
+                            level,
+                            "settings",
+                            &cx,
+                            &session_usage,
+                            &toasts,
+                            plugin_runtime.as_ref(),
+                            session_path.as_ref(),
+                            session_header.as_ref(),
+                            &buffer,
+                        );
+                    } else {
                         let mut buf = lock(&buffer);
                         buf.push_custom(
                             "kage:error",
-                            format!("session: append thinking_level: {err}"),
+                            format!("settings: unknown thinking level: {value}"),
                             false,
+                        );
+                    }
+                }
+                RunRequest::SetPermissionMode(mode) => {
+                    let prev = permission_gate.mode();
+                    permission_gate.set_mode(mode);
+                    lock(&session_usage).permission_mode = mode;
+                    let label = |m: Option<kage_core::permissions::PermissionAction>| match m {
+                        Some(kage_core::permissions::PermissionAction::Ask) => "ask".to_owned(),
+                        Some(kage_core::permissions::PermissionAction::Deny) => "deny".to_owned(),
+                        _ => "default".to_owned(),
+                    };
+                    push_toast(
+                        &toasts,
+                        Toast::info(format!(
+                            "permission mode: {}",
+                            if mode.is_some() {
+                                label(mode)
+                            } else {
+                                "default (configured rules)".to_owned()
+                            }
+                        )),
+                    );
+                    if let Some(rt) = plugin_runtime.as_ref() {
+                        let _ = rt.dispatch_event(
+                            "permission_mode_select",
+                            &serde_json::json!({
+                                "prev": label(prev),
+                                "next": label(mode),
+                                "source": "command",
+                            }),
                         );
                     }
                 }

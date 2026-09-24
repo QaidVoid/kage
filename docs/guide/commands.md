@@ -40,7 +40,8 @@ Editing clears the error.
 | `:keybindings` / `:keys` | List active key bindings (config/plugin/reserved) |
 | `:events`                | List events plugins can hook with `kage.on`     |
 | `:compact`               | Run a compaction pass right now                 |
-| `:settings`              | Open the settings dialog (theme/model/mouse/..) |
+| `:settings`              | Open the settings dialog (theme/model/mouse/thinking/..) |
+| `:permission [mode]` / `:perm` | Show or set the session permission mode (`allow\|ask\|deny\|default`) |
 | `:tree`                  | Browse the session fork forest                  |
 | `:attach [path]` / `:img` | Attach an image to the next prompt: a file `path`, or the OS clipboard image when no path is given |
 | `:clear`                 | Clear the conversation buffer                   |

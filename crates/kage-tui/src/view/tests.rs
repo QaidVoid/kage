@@ -798,3 +798,54 @@ fn error_line_truncates_in_narrow_viewport() {
         "long error should be truncated with ellipsis, got {error_row:?}"
     );
 }
+
+fn modeline_rows(usage: Option<&SessionUsage>, width: u16) -> Vec<String> {
+    let backend = TestBackend::new(width, 2);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let regions = crate::layout::split(Rect::new(0, 0, width, 2), 1, 1);
+    terminal
+        .draw(|frame| {
+            modeline::render_modeline(frame, regions, usage, &[]);
+        })
+        .unwrap();
+    terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(width as usize)
+        .map(|row| {
+            row.iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn modeline_paints_permission_pill_when_overridden() {
+    let usage = SessionUsage {
+        model: "test:model".to_owned(),
+        permission_mode: Some(kage_core::permissions::PermissionAction::Ask),
+        ..SessionUsage::default()
+    };
+    let rows = modeline_rows(Some(&usage), 60);
+    assert!(
+        rows.iter().any(|r| r.contains("perm:ask")),
+        "modeline should show the ask override, got {rows:?}"
+    );
+}
+
+#[test]
+fn modeline_hides_permission_pill_without_override() {
+    let usage = SessionUsage {
+        model: "test:model".to_owned(),
+        ..SessionUsage::default()
+    };
+    let rows = modeline_rows(Some(&usage), 60);
+    assert!(
+        rows.iter().all(|r| !r.contains("perm:")),
+        "no pill without an override, got {rows:?}"
+    );
+}

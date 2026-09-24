@@ -57,6 +57,11 @@ pub struct SessionUsage {
     /// "think:<level>" pill for any other variant. Mutated by the
     /// host worker when `Shift+Tab` cycles the level.
     pub thinking_level: Option<ThinkingLevel>,
+    /// Session permission mode override. `None` hides the pill (the
+    /// configured `[permissions]` rules decide); the renderer draws
+    /// `perm:ask` / `perm:deny` for the matching override. Mutated
+    /// by the host worker on `:permission`.
+    pub permission_mode: Option<kage_core::permissions::PermissionAction>,
 }
 
 impl SessionUsage {

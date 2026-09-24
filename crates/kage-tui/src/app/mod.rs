@@ -193,6 +193,22 @@ pub enum RunRequest {
     /// `thinking_level`, persists the change as a session entry, and
     /// fires the `thinking_level_select` plugin event.
     CycleThinkingLevel,
+    /// Set the thinking level to an explicit ladder string (`off`,
+    /// `minimal`, `low`, `medium`, `high`, `xhigh`) from the
+    /// `:settings` dialog. The level rides as a raw string because
+    /// kage-tui is provider-free; the worker parses it and applies
+    /// exactly what [`RunRequest::CycleThinkingLevel`] applies,
+    /// firing the plugin event with `"source": "settings"`. Unknown
+    /// strings surface an inline error instead of changing anything.
+    SetThinkingLevel(String),
+    /// Set the session permission mode override from the `:permission`
+    /// command. `Some(action)` forces every tool call through that
+    /// action for the rest of the session; `None` (values `default`
+    /// or `allow`) clears the override so the configured
+    /// `[permissions]` rules decide again. The worker applies it to
+    /// the gate, updates the modeline state, and fires
+    /// `permission_mode_select`.
+    SetPermissionMode(Option<kage_core::permissions::PermissionAction>),
     /// Run the plugin keybinding whose canonical chord is `chord`. The
     /// worker invokes its handler through the coroutine bridge (so it
     /// may open `kage.ui.*` dialogs), like a plugin command.

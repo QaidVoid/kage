@@ -67,6 +67,24 @@ escape-checked resolution: a read or write must stay under the working
 directory. `bash` is unaffected; a shell can always reach the whole
 filesystem, so confine it with `deny` rules instead.
 
+## runtime mode (`:permission`)
+
+Switch modes without touching the config file. In the TUI:
+
+    :permission ask     # every tool call prompts this session
+    :permission deny    # every tool call is refused this session
+    :permission default # back to the configured rules (allow-all
+                        # unless you configured [permissions])
+
+`allow` is an alias of `default`. With no argument, `:permission`
+shows the current mode. An active override shows as a `perm:ask` or
+`perm:deny` pill in the modeline.
+
+The override lives for the current session only and is never written
+to the config file. It short-circuits the per-tool rules entirely:
+while `deny` is active even allow-listed tools refuse, and while
+`ask` is active even never-configured tools prompt.
+
 ## validation
 
 Broken configuration refuses to start: empty tool names, empty

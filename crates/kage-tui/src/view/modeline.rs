@@ -88,19 +88,7 @@ pub(super) fn render_modeline(
         && (!u.model.is_empty() || u.total_tokens() > 0 || u.current_context > 0 || u.working)
     {
         spans.push(Span::styled(" ", bg));
-        // Working spinner: a 10-frame braille ticker keyed off
-        // wall-clock time so it animates without a frame counter
-        // on the App. When idle, paint a single dim dot so the
-        // strip width stays stable across transitions.
-        if u.working {
-            let frame = spinner_frame();
-            spans.push(Span::styled(
-                format!("{frame} "),
-                fg.add_modifier(Modifier::BOLD),
-            ));
-        } else {
-            spans.push(Span::styled("  ", bg));
-        }
+        push_working_indicator(&mut spans, u.working, bg, fg);
         // Logical groups separated by a muted dot: model, context
         // fill, cumulative io (+ cost), thinking level. Each is
         // labelled so a field reads on its own; the dot only ever
@@ -164,8 +152,17 @@ pub(super) fn render_modeline(
                 fg.add_modifier(Modifier::BOLD),
             ));
         }
+        if let Some(mode) = u.permission_mode
+            && mode != kage_core::permissions::PermissionAction::Allow
+        {
+            sep(&mut spans, &mut prior_group);
+            spans.push(Span::styled(
+                format!("perm:{}", mode_label(mode)),
+                fg.add_modifier(Modifier::BOLD),
+            ));
+        }
     }
-    let used: usize = spans.iter().map(|s| s.content.width()).sum();
+    let used: usize = spans.iter().map(Span::width).sum();
     let pad = usize::from(area.width).saturating_sub(used);
     if pad > 0 {
         spans.push(Span::styled(" ".repeat(pad), bg));
@@ -174,6 +171,31 @@ pub(super) fn render_modeline(
         .alignment(Alignment::Left)
         .style(bg);
     frame.render_widget(line, area);
+}
+
+/// Lowercase label for a permission override pill.
+fn mode_label(mode: kage_core::permissions::PermissionAction) -> &'static str {
+    match mode {
+        kage_core::permissions::PermissionAction::Allow => "allow",
+        kage_core::permissions::PermissionAction::Ask => "ask",
+        kage_core::permissions::PermissionAction::Deny => "deny",
+    }
+}
+
+/// Working spinner: a 10-frame braille ticker keyed off wall-clock
+/// time so it animates without a frame counter on the App. When
+/// idle, paint a single dim dot so the strip width stays stable
+/// across transitions.
+fn push_working_indicator(spans: &mut Vec<Span<'static>>, working: bool, bg: Style, fg: Style) {
+    if working {
+        let frame = spinner_frame();
+        spans.push(Span::styled(
+            format!("{frame} "),
+            fg.add_modifier(Modifier::BOLD),
+        ));
+    } else {
+        spans.push(Span::styled("  ", bg));
+    }
 }
 
 /// Format a token count compactly so the modeline stays narrow:

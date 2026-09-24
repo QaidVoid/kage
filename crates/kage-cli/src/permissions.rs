@@ -38,6 +38,11 @@ pub(crate) struct PermissionGate {
     rules: Arc<Mutex<PermissionsConfig>>,
     ask: Option<Sender<PermissionAsk>>,
     cancel: CancelFlag,
+    /// Session-scoped mode override. `Some(action)` short-circuits
+    /// the per-tool rules for every call; `None` (the initial state)
+    /// evaluates the configured rules, which default to allow. Never
+    /// persisted: it lives and dies with this session.
+    mode: Arc<Mutex<Option<PermissionAction>>>,
     /// Where "always allow" decisions are written. `None` (every
     /// production construction) resolves [`Config::default_path`] at
     /// write time; tests point it at a tempdir.
@@ -55,8 +60,22 @@ impl PermissionGate {
             rules: Arc::new(Mutex::new(rules)),
             ask: None,
             cancel: CancelFlag::new(),
+            mode: Arc::new(Mutex::new(None)),
             config_path: None,
         }
+    }
+
+    /// Set the session mode override. `None` clears it, restoring
+    /// the configured per-tool rules. Shared across every clone.
+    pub(crate) fn set_mode(&self, mode: Option<PermissionAction>) {
+        *lock(&self.mode) = mode;
+    }
+
+    /// Current session mode override, `None` when the configured
+    /// rules decide.
+    #[must_use]
+    pub(crate) fn mode(&self) -> Option<PermissionAction> {
+        *lock(&self.mode)
     }
 
     /// Attach the channel a TUI host listens on. While set, an `ask`
@@ -177,6 +196,16 @@ fn save_allow_always(path: &Path, tool: &str) -> Result<(), String> {
 impl Hooks for PermissionGate {
     fn before_tool_call(&mut self, name: &str, input: &serde_json::Value) -> Option<ToolOutput> {
         let subject = PermissionsConfig::subject_for(input);
+        if let Some(mode) = self.mode() {
+            return match mode {
+                PermissionAction::Allow => None,
+                PermissionAction::Deny => Some(error_output(
+                    name,
+                    "permission mode is deny this session (`:permission default` restores rules)",
+                )),
+                PermissionAction::Ask => self.ask_user(name, subject),
+            };
+        }
         let action = lock(&self.rules).check(name, &subject);
         match action {
             PermissionAction::Allow => None,
@@ -249,6 +278,43 @@ mod tests {
             gate.before_tool_call("write", &serde_json::json!({}))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn mode_deny_overrides_allow_rules() {
+        let mut gate = PermissionGate::new(rules_for(PermissionAction::Allow));
+        gate.set_mode(Some(PermissionAction::Deny));
+        let out = gate.before_tool_call("bash", &bash_input()).unwrap();
+        assert!(out.is_error);
+        assert!(out.text.contains("permission mode is deny"), "{}", out.text);
+        gate.set_mode(None);
+        assert!(gate.before_tool_call("bash", &bash_input()).is_none());
+    }
+
+    #[test]
+    fn mode_ask_overrides_allow_rules_and_uses_channel() {
+        let (ask_tx, ask_rx) = mpsc::channel::<PermissionAsk>();
+        let gate = PermissionGate::new(rules_for(PermissionAction::Allow)).with_ask(ask_tx);
+        gate.set_mode(Some(PermissionAction::Ask));
+        let (done_tx, done_rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let mut gate = gate;
+            let out = gate.before_tool_call("bash", &bash_input());
+            let _ = done_tx.send(out.is_none());
+        });
+        let ask = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        ask.reply.send(PermissionDecision::Deny).unwrap();
+        handle.join().unwrap();
+        assert!(!done_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+    }
+
+    #[test]
+    fn mode_allow_overrides_deny_rules_and_shares_across_clones() {
+        let gate = PermissionGate::new(rules_for(PermissionAction::Deny));
+        let mut clone = gate.clone();
+        gate.set_mode(Some(PermissionAction::Allow));
+        assert!(clone.before_tool_call("bash", &bash_input()).is_none());
+        assert_eq!(clone.mode(), Some(PermissionAction::Allow));
     }
 
     #[test]

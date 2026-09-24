@@ -660,6 +660,72 @@ fn cancel_command_flips_registered_cancel_flag_synchronously() {
 }
 
 #[test]
+fn permission_command_dispatches_mode_override() {
+    let buffer = shared_buffer();
+    let (tx, rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    let registry: Vec<&CommandSpec> = BUILTIN_COMMANDS.iter().collect();
+
+    let result = app.run_command_validated("permission ask", &registry);
+    assert!(matches!(result, CommandResult::Done(None)));
+    match rx.recv_timeout(Duration::from_millis(100)).unwrap() {
+        RunRequest::SetPermissionMode(mode) => {
+            assert_eq!(mode, Some(kage_core::permissions::PermissionAction::Ask));
+        }
+        other => panic!("expected SetPermissionMode, got {other:?}"),
+    }
+
+    let _ = app.run_command_validated("permission deny", &registry);
+    match rx.recv_timeout(Duration::from_millis(100)).unwrap() {
+        RunRequest::SetPermissionMode(mode) => {
+            assert_eq!(mode, Some(kage_core::permissions::PermissionAction::Deny));
+        }
+        other => panic!("expected SetPermissionMode, got {other:?}"),
+    }
+
+    let _ = app.run_command_validated("permission default", &registry);
+    match rx.recv_timeout(Duration::from_millis(100)).unwrap() {
+        RunRequest::SetPermissionMode(mode) => assert_eq!(mode, None),
+        other => panic!("expected SetPermissionMode, got {other:?}"),
+    }
+}
+
+#[test]
+fn permission_command_rejects_unknown_mode_without_request() {
+    let buffer = shared_buffer();
+    let (tx, rx) = mpsc::channel();
+    let mut app = App::new(buffer.clone(), tx);
+    let registry: Vec<&CommandSpec> = BUILTIN_COMMANDS.iter().collect();
+
+    let result = app.run_command_validated("permission bogus", &registry);
+    assert!(
+        matches!(result, CommandResult::ValidationError(_)),
+        "arg validation should reject an unknown mode, got {result:?}"
+    );
+    assert!(
+        rx.recv_timeout(Duration::from_millis(50)).is_err(),
+        "no request should be sent for an invalid mode"
+    );
+}
+
+#[test]
+fn permission_command_without_arg_reports_current_mode() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = App::new(buffer.clone(), tx);
+    let registry: Vec<&CommandSpec> = BUILTIN_COMMANDS.iter().collect();
+
+    let result = app.run_command_validated("permission", &registry);
+    assert!(matches!(result, CommandResult::Done(None)));
+    let buf = buffer.lock().unwrap();
+    let rendered = match buf.blocks().last() {
+        Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
+        other => panic!("expected a custom block, got {other:?}"),
+    };
+    assert!(rendered.contains("permission mode: default"), "{rendered}");
+}
+
+#[test]
 fn render_into_paints_status_and_buffer() {
     let buffer = shared_buffer();
     if let Ok(mut buf) = buffer.lock() {
@@ -994,6 +1060,41 @@ fn settings_command_opens_overlay_and_esc_closes_it() {
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     assert!(app.settings_overlay.is_none());
     assert_eq!(app.input().text(), "", "esc went to the overlay, not input");
+}
+
+#[test]
+fn settings_thinking_level_persists_and_sets_the_live_level() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let buffer = shared_buffer();
+    let (tx, rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    app.apply_settings_at(
+        &serde_json::json!({ "thinking_level": "high" }),
+        Some(path.clone()),
+    );
+    let cfg = kage_core::config::Config::load(&path).unwrap();
+    assert_eq!(cfg.ui.thinking_level.as_deref(), Some("high"));
+    assert_eq!(
+        rx.try_recv(),
+        Ok(RunRequest::SetThinkingLevel("high".into()))
+    );
+}
+
+#[test]
+fn settings_thinking_level_ignores_unknown_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let buffer = shared_buffer();
+    let (tx, rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    app.apply_settings_at(
+        &serde_json::json!({ "thinking_level": "maximum" }),
+        Some(path.clone()),
+    );
+    let cfg = kage_core::config::Config::load(&path).unwrap();
+    assert_eq!(cfg.ui.thinking_level, None);
+    assert!(rx.try_recv().is_err());
 }
 
 fn snapshot_rows(terminal: &Terminal<TestBackend>) -> Vec<String> {
@@ -1956,6 +2057,7 @@ fn modal_open_reflects_every_modal_field() {
         threshold: 0.8,
         keybindings: Vec::new(),
         editor_modeless: false,
+        thinking_level: "off".into(),
     }));
     assert!(app.modal_open());
     app.settings_overlay = None;

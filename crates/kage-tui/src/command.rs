@@ -395,6 +395,18 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         subcommands: &[],
     },
     CommandSpec {
+        name: "permission",
+        aliases: &["perm"],
+        description: "show or set the session permission mode (allow|ask|deny|default)",
+        category: CommandCategory::Both,
+        args: &[ArgSpec::Choice {
+            name: "mode",
+            values: &["allow", "ask", "deny", "default"],
+            optional: true,
+        }],
+        subcommands: &[],
+    },
+    CommandSpec {
         name: "help",
         aliases: &[],
         description: "show available commands",
@@ -612,7 +624,7 @@ mod tests {
 
     #[test]
     fn builtin_registry_has_expected_command_count() {
-        assert_eq!(BUILTIN_COMMANDS.len(), 19);
+        assert_eq!(BUILTIN_COMMANDS.len(), 20);
     }
 
     #[test]

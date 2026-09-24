@@ -16,7 +16,7 @@ pub(super) const ALIASES: &[Alias] = &[
     Alias {
         name: "kage.ToolRisk",
         doc: &["Permission tier for a registered tool."],
-        variants: &["read", "write", "network"],
+        variants: &["read", "write", "exec", "network"],
     },
     Alias {
         name: "kage.ArgKind",
@@ -51,8 +51,6 @@ pub(super) const ALIASES: &[Alias] = &[
             "tool_call",
             "tool_update",
             "tool_result",
-            "session_open",
-            "session_close",
             "model_select",
             "thinking_level_select",
             "user_bash",
@@ -62,7 +60,6 @@ pub(super) const ALIASES: &[Alias] = &[
             "should_stop_after_turn",
             "session_before_switch",
             "session_before_fork",
-            "session_before_tree",
             "resources_discover",
         ],
     },

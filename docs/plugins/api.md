@@ -160,10 +160,13 @@ built-in `read` or `bash`. Spec fields:
   name        = "echo",                       -- string, required
   description = "echo back the input",        -- string, required
   schema      = { type = "object" },          -- json schema, required
-  risk        = "read",                       -- "read" | "write" | "network"
+  risk        = "read",                       -- "read" | "write" | "exec" | "network"
   execute     = function(input) ... end,      -- (table) -> string | table
 }
 ```
+
+`risk` defaults to `"read"` when omitted. Any other value raises an
+error and the tool is not registered.
 
 `execute` may return a string (the tool output text) or a table:
 
@@ -193,13 +196,24 @@ Register a slash / colon command:
   aliases     = { "br", "git-branch" },  -- optional
   description = "current git branch",
   args        = {
-    { name = "verbose", kind = "flag" },
+    { name = "remote", kind = "text", optional = true },
   },
-  handler     = function(args)
-    -- args.rest, args.verbose, args.<arg-name>
+  handler     = function(raw, ctx, args)
+    return "raw: " .. raw .. ", remote: " .. (args.remote or "origin")
   end,
 }
 ```
+
+The handler receives three arguments:
+
+- `raw` - the text typed after the command name, unparsed.
+- `ctx` - reserved for host context. It is currently `nil`.
+- `args` - a table keyed by arg name, holding the values parsed from
+  `raw` using the declared `args` list. Omitted optional args are
+  absent.
+
+The handler may return `nil`, a string (the command output), or a
+table `{ text, is_error? }`.
 
 Argument `kind` values: `"text"`, `"choice"`, `"path"`, `"session"`,
 `"flag"`. For `"choice"`, also supply `choices = { "...", ... }`.
@@ -385,14 +399,15 @@ Plain notification events (the handler's return value is ignored):
 | `tool_call`              | `{ id, name, input }`                             |
 | `tool_update`            | `{ id, content, structured? }`                    |
 | `tool_result`            | `{ id, is_error, text }`                          |
-| `session_open`           | `{ ... }`                                          |
-| `session_close`          | `{ ... }`                                          |
 | `model_select`           | `{ prev, next, source }`                          |
 | `thinking_level_select`  | `{ prev, next, source }`                          |
-| `user_bash`              | `{ cmd, mode }`                                   |
+| `user_bash`              | `{ cmd, exit_code }`                              |
 
-`usage` is `{ input, output, cache_read, cache_write }`. `source`
-is `"set"`, `"cycle"`, or `"restore"`. `tool_update` only fires
+`usage` is `{ input, output, cache_read, cache_write }`. For
+`model_select`, `source` is `"set"`. For `thinking_level_select`,
+`source` is `"cycle"` or `"settings"`. `user_bash` fires after an
+inline `!cmd` from the input pane completes; `exit_code` is `nil`
+when the command was killed by a signal. `tool_update` only fires
 when at least one handler is subscribed.
 
 ### transform hooks
@@ -426,8 +441,8 @@ produced and returns a replacement, or `nil` for "no change".
 
 ### cancellable session-op hooks
 
-`session_before_switch`, `session_before_fork`, and
-`session_before_tree` fire before the host runs the action. The
+`session_before_switch` and `session_before_fork` fire before the
+host runs the action. The
 argument is the target string (session id / entry id). Return
 `nil` to proceed, `{ cancel = "reason" }` to veto, or
 `{ patch = "new-target" }` to redirect.

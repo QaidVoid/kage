@@ -40,9 +40,10 @@ The sandbox strips `os.execute`, `io.popen`, `package.loadlib`,
 `dofile`, `loadfile`, and a handful of other escape hatches before
 your code runs. Routine `string`, `math`, `table` functions stay.
 
-Subprocess access and session rewriting are available as opt-in,
-per-plugin [capabilities](/plugins/capabilities) the user grants in
-config - closed by default, loud when granted.
+Subprocess access, session rewriting, environment variables and
+network access are available as opt-in, per-plugin
+[capabilities](/plugins/capabilities) the user grants in config -
+closed by default, loud when granted.
 
 ## minimal example
 
@@ -52,8 +53,11 @@ config - closed by default, loud when granted.
 kage.register_command({
   name = "hello",
   description = "say hi",
-  handler = function(args)
-    kage.notify("hello " .. (args.rest or "there"))
+  args = {
+    { name = "name", kind = "text", optional = true },
+  },
+  handler = function(raw, ctx, args)
+    kage.notify("hello " .. (args.name or "there"))
   end,
 })
 ```
@@ -65,6 +69,7 @@ or `/hello`. You should see a transient toast.
 
 - [Lua API](/plugins/api) - every function exposed under `kage.*`
 - [Capabilities](/plugins/capabilities) - the opt-in tier for
-  subprocesses and session rewriting
+  subprocesses, session rewriting, environment variables and network
+  access
 - [Examples](/plugins/examples) - longer plugins that demonstrate
   the patterns

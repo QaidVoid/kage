@@ -140,6 +140,16 @@ fn reload_dir_clears_prior_registrations() {
 }
 
 #[test]
+fn reload_dir_drops_pending_session_requests() {
+    let rt = PluginRuntime::new().unwrap();
+    rt.eval("kage.session.fork('e1'); kage.compact()").unwrap();
+    let empty = tempfile::tempdir().unwrap();
+    rt.reload_dir(empty.path()).unwrap();
+    assert_eq!(rt.take_fork_request(), None);
+    assert_eq!(rt.take_compact_request(), None);
+}
+
+#[test]
 fn reload_dir_clears_acp_and_mcp_registrations() {
     use std::fs;
     let dir = tempfile::tempdir().unwrap();

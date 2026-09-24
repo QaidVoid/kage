@@ -24,7 +24,7 @@
 ---@alias kage.NotifyLevel "info"|"warning"|"error"
 
 --- Permission tier for a registered tool.
----@alias kage.ToolRisk "read"|"write"|"network"
+---@alias kage.ToolRisk "read"|"write"|"exec"|"network"
 
 --- A declared command argument kind.
 ---@alias kage.ArgKind "text"|"choice"|"path"|"session"|"flag"
@@ -49,8 +49,6 @@
 ---| "tool_call"
 ---| "tool_update"
 ---| "tool_result"
----| "session_open"
----| "session_close"
 ---| "model_select"
 ---| "thinking_level_select"
 ---| "user_bash"
@@ -60,7 +58,6 @@
 ---| "should_stop_after_turn"
 ---| "session_before_switch"
 ---| "session_before_fork"
----| "session_before_tree"
 ---| "resources_discover"
 
 --- One result a tool may return instead of a bare string.

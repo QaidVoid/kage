@@ -1,7 +1,8 @@
 # capabilities
 
 The plugin sandbox is closed by default: no subprocesses, no
-filesystem outside the workdir, no rewriting the live session. A few
+filesystem outside the workdir, no rewriting the live session, no
+environment variables and no network. A few
 plugins genuinely need more. Those powers are **capabilities**: opt-in,
 per-plugin, and only ever attached to the one plugin that was granted
 them.
@@ -67,6 +68,46 @@ workdir (the same escape check `kage.fs` uses; `cwd` may not contain
 `..` or be absolute). The call blocks until the process exits and
 returns its captured output, the way `kage.http.get` blocks.
 
+### `env`
+
+```lua
+local token = kage.env("GITHUB_TOKEN")  -- string, or nil when unset
+```
+
+Reads one variable from the host process environment. It returns `nil`
+when the variable is unset and raises when the value is not valid
+UTF-8. Access is read-only; there is no setter. There is no
+per-variable allowlist, so a granted plugin can read every variable,
+including secrets such as provider API keys. Grant it only to plugins
+you trust.
+
+### `net`
+
+```lua
+local res = kage.http.get("https://example.com/status")
+-- res = { status = 200, body = "...", content_type = "...", truncated = false }
+```
+
+Attaches the request helpers to `kage.http`. Without the grant,
+`kage.http` is an empty table and `kage.http.get` is `nil`.
+
+| call | effect |
+| --- | --- |
+| `kage.http.get(url, opts?)` | GET request. |
+| `kage.http.post(url, opts?)` | POST request. |
+| `kage.http.delete(url, opts?)` | DELETE request. |
+| `kage.http.post_stream(url, opts, fn)` | POST that calls `fn` with `{ event, data }` for each server-sent event frame. Returns `{ status, content_type }`. |
+
+`opts` may carry `headers`, `body`, `json`, `max_bytes` and
+`timeout_secs`. `get`, `post` and `delete` return
+`{ status, body, content_type, truncated }` and give up after
+`timeout_secs` seconds (30 by default). The body is capped at
+`max_bytes`, and `truncated` is `true` when the cap was hit.
+
+Every request passes the same SSRF check as the built-in `web_fetch`
+tool: the scheme must be `http` or `https` and the host must resolve to
+a routable address. There is no host allowlist beyond that.
+
 ## why this is safe enough
 
 - Closed by default - a plugin you never granted anything to is exactly
@@ -74,12 +115,13 @@ returns its captured output, the way `kage.http.get` blocks.
 - Per-plugin attachment - a grant to `rewind` does nothing for any
   other plugin in the same runtime.
 - No shell in `exec`, workdir-scoped `cwd`.
+- `net` requests are SSRF-checked and size-capped.
 - Session reseats are host-applied between turns and pass through the
   `session_before_switch` veto.
 
 ## see it in use
 
-`plugins/examples/rewind.lua` combines both capabilities: it
+`plugins/examples/rewind.lua` combines `session_write` and `exec`: it
 git-snapshots tracked files every `turn_end`, then `/undo` drops the
 last exchange (or `/rewind` forks at a chosen point) while restoring
 files to that turn, and `/redo` re-applies. See

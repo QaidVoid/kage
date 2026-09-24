@@ -615,6 +615,12 @@ impl PluginRuntime {
             *parked = None;
             let mut slot = lock(&self.theme_request);
             *slot = None;
+            let mut slot = lock(&self.compact_request);
+            *slot = None;
+            let mut slot = lock(&self.fork_request);
+            *slot = None;
+            let mut slot = lock(&self.switch_request);
+            *slot = None;
             let mut slot = lock(&self.header);
             *slot = None;
             let mut slot = lock(&self.footer);

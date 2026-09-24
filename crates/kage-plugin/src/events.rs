@@ -25,8 +25,6 @@
 //! * `tool_update` - mid-execution progress payload from a running tool
 //!   (`{id, content, structured?}`); fires only when subscribers exist
 //! * `tool_result` - a tool invocation produced an output
-//! * `session_open` - the host opened a session writer
-//! * `session_close` - the host closed a session writer
 //! * `resources_discover` - fires once at startup; handlers return a
 //!   table `{ skills?, templates?, themes? }` of directory paths the
 //!   host should add to its filesystem-discovered set. See
@@ -36,16 +34,17 @@
 //!   `"cycle"`, or `"restore"`. Today only the `set` source fires
 //!   (from `:model` / model picker); `cycle` and `restore` are
 //!   reserved for upcoming features.
-//! * `thinking_level_select` - reserved for the thinking-level UI
-//!   (PP.C); same payload shape as `model_select`.
-//! * `user_bash` - reserved for inline (`!cmd`) and background
-//!   (`!!cmd`) bash from the input pane; not wired in v0.1.
+//! * `thinking_level_select` - the thinking level changed. Payload:
+//!   `{ prev, next, source }` where `source` is `"cycle"` or
+//!   `"settings"`.
+//! * `user_bash` - an inline `!cmd` from the input pane completed.
+//!   Payload: `{ cmd, exit_code }`; `exit_code` is `nil` when the
+//!   command was killed by a signal.
 //!
 //! Session-op pre-hooks fire before the host runs a session action and
 //! let a plugin veto or patch the target:
 //! * `session_before_switch` - target is a session id or path
 //! * `session_before_fork` - target is the entry id to fork at
-//! * `session_before_tree` - target is the current session id (or empty)
 //!
 //! See [`dispatch_session_op`] and [`SessionOpDecision`].
 //!
@@ -125,26 +124,16 @@ pub const KNOWN_EVENTS: &[(&str, &str, &str)] = &[
     ("tool_call", "notification", "a tool invocation began"),
     ("tool_update", "notification", "mid-execution tool progress"),
     ("tool_result", "notification", "a tool produced output"),
-    (
-        "session_open",
-        "notification",
-        "host opened a session writer",
-    ),
-    (
-        "session_close",
-        "notification",
-        "host closed a session writer",
-    ),
     ("model_select", "notification", "active model changed"),
     (
         "thinking_level_select",
         "notification",
-        "thinking level changed (reserved)",
+        "thinking level changed",
     ),
     (
         "user_bash",
         "notification",
-        "inline `!cmd` from input (reserved)",
+        "inline `!cmd` from input completed",
     ),
     (
         "resources_discover",
@@ -177,7 +166,6 @@ pub const KNOWN_EVENTS: &[(&str, &str, &str)] = &[
         "veto/patch a session switch",
     ),
     ("session_before_fork", "veto", "veto/patch a fork point"),
-    ("session_before_tree", "veto", "veto/patch a tree action"),
 ];
 
 /// Lua-registry key under which subscribed handlers are stored.
@@ -376,8 +364,8 @@ fn collect_paths(table: &Table, key: &str, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Outcome of a session-op pre-hook (`session_before_switch`,
-/// `session_before_fork`, `session_before_tree`).
+/// Outcome of a session-op pre-hook (`session_before_switch` or
+/// `session_before_fork`).
 ///
 /// Mirrors the shape of `kage_loop::HookResult<String>` but stays in
 /// `kage-plugin` to avoid pulling the loop crate into plugin code. The

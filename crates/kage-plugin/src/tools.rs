@@ -215,8 +215,8 @@ fn install_tool_fn(
         lua.create_function(move |lua, spec: Table| {
             let name: String = spec.get("name")?;
             let description: String = spec.get("description")?;
-            let risk_str: Option<String> = spec.get("risk").ok();
-            let risk = parse_risk(risk_str.as_deref());
+            let risk_str: Option<String> = spec.get("risk")?;
+            let risk = parse_risk(risk_str.as_deref())?;
             let schema_value: Value = spec.get("schema").unwrap_or(Value::Nil);
             let schema = lua_to_json(schema_value).unwrap_or(serde_json::Value::Null);
             let execute: Function = spec.get("execute")?;
@@ -240,11 +240,15 @@ fn install_tool_fn(
     Ok(())
 }
 
-fn parse_risk(raw: Option<&str>) -> Risk {
+fn parse_risk(raw: Option<&str>) -> Result<Risk, mlua::Error> {
     match raw {
-        Some("write") => Risk::Write,
-        Some("network") => Risk::Network,
-        _ => Risk::Read,
+        None | Some("read") => Ok(Risk::Read),
+        Some("write") => Ok(Risk::Write),
+        Some("exec") => Ok(Risk::Exec),
+        Some("network") => Ok(Risk::Network),
+        Some(other) => Err(mlua::Error::runtime(format!(
+            "unknown risk \"{other}\" (expected read, write, exec, network)"
+        ))),
     }
 }
 
@@ -375,11 +379,53 @@ mod tests {
 
     #[test]
     fn risk_parses_known_strings() {
-        assert_eq!(parse_risk(Some("read")), Risk::Read);
-        assert_eq!(parse_risk(Some("write")), Risk::Write);
-        assert_eq!(parse_risk(Some("network")), Risk::Network);
-        assert_eq!(parse_risk(Some("anything-else")), Risk::Read);
-        assert_eq!(parse_risk(None), Risk::Read);
+        assert_eq!(parse_risk(Some("read")).unwrap(), Risk::Read);
+        assert_eq!(parse_risk(Some("write")).unwrap(), Risk::Write);
+        assert_eq!(parse_risk(Some("exec")).unwrap(), Risk::Exec);
+        assert_eq!(parse_risk(Some("network")).unwrap(), Risk::Network);
+        assert_eq!(parse_risk(None).unwrap(), Risk::Read);
+    }
+
+    #[test]
+    fn unknown_risk_raises_with_expected_values() {
+        let rt = PluginRuntime::new().unwrap();
+        let err = rt
+            .eval(
+                r"
+                kage.register_tool({
+                    name = 'bad',
+                    description = '',
+                    schema = {},
+                    risk = 'danger',
+                    execute = function() return '' end,
+                })
+                ",
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(r#"unknown risk "danger" (expected read, write, exec, network)"#),
+            "{err}"
+        );
+        assert!(rt.registered_tools().is_empty());
+    }
+
+    #[test]
+    fn exec_risk_registers_as_exec() {
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval(
+            r"
+            kage.register_tool({
+                name = 'run',
+                description = '',
+                schema = {},
+                risk = 'exec',
+                execute = function() return '' end,
+            })
+            ",
+        )
+        .unwrap();
+        assert_eq!(rt.registered_tools()[0].risk(), Risk::Exec);
     }
 
     #[test]

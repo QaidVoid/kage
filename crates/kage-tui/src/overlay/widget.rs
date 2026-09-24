@@ -1,23 +1,18 @@
 //! `OverlayWidget` trait, render context, and action enum.
 //!
-//! PO.1 lays the foundation for the per-overlay widget refactor: every
-//! overlay surface (model picker, slash palette, settings dialog,
-//! session tree, login, confirmation, single-line input, multi-line
-//! editor, custom plugin overlay) eventually becomes a type that
+//! Every overlay surface (model picker, slash palette, settings
+//! dialog, session tree, login, confirmation, single-line input,
+//! multi-line editor, custom plugin overlay) is a type that
 //! implements [`OverlayWidget`] and is dispatched through an
 //! [`crate::overlay::OverlayRegistry`] instead of a stack of
 //! hand-rolled `Option<X>` fields on [`crate::App`].
 //!
 //! The trait is deliberately `dyn`-compatible: no generic methods, no
-//! `Self` in return positions, no associated types. This lets PE.B's
-//! `ui.custom(...)` accept `Box<dyn OverlayWidget>` from a Lua
-//! factory and the registry hold `Arc<dyn OverlayWidget>` per key.
-//!
-//! No callers are wired in this commit. PO.2 onward port one overlay
-//! at a time onto this trait while the existing `OverlayPicker` and
-//! `SlashPalette` paths keep working in parallel. The registry lands
-//! in PO.5 once enough overlays implement the trait that there is
-//! something to dispatch.
+//! `Self` in return positions, no associated types. That lets plugin
+//! dialog factories hand back `Box<dyn OverlayWidget>` from Lua and
+//! the registry hold `Arc<dyn OverlayWidget>` per key. Every overlay
+//! in the app implements this trait; the dispatch layers in the App
+//! route keys to whichever modal is on top.
 
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::KeyEvent;
@@ -41,8 +36,8 @@ pub struct OverlayCtx<'a> {
 
 /// Outcome of one keystroke on an overlay.
 ///
-/// `Resolve` carries a JSON payload because PE.B's dialog APIs need
-/// to round-trip results to Lua handlers; built-in overlays whose
+/// `Resolve` carries a JSON payload because the plugin dialog
+/// overlays round-trip results to Lua handlers; built-in overlays whose
 /// result is a single string still serialize it as
 /// `serde_json::Value::String`.
 #[derive(Clone, Debug, PartialEq, Eq)]

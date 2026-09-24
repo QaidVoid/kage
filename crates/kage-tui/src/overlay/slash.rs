@@ -23,7 +23,7 @@
 //! render path stays as an inherent [`SlashPalette::render`] method;
 //! the trait render paints just the popup, and the trait `handle_key` is
 //! the canonical input entry. App still drives this overlay through
-//! the inherent render until PO.5 wires the registry.
+//! the inherent render.
 
 use ratatui::Frame;
 use ratatui::buffer::Buffer;

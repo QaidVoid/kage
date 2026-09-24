@@ -11,8 +11,8 @@
 //! Only `deliver_as = "user"` is wired end-to-end. Passing
 //! `"assistant"` or `"system"` raises a Lua error rather than
 //! silently doing the wrong thing; the entries ride a different code
-//! path (history insertion / system note injection) that lands
-//! together with the rest of PE.D's hooks.
+//! path (history insertion / system note injection) that lands with
+//! the future message-delivery hooks.
 //!
 //! `trigger_turn` is captured but does not change in-loop behavior in
 //! 0.1: when the loop is already running, the next steering poll
@@ -117,14 +117,14 @@ fn parse_opts(opts: Option<&Table>) -> mlua::Result<(bool, PendingRole)> {
             "user" => PendingRole::User,
             "assistant" => {
                 return Err(mlua::Error::external(
-                    "kage.send_message: deliver_as=\"assistant\" is not implemented yet \
-                     (PE.D follow-up); use deliver_as=\"user\" for now",
+                    "kage.send_message: deliver_as=\"assistant\" is not implemented yet; \
+                     use deliver_as=\"user\" for now",
                 ));
             }
             "system" => {
                 return Err(mlua::Error::external(
-                    "kage.send_message: deliver_as=\"system\" is not implemented yet \
-                     (PE.D follow-up); use deliver_as=\"user\" for now",
+                    "kage.send_message: deliver_as=\"system\" is not implemented yet; \
+                     use deliver_as=\"user\" for now",
                 ));
             }
             other => {

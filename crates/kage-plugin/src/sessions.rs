@@ -9,9 +9,9 @@
 //!
 //! `fork(at?)` writes a pending request that the host drains between
 //! turns. `at` is an entry-id prefix or `nil` for "fork at the most
-//! recent entry". The function returns `nil` in v0.1: synchronous
-//! return of the new session id needs a callback pattern, which is
-//! deferred until PE.B's coroutine bridge.
+//! recent entry". The function returns `nil`: synchronous return of
+//! the new session id would need the fork request to ride the
+//! coroutine bridge, which fork does not use yet.
 
 use std::sync::{Arc, Mutex};
 

@@ -7,7 +7,7 @@
 //! numbers without an RPC. [`SharedCompactRequest`] holds an optional
 //! pending request the host drains between turns; the inner
 //! `Option<String>` is the prompt the plugin supplied (currently
-//! advisory: PE.C.4's `on_compact_prepare` hook is the proper place to
+//! advisory: a future `on_compact_prepare` hook is the proper place to
 //! rewrite the compaction prompt).
 
 use std::sync::{Arc, Mutex};

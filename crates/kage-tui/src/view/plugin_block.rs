@@ -1,5 +1,5 @@
 //! Bridge a Lua `kage.register_block_renderer` handler into the
-//! [`BlockWidget`] registry (PT.7).
+//! [`BlockWidget`] registry.
 //!
 //! A [`PluginBlockFactory`] holds one plugin renderer and produces a
 //! [`PluginBlockWidget`] for every `Block::Custom` of the matching

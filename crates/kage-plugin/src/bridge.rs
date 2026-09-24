@@ -1,7 +1,7 @@
 //! Coroutine bridge for blocking plugin APIs.
 //!
-//! Some plugin APIs are conceptually blocking: `kage.ui.select` (added
-//! in PE.B.2+) opens an overlay, waits for the user, and returns the
+//! Some plugin APIs are conceptually blocking: `kage.ui.select` opens
+//! an overlay, waits for the user, and returns the
 //! choice. Lua cannot block the host thread, so the call instead
 //! *suspends* the running plugin coroutine: the Lua side calls
 //! `kage._suspend(kind, payload)`, which `coroutine.yield`s a tagged
@@ -36,7 +36,7 @@ use crate::error::PluginError;
 const SUSPEND_MARKER: &str = "__kage_suspend";
 
 /// Lua source for the internal `kage._suspend` primitive. Underscore
-/// prefixed: it is the substrate the PE.B `kage.ui.*` wrappers build
+/// prefixed: it is the substrate the `kage.ui.*` wrappers build
 /// on, not a documented plugin entry point.
 const SUSPEND_LUA: &str = "kage._suspend = function(kind, payload)\n  \
      return coroutine.yield({ __kage_suspend = true, kind = kind, payload = payload })\n\
@@ -45,8 +45,8 @@ const SUSPEND_LUA: &str = "kage._suspend = function(kind, payload)\n  \
 /// A request a parked plugin coroutine made of the host.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SuspendRequest {
-    /// Namespace of the host action, e.g. `"ui.select"`. PE.B wrappers
-    /// pick the kind; the host routes on it.
+    /// Namespace of the host action, e.g. `"ui.select"`. The `kage.ui.*`
+    /// wrappers pick the kind; the host routes on it.
     pub kind: String,
     /// Action arguments, shaped per `kind`. `null` when the Lua side
     /// passed no payload.

@@ -1,15 +1,15 @@
 //! Multi-line text editor overlay.
 //!
-//! Bare-minimum primitive that PE.B's `kage.ui.editor(title, prefill?)`
-//! will wrap. The overlay paints a large bordered modal hosting a
+//! Bare-minimum primitive behind the `kage.ui.editor(title, prefill?)`
+//! plugin dialog. The overlay paints a large bordered modal hosting a
 //! multi-line text buffer. `Ctrl+S` resolves with the edited string as
 //! a JSON string value; Esc and Ctrl+C close without resolving.
 //!
 //! Deliberately small: arrow keys, Backspace, Enter for newlines,
 //! visible cursor cell. Bracketed paste routes through
 //! [`OverlayWidget::handle_paste`] and inserts at the cursor.
-//! PE.B may layer kill-ring or undo on top once it consumes this;
-//! the primitive itself stays lean.
+//! Kill-ring or undo can layer on top later; the primitive itself
+//! stays lean.
 
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};

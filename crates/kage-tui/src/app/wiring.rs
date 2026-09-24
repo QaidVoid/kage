@@ -556,8 +556,7 @@ impl App {
 
     /// Drain any pending `kage.compact()` request and forward it as
     /// [`RunRequest::CompactNow`] to the worker. The optional prompt
-    /// is currently advisory; PE.C.4 will wire it into the compact
-    /// hook.
+    /// is currently advisory; a future compaction hook will receive it.
     pub(crate) fn drain_plugin_compact_request(&mut self) {
         let Some(slot) = self.plugin_compact_request.as_ref() else {
             return;

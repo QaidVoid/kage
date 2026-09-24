@@ -95,7 +95,7 @@ mod tests {
 
     #[test]
     fn folded_widget_measures_header_plus_bottom_pad() {
-        // PB.7: every non-bubble block gets a trailing pad row, so
+        // Every non-bubble block gets a trailing pad row, so
         // a folded thinking block (1 header line) is 2 rows.
         let w = ThinkingBlockWidget::new("a\nb\nc", true, false);
         let theme = Theme::default();
@@ -124,7 +124,7 @@ mod tests {
     fn unfocused_lines_keep_gutter_blank_but_reserved() {
         let w = ThinkingBlockWidget::new("body", false, false);
         let theme = Theme::default();
-        // PB.5: column 0 is the reserved gutter so toggling focus
+        // Column 0 is the reserved gutter so toggling focus
         // does not shift the body. Thinking has no visible rule
         // glyph, so unfocused it is always a plain space.
         for row in w.lines(30, &ctx(&theme)) {

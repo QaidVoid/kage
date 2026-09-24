@@ -1,7 +1,7 @@
 //! Per-kind block-widget registry for built-in and plugin renderers.
 //!
-//! PB.10 locks the extensibility shape the upcoming PE.A.N Lua-block-
-//! renderer phase will plug into. The registry maps a [`Block`]'s
+//! The registry is the extensibility point plugin block renderers
+//! plug into. It maps a [`Block`]'s
 //! kind to a [`BlockFactory`] that produces a boxed [`BlockWidget`]
 //! tailored to that block's data. Built-ins are registered at TUI
 //! startup; plugins call [`BlockRenderer::set_custom`] to add a

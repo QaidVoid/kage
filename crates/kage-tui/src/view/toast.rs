@@ -7,8 +7,8 @@
 //! Widths adapt to text up to a sensible cap so long notifications
 //! do not eclipse the conversation pane.
 //!
-//! The renderer is exposed behind a small trait so a plugin can
-//! later swap the implementation entirely (PE.A wiring).
+//! The renderer is exposed behind a small trait so hosts and plugins
+//! can swap the implementation entirely.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;

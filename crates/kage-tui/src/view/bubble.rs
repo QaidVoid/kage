@@ -27,7 +27,7 @@ pub(crate) fn user_block_lines(text: &str, width: u16, emphasis: Emphasis) -> Ve
     )
 }
 
-/// Width in cells of the focus-rule chrome that PB.5 reserves on
+/// Width in cells of the focus-rule chrome reserved on
 /// every non-bubble block (assistant text, thinking, custom,
 /// standalone tool result). One cell for the rule glyph or its
 /// blank stand-in, one cell of padding before the body.
@@ -36,8 +36,8 @@ pub(crate) const FOCUS_RULE_WIDTH: usize = 2;
 /// Prepend a left-edge focus rule to every visual row of an
 /// already-built non-bubble block's render.
 ///
-/// PB.5 reserves the column unconditionally so toggling focus does
-/// not shift the body horizontally; PB.6 additionally pre-wraps
+/// The column is reserved unconditionally so toggling focus does
+/// not shift the body horizontally; the renderer additionally pre-wraps
 /// each logical line to `width - FOCUS_RULE_WIDTH` display columns
 /// so the rule prefix lands on **every** visual row, including
 /// wrapped continuations. Without the pre-wrap, ratatui's
@@ -83,7 +83,7 @@ pub(crate) fn mark_emphasis(
             out.push(Line::from(spans));
         }
     }
-    // PB.7: trailing pad row(s) so non-bubble blocks have the same
+    // Trailing pad row(s) so non-bubble blocks have the same
     // visual separation bubbles already get from their bottom pad.
     // Carries the gutter so the rule reads as continuous.
     for _ in 0..widget::BlockPadding::BOTTOM {

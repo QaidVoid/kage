@@ -93,8 +93,8 @@ impl<H: Hooks> SessionRecordingHooks<H> {
 
     /// Attach a plugin runtime so the recorder drains its
     /// `take_pending_session_ops` queue after every turn. Calling
-    /// this is optional; without it the recorder behaves exactly as
-    /// it did pre-PE.D.
+    /// this is optional; without it the recorder ignores plugin
+    /// session ops and behaves as a plain recorder.
     #[must_use]
     pub fn with_plugin_runtime(mut self, runtime: Arc<PluginRuntime>) -> Self {
         self.runtime = Some(runtime);

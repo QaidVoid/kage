@@ -1,7 +1,7 @@
 //! Single-line text input overlay.
 //!
-//! Bare-minimum primitive that PE.B's `kage.ui.input(title, placeholder?)`
-//! will wrap. The overlay paints a centered modal with a title row and
+//! Bare-minimum primitive behind the `kage.ui.input(title, placeholder?)`
+//! plugin dialog. The overlay paints a centered modal with a title row and
 //! a single-line editor. Enter resolves with the typed string as a
 //! JSON string value; Esc and Ctrl+C close without resolving.
 //!

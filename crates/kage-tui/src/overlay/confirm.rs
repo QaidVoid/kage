@@ -1,7 +1,7 @@
 //! Yes/no/cancel confirmation overlay.
 //!
-//! Bare-minimum primitive that PE.B's `kage.ui.confirm(title, message)`
-//! will wrap. The overlay paints a centered modal with a title row, a
+//! Bare-minimum primitive behind the `kage.ui.confirm(title, message)`
+//! plugin dialog. The overlay paints a centered modal with a title row, a
 //! wrapped message body, and two highlighted options ("Yes" / "No").
 //! Enter resolves with the current selection as a JSON boolean; Esc
 //! and Ctrl+C close without resolving.

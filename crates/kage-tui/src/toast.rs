@@ -8,12 +8,12 @@
 //! wants to scroll back to them; toasts are for "thing happened, ack
 //! it, move on" feedback.
 //!
-//! Plugins customize toasts in three places (PE.A wiring lands later):
+//! Plugins customize toasts in three places:
 //!
-//! 1. **Source** - `kage.notify(text)` already pushes a toast via the
+//! 1. **Source** - `kage.notify(text)` pushes a toast via the
 //!    plugin host log sink.
 //! 2. **Style** - the per-kind theme colors live in the `Theme` and
-//!    can be overridden by a plugin's theme TOML in PT.9.
+//!    can be overridden by a plugin's theme TOML.
 //! 3. **Renderer** - swap the implementation behind
 //!    [`ToastRenderer`] via [`crate::App::set_toast_renderer`] for
 //!    full layout control. The default renderer is bundled.

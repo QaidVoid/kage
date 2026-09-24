@@ -549,7 +549,7 @@ impl PluginRuntime {
 
     /// Resume the parked coroutine signalling the host action was
     /// cancelled. The blocking call returns `nil` to the plugin (the
-    /// PE.B dialog contract for "user dismissed").
+    /// `kage.ui.*` dialog contract for "user dismissed").
     pub fn bridge_cancel(&self) -> Result<BridgeStep, PluginError> {
         let mut slot = lock(&self.bridge);
         let thread = slot.take().ok_or(PluginError::BridgeIdle)?;

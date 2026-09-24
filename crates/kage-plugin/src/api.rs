@@ -7,7 +7,7 @@
 //!   notification; `level` is `"info"` (default), `"warning"`, or
 //!   `"error"`. Non-info levels are also recorded via the log sink so
 //!   the severity is not lost. `kage.notify` is a back-compat alias for
-//!   the same function (the pre-PE.B name).
+//!   the same function (the older name).
 //! * `kage.log(level, message)` records a structured log line; `level` is
 //!   one of `"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`.
 //! * `kage.config()` returns a fresh copy of the host-supplied

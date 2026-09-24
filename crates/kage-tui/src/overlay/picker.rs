@@ -36,6 +36,7 @@ pub struct OverlayPicker {
     search: String,
     selected: usize,
     scroll_offset: usize,
+    note: Option<String>,
 }
 
 impl OverlayPicker {
@@ -63,7 +64,15 @@ impl OverlayPicker {
             search: String::new(),
             selected: 0,
             scroll_offset: 0,
+            note: None,
         }
+    }
+
+    /// Add a muted note row between the list and the key hint.
+    #[must_use]
+    pub fn with_note(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
+        self
     }
 
     /// Render the picker over `area`. Thin wrapper that drives the
@@ -108,7 +117,11 @@ impl OverlayWidget for OverlayPicker {
             .saturating_add(6); // borders + selection gutter
         let title = u16::try_from(self.title.width() + 4).unwrap_or(u16::MAX);
         let hint = u16::try_from(HELP_HINT.width() + 2).unwrap_or(u16::MAX);
-        let longest = rows.max(title).max(hint);
+        let note = self
+            .note
+            .as_deref()
+            .map_or(0, |n| u16::try_from(n.width() + 2).unwrap_or(u16::MAX));
+        let longest = rows.max(title).max(hint).max(note);
         let max_w = (available.width.saturating_mul(80) / 100).max(30);
         let want_w = longest.clamp(30, max_w);
 
@@ -123,7 +136,7 @@ impl OverlayWidget for OverlayPicker {
             .collect();
         let item_rows = u16::try_from(self.items.len()).unwrap_or(u16::MAX);
         let group_rows = u16::try_from(groups.len()).unwrap_or(0).saturating_mul(2);
-        let chrome = 4u16; // borders (2) + search (1) + help (1)
+        let chrome = 4 + u16::from(self.note.is_some()); // borders, search, note, help
         let want_h = item_rows
             .saturating_add(group_rows)
             .saturating_add(chrome)
@@ -148,13 +161,22 @@ impl OverlayWidget for OverlayPicker {
             .constraints([
                 Constraint::Length(1),
                 Constraint::Min(1),
+                Constraint::Length(u16::from(self.note.is_some())),
                 Constraint::Length(1),
             ])
             .split(inner);
 
         self.render_search(buf, chunks[0]);
         self.render_list(buf, chunks[1]);
-        Self::render_help(buf, chunks[2]);
+        if let Some(note) = &self.note {
+            let style = Style::default().fg(crate::theme::current().muted_fg);
+            Widget::render(
+                Paragraph::new(Span::styled(note.clone(), style)),
+                chunks[2],
+                buf,
+            );
+        }
+        Self::render_help(buf, chunks[3]);
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> OverlayAction {

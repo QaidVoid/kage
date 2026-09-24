@@ -47,6 +47,7 @@ pub struct CommandLine {
     /// Set by the host after a failed submit; cleared on the next
     /// keystroke that changes the text.
     error: Option<String>,
+    palette: bool,
 }
 
 impl CommandLine {
@@ -54,6 +55,18 @@ impl CommandLine {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct a command line for the `/` palette. Every refilter
+    /// hides aliases until the typed name reaches one and highlights a
+    /// row through [`Self::select_first`], so Enter, Down and Up act
+    /// without a Tab first.
+    #[must_use]
+    pub fn for_palette() -> Self {
+        Self {
+            palette: true,
+            ..Self::default()
+        }
     }
 
     /// Current command text (without the leading `:`).
@@ -116,6 +129,17 @@ impl CommandLine {
         self.selected = None;
     }
 
+    /// Highlight the candidate equal to the typed token, or the first
+    /// one, without inserting it. Enter accepts the highlighted row.
+    pub fn select_first(&mut self) {
+        let typed = self
+            .text
+            .get(self.completions.anchor..self.cursor)
+            .unwrap_or("");
+        let exact = self.completions.items.iter().position(|c| c.value == typed);
+        self.selected = exact.or((!self.completions.items.is_empty()).then_some(0));
+    }
+
     /// Recompute completions against `registry` and `resolver` using
     /// the current text. Callers use this when they need to populate
     /// the popup without driving through a keystroke, e.g. the slash
@@ -149,14 +173,7 @@ impl CommandLine {
                     CommandLineEvent::Cancelled
                 }
             }
-            KeyCode::Enter => {
-                let trimmed = self.text.trim().to_owned();
-                if trimmed.is_empty() {
-                    CommandLineEvent::Cancelled
-                } else {
-                    CommandLineEvent::Submit(trimmed)
-                }
-            }
+            KeyCode::Enter => self.submit(),
             KeyCode::Tab => {
                 self.error = None;
                 if self.completions.items.is_empty() {
@@ -173,11 +190,11 @@ impl CommandLine {
                 self.tab(false);
                 CommandLineEvent::Pending
             }
-            KeyCode::Down if self.popup_open => {
+            KeyCode::Down if self.popup_open || self.palette => {
                 self.cycle(true);
                 CommandLineEvent::Pending
             }
-            KeyCode::Up if self.popup_open => {
+            KeyCode::Up if self.popup_open || self.palette => {
                 self.cycle(false);
                 CommandLineEvent::Pending
             }
@@ -280,6 +297,22 @@ impl CommandLine {
         self.refresh(registry, resolver);
     }
 
+    fn submit(&mut self) -> CommandLineEvent {
+        if let Some(value) = self
+            .selected
+            .and_then(|i| self.completions.items.get(i))
+            .map(|c| c.value.clone())
+        {
+            self.replace_at_anchor(&value);
+        }
+        let trimmed = self.text.trim().to_owned();
+        if trimmed.is_empty() {
+            CommandLineEvent::Cancelled
+        } else {
+            CommandLineEvent::Submit(trimmed)
+        }
+    }
+
     fn cycle(&mut self, forward: bool) {
         let n = self.completions.items.len();
         if n == 0 {
@@ -305,6 +338,21 @@ impl CommandLine {
         self.popup_open = false;
         self.selected = None;
         self.completions = complete(registry, &self.text, self.cursor, resolver);
+        if !self.palette {
+            return;
+        }
+        let at_name = self
+            .text
+            .get(..self.completions.anchor)
+            .is_some_and(|head| head.trim().is_empty());
+        if at_name && self.cursor == self.completions.anchor {
+            self.completions
+                .items
+                .retain(|c| registry.iter().any(|spec| spec.name == c.value));
+        }
+        if at_name || self.cursor > self.completions.anchor {
+            self.select_first();
+        }
     }
 
     fn replace_at_anchor(&mut self, value: &str) {
@@ -390,6 +438,7 @@ impl CommandLine {
             popup_open,
             selected,
             error: None,
+            palette: false,
         }
     }
 
@@ -403,6 +452,7 @@ impl CommandLine {
             popup_open: false,
             selected: None,
             error: Some(error.to_owned()),
+            palette: false,
         }
     }
 }

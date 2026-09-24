@@ -1610,8 +1610,7 @@ fn validated_missing_required_arg_returns_error() {
     let (tx, _rx) = mpsc::channel();
     let mut app = app_with_defaults(buffer, tx);
     let registry = builtin_registry();
-    // "model" without a required <id> argument
-    let result = app.run_command_validated("model", &registry);
+    let result = app.run_command_validated("fold", &registry);
     match result {
         CommandResult::ValidationError(msg) => {
             assert!(
@@ -1809,6 +1808,79 @@ fn slash_bad_arg_keeps_palette_open_with_error() {
     assert!(
         sp.cmdline().error().is_some(),
         "validation error should be set on the palette"
+    );
+}
+
+fn palette_values(app: &App) -> Vec<String> {
+    let sp = app.slash_palette.as_ref().expect("palette open");
+    let items = &sp.cmdline().completions().items;
+    items.iter().map(|c| c.value.clone()).collect()
+}
+
+fn palette_selected(app: &App) -> Option<String> {
+    let cl = app.slash_palette.as_ref().expect("palette open").cmdline();
+    cl.selected()
+        .map(|i| cl.completions().items[i].value.clone())
+}
+
+#[test]
+fn palette_opens_with_model_selected_on_top() {
+    let mut app = defaults_app();
+    app.handle_key(key('/'));
+    assert_eq!(palette_values(&app)[0], "model");
+    assert_eq!(palette_selected(&app).as_deref(), Some("model"));
+}
+
+#[test]
+fn palette_hides_aliases_until_typed() {
+    let mut app = defaults_app();
+    app.handle_key(key('/'));
+    assert!(!palette_values(&app).iter().any(|v| v == "q"));
+    app.handle_key(key('q'));
+    assert!(palette_values(&app).iter().any(|v| v == "q"));
+    assert_eq!(palette_selected(&app).as_deref(), Some("q"));
+}
+
+#[test]
+fn palette_first_down_selects_the_second_row() {
+    let mut app = defaults_app();
+    app.handle_key(key('/'));
+    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+    assert_eq!(palette_selected(&app), palette_values(&app).get(1).cloned());
+}
+
+#[test]
+fn palette_enter_on_open_runs_the_model_picker() {
+    let mut app = defaults_app();
+    app.set_model_choices(vec![PickItem::simple("fake:m")]);
+    app.handle_key(key('/'));
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert!(app.slash_palette.is_none());
+    assert!(app.picker.is_some(), "bare /model opens the picker");
+    assert_eq!(app.picker_kind, Some(PickerKind::Model));
+}
+
+#[test]
+fn slash_reload_sends_reload_plugins() {
+    let (tx, rx) = mpsc::channel();
+    let mut app = app_with_defaults(shared_buffer(), tx);
+    app.handle_key(key('/'));
+    type_str(&mut app, "reload");
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(rx.try_recv(), Ok(RunRequest::ReloadPlugins));
+}
+
+#[test]
+fn model_picker_renders_its_login_note() {
+    let mut app = defaults_app();
+    app.set_model_choices(vec![PickItem::simple("fake:m")]);
+    let _ = app.apply(InputAction::OpenModelPicker);
+    let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+    app.render_into(&mut terminal).unwrap();
+    let rows = snapshot_rows(&terminal);
+    assert!(
+        rows.iter().any(|r| r.contains("/login to add a provider")),
+        "{rows:#?}"
     );
 }
 

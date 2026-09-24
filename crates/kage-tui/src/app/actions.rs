@@ -114,7 +114,7 @@ impl App {
             }
             "model" => {
                 if rest.is_empty() {
-                    self.push_error("model: usage `/model <provider:id>`");
+                    let _ = self.apply(InputAction::OpenModelPicker);
                 } else {
                     let _ = self.send_request(RunRequest::SwitchModel(rest.to_owned()));
                 }
@@ -203,6 +203,10 @@ impl App {
             }
             "noh" => {
                 self.search_pattern = None;
+                None
+            }
+            "reload" => {
+                let _ = self.send_request(RunRequest::ReloadPlugins);
                 None
             }
             _ => None,

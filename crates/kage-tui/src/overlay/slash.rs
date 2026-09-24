@@ -6,9 +6,12 @@
 //!
 //! The palette shows a `/` prefix and the typed input on a single row
 //! immediately above the input card, with a tight completion list
-//! stacked above it. As the user types, the list filters; Tab applies
-//! the longest common prefix and opens cycling, Down/Up navigate, and
-//! Enter dispatches the selected command. Once a command name is
+//! stacked above it on a tinted `KageOverlay` panel under a top rule.
+//! As the user types, the list filters and the first row is
+//! highlighted again. Aliases stay hidden until the typed name reaches
+//! one. Tab applies the longest common prefix and opens cycling,
+//! Down/Up navigate at once, and Enter dispatches the highlighted
+//! command. Once a command name is
 //! committed, continued typing edits the arguments inline with per-arg
 //! completion driven by the same [`Resolver`] the `:` line uses.
 //! Plugin commands appear in the list tagged `[plugin]` via the
@@ -103,7 +106,7 @@ impl SlashPalette {
     #[must_use]
     pub fn new(registry: Vec<&'static CommandSpec>, ctx: SlashContext) -> Self {
         Self {
-            cmdline: CommandLine::new(),
+            cmdline: CommandLine::for_palette(),
             registry,
             ctx,
         }
@@ -198,9 +201,12 @@ impl SlashPalette {
 
     fn paint_popup(&self, area: Rect, buf: &mut Buffer) {
         let theme = crate::theme::current();
-        let bg = theme.modeline_bg;
-        let row_style = Style::default().fg(theme.overlay_fg).bg(bg);
-        let dim_style = Style::default().fg(theme.status_dim_fg).bg(bg);
+        let row_style = Style::default()
+            .fg(theme.overlay_fg)
+            .bg(theme.modeline_bg)
+            .patch(theme.group_style("KageOverlay"));
+        let dim_style = row_style.fg(theme.status_dim_fg);
+        let rule_style = row_style.fg(theme.overlay_border);
         let sel_style = Style::default()
             .fg(theme.overlay_selected_fg)
             .bg(theme.overlay_selected_bg)
@@ -227,6 +233,10 @@ impl SlashPalette {
             .unwrap_or(0);
 
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(usize::from(area.height));
+        lines.push(Line::from(Span::styled(
+            "\u{2500}".repeat(inner_width),
+            rule_style,
+        )));
         if above > 0 {
             lines.push(Line::from(Span::styled(
                 pad_to_width(&format!("  ... {above} more above"), inner_width),
@@ -298,7 +308,7 @@ impl OverlayWidget for SlashPalette {
         let (offset, window) = popup_scroll_window(self.cmdline.selected(), total, max_visible);
         let above = offset;
         let below = total.saturating_sub(offset + window);
-        let rows = window + usize::from(above > 0) + usize::from(below > 0);
+        let rows = 1 + window + usize::from(above > 0) + usize::from(below > 0);
         let height = u16::try_from(rows)
             .unwrap_or(u16::MAX)
             .min(available.height);
@@ -335,7 +345,7 @@ fn popup_area(regions: Regions, total: usize, selected: Option<usize>) -> Option
     let (offset, window) = popup_scroll_window(selected, total, max_visible);
     let above = offset;
     let below = total.saturating_sub(offset + window);
-    let rows = window + usize::from(above > 0) + usize::from(below > 0);
+    let rows = 1 + window + usize::from(above > 0) + usize::from(below > 0);
 
     let space_above = regions.input.y.saturating_sub(regions.buffer.y);
     let rows = rows.min(usize::from(space_above));

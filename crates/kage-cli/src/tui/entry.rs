@@ -265,6 +265,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     // "always allow" stick for the whole session.
     let (permission_tx, permission_rx) = mpsc::channel::<kage_tui::PermissionAsk>();
     let permission_gate = crate::permissions::PermissionGate::new(app_config.permissions.clone())
+        .with_mcp_servers(mcp_manager.server_names().map(str::to_owned).collect())
         .with_ask(permission_tx)
         .with_cancel(cancel.clone());
 

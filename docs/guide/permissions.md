@@ -1,9 +1,10 @@
 # permissions
 
-By default kage runs every tool call without asking: the same yolo
-behavior it always had. The `[permissions]` table lets you opt specific
-tools into rules instead. Nothing changes until you write
-configuration.
+By default kage runs every built-in tool call without asking: the
+same yolo behavior it always had. The `[permissions]` table lets you
+opt specific tools into rules instead. MCP tools are the exception:
+they ask unless you allow their server (see
+[MCP tools](#mcp-tools)).
 
 ```toml
 [permissions]
@@ -21,13 +22,18 @@ default = "ask"
 allow = ["git *", "cargo *"]
 # glob patterns. a match refuses the call outright.
 deny = ["rm -rf *"]
+
+[permissions.mcp]
+# action for the tools of one MCP server: "allow", "ask", or "deny".
+# servers not listed here ask.
+github = "allow"
 ```
 
 ## how rules evaluate
 
 Tool names are literal: `bash`, `write`, `edit`, `web_fetch`, or any
-registered MCP tool name such as `mcp_github_create_issue`. A tool
-with no `[permissions.tools.<name>]` entry is always allowed.
+registered MCP tool name such as `github__create_issue`. A built-in
+tool with no `[permissions.tools.<name>]` entry is always allowed.
 
 When an entry exists, the `deny` patterns are checked first, then the
 `allow` patterns, then `default`. First match wins; within a list,
@@ -46,13 +52,37 @@ can block a few dangerous calls without opting into prompts:
 deny = ["curl *", "wget *"]
 ```
 
+## mcp tools
+
+An MCP tool is named `<server>__<tool>`. Its verdict is decided in
+this order:
+
+1. a `[permissions.tools.<server>__<tool>]` entry, evaluated as above;
+2. otherwise the server's action under `[permissions.mcp]`;
+3. otherwise `ask`.
+
+So an unconfigured MCP tool always asks, while a per-tool entry can
+tighten or loosen one tool of an allowed or denied server:
+
+```toml
+[permissions.mcp]
+github = "allow"
+
+[permissions.tools.github__create_issue]
+default = "ask"
+```
+
+This matters most in print mode, which cannot ask: MCP tools there are
+refused until you allow the server or the tool.
+
 ## what "ask" does per mode
 
 | mode | ask behavior |
 |---|---|
 | TUI | a modal opens showing the tool and its command; choose allow once, always allow, or deny. Ctrl+C cancels the prompt and the call. |
-| print (`kage -p`) | the call is denied with an error telling you to add an allow rule; there is no interactive prompt. |
-| ACP (`kage rpc`) | the editor client is asked through `session/request_permission`, exactly as before. A config `allow` skips the round-trip; a config `deny` refuses locally. |
+| print (`kage -p`) | the call is denied with an error telling you to add an allow rule; there is no interactive prompt. For an MCP tool the error names both the `[permissions.mcp]` and the per-tool fix. |
+| ACP (`kage rpc`) | the editor client is asked through `session/request_permission`. Every tool without a config entry asks here, built-ins included. A config `allow` skips the round-trip; a config `deny` refuses locally. |
+| MCP server (`kage mcp serve`) | the call is refused, since there is no one to ask. |
 
 "Always allow" flips the tool's `default` to `allow` for the running
 session and persists `[permissions.tools.<name>] default = "allow"`
@@ -87,5 +117,6 @@ while `deny` is active even allow-listed tools refuse, and while
 
 ## validation
 
-Broken configuration refuses to start: empty tool names, empty
-patterns, or patterns that do not compile print an error and exit 1.
+Broken configuration refuses to start: empty tool or server names,
+empty patterns, or patterns that do not compile print an error and
+exit 1.

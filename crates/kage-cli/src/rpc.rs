@@ -192,7 +192,9 @@ impl CliAcpAgent {
             cx,
             recorder: None,
             tools,
-            gate: PermissionGate::new(config.permissions).with_fallback(PermissionAction::Ask),
+            gate: PermissionGate::new(config.permissions)
+                .with_fallback(PermissionAction::Ask)
+                .with_mcp_servers(mcp.server_names().map(str::to_owned).collect()),
             loop_cfg: LoopConfig {
                 compaction_threshold: config.loop_settings.compaction_threshold,
                 parallel_tools: false,

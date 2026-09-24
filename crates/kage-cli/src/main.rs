@@ -196,8 +196,15 @@ pub(crate) enum Command {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum McpAction {
-    /// Serve kage's built-in tools as an MCP server over stdio.
-    Serve,
+    /// Serve kage's built-in tools as an MCP server over stdio. Calls
+    /// are checked against `[permissions]`, and a tool whose verdict is
+    /// `ask` is refused because there is no one to ask.
+    Serve {
+        /// Comma-separated built-in tools to expose. Unknown names are
+        /// an error.
+        #[arg(long, value_delimiter = ',', default_value = "read,grep,find,ls")]
+        tools: Vec<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -261,7 +268,7 @@ pub(crate) fn run_subcommand(command: Command) -> ExitCode {
         Command::Completions { shell } => run_completions(shell),
         Command::Rpc { model, system } => rpc::run(model.as_deref(), &system),
         Command::Mcp { action } => match action {
-            McpAction::Serve => mcp::run_serve(),
+            McpAction::Serve { tools } => mcp::run_serve(&tools),
         },
     }
 }

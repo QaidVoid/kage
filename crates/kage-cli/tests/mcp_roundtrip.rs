@@ -32,6 +32,10 @@ fn spawn_kage_mcp_serve_and_round_trip_a_builtin_tool() {
     let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
     assert!(names.contains(&"ls"), "builtin `ls` exposed: {names:?}");
     assert!(names.contains(&"read"), "builtin `read` exposed: {names:?}");
+    assert!(
+        !names.contains(&"bash"),
+        "`bash` is not served by default: {names:?}"
+    );
 
     let tools = tools_from_connection(conn).expect("adapt tools");
     let ls = tools

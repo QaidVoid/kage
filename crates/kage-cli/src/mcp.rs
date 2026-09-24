@@ -1,7 +1,8 @@
 //! MCP wiring for the binary.
 //!
-//! - [`run_serve`] is the `kage mcp serve` server: builds the built-in
-//!   registry and hands stdin/stdout to [`kage_mcp::serve`].
+//! - [`run_serve`] is the `kage mcp serve` server: builds a registry of
+//!   the requested built-in tools and hands stdin/stdout to
+//!   [`kage_mcp::serve`], gated by the layered `[permissions]`.
 //! - [`spawn_and_register`] is the client side every run path calls:
 //!   it spawns the configured `[mcp.servers.*]` (merged with any a
 //!   plugin declared via `kage.mcp.add_server`) and registers their
@@ -16,17 +17,40 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use kage_core::config::{Config, McpConfig};
+use kage_core::permissions::{PermissionAction, PermissionsConfig};
 use kage_mcp::{McpError, McpManager};
 use kage_plugin::PluginRuntime;
 use kage_tools::ToolRegistry;
 
-/// Serve built-in tools as an MCP server until stdin closes.
-pub(crate) fn run_serve() -> ExitCode {
-    let registry = kage_tools::builtin_registry();
+/// Serve the built-in `tools` as an MCP server until stdin closes.
+/// Calls are checked against the layered `[permissions]`; an `ask`
+/// verdict is refused because there is no one to ask.
+pub(crate) fn run_serve(tools: &[String]) -> ExitCode {
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let registry = match serve_registry(tools) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("kage: mcp serve: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let permissions = match Config::load_layered(&workdir) {
+        Ok(c) => c.permissions,
+        Err(e) => {
+            eprintln!("kage: mcp serve: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(e) = permissions.validate() {
+        eprintln!("kage: mcp serve: {e}");
+        return ExitCode::from(1);
+    }
+    let gate = |name: &str, input: &serde_json::Value| serve_verdict(&permissions, name, input);
     match kage_mcp::serve(
         &registry,
         &workdir,
+        permissions.confine_paths,
+        &gate,
         BufReader::new(std::io::stdin()),
         std::io::stdout(),
     ) {
@@ -35,6 +59,52 @@ pub(crate) fn run_serve() -> ExitCode {
             eprintln!("kage: mcp serve: {e}");
             ExitCode::from(1)
         }
+    }
+}
+
+/// The built-in registry reduced to `tools`.
+///
+/// # Errors
+///
+/// A message naming the first unknown tool and the known ones.
+fn serve_registry(tools: &[String]) -> Result<ToolRegistry, String> {
+    let mut registry = kage_tools::builtin_registry();
+    let wanted: Vec<&str> = tools.iter().map(|t| t.trim()).collect();
+    if let Some(unknown) = wanted.iter().find(|t| registry.get(t).is_none()) {
+        let mut known: Vec<&str> = registry.names().collect();
+        known.sort_unstable();
+        return Err(format!(
+            "unknown tool `{unknown}` in --tools (known: {})",
+            known.join(", ")
+        ));
+    }
+    let unlisted: Vec<String> = registry
+        .names()
+        .filter(|n| !wanted.contains(n))
+        .map(str::to_owned)
+        .collect();
+    for name in unlisted {
+        registry.unregister(&name);
+    }
+    Ok(registry)
+}
+
+/// The serve gate's answer for one call: `[permissions.tools.<name>]`
+/// decides, and `ask` is refused since `kage mcp serve` cannot prompt.
+fn serve_verdict(
+    permissions: &PermissionsConfig,
+    name: &str,
+    input: &serde_json::Value,
+) -> Option<String> {
+    match permissions.check(name, &PermissionsConfig::subject_for(input)) {
+        PermissionAction::Allow => None,
+        PermissionAction::Ask => Some(format!(
+            "`{name}`: permission is `ask` ([permissions.tools.{name}]) and \
+             `kage mcp serve` cannot prompt; denied"
+        )),
+        PermissionAction::Deny => Some(format!(
+            "`{name}`: permission denied by [permissions.tools.{name}]"
+        )),
     }
 }
 
@@ -187,7 +257,54 @@ mod tests {
     use kage_provider::testing::MockProvider;
     use kage_provider::{ProviderEvent, ProviderRegistry, StopReason};
 
-    use super::SamplingHandler;
+    use kage_core::permissions::{PermissionAction, PermissionsConfig, ToolPermissionRules};
+
+    use super::{SamplingHandler, serve_registry, serve_verdict};
+
+    fn names(tools: &[&str]) -> Vec<String> {
+        tools.iter().map(|t| (*t).to_owned()).collect()
+    }
+
+    #[test]
+    fn serve_registry_keeps_only_listed_tools() {
+        let reg = serve_registry(&names(&["read", "ls"])).unwrap();
+        let mut listed: Vec<&str> = reg.names().collect();
+        listed.sort_unstable();
+        assert_eq!(listed, vec!["ls", "read"]);
+        assert!(reg.get("bash").is_none());
+    }
+
+    #[test]
+    fn serve_registry_rejects_unknown_tools() {
+        let err = serve_registry(&names(&["read", "nope"])).unwrap_err();
+        assert!(err.contains("`nope`"), "{err}");
+    }
+
+    #[test]
+    fn serve_verdict_refuses_ask_and_deny() {
+        let mut permissions = PermissionsConfig::default();
+        for (tool, default) in [
+            ("bash", PermissionAction::Ask),
+            ("write", PermissionAction::Deny),
+        ] {
+            permissions.tools.insert(
+                tool.to_owned(),
+                ToolPermissionRules {
+                    default,
+                    ..ToolPermissionRules::default()
+                },
+            );
+        }
+        let input = serde_json::json!({});
+        assert!(serve_verdict(&permissions, "read", &input).is_none());
+        let ask = serve_verdict(&permissions, "bash", &input).unwrap();
+        assert!(ask.contains("cannot prompt"), "{ask}");
+        let deny = serve_verdict(&permissions, "write", &input).unwrap();
+        assert!(
+            deny.contains("denied by [permissions.tools.write]"),
+            "{deny}"
+        );
+    }
 
     #[test]
     fn sampling_runs_the_prompt_through_the_model() {

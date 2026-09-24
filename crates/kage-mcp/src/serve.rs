@@ -8,10 +8,13 @@
 //! each response, and sequential dispatch keeps tool side effects
 //! ordered without a work-stealing pool.
 //!
-//! Tool failures are reported the MCP way - a normal result with
-//! `isError: true` - so the calling agent sees the message instead of
-//! a transport-level fault. Only genuinely unknown JSON-RPC methods
-//! get a JSON-RPC error.
+//! The caller decides what is exposed: the registry holds only the tools
+//! to serve, and a [`ServeGate`] may refuse individual calls.
+//!
+//! Tool failures and refusals are reported the MCP way, as a normal
+//! result with `isError: true`, so the calling agent sees the message
+//! instead of a transport-level fault. Only genuinely unknown JSON-RPC
+//! methods get a JSON-RPC error.
 
 use std::io::{BufRead, Write};
 use std::path::Path;
@@ -23,10 +26,16 @@ use kage_tools::tool::ToolContext;
 
 use crate::server::PROTOCOL_VERSION;
 
+/// Decides whether one `tools/call` may run: `None` runs it, `Some(reason)`
+/// refuses it with `reason` as the error text. Receives the tool name and
+/// its arguments.
+pub type ServeGate<'a> = &'a dyn Fn(&str, &serde_json::Value) -> Option<String>;
+
 /// Run the MCP server loop until the client closes the connection.
 ///
 /// `workdir` scopes filesystem tools; the binary passes the process
-/// working directory.
+/// working directory. `confine` keeps tool paths under `workdir`, and
+/// `gate` is consulted before every call.
 ///
 /// # Errors
 ///
@@ -35,6 +44,8 @@ use crate::server::PROTOCOL_VERSION;
 pub fn serve<R, W>(
     registry: &ToolRegistry,
     workdir: &Path,
+    confine: bool,
+    gate: ServeGate<'_>,
     reader: R,
     writer: W,
 ) -> std::io::Result<()>
@@ -57,7 +68,7 @@ where
                 },
             })),
             "tools/list" => Ok(serde_json::json!({ "tools": tool_list(registry) })),
-            "tools/call" => Ok(call_tool(registry, workdir, &params)),
+            "tools/call" => Ok(call_tool(registry, workdir, confine, gate, &params)),
             "ping" => Ok(serde_json::json!({})),
             other => Err(RpcError::method_not_found(other)),
         };
@@ -85,11 +96,14 @@ fn tool_list(registry: &ToolRegistry) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Dispatch one `tools/call`. An unknown tool, bad params, or a tool
-/// error all become an `isError` result rather than a fault.
+/// Dispatch one `tools/call`. An unknown tool, a gate refusal, bad
+/// params, or a tool error all become an `isError` result rather than a
+/// fault.
 fn call_tool(
     registry: &ToolRegistry,
     workdir: &Path,
+    confine: bool,
+    gate: ServeGate<'_>,
     params: &serde_json::Value,
 ) -> serde_json::Value {
     let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
@@ -100,8 +114,14 @@ fn call_tool(
     let Some(tool) = registry.get(name) else {
         return error_result(format!("unknown tool: {name}"));
     };
+    if let Some(reason) = gate(name, &arguments) {
+        return error_result(reason);
+    }
     let cancel = CancelFlag::new();
-    let cx = ToolContext::new(workdir, &cancel);
+    let mut cx = ToolContext::new(workdir, &cancel);
+    if confine {
+        cx = cx.with_confine();
+    }
     match tool.execute(arguments, &cx) {
         Ok(out) => serde_json::json!({
             "content": [{ "type": "text", "text": out.text }],
@@ -179,7 +199,10 @@ mod tests {
             let mut reg = ToolRegistry::new();
             reg.register(Arc::new(Echo));
             let wd = std::env::temp_dir();
-            serve(&reg, &wd, BufReader::new(srv_r), srv_w).unwrap();
+            let gate = |_: &str, input: &serde_json::Value| {
+                (input["message"] == "forbidden").then(|| "refused by gate".to_owned())
+            };
+            serve(&reg, &wd, false, &gate, BufReader::new(srv_r), srv_w).unwrap();
         });
         let (peer, _in, _h) = connect(BufReader::new(cli_r), cli_w);
         peer
@@ -235,6 +258,22 @@ mod tests {
                 .unwrap()
                 .contains("unknown tool")
         );
+    }
+
+    #[test]
+    fn gate_refusal_is_an_in_band_error() {
+        let peer = client();
+        let res = peer
+            .request(
+                "tools/call",
+                serde_json::json!({
+                    "name": "echo",
+                    "arguments": { "message": "forbidden" },
+                }),
+            )
+            .unwrap();
+        assert_eq!(res["isError"], true);
+        assert_eq!(res["content"][0]["text"], "refused by gate");
     }
 
     #[test]

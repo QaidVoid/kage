@@ -53,13 +53,15 @@ suppress_warning = false
 compaction_threshold = 0.8
 
 [permissions]
-# tool permission rules. everything is allowed unless configured;
-# see the permissions guide for the full reference.
+# tool permission rules. built-in tools are allowed unless configured
+# and MCP tools ask; see the permissions guide for the full reference.
 # confine_paths = false
 # [permissions.tools.bash]
 # default = "ask"
 # allow = ["git *"]
 # deny = ["rm -rf *"]
+# [permissions.mcp]
+# github = "allow"   # action for every tool of one MCP server
 ```
 
 Every table and key is optional; omitted values fall back to the

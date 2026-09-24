@@ -9,7 +9,7 @@ pub mod server;
 pub mod tools;
 
 pub use manager::McpManager;
-pub use serve::serve;
+pub use serve::{ServeGate, serve};
 pub use server::{
     McpConnection, McpError, McpServerHandle, PROTOCOL_VERSION, ServerRequestHandler,
 };

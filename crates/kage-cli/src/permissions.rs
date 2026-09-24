@@ -1,9 +1,11 @@
 //! Tool permission gate (`[permissions]`).
 //!
 //! [`PermissionGate`] implements [`kage_loop::Hooks::before_tool_call`].
-//! A configured tool resolves through [`PermissionsConfig::check`]; a tool
-//! without an entry gets the gate's fallback action (allow by default,
-//! ask for editor sessions). Deny synthesizes an error output, allow
+//! A configured tool resolves through [`PermissionsConfig::check`]; an MCP
+//! tool (`<server>__<tool>`) of a known server without an entry resolves
+//! through [`PermissionsConfig::mcp_action`], which asks for unlisted
+//! servers; any other tool gets the gate's fallback action (allow by
+//! default, ask for editor sessions). Deny synthesizes an error output, allow
 //! passes through, and ask blocks the run until an [`Asker`] delivers the
 //! answer, or, when there is none (print mode), denies with a message
 //! pointing at the config.
@@ -48,8 +50,12 @@ pub(crate) type Asker =
 pub(crate) struct PermissionGate {
     rules: Arc<Mutex<PermissionsConfig>>,
     ask: Option<Asker>,
-    /// Action for tools with no `[permissions.tools.<name>]` entry.
+    /// Action for tools with no `[permissions.tools.<name>]` entry
+    /// that do not belong to a known MCP server.
     fallback: PermissionAction,
+    /// Names of the MCP servers whose tools are registered, used to
+    /// recognize `<server>__<tool>` names.
+    mcp_servers: Arc<[String]>,
     cancel: CancelFlag,
     /// Session-scoped mode override. `Some(action)` short-circuits
     /// the per-tool rules for every call; `None` (the initial state)
@@ -73,6 +79,7 @@ impl PermissionGate {
             rules: Arc::new(Mutex::new(rules)),
             ask: None,
             fallback: PermissionAction::Allow,
+            mcp_servers: Arc::from([]),
             cancel: CancelFlag::new(),
             mode: Arc::new(Mutex::new(None)),
             config_path: None,
@@ -123,6 +130,28 @@ impl PermissionGate {
         self
     }
 
+    /// Treat tools named `<server>__<tool>` for any of `servers` as MCP
+    /// tools, resolved through `[permissions.mcp]`.
+    #[must_use]
+    pub(crate) fn with_mcp_servers(mut self, servers: Vec<String>) -> Self {
+        self.mcp_servers = servers.into();
+        self
+    }
+
+    /// The known MCP server `tool` belongs to. Matching by prefix
+    /// against the known names keeps servers whose names contain `__`
+    /// correct; the longest match wins.
+    fn mcp_server_of(&self, tool: &str) -> Option<&str> {
+        self.mcp_servers
+            .iter()
+            .filter(|server| {
+                tool.strip_prefix(server.as_str())
+                    .is_some_and(|rest| rest.len() > 2 && rest.starts_with("__"))
+            })
+            .max_by_key(|server| server.len())
+            .map(String::as_str)
+    }
+
     /// Point the gate at the run's real cancel flag so a Ctrl+C while
     /// parked on an ask unblocks the worker as a cancellation.
     #[must_use]
@@ -142,9 +171,9 @@ impl PermissionGate {
     /// Resolve an `ask` verdict: forward to the host and park until
     /// it answers, the channel dies, or the run is cancelled. Returns
     /// `None` to run the tool or `Some(output)` to short-circuit.
-    fn ask_user(&self, prompt: PermissionPrompt) -> Option<ToolOutput> {
+    fn ask_user(&self, prompt: PermissionPrompt, rule: &Rule) -> Option<ToolOutput> {
         let Some(ask) = self.ask.as_ref() else {
-            return Some(non_interactive_output(&prompt.tool));
+            return Some(non_interactive_output(&prompt.tool, rule));
         };
         let tool = prompt.tool.clone();
         let tool = tool.as_str();
@@ -231,32 +260,53 @@ impl Hooks for PermissionGate {
         input: &serde_json::Value,
     ) -> Option<ToolOutput> {
         let subject = PermissionsConfig::subject_for(input);
-        let action = self.mode().unwrap_or_else(|| {
+        let (action, rule) = if let Some(mode) = self.mode() {
+            (mode, Rule::Mode)
+        } else {
             let rules = lock(&self.rules);
             if rules.tools.contains_key(name) {
-                rules.check(name, &subject)
+                (rules.check(name, &subject), Rule::Tool)
+            } else if let Some(server) = self.mcp_server_of(name) {
+                (rules.mcp_action(server), Rule::Mcp(server.to_owned()))
             } else {
-                self.fallback
+                (self.fallback, Rule::Tool)
             }
-        });
-        match action {
-            PermissionAction::Allow => None,
-            PermissionAction::Deny if self.mode().is_some() => Some(error_output(
+        };
+        match (action, &rule) {
+            (PermissionAction::Allow, _) => None,
+            (PermissionAction::Deny, Rule::Mode) => Some(error_output(
                 name,
                 "permission mode is deny this session (`/permission default` restores rules)",
             )),
-            PermissionAction::Deny => Some(error_output(
+            (PermissionAction::Deny, Rule::Mcp(server)) => Some(error_output(
+                name,
+                &format!("permission denied by [permissions.mcp] {server}"),
+            )),
+            (PermissionAction::Deny, Rule::Tool) => Some(error_output(
                 name,
                 &format!("permission denied by [permissions.tools.{name}]"),
             )),
-            PermissionAction::Ask => self.ask_user(PermissionPrompt {
-                call_id: id.clone(),
-                tool: name.to_owned(),
-                subject,
-                input: input.clone(),
-            }),
+            (PermissionAction::Ask, _) => self.ask_user(
+                PermissionPrompt {
+                    call_id: id.clone(),
+                    tool: name.to_owned(),
+                    subject,
+                    input: input.clone(),
+                },
+                &rule,
+            ),
         }
     }
+}
+
+/// Where a verdict came from, so refusals name the right remedy.
+enum Rule {
+    /// The session mode override.
+    Mode,
+    /// A `[permissions.tools.<name>]` entry or the gate's fallback.
+    Tool,
+    /// The `[permissions.mcp]` action for this server.
+    Mcp(String),
 }
 
 /// Synthesized `is_error` output for a refused call. The text is what
@@ -272,14 +322,20 @@ fn error_output(tool: &str, reason: &str) -> ToolOutput {
 
 /// The print-mode `ask` outcome: there is no one to ask, so the call
 /// is refused with the remedy in the message.
-fn non_interactive_output(tool: &str) -> ToolOutput {
-    error_output(
-        tool,
-        &format!(
+fn non_interactive_output(tool: &str, rule: &Rule) -> ToolOutput {
+    let text = match rule {
+        Rule::Mcp(server) => format!(
+            "permission is `ask` (MCP tools ask by default) and this mode is non-interactive; \
+             allow the server with `{server} = \"allow\"` under [permissions.mcp], \
+             allow the tool with `default = \"allow\"` under [permissions.tools.{tool}], \
+             or run the interactive TUI"
+        ),
+        Rule::Mode | Rule::Tool => format!(
             "permission is `ask` ([permissions.tools.{tool}]) and this mode is non-interactive; \
              add an allow rule or run the interactive TUI"
         ),
-    )
+    };
+    error_output(tool, &text)
 }
 
 #[cfg(test)]
@@ -294,6 +350,7 @@ mod tests {
     fn rules_for(default: PermissionAction) -> PermissionsConfig {
         PermissionsConfig {
             confine_paths: false,
+            mcp: std::collections::BTreeMap::new(),
             tools: [(
                 "bash".to_owned(),
                 ToolPermissionRules {
@@ -531,6 +588,104 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(text.contains("denied"), "{text}");
+    }
+
+    fn call(gate: &mut PermissionGate, tool: &str) -> Option<ToolOutput> {
+        gate.before_tool_call(
+            &kage_core::ToolCallId::new("call"),
+            tool,
+            &serde_json::json!({}),
+        )
+    }
+
+    fn github_gate(rules: PermissionsConfig) -> PermissionGate {
+        PermissionGate::new(rules).with_mcp_servers(vec!["github".to_owned()])
+    }
+
+    #[test]
+    fn unconfigured_mcp_tool_asks_and_builtins_stay_allowed() {
+        let mut gate = github_gate(PermissionsConfig::default());
+        let out = call(&mut gate, "github__create_issue").unwrap();
+        assert!(out.is_error);
+        assert!(out.text.contains("non-interactive"), "{}", out.text);
+        assert!(call(&mut gate, "bash").is_none());
+        assert!(call(&mut gate, "other__tool").is_none());
+    }
+
+    #[test]
+    fn mcp_server_allow_and_deny_apply() {
+        let mut rules = PermissionsConfig::default();
+        rules
+            .mcp
+            .insert("github".to_owned(), PermissionAction::Allow);
+        let mut gate = github_gate(rules.clone());
+        assert!(call(&mut gate, "github__create_issue").is_none());
+
+        rules
+            .mcp
+            .insert("github".to_owned(), PermissionAction::Deny);
+        let mut gate = github_gate(rules);
+        let out = call(&mut gate, "github__create_issue").unwrap();
+        assert_eq!(
+            out.text,
+            "`github__create_issue`: permission denied by [permissions.mcp] github"
+        );
+    }
+
+    #[test]
+    fn per_tool_entry_beats_server_default() {
+        let mut rules = PermissionsConfig::default();
+        rules
+            .mcp
+            .insert("github".to_owned(), PermissionAction::Deny);
+        rules.tools.insert(
+            "github__list_issues".to_owned(),
+            ToolPermissionRules::default(),
+        );
+        let mut gate = github_gate(rules);
+        assert!(call(&mut gate, "github__list_issues").is_none());
+        assert!(call(&mut gate, "github__create_issue").is_some());
+    }
+
+    #[test]
+    fn server_names_containing_separator_match_by_prefix() {
+        let mut rules = PermissionsConfig::default();
+        rules.mcp.insert("a__b".to_owned(), PermissionAction::Allow);
+        let mut gate =
+            PermissionGate::new(rules).with_mcp_servers(vec!["a".to_owned(), "a__b".to_owned()]);
+        assert!(call(&mut gate, "a__b__tool").is_none());
+        assert!(call(&mut gate, "a__tool").is_some());
+    }
+
+    #[test]
+    fn allowed_server_skips_the_asker_under_ask_fallback() {
+        let mut rules = PermissionsConfig::default();
+        rules
+            .mcp
+            .insert("github".to_owned(), PermissionAction::Allow);
+        let asker: Asker = Arc::new(|_| panic!("allowed server must not ask"));
+        let mut gate = github_gate(rules)
+            .with_fallback(PermissionAction::Ask)
+            .with_asker(asker);
+        assert!(call(&mut gate, "github__create_issue").is_none());
+    }
+
+    #[test]
+    fn print_mode_refusal_names_both_remedies() {
+        let mut gate = github_gate(PermissionsConfig::default());
+        let out = call(&mut gate, "github__create_issue").unwrap();
+        assert!(
+            out.text
+                .contains(r#"`github = "allow"` under [permissions.mcp]"#),
+            "{}",
+            out.text
+        );
+        assert!(
+            out.text
+                .contains("[permissions.tools.github__create_issue]"),
+            "{}",
+            out.text
+        );
     }
 
     #[test]

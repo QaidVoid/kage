@@ -59,6 +59,10 @@ pub(crate) fn execute_print_run(
         .as_ref()
         .and_then(|w| crate::engine::session_id_of(w.path()))
         .unwrap_or_default();
+    let mcp_servers = mcp
+        .as_ref()
+        .map(|m| m.server_names().map(str::to_owned).collect())
+        .unwrap_or_default();
     let engine = crate::engine::Engine::start(registry);
     engine.subscribe(printer);
     engine.open(crate::engine::SessionSpec {
@@ -68,7 +72,8 @@ pub(crate) fn execute_print_run(
         recorder: writer.map(|w| crate::engine::Recorder::new(w, plugin_runtime.clone())),
         tools,
         plugins: plugin_runtime,
-        gate: crate::permissions::PermissionGate::new(layered.permissions),
+        gate: crate::permissions::PermissionGate::new(layered.permissions)
+            .with_mcp_servers(mcp_servers),
         loop_cfg: LoopConfig {
             compaction_threshold: layered.loop_settings.compaction_threshold,
             ..LoopConfig::default()

@@ -1,14 +1,17 @@
 //! Tool permission rules (`[permissions]`): allow / ask / deny.
 //!
-//! Everything is allowed unless configured otherwise. With no
-//! `[permissions]` table every tool call in every mode runs without
-//! prompting, which preserves the historical auto-approve behavior.
+//! Built-in tools are allowed unless configured otherwise, which
+//! preserves the historical auto-approve behavior.
 //! A `[permissions.tools.<name>]` entry opts one tool into rules;
 //! within an entry the `deny` patterns are checked first, then the
 //! `allow` patterns, and the `default` action applies when neither
 //! matches. Patterns are globs matched against the tool's "command
 //! line": the `command` string for shell-style tools, otherwise the
 //! compact JSON encoding of the whole input.
+//!
+//! MCP tools (`<server>__<tool>`) are the exception to the allow
+//! default: a call to one without a `[permissions.tools.<name>]` entry
+//! resolves through `[permissions.mcp]`, where unlisted servers ask.
 
 use std::collections::BTreeMap;
 
@@ -54,27 +57,48 @@ pub struct PermissionsConfig {
     /// may escape it).
     pub confine_paths: bool,
     /// Per-tool rules, keyed by literal tool name (`bash`,
-    /// `write`, `mcp_github_create_issue`, ...). No glob keys in
+    /// `write`, `github__create_issue`, ...). No glob keys in
     /// v1: ordering overlapping patterns deterministically is not
     /// worth the confusion yet.
     pub tools: BTreeMap<String, ToolPermissionRules>,
+    /// Action for tools of an MCP server, keyed by server name, when
+    /// the tool has no `[permissions.tools.<name>]` entry. Servers
+    /// not listed here ask.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp: BTreeMap<String, PermissionAction>,
 }
 
 impl PermissionsConfig {
     /// Whether the table carries no configuration at all.
     #[must_use]
     pub fn is_default(&self) -> bool {
-        !self.confine_paths && self.tools.is_empty()
+        !self.confine_paths && self.tools.is_empty() && self.mcp.is_empty()
+    }
+
+    /// The action for a tool of MCP server `server` that has no
+    /// per-tool entry: the `[permissions.mcp]` entry, or `ask` when
+    /// the server is not listed.
+    #[must_use]
+    pub fn mcp_action(&self, server: &str) -> PermissionAction {
+        self.mcp
+            .get(server)
+            .copied()
+            .unwrap_or(PermissionAction::Ask)
     }
 
     /// Reject structurally broken configuration so `kage` refuses to
     /// start on rules it would silently misapply: empty tool names
-    /// and empty or uncompilable glob patterns.
+    /// and server names, and empty or uncompilable glob patterns.
     ///
     /// # Errors
     ///
     /// A [`crate::error::Error`] describing the first problem found.
     pub fn validate(&self) -> Result<(), crate::error::Error> {
+        if self.mcp.contains_key("") {
+            return Err(config_error(
+                "[permissions.mcp] keys must be non-empty server names".to_owned(),
+            ));
+        }
         for (tool, rules) in &self.tools {
             if tool.is_empty() {
                 return Err(config_error(
@@ -143,6 +167,7 @@ mod tests {
     fn rules(default: PermissionAction, allow: &[&str], deny: &[&str]) -> PermissionsConfig {
         PermissionsConfig {
             confine_paths: false,
+            mcp: BTreeMap::new(),
             tools: [(
                 "bash".to_owned(),
                 ToolPermissionRules {
@@ -245,5 +270,30 @@ mod tests {
         assert_eq!(cfg.check("bash", "git status"), PermissionAction::Allow);
         assert_eq!(cfg.check("bash", "ls"), PermissionAction::Ask);
         assert!(!cfg.is_default());
+    }
+
+    #[test]
+    fn mcp_action_defaults_to_ask_and_honours_entries() {
+        let mut cfg = PermissionsConfig::default();
+        assert_eq!(cfg.mcp_action("github"), PermissionAction::Ask);
+        cfg.mcp.insert("github".to_owned(), PermissionAction::Allow);
+        cfg.mcp.insert("shell".to_owned(), PermissionAction::Deny);
+        assert_eq!(cfg.mcp_action("github"), PermissionAction::Allow);
+        assert_eq!(cfg.mcp_action("shell"), PermissionAction::Deny);
+        assert_eq!(cfg.mcp_action("other"), PermissionAction::Ask);
+        assert!(!cfg.is_default());
+    }
+
+    #[test]
+    fn mcp_table_parses_from_toml() {
+        let src = r#"
+            [mcp]
+            github = "allow"
+            shell = "deny"
+        "#;
+        let cfg: PermissionsConfig = toml::from_str(src).unwrap();
+        assert_eq!(cfg.mcp_action("github"), PermissionAction::Allow);
+        assert_eq!(cfg.mcp_action("shell"), PermissionAction::Deny);
+        assert_eq!(cfg.mcp_action("fs"), PermissionAction::Ask);
     }
 }

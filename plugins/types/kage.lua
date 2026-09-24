@@ -45,6 +45,7 @@
 ---@alias kage.SlotName "header"|"activity"|"input_pill"|"footer"|"start"
 
 --- A built-in slot component, painted by the host every frame.
+--- `sessions` and `notices` paint only in `start`.
 ---@alias kage.Component
 ---| "brand"
 ---| "title"
@@ -62,6 +63,8 @@
 ---| "hint"
 ---| "cwd"
 ---| "version"
+---| "sessions"
+---| "notices"
 
 --- Every event name `kage.on` and `kage.api.autocmd_create`
 --- accept. Notification events ignore the handler return;

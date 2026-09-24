@@ -13,6 +13,24 @@ kage.ui.set_slot("footer", {
   sep = dot,
 })
 
+local tips = {
+  "Enter while kage works steers the running turn.",
+  "Shift+Enter inserts a newline. Ctrl+G edits the prompt in $EDITOR.",
+  "Ctrl+O folds or unfolds the focused block. Alt+P and Alt+N move the focus.",
+  "Start a prompt with ! to run a shell command. Type @ to complete a file path.",
+  "Ctrl+V attaches an image from the clipboard.",
+  "/settings changes the theme, the editor style and more.",
+}
+local blank = { text = "" }
+kage.ui.set_slot("start", {
+  lines = {
+    "brand", blank,
+    "model", "cwd", "permission", "thinking", blank,
+    "sessions", "notices",
+    { text = "Tip: " .. tips[math.random(#tips)], hl = "KageMuted" },
+  },
+})
+
 local map, act = kage.keymap.set, kage.action
 
 map("g", "<C-p>", act.OpenModelPicker, { desc = "model picker", group = "general" })

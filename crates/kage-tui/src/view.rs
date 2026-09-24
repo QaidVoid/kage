@@ -93,6 +93,38 @@ pub struct StatusCtx<'a> {
     pub activity: Option<&'a str>,
     /// Working directory, for the `cwd` component.
     pub cwd: Option<&'a str>,
+    /// Id of the active model, shown next to its label on the start
+    /// card.
+    pub model_id: Option<&'a str>,
+    /// What the start card lists, when the host provided it.
+    pub start: Option<&'a StartInfo>,
+    /// Keys for the start card's change hints.
+    pub start_keys: StartKeys,
+}
+
+/// Start card data the chrome state does not carry. Set once by the
+/// host, with the sessions listed again when the session changes.
+#[derive(Clone, Debug, Default)]
+pub struct StartInfo {
+    /// Recent sessions in the working directory, newest first, as the
+    /// session lister reports them.
+    pub sessions: Vec<crate::picker::PickItem>,
+    /// Startup notices: credential problems, an unavailable default
+    /// model, the version update.
+    pub notices: Vec<(kage_core::protocol::NoticeLevel, String)>,
+    /// One line on how the configured permission rules gate tools.
+    pub permissions: String,
+}
+
+/// Keys the start card's change hints name, from the live keymap.
+#[derive(Clone, Debug, Default)]
+pub struct StartKeys {
+    /// Opens the model picker.
+    pub model: Option<String>,
+    /// Cycles the thinking level.
+    pub thinking: Option<String>,
+    /// Opens the session picker.
+    pub sessions: Option<String>,
 }
 
 /// `Modifier` bit reserved as the per-cell "decoration" tag - the
@@ -189,8 +221,8 @@ pub fn render(
         status.search_pattern,
         status.search_match_set,
     );
-    if buffer.blocks().is_empty() {
-        slot::render_start(frame, regions.buffer, &sources);
+    if let Some(area) = start_area(buffer, regions.buffer) {
+        slot::render_start(frame, area, &sources);
     }
     slot::render_activity(frame, regions.activity, &sources);
     render_input(frame, regions, input, &sources);
@@ -210,6 +242,24 @@ pub fn render(
         slot::render_footer(frame, regions.footer, &sources);
     }
     capture_and_overlay(frame, regions, buffer, screen_selection, captured_rows);
+}
+
+/// Where the start card may paint: the buffer rows below the last
+/// painted block, while the conversation is empty. Notice blocks, such
+/// as config errors, stay above the card. Shell output ends it like a
+/// prompt does.
+fn start_area(buffer: &Buffer, area: Rect) -> Option<Rect> {
+    let blocks = buffer.blocks();
+    let is_notice = |b: &Block| matches!(b, Block::Custom { kind, .. } if kind != "kage:shell");
+    if !blocks.iter().all(is_notice) {
+        return None;
+    }
+    let top = match blocks.len().checked_sub(1) {
+        None => area.y,
+        Some(last) => buffer.screen_rows_of(last)?.1.saturating_add(1),
+    };
+    let bottom = area.y.saturating_add(area.height);
+    (top < bottom).then(|| Rect::new(area.x, top, area.width, bottom - top))
 }
 
 /// Row heights of the chrome for one frame: the header and activity
@@ -372,6 +422,7 @@ pub use buffer::CapturedCell;
 pub(crate) use input::INPUT_GLYPH_WIDTH;
 pub use modeline::input_visual_row_count;
 pub(crate) use modeline::{chrome_lines_to_ratatui, spinner_frame_index};
+pub(crate) use slot::START_SESSIONS;
 
 #[cfg(test)]
 mod tests;

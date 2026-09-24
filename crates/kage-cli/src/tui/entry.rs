@@ -134,13 +134,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         }
     };
     let defaulted = model.is_none().then_some(qualified_model.as_str());
-    for (level, text) in support::start_notices(&registry, defaulted, chrono::Utc::now()) {
-        let kind = match level {
-            NoticeLevel::Error => "kage:error",
-            NoticeLevel::Info | NoticeLevel::Warning => "kage:notify",
-        };
-        lock(&buffer).push_custom(kind, text, false);
-    }
+    let notices = support::start_notices(&registry, defaulted, chrono::Utc::now());
     let registry = Arc::new(registry);
 
     let skills = crate::load_skills(&workdir, plugin_runtime.as_deref());
@@ -203,17 +197,6 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     let gate = crate::permissions::PermissionGate::new(app_config.permissions.clone())
         .with_mcp_servers(mcp_manager.server_names().map(str::to_owned).collect());
 
-    let start_screen = plugin_runtime
-        .as_ref()
-        .is_some_and(|rt| rt.slots().spec(kage_plugin::SlotName::Start).is_some());
-    if !start_screen {
-        let mut buf = lock(&buffer);
-        buf.push_custom(
-            "kage:help",
-            "welcome to kage - ? for keys, / for commands, /settings to theme",
-            false,
-        );
-    }
     let model_choices = available_model_items(&registry, &qualified_model);
     if let Err(err) = crate::state::record_last_model(&qualified_model) {
         let mut buf = lock(&buffer);
@@ -385,7 +368,18 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     app.set_toasts(toasts.clone());
     app.set_session_usage(shared_session_usage());
     app.set_status_session_id(session_id.to_string().chars().take(8).collect());
+    let permissions = if app_config.permissions.is_default() {
+        "built-in tools run without asking"
+    } else {
+        "configured rules"
+    };
+    let mut start = kage_tui::StartInfo {
+        sessions: Vec::new(),
+        notices,
+        permissions: permissions.to_owned(),
+    };
     if let Ok(dir) = crate::sessions_dir() {
+        start.sessions = list_session_choices(&dir, &workdir, false);
         let tree_dir = dir.clone();
         let tree_mirror = Arc::clone(&mirror);
         let lister_workdir = workdir.clone();
@@ -396,6 +390,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
             list_session_nodes(&tree_dir, lock(&tree_mirror).path())
         }));
     }
+    app.set_start_info(start);
     let result = app.run(&mut tui);
     drop(tui);
     drop(app);

@@ -1,5 +1,5 @@
 //! Slot painting: the header, the activity row, the input pill, the
-//! footer and the start screen, composed from their [`SlotSpec`]s.
+//! footer and the start card, composed from their [`SlotSpec`]s.
 //!
 //! Built-in components render here from frame state and carry their own
 //! spacing. Lua components and span items paint the lines the plugin
@@ -152,38 +152,289 @@ pub(super) fn pill_titles(
     (left, right)
 }
 
-/// Paint the start slot centered in the empty buffer region.
+/// Columns before the start card's text, and after its hints.
+const START_INDENT: usize = 3;
+/// Width of the label column of the start card's labeled rows.
+const START_LABEL_WIDTH: usize = 14;
+/// Recent sessions the start card lists.
+pub(crate) const START_SESSIONS: usize = 3;
+/// Notices the start card keeps when it runs out of rows.
+const START_NOTICES_KEPT: usize = 2;
+
+/// Which start card lines go when the card does not fit, in drop
+/// order. `Always` lines stay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Keep {
+    Tip,
+    Sessions,
+    ExtraNotices,
+    Always,
+}
+
+/// Paint the start slot bottom-aligned in `area`, the rows between the
+/// last notice block and the input. Lines drop when it does not fit:
+/// the tip first, then the sessions, then notices past the first two.
 pub(super) fn render_start(frame: &mut Frame, area: Rect, src: &Sources<'_>) {
     let spec = src.status.slots.get(SlotName::Start);
     if spec.lines.is_empty() || area.height == 0 || area.width == 0 {
         return;
     }
+    let height = usize::from(area.height);
+    let mut lines = start_lines(&spec, src, usize::from(area.width));
+    let trim = |lines: &mut Vec<(Keep, Line<'static>)>| {
+        while lines.last().is_some_and(|(_, line)| line.width() == 0) {
+            lines.pop();
+        }
+    };
+    trim(&mut lines);
+    for drop in [Keep::Tip, Keep::Sessions, Keep::ExtraNotices] {
+        if lines.len() <= height {
+            break;
+        }
+        lines.retain(|(keep, _)| *keep != drop);
+        trim(&mut lines);
+    }
+    lines.truncate(height);
+    let rows = u16::try_from(lines.len()).unwrap_or(area.height);
+    let rect = Rect::new(area.x, area.y + area.height - rows, area.width, rows);
+    let lines: Vec<Line<'static>> = lines.into_iter().map(|(_, line)| line).collect();
+    frame.render_widget(Paragraph::new(lines), rect);
+}
+
+fn start_lines(spec: &SlotSpec, src: &Sources<'_>, width: usize) -> Vec<(Keep, Line<'static>)> {
     let theme = crate::theme::current();
-    let styles = Styles::uniform(Style::default().fg(theme.muted_fg));
-    let mut lines = Vec::new();
+    let value = Style::default().fg(theme.assistant_fg);
+    let styles = Styles {
+        base: Style::default().fg(theme.muted_fg),
+        text: value,
+        strong: value.add_modifier(Modifier::BOLD),
+        pad: Style::default(),
+        sep: Style::default().fg(theme.muted_fg),
+        hint: Style::default().fg(theme.input_hint_fg),
+    };
+    let indent = || Span::raw(" ".repeat(START_INDENT));
+    let mut out = Vec::new();
     for item in &spec.lines {
         match item {
+            SlotItem::Builtin("brand") => out.push((
+                Keep::Always,
+                Line::from(vec![
+                    indent(),
+                    Span::styled("kage", styles.strong),
+                    Span::styled(format!(" {}", env!("CARGO_PKG_VERSION")), styles.base),
+                ]),
+            )),
+            SlotItem::Builtin(name @ ("model" | "cwd" | "permission" | "thinking")) => {
+                let (label, text, hint) = labeled(name, src);
+                out.push((
+                    Keep::Always,
+                    labeled_row(label, &text, hint.as_deref(), width, &styles),
+                ));
+            }
+            SlotItem::Builtin("sessions") => push_sessions(src, width, &styles, &mut out),
+            SlotItem::Builtin("notices") => push_notices(src, width, &styles, &mut out),
+            SlotItem::Builtin(name) => {
+                let mut spans = vec![indent()];
+                push_builtin(name, src, &styles, &mut spans);
+                if spans.len() > 1 {
+                    out.push((Keep::Always, Line::from(spans)));
+                }
+            }
+            SlotItem::Text(span) if span.text.is_empty() => {
+                out.push((Keep::Always, Line::default()));
+            }
+            SlotItem::Text(_) => {
+                let mut spans = vec![indent()];
+                push_item(item, src, &styles, &mut spans);
+                out.push((Keep::Tip, Line::from(spans)));
+            }
             SlotItem::Lua(component) => {
                 let base = with_hl(styles.base, component.hl());
-                lines.extend(chrome_lines_to_ratatui(&component.lines(), base));
-            }
-            other => {
-                let mut spans = Vec::new();
-                push_item(other, src, &styles, &mut spans);
-                lines.push(Line::from(spans));
+                for line in chrome_lines_to_ratatui(&component.lines(), base) {
+                    let mut spans = vec![indent()];
+                    spans.extend(line.spans);
+                    out.push((Keep::Tip, Line::from(spans)));
+                }
             }
         }
     }
-    let height = u16::try_from(lines.len())
-        .unwrap_or(u16::MAX)
-        .min(area.height);
-    let rect = Rect::new(
-        area.x,
-        area.y + (area.height - height) / 2,
-        area.width,
-        height,
-    );
-    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), rect);
+    out
+}
+
+/// Label, value and change hint of a labeled start card row.
+fn labeled(name: &str, src: &Sources<'_>) -> (&'static str, String, Option<String>) {
+    let status = src.status;
+    let keys = &status.start_keys;
+    let change = |key: &Option<String>| key.as_ref().map(|k| format!("{k} to change"));
+    match name {
+        "model" => {
+            let label = status
+                .model
+                .or_else(|| src.usage.map(|u| u.model.as_str()))
+                .filter(|m| !m.is_empty());
+            let text = match (label, status.model_id) {
+                (Some(label), Some(id)) if label != id => format!("{label} ({id})"),
+                (Some(label), _) => label.to_owned(),
+                (None, id) => id.unwrap_or("none").to_owned(),
+            };
+            ("model", text, change(&keys.model))
+        }
+        "cwd" => (
+            "directory",
+            status.cwd.map(home_relative).unwrap_or_default(),
+            None,
+        ),
+        "permission" => {
+            let text = match src.usage.and_then(|u| u.permission_mode) {
+                Some(mode) => format!("{} mode for this session", mode_label(mode)),
+                None => status
+                    .start
+                    .map(|s| s.permissions.clone())
+                    .unwrap_or_default(),
+            };
+            (
+                "permissions",
+                text,
+                Some("/permission to change".to_owned()),
+            )
+        }
+        _ => {
+            let level = src
+                .usage
+                .and_then(|u| u.thinking_level)
+                .map_or("off", kage_core::ThinkingLevel::label);
+            ("thinking", level.to_owned(), change(&keys.thinking))
+        }
+    }
+}
+
+/// `path` with the home directory written as `~`.
+fn home_relative(path: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    match path.strip_prefix(home.as_str()) {
+        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => {
+            format!("~{rest}")
+        }
+        _ => path.to_owned(),
+    }
+}
+
+/// One labeled start card row: the label column, the value, and the
+/// hint against the right edge while it fits.
+fn labeled_row(
+    label: &str,
+    value: &str,
+    hint: Option<&str>,
+    width: usize,
+    styles: &Styles,
+) -> Line<'static> {
+    let lead = format!("{:START_INDENT$}{label:<START_LABEL_WIDTH$}", "");
+    let room = width.saturating_sub(lead.width() + START_INDENT);
+    let value = truncate_to_width(value, room, "...");
+    let mut spans = vec![
+        Span::styled(lead, styles.base),
+        Span::styled(value.clone(), styles.text),
+    ];
+    if let Some(hint) = hint.filter(|h| value.width() + 2 + h.width() <= room) {
+        let pad = room - value.width() - hint.width();
+        spans.push(Span::raw(" ".repeat(pad)));
+        spans.push(Span::styled(hint.to_owned(), styles.hint));
+    }
+    Line::from(spans)
+}
+
+/// The `sessions` rows: title and time per recent session, the resume
+/// hint on the first row, then a blank line. Nothing without sessions.
+fn push_sessions(
+    src: &Sources<'_>,
+    width: usize,
+    styles: &Styles,
+    out: &mut Vec<(Keep, Line<'static>)>,
+) {
+    let Some(start) = src.status.start.filter(|s| !s.sessions.is_empty()) else {
+        return;
+    };
+    let sessions = &start.sessions[..start.sessions.len().min(START_SESSIONS)];
+    let times: Vec<String> = sessions
+        .iter()
+        .map(|s| {
+            [s.group.as_deref(), s.right.as_deref()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect();
+    let time_w = times.iter().map(|t| t.width()).max().unwrap_or(0);
+    let title_w = sessions.iter().map(|s| s.label.width()).max().unwrap_or(0);
+    let room = width.saturating_sub(START_INDENT * 2 + START_LABEL_WIDTH + time_w + 2);
+    let hint = src
+        .status
+        .start_keys
+        .sessions
+        .as_ref()
+        .map(|k| format!("{k} to resume"))
+        .filter(|h| room >= title_w.min(24) + 2 + h.width());
+    let title_room = room.saturating_sub(hint.as_ref().map_or(0, |h| h.width() + 2));
+    let title_w = title_w.min(title_room);
+    for (i, (session, time)) in sessions.iter().zip(&times).enumerate() {
+        let label = if i == 0 { "recent" } else { "" };
+        let lead = format!("{:START_INDENT$}{label:<START_LABEL_WIDTH$}", "");
+        let title = pad_to_width(&truncate_to_width(&session.label, title_w, "..."), title_w);
+        let mut spans = vec![
+            Span::styled(lead, styles.base),
+            Span::styled(title, styles.text),
+            Span::styled(format!("  {}", pad_to_width(time, time_w)), styles.base),
+        ];
+        if let Some(hint) = hint.as_ref().filter(|_| i == 0) {
+            let pad = title_room.saturating_sub(title_w) + 2;
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.push(Span::styled(hint.clone(), styles.hint));
+        }
+        out.push((Keep::Sessions, Line::from(spans)));
+    }
+    out.push((Keep::Sessions, Line::default()));
+}
+
+/// The `notices` rows, wrapped with a hanging indent: warnings and
+/// errors behind a `!` in their style, info in the muted style, then a
+/// blank line. Nothing without notices.
+fn push_notices(
+    src: &Sources<'_>,
+    width: usize,
+    styles: &Styles,
+    out: &mut Vec<(Keep, Line<'static>)>,
+) {
+    use kage_core::protocol::NoticeLevel;
+    let Some(start) = src.status.start.filter(|s| !s.notices.is_empty()) else {
+        return;
+    };
+    let theme = crate::theme::current();
+    let body = width.saturating_sub(START_INDENT * 2 + 2);
+    let body = u16::try_from(body).unwrap_or(u16::MAX);
+    for (i, (level, text)) in start.notices.iter().enumerate() {
+        let (glyph, style) = match level {
+            NoticeLevel::Warning => ("! ", Style::default().fg(theme.warning_fg)),
+            NoticeLevel::Error => ("! ", Style::default().fg(theme.tool_error_fg)),
+            NoticeLevel::Info => ("  ", styles.base),
+        };
+        let keep = if i < START_NOTICES_KEPT {
+            Keep::Always
+        } else {
+            Keep::ExtraNotices
+        };
+        for (row, (from, to)) in wrap_input_rows(text, body).into_iter().enumerate() {
+            let lead = if row == 0 { glyph } else { "  " };
+            out.push((
+                keep,
+                Line::from(vec![
+                    Span::raw(" ".repeat(START_INDENT)),
+                    Span::styled(format!("{lead}{}", text[from..to].trim_end()), style),
+                ]),
+            ));
+        }
+    }
+    out.push((Keep::Always, Line::default()));
 }
 
 fn paint_row(frame: &mut Frame, area: Rect, spec: &SlotSpec, src: &Sources<'_>, styles: &Styles) {
@@ -451,7 +702,10 @@ mod tests {
         };
         let src = Sources::new(&status, Some(&usage), &InputState::new());
         let styles = Styles::uniform(Style::default());
-        for name in kage_plugin::slots::BUILTIN_COMPONENTS {
+        let row_components = kage_plugin::slots::BUILTIN_COMPONENTS
+            .iter()
+            .filter(|name| !matches!(**name, "sessions" | "notices"));
+        for name in row_components {
             let mut out = Vec::new();
             push_builtin(name, &src, &styles, &mut out);
             assert!(!out.is_empty(), "{name} painted nothing");

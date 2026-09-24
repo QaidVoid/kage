@@ -52,7 +52,10 @@ pub(super) const ALIASES: &[Alias] = &[
     },
     Alias {
         name: "kage.Component",
-        doc: &["A built-in slot component, painted by the host every frame."],
+        doc: &[
+            "A built-in slot component, painted by the host every frame.",
+            "`sessions` and `notices` paint only in `start`.",
+        ],
         variants: &[
             "brand",
             "title",
@@ -70,6 +73,8 @@ pub(super) const ALIASES: &[Alias] = &[
             "hint",
             "cwd",
             "version",
+            "sessions",
+            "notices",
         ],
     },
     Alias {

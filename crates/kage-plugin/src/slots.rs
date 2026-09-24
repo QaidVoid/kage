@@ -3,7 +3,8 @@
 //! Five slots exist: `header` (the top row, collapsed while empty),
 //! `activity` (the working row above the input, collapsed while
 //! empty), `input_pill` (the input's top rule), `footer` (the bottom
-//! row) and `start` (the buffer region while the buffer is empty).
+//! row) and `start` (the start card above the input while the
+//! conversation is empty).
 //! `kage.api.slot_set(name,
 //! spec)` sets one, and `nil` restores the spec `_defaults.lua` set. A
 //! row slot takes `{ left = items, right = items, sep = string? }`, and
@@ -54,7 +55,7 @@ pub enum SlotName {
     Footer,
     /// The input's top rule.
     InputPill,
-    /// The buffer region while the buffer is empty.
+    /// The start card above the input while the conversation is empty.
     Start,
     /// The working row above the input, collapsed while it paints
     /// nothing.
@@ -97,7 +98,8 @@ impl SlotName {
     }
 }
 
-/// Names of the built-in components the host implements.
+/// Names of the built-in components the host implements. `sessions`
+/// and `notices` paint only in `start`.
 pub const BUILTIN_COMPONENTS: &[&str] = &[
     "brand",
     "title",
@@ -115,6 +117,8 @@ pub const BUILTIN_COMPONENTS: &[&str] = &[
     "hint",
     "cwd",
     "version",
+    "sessions",
+    "notices",
 ];
 
 /// One entry of a [`SlotSpec`].
@@ -167,7 +171,8 @@ impl SlotSpec {
 }
 
 /// The spec a slot paints when none is set: kage's built-in chrome.
-/// `_defaults.lua` sets exactly these, and `start` is empty.
+/// `_defaults.lua` sets exactly these, except that its `start` tip is
+/// picked at random and this one is the first tip.
 #[must_use]
 pub fn default_spec(slot: SlotName) -> Arc<SlotSpec> {
     Arc::clone(&DEFAULT_SPECS[slot.index()])
@@ -192,13 +197,44 @@ static DEFAULT_SPECS: LazyLock<[Arc<SlotSpec>; SLOTS]> = LazyLock::new(|| {
             right: items(&["thinking"]),
             ..SlotSpec::default()
         }),
-        Arc::new(SlotSpec::default()),
+        Arc::new(SlotSpec {
+            lines: start_lines(),
+            ..SlotSpec::default()
+        }),
         Arc::new(SlotSpec {
             left: items(&["activity"]),
             ..SlotSpec::default()
         }),
     ]
 });
+
+/// The default start card: brand, the labeled rows, recent sessions,
+/// notices and a tip, with blank lines between the groups.
+fn start_lines() -> Vec<SlotItem> {
+    let text = |text: &str, hl: Option<&str>| {
+        SlotItem::Text(ChromeSpan {
+            text: text.to_owned(),
+            hl: hl.map(str::to_owned),
+            ..ChromeSpan::default()
+        })
+    };
+    let blank = || text("", None);
+    vec![
+        SlotItem::Builtin("brand"),
+        blank(),
+        SlotItem::Builtin("model"),
+        SlotItem::Builtin("cwd"),
+        SlotItem::Builtin("permission"),
+        SlotItem::Builtin("thinking"),
+        blank(),
+        SlotItem::Builtin("sessions"),
+        SlotItem::Builtin("notices"),
+        text(
+            "Tip: Enter while kage works steers the running turn.",
+            Some("KageMuted"),
+        ),
+    ]
+}
 
 /// Every slot's spec at one point in time. The default value holds no
 /// spec, so every slot paints its [`default_spec`].

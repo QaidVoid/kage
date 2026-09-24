@@ -44,7 +44,33 @@ fn defaults_set_the_built_in_chrome() {
     ] {
         assert_eq!(rt.slots().spec(slot), Some(default_spec(slot)), "{slot:?}");
     }
-    assert!(rt.slots().spec(SlotName::Start).is_none());
+    assert_default_start(&rt.slots().spec(SlotName::Start).expect("start set"));
+}
+
+/// `spec` is the default start card up to the tip, which `_defaults.lua`
+/// picks at random.
+fn assert_default_start(spec: &SlotSpec) {
+    let default = default_spec(SlotName::Start);
+    let (tip, lines) = spec.lines.split_last().expect("start has lines");
+    assert_eq!(lines, &default.lines[..default.lines.len() - 1]);
+    let SlotItem::Text(tip) = tip else {
+        panic!("expected a tip span, got {tip:?}");
+    };
+    assert!(tip.text.starts_with("Tip: "), "{tip:?}");
+    assert_eq!(tip.hl.as_deref(), Some("KageMuted"));
+}
+
+#[test]
+fn a_user_start_spec_replaces_the_card_and_nil_restores_it() {
+    let rt = PluginRuntime::new().unwrap();
+    crate::load_all(None, &rt).unwrap();
+    let card = rt.slots().spec(SlotName::Start).expect("start set");
+    rt.eval("kage.ui.set_slot('start', { lines = { 'version' } })")
+        .unwrap();
+    let user = rt.slots().spec(SlotName::Start).unwrap();
+    assert_eq!(user.lines, [SlotItem::Builtin("version")]);
+    rt.eval("kage.ui.set_slot('start', nil)").unwrap();
+    assert_eq!(rt.slots().spec(SlotName::Start), Some(card));
 }
 
 #[test]
@@ -347,7 +373,7 @@ fn reload_drops_user_specs_and_hooks() {
         rt.slots().spec(SlotName::Header),
         Some(default_spec(SlotName::Header))
     );
-    assert!(rt.slots().spec(SlotName::Start).is_none());
+    assert_default_start(&rt.slots().spec(SlotName::Start).expect("start set"));
 }
 
 #[test]

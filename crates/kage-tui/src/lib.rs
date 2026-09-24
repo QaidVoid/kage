@@ -61,6 +61,6 @@ pub use toast::{
 pub use usage::{SessionUsage, SharedSessionUsage, shared_session_usage};
 pub use view::{
     AssistantBlockWidget, BlockFactory, BlockRenderer, BlockWidget, BuiltinKind, EmptyBlockWidget,
-    RenderCtx, SelectionState, StatusCtx, ThinkingBlockWidget, ToolPairBlockWidget,
-    UserBlockWidget,
+    RenderCtx, SelectionState, StartInfo, StartKeys, StatusCtx, ThinkingBlockWidget,
+    ToolPairBlockWidget, UserBlockWidget,
 };

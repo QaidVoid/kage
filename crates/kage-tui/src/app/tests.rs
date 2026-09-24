@@ -1230,6 +1230,79 @@ fn key_label_follows_a_remap_of_the_model_picker() {
 }
 
 #[test]
+fn the_card_hint_follows_a_remap_of_the_model_picker() {
+    let (mut app, _rx, _buffer) = app_with_config(
+        "kage.keymap.set('g', '<M-m>', kage.action.OpenModelPicker)",
+        &[],
+    );
+    let rows = snapshot_rows(&render_app(&mut app));
+    let model = rows.iter().find(|r| r.starts_with("   model ")).unwrap();
+    assert!(model.ends_with("alt+m to change"), "{rows:#?}");
+}
+
+#[test]
+fn a_user_start_spec_replaces_the_card_until_set_to_nil() {
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(shared_buffer(), tx);
+    let rt = kage_plugin::PluginRuntime::new().unwrap();
+    kage_plugin::load_all(None, &rt).unwrap();
+    app.set_slots(rt.slots());
+    let has_card = |rows: &[String]| rows.iter().any(|r| r.starts_with("   permissions "));
+    assert!(has_card(&snapshot_rows(&render_app(&mut app))));
+    rt.eval("kage.ui.set_slot('start', { lines = { { text = 'MINE' } } })")
+        .unwrap();
+    let rows = snapshot_rows(&render_app(&mut app));
+    assert!(!has_card(&rows), "{rows:#?}");
+    assert!(rows.iter().any(|r| r == "   MINE"), "{rows:#?}");
+    rt.eval("kage.ui.set_slot('start', nil)").unwrap();
+    assert!(has_card(&snapshot_rows(&render_app(&mut app))));
+}
+
+#[test]
+fn start_sessions_are_listed_on_session_changes_only() {
+    let (mut app, _rx, events) = app_with_events();
+    let listed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls = Arc::clone(&listed);
+    app.set_session_lister(Box::new(move |all| {
+        assert!(!all);
+        calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (0..5).map(|i| PickItem::simple(format!("s{i}"))).collect()
+    }));
+    let session = |title: &str| PickItem::simple(title).with_label(title);
+    app.set_start_info(view::StartInfo {
+        sessions: ["a", "b", "c", "d"].map(session).to_vec(),
+        ..view::StartInfo::default()
+    });
+    let sessions = |app: &App| {
+        app.start_info
+            .as_ref()
+            .unwrap()
+            .sessions
+            .iter()
+            .map(|s| s.value.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(sessions(&app), ["a", "b", "c"]);
+    let mut terminal = render_app(&mut app);
+    app.render_into(&mut terminal).unwrap();
+    assert_eq!(listed.load(std::sync::atomic::Ordering::SeqCst), 0);
+    events
+        .send(envelope(
+            kage_core::SessionId::new(),
+            1,
+            kage_core::protocol::HostEvent::SessionChanged {
+                path: "/tmp/s.jsonl".into(),
+                title: None,
+                messages: Vec::new(),
+            },
+        ))
+        .unwrap();
+    app.drain_engine_events();
+    assert_eq!(listed.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(sessions(&app), ["s0", "s1", "s2"]);
+}
+
+#[test]
 fn the_activity_row_shows_while_working_with_elapsed_seconds() {
     let buffer = shared_buffer();
     lock(&buffer).push_user("hello");

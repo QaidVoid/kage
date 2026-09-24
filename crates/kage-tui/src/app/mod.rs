@@ -820,6 +820,8 @@ pub struct App {
     run_started: Option<Instant>,
     /// Cached hint labels for [`Self::key_label`].
     key_labels: wiring::KeyLabels,
+    /// What the start card lists. `None` until the host sets it.
+    start_info: Option<view::StartInfo>,
 }
 
 mod actions;

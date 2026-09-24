@@ -192,6 +192,26 @@ fn snapshot_frame(
     usage: Option<&SessionUsage>,
     area: Rect,
 ) -> Vec<String> {
+    let buf = paint_frame(buffer, input, cmdline, status, usage, area);
+    let mut out = Vec::new();
+    for y in 0..buf.area.height {
+        let mut row = String::new();
+        for x in 0..buf.area.width {
+            row.push_str(buf[(x, y)].symbol());
+        }
+        out.push(row.trim_end().to_owned());
+    }
+    out
+}
+
+fn paint_frame(
+    buffer: &mut Buffer,
+    input: &InputState,
+    cmdline: Option<&CommandLine>,
+    status: &StatusCtx<'_>,
+    usage: Option<&SessionUsage>,
+    area: Rect,
+) -> ratatui::buffer::Buffer {
     let backend = TestBackend::new(area.width, area.height);
     let mut terminal = Terminal::new(backend).unwrap();
     let mut captured: std::collections::BTreeMap<usize, Vec<CapturedCell>> =
@@ -214,16 +234,7 @@ fn snapshot_frame(
             );
         })
         .unwrap();
-    let buf = terminal.backend().buffer();
-    let mut out = Vec::new();
-    for y in 0..buf.area.height {
-        let mut row = String::new();
-        for x in 0..buf.area.width {
-            row.push_str(buf[(x, y)].symbol());
-        }
-        out.push(row.trim_end().to_owned());
-    }
-    out
+    terminal.backend().buffer().clone()
 }
 
 #[test]
@@ -740,13 +751,15 @@ fn the_activity_row_sits_above_the_input_only_while_it_has_text() {
         activity: Some("Running cargo test (3s, ctrl+c to interrupt)"),
         ..StatusCtx::default()
     };
-    let rows = snapshot_frame(&mut Buffer::new(), &input, None, &status, None, area);
+    let mut buffer = Buffer::new();
+    buffer.push_user("hi");
+    let rows = snapshot_frame(&mut buffer, &input, None, &status, None, area);
     assert_eq!(
         rows[5], "  Running cargo test (3s, ctrl+c to interrupt)",
         "{rows:#?}"
     );
     assert!(rows[6].starts_with(RULE), "{rows:#?}");
-    let rows = snapshot_lines(&mut Buffer::new(), &input, area);
+    let rows = snapshot_lines(&mut buffer, &input, area);
     assert!(rows[5].is_empty(), "{rows:#?}");
 }
 
@@ -806,9 +819,13 @@ fn the_colon_and_search_lines_paint_on_the_footer_row() {
     assert!(footer.ends_with("match 2/5"), "{rows:#?}");
 }
 
+/// Paint a frame with `cmdline` open over a conversation, so no start
+/// card competes with the popup.
 fn snapshot_with_cmdline(cmdline: &CommandLine, area: Rect) -> Vec<String> {
+    let mut buffer = Buffer::new();
+    buffer.push_user("hi");
     snapshot_frame(
-        &mut Buffer::new(),
+        &mut buffer,
         &InputState::new(),
         Some(cmdline),
         &StatusCtx::default(),
@@ -1099,4 +1116,184 @@ fn modeline_hides_permission_pill_without_override() {
         rows.iter().all(|r| !r.contains(" mode")),
         "no pill without an override, got {rows:?}"
     );
+}
+
+// --- Start card ---
+
+const TIP: &str = "   Tip: Enter while kage works steers the running turn.";
+
+fn start_info(sessions: usize) -> StartInfo {
+    let titles = [
+        "fix the parser tests",
+        "refactor slot painting",
+        "list files please",
+        "fourth session",
+        "fifth session",
+    ];
+    StartInfo {
+        sessions: titles[..sessions]
+            .iter()
+            .map(|title| {
+                crate::picker::PickItem::simple(format!("/s/{title}"))
+                    .with_label(*title)
+                    .with_group("Today")
+                    .with_right("09:30")
+            })
+            .collect(),
+        notices: vec![(
+            kage_core::protocol::NoticeLevel::Warning,
+            "the `anthropic` login expires in 1 day. Run /login anthropic.".to_owned(),
+        )],
+        permissions: "built-in tools run without asking".to_owned(),
+    }
+}
+
+fn card_status(info: &StartInfo) -> StatusCtx<'_> {
+    StatusCtx {
+        model: Some("Fake"),
+        model_id: Some("fake:m"),
+        cwd: Some("/work/kage"),
+        start: Some(info),
+        start_keys: StartKeys {
+            model: Some("ctrl+p".to_owned()),
+            thinking: Some("shift+tab".to_owned()),
+            sessions: Some("ctrl+s".to_owned()),
+        },
+        ..StatusCtx::default()
+    }
+}
+
+fn card_rows(buffer: &mut Buffer, info: &StartInfo, area: Rect) -> Vec<String> {
+    let input = InputState::new();
+    snapshot_frame(buffer, &input, None, &card_status(info), None, area)
+}
+
+#[test]
+fn the_card_reads_as_labeled_rows_with_change_hints() {
+    let info = start_info(1);
+    let rows = card_rows(&mut Buffer::new(), &info, Rect::new(0, 0, 80, 24));
+    let row = |label: &str| {
+        rows.iter()
+            .find(|r| r.starts_with(&format!("   {label} ")))
+            .unwrap_or_else(|| panic!("no {label} row in {rows:#?}"))
+            .clone()
+    };
+    assert_eq!(
+        row("kage"),
+        format!("   kage {}", env!("CARGO_PKG_VERSION"))
+    );
+    assert!(row("model").starts_with("   model         Fake (fake:m)"));
+    assert!(row("model").ends_with("ctrl+p to change"));
+    assert_eq!(row("model").len(), 77);
+    assert_eq!(row("directory"), "   directory     /work/kage");
+    assert!(row("permissions").contains("built-in tools run without asking"));
+    assert!(row("permissions").ends_with("/permission to change"));
+    assert!(row("thinking").starts_with("   thinking      off"));
+    assert!(row("thinking").ends_with("shift+tab to change"));
+    assert!(row("recent").starts_with("   recent        fix the parser tests  Today 09:30"));
+    assert!(row("recent").ends_with("ctrl+s to resume"));
+    assert!(
+        rows.iter()
+            .any(|r| r.starts_with("   ! the `anthropic` login"))
+    );
+}
+
+#[test]
+fn the_card_shows_below_notice_blocks_and_hides_after_the_first_prompt() {
+    let info = start_info(3);
+    let area = Rect::new(0, 0, 80, 24);
+    let mut buffer = Buffer::new();
+    buffer.push_custom("kage:error", "config: bad value", false);
+    let rows = card_rows(&mut buffer, &info, area);
+    let error = rows.iter().position(|r| r.contains("config: bad value"));
+    let brand = rows.iter().position(|r| r.starts_with("   kage "));
+    assert!(error.is_some() && brand > error, "{rows:#?}");
+    buffer.push_user("hello");
+    let rows = card_rows(&mut buffer, &info, area);
+    assert!(rows.iter().all(|r| !r.contains("permissions")), "{rows:#?}");
+}
+
+#[test]
+fn shell_output_hides_the_card() {
+    let info = start_info(1);
+    let mut buffer = Buffer::new();
+    buffer.push_custom("kage:shell", "$ ls\na.rs\n(exit code 0)", false);
+    let rows = card_rows(&mut buffer, &info, Rect::new(0, 0, 80, 24));
+    assert!(rows.iter().all(|r| !r.contains("permissions")), "{rows:#?}");
+}
+
+#[test]
+fn the_card_ends_directly_above_the_input_rule() {
+    let info = start_info(3);
+    let rows = card_rows(&mut Buffer::new(), &info, Rect::new(0, 0, 120, 36));
+    let rule = rows.len() - 4;
+    assert!(rows[rule].starts_with(RULE), "{rows:#?}");
+    assert_eq!(rows[rule - 1], TIP, "{rows:#?}");
+}
+
+#[test]
+fn a_short_card_drops_the_tip_then_the_sessions() {
+    let info = start_info(3);
+    let area = Rect::new(0, 0, 80, 24);
+    let filler = |lines: usize| {
+        let mut buffer = Buffer::new();
+        let text = vec!["config: bad value"; lines].join("\n");
+        buffer.push_custom("kage:error", text, false);
+        buffer
+    };
+    let full = card_rows(&mut Buffer::new(), &info, area);
+    let card = full.len() - 4 - full.iter().position(|r| r.starts_with("   kage ")).unwrap();
+    let room = |rows: &[String]| {
+        let error = rows
+            .iter()
+            .rposition(|r| r.contains("config: bad value"))
+            .unwrap();
+        rows.len() - 4 - error - 2
+    };
+    let mut buffer = filler(1);
+    let spare = room(&card_rows(&mut buffer, &info, area)) - card;
+    let rows = card_rows(&mut filler(1 + spare + 1), &info, area);
+    assert!(rows.iter().all(|r| !r.contains("Tip:")), "{rows:#?}");
+    assert!(rows.iter().any(|r| r.contains("recent")), "{rows:#?}");
+    let rows = card_rows(&mut filler(1 + spare + 3), &info, area);
+    assert!(rows.iter().all(|r| !r.contains("recent")), "{rows:#?}");
+    assert!(
+        rows.iter().any(|r| r.contains("! the `anthropic`")),
+        "{rows:#?}"
+    );
+    assert!(
+        rows.iter().any(|r| r.starts_with("   thinking")),
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn the_card_lists_at_most_three_sessions() {
+    let info = start_info(5);
+    let rows = card_rows(&mut Buffer::new(), &info, Rect::new(0, 0, 80, 24));
+    let listed = rows.iter().filter(|r| r.contains("Today 09:30")).count();
+    assert_eq!(listed, 3, "{rows:#?}");
+    assert!(rows.iter().all(|r| !r.contains("fourth")), "{rows:#?}");
+}
+
+#[test]
+fn notices_paint_in_the_warning_style() {
+    let _guard = crate::theme::theme_test_lock();
+    let info = start_info(0);
+    let input = InputState::new();
+    let area = Rect::new(0, 0, 80, 24);
+    let buf = paint_frame(
+        &mut Buffer::new(),
+        &input,
+        None,
+        &card_status(&info),
+        None,
+        area,
+    );
+    let y = (0..area.height)
+        .find(|&y| buf[(3, y)].symbol() == "!")
+        .expect("a notice row");
+    let warning = crate::theme::current().warning_fg;
+    assert_eq!(buf[(3, y)].fg, warning);
+    assert_eq!(buf[(10, y)].fg, warning);
 }

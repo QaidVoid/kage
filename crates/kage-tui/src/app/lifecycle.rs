@@ -313,7 +313,9 @@ impl App {
             .slots
             .as_ref()
             .and_then(|slots| lock(&slots.ui_state()).session_title.clone());
-        let model_label = self.model_label(session_usage.as_ref());
+        let model_id = self.model_id(session_usage.as_ref());
+        let model_label = self.model_label(model_id.as_deref());
+        let start_keys = self.start_keys();
         let cwd = self
             .completion_workdir
             .as_ref()
@@ -333,6 +335,9 @@ impl App {
             hint: Some(hint.as_str()),
             activity: activity.as_deref(),
             cwd: cwd.as_deref(),
+            model_id: model_id.as_deref(),
+            start: self.start_info.as_ref(),
+            start_keys,
         };
         let screen_selection = self.screen_selection;
         let mut captured_rows = std::mem::take(&mut self.captured_rows);

@@ -87,6 +87,7 @@ impl App {
             permission_queue: std::collections::VecDeque::new(),
             run_started: None,
             key_labels: KeyLabels::default(),
+            start_info: None,
         }
     }
 
@@ -258,6 +259,23 @@ impl App {
         self.session_lister = Some(lister);
     }
 
+    /// Set what the start card lists: recent sessions, startup notices
+    /// and the permission summary. Later session changes list the
+    /// sessions again through the session lister.
+    pub fn set_start_info(&mut self, mut info: view::StartInfo) {
+        info.sessions.truncate(view::START_SESSIONS);
+        self.start_info = Some(info);
+    }
+
+    /// List the start card's recent sessions again.
+    pub(crate) fn refresh_start_sessions(&mut self) {
+        let (Some(info), Some(lister)) = (self.start_info.as_mut(), &self.session_lister) else {
+            return;
+        };
+        info.sessions = lister(false);
+        info.sessions.truncate(view::START_SESSIONS);
+    }
+
     /// Register the closure that produces the `:tree` session forest
     /// at open time. Without this, `:tree` reports it is unavailable.
     pub fn set_session_tree_source(&mut self, source: SessionTreeSource) {
@@ -324,8 +342,8 @@ impl App {
     }
 
     /// Wire the slot specs `kage.ui.set_slot`, `set_header` and
-    /// `set_footer` fill. Without this the header, footer and input
-    /// pill paint the default chrome and the start screen stays empty.
+    /// `set_footer` fill. Without this every slot paints its default
+    /// spec.
     pub fn set_slots(&mut self, slots: kage_plugin::Slots) {
         self.slots = Some(slots);
     }
@@ -598,18 +616,33 @@ impl App {
         Some(format!("{doing} ({elapsed}, {key} to interrupt)"))
     }
 
-    /// The model picker's label for the active model, else its id.
-    pub(crate) fn model_label(&self, usage: Option<&crate::usage::SessionUsage>) -> Option<String> {
-        let id = match usage.map(|u| u.model.as_str()).filter(|m| !m.is_empty()) {
-            Some(id) => id.to_owned(),
-            None => self.status_model.as_ref().map(|m| lock(m).clone())?,
-        };
+    /// The active model's id: the engine's last report, else the
+    /// model the host started with.
+    pub(crate) fn model_id(&self, usage: Option<&crate::usage::SessionUsage>) -> Option<String> {
+        match usage.map(|u| u.model.as_str()).filter(|m| !m.is_empty()) {
+            Some(id) => Some(id.to_owned()),
+            None => self.status_model.as_ref().map(|m| lock(m).clone()),
+        }
+    }
+
+    /// The model picker's label for the model `id`, else the id.
+    pub(crate) fn model_label(&self, id: Option<&str>) -> Option<String> {
+        let id = id?;
         let label = self
             .model_choices
             .iter()
             .find(|item| item.value == id)
-            .map(|item| item.label.clone());
-        Some(label.unwrap_or(id))
+            .map_or(id, |item| item.label.as_str());
+        Some(label.to_owned())
+    }
+
+    /// Keys for the start card's change hints, while it shows.
+    pub(crate) fn start_keys(&mut self) -> view::StartKeys {
+        view::StartKeys {
+            model: self.key_label("OpenModelPicker"),
+            thinking: self.key_label("CycleThinkingLevel"),
+            sessions: self.key_label("OpenSessionPicker"),
+        }
     }
 
     pub(crate) fn refresh_plugin_widget_texts(&mut self, width: u16) {

@@ -107,9 +107,12 @@ impl App {
             }
             HostEvent::SessionChanged { messages, .. } => {
                 let durations = crate::events::tool_durations(&messages);
-                let mut buf = lock(&self.buffer);
-                buf.clear();
-                crate::events::populate_from_history(&mut buf, &messages, &durations);
+                {
+                    let mut buf = lock(&self.buffer);
+                    buf.clear();
+                    crate::events::populate_from_history(&mut buf, &messages, &durations);
+                }
+                self.refresh_start_sessions();
             }
             HostEvent::ShellFinished {
                 command,

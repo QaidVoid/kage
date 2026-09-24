@@ -8,6 +8,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
+pub use kage_core::SessionId;
 use kage_core::{Message, TokenUsage};
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
@@ -17,31 +18,6 @@ use ulid::Ulid;
 /// Bumped (and migrated via [`crate::migrate`]) whenever the entry schema
 /// changes in a non-additive way. v1 is the initial schema.
 pub const FORMAT_VERSION: u32 = 1;
-
-/// Stable identifier for a single session file.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct SessionId(pub Ulid);
-
-impl SessionId {
-    /// Generate a fresh session id.
-    #[must_use]
-    pub fn new() -> Self {
-        Self(Ulid::new())
-    }
-}
-
-impl Default for SessionId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Display for SessionId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
 
 /// Stable identifier for a single entry within a session.
 ///

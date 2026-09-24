@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::message::{MessageId, ToolCallId};
+use crate::message::{Message, MessageId, ToolCallId};
 
 /// Why a provider's stream ended.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -284,6 +284,26 @@ pub enum LoopEvent {
         /// truncation is never mistaken for a complete answer.
         #[serde(default)]
         stop_reason: StopReason,
+    },
+    /// A message was appended to the conversation history: the initial
+    /// prompt, a steered or follow-up prompt, an assistant reply, or a
+    /// tool result. Recording these in order reproduces the history
+    /// exactly. Durable.
+    MessageAppended {
+        /// The appended message, with its parent link set.
+        message: Message,
+    },
+    /// A turn (one provider round trip plus its tool calls) began. Durable.
+    TurnStarted {
+        /// Zero-based turn index within the run.
+        index: u32,
+    },
+    /// A turn finished. Durable.
+    TurnEnded {
+        /// Zero-based turn index within the run.
+        index: u32,
+        /// Whether the assistant requested tool calls this turn.
+        had_tool_calls: bool,
     },
     /// Older turns were summarized to fit the context window.
     Compaction {

@@ -250,6 +250,9 @@ impl<H: Hooks> Hooks for SessionRecordingHooks<H> {
             LoopEvent::ToolCallArgsDelta { .. }
             | LoopEvent::ToolUpdate { .. }
             | LoopEvent::ProviderRetry { .. }
+            | LoopEvent::MessageAppended { .. }
+            | LoopEvent::TurnStarted { .. }
+            | LoopEvent::TurnEnded { .. }
             | LoopEvent::Error { .. } => {}
         }
         self.inner.on_event(event);

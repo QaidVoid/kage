@@ -372,17 +372,7 @@ pub struct PermissionAsk {
     pub reply: std::sync::mpsc::Sender<PermissionDecision>,
 }
 
-/// The App's answer to a [`PermissionAsk`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PermissionDecision {
-    /// Run this one call; the next identical call asks again.
-    AllowOnce,
-    /// Run this call and persist an allow rule so future calls of
-    /// this tool skip the prompt.
-    AllowAlways,
-    /// Refuse the call.
-    Deny,
-}
+pub use kage_core::protocol::PermissionDecision;
 
 /// In-flight dialog bookkeeping: the reply channel plus how to turn an
 /// [`OverlayAction`] outcome into the value the parked coroutine is

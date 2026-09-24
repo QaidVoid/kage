@@ -137,7 +137,11 @@ impl<H: Hooks> Hooks for TuiHooks<H> {
 
 fn apply_event(buf: &mut Buffer, event: &LoopEvent) {
     match event {
-        LoopEvent::MessageStart { .. } | LoopEvent::ToolUpdate { .. } => {
+        LoopEvent::MessageStart { .. }
+        | LoopEvent::ToolUpdate { .. }
+        | LoopEvent::MessageAppended { .. }
+        | LoopEvent::TurnStarted { .. }
+        | LoopEvent::TurnEnded { .. } => {
             // The buffer lazily begins an Assistant block on the first
             // text/thinking delta, so MessageStart is a no-op here.
             // Mid-execution tool progress is consumed by plugin event

@@ -130,8 +130,8 @@ pub fn render() -> String {
     s
 }
 
-/// Emit one function: its sub-table declaration (once), doc, params,
-/// return, and stub body.
+/// Emit one function: its sub-table declaration (once), doc, the API
+/// generation that introduced it, params, return, and stub body.
 fn emit_func(
     s: &mut String,
     declared: &mut Vec<&'static str>,
@@ -154,6 +154,7 @@ fn emit_func(
     }
     s.push('\n');
     doc_lines(s, f.doc);
+    let _ = writeln!(s, "--- Since API {}.", f.since);
     let mut args: Vec<String> = Vec::new();
     for p in f.params {
         let opt = if p.name.ends_with('?') { "?" } else { "" };
@@ -227,6 +228,13 @@ mod tests {
         for path in paths {
             assert!(s.contains(&format!("function {path}(")), "missing {path}");
         }
+    }
+
+    #[test]
+    fn every_func_states_its_api_generation() {
+        let s = render();
+        assert!(s.contains("--- Since API 1.\n---@return integer\nfunction kage.now_ms() end"));
+        assert!(s.contains("--- Since API 2.\n---@param event kage.Event"));
     }
 
     #[test]

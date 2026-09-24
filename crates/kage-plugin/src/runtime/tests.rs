@@ -331,3 +331,78 @@ fn plugin_stdlib_mutations_stay_private() {
     rt.eval_plugin("a", "kage.shadow_probe = 1").unwrap();
     assert!(rt.eval("return kage.shadow_probe").unwrap().is_nil());
 }
+
+#[test]
+fn plugin_replacing_a_kage_sub_table_function_stays_private() {
+    let rt = PluginRuntime::new().unwrap();
+    rt.eval_plugin(
+        "evil",
+        "kage.ui.set_header = function() error('hijacked') end
+         kage.api.autocmd_create = nil
+         kage.json.encode = nil",
+    )
+    .unwrap();
+    rt.eval_plugin(
+        "good",
+        "kage.ui.set_header(function() return 'good' end)
+         kage.api.autocmd_create('agent_end', { callback = function() end })
+         assert(kage.json.encode({}) == '[]' or kage.json.encode({}) == '{}')",
+    )
+    .unwrap();
+    assert!(rt.header_chrome().is_some());
+    assert_eq!(rt.handler_count("agent_end"), 1);
+    let v = rt
+        .eval("return pcall(kage.ui.set_header, nil) and kage.api.autocmd_create ~= nil")
+        .unwrap();
+    assert_eq!(v.as_boolean(), Some(true), "host globals were modified");
+}
+
+#[test]
+fn plugin_cannot_walk_metatables_back_to_the_shared_tables() {
+    let rt = PluginRuntime::new().unwrap();
+    let v = rt
+        .eval_plugin(
+            "p",
+            "return getmetatable(_G) == false and getmetatable(kage) == false
+                and getmetatable(kage.ui) == nil and getmetatable('') == false",
+        )
+        .unwrap();
+    assert_eq!(v.as_boolean(), Some(true));
+    assert!(rt.eval_plugin("p", "setmetatable(_G, nil)").is_err());
+
+    let mut caps = BTreeMap::new();
+    caps.insert("w".to_owned(), vec!["session_write".to_owned()]);
+    let rt = PluginRuntime::builder().capabilities(caps).build().unwrap();
+    let v = rt
+        .eval_plugin(
+            "w",
+            "kage.request_capabilities({ 'session_write' })
+             return getmetatable(kage.session) == false",
+        )
+        .unwrap();
+    assert_eq!(v.as_boolean(), Some(true));
+}
+
+#[test]
+fn kage_api_and_stdlib_tables_are_read_only_in_the_base() {
+    let rt = PluginRuntime::new().unwrap();
+    for chunk in [
+        "kage.api.extra = 1",
+        "kage.ui.extra = 1",
+        "kage.json.extra = 1",
+        "setmetatable(kage.api, {})",
+        "setmetatable(kage.ui, {})",
+    ] {
+        let err = rt.eval(chunk).unwrap_err().to_string();
+        assert!(
+            err.contains("read-only") || err.contains("protected metatable"),
+            "{chunk}: {err}"
+        );
+    }
+    let err = rt.eval("kage.api.extra = 1").unwrap_err().to_string();
+    assert!(err.contains("'kage.api' is read-only"), "{err}");
+    let v = rt
+        .eval("return type(kage.on) == 'function' and getmetatable(kage.api) == false")
+        .unwrap();
+    assert_eq!(v.as_boolean(), Some(true));
+}

@@ -85,6 +85,7 @@ pub(crate) fn register(
             let psession = lua.create_table()?;
             let mt = lua.create_table()?;
             mt.set("__index", base_session.clone())?;
+            mt.set("__metatable", false)?;
             psession.set_metatable(Some(mt))?;
 
             let snapshot = Arc::clone(&entries);

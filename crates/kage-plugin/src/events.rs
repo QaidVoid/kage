@@ -1,18 +1,19 @@
-//! `kage.on(event, handler)` and host-driven event dispatch.
+//! Host-driven event dispatch over the autocmd registry.
 //!
-//! Plugins call `kage.on("message_end", function(ev) ... end)` to subscribe
-//! to a named event. The call returns an `off` function that removes the
-//! subscription; calling it again does nothing. The host then calls
-//! [`dispatch`] (or one of the typed helpers) at the appropriate
-//! boundaries to fire every registered handler in registration order.
-//! Each dispatch iterates a snapshot of the handler list, so a handler
-//! may call `off` for itself or another subscription while it runs.
+//! Plugins subscribe with `kage.on("message_end", function(payload) ... end)`,
+//! a stdlib alias over `kage.api.autocmd_create` (see [`crate::autocmd`]).
+//! The call returns an `off` function that removes the subscription;
+//! calling it again does nothing. The host then calls [`dispatch`] (or one
+//! of the typed helpers) at the appropriate boundaries to fire every
+//! matching autocmd in creation order. Each dispatch iterates a snapshot,
+//! so a handler may call `off` for itself or another subscription while
+//! it runs.
 //!
 //! Most host events fire at turn boundaries; the `message_*` events are the
-//! exception and fire mid-stream so plugins can react to partial output. The
-//! host skips JSON conversion when [`handler_count`] reports zero subscribers
-//! for the streaming names, so a no-listener configuration pays no per-delta
-//! cost. v0.1 ships these names:
+//! exception and fire mid-stream so plugins can react to partial output.
+//! [`crate::PluginRuntime`] keeps subscriber counts outside Lua and skips
+//! the owner thread entirely for an event nobody subscribes to, so a
+//! no-listener configuration pays no per-event cost. These names fire:
 //! * `before_agent_start` - fires once before the first provider call, with
 //!   the system prompt and the first user message text in scope
 //! * `agent_start` - the agent loop is about to call the provider for the first time
@@ -43,6 +44,10 @@
 //! * `user_bash` - an inline `!cmd` from the input pane completed.
 //!   Payload: `{ cmd, exit_code }`; `exit_code` is `nil` when the
 //!   command was killed by a signal.
+//! * `permission_mode_select` - the permission mode changed. Payload:
+//!   `{ prev, next, source }`.
+//! * `user` - fired only by `kage.api.autocmd_exec("user", { pattern,
+//!   data })`, matched against `pattern`.
 //!
 //! Session-op pre-hooks fire before the host runs a session action and
 //! let a plugin veto or patch the target:
@@ -75,12 +80,13 @@ use std::path::PathBuf;
 
 use kage_core::sync::lock;
 
-use mlua::{Function, Lua, Table, Value};
+use mlua::{Lua, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog, json_to_lua, lua_to_json};
+use crate::autocmd;
 use crate::error::PluginError;
 
-/// Every event name `kage.on` recognises, with its dispatch kind and
+/// Every event name `kage.on` and `kage.api.autocmd_create` recognise, with its dispatch kind and
 /// a one-line summary. The single source of truth for runtime
 /// introspection (`:events`) so the catalog cannot drift from what
 /// the host actually fires. Kinds: `notification` (return ignored),
@@ -139,6 +145,16 @@ pub const KNOWN_EVENTS: &[(&str, &str, &str)] = &[
         "inline `!cmd` from input completed",
     ),
     (
+        "permission_mode_select",
+        "notification",
+        "permission mode changed",
+    ),
+    (
+        "user",
+        "notification",
+        "fired by autocmd_exec with a pattern",
+    ),
+    (
         "resources_discover",
         "notification",
         "return {skills?,templates?,themes?} dirs",
@@ -171,81 +187,6 @@ pub const KNOWN_EVENTS: &[(&str, &str, &str)] = &[
     ("session_before_fork", "veto", "veto/patch a fork point"),
 ];
 
-/// Lua-registry key under which subscribed handlers are stored.
-const HANDLERS_KEY: &str = "kage._handlers";
-
-/// Lua-registry key of the factory that builds the `off` closure
-/// returned by `kage.on`.
-const MAKE_OFF_KEY: &str = "kage._make_off";
-
-/// Builds `off` in Lua so a handler that captures its own `off` forms
-/// a cycle the Lua collector can reclaim.
-const MAKE_OFF: &str = r"
-local remove, rawequal = table.remove, rawequal
-return function(list, handler)
-    local done = false
-    return function()
-        if done then return end
-        done = true
-        for i = 1, #list do
-            if rawequal(list[i], handler) then
-                remove(list, i)
-                return
-            end
-        end
-    end
-end
-";
-
-/// Install `kage.on` on the running Lua state. Idempotent: calling twice
-/// rebinds the same handler table without losing previous subscriptions.
-pub fn install_subscriptions(lua: &Lua) -> Result<(), PluginError> {
-    if !has_handlers_table(lua)? {
-        let table = lua.create_table()?;
-        lua.set_named_registry_value(HANDLERS_KEY, table)?;
-    }
-    let make_off: Function = lua.load(MAKE_OFF).set_name("=kage.on").eval()?;
-    lua.set_named_registry_value(MAKE_OFF_KEY, make_off)?;
-
-    let kage: Table = lua.globals().get("kage")?;
-    kage.set(
-        "on",
-        lua.create_function(|lua, (event, handler): (String, Function)| {
-            let handlers: Table = lua.named_registry_value(HANDLERS_KEY)?;
-            let list = if let Value::Table(t) = handlers.get::<Value>(event.as_str())? {
-                t
-            } else {
-                let t = lua.create_table()?;
-                handlers.set(event, t.clone())?;
-                t
-            };
-            list.push(handler.clone())?;
-            let make_off: Function = lua.named_registry_value(MAKE_OFF_KEY)?;
-            make_off.call::<Function>((list, handler))
-        })?,
-    )?;
-    Ok(())
-}
-
-fn has_handlers_table(lua: &Lua) -> Result<bool, PluginError> {
-    let v: Value = lua.named_registry_value(HANDLERS_KEY)?;
-    Ok(matches!(v, Value::Table(_)))
-}
-
-/// Snapshot of the handlers subscribed to `event_name`, in registration
-/// order. Dispatch iterates this copy so `off` during a call is safe.
-fn subscribers(lua: &Lua, event_name: &str) -> Result<Vec<Function>, PluginError> {
-    let Ok(handlers) = lua.named_registry_value::<Table>(HANDLERS_KEY) else {
-        return Ok(Vec::new());
-    };
-    let Value::Table(list) = handlers.get::<Value>(event_name)? else {
-        return Ok(Vec::new());
-    };
-    Ok(list
-        .sequence_values::<Function>()
-        .collect::<mlua::Result<_>>()?)
-}
-
 /// Fire every handler subscribed to `event_name`, passing `payload`
 /// converted to a Lua table.
 ///
@@ -259,20 +200,13 @@ pub fn dispatch(
     payload: &serde_json::Value,
     sink: &SharedHostLog,
 ) -> Result<(), PluginError> {
-    let funcs = subscribers(lua, event_name)?;
-    if funcs.is_empty() {
+    let matched = autocmd::match_key(event_name, payload);
+    let targets = autocmd::targets(lua, event_name, matched)?;
+    if targets.is_empty() {
         return Ok(());
     }
-    let lua_payload = json_to_lua(lua, payload)?;
-    for func in funcs {
-        if let Err(err) = func.call::<()>(lua_payload.clone()) {
-            let mut s = lock(sink);
-            s.log(
-                LogLevel::Error,
-                &format!("plugin handler for '{event_name}' raised: {err}"),
-            );
-        }
-    }
+    let data = json_to_lua(lua, payload)?;
+    autocmd::notify(lua, sink, event_name, matched, &targets, &data);
     Ok(())
 }
 
@@ -293,10 +227,12 @@ pub fn dispatch_transform(
     payload: serde_json::Value,
     sink: &SharedHostLog,
 ) -> Result<serde_json::Value, PluginError> {
+    let matched = autocmd::match_key(event_name, &payload).map(str::to_owned);
+    let targets = autocmd::targets(lua, event_name, matched.as_deref())?;
     let mut current = payload;
-    for func in subscribers(lua, event_name)? {
-        let lua_payload = json_to_lua(lua, &current)?;
-        match func.call::<Value>(lua_payload) {
+    for target in targets {
+        let data = json_to_lua(lua, &current)?;
+        match target.call::<Value>(lua, event_name, matched.as_deref(), data) {
             Ok(Value::Nil) => {}
             Ok(value) => match lua_to_json(value) {
                 Ok(next) => current = next,
@@ -311,13 +247,7 @@ pub fn dispatch_transform(
                     );
                 }
             },
-            Err(err) => {
-                let mut s = lock(sink);
-                s.log(
-                    LogLevel::Error,
-                    &format!("plugin handler for '{event_name}' raised: {err}"),
-                );
-            }
+            Err(err) => target.log_error(sink, event_name, err),
         }
     }
     Ok(current)
@@ -354,21 +284,15 @@ pub fn dispatch_resources_discover(
     sink: &SharedHostLog,
 ) -> Result<DiscoveryEntries, PluginError> {
     let mut entries = DiscoveryEntries::default();
-    for func in subscribers(lua, "resources_discover")? {
-        match func.call::<Value>(()) {
+    for target in autocmd::targets(lua, "resources_discover", None)? {
+        match target.call::<Value>(lua, "resources_discover", None, Value::Nil) {
             Ok(Value::Table(table)) => {
                 collect_paths(&table, "skills", &mut entries.skills);
                 collect_paths(&table, "templates", &mut entries.templates);
                 collect_paths(&table, "themes", &mut entries.themes);
             }
             Ok(_) => {}
-            Err(err) => {
-                let mut s = lock(sink);
-                s.log(
-                    LogLevel::Error,
-                    &format!("plugin handler for 'resources_discover' raised: {err}"),
-                );
-            }
+            Err(err) => target.log_error(sink, "resources_discover", err),
         }
     }
     Ok(entries)
@@ -423,13 +347,13 @@ pub fn dispatch_session_op(
     target: &str,
     sink: &SharedHostLog,
 ) -> Result<SessionOpDecision, PluginError> {
-    let funcs = subscribers(lua, event_name)?;
-    if funcs.is_empty() {
+    let targets = autocmd::targets(lua, event_name, None)?;
+    if targets.is_empty() {
         return Ok(SessionOpDecision::Proceed);
     }
-    let lua_payload = lua.create_string(target)?;
-    for func in funcs {
-        match func.call::<Value>(Value::String(lua_payload.clone())) {
+    let data = Value::String(lua.create_string(target)?);
+    for target in targets {
+        match target.call::<Value>(lua, event_name, None, data.clone()) {
             Ok(Value::Table(t)) => {
                 if let Ok(reason) = t.get::<String>("cancel") {
                     return Ok(SessionOpDecision::Cancel { reason });
@@ -439,13 +363,7 @@ pub fn dispatch_session_op(
                 }
             }
             Ok(_) => {}
-            Err(err) => {
-                let mut s = lock(sink);
-                s.log(
-                    LogLevel::Error,
-                    &format!("plugin handler for '{event_name}' raised: {err}"),
-                );
-            }
+            Err(err) => target.log_error(sink, event_name, err),
         }
     }
     Ok(SessionOpDecision::Proceed)
@@ -464,38 +382,27 @@ pub fn dispatch_predicate(
     payload: &serde_json::Value,
     sink: &SharedHostLog,
 ) -> Result<bool, PluginError> {
-    let funcs = subscribers(lua, event_name)?;
-    if funcs.is_empty() {
+    let matched = autocmd::match_key(event_name, payload);
+    let targets = autocmd::targets(lua, event_name, matched)?;
+    if targets.is_empty() {
         return Ok(false);
     }
-    let lua_payload = json_to_lua(lua, payload)?;
-    for func in funcs {
-        match func.call::<Value>(lua_payload.clone()) {
+    let data = json_to_lua(lua, payload)?;
+    for target in targets {
+        match target.call::<Value>(lua, event_name, matched, data.clone()) {
             Ok(Value::Boolean(true)) => return Ok(true),
             Ok(_) => {}
-            Err(err) => {
-                let mut s = lock(sink);
-                s.log(
-                    LogLevel::Error,
-                    &format!("plugin handler for '{event_name}' raised: {err}"),
-                );
-            }
+            Err(err) => target.log_error(sink, event_name, err),
         }
     }
     Ok(false)
 }
 
-/// Number of handlers currently subscribed to `event_name`. Used by the
-/// host to skip JSON conversion for events nobody listens to.
+/// Number of handlers currently subscribed to `event_name`. Reads the
+/// autocmd counts kept outside Lua, so it never runs any Lua code.
 #[must_use]
 pub fn handler_count(lua: &Lua, event_name: &str) -> usize {
-    let Ok(handlers) = lua.named_registry_value::<Table>(HANDLERS_KEY) else {
-        return 0;
-    };
-    let Ok(Value::Table(list)) = handlers.get::<Value>(event_name) else {
-        return 0;
-    };
-    list.raw_len()
+    autocmd::count(lua, event_name)
 }
 
 #[cfg(test)]

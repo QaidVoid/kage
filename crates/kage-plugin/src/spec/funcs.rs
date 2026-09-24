@@ -6,6 +6,7 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &["Wall-clock milliseconds since the Unix epoch."],
         path: "kage.now_ms",
+        since: 1,
         params: &[],
         ret: Some("integer"),
     },
@@ -16,12 +17,14 @@ pub(super) const FUNCS: &[Func] = &[
             "`kage.requires` to guard against an incompatible host.",
         ],
         path: "kage.api_version",
+        since: 1,
         params: &[],
         ret: Some("integer"),
     },
     Func {
         doc: &["Host crate version string (semver), e.g. \"0.1.0\"."],
         path: "kage.host_version",
+        since: 1,
         params: &[],
         ret: Some("string"),
     },
@@ -33,6 +36,7 @@ pub(super) const FUNCS: &[Func] = &[
             "of part-way through a missing binding.",
         ],
         path: "kage.requires",
+        since: 1,
         params: &[Field {
             name: "spec",
             ty: "{ api: integer? }",
@@ -47,6 +51,7 @@ pub(super) const FUNCS: &[Func] = &[
             "multi-second sleep; loop the call to wait longer.",
         ],
         path: "kage.sleep_ms",
+        since: 1,
         params: &[Field {
             name: "ms",
             ty: "integer",
@@ -57,6 +62,7 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &["Decode a JSON string into the equivalent Lua table or value."],
         path: "kage.json.decode",
+        since: 1,
         params: &[Field {
             name: "raw",
             ty: "string",
@@ -67,6 +73,7 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &["Encode a Lua value as a JSON string."],
         path: "kage.json.encode",
+        since: 1,
         params: &[Field {
             name: "value",
             ty: "any",
@@ -77,6 +84,7 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &["Record a structured log line at `level`."],
         path: "kage.log",
+        since: 1,
         params: &[
             Field {
                 name: "level",
@@ -98,6 +106,7 @@ pub(super) const FUNCS: &[Func] = &[
             "disk; use `kage.store` for state that must persist.",
         ],
         path: "kage.config",
+        since: 1,
         params: &[],
         ret: Some("table"),
     },
@@ -110,6 +119,7 @@ pub(super) const FUNCS: &[Func] = &[
             "disk; use `kage.store` to persist state.",
         ],
         path: "kage.plugin_config",
+        since: 1,
         params: &[],
         ret: Some("table"),
     },
@@ -120,6 +130,7 @@ pub(super) const FUNCS: &[Func] = &[
             "and persists across reloads and restarts.",
         ],
         path: "kage.store.get",
+        since: 1,
         params: &[Field {
             name: "key",
             ty: "string",
@@ -130,6 +141,7 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &["Persist `value` (any JSON-serializable value) under `key`."],
         path: "kage.store.set",
+        since: 1,
         params: &[
             Field {
                 name: "key",
@@ -147,6 +159,7 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &["Remove `key` from this plugin's store. A no-op when unset."],
         path: "kage.store.delete",
+        since: 1,
         params: &[Field {
             name: "key",
             ty: "string",
@@ -157,6 +170,7 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &["List the keys currently held in this plugin's store."],
         path: "kage.store.keys",
+        since: 1,
         params: &[],
         ret: Some("string[]"),
     },
@@ -170,6 +184,7 @@ pub(super) const FUNCS: &[Func] = &[
             "capability is missing. Unknown names raise an error.",
         ],
         path: "kage.request_capabilities",
+        since: 1,
         params: &[Field {
             name: "caps",
             ty: "kage.Capability[]",
@@ -180,6 +195,7 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &["Back-compat alias for `kage.ui.notify`."],
         path: "kage.notify",
+        since: 1,
         params: &[
             Field {
                 name: "message",
@@ -200,6 +216,7 @@ pub(super) const FUNCS: &[Func] = &[
             "levels are also logged. Unknown level raises an error.",
         ],
         path: "kage.ui.notify",
+        since: 1,
         params: &[
             Field {
                 name: "message",
@@ -221,6 +238,7 @@ pub(super) const FUNCS: &[Func] = &[
             "coroutine; returns the chosen value, or nil if cancelled.",
         ],
         path: "kage.ui.select",
+        since: 1,
         params: &[
             Field {
                 name: "title",
@@ -238,6 +256,7 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &["Open a yes/no overlay. Cancelling counts as false."],
         path: "kage.ui.confirm",
+        since: 1,
         params: &[
             Field {
                 name: "title",
@@ -258,6 +277,7 @@ pub(super) const FUNCS: &[Func] = &[
             "cancelled. `placeholder` is dim help, not part of result.",
         ],
         path: "kage.ui.input",
+        since: 1,
         params: &[
             Field {
                 name: "title",
@@ -278,6 +298,7 @@ pub(super) const FUNCS: &[Func] = &[
             "submits, Esc cancels. Returns the buffer, or nil.",
         ],
         path: "kage.ui.editor",
+        since: 1,
         params: &[
             Field {
                 name: "title",
@@ -299,6 +320,7 @@ pub(super) const FUNCS: &[Func] = &[
             "Pass nil to restore the built-in status bar.",
         ],
         path: "kage.ui.set_header",
+        since: 1,
         params: &[Field {
             name: "fn",
             ty: "fun(width: integer): any|nil",
@@ -309,6 +331,7 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &["Take over the bottom modeline row. Same shape as set_header."],
         path: "kage.ui.set_footer",
+        since: 1,
         params: &[Field {
             name: "fn",
             ty: "fun(width: integer): any|nil",
@@ -319,6 +342,7 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &["Register a tool the agent can call like a built-in."],
         path: "kage.register_tool",
+        since: 1,
         params: &[Field {
             name: "spec",
             ty: "kage.ToolSpec",
@@ -332,6 +356,7 @@ pub(super) const FUNCS: &[Func] = &[
             "name. The host logs a warning if no such tool existed.",
         ],
         path: "kage.override_tool",
+        since: 1,
         params: &[Field {
             name: "spec",
             ty: "kage.ToolSpec",
@@ -342,6 +367,7 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &["Register a slash / colon command."],
         path: "kage.register_command",
+        since: 1,
         params: &[Field {
             name: "spec",
             ty: "kage.CommandSpec",
@@ -355,6 +381,7 @@ pub(super) const FUNCS: &[Func] = &[
             "command of the same name and dispatched ahead of it.",
         ],
         path: "kage.override_command",
+        since: 1,
         params: &[Field {
             name: "spec",
             ty: "kage.CommandSpec",
@@ -372,6 +399,7 @@ pub(super) const FUNCS: &[Func] = &[
             "Pass `nil` to remove a renderer.",
         ],
         path: "kage.register_block_renderer",
+        since: 1,
         params: &[
             Field {
                 name: "kind",
@@ -393,6 +421,7 @@ pub(super) const FUNCS: &[Func] = &[
             "coroutine bridge, so it may open `kage.ui.*` dialogs.",
         ],
         path: "kage.register_keybinding",
+        since: 1,
         params: &[
             Field {
                 name: "spec",
@@ -414,6 +443,7 @@ pub(super) const FUNCS: &[Func] = &[
             "the Lua thread, so keep it cheap.",
         ],
         path: "kage.add_autocomplete_provider",
+        since: 1,
         params: &[Field {
             name: "spec",
             ty: "kage.AutocompleteSpec",
@@ -429,6 +459,7 @@ pub(super) const FUNCS: &[Func] = &[
             "register_keybinding unless you must swallow arbitrary keys.",
         ],
         path: "kage.on_terminal_input",
+        since: 1,
         params: &[Field {
             name: "handler",
             ty: "fun(ev: kage.KeyEvent): boolean",
@@ -439,6 +470,7 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &["Register a status-bar widget."],
         path: "kage.register_widget",
+        since: 1,
         params: &[Field {
             name: "spec",
             ty: "kage.WidgetSpec",
@@ -449,6 +481,7 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &["Push or clear a transient status entry. Nil/empty clears."],
         path: "kage.set_status",
+        since: 1,
         params: &[
             Field {
                 name: "key",
@@ -466,6 +499,7 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &["Clear a transient status entry."],
         path: "kage.clear_status",
+        since: 1,
         params: &[Field {
             name: "key",
             ty: "string",
@@ -480,9 +514,12 @@ pub(super) const FUNCS: &[Func] = &[
             "Notification events ignore the return; transform events",
             "chain it; predicate / session-op events interpret it.",
             "Returns `off`, which removes this subscription. Calling",
-            "it again, or from inside a handler, is safe.",
+            "it again, or from inside a handler, is safe. An unknown",
+            "event name logs one warning and subscribes to nothing.",
+            "An alias over `kage.api.autocmd_create`.",
         ],
         path: "kage.on",
+        since: 1,
         params: &[
             Field {
                 name: "event",
@@ -503,6 +540,7 @@ pub(super) const FUNCS: &[Func] = &[
             "the example plugins for a realistic shape.",
         ],
         path: "kage.register_provider",
+        since: 1,
         params: &[Field {
             name: "spec",
             ty: "kage.ProviderSpec",
@@ -513,6 +551,7 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &["Sessions the host knows about: `{ id, value }` each."],
         path: "kage.session.list",
+        since: 1,
         params: &[],
         ret: Some("{ id: string, value: string }[]"),
     },
@@ -522,6 +561,7 @@ pub(super) const FUNCS: &[Func] = &[
             "latest entry when omitted). Performed between turns.",
         ],
         path: "kage.session.fork",
+        since: 1,
         params: &[Field {
             name: "at?",
             ty: "string",
@@ -535,6 +575,7 @@ pub(super) const FUNCS: &[Func] = &[
             "namespaced string; `data` is any table (defaults to {}).",
         ],
         path: "kage.session.append_entry",
+        since: 1,
         params: &[
             Field {
                 name: "kind",
@@ -552,6 +593,7 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &["Write a label pointing at entry id `anchor`. Nil clears."],
         path: "kage.session.set_label",
+        since: 1,
         params: &[
             Field {
                 name: "anchor",
@@ -569,6 +611,7 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &["Queue a synthetic message delivered between turns."],
         path: "kage.send_message",
+        since: 1,
         params: &[
             Field {
                 name: "text",
@@ -589,6 +632,7 @@ pub(super) const FUNCS: &[Func] = &[
             "at least one turn.",
         ],
         path: "kage.context_usage",
+        since: 1,
         params: &[],
         ret: Some("kage.Usage|nil"),
     },
@@ -598,6 +642,7 @@ pub(super) const FUNCS: &[Func] = &[
             "advisory; the compact_prepare event is the precise hook.",
         ],
         path: "kage.compact",
+        since: 1,
         params: &[Field {
             name: "prompt?",
             ty: "string",
@@ -611,6 +656,7 @@ pub(super) const FUNCS: &[Func] = &[
             "the workdir tree raise an error.",
         ],
         path: "kage.fs.read",
+        since: 1,
         params: &[Field {
             name: "path",
             ty: "string",
@@ -621,6 +667,7 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &["Write a file under the workdir. Same restriction as read."],
         path: "kage.fs.write",
+        since: 1,
         params: &[
             Field {
                 name: "path",
@@ -641,6 +688,7 @@ pub(super) const FUNCS: &[Func] = &[
             "`[acp.agents.<name>]` in config.toml. Core spawns it.",
         ],
         path: "kage.acp.add_agent",
+        since: 1,
         params: &[Field {
             name: "spec",
             ty: "kage.AcpAgentSpec",
@@ -657,6 +705,7 @@ pub(super) const FUNCS: &[Func] = &[
             "erroring handler, denies.",
         ],
         path: "kage.on_acp_permission",
+        since: 1,
         params: &[Field {
             name: "handler",
             ty: "fun(req: table): boolean",
@@ -670,6 +719,7 @@ pub(super) const FUNCS: &[Func] = &[
             "`[mcp.servers.<name>]` in config.toml. Core spawns it.",
         ],
         path: "kage.mcp.add_server",
+        since: 1,
         params: &[Field {
             name: "spec",
             ty: "kage.McpServerSpec",
@@ -680,6 +730,7 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &["Names of the plugin-declared MCP servers, sorted."],
         path: "kage.mcp.list_servers",
+        since: 1,
         params: &[],
         ret: Some("string[]"),
     },
@@ -689,6 +740,7 @@ pub(super) const FUNCS: &[Func] = &[
             "between turns against the live manager.",
         ],
         path: "kage.mcp.restart",
+        since: 1,
         params: &[Field {
             name: "name",
             ty: "string",
@@ -699,12 +751,14 @@ pub(super) const FUNCS: &[Func] = &[
     Func {
         doc: &["The active theme name, or \"\" if none is set yet."],
         path: "kage.theme.current",
+        since: 1,
         params: &[],
         ret: Some("string"),
     },
     Func {
         doc: &["Theme names that may be passed to `kage.theme.set`."],
         path: "kage.theme.list",
+        since: 1,
         params: &[],
         ret: Some("string[]"),
     },
@@ -714,11 +768,105 @@ pub(super) const FUNCS: &[Func] = &[
             "between turns. Errors on a non-string or empty name.",
         ],
         path: "kage.theme.set",
+        since: 1,
         params: &[Field {
             name: "name",
             ty: "string",
             doc: "",
         }],
+        ret: None,
+    },
+    Func {
+        doc: &[
+            "Create an autocmd for `event` and return its id. Raises on",
+            "an unknown event, an unknown group, or a pattern other than",
+            "`*` for an event without a match key.",
+        ],
+        path: "kage.api.autocmd_create",
+        since: 2,
+        params: &[
+            Field {
+                name: "event",
+                ty: "kage.Event",
+                doc: "",
+            },
+            Field {
+                name: "opts",
+                ty: "kage.AutocmdOpts",
+                doc: "",
+            },
+        ],
+        ret: Some("integer"),
+    },
+    Func {
+        doc: &["Delete the autocmd with `id`. A missing id is ignored."],
+        path: "kage.api.autocmd_del",
+        since: 2,
+        params: &[Field {
+            name: "id",
+            ty: "integer",
+            doc: "",
+        }],
+        ret: None,
+    },
+    Func {
+        doc: &[
+            "Create the group `name`, or return the existing one, and",
+            "return its id. With `clear = true` (the default) an",
+            "existing group loses its autocmds, so re-running the same",
+            "setup does not register twice.",
+        ],
+        path: "kage.api.augroup_create",
+        since: 2,
+        params: &[
+            Field {
+                name: "name",
+                ty: "string",
+                doc: "",
+            },
+            Field {
+                name: "opts?",
+                ty: "{ clear: boolean? }",
+                doc: "",
+            },
+        ],
+        ret: Some("integer"),
+    },
+    Func {
+        doc: &[
+            "Delete a group, by id or name, with all its autocmds. An",
+            "unknown group is ignored.",
+        ],
+        path: "kage.api.augroup_del",
+        since: 2,
+        params: &[Field {
+            name: "group",
+            ty: "integer|string",
+            doc: "",
+        }],
+        ret: None,
+    },
+    Func {
+        doc: &[
+            "Fire `event` now. `pattern` is the match autocmd patterns",
+            "compare against, and `data` arrives as `ev.data`. Raising",
+            "callbacks are logged and skipped. Nesting deeper than 16",
+            "raises.",
+        ],
+        path: "kage.api.autocmd_exec",
+        since: 2,
+        params: &[
+            Field {
+                name: "event",
+                ty: "kage.Event",
+                doc: "",
+            },
+            Field {
+                name: "opts?",
+                ty: "{ pattern: string?, data: any }",
+                doc: "",
+            },
+        ],
         ret: None,
     },
 ];

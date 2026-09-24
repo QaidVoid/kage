@@ -33,9 +33,11 @@
 --- per-plugin in `[plugins.capabilities]`.
 ---@alias kage.Capability "session_write"|"exec"|"env"|"net"
 
---- Every event name `kage.on` accepts. Notification events
---- ignore the handler return; transform events chain it;
---- predicate and session-op events interpret it.
+--- Every event name `kage.on` and `kage.api.autocmd_create`
+--- accept. Notification events ignore the handler return;
+--- transform events chain it; predicate and session-op events
+--- interpret it. `user` fires only through
+--- `kage.api.autocmd_exec`.
 ---@alias kage.Event
 ---| "before_agent_start"
 ---| "agent_start"
@@ -52,6 +54,8 @@
 ---| "model_select"
 ---| "thinking_level_select"
 ---| "user_bash"
+---| "permission_mode_select"
+---| "user"
 ---| "transform_context"
 ---| "before_provider_request"
 ---| "compact_prepare"
@@ -190,20 +194,42 @@
 ---@field json? table Body encoded as JSON; sets Content-Type to application/json.
 ---@field max_bytes? integer Response body cap. Defaults: 2 MB simple, 32 MB streamed.
 
+--- Options for `kage.api.autocmd_create`.
+---@class kage.AutocmdOpts
+---@field callback fun(ev: kage.AutocmdEvent): any Called when the event fires.
+---@field group? integer|string Group id or name from `kage.api.augroup_create`.
+---@field pattern? string|string[] Exact match values; `*` (the default) matches all.
+---@field once? boolean Delete the autocmd before its first call.
+---@field desc? string Shown in error messages.
+
+--- What an autocmd callback receives. `match` is the tool name
+--- for `tool_call` and `tool_result`, the new value for
+--- `model_select` and `thinking_level_select`, and the exec
+--- pattern for `user`.
+---@class kage.AutocmdEvent
+---@field id integer Autocmd id.
+---@field event kage.Event Event name.
+---@field match? string Value the patterns matched against.
+---@field group? integer Group id.
+---@field data any Event payload.
+
 ---@class kage
 kage = {}
 
 --- Wall-clock milliseconds since the Unix epoch.
+--- Since API 1.
 ---@return integer
 function kage.now_ms() end
 
 --- Integer generation of the `kage` plugin API surface. Bumped
 --- when a binding is added or removed; pair with
 --- `kage.requires` to guard against an incompatible host.
+--- Since API 1.
 ---@return integer
 function kage.api_version() end
 
 --- Host crate version string (semver), e.g. "0.1.0".
+--- Since API 1.
 ---@return string
 function kage.host_version() end
 
@@ -211,12 +237,14 @@ function kage.host_version() end
 --- minimum `kage.api_version` the plugin needs; an older host
 --- raises a clear error so a stale plugin fails loudly instead
 --- of part-way through a missing binding.
+--- Since API 1.
 ---@param spec { api: integer? }
 function kage.requires(spec) end
 
 --- Sleep the calling thread for `ms` milliseconds. Capped at
 --- 500 ms per call so a host-side cancel never has to wait a
 --- multi-second sleep; loop the call to wait longer.
+--- Since API 1.
 ---@param ms integer
 function kage.sleep_ms(ms) end
 
@@ -225,16 +253,19 @@ function kage.sleep_ms(ms) end
 kage.json = {}
 
 --- Decode a JSON string into the equivalent Lua table or value.
+--- Since API 1.
 ---@param raw string
 ---@return any
 function kage.json.decode(raw) end
 
 --- Encode a Lua value as a JSON string.
+--- Since API 1.
 ---@param value any
 ---@return string
 function kage.json.encode(value) end
 
 --- Record a structured log line at `level`.
+--- Since API 1.
 ---@param level kage.LogLevel
 ---@param message string
 function kage.log(level, message) end
@@ -242,6 +273,7 @@ function kage.log(level, message) end
 --- A copy of the host-supplied configuration table. Mutating
 --- the returned table does not propagate back to the host or to
 --- disk; use `kage.store` for state that must persist.
+--- Since API 1.
 ---@return table
 function kage.config() end
 
@@ -250,6 +282,7 @@ function kage.config() end
 --- sees only its own slice, never another plugin's. Mutating
 --- the returned table does not propagate back to the host or to
 --- disk; use `kage.store` to persist state.
+--- Since API 1.
 ---@return table
 function kage.plugin_config() end
 
@@ -260,20 +293,24 @@ kage.store = {}
 --- Read a value previously saved with `kage.store.set`, or
 --- `nil` when the key is unset. State is private to this plugin
 --- and persists across reloads and restarts.
+--- Since API 1.
 ---@param key string
 ---@return any
 function kage.store.get(key) end
 
 --- Persist `value` (any JSON-serializable value) under `key`.
+--- Since API 1.
 ---@param key string
 ---@param value any
 function kage.store.set(key, value) end
 
 --- Remove `key` from this plugin's store. A no-op when unset.
+--- Since API 1.
 ---@param key string
 function kage.store.delete(key) end
 
 --- List the keys currently held in this plugin's store.
+--- Since API 1.
 ---@return string[]
 function kage.store.keys() end
 
@@ -283,11 +320,13 @@ function kage.store.keys() end
 --- `[plugins.capabilities]`. Granted APIs are attached to
 --- this plugin alone. Call once at load and degrade when a
 --- capability is missing. Unknown names raise an error.
+--- Since API 1.
 ---@param caps kage.Capability[]
 ---@return table<string, boolean>
 function kage.request_capabilities(caps) end
 
 --- Back-compat alias for `kage.ui.notify`.
+--- Since API 1.
 ---@param message string
 ---@param level? kage.NotifyLevel
 function kage.notify(message, level) end
@@ -298,6 +337,7 @@ kage.ui = {}
 
 --- Show a transient toast (stderr in print mode). Non-info
 --- levels are also logged. Unknown level raises an error.
+--- Since API 1.
 ---@param message string
 ---@param level? kage.NotifyLevel
 function kage.ui.notify(message, level) end
@@ -305,12 +345,14 @@ function kage.ui.notify(message, level) end
 --- Open a fuzzy picker. Each item is a string or
 --- `{ label, value?, detail? }`. Suspends the calling
 --- coroutine; returns the chosen value, or nil if cancelled.
+--- Since API 1.
 ---@param title string
 ---@param items (string|{ label: string, value?: string, detail?: string })[]
 ---@return string|nil
 function kage.ui.select(title, items) end
 
 --- Open a yes/no overlay. Cancelling counts as false.
+--- Since API 1.
 ---@param title string
 ---@param message string
 ---@return boolean
@@ -318,6 +360,7 @@ function kage.ui.confirm(title, message) end
 
 --- Open a single-line input. Returns the string, or nil if
 --- cancelled. `placeholder` is dim help, not part of result.
+--- Since API 1.
 ---@param title string
 ---@param placeholder? string
 ---@return string|nil
@@ -325,6 +368,7 @@ function kage.ui.input(title, placeholder) end
 
 --- Open a multi-line editor seeded with `prefill`. Ctrl+S
 --- submits, Esc cancels. Returns the buffer, or nil.
+--- Since API 1.
 ---@param title string
 ---@param prefill? string
 ---@return string|nil
@@ -333,28 +377,34 @@ function kage.ui.editor(title, prefill) end
 --- Take over the top status row. `fn(width)` runs each redraw
 --- and returns a string, a span table, or an array of those.
 --- Pass nil to restore the built-in status bar.
+--- Since API 1.
 ---@param fn fun(width: integer): any|nil
 function kage.ui.set_header(fn) end
 
 --- Take over the bottom modeline row. Same shape as set_header.
+--- Since API 1.
 ---@param fn fun(width: integer): any|nil
 function kage.ui.set_footer(fn) end
 
 --- Register a tool the agent can call like a built-in.
+--- Since API 1.
 ---@param spec kage.ToolSpec
 function kage.register_tool(spec) end
 
 --- Like `register_tool` but replaces the existing tool by
 --- name. The host logs a warning if no such tool existed.
+--- Since API 1.
 ---@param spec kage.ToolSpec
 function kage.override_tool(spec) end
 
 --- Register a slash / colon command.
+--- Since API 1.
 ---@param spec kage.CommandSpec
 function kage.register_command(spec) end
 
 --- Like `register_command`, but allowed to shadow a built-in
 --- command of the same name and dispatched ahead of it.
+--- Since API 1.
 ---@param spec kage.CommandSpec
 function kage.override_command(spec) end
 
@@ -364,6 +414,7 @@ function kage.override_command(spec) end
 --- type; the reserved names `user`/`assistant`/`thinking`/
 --- `tool_call`/`tool_result`/`custom` override a built-in.
 --- Pass `nil` to remove a renderer.
+--- Since API 1.
 ---@param kind string Custom block kind to take over.
 ---@param render fun(block: table): any|nil Gets { kind, text, width }; nil unregisters.
 function kage.register_block_renderer(kind, render) end
@@ -371,6 +422,7 @@ function kage.register_block_renderer(kind, render) end
 --- Bind a chord to a handler. `spec` is a chord string or
 --- `{ key, description? }`. The handler runs through the
 --- coroutine bridge, so it may open `kage.ui.*` dialogs.
+--- Since API 1.
 ---@param spec string|{ key: string, description?: string }
 ---@param handler fun(): string?
 function kage.register_keybinding(spec, handler) end
@@ -378,6 +430,7 @@ function kage.register_keybinding(spec, handler) end
 --- Add a prompt-input autocomplete provider. Providers form a
 --- stack; the most recently added wins. Runs synchronously on
 --- the Lua thread, so keep it cheap.
+--- Since API 1.
 ---@param spec kage.AutocompleteSpec
 function kage.add_autocomplete_provider(spec) end
 
@@ -385,20 +438,24 @@ function kage.add_autocomplete_provider(spec) end
 --- consumes the event. Returns an `off` function that
 --- unregisters this handler (idempotent). Prefer
 --- register_keybinding unless you must swallow arbitrary keys.
+--- Since API 1.
 ---@param handler fun(ev: kage.KeyEvent): boolean
 ---@return fun()
 function kage.on_terminal_input(handler) end
 
 --- Register a status-bar widget.
+--- Since API 1.
 ---@param spec kage.WidgetSpec
 function kage.register_widget(spec) end
 
 --- Push or clear a transient status entry. Nil/empty clears.
+--- Since API 1.
 ---@param key string
 ---@param text string|nil
 function kage.set_status(key, text) end
 
 --- Clear a transient status entry.
+--- Since API 1.
 ---@param key string
 function kage.clear_status(key) end
 
@@ -407,7 +464,10 @@ function kage.clear_status(key) end
 --- Notification events ignore the return; transform events
 --- chain it; predicate / session-op events interpret it.
 --- Returns `off`, which removes this subscription. Calling
---- it again, or from inside a handler, is safe.
+--- it again, or from inside a handler, is safe. An unknown
+--- event name logs one warning and subscribes to nothing.
+--- An alias over `kage.api.autocmd_create`.
+--- Since API 1.
 ---@param event kage.Event
 ---@param handler fun(payload: any): any
 ---@return fun()
@@ -415,6 +475,7 @@ function kage.on(event, handler) end
 
 --- Register a new LLM provider implementation. Advanced; see
 --- the example plugins for a realistic shape.
+--- Since API 1.
 ---@param spec kage.ProviderSpec
 function kage.register_provider(spec) end
 
@@ -423,37 +484,44 @@ function kage.register_provider(spec) end
 kage.session = {}
 
 --- Sessions the host knows about: `{ id, value }` each.
+--- Since API 1.
 ---@return { id: string, value: string }[]
 function kage.session.list() end
 
 --- Fork the current session at entry-id prefix `at` (or the
 --- latest entry when omitted). Performed between turns.
+--- Since API 1.
 ---@param at? string
 function kage.session.fork(at) end
 
 --- Append a custom entry to the session JSONL. `kind` is a
 --- namespaced string; `data` is any table (defaults to {}).
+--- Since API 1.
 ---@param kind string
 ---@param data? table
 function kage.session.append_entry(kind, data) end
 
 --- Write a label pointing at entry id `anchor`. Nil clears.
+--- Since API 1.
 ---@param anchor string
 ---@param label? string
 function kage.session.set_label(anchor, label) end
 
 --- Queue a synthetic message delivered between turns.
+--- Since API 1.
 ---@param text string
 ---@param opts? kage.SendOpts
 function kage.send_message(text, opts) end
 
 --- Snapshot per-turn token usage. Nil until the host has run
 --- at least one turn.
+--- Since API 1.
 ---@return kage.Usage|nil
 function kage.context_usage() end
 
 --- Ask the host to run a compaction pass. `prompt` is
 --- advisory; the compact_prepare event is the precise hook.
+--- Since API 1.
 ---@param prompt? string
 function kage.compact(prompt) end
 
@@ -463,11 +531,13 @@ kage.fs = {}
 
 --- Read a file relative to the session workdir. Paths outside
 --- the workdir tree raise an error.
+--- Since API 1.
 ---@param path string
 ---@return string
 function kage.fs.read(path) end
 
 --- Write a file under the workdir. Same restriction as read.
+--- Since API 1.
 ---@param path string
 ---@param content string
 function kage.fs.write(path, content) end
@@ -478,6 +548,7 @@ kage.acp = {}
 
 --- Declare an upstream ACP agent at runtime, mirroring
 --- `[acp.agents.<name>]` in config.toml. Core spawns it.
+--- Since API 1.
 ---@param spec kage.AcpAgentSpec
 function kage.acp.add_agent(spec) end
 
@@ -486,6 +557,7 @@ function kage.acp.add_agent(spec) end
 --- boolean and must not open a dialog (no coroutine suspend):
 --- it is policy, not UI. No handler, or a non-boolean or
 --- erroring handler, denies.
+--- Since API 1.
 ---@param handler fun(req: table): boolean
 function kage.on_acp_permission(handler) end
 
@@ -495,15 +567,18 @@ kage.mcp = {}
 
 --- Declare an MCP server at runtime, mirroring
 --- `[mcp.servers.<name>]` in config.toml. Core spawns it.
+--- Since API 1.
 ---@param spec kage.McpServerSpec
 function kage.mcp.add_server(spec) end
 
 --- Names of the plugin-declared MCP servers, sorted.
+--- Since API 1.
 ---@return string[]
 function kage.mcp.list_servers() end
 
 --- Ask the host to restart a declared MCP server. Applied
 --- between turns against the live manager.
+--- Since API 1.
 ---@param name string
 function kage.mcp.restart(name) end
 
@@ -512,22 +587,69 @@ function kage.mcp.restart(name) end
 kage.theme = {}
 
 --- The active theme name, or "" if none is set yet.
+--- Since API 1.
 ---@return string
 function kage.theme.current() end
 
 --- Theme names that may be passed to `kage.theme.set`.
+--- Since API 1.
 ---@return string[]
 function kage.theme.list() end
 
 --- Request a theme switch. The host validates and applies it
 --- between turns. Errors on a non-string or empty name.
+--- Since API 1.
 ---@param name string
 function kage.theme.set(name) end
+
+--- Low-level primitives the stdlib builds on.
+---@class kage.api
+kage.api = {}
+
+--- Create an autocmd for `event` and return its id. Raises on
+--- an unknown event, an unknown group, or a pattern other than
+--- `*` for an event without a match key.
+--- Since API 2.
+---@param event kage.Event
+---@param opts kage.AutocmdOpts
+---@return integer
+function kage.api.autocmd_create(event, opts) end
+
+--- Delete the autocmd with `id`. A missing id is ignored.
+--- Since API 2.
+---@param id integer
+function kage.api.autocmd_del(id) end
+
+--- Create the group `name`, or return the existing one, and
+--- return its id. With `clear = true` (the default) an
+--- existing group loses its autocmds, so re-running the same
+--- setup does not register twice.
+--- Since API 2.
+---@param name string
+---@param opts? { clear: boolean? }
+---@return integer
+function kage.api.augroup_create(name, opts) end
+
+--- Delete a group, by id or name, with all its autocmds. An
+--- unknown group is ignored.
+--- Since API 2.
+---@param group integer|string
+function kage.api.augroup_del(group) end
+
+--- Fire `event` now. `pattern` is the match autocmd patterns
+--- compare against, and `data` arrives as `ev.data`. Raising
+--- callbacks are logged and skipped. Nesting deeper than 16
+--- raises.
+--- Since API 2.
+---@param event kage.Event
+---@param opts? { pattern: string?, data: any }
+function kage.api.autocmd_exec(event, opts) end
 
 --- Metadata for every entry in the current session, in
 --- order, each `{ id, kind, role?, ts }`. Use it to find
 --- a rewind point. Requires the `session_write`
 --- capability.
+--- Since API 1.
 ---@return { id: string, kind: string, role: string?, ts: string }[]
 function kage.session.entries() end
 
@@ -537,6 +659,7 @@ function kage.session.entries() end
 --- the rewind move: base `fork` branches and stays;
 --- `fork_to` branches and goes there. Requires
 --- `session_write`.
+--- Since API 1.
 ---@param at? string
 function kage.session.fork_to(at) end
 
@@ -544,6 +667,7 @@ function kage.session.fork_to(at) end
 --- (an id or path from `kage.session.list()`). The host
 --- validates and applies it between turns, consulting the
 --- `session_before_switch` veto. Requires `session_write`.
+--- Since API 1.
 ---@param target string
 function kage.session.switch(target) end
 
@@ -553,6 +677,7 @@ function kage.session.switch(target) end
 --- coarse: any binary on the `PATH` may run with any args,
 --- with no command allowlist. Requires the `exec`
 --- capability.
+--- Since API 1.
 ---@param spec kage.ExecSpec
 ---@return kage.ExecResult
 function kage.exec(spec) end
@@ -561,6 +686,7 @@ function kage.exec(spec) end
 --- or `nil` when unset. The grant is coarse: any variable
 --- can be read (including secrets) and there is no setter.
 --- Requires the `env` capability.
+--- Since API 1.
 ---@param name string
 ---@return string?
 function kage.env(name) end
@@ -573,6 +699,7 @@ kage.http = {}
 --- SSRF filtering applies: the scheme must be http(s) and
 --- the host must resolve to a routable address; there is no
 --- host allow-list. Requires the `net` capability.
+--- Since API 1.
 ---@param url string
 ---@param opts? kage.HttpRequestOpts
 ---@return { status: integer, body: string, content_type: string, truncated: boolean }
@@ -582,6 +709,7 @@ function kage.http.get(url, opts) end
 --- (string) or `json` (table; auto-serialized with
 --- `Content-Type: application/json`). The two are mutually
 --- exclusive. Same SSRF rules as GET. Requires `net`.
+--- Since API 1.
 ---@param url string
 ---@param opts? kage.HttpRequestOpts
 ---@return { status: integer, body: string, content_type: string, truncated: boolean }
@@ -590,6 +718,7 @@ function kage.http.post(url, opts) end
 --- HTTP DELETE. `opts` carries headers (and optionally
 --- body, though most servers ignore it). Same SSRF rules as
 --- GET. Requires `net`.
+--- Since API 1.
 ---@param url string
 ---@param opts? kage.HttpRequestOpts
 ---@return { status: integer, body: string, content_type: string, truncated: boolean }
@@ -600,6 +729,7 @@ function kage.http.delete(url, opts) end
 --- called once per blank-line-terminated frame. Multi-line
 --- `data:` lines join with `\n`. Returns when the stream
 --- ends. Same SSRF rules as GET. Requires `net`.
+--- Since API 1.
 ---@param url string
 ---@param opts? kage.HttpRequestOpts
 ---@param on_event fun(ev: { event: string, data: string })

@@ -34,9 +34,11 @@ pub(super) const ALIASES: &[Alias] = &[
     Alias {
         name: "kage.Event",
         doc: &[
-            "Every event name `kage.on` accepts. Notification events",
-            "ignore the handler return; transform events chain it;",
-            "predicate and session-op events interpret it.",
+            "Every event name `kage.on` and `kage.api.autocmd_create`",
+            "accept. Notification events ignore the handler return;",
+            "transform events chain it; predicate and session-op events",
+            "interpret it. `user` fires only through",
+            "`kage.api.autocmd_exec`.",
         ],
         variants: &[
             "before_agent_start",
@@ -54,6 +56,8 @@ pub(super) const ALIASES: &[Alias] = &[
             "model_select",
             "thinking_level_select",
             "user_bash",
+            "permission_mode_select",
+            "user",
             "transform_context",
             "before_provider_request",
             "compact_prepare",

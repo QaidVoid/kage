@@ -10,6 +10,7 @@
 
 pub mod acp;
 pub mod api;
+pub(crate) mod autocmd;
 pub mod autocomplete;
 pub mod block_renderers;
 pub mod bridge;
@@ -35,6 +36,7 @@ pub(crate) mod session_write;
 pub mod sessions;
 pub mod spec;
 pub mod status;
+pub(crate) mod stdlib;
 pub(crate) mod store;
 pub mod terminal_input;
 #[cfg(any(test, feature = "testing"))]

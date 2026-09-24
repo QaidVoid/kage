@@ -39,4 +39,8 @@ pub(super) const TABLES: &[Table] = &[
         path: "kage.theme",
         class_doc: "Theme inspection and switching.",
     },
+    Table {
+        path: "kage.api",
+        class_doc: "Low-level primitives the stdlib builds on.",
+    },
 ];

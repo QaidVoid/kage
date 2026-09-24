@@ -59,6 +59,9 @@ pub struct Func {
     pub doc: &'static [&'static str],
     /// Dotted path, e.g. `kage.ui.select`.
     pub path: &'static str,
+    /// API generation ([`crate::api::API_VERSION`]) that introduced
+    /// the function.
+    pub since: u32,
     /// Parameters, in order.
     pub params: &'static [Field],
     /// emmylua return type, or `None` for a function that returns

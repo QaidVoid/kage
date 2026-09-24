@@ -1,6 +1,6 @@
 //! One agent run on its own thread.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
@@ -89,9 +89,10 @@ impl Run {
         } = self;
 
         bus.publish(session, HostEvent::RunStarted);
+        let mut tool_names = HashMap::new();
         let mut emit = |event: LoopEvent| {
             if let Some(rt) = &plugins {
-                crate::plugins::forward_event(rt, &event);
+                crate::plugins::forward_event(rt, &event, &mut tool_names);
             }
             if let Some(rec) = recorder.as_mut()
                 && let Err(err) = rec.observe(&event)

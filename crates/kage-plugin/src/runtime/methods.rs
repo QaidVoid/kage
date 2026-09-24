@@ -27,6 +27,7 @@ impl PluginRuntime {
             plugin_config: BTreeMap::new(),
             state_dir: None,
             script_budget: watchdog::BUDGET,
+            defaults: stdlib::DEFAULTS,
         }
     }
 
@@ -113,12 +114,16 @@ impl PluginRuntime {
     /// handlers' side effects right after (queued messages, session
     /// ops, compact or fork requests, host-log lines) and surface the
     /// returned error, so a fire-and-forget dispatch would race them.
-    /// Dispatches from one thread run in call order.
+    /// Dispatches from one thread run in call order. With no
+    /// subscriber it returns at once without touching the owner thread.
     pub fn dispatch_event(
         &self,
         event_name: &str,
         payload: &serde_json::Value,
     ) -> Result<(), PluginError> {
+        if self.handler_count(event_name) == 0 {
+            return Ok(());
+        }
         let (name, payload) = (event_name.to_owned(), payload.clone());
         let (sink, budget) = (self.sink(), self.eval.script_budget);
         self.host.call(move |lua| {
@@ -126,6 +131,35 @@ impl PluginRuntime {
                 events::dispatch(lua, &name, &payload, &sink)
             })
         })?
+    }
+
+    /// Queue `event_name` for dispatch and return without waiting.
+    ///
+    /// For events that originate in the host UI, where nothing reads the
+    /// handlers' side effects right away. Handler errors go to the host
+    /// log. Jobs keep submission order, so a later [`Self::dispatch_event`]
+    /// runs after this one. With no subscriber nothing is queued.
+    pub fn notify_event(
+        &self,
+        event_name: &str,
+        payload: &serde_json::Value,
+    ) -> Result<(), PluginError> {
+        if self.handler_count(event_name) == 0 {
+            return Ok(());
+        }
+        let (name, payload) = (event_name.to_owned(), payload.clone());
+        let (sink, budget) = (self.sink(), self.eval.script_budget);
+        self.host.submit(move |lua| {
+            let result = watchdog::run(lua, budget, || {
+                events::dispatch(lua, &name, &payload, &sink)
+            });
+            if let Err(err) = result {
+                lock(&sink).log(
+                    crate::api::LogLevel::Error,
+                    &format!("{name} dispatch: {err}"),
+                );
+            }
+        })
     }
 
     /// Chain every handler subscribed to `event_name` and return the
@@ -136,6 +170,9 @@ impl PluginRuntime {
         event_name: &str,
         payload: serde_json::Value,
     ) -> Result<serde_json::Value, PluginError> {
+        if self.handler_count(event_name) == 0 {
+            return Ok(payload);
+        }
         let name = event_name.to_owned();
         let (sink, budget) = (self.sink(), self.eval.script_budget);
         self.host.call(move |lua| {
@@ -152,6 +189,9 @@ impl PluginRuntime {
         event_name: &str,
         payload: &serde_json::Value,
     ) -> Result<bool, PluginError> {
+        if self.handler_count(event_name) == 0 {
+            return Ok(false);
+        }
         let (name, payload) = (event_name.to_owned(), payload.clone());
         let (sink, budget) = (self.sink(), self.eval.script_budget);
         self.host.call(move |lua| {
@@ -169,6 +209,9 @@ impl PluginRuntime {
         event_name: &str,
         target: &str,
     ) -> Result<events::SessionOpDecision, PluginError> {
+        if self.handler_count(event_name) == 0 {
+            return Ok(events::SessionOpDecision::Proceed);
+        }
         let (name, target) = (event_name.to_owned(), target.to_owned());
         let (sink, budget) = (self.sink(), self.eval.script_budget);
         self.host.call(move |lua| {
@@ -181,6 +224,9 @@ impl PluginRuntime {
     /// Fire every `resources_discover` handler and collect the aggregated
     /// directory paths. See [`events::dispatch_resources_discover`].
     pub fn discover_resources(&self) -> Result<events::DiscoveryEntries, PluginError> {
+        if self.handler_count("resources_discover") == 0 {
+            return Ok(events::DiscoveryEntries::default());
+        }
         let (sink, budget) = (self.sink(), self.eval.script_budget);
         self.host.call(move |lua| {
             watchdog::run(lua, budget, || {
@@ -189,13 +235,12 @@ impl PluginRuntime {
         })?
     }
 
-    /// Number of handlers subscribed to `event_name`.
+    /// Number of handlers subscribed to `event_name`. Reads counts kept
+    /// outside Lua, so it answers at once even while the owner thread
+    /// runs a long job.
     #[must_use]
     pub fn handler_count(&self, event_name: &str) -> usize {
-        let name = event_name.to_owned();
-        self.host
-            .call(move |lua| events::handler_count(lua, &name))
-            .unwrap_or(0)
+        lock(&self.autocmds).count(event_name)
     }
 
     /// Snapshot the tools registered by plugins so far. Each call returns
@@ -611,9 +656,9 @@ impl PluginRuntime {
         lock(&self.bridge).is_some()
     }
 
-    /// Drop every registration that came from plugins (event handlers,
-    /// tools, commands, providers, ACP/MCP declarations) and replay
-    /// every `*.lua` file in `dir`. Designed for hot reload between
+    /// Drop every registration that came from plugins (autocmds and
+    /// groups, tools, commands, providers, ACP/MCP declarations), rerun
+    /// `_defaults.lua`, and replay every `*.lua` file in `dir`. Designed for hot reload between
     /// turns: a stale plugin snapshot does not survive after this
     /// call.
     ///
@@ -656,8 +701,7 @@ impl PluginRuntime {
         let bridge = Arc::clone(&self.bridge);
         let dir = dir.to_path_buf();
         self.host.call(move |lua| {
-            let handlers: mlua::Table = lua.named_registry_value("kage._handlers")?;
-            handlers.clear()?;
+            autocmd::clear(lua)?;
             acp::clear_permission_handler(lua)?;
             *lock(&bridge) = None;
             eval.reset(lua);

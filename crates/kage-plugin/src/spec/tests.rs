@@ -45,6 +45,26 @@ fn resolve_function(lua: &mlua::Lua, path: &str) -> Result<(), String> {
 }
 
 #[test]
+fn every_func_has_a_since_within_the_api_version() {
+    let s = surface();
+    let max = u32::try_from(crate::api::API_VERSION).unwrap();
+    for f in s.funcs.iter().chain(s.gated.iter().map(|g| &g.func)) {
+        assert!(
+            (1..=max).contains(&f.since),
+            "{} has since {} outside 1..={max}",
+            f.path,
+            f.since
+        );
+    }
+    assert!(
+        s.funcs
+            .iter()
+            .filter(|f| f.path.starts_with("kage.api."))
+            .all(|f| f.since == 2)
+    );
+}
+
+#[test]
 fn surface_has_no_duplicate_func_paths() {
     let s = surface();
     let mut seen = std::collections::BTreeSet::new();

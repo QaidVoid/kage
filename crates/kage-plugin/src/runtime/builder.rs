@@ -72,18 +72,26 @@ impl PluginRuntimeBuilder {
         self
     }
 
+    /// Replace the embedded `_defaults.lua` source.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn defaults(mut self, defaults: &'static str) -> Self {
+        self.defaults = defaults;
+        self
+    }
+
     /// Finalize the runtime: build the Lua state, apply sandbox removals,
-    /// install the `kage` API table, wire `kage.on`,
+    /// install the `kage` API table with its `kage.api` primitives, wire
     /// `kage.register_tool`, `kage.register_command`,
-    /// `kage.register_provider`, and `kage.fs.*`, then hand the state
-    /// to its owner thread.
+    /// `kage.register_provider`, and `kage.fs.*`, evaluate the embedded
+    /// stdlib (which defines `kage.on`), freeze the shared tables, then
+    /// hand the state to its owner thread.
     #[allow(clippy::too_many_lines)]
     pub fn build(self) -> Result<PluginRuntime, PluginError> {
         let lua = Lua::new();
         apply_sandbox(&lua)?;
         watchdog::install(&lua)?;
         api::install(&lua, self.sink.clone(), self.config)?;
-        events::install_subscriptions(&lua)?;
         plugin_fs::install_fs(&lua, self.workdir.clone())?;
         http::install_http(&lua)?;
         store::install_base(&lua)?;
@@ -117,6 +125,7 @@ impl PluginRuntimeBuilder {
         let plugin_envs: Arc<Mutex<HashMap<String, RegistryKey>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let current_plugin: CurrentPlugin = Arc::new(Mutex::new(None));
+        let autocmds = autocmd::install(&lua, self.sink.clone(), Arc::clone(&current_plugin))?;
         let grants = Arc::new(capabilities::parse_grants(&self.capabilities)?);
         let cap_registry = capabilities::capability_registry();
         let session_entries = session_write::shared_session_entries();
@@ -216,6 +225,7 @@ impl PluginRuntimeBuilder {
             self.sink.clone(),
             &terminal_hook_registry,
         )?;
+        stdlib::install(&lua)?;
         // Last: lock down the shared tables. Everything above runs
         // build-time writes through plain `Table::set`, which would
         // trip the read-only `__newindex` guards.
@@ -229,6 +239,7 @@ impl PluginRuntimeBuilder {
             plugin_config: self.plugin_config,
             state_dir: self.state_dir,
             script_budget: self.script_budget,
+            defaults: self.defaults,
         });
         Ok(PluginRuntime {
             host,
@@ -259,6 +270,7 @@ impl PluginRuntimeBuilder {
             block_renderers: block_renderer_map,
             autocomplete: autocomplete_registry,
             terminal_hooks: terminal_hook_registry,
+            autocmds,
             session_entries,
             switch_request,
         })

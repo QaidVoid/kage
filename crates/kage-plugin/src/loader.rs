@@ -1,11 +1,12 @@
 //! Discover and execute `*.lua` plugin files in a directory.
 //!
-//! [`load_dir`] reads every `*.lua` file in `dir` and evaluates it inside
-//! the given [`PluginRuntime`], in file-name order. Each file is loaded
-//! independently: a
-//! broken plugin logs an error through the runtime's host log and is
-//! skipped while the next file proceeds. The function returns a summary
-//! the host can surface to the user.
+//! [`load_dir`] first evaluates the embedded `_defaults.lua` in its own
+//! environment, then reads every `*.lua` file in `dir` and evaluates it
+//! inside the given [`PluginRuntime`], in file-name order, so plugins
+//! override the defaults. Each file is loaded independently: a broken
+//! plugin logs an error through the runtime's host log and is skipped
+//! while the next file proceeds. The function returns a summary the
+//! host can surface to the user.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -54,6 +55,9 @@ pub fn load_dir(dir: &Path, runtime: &PluginRuntime) -> Result<LoadReport, Plugi
 
 /// Body of [`load_dir`], run on the owner thread.
 pub(crate) fn load_on(lua: &Lua, dir: &Path, eval: &EvalState) -> Result<LoadReport, PluginError> {
+    if let Err(err) = eval.eval_defaults(lua) {
+        lock(eval.sink()).log(LogLevel::Error, &format!("_defaults.lua: {err}"));
+    }
     let read_dir = match std::fs::read_dir(dir) {
         Ok(d) => d,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(LoadReport::default()),
@@ -159,6 +163,37 @@ mod tests {
             .map(|p| p.file_stem().unwrap().to_str().unwrap())
             .collect();
         assert_eq!(names, ["a", "m", "z"]);
+    }
+
+    #[test]
+    fn defaults_run_before_plugins() {
+        let dir = tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.lua"),
+            "kage.on('agent_start', function() kage.notify('a') end)",
+        )
+        .unwrap();
+        let (rec, sink) = crate::testing::recording_sink();
+        let rt = PluginRuntime::builder()
+            .sink(sink)
+            .defaults("kage.on('agent_start', function() kage.notify('defaults') end)")
+            .build()
+            .unwrap();
+        let report = load_dir(dir.path(), &rt).unwrap();
+        assert_eq!(report.loaded.len(), 1);
+        rt.dispatch_event("agent_start", &serde_json::json!({}))
+            .unwrap();
+        assert_eq!(rec.snapshot().notifications, ["defaults", "a"]);
+
+        rt.reload_dir(dir.path()).unwrap();
+        assert_eq!(rt.handler_count("agent_start"), 2);
+    }
+
+    #[test]
+    fn embedded_defaults_load_cleanly() {
+        let (rec, rt) = crate::testing::runtime_with_recording(PathBuf::from("."));
+        load_dir(Path::new("/nonexistent/here"), &rt).unwrap();
+        assert!(rec.snapshot().logs.is_empty());
     }
 
     #[test]

@@ -8,9 +8,14 @@ use super::*;
 use crate::api::{self, HostLog, SharedHostLog, default_host_log};
 
 fn fresh_lua_with_kage() -> Lua {
+    lua_with_kage(default_host_log())
+}
+
+fn lua_with_kage(sink: SharedHostLog) -> Lua {
     let lua = Lua::new();
-    api::install(&lua, default_host_log(), json!({})).unwrap();
-    install_subscriptions(&lua).unwrap();
+    api::install(&lua, sink.clone(), json!({})).unwrap();
+    crate::autocmd::install(&lua, sink, Arc::new(Mutex::new(None))).unwrap();
+    crate::stdlib::install(&lua).unwrap();
     lua
 }
 
@@ -146,9 +151,7 @@ fn handler_error_is_logged_but_does_not_stop_other_handlers() {
         ))
     };
 
-    let lua = Lua::new();
-    api::install(&lua, sink.clone(), json!({})).unwrap();
-    install_subscriptions(&lua).unwrap();
+    let lua = lua_with_kage(sink.clone());
 
     lua.load(
         r"

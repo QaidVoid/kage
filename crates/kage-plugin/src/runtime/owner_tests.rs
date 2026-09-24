@@ -251,3 +251,50 @@ fn render_surfaces_outlive_the_runtime_handle() {
         .unwrap();
     assert_eq!(lines[0].spans[0].text, "still here");
 }
+
+#[test]
+fn handler_count_answers_while_the_owner_is_busy() {
+    let rt = PluginRuntime::new().unwrap();
+    rt.eval(SLOW_TOOL).unwrap();
+    rt.eval("kage.on('turn_start', function() end)").unwrap();
+    let running = occupy_owner(&rt);
+    let start = Instant::now();
+    assert_eq!(rt.handler_count("turn_start"), 1);
+    assert_eq!(rt.handler_count("turn_end"), 0);
+    assert!(start.elapsed() < Duration::from_millis(100));
+    assert_eq!(running.join().unwrap(), "done");
+}
+
+#[test]
+fn dispatch_without_subscribers_skips_the_owner() {
+    let rt = PluginRuntime::new().unwrap();
+    rt.eval(SLOW_TOOL).unwrap();
+    let running = occupy_owner(&rt);
+    let start = Instant::now();
+    rt.dispatch_event("turn_end", &json!({})).unwrap();
+    let payload = rt
+        .dispatch_transform("transform_context", json!({ "keep": 1 }))
+        .unwrap();
+    assert!(
+        !rt.dispatch_predicate("should_stop_after_turn", &json!({}))
+            .unwrap()
+    );
+    rt.notify_event("turn_end", &json!({})).unwrap();
+    assert!(start.elapsed() < Duration::from_millis(100));
+    assert_eq!(payload, json!({ "keep": 1 }));
+    assert_eq!(running.join().unwrap(), "done");
+}
+
+#[test]
+fn notify_event_returns_before_its_handler_runs() {
+    let rt = PluginRuntime::new().unwrap();
+    rt.eval(SLOW_TOOL).unwrap();
+    rt.eval("hits = 0; kage.on('user_bash', function(p) hits = hits + p.n end)")
+        .unwrap();
+    let running = occupy_owner(&rt);
+    let start = Instant::now();
+    rt.notify_event("user_bash", &json!({ "n": 2 })).unwrap();
+    assert!(start.elapsed() < Duration::from_millis(100));
+    assert_eq!(running.join().unwrap(), "done");
+    assert_eq!(rt.eval("return hits").unwrap().as_integer(), Some(2));
+}

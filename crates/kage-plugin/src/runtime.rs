@@ -8,9 +8,10 @@
 //! which routes through the same guards as built-in tools.
 //!
 //! The runtime is host-driven: nothing runs unless the host calls
-//! [`PluginRuntime::eval`] or one of the typed dispatch helpers added
-//! later. A plugin cannot start a thread or schedule a callback on its
-//! own.
+//! [`PluginRuntime::eval`] or one of the typed dispatch helpers. A
+//! plugin cannot start a thread or schedule a callback on its own.
+//! Before any plugin code, `build` installs the `kage.api` primitives
+//! and evaluates the embedded Lua stdlib (see [`crate::stdlib`]).
 //!
 //! See `crates/kage-plugin/src/runtime.rs` source for the exact list of
 //! removed bindings.
@@ -19,8 +20,9 @@
 //!
 //! Each plugin is evaluated in its own `_ENV` (see
 //! [`PluginRuntime::eval_plugin`]): the standard library and the base
-//! `kage` API surface as a private per-plugin snapshot, so a plugin can
-//! mutate them without poisoning other plugins or the host, and the
+//! `kage` API surface, down to every `kage.*` sub-table, as a private
+//! per-plugin snapshot, so a plugin can mutate them without poisoning
+//! other plugins or the host, and the
 //! obvious escapes back to the real globals
 //! (`_G`, `load`, `require`, `package`, `debug`, `rawset`) are removed.
 //! This is the substrate the opt-in capability tier builds on: elevated
@@ -38,6 +40,7 @@ pub(crate) use mlua::{Lua, RegistryKey, Table};
 
 pub(crate) use crate::acp::{self, SharedAcpAgents, shared_acp_agents};
 pub(crate) use crate::api::{self, SharedHostLog, default_host_log};
+pub(crate) use crate::autocmd::{self, SharedAutocmds};
 pub(crate) use crate::autocomplete::{
     self, LuaAutocompleteProvider, RegisteredAutocompleteProviders,
     registered_autocomplete_providers,
@@ -75,6 +78,7 @@ pub(crate) use crate::sessions::{
     shared_fork_request, shared_session_list, shared_session_ops,
 };
 pub(crate) use crate::status::{self, SharedStatus, shared_status};
+pub(crate) use crate::stdlib;
 pub(crate) use crate::store;
 pub(crate) use crate::terminal_input::{self, RegisteredTerminalHooks, registered_terminal_hooks};
 pub(crate) use crate::theme::{
@@ -126,6 +130,8 @@ pub struct PluginRuntime {
     block_renderers: SharedBlockRenderers,
     autocomplete: RegisteredAutocompleteProviders,
     terminal_hooks: RegisteredTerminalHooks,
+    /// Autocmd metadata, read without a round trip to the owner thread.
+    autocmds: SharedAutocmds,
     /// Host-maintained snapshot of the current session's entry
     /// metadata, read by `session_write`'s `kage.session.entries`.
     session_entries: SharedSessionEntries,
@@ -160,6 +166,8 @@ pub(crate) struct EvalState {
     /// VM instructions one host-driven plugin entry may execute before
     /// the watchdog aborts it. See [`crate::watchdog`].
     pub(crate) script_budget: u64,
+    /// Source of `_defaults.lua`, evaluated before plugins on every load.
+    defaults: &'static str,
 }
 
 impl EvalState {
@@ -196,9 +204,16 @@ impl EvalState {
                 .set_name(name)
                 .set_environment(env)
                 .eval::<mlua::Value>()
-        })?;
+        });
         *lock(&self.current_plugin) = None;
-        Ok(result)
+        result
+    }
+
+    /// Evaluate `_defaults.lua` in its own environment. Runs before the
+    /// plugins on every load, so plugins and user config override it.
+    pub(crate) fn eval_defaults(&self, lua: &Lua) -> Result<(), PluginError> {
+        self.eval_plugin(lua, stdlib::DEFAULTS_ENV, self.defaults)
+            .map(drop)
     }
 
     /// Drop every per-plugin environment so a reload is a clean slate:
@@ -229,6 +244,7 @@ pub struct PluginRuntimeBuilder {
     plugin_config: BTreeMap<String, serde_json::Value>,
     state_dir: Option<PathBuf>,
     script_budget: u64,
+    defaults: &'static str,
 }
 
 impl std::fmt::Debug for PluginRuntimeBuilder {
@@ -293,15 +309,18 @@ pub const SANDBOX_REMOVALS: &[(&str, &str)] = &[
 
 /// Get or create the dedicated `_ENV` table for plugin `name`.
 ///
-/// The table reads through to the shared, sandboxed globals (standard
-/// library plus the base `kage` API) via an `__index` metatable, but
-/// has no `__newindex`, so a plugin's own top-level assignments are
-/// `rawset` into this table and stay private to it. `kage` is a
-/// per-plugin proxy over the shared base table - reads fall through,
-/// and the capability tier attaches granted APIs onto this proxy so
-/// they are visible only to the grantee. `_G` is bound back to this
-/// table so `_G.x = ...` cannot reach the real globals. The table is
-/// kept in the Lua registry and reused for repeat evals of `name`.
+/// The table reads through to a private copy of the shared, sandboxed
+/// globals (standard library plus the base `kage` API) via an `__index`
+/// metatable, but has no `__newindex`, so a plugin's own top-level
+/// assignments are `rawset` into this table and stay private to it.
+/// The copy covers two levels, so `kage.ui` and every other `kage.*`
+/// sub-table is private too. `kage` is a per-plugin proxy over that
+/// copy: reads fall through, and the capability tier attaches granted
+/// APIs onto this proxy so they are visible only to the grantee. `_G`
+/// is bound back to this table so `_G.x = ...` cannot reach the real
+/// globals, and every metatable on the way is protected so
+/// `getmetatable` cannot walk back to them either. The table is kept in
+/// the Lua registry and reused for repeat evals of `name`.
 fn plugin_env(
     lua: &Lua,
     name: &str,
@@ -316,34 +335,21 @@ fn plugin_env(
     let globals = lua.globals();
     let env = lua.create_table()?;
     // Per-plugin snapshot of the shared tables: a fresh copy per env,
-    // so a plugin assigning e.g. `string.format` poisons only its own
-    // view, never another plugin or the host. The snapshot falls back
-    // to the shared globals for everything it does not carry (`print`,
-    // `pcall`, ...). Writes never reach the snapshot itself: a plugin's
-    // assignments land in its own env, one level above.
+    // so a plugin assigning e.g. `string.format` or `kage.ui.notify`
+    // poisons only its own view, never another plugin or the host. The
+    // snapshot falls back to the shared globals for everything it does
+    // not carry (`print`, `pcall`, ...).
     let snapshot = lua.create_table()?;
     for shared in SHARED_TABLES {
         let src: Table = globals.get(*shared)?;
-        let copy = lua.create_table()?;
-        for entry in src.pairs::<mlua::Value, mlua::Value>() {
-            let (key, value) = entry?;
-            copy.raw_set(key, value)?;
-        }
-        snapshot.raw_set(*shared, copy)?;
+        snapshot.raw_set(*shared, copy_two_levels(lua, &src)?)?;
     }
-    let snapshot_mt = lua.create_table()?;
-    snapshot_mt.set("__index", globals.clone())?;
-    snapshot.set_metatable(Some(snapshot_mt))?;
-
-    let env_mt = lua.create_table()?;
-    env_mt.set("__index", snapshot.clone())?;
-    env.set_metatable(Some(env_mt))?;
+    snapshot.set_metatable(Some(protected_index(lua, globals)?))?;
+    env.set_metatable(Some(protected_index(lua, snapshot.clone())?))?;
 
     let base_kage: Table = snapshot.get("kage")?;
     let pkage = lua.create_table()?;
-    let pkage_mt = lua.create_table()?;
-    pkage_mt.set("__index", base_kage)?;
-    pkage.set_metatable(Some(pkage_mt))?;
+    pkage.set_metatable(Some(protected_index(lua, base_kage)?))?;
     // Override the base `kage.plugin_config()` with one that returns
     // this plugin's own `[plugins.config.<stem>]` slice. An absent slice
     // yields an empty table, matching the base surface.
@@ -370,6 +376,36 @@ fn plugin_env(
     Ok(env)
 }
 
+/// Copy `src` and every table directly inside it.
+fn copy_two_levels(lua: &Lua, src: &Table) -> mlua::Result<Table> {
+    let copy = lua.create_table()?;
+    for entry in src.pairs::<mlua::Value, mlua::Value>() {
+        let (key, value) = entry?;
+        let value = match value {
+            mlua::Value::Table(inner) => {
+                let inner_copy = lua.create_table()?;
+                for entry in inner.pairs::<mlua::Value, mlua::Value>() {
+                    let (k, v) = entry?;
+                    inner_copy.raw_set(k, v)?;
+                }
+                mlua::Value::Table(inner_copy)
+            }
+            other => other,
+        };
+        copy.raw_set(key, value)?;
+    }
+    Ok(copy)
+}
+
+/// A metatable that reads through to `index` and hides itself from
+/// `getmetatable` and `setmetatable`.
+fn protected_index(lua: &Lua, index: Table) -> mlua::Result<Table> {
+    let mt = lua.create_table()?;
+    mt.raw_set("__index", index)?;
+    mt.raw_set("__metatable", false)?;
+    Ok(mt)
+}
+
 fn apply_sandbox(lua: &Lua) -> Result<(), PluginError> {
     let globals = lua.globals();
     for (path, key) in SANDBOX_REMOVALS {
@@ -387,10 +423,10 @@ fn apply_sandbox(lua: &Lua) -> Result<(), PluginError> {
 
 /// Shared tables (standard library plus the base `kage` API) treated as
 /// read-only. Two layers: [`plugin_env`] gives each plugin a private
-/// copy of these, so a mutating plugin poisons only itself, and
-/// [`freeze_shared_tables`] stops further writes into the shared
-/// originals once `build` finishes (new keys raise, metatable
-/// protected).
+/// two-level copy of these, so a mutating plugin poisons only itself,
+/// and [`freeze_shared_tables`] stops further writes into the shared
+/// originals and every table nested in them once `build` finishes (new
+/// keys raise, metatable protected).
 const SHARED_TABLES: &[&str] = &[
     "string",
     "table",
@@ -402,29 +438,52 @@ const SHARED_TABLES: &[&str] = &[
     "kage",
 ];
 
-/// Guard the shared originals after all build-time installs:
-/// assignments of NEW keys raise, and a protected `__metatable` stops
-/// `setmetatable` from swapping the table out. Lua's `__newindex` does
-/// not fire for keys the table already has, so plugin isolation does
-/// not rely on this layer - see [`plugin_env`].
+/// Guard the shared originals, and every table nested inside them,
+/// after all build-time installs: assignments of NEW keys raise, and a
+/// protected `__metatable` stops `setmetatable` from swapping a table
+/// out. Lua's `__newindex` does not fire for keys a table already has,
+/// so plugin isolation does not rely on this layer: plugins only ever
+/// hold copies (see [`plugin_env`]). The string metatable is protected
+/// too, since its `__index` is the shared `string` table.
 fn freeze_shared_tables(lua: &Lua) -> Result<(), PluginError> {
     let globals = lua.globals();
+    let mut seen = std::collections::HashSet::new();
     for name in SHARED_TABLES {
         let table: Table = globals.get(*name)?;
-        let mt = lua.create_table()?;
-        mt.set(
-            "__newindex",
-            lua.create_function(
-                move |_, _: (mlua::Value, mlua::Value, mlua::Value)| -> mlua::Result<()> {
-                    Err(mlua::Error::external(format!(
-                        "shared table '{name}' is read-only"
-                    )))
-                },
-            )?,
-        )?;
-        mt.set("__metatable", false)?;
-        table.set_metatable(Some(mt))?;
+        freeze(lua, &table, (*name).to_owned(), &mut seen)?;
     }
+    let string_mt: Table = lua.load("return getmetatable('')").eval()?;
+    string_mt.raw_set("__metatable", false)?;
+    Ok(())
+}
+
+fn freeze(
+    lua: &Lua,
+    table: &Table,
+    path: String,
+    seen: &mut std::collections::HashSet<*const std::ffi::c_void>,
+) -> Result<(), PluginError> {
+    if !seen.insert(table.to_pointer()) {
+        return Ok(());
+    }
+    for entry in table.pairs::<mlua::Value, mlua::Value>() {
+        if let (mlua::Value::String(key), mlua::Value::Table(inner)) = entry? {
+            freeze(lua, &inner, format!("{path}.{}", key.to_str()?), seen)?;
+        }
+    }
+    let mt = lua.create_table()?;
+    mt.set(
+        "__newindex",
+        lua.create_function(
+            move |_, _: (mlua::Value, mlua::Value, mlua::Value)| -> mlua::Result<()> {
+                Err(mlua::Error::external(format!(
+                    "shared table '{path}' is read-only"
+                )))
+            },
+        )?,
+    )?;
+    mt.set("__metatable", false)?;
+    table.set_metatable(Some(mt))?;
     Ok(())
 }
 

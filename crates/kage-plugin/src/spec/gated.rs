@@ -13,6 +13,7 @@ pub(super) const GATED: &[GatedFunc] = &[
                 "capability.",
             ],
             path: "kage.session.entries",
+            since: 1,
             params: &[],
             ret: Some("{ id: string, kind: string, role: string?, ts: string }[]"),
         },
@@ -29,6 +30,7 @@ pub(super) const GATED: &[GatedFunc] = &[
                 "`session_write`.",
             ],
             path: "kage.session.fork_to",
+            since: 1,
             params: &[Field {
                 name: "at?",
                 ty: "string",
@@ -47,6 +49,7 @@ pub(super) const GATED: &[GatedFunc] = &[
                 "`session_before_switch` veto. Requires `session_write`.",
             ],
             path: "kage.session.switch",
+            since: 1,
             params: &[Field {
                 name: "target",
                 ty: "string",
@@ -67,6 +70,7 @@ pub(super) const GATED: &[GatedFunc] = &[
                 "capability.",
             ],
             path: "kage.exec",
+            since: 1,
             params: &[Field {
                 name: "spec",
                 ty: "kage.ExecSpec",
@@ -85,6 +89,7 @@ pub(super) const GATED: &[GatedFunc] = &[
                 "Requires the `env` capability.",
             ],
             path: "kage.env",
+            since: 1,
             params: &[Field {
                 name: "name",
                 ty: "string",
@@ -103,6 +108,7 @@ pub(super) const GATED: &[GatedFunc] = &[
                 "host allow-list. Requires the `net` capability.",
             ],
             path: "kage.http.get",
+            since: 1,
             params: &[
                 Field {
                     name: "url",
@@ -130,6 +136,7 @@ pub(super) const GATED: &[GatedFunc] = &[
                 "exclusive. Same SSRF rules as GET. Requires `net`.",
             ],
             path: "kage.http.post",
+            since: 1,
             params: &[
                 Field {
                     name: "url",
@@ -156,6 +163,7 @@ pub(super) const GATED: &[GatedFunc] = &[
                 "GET. Requires `net`.",
             ],
             path: "kage.http.delete",
+            since: 1,
             params: &[
                 Field {
                     name: "url",
@@ -184,6 +192,7 @@ pub(super) const GATED: &[GatedFunc] = &[
                 "ends. Same SSRF rules as GET. Requires `net`.",
             ],
             path: "kage.http.post_stream",
+            since: 1,
             params: &[
                 Field {
                     name: "url",

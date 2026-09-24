@@ -6,6 +6,7 @@
 //! and forwards loop events to subscribed plugin handlers, plus synthesizes
 //! the `agent_start` / `agent_end` events the loop never emits itself.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -204,22 +205,37 @@ fn log_plugin_error(rt: &PluginRuntime, args: std::fmt::Arguments<'_>) {
 }
 
 /// Fire the plugin events that mirror a loop event: message, tool, and
-/// turn lifecycle.
-pub(crate) fn forward_event(rt: &PluginRuntime, event: &LoopEvent) {
+/// turn lifecycle. Each event is skipped when nobody subscribes to it.
+/// `tool_names` maps tool call ids to tool names for the run, so
+/// `tool_result` carries the name its patterns match against.
+pub(crate) fn forward_event(
+    rt: &PluginRuntime,
+    event: &LoopEvent,
+    tool_names: &mut HashMap<String, String>,
+) {
+    let fire = |name: &str, payload: serde_json::Value| {
+        let _ = rt.dispatch_event(name, &payload);
+    };
+    let wanted = |name: &str| rt.handler_count(name) > 0;
     match event {
-        LoopEvent::MessageStart { id } if rt.handler_count("message_start") > 0 => {
-            let _ = rt.dispatch_event("message_start", &json!({ "id": id.to_string() }));
+        LoopEvent::MessageStart { id } if wanted("message_start") => {
+            fire("message_start", json!({ "id": id.to_string() }));
         }
-        LoopEvent::TextDelta { id, delta } if rt.handler_count("message_update") > 0 => {
-            let _ = rt.dispatch_event(
+        LoopEvent::TextDelta { id, delta } if wanted("message_update") => {
+            fire(
                 "message_update",
-                &json!({
+                json!({
                     "id": id.to_string(),
                     "delta": delta,
                 }),
             );
         }
         LoopEvent::MessageEnd { id, usage, .. } => {
+            let end = wanted("message_end");
+            let response = wanted("after_provider_response");
+            if !end && !response {
+                return;
+            }
             let payload = json!({
                 "id": id.to_string(),
                 "usage": {
@@ -229,9 +245,11 @@ pub(crate) fn forward_event(rt: &PluginRuntime, event: &LoopEvent) {
                     "cache_write": usage.cache_write,
                 },
             });
-            let _ = rt.dispatch_event("message_end", &payload);
-            if rt.handler_count("after_provider_response") > 0 {
-                let _ = rt.dispatch_event("after_provider_response", &payload);
+            if end {
+                fire("message_end", payload.clone());
+            }
+            if response {
+                fire("after_provider_response", payload);
             }
         }
         LoopEvent::ToolCallStart {
@@ -239,45 +257,53 @@ pub(crate) fn forward_event(rt: &PluginRuntime, event: &LoopEvent) {
             name,
             input_partial,
         } => {
-            let _ = rt.dispatch_event(
-                "tool_call",
-                &json!({
-                    "id": id.to_string(),
-                    "name": name,
-                    "input": input_partial,
-                }),
-            );
+            tool_names.insert(id.to_string(), name.clone());
+            if wanted("tool_call") {
+                fire(
+                    "tool_call",
+                    json!({
+                        "id": id.to_string(),
+                        "name": name,
+                        "input": input_partial,
+                    }),
+                );
+            }
         }
         LoopEvent::ToolCallEnd { id, output } => {
-            let _ = rt.dispatch_event(
-                "tool_result",
-                &json!({
-                    "id": id.to_string(),
-                    "is_error": output.is_error,
-                    "text": output.text,
-                }),
-            );
+            let id = id.to_string();
+            let name = tool_names.remove(&id);
+            if wanted("tool_result") {
+                fire(
+                    "tool_result",
+                    json!({
+                        "id": id,
+                        "name": name,
+                        "is_error": output.is_error,
+                        "text": output.text,
+                    }),
+                );
+            }
         }
-        LoopEvent::ToolUpdate { id, update } if rt.handler_count("tool_update") > 0 => {
-            let _ = rt.dispatch_event(
+        LoopEvent::ToolUpdate { id, update } if wanted("tool_update") => {
+            fire(
                 "tool_update",
-                &json!({
+                json!({
                     "id": id.to_string(),
                     "content": update.content,
                     "structured": update.structured,
                 }),
             );
         }
-        LoopEvent::TurnStarted { index } => {
-            let _ = rt.dispatch_event("turn_start", &json!({ "index": index }));
+        LoopEvent::TurnStarted { index } if wanted("turn_start") => {
+            fire("turn_start", json!({ "index": index }));
         }
         LoopEvent::TurnEnded {
             index,
             had_tool_calls,
-        } => {
-            let _ = rt.dispatch_event(
+        } if wanted("turn_end") => {
+            fire(
                 "turn_end",
-                &json!({ "index": index, "had_tool_calls": had_tool_calls }),
+                json!({ "index": index, "had_tool_calls": had_tool_calls }),
             );
         }
         _ => {}

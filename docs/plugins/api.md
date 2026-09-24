@@ -399,7 +399,8 @@ Remove a status entry. Equivalent to `kage.set_status(key, nil)`.
 
 Subscribe to an event. Multiple handlers per event fire in
 registration order; a handler that raises is logged and skipped so
-one bad plugin does not silence the rest.
+one bad plugin does not silence the rest. An unknown event name logs
+one warning and subscribes to nothing.
 
 The call returns an `off` function that removes this subscription.
 Calling `off` more than once does nothing. A handler may call `off`
@@ -429,10 +430,11 @@ Plain notification events (the handler's return value is ignored):
 | `after_provider_response`| `{ id, usage }`                                   |
 | `tool_call`              | `{ id, name, input }`                             |
 | `tool_update`            | `{ id, content, structured? }`                    |
-| `tool_result`            | `{ id, is_error, text }`                          |
+| `tool_result`            | `{ id, name, is_error, text }`                    |
 | `model_select`           | `{ prev, next, source }`                          |
 | `thinking_level_select`  | `{ prev, next, source }`                          |
 | `user_bash`              | `{ cmd, exit_code }`                              |
+| `permission_mode_select` | `{ prev, next, source }`                          |
 
 `usage` is `{ input, output, cache_read, cache_write }`. For
 `model_select`, `source` is `"set"`. For `thinking_level_select`,

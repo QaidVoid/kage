@@ -20,6 +20,8 @@
 //!   `kage.host_version()` the host crate version string;
 //!   `kage.requires{ api = N }` raises at load time when the host is
 //!   older than the generation the plugin needs.
+//! * `kage.api` holds the low-level primitives (autocmds today) that the
+//!   embedded Lua stdlib builds its friendlier aliases on.
 
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -37,7 +39,7 @@ use crate::error::PluginError;
 /// with [`kage.requires`](requires) and fail loudly at load against an
 /// incompatible host instead of erroring deep inside a missing binding.
 /// Exposed to Lua as `kage.api_version()`.
-pub const API_VERSION: i64 = 1;
+pub const API_VERSION: i64 = 2;
 
 /// Severity tier for [`HostLog::log`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -206,6 +208,7 @@ pub fn install(
         })?,
     )?;
     kage.set("json", json)?;
+    kage.set("api", lua.create_table()?)?;
 
     lua.globals().set("kage", kage)?;
     Ok(())

@@ -1,0 +1,2 @@
+-- kage's own defaults, evaluated in a private environment before any
+-- plugin or user config, so later layers can override every entry.

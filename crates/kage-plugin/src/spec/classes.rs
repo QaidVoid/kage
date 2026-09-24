@@ -477,4 +477,71 @@ pub(super) const CLASSES: &[Class] = &[
             },
         ],
     },
+    Class {
+        name: "kage.AutocmdOpts",
+        doc: &["Options for `kage.api.autocmd_create`."],
+        fields: &[
+            Field {
+                name: "callback",
+                ty: "fun(ev: kage.AutocmdEvent): any",
+                doc: "Called when the event fires.",
+            },
+            Field {
+                name: "group?",
+                ty: "integer|string",
+                doc: "Group id or name from `kage.api.augroup_create`.",
+            },
+            Field {
+                name: "pattern?",
+                ty: "string|string[]",
+                doc: "Exact match values; `*` (the default) matches all.",
+            },
+            Field {
+                name: "once?",
+                ty: "boolean",
+                doc: "Delete the autocmd before its first call.",
+            },
+            Field {
+                name: "desc?",
+                ty: "string",
+                doc: "Shown in error messages.",
+            },
+        ],
+    },
+    Class {
+        name: "kage.AutocmdEvent",
+        doc: &[
+            "What an autocmd callback receives. `match` is the tool name",
+            "for `tool_call` and `tool_result`, the new value for",
+            "`model_select` and `thinking_level_select`, and the exec",
+            "pattern for `user`.",
+        ],
+        fields: &[
+            Field {
+                name: "id",
+                ty: "integer",
+                doc: "Autocmd id.",
+            },
+            Field {
+                name: "event",
+                ty: "kage.Event",
+                doc: "Event name.",
+            },
+            Field {
+                name: "match?",
+                ty: "string",
+                doc: "Value the patterns matched against.",
+            },
+            Field {
+                name: "group?",
+                ty: "integer",
+                doc: "Group id.",
+            },
+            Field {
+                name: "data",
+                ty: "any",
+                doc: "Event payload.",
+            },
+        ],
+    },
 ];

@@ -46,8 +46,9 @@ end)
 ## blocking dialogs and a keybinding
 
 `plugins/examples/select_demo.lua` exercises the whole `kage.ui.*`
-surface plus `kage.register_keybinding`. Each command opens a modal
-and the coroutine suspends until the user answers:
+surface plus `kage.register_keybinding`, which maps a chord in mode
+`g` and returns an `off` function. Each command opens a modal and the
+coroutine suspends until the user answers:
 
 ```lua
 kage.register_command({
@@ -70,6 +71,76 @@ kage.register_keybinding({ key = "ctrl+alt+k", description = "Quick pick" },
 
 It also registers `/confirm-delete` (`kage.ui.confirm`), `/ask-name`
 (`kage.ui.input`), and `/compose-note` (`kage.ui.editor`).
+
+## throughput in the footer
+
+The same readout as a footer component instead of a toast. The
+component recomputes only when `message_end` fires, so it costs
+nothing between turns. Autocmds fire in creation order, so the `kage.on`
+handler updates `last` before the component reads it:
+
+```lua
+local start_ms, last = nil, ""
+
+kage.api.hl_set("TpsReadout", { link = "KageMuted" })
+
+kage.on("agent_start", function()
+  start_ms = kage.now_ms()
+end)
+
+kage.on("message_end", function(ev)
+  if not start_ms then return end
+  local elapsed = (kage.now_ms() - start_ms) / 1000
+  local out = (ev.usage and ev.usage.output) or 0
+  last = string.format("%.1f tok/s", out / math.max(elapsed, 0.001))
+end)
+
+kage.ui.set_slot("footer", {
+  left = { "working", "model", "context", "tokens", "thinking", "permission" },
+  right = {
+    { events = { "message_end" }, hl = "TpsReadout", render = function() return last end },
+  },
+  sep = " . ",
+})
+```
+
+`TpsReadout` is not a `Kage*` group, so it survives theme switches. A
+user who prefers another footer can replace it from `init.lua`, which
+loads after every plugin.
+
+## keys and autocmds
+
+A plugin that shows the running shell command in the header's
+widget area and adds a key to copy the last one into a toast:
+
+```lua
+local group = kage.api.augroup_create("bash-watch")
+local last
+
+kage.api.autocmd_create("tool_call", {
+  group = group,
+  pattern = "bash",
+  callback = function(ev)
+    last = tostring(ev.data.input.command)
+    kage.set_status("bash", "$ " .. last)
+  end,
+})
+
+kage.api.autocmd_create("agent_end", {
+  group = group,
+  callback = function()
+    kage.clear_status("bash")
+  end,
+})
+
+kage.keymap.set("g", "<F6>", function()
+  kage.ui.notify(last or "no shell command yet")
+end, { desc = "show the last shell command", group = "bash watch" })
+```
+
+`pattern = "bash"` limits the first autocmd to the `bash` tool. The
+mapping has a `desc`, so it appears in the `?` reference under
+`bash watch`.
 
 ## safer bash
 

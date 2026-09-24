@@ -24,7 +24,7 @@ the only crate that wires the whole graph together.
 
 | Crate            | Responsibility                                      |
 | ---------------- | --------------------------------------------------- |
-| `kage-core`      | Message types, content blocks, errors, cancel flag, the engine protocol (events and commands) |
+| `kage-core`      | Message types, content blocks, errors, cancel flag, the engine protocol (events and commands), the keymap, option and highlight registries |
 | `kage-jsonrpc`   | Shared bidirectional JSON-RPC peer over stdio       |
 | `kage-provider`  | LLM provider clients, registry, model catalog       |
 | `kage-tools`     | Tool trait, built-in tools, tool registry           |
@@ -32,7 +32,7 @@ the only crate that wires the whole graph together.
 | `kage-loop`      | The agent loop, compaction, hooks                   |
 | `kage-mcp`       | MCP client (external tool servers) and MCP server (kage's built-in tools over stdio) |
 | `kage-acp`       | ACP agent (editors drive kage) and ACP client (kage drives another agent as a provider) |
-| `kage-plugin`    | Lua runtime, sandbox, host API surface              |
+| `kage-plugin`    | Lua runtime, sandbox, host API surface, embedded stdlib and defaults, `init.lua` loading |
 | `kage-tui`       | The interactive TUI, modal input, block renderer    |
 | `kage-cli`       | The binary, CLI flags, the session engine, frontend wiring |
 
@@ -104,19 +104,50 @@ Files are append-only: the writer never rewrites prior lines, and an
 advisory lock rejects a second concurrent writer. To branch from an
 existing session, fork instead.
 
-## plugins, briefly
+## the Lua layer
 
-`kage-plugin` builds a `PluginRuntime` per process, runs every `.lua`
-file in the plugins directory against it, and stores Lua-registered
-tools, commands, providers, and event handlers. The host pulls
-snapshots when it needs to wire them into the agent loop.
+Lua is kage's configuration and extension layer. From the top down:
 
-A single thread owns the Lua state. Everything else (tools, event
-dispatch, commands, keybindings) sends it jobs and waits for the reply,
-so calls never interleave. Status widgets, header and footer chrome,
-and block renderers keep their last output, so the screen never waits
-on Lua. A long Lua tool or provider occupies that thread until it
-finishes.
+```text
+~/.config/kage/init.lua, lua/**   trusted user config, all capabilities
+plugins/*.lua (sorted by name)    sandboxed, capabilities on request
+kage.* stdlib (embedded Lua)      kage.on, kage.keymap, kage.ui.set_slot, aliases
+_defaults.lua (embedded Lua)      default keymaps and slot specs
+kage.api.* (Rust primitives)      autocmds, options, keymaps, highlights, slots
+kage-core registries              Keymap, OptionStore, Highlights (plain data)
+Rust renderers and components     kage-tui
+```
+
+`kage-plugin` builds one `PluginRuntime` per process. A single owner
+thread holds the Lua state. Everything else (tools, event dispatch,
+commands, key handlers, option changes from the TUI) sends it jobs
+and waits for the reply, so calls never interleave. Between jobs the
+same thread runs `kage.schedule`, `kage.defer` and `kage.timer`
+callbacks from a deadline heap. A long Lua tool or provider occupies
+the thread until it finishes.
+
+The TUI loads, in order: `_defaults.lua`, the plugins sorted by file
+name, `[keybindings]` from `config.toml`, then `init.lua`, and fires
+`color_scheme` once. Each layer overrides the ones before it. Print
+mode and `kage rpc` load `_defaults.lua` and the plugins, never
+`init.lua`. Each file
+evaluates in its own environment with private copies of the shared
+`kage` tables, so no plugin can change another's view or reach the
+trusted user environment.
+
+The keymap table, the option store and the highlight table are plain
+data in `kage-core`, shared behind mutexes with generation counters.
+Lua writes them on the owner thread. The TUI reads them under a short
+lock and recompiles what it needs when a generation moves, so looking
+up a key or painting a color never runs Lua. A key mapped to a Lua
+function is sent to the owner thread as a job.
+
+Autocmd metadata and subscriber counts live on the Rust side, so an
+event nobody subscribes to never reaches the owner thread. Slot
+components, widgets and block renderers keep their last output. Slot
+components recompute on the owner thread only when a listed event
+fires, their interval passes, or the width changes, and the renderer
+reads the retained lines, so the screen never waits on Lua.
 
 ## why no async
 

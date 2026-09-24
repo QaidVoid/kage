@@ -1,8 +1,13 @@
 # configuration
 
 kage reads its configuration from `~/.config/kage/config.toml`. The file is
-optional; sane defaults work without it. `kage init` writes a
+optional, and sane defaults work without it. `kage init` writes a
 starter one.
+
+The TUI also runs `~/.config/kage/init.lua` after this file, so
+anything set there wins. The `[ui]` and `[loop]` keys that are options
+and the `[keybindings]` table feed the same settings `init.lua` sets.
+See [lua config](/guide/lua-config).
 
 Keys are grouped into tables:
 
@@ -18,6 +23,8 @@ default_model = "anthropic:claude-sonnet-4-6"
 theme = "default"
 # capture terminal mouse events. Toggle at runtime with :mouse.
 mouse = true
+# prompt editing style: "modeless" or "vim".
+editor = "modeless"
 # input card sizing (content rows, before the 2-row border chrome).
 # the card grows with what you type, from input_min_lines up to
 # input_max_lines, then scrolls internally. raise the max for a
@@ -42,9 +49,13 @@ backend = "local"
 suppress_warning = false
 
 [keybindings]
-# chord -> builtin command name, or an `action:<Name>` builtin
-# input action (see the keybindings guide).
-# bindings = { "ctrl+r" = "cancel" }
+# the key <leader> expands to in bindings: one key, default a backslash.
+# leader = "<C-x>"
+# ms a key that starts a longer mapping waits for more keys.
+timeoutlen = 1000
+# key -> command line, or `action:<Name>` for a built-in action
+# (see the keybindings guide). Every binding maps in mode g.
+# bindings = { "ctrl+t" = "theme set tokyo-night", "<leader>s" = "settings" }
 
 [loop]
 # compact older history once the prompt fills this fraction of the
@@ -64,7 +75,7 @@ compaction_threshold = 0.8
 # github = "allow"   # action for every tool of one MCP server
 ```
 
-Every table and key is optional; omitted values fall back to the
+Every table and key is optional. Omitted values fall back to the
 defaults shown above. See [permissions](/guide/permissions) for the
 rules reference.
 
@@ -80,6 +91,9 @@ Configuration is merged lowest-to-highest precedence:
 
 Env vars use `KAGE_` with `__` for nesting, e.g.
 `KAGE_UI__THEME=catppuccin-mocha` overrides the `[ui].theme` key.
+
+In the TUI, `init.lua` runs after all of these. An option it sets, such
+as `kage.opt.theme`, wins over every layer above.
 
 ## project config and trust
 
@@ -149,6 +163,8 @@ endpoints, and per-provider overrides (base URL, headers, key env var).
 | Path                                | Contents                                                       |
 | ----------------------------------- | -------------------------------------------------------------- |
 | `~/.config/kage/config.toml`        | user config                                                    |
+| `~/.config/kage/init.lua`           | trusted Lua config, TUI only ([lua config](/guide/lua-config)) |
+| `~/.config/kage/lua/`               | modules `init.lua` can `require`                               |
 | `<workdir>/.kage/config.toml`       | project-local config overlay                                   |
 | `~/.config/kage/themes/`            | user theme TOML files                                          |
 | `~/.config/kage/plugins/`           | Lua plugin scripts                                             |

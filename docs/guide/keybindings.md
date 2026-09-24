@@ -5,8 +5,11 @@ press `?` on an empty prompt (or run `/help`) for the same reference
 as an overlay.
 
 The TUI supports two editor modes: **modeless** (the default) and
-**vim** (`editor = "vim"` in config). Both share the same
-buffer navigation keys.
+**vim** (`[ui] editor = "vim"` in `config.toml`, or
+`kage.opt.editor = "vim"` in `init.lua`). Both share the same
+buffer navigation keys. Every key on this page that is not part of
+the editor grammar can be remapped. See
+[remapping keys](#remapping-keys).
 
 ## buffer navigation (works in both modes)
 
@@ -210,93 +213,117 @@ operators are available for editing the prompt text.
 | `o` / `O`     | Open line below / above                     |
 | `3dw`         | Delete 3 words (count prefix)               |
 
-## remapping keys (`[keybindings]`)
+## remapping keys
 
-Bind any chord to any command in `config.toml`. The bound string runs
-through the same executor as the command palette, so anything `/`
-can do is bindable, including `quit` and plugin commands:
+Most keys above are mappings in one keymap table, which kage fills
+from its embedded defaults at startup. Plugins, `config.toml` and
+`init.lua` add to the same table in that order, and the last mapping
+set for a key wins. So `init.lua` beats `config.toml`, which beats
+plugins, which beat the defaults.
 
-```toml
-[keybindings]
-"ctrl+s" = "settings"
-"ctrl+t" = "theme set tokyo-night"
-"ctrl+x" = "quit"
-```
+`init.lua` is the full interface: modes, key sequences, a leader,
+Lua functions and deleting defaults. See
+[lua config](/guide/lua-config#keymaps). The `[keybindings]` table in
+`config.toml` covers the common case.
 
-Config bindings are user-authoritative: they are checked before
-plugin keybindings and before built-in handling, so you can always
-reclaim a key. A chord that does not parse is reported inline at
-startup (never silently dropped). Prefer modified chords - a bare
-letter will shadow typing it into the prompt.
+The editor grammar is not in the table: vim motions, operators,
+counts, registers, undo and redo, readline edits, Enter, Esc, history
+Up and Down, Ctrl+O in insert mode, Ctrl+G and the modeless `/`, `!`
+and `?` prefixes. A mapping on one of these keys shadows it, but
+cannot remove it.
 
-### binding builtin actions (`action:` form)
-
-A binding value can also name a builtin input action directly with
-the `action:` prefix. The bound chord then fires the same action the
-built-in key for it would, checked before builtin handling so the
-remap wins:
+### `[keybindings]` in config.toml
 
 ```toml
 [keybindings]
-"ctrl+l" = "action:OpenModelPicker"
-"ctrl+y" = "action:YankFocusedBlock"
+# the key <leader> expands to: one key, default a backslash.
+leader = "<C-x>"
+# ms a mapping that is also the start of a longer one waits for
+# more keys (0 to 5000). Default 1000.
+timeoutlen = 600
+bindings = { "ctrl+t" = "theme set tokyo-night", "ctrl+l" = "action:OpenModelPicker", "<leader>s" = "settings", "<leader>q" = "quit" }
 ```
 
-Command strings remain the default form: a value
-without the `action:` prefix is a command string, exactly as before,
-and an `action:` value is never run through the command executor.
+With this table, `Ctrl+X` then `s` opens the settings dialog and
+`Ctrl+X` then `q` quits.
 
-These action names are rebindable:
+Mappings go in the `bindings` table, written inline as above or as a
+`[keybindings.bindings]` table. A key written directly under
+`[keybindings]`, as older versions of this page showed, is reported as
+an error at startup instead of being dropped.
 
-| Group      | Name                 | Effect                            |
-| ---------- | -------------------- | --------------------------------- |
-| navigation | `ScrollToTop`        | snap the buffer to the top        |
-| navigation | `ScrollToBottom`     | snap the buffer to the bottom     |
-| navigation | `FocusPrev`          | focus the previous block          |
-| navigation | `FocusNext`          | focus the next block              |
-| navigation | `CyclePane`          | cycle pane focus (input / buffer) |
-| overlays   | `OpenModelPicker`    | open the model picker             |
-| overlays   | `OpenSessionPicker`  | open the session picker           |
-| overlays   | `OpenCommandPalette` | open the slash command palette    |
-| folds      | `ToggleFold`         | toggle the focused block's fold   |
-| folds      | `UnfoldAll`          | open every fold                   |
-| folds      | `FoldAll`            | close every fold                  |
-| search     | `BeginSearch`        | open the `/` search line          |
-| search     | `SearchNext`         | jump to the next match            |
-| search     | `SearchPrev`         | jump to the previous match        |
-| misc       | `BeginCommand`       | open the `:` command line         |
-| misc       | `Cancel`             | cancel the in-flight turn         |
-| misc       | `Yank`               | copy the active selection         |
-| misc       | `YankFocusedBlock`   | copy the focused block            |
-| misc       | `ClearSelection`     | drop the active selection         |
-| misc       | `CycleThinkingLevel` | step the thinking level           |
+Every binding maps in mode `g`, which covers every editing state. A
+key is either the chord form (`ctrl+shift+x`, `alt+p`, `f5`) or Vim
+notation (`<C-t>`, `<F2>`, `<leader>s`, `gs`). `<leader>` expands with
+the `leader` value from the same table. A key sequence waits up to
+`timeoutlen` for the next key. Prefer modified keys. A bare letter, or
+a leader that is a letter or punctuation, catches that key while you
+type in the prompt.
 
-Payload-carrying actions (`Submit`, `Scroll`, `EnterMode`,
-`FocusPane`) and the visual-mode cursor moves are not nameable: a
-config binding fires with no arguments, so only payload-free
-actions have names. An unknown or empty name after `action:` fails
-startup with an error line naming the offending value, the same
-surface an unparseable chord uses.
+The value is a command line, run through the same executor as the
+command palette, so anything `/` can do is bindable, including `quit`
+and plugin commands. A value starting with `action:` names a built-in
+action instead and is never run as a command. A key or action that
+does not parse is reported inline at startup, never silently dropped.
+
+These action names work after `action:`:
+
+| Group      | Name                   | Effect                            |
+| ---------- | ---------------------- | --------------------------------- |
+| navigation | `ScrollToTop`          | snap the buffer to the top        |
+| navigation | `ScrollToBottom`       | snap the buffer to the bottom     |
+| navigation | `FocusPrev`            | focus the previous block          |
+| navigation | `FocusNext`            | focus the next block              |
+| navigation | `CyclePane`            | cycle pane focus (input / buffer) |
+| overlays   | `OpenModelPicker`      | open the model picker             |
+| overlays   | `OpenSessionPicker`    | open the session picker           |
+| overlays   | `OpenCommandPalette`   | open the slash command palette    |
+| overlays   | `OpenJumpPicker`       | open the message jump picker      |
+| overlays   | `OpenHelp`             | open the keyboard reference       |
+| folds      | `ToggleFold`           | toggle the focused block's fold   |
+| folds      | `UnfoldAll`            | open every fold                   |
+| folds      | `FoldAll`              | close every fold                  |
+| search     | `BeginSearch`          | open the `/` search line          |
+| search     | `SearchNext`           | jump to the next match            |
+| search     | `SearchPrev`           | jump to the previous match        |
+| misc       | `BeginCommand`         | open the `:` command line         |
+| misc       | `Cancel`               | cancel the in-flight turn         |
+| misc       | `Yank`                 | copy the active selection         |
+| misc       | `YankFocusedBlock`     | copy the focused block            |
+| misc       | `ClearSelection`       | drop the active selection         |
+| misc       | `EnterVisual`          | start a visual selection          |
+| misc       | `AttachClipboardImage` | attach an image from the clipboard |
+| misc       | `CycleThinkingLevel`   | step the thinking level           |
+
+Scrolling by a line count needs an argument, so it is only available
+from Lua as `kage.action.scroll(n)`.
 
 `CycleThinkingLevel` steps the thinking level (also `Shift+Tab`).
 The level a new TUI session starts on comes from
 `[ui] thinking_level` (one of `off`, `minimal`, `low`, `medium`,
-`high`, `xhigh`); the cycle still overrides it per session.
+`high`, `xhigh`). The cycle still overrides it per session.
 
-`Ctrl+Q` quits as a panic hatch even from a stuck modal. It yields
-**only** if you explicitly bind `ctrl+q` to something in
-`[keybindings]` - then your config wins and quit is reachable via
-whatever chord you mapped `quit` to.
+### quit and cancel hatches
 
-Run `:keybindings` (alias `:keys`) to list every active binding:
-your config bindings, plugin-registered chords, and the reserved
-keys the TUI handles itself.
+`Ctrl+Q` quits and `Ctrl+C` cancels the running turn from anywhere,
+even a stuck modal. They yield **only** to a mapping from `config.toml`
+or `init.lua` on the same key. Then your mapping wins, and quit stays
+reachable through whatever key you mapped `quit` to. A plugin mapping
+on either key never fires and logs a warning.
+
+### listing mappings
+
+Run `:keybindings` (alias `:keys`) to list the table per mode, with
+each mapping's action or command and its owner (`defaults`, a plugin
+name, `config.toml` or `init.lua`), followed by the editor grammar
+keys and the two hatches. The `?` reference is built from the same
+table: it shows every mapping with a description.
 
 ## plugin keybindings
 
-Plugins bind their own chords with
-[`kage.register_keybinding`](/plugins/api#keybindings). A plugin
-chord is checked after `[keybindings]` config but before built-in
-key handling, so it wins over the built-in binding for that key -
-but never over user config, an open modal layer, or the `Ctrl+Q`
-quit hatch. Binding a reserved chord still works and logs a warning.
+Plugins bind keys with
+[`kage.register_keybinding`](/plugins/api#keybindings), which maps a
+chord in mode `g`, or with `kage.keymap.set`. Plugins load after the
+defaults, so a plugin mapping replaces a default one on the same key.
+`config.toml` and `init.lua` load after plugins, so your mappings
+replace plugin ones. No mapping applies while a modal layer is open.

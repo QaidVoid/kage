@@ -34,6 +34,7 @@ export default defineConfig({
           { text: "keybindings", link: "/guide/keybindings" },
           { text: "commands", link: "/guide/commands" },
           { text: "configuration", link: "/guide/config" },
+          { text: "lua config", link: "/guide/lua-config" },
           { text: "providers", link: "/guide/providers" },
           { text: "themes", link: "/guide/themes" },
           { text: "mcp", link: "/guide/mcp" },

@@ -1,18 +1,82 @@
 # lua api
 
 Every function below is reachable as `kage.<name>` from inside a
-plugin script. Types are described in TypeScript-ish notation for
-readability; Lua is dynamically typed.
+plugin script and from `init.lua`. Types are described in
+TypeScript-ish notation for readability. Lua is dynamically typed.
 
 Plugin files load in file-name order, so `a.lua` always runs before
 `b.lua`. Registrations that replace each other (a header, a block
-renderer for the same kind) end with the last file's value.
+renderer for the same kind, a key mapping) end with the last file's
+value. `config.toml` bindings and `init.lua` load after every plugin.
+See [lua config](/guide/lua-config#load-order-and-reload) for the
+whole load order.
+
+## api versions
+
+Every function carries the API generation that introduced it. The
+current generation is 2. A function is available since API 1 unless
+its heading says **since API 2**. The generated editor stub
+`plugins/types/kage.lua` shows the generation of every function as
+`Since API N`. A plugin that needs API 2 can say so at load time:
+
+```lua
+kage.requires({ api = 2 })
+```
+
+## layers
+
+The API has two layers:
+
+- `kage.api.*` holds the low-level primitives, implemented in Rust.
+  All of them are since API 2. See the [reference](#kage-api-reference)
+  at the end of this page.
+- The stdlib is Lua embedded in kage and loaded before any plugin. It
+  builds the friendly functions on top of `kage.api`. The functions
+  that existed before `kage.api` keep their names and behavior as
+  aliases:
+
+| Stdlib function | Built on |
+| --- | --- |
+| `kage.on(event, fn)` | `kage.api.autocmd_create`. `fn` gets the payload, and the call returns `off`. |
+| `kage.register_keybinding(spec, fn)` | `kage.api.keymap_set` in mode `g`. Returns `off`. |
+| `kage.keymap.set(modes, lhs, rhs, opts)` | `kage.api.keymap_set`, once per mode |
+| `kage.keymap.del(modes, lhs)` | `kage.api.keymap_del`, once per mode |
+| `kage.ui.set_slot(name, spec)` | `kage.api.slot_set` |
+| `kage.ui.set_header(fn)`, `kage.ui.set_footer(fn)` | `kage.api.slot_set` with one component that calls `fn(width)` every 500 ms |
+
+## trust tiers
+
+Plugins and `init.lua` share this API but not the same privileges.
+
+| | plugins | `init.lua` and its `lua/` modules |
+| --- | --- | --- |
+| Capabilities (`exec`, `env`, `net`, `session_write`) | only when granted in `[plugins.capabilities]` and requested | all, without asking |
+| `require` | not available | confined to `~/.config/kage/lua/` |
+| Raw `io`, `os.execute`, `debug` | removed | removed |
+| Loaded by | the TUI, print mode and `kage rpc` | the TUI only |
+
+Each plugin and `init.lua` get their own copy of the `kage` tables. A
+plugin that replaces `kage.ui.set_header` changes only its own copy,
+and no plugin can reach the functions `init.lua` holds. See
+[capabilities](/plugins/capabilities) and
+[lua config](/guide/lua-config#trust).
 
 ## host
 
 ### `kage.now_ms()`
 
 Wall-clock milliseconds since the Unix epoch as an integer.
+
+### `kage.api_version()` / `kage.host_version()`
+
+The plugin API generation as an integer (currently 2), and the kage
+version string.
+
+### `kage.requires({ api })`
+
+Raise at load time when the host's API generation is older than `api`,
+so a plugin fails with a clear message instead of part-way through a
+missing function.
 
 ### `kage.log(level: string, message: string)`
 
@@ -80,36 +144,63 @@ Open a multi-line editor seeded with `prefill`. `Ctrl+S` submits,
 ### `kage.ui.set_header(fn | nil)` / `kage.ui.set_footer(fn | nil)`
 
 Take over the top status row (`set_header`) or the bottom modeline
-row (`set_footer`). The host calls `fn(width)` once per redraw and
-paints the returned styled lines in place of the built-in chrome.
-Passing `nil` clears the slot and restores the built-in row. The `:`
+row (`set_footer`). kage calls `fn(width)` every 500 ms and when the
+width changes, and paints the first line it returns in place of the
+built-in row. Passing `nil` restores the default row. The `:`
 command line and `/` search line still take priority over a custom
-header.
+header. Both are shorthands for [`kage.ui.set_slot`](#kage-ui-set-slot-name-spec-nil).
 
 `fn(width)` returns one of: a plain string (one unstyled span), a
-span table, or an array of those (one line per element; an element
-that is itself an array of spans is a multi-span line). A span table
-is `{ text, fg?, bg?, bold?, dim?, italic?, underline? }`. A color is a
-theme role name such as `"muted_fg"` or `"tool_error_fg"` (any key of
-a theme's `[colors]` table), which follows the active theme, or a
-fixed color (`"red"`, `"#1f1f28"`, `"42"`). An unknown color is
-ignored and the span keeps the row's default. A `nil` return, a
-non-conforming value, or an error logs and paints the built-in row
-instead (no silent failure).
+span table, or an array of those, one line per element. An element
+that is itself an array of spans is a multi-span line. A span table
+is `{ text, hl?, fg?, bg?, bold?, dim?, italic?, underline? }`. `hl`
+names a [highlight group](/guide/lua-config#highlight-groups) whose
+colors and attributes apply first. A color is a group name (its `fg`
+or `bg`), a theme role name such as `"muted_fg"` or `"tool_error_fg"`
+(any key of a theme's `[colors]` table), or a fixed color (`"red"`,
+`"#1f1f28"`, `"42"`). Group and role colors follow the active theme.
+An unknown color is ignored and the span keeps the row's default.
+
+A `nil` return, an empty string or a non-conforming value paints an
+empty row. An error is logged and the previous output stays on screen.
 
 ```lua
 kage.ui.set_footer(function(width)
-  return { { text = "branch: ", dim = true },
+  return { { text = "branch: ", hl = "KageMuted" },
            { text = "main", fg = "green", bold = true } }
 end)
 ```
 
-kage keeps the last output on screen and calls the render function
-again on a short cadence or when the width changes, so the screen never
-waits on Lua. Keep it cheap anyway: no blocking dialogs, no network.
-A render call gets a much smaller CPU budget than a tool or command. A
-render that runs away is aborted within a fraction of a second, logged,
-and the previous output stays on screen.
+kage keeps the last output on screen, so the screen never waits on
+Lua. Keep it cheap anyway: no blocking dialogs, no network. A render
+call gets a much smaller CPU budget than a tool or command. A render
+that runs away is aborted within a fraction of a second, logged, and
+the previous output stays on screen.
+
+### `kage.ui.set_slot(name, spec | nil)`
+
+**Since API 2.** Fill one of the chrome slots: `header`, `footer`,
+`input_pill` or `start`. A row slot takes
+`{ left = items, right = items, sep = string? }` and `start` takes
+`{ lines = items }`. An item is a built-in component name (`"model"`,
+`"tokens"`, ...), a span table, or a Lua component
+`{ render = fn(ctx), events?, interval?, hl? }` whose output kage
+keeps and recomputes only when a listed event fires, the interval
+passes, the slot is set, `kage.api.redraw` is called or the width
+changes. `nil` restores the default spec. Unknown slots, components
+and events raise.
+
+```lua
+kage.ui.set_slot("header", {
+  left = { "brand", "model" },
+  right = { { events = { "turn_end" }, render = function(ctx)
+    return ctx.working and "" or os.date("%H:%M ")
+  end }, "session" },
+})
+```
+
+See [lua config](/guide/lua-config#slots) for the component list and
+the fields of `ctx`.
 
 ### `kage.register_block_renderer(kind, render | nil)`
 
@@ -263,18 +354,57 @@ built-in.
 
 ## keybindings
 
-### `kage.register_keybinding(spec, handler)`
+Keys resolve against one keymap table. `_defaults.lua` fills it, then
+plugins, `config.toml` and `init.lua` add to it, and the last mapping
+set for a key wins. See [lua config](/guide/lua-config#keymaps) for
+modes, notation, sequences and the leader.
 
-Bind a chord to a handler. `spec` is either a chord string or a
-table `{ key = "...", description? = "..." }`:
+### `kage.keymap.set(mode, lhs, rhs, opts?)`
+
+**Since API 2.** Map `lhs` in `mode`, one of `n`, `b`, `i`, `v`, `g`,
+or a list of them. `rhs` is a `kage.action` value, a `":command"`
+string, a function, or `"<Nop>"`. `opts` takes `desc` (shown in the
+`?` reference) and `group` (its section there).
 
 ```lua
-kage.register_keybinding("ctrl+shift+x", function()
+kage.keymap.set("n", "<leader>m", kage.action.OpenModelPicker, { desc = "pick a model" })
+kage.keymap.set("g", "<C-t>", ":theme set tokyo-night")
+kage.keymap.set("i", "<C-l>", function() kage.ui.notify("hi") end)
+```
+
+A function rhs runs through the coroutine bridge, so it may open
+[`kage.ui.*`](#ui) dialogs. A non-empty string return is shown as a
+conversation block, like a command.
+
+### `kage.keymap.del(mode, lhs)`
+
+**Since API 2.** Remove a mapping. Raises when there is none. Keys the
+editor grammar handles (vim motions, readline edits, Enter, Esc) are
+not mappings. Shadow them with `"<Nop>"` instead.
+
+### `kage.action`
+
+**Since API 2.** Built-in actions to use as an rhs, such as
+`kage.action.OpenModelPicker` or `kage.action.FoldAll`.
+`kage.action.scroll(n)` scrolls by `n` lines. See
+[lua config](/guide/lua-config#rhs) for the full list.
+
+### `kage.register_keybinding(spec, handler)` -> off
+
+Bind a chord to a handler in mode `g`. `spec` is either a chord string
+or a table `{ key = "...", description? = "..." }`:
+
+```lua
+local off = kage.register_keybinding("ctrl+shift+x", function()
   kage.ui.notify("hello from a chord")
 end)
 
 kage.register_keybinding({ key = "f5", description = "reload" }, reload)
 ```
+
+The call returns an `off` function that removes the mapping while it
+is still this one. Calling it again does nothing. A mapping with a
+`description` shows in the `?` reference under `plugins`.
 
 Chord grammar (case-insensitive, modifiers in any order):
 
@@ -284,12 +414,15 @@ Chord grammar (case-insensitive, modifiers in any order):
   `space`, `backspace`, `delete`, `up`, `down`, `left`, `right`,
   `home`, `end`, `pageup`, `pagedown`, `insert`), or `f1`..`f12`
 
-A plugin chord wins over the built-in binding for that key (it is
-checked before built-in input handling, but never over an open
-modal layer or `Ctrl+Q`). Binding a reserved chord (`ctrl+q`) still
-works but logs a warning. The handler runs through the coroutine
-bridge, so it too may open [`kage.ui.*`](#ui) dialogs; a non-empty
-string return is shown as a conversation block, like a command.
+Vim notation (`<C-S-x>`, `<F5>`) works too.
+
+A plugin mapping replaces a default mapping on the same key, and a
+mapping from `config.toml` or `init.lua` replaces the plugin one.
+Mappings never apply while a modal layer is open. `Ctrl+Q` and
+`Ctrl+C` stay with kage's quit and cancel hatches: a plugin mapping
+on them never fires and logs a warning. The handler runs through the
+coroutine bridge, so it too may open [`kage.ui.*`](#ui) dialogs, and a
+non-empty string return is shown as a conversation block.
 
 ## autocomplete
 
@@ -398,9 +531,11 @@ Remove a status entry. Equivalent to `kage.set_status(key, nil)`.
 ### `kage.on(event: string, handler)` -> off
 
 Subscribe to an event. Multiple handlers per event fire in
-registration order; a handler that raises is logged and skipped so
+registration order. A handler that raises is logged and skipped, so
 one bad plugin does not silence the rest. An unknown event name logs
-one warning and subscribes to nothing.
+one warning and subscribes to nothing. `kage.on` is an alias over
+[`kage.api.autocmd_create`](#autocmds): the handler receives the
+payload alone.
 
 The call returns an `off` function that removes this subscription.
 Calling `off` more than once does nothing. A handler may call `off`
@@ -436,6 +571,8 @@ Plain notification events (the handler's return value is ignored):
 | `user_bash`              | `{ cmd, exit_code }`                              |
 | `permission_mode_select` | `{ prev, next, source }`                          |
 | `option_set`             | `{ name, old, new, source }`                      |
+| `color_scheme`           | `{ name }`                                        |
+| `user`                   | the `data` passed to `kage.api.autocmd_exec`      |
 
 `usage` is `{ input, output, cache_read, cache_write }`. For
 `model_select`, `source` is `"set"`. For `thinking_level_select`,
@@ -445,6 +582,9 @@ when the command was killed by a signal. `tool_update` only fires
 when at least one handler is subscribed. `option_set` fires when
 `kage.opt.<name>` is assigned (`source` is `"lua"`) or a command or
 the settings dialog changes an option (`source` is `"runtime"`).
+`color_scheme` fires after the theme's base highlight groups change,
+and once at the end of every load. `user` fires only through
+`kage.api.autocmd_exec("user", { pattern, data })`.
 
 ### transform hooks
 
@@ -486,8 +626,124 @@ argument is the target string (session id / entry id). Return
 ### `resources_discover`
 
 Fires once at startup with no argument. Return
-`{ skills? = {paths}, templates? = {paths}, themes? = {paths} }`;
-the loader adds those directories to the filesystem-discovered set.
+`{ skills? = {paths}, templates? = {paths}, themes? = {paths} }`.
+The loader adds those directories to the filesystem-discovered set.
+
+### autocmds
+
+**Since API 2.** `kage.api.autocmd_create(event, opts)` is the full
+form of `kage.on`. It returns an integer id and raises on an unknown
+event name.
+
+```lua
+local group = kage.api.augroup_create("myplugin")
+kage.api.autocmd_create("tool_result", {
+  group = group,
+  pattern = { "bash", "write" },
+  callback = function(ev)
+    -- ev = { id, event, match, group, data }
+    if ev.data.is_error then kage.ui.notify(ev.match .. " failed") end
+  end,
+})
+```
+
+`opts` takes `callback` (required), `group`, `pattern` (a string or a
+list of exact values, `"*"` by default), `once` and `desc`. Patterns
+compare against the tool name for `tool_call` and `tool_result`, the
+new value for `model_select` and `thinking_level_select`, the option
+name for `option_set`, the theme name for `color_scheme`, and the exec
+pattern for `user`. Other events accept only `"*"`. The four dispatch
+kinds above (notification, transform, predicate, session op) apply to
+autocmds the same way, reading the callback's return value.
+
+- `kage.api.autocmd_del(id)` removes one autocmd.
+- `kage.api.augroup_create(name, { clear = true })` returns a group
+  id. With `clear = true`, the default, an existing group loses its
+  autocmds, so a re-run registers once.
+- `kage.api.augroup_del(group)` removes a group, by id or name, and
+  its autocmds.
+- `kage.api.autocmd_exec(event, { pattern, data })` fires an event
+  now. Nesting deeper than 16 levels raises.
+
+## options
+
+### `kage.opt`
+
+**Since API 2.** Read an option with `kage.opt.<name>` and set it by
+assigning. A set validates the value, records its source and fires
+`option_set`. Unknown names and invalid values raise with what is
+valid. `kage.api.option_get(name)` returns the value and its source
+(`default`, `toml`, `lua` or `runtime`). `kage.api.option_set(name,
+value)` is the same as assigning. The options are listed in
+[lua config](/guide/lua-config#options).
+
+```lua
+if kage.opt.editor == "vim" then
+  kage.opt.timeoutlen = 500
+end
+```
+
+## highlights
+
+### `kage.api.hl_set(name, spec)` / `kage.api.hl_get(name, opts?)`
+
+**Since API 2.** Set highlight group `name` to
+`{ fg?, bg?, bold?, italic?, underline?, dim?, reverse?, link? }`,
+replacing any earlier value of that group. A `link` follows another
+group and wins over the other fields. An invalid color or an unknown
+field raises. `hl_get` returns the group as set, or `nil`. With
+`{ link = false }` it follows links and returns the effective spec.
+
+Overrides of `Kage*` groups reset when the theme changes. Set them
+from a `color_scheme` autocmd to keep them. Groups with other names
+persist, which makes them a good home for a plugin's own colors:
+
+```lua
+kage.api.hl_set("MyPluginAccent", { link = "KageWarning" })
+kage.ui.set_footer(function() return { text = "ready", hl = "MyPluginAccent" } end)
+```
+
+See [lua config](/guide/lua-config#group-list) for the group list.
+
+## theme
+
+### `kage.theme.current()` / `kage.theme.list()`
+
+The active theme name, and every name `kage.theme.set` accepts
+(bundled themes plus files in `~/.config/kage/themes/`).
+
+### `kage.theme.set(name: string)`
+
+Set the `theme` option. The base highlight groups switch before the
+call returns, then `color_scheme` and `option_set` fire. Raises on a
+non-string, empty or unknown name.
+
+## scheduling
+
+**Since API 2.** These run a callback on the Lua thread later. A
+callback that raises is logged, and a timer that raises stops.
+Callbacks cannot open `kage.ui.*` dialogs. A reload cancels all of
+them.
+
+### `kage.schedule(fn)`
+
+Run `fn` once, right after the current Lua call returns and before the
+next queued one. Useful to move work out of an event handler.
+
+### `kage.defer(fn, ms: integer)` -> stop
+
+Run `fn` once, `ms` milliseconds from now. Calling `stop` before then
+cancels it.
+
+### `kage.timer(fn, ms: integer)` -> stop
+
+Run `fn` every `ms` milliseconds (at least 50) until `stop` is called.
+
+```lua
+local stop = kage.timer(function()
+  kage.api.redraw("footer")
+end, 1000)
+```
 
 ## session
 
@@ -587,3 +843,23 @@ Register a new LLM provider implementation. Advanced; a streaming
 provider makes outbound requests via `kage.http.post_stream`, so it
 also needs the `net` capability. See `plugins/types/kage.lua` for the
 full spec shape.
+
+## `kage.api` reference
+
+Every `kage.api` function is since API 2.
+
+| Function | Purpose |
+| --- | --- |
+| `autocmd_create(event, opts)` -> id | subscribe to an event ([autocmds](#autocmds)) |
+| `autocmd_del(id)` | remove an autocmd |
+| `augroup_create(name, opts?)` -> id | create or clear a group |
+| `augroup_del(group)` | remove a group and its autocmds |
+| `autocmd_exec(event, opts?)` | fire an event now |
+| `option_get(name)` -> value, source | read an option ([options](#options)) |
+| `option_set(name, value)` | set an option |
+| `hl_set(name, spec)` | set a highlight group ([highlights](#highlights)) |
+| `hl_get(name, opts?)` -> spec or nil | read a highlight group |
+| `slot_set(name, spec)` | fill a slot, same as `kage.ui.set_slot` |
+| `redraw(name?)` | recompute the Lua components of one slot, or of every slot |
+| `keymap_set(mode, lhs, rhs, opts?)` | map a key in one mode, see `kage.keymap.set` |
+| `keymap_del(mode, lhs)` | remove a mapping in one mode |

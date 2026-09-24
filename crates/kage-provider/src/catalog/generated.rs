@@ -15,7 +15,6 @@ pub static PROVIDERS: &[ProviderInfo] = &[
         id: "anthropic",
         name: "Anthropic",
         api: None,
-        env: &["ANTHROPIC_API_KEY"],
         models: &[
             ModelInfo {
                 id: "claude-fable-5",
@@ -248,7 +247,6 @@ pub static PROVIDERS: &[ProviderInfo] = &[
         id: "openai",
         name: "OpenAI",
         api: None,
-        env: &["OPENAI_API_KEY"],
         models: &[
             ModelInfo {
                 id: "gpt-4",
@@ -871,7 +869,6 @@ pub static PROVIDERS: &[ProviderInfo] = &[
         id: "openai-responses",
         name: "OpenAI",
         api: None,
-        env: &["OPENAI_API_KEY"],
         models: &[
             ModelInfo {
                 id: "gpt-4",
@@ -1494,7 +1491,6 @@ pub static PROVIDERS: &[ProviderInfo] = &[
         id: "zai",
         name: "Z.AI",
         api: Some("https://api.z.ai/api/paas/v4"),
-        env: &["ZHIPU_API_KEY"],
         models: &[
             ModelInfo {
                 id: "glm-4.5",
@@ -1772,7 +1768,6 @@ pub static PROVIDERS: &[ProviderInfo] = &[
         id: "zai-coding-plan",
         name: "Z.AI Coding Plan",
         api: Some("https://api.z.ai/api/coding/paas/v4"),
-        env: &["ZHIPU_API_KEY"],
         models: &[
             ModelInfo {
                 id: "glm-4.7",
@@ -1885,7 +1880,6 @@ pub static PROVIDERS: &[ProviderInfo] = &[
         id: "deepseek",
         name: "DeepSeek",
         api: Some("https://api.deepseek.com"),
-        env: &["DEEPSEEK_API_KEY"],
         models: &[
             ModelInfo {
                 id: "deepseek-flash",
@@ -1953,7 +1947,6 @@ pub static PROVIDERS: &[ProviderInfo] = &[
         id: "groq",
         name: "Groq",
         api: None,
-        env: &["GROQ_API_KEY"],
         models: &[
             ModelInfo {
                 id: "llama-3.1-8b-instant",
@@ -2066,7 +2059,6 @@ pub static PROVIDERS: &[ProviderInfo] = &[
         id: "mistral",
         name: "Mistral",
         api: None,
-        env: &["MISTRAL_API_KEY"],
         models: &[
             ModelInfo {
                 id: "codestral-latest",
@@ -2554,7 +2546,6 @@ pub static PROVIDERS: &[ProviderInfo] = &[
         id: "cerebras",
         name: "Cerebras",
         api: None,
-        env: &["CEREBRAS_API_KEY"],
         models: &[
             ModelInfo {
                 id: "gpt-oss-120b",
@@ -2592,7 +2583,6 @@ pub static PROVIDERS: &[ProviderInfo] = &[
         id: "xai",
         name: "xAI",
         api: None,
-        env: &["XAI_API_KEY"],
         models: &[
             ModelInfo {
                 id: "grok-4.20-0309-non-reasoning",
@@ -2705,7 +2695,6 @@ pub static PROVIDERS: &[ProviderInfo] = &[
         id: "openrouter",
         name: "OpenRouter",
         api: Some("https://openrouter.ai/api/v1"),
-        env: &["OPENROUTER_API_KEY"],
         models: &[
             ModelInfo {
                 id: "aion-labs/aion-2.0",
@@ -3390,8 +3379,8 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 reasoning: true,
                 release_date: Some("2026-07-31"),
                 cost: Some(ModelCost {
-                    input: 0.040000,
-                    output: 0.640000,
+                    input: 0.030000,
+                    output: 0.320000,
                     cache_read: Some(0.016000),
                     cache_write: None,
                 }),
@@ -3468,6 +3457,21 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     input: 0.000000,
                     output: 0.000000,
                     cache_read: None,
+                    cache_write: None,
+                }),
+                thinking_levels: None,
+            },
+            ModelInfo {
+                id: "fireworks/ember-1",
+                name: "Ember-1",
+                context: Some(1048576),
+                output: Some(943718),
+                reasoning: true,
+                release_date: Some("2026-09-24"),
+                cost: Some(ModelCost {
+                    input: 3.000000,
+                    output: 15.000000,
+                    cache_read: Some(0.300000),
                     cache_write: None,
                 }),
                 thinking_levels: None,
@@ -4530,7 +4534,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 reasoning: true,
                 release_date: Some("2026-06-12"),
                 cost: Some(ModelCost {
-                    input: 0.706200,
+                    input: 0.656200,
                     output: 3.300000,
                     cache_read: Some(0.180000),
                     cache_write: None,
@@ -4563,21 +4567,6 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     input: 0.000000,
                     output: 0.000000,
                     cache_read: None,
-                    cache_write: None,
-                }),
-                thinking_levels: None,
-            },
-            ModelInfo {
-                id: "nex-agi/nex-n2.5-pro",
-                name: "Nex-N2.5-Pro",
-                context: Some(262144),
-                output: Some(235929),
-                reasoning: true,
-                release_date: Some("2026-09-08"),
-                cost: Some(ModelCost {
-                    input: 0.075000,
-                    output: 0.250000,
-                    cache_read: Some(0.015000),
                     cache_write: None,
                 }),
                 thinking_levels: None,
@@ -5826,12 +5815,12 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 id: "qwen/qwen3-30b-a3b-instruct-2507",
                 name: "Qwen3 30B A3B Instruct 2507",
                 context: Some(262144),
-                output: Some(32000),
+                output: Some(235929),
                 reasoning: false,
                 release_date: Some("2025-07-29"),
                 cost: Some(ModelCost {
-                    input: 0.048150,
-                    output: 0.193050,
+                    input: 0.100000,
+                    output: 0.300000,
                     cache_read: None,
                     cache_write: None,
                 }),
@@ -7255,9 +7244,9 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 reasoning: true,
                 release_date: Some("2026-09-14"),
                 cost: Some(ModelCost {
-                    input: 0.099000,
-                    output: 0.600000,
-                    cache_read: Some(0.060000),
+                    input: 0.040000,
+                    output: 1.000000,
+                    cache_read: Some(0.010000),
                     cache_write: None,
                 }),
                 thinking_levels: None,
@@ -7270,7 +7259,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 reasoning: true,
                 release_date: Some("2026-09-14"),
                 cost: Some(ModelCost {
-                    input: 0.386500,
+                    input: 0.390000,
                     output: 2.900000,
                     cache_read: Some(0.250000),
                     cache_write: None,
@@ -7285,9 +7274,9 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 reasoning: true,
                 release_date: Some("2026-08-01"),
                 cost: Some(ModelCost {
-                    input: 0.038000,
-                    output: 0.550000,
-                    cache_read: Some(0.022800),
+                    input: 0.030000,
+                    output: 0.320000,
+                    cache_read: Some(0.016000),
                     cache_write: None,
                 }),
                 thinking_levels: None,
@@ -7330,9 +7319,9 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 reasoning: true,
                 release_date: Some("2026-04-27"),
                 cost: Some(ModelCost {
-                    input: 0.910000,
-                    output: 6.987500,
-                    cache_read: Some(0.195000),
+                    input: 1.400000,
+                    output: 10.750000,
+                    cache_read: Some(0.300000),
                     cache_write: None,
                 }),
                 thinking_levels: None,
@@ -7431,13 +7420,13 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 id: "~z-ai/glm-flash-latest",
                 name: "GLM Flash Latest",
                 context: Some(1310720),
-                output: Some(131072),
+                output: Some(128000),
                 reasoning: true,
                 release_date: Some("2026-08-27"),
                 cost: Some(ModelCost {
-                    input: 0.075000,
-                    output: 0.250000,
-                    cache_read: Some(0.015000),
+                    input: 0.045000,
+                    output: 0.140000,
+                    cache_read: Some(0.010000),
                     cache_write: None,
                 }),
                 thinking_levels: None,
@@ -7463,7 +7452,6 @@ pub static PROVIDERS: &[ProviderInfo] = &[
         id: "fireworks-ai",
         name: "Fireworks AI",
         api: Some("https://api.fireworks.ai/inference/v1/"),
-        env: &["FIREWORKS_API_KEY"],
         models: &[
             ModelInfo {
                 id: "accounts/fireworks/models/deepseek-v4-flash-0731",
@@ -7981,7 +7969,6 @@ pub static PROVIDERS: &[ProviderInfo] = &[
         id: "moonshotai",
         name: "Moonshot AI",
         api: Some("https://api.moonshot.ai/v1"),
-        env: &["MOONSHOT_API_KEY"],
         models: &[
             ModelInfo {
                 id: "kimi-k2.6",
@@ -8049,7 +8036,6 @@ pub static PROVIDERS: &[ProviderInfo] = &[
         id: "xiaomi",
         name: "Xiaomi",
         api: Some("https://api.xiaomimimo.com/v1"),
-        env: &["XIAOMI_API_KEY"],
         models: &[
             ModelInfo {
                 id: "mimo-v2-flash",
@@ -8192,7 +8178,6 @@ pub static PROVIDERS: &[ProviderInfo] = &[
         id: "xiaomi-token-plan-ams",
         name: "Xiaomi Token Plan (Europe)",
         api: Some("https://token-plan-ams.xiaomimimo.com/v1"),
-        env: &["XIAOMI_API_KEY"],
         models: &[
             ModelInfo {
                 id: "mimo-v2-pro",
@@ -8275,7 +8260,6 @@ pub static PROVIDERS: &[ProviderInfo] = &[
         id: "xiaomi-token-plan-cn",
         name: "Xiaomi Token Plan (China)",
         api: Some("https://token-plan-cn.xiaomimimo.com/v1"),
-        env: &["XIAOMI_API_KEY"],
         models: &[
             ModelInfo {
                 id: "mimo-v2-pro",
@@ -8358,7 +8342,6 @@ pub static PROVIDERS: &[ProviderInfo] = &[
         id: "xiaomi-token-plan-sgp",
         name: "Xiaomi Token Plan (Singapore)",
         api: Some("https://token-plan-sgp.xiaomimimo.com/v1"),
-        env: &["XIAOMI_API_KEY"],
         models: &[
             ModelInfo {
                 id: "mimo-v2-pro",
@@ -8441,11 +8424,6 @@ pub static PROVIDERS: &[ProviderInfo] = &[
         id: "gemini",
         name: "Google",
         api: None,
-        env: &[
-            "GOOGLE_API_KEY",
-            "GOOGLE_GENERATIVE_AI_API_KEY",
-            "GEMINI_API_KEY",
-        ],
         models: &[
             ModelInfo {
                 id: "deep-research-max-preview-04-2026",

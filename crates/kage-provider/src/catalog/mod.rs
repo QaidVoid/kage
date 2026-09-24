@@ -25,9 +25,6 @@ pub struct ProviderInfo {
     pub name: &'static str,
     /// Documented API endpoint, when models.dev publishes one.
     pub api: Option<&'static str>,
-    /// Env-var names the upstream catalog associates with this
-    /// provider. Informational only; kage uses its own auth store.
-    pub env: &'static [&'static str],
     /// Models the provider exposes that support tool calling.
     pub models: &'static [ModelInfo],
 }

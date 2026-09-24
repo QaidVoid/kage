@@ -146,8 +146,6 @@ struct ApiProvider {
     #[serde(default)]
     api: Option<String>,
     #[serde(default)]
-    env: Vec<String>,
-    #[serde(default)]
     models: BTreeMap<String, ApiModel>,
 }
 
@@ -234,7 +232,6 @@ struct CuratedProvider {
     kage_id: String,
     name: String,
     api: Option<String>,
-    env: Vec<String>,
     models: Vec<CuratedModel>,
 }
 
@@ -251,7 +248,6 @@ impl CuratedProvider {
             kage_id: kage_id.to_owned(),
             name: api.name.clone(),
             api: api.api.clone(),
-            env: api.env.clone(),
             models,
         }
     }
@@ -332,14 +328,6 @@ fn emit_provider(out: &mut String, p: &CuratedProvider) {
     let _ = writeln!(out, "        id: {},", quote(&p.kage_id));
     let _ = writeln!(out, "        name: {},", quote(&p.name));
     let _ = writeln!(out, "        api: {},", opt_quote(p.api.as_deref()));
-    out.push_str("        env: &[");
-    for (i, e) in p.env.iter().enumerate() {
-        if i > 0 {
-            out.push_str(", ");
-        }
-        out.push_str(&quote(e));
-    }
-    out.push_str("],\n");
     out.push_str("        models: &[\n");
     for m in &p.models {
         emit_model(out, m);

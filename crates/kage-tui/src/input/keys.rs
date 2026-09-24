@@ -33,6 +33,10 @@ impl InputState {
     /// handler. The insert handler's only mode transition is its own
     /// `Esc` arm, which is intercepted here, so the editor can never
     /// leave the insert state.
+    ///
+    /// On an empty prompt, `/` and `!` act as command prefixes (the
+    /// command palette and the shell escape) instead of literal text,
+    /// keeping every command reachable without a mode switch.
     pub(crate) fn handle_modeless(&mut self, key: KeyEvent) -> Vec<InputAction> {
         match key.code {
             KeyCode::Esc => {

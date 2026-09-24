@@ -10,11 +10,12 @@
 //! is the useful debugging view for plugin authors.
 
 use ratatui::style::{Modifier, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 
 use super::widget::{BlockWidget, RenderCtx};
 use super::{
-    Emphasis, custom_style, fold_indicator, header_line, mark_emphasis, plain_lines, prefix_line,
+    Emphasis, custom_style, fold_indicator, header_line, mark_emphasis, mark_emphasis_bare,
+    plain_lines,
 };
 use crate::buffer::Block;
 use crate::theme::current;
@@ -69,18 +70,17 @@ impl CustomBlockWidget {
 
     fn lines_for(&self, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
         let mut out = Vec::new();
-        match chrome_for(&self.kind) {
+        let bare = match chrome_for(&self.kind) {
             Chrome::Quiet => {
                 if self.folded {
                     // A folded quiet block still needs one visible
-                    // row: the fold indicator plus its first line.
+                    // row so it stays findable.
                     let first = self.text.lines().next().unwrap_or_default().to_owned();
-                    out.push(prefix_line("  ", Line::from(first).style(muted_style())));
+                    out.push(Line::from(first).style(muted_style()));
                 } else {
-                    for body_line in plain_lines(&self.text, muted_style()) {
-                        out.push(prefix_line("  ", body_line));
-                    }
+                    out.extend(plain_lines(&self.text, muted_style()));
                 }
+                true
             }
             Chrome::Tag(tag, alarm) => {
                 let tag_style = if alarm {
@@ -90,22 +90,19 @@ impl CustomBlockWidget {
                 } else {
                     muted_style().add_modifier(Modifier::BOLD)
                 };
-                out.push(header_line(
-                    fold_indicator(self.folded),
-                    tag,
-                    None,
-                    tag_style,
-                ));
+                // A bare bracketed tag: no fold chevron, no indent.
+                // These blocks are short enough that the chrome
+                // should not outweigh the text.
+                out.push(Line::from(Span::styled(format!("[{tag}]"), tag_style)));
                 if !self.folded {
                     let body_style = if alarm {
                         Style::default().fg(current().tool_error_fg)
                     } else {
                         Style::default().fg(current().assistant_fg)
                     };
-                    for body_line in plain_lines(&self.text, body_style) {
-                        out.push(prefix_line("  ", body_line));
-                    }
+                    out.extend(plain_lines(&self.text, body_style));
                 }
+                true
             }
             Chrome::Raw => {
                 out.push(header_line(
@@ -115,13 +112,18 @@ impl CustomBlockWidget {
                     custom_style(),
                 ));
                 if !self.folded {
-                    for body_line in plain_lines(&self.text, custom_style()) {
-                        out.push(prefix_line("  ", body_line));
-                    }
+                    out.extend(plain_lines(&self.text, custom_style()));
                 }
+                false
             }
+        };
+        // Quiet and tag chrome skips the reserved rule column: the
+        // notice sits flush with the terminal edge.
+        if bare {
+            mark_emphasis_bare(out, width, emphasis)
+        } else {
+            mark_emphasis(out, width, emphasis, None)
         }
-        mark_emphasis(out, width, emphasis, None)
     }
 }
 
@@ -248,5 +250,55 @@ mod tests {
         let text = painted(&w.lines(60, &ctx(&Theme::default())));
         assert!(text.contains("first line"), "{text:?}");
         assert!(!text.contains("second line"), "{text:?}");
+    }
+
+    #[test]
+    fn tag_blocks_have_no_chevron_indent_or_margin() {
+        let block = Block::Custom {
+            kind: "kage:error".into(),
+            text: "provider returned status 401".into(),
+            folded: false,
+        };
+        let w = CustomBlockWidget::from_block(&block).unwrap();
+        let lines = w.lines(60, &ctx(&Theme::default()));
+        let header = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert_eq!(header, "[error]", "bare tag, no chevron: {header:?}");
+        for line in &lines[1..] {
+            let text = line
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>();
+            assert!(!text.starts_with("  "), "no left margin: {text:?}");
+        }
+    }
+
+    #[test]
+    fn quiet_blocks_have_no_margin() {
+        let block = Block::Custom {
+            kind: "kage:help".into(),
+            text: "welcome to kage".into(),
+            folded: false,
+        };
+        let w = CustomBlockWidget::from_block(&block).unwrap();
+        let lines = w.lines(60, &ctx(&Theme::default()));
+        let text = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert_eq!(text, "welcome to kage", "flush left, no prefix");
+        for line in lines.iter().skip(1) {
+            let pad = line
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>();
+            assert!(!pad.starts_with(' '), "pad rows stay blank: {pad:?}");
+        }
     }
 }

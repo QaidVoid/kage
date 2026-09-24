@@ -213,6 +213,14 @@ impl App {
             }
         }
 
+        // Modeless `?` on an empty prompt opens the keyboard
+        // reference, matching the welcome hint. With text present (or
+        // the shell escape armed) `?` is a literal character.
+        if self.modeless_help_chord(&key) {
+            self.open_help();
+            return None;
+        }
+
         let actions = self.input.handle_key(key);
         for action in actions {
             if let Some(exit) = self.apply(action) {
@@ -227,6 +235,17 @@ impl App {
     /// prompt text and rebuild the popup. A no-op (and closes any open
     /// popup) unless plugins registered providers and the user is
     /// actively typing in the input pane.
+    /// Modeless `?` chord: an empty prompt (shell escape disarmed)
+    /// with a bare `?` opens the keyboard reference.
+    fn modeless_help_chord(&self, key: &ratatui::crossterm::event::KeyEvent) -> bool {
+        use ratatui::crossterm::event::{KeyCode, KeyModifiers};
+        self.input.is_modeless()
+            && self.input.text().is_empty()
+            && !self.input.shell_armed()
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('?'))
+    }
+
     pub(crate) fn refresh_input_completion(&mut self) {
         let has_sources =
             !self.autocomplete_providers.is_empty() || self.completion_workdir.is_some();

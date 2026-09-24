@@ -417,7 +417,9 @@ pub(crate) use blocks::{
     tool_call_style, tool_error_style, tool_pair_to_lines, tool_result_header_line,
     tool_result_style, truncated_body_lines,
 };
-pub(crate) use bubble::{mark_emphasis, plain_lines, user_block_lines, wrap_in_bubble_focused};
+pub(crate) use bubble::{
+    mark_emphasis, mark_emphasis_bare, plain_lines, user_block_lines, wrap_in_bubble_focused,
+};
 pub use buffer::CapturedCell;
 pub(crate) use input::INPUT_GLYPH_WIDTH;
 pub use modeline::input_visual_row_count;

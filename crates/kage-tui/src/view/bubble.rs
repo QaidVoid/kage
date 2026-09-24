@@ -92,6 +92,44 @@ pub(crate) fn mark_emphasis(
     out
 }
 
+/// Like [`mark_emphasis`], but the unfocused gutter is empty so
+/// chrome-light custom blocks (system notices, errors) sit flush
+/// with the terminal edge. Focused or search-matched blocks still
+/// get the rule glyph, and the pre-wrap and bottom pad are kept so
+/// height measurement and separation behave identically.
+pub(crate) fn mark_emphasis_bare(
+    lines: Vec<Line<'static>>,
+    width: u16,
+    emphasis: Emphasis,
+) -> Vec<Line<'static>> {
+    let prefix: Span<'static> = if emphasis == Emphasis::None {
+        Span::raw("")
+    } else {
+        Span::styled(
+            format!("{} ", emphasis.rule_glyph()),
+            Style::default()
+                .fg(emphasis.rule_color(crate::theme::current().focus_color))
+                .add_modifier(Modifier::BOLD)
+                .add_modifier(DECORATION_MARKER),
+        )
+    };
+    let body_width = usize::from(width).saturating_sub(FOCUS_RULE_WIDTH).max(1);
+    let mut out: Vec<Line<'static>> =
+        Vec::with_capacity(lines.len() + widget::BlockPadding::BOTTOM);
+    for line in lines {
+        for row_spans in split_line_into_rows(line, body_width) {
+            let mut spans = Vec::with_capacity(row_spans.len() + 1);
+            spans.push(prefix.clone());
+            spans.extend(row_spans);
+            out.push(Line::from(spans));
+        }
+    }
+    for _ in 0..widget::BlockPadding::BOTTOM {
+        out.push(Line::from(vec![prefix.clone()]));
+    }
+    out
+}
+
 /// Wrap a vector of content lines in a full-width "bubble": each row
 /// starts with a colored left-edge rule, every cell is given the
 /// background color, and a one-row pad sits above and below.

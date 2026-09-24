@@ -29,7 +29,7 @@ switch modes or panes.
 | `Ctrl+V`         | Attach an image from the clipboard          |
 | `Ctrl+G`         | Edit the prompt draft in `$VISUAL`/`$EDITOR` |
 | `!`              | Shell escape: `!` on an empty prompt, then Enter runs the line |
-| `?`              | Open the keyboard reference (Normal mode)   |
+| `?`              | Open the keyboard reference (Normal mode, or an empty modeless prompt)   |
 
 `Ctrl+O` also expands a collapsed bracketed paste if one is present
 in the input. When no paste is collapsed, it toggles the fold.
@@ -56,6 +56,11 @@ without any mode switching.
 | ---- | ------------------------------- |
 | `Esc` | Cancel the current turn |
 | `PageUp` / `PageDown` | Scroll the conversation buffer 10 lines |
+| `?`   | Open the keyboard reference (empty prompt only) |
+
+The `?` (keys), `/` (command palette), and `!` (shell escape)
+prefixes all key off an empty prompt, so every surface stays one
+keystroke away without a mode switch.
 
 ## command pathways
 

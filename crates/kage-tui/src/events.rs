@@ -208,7 +208,9 @@ fn apply_event(buf: &mut Buffer, event: &LoopEvent) {
             buf.push_custom("kage:notify", msg, false);
         }
         LoopEvent::Error { kind } => {
-            buf.push_custom("kage:error", format!("[error] {kind}"), false);
+            // The block's `error` chrome already names the severity;
+            // the payload adds nothing but the message.
+            buf.push_custom("kage:error", kind.to_string(), false);
         }
     }
 }

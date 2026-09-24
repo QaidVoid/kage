@@ -1049,6 +1049,28 @@ fn set_editor_modeless_flips_the_input_editor() {
 }
 
 #[test]
+fn modeless_question_mark_on_empty_prompt_opens_help() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    app.set_editor_modeless(true);
+    assert!(app.dispatch_key(key('?')).is_none());
+    assert!(app.help_overlay.is_some(), "`?` opens the keys reference");
+}
+
+#[test]
+fn modeless_question_mark_with_text_types_literally() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    app.set_editor_modeless(true);
+    app.dispatch_key(key('h'));
+    app.dispatch_key(key('?'));
+    assert!(app.help_overlay.is_none(), "`?` stays literal with text");
+    assert!(app.input().text().ends_with('?'));
+}
+
+#[test]
 fn settings_command_opens_overlay_and_esc_closes_it() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();

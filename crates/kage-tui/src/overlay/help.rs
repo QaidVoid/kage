@@ -50,6 +50,7 @@ fn rows() -> Vec<Row> {
         Key("Ctrl+W", "kill previous word"),
         Key("Ctrl+Y", "yank last kill"),
         Key("Ctrl+/", "undo last edit"),
+        Key("/ or ?", "empty prompt: command palette / keys"),
         Header("pickers & overlays"),
         Key("Ctrl+P", "model picker"),
         Key("Ctrl+S", "session picker"),

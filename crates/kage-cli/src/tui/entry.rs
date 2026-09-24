@@ -286,7 +286,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         let mut buf = lock(&buffer);
         buf.push_custom(
             "kage:help",
-            "welcome to kage - ? for keys, : for commands, :settings to theme",
+            "welcome to kage - ? for keys, / for commands, /settings to theme",
             false,
         );
     }

@@ -55,6 +55,13 @@ impl PluginRuntime {
         self.host.redraw_flag()
     }
 
+    /// Flag set when block renderer output changed, so the host should
+    /// measure plugin blocks again. Hosts `swap(false)` it on their tick.
+    #[must_use]
+    pub fn blocks_flag(&self) -> Arc<AtomicBool> {
+        self.host.blocks_flag()
+    }
+
     /// Cloneable handle to the host log sink.
     #[must_use]
     pub fn sink(&self) -> SharedHostLog {

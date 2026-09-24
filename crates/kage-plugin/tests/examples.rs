@@ -767,7 +767,9 @@ fn block_renderer_demo_paints_a_boxed_demo_card() {
     assert_eq!(renderers[0].kind(), "demo:card");
 
     // width 40 -> 38-char inner bar wrapped in '.' / "'" per the demo.
-    let lines = renderers[0].render(&json!({ "kind": "demo:card", "text": "hello", "width": 40 }));
+    let lines = renderers[0]
+        .render(&json!({ "kind": "demo:card", "text": "hello", "width": 40 }))
+        .expect("an idle runtime renders on first use");
     assert_eq!(lines.len(), 3, "top bar, title row, bottom bar: {lines:?}");
     let top = &lines[0].spans[0];
     assert_eq!(top.text.len(), 40);

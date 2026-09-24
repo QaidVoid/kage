@@ -105,19 +105,19 @@ fn block_render_never_waits_on_a_busy_owner() {
         .unwrap();
     let renderer = rt.registered_block_renderers().pop().unwrap();
     let block = |text: &str| json!({ "kind": "k", "text": text, "width": 40 });
-    assert_eq!(renderer.render(&block("a"))[0].spans[0].text, "a");
+    assert_eq!(renderer.render(&block("a")).unwrap()[0].spans[0].text, "a");
     let redraw = rt.redraw_flag();
     redraw.store(false, Ordering::SeqCst);
 
     let running = occupy_owner(&rt);
     let start = Instant::now();
-    assert_eq!(renderer.render(&block("a"))[0].spans[0].text, "a");
-    assert!(renderer.render(&block("b")).is_empty());
+    assert_eq!(renderer.render(&block("a")).unwrap()[0].spans[0].text, "a");
+    assert!(renderer.render(&block("b")).is_none());
     assert!(start.elapsed() < Duration::from_millis(50));
     running.join().unwrap();
 
     wait_for(&redraw);
-    assert_eq!(renderer.render(&block("b"))[0].spans[0].text, "b");
+    assert_eq!(renderer.render(&block("b")).unwrap()[0].spans[0].text, "b");
 }
 
 #[test]
@@ -246,6 +246,8 @@ fn render_surfaces_outlive_the_runtime_handle() {
             .unwrap();
         rt.registered_block_renderers().pop().unwrap()
     };
-    let lines = renderer.render(&json!({ "kind": "k", "text": "still here" }));
+    let lines = renderer
+        .render(&json!({ "kind": "k", "text": "still here" }))
+        .unwrap();
     assert_eq!(lines[0].spans[0].text, "still here");
 }

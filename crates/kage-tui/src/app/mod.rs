@@ -666,8 +666,12 @@ pub struct App {
     /// Set when plugin widgets are (re)registered; the next frame
     /// refreshes immediately instead of waiting for the tick.
     plugin_texts_dirty: bool,
-    /// Set by the plugin runtime when retained plugin output changed.
-    plugin_redraw: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Set by the plugin runtime when retained plugin output changed:
+    /// any output, and block renderer output.
+    plugin_redraw: Option<(
+        Arc<std::sync::atomic::AtomicBool>,
+        Arc<std::sync::atomic::AtomicBool>,
+    )>,
     /// Transient status entries populated by `kage.set_status` /
     /// `kage.clear_status`. The plugin-refresh tick snapshots the map
     /// into [`Self::plugin_status_cache`].

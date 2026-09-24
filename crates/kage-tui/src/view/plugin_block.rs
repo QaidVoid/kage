@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 
 use super::registry::BlockFactory;
@@ -99,23 +99,26 @@ struct PluginBlockWidget {
 
 impl PluginBlockWidget {
     /// Call the Lua renderer, map its `ChromeLine`s onto ratatui
-    /// lines, and apply the uniform block chrome at `emphasis`. Empty
-    /// Lua output (error / non-conforming / genuinely empty) becomes
-    /// one marker line so the failure is visible, never a silent
-    /// blank block.
+    /// lines, and apply the uniform block chrome at `emphasis`. Output
+    /// that is still being computed shows a dim placeholder; empty Lua
+    /// output (error, non-conforming, or genuinely empty) becomes one
+    /// marker line so the failure is visible, never a silent blank
+    /// block.
     fn lines_for(&self, width: u16, emphasis: Emphasis) -> Vec<Line<'static>> {
         let mut payload = self.payload.clone();
         if let Some(obj) = payload.as_object_mut() {
             obj.insert("width".into(), serde_json::json!(width));
         }
-        let chrome = self.renderer.render(&payload);
-        let body = if chrome.is_empty() {
-            vec![Line::from(format!(
+        let body = match self.renderer.render(&payload) {
+            None => vec![Line::styled(
+                "...",
+                Style::default().add_modifier(Modifier::DIM),
+            )],
+            Some(chrome) if chrome.is_empty() => vec![Line::from(format!(
                 "[block renderer `{}` produced no output]",
                 self.renderer.kind()
-            ))]
-        } else {
-            super::chrome_lines_to_ratatui(&chrome, Style::default())
+            ))],
+            Some(chrome) => super::chrome_lines_to_ratatui(&chrome, Style::default()),
         };
         mark_emphasis(body, width, emphasis, None)
     }

@@ -568,19 +568,29 @@ impl App {
         self.refresh_plugin_widget_texts(width);
     }
 
-    /// Register the flag the plugin runtime sets when a widget, chrome
-    /// row, or block renderer produced new output.
-    pub fn set_plugin_redraw(&mut self, flag: Arc<std::sync::atomic::AtomicBool>) {
-        self.plugin_redraw = Some(flag);
+    /// Register the flags the plugin runtime sets when any retained
+    /// output changed (`redraw`) and when block renderer output changed
+    /// (`blocks`).
+    pub fn set_plugin_redraw(
+        &mut self,
+        redraw: Arc<std::sync::atomic::AtomicBool>,
+        blocks: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        self.plugin_redraw = Some((redraw, blocks));
     }
 
     /// Whether plugin output changed since the last check. Marks the
-    /// text caches for refresh.
+    /// text caches for refresh, and re-measures blocks when block
+    /// renderer output changed.
     pub(crate) fn take_plugin_redraw(&mut self) -> bool {
-        let fresh = self
-            .plugin_redraw
-            .as_ref()
-            .is_some_and(|f| f.swap(false, std::sync::atomic::Ordering::Relaxed));
+        use std::sync::atomic::Ordering;
+        let Some((redraw, blocks)) = &self.plugin_redraw else {
+            return false;
+        };
+        if blocks.swap(false, Ordering::Relaxed) {
+            lock(&self.buffer).invalidate_all_heights();
+        }
+        let fresh = redraw.swap(false, Ordering::Relaxed);
         if fresh {
             self.plugin_texts_dirty = true;
         }

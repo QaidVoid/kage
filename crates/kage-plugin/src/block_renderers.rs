@@ -83,31 +83,31 @@ impl LuaBlockRenderer {
     /// host shapes per block variant: always `kind` + `width`, plus
     /// `text` / `name` / `output` / `folded` / ... as relevant).
     ///
-    /// Returns retained lines for a payload rendered before. Empty
-    /// output means the payload is not computed yet (the owner thread
-    /// is busy), the Lua renderer raised (logged to the sink), or it
-    /// returned a non-conforming value; the host then paints its
-    /// fallback so a broken renderer never blanks the conversation
-    /// silently.
+    /// Returns retained lines for a payload rendered before, or `None`
+    /// while the payload is not computed yet because the owner thread is
+    /// busy. Empty lines mean the Lua renderer raised (logged to the
+    /// sink) or returned a non-conforming value, so the host can make the
+    /// failure visible.
     #[must_use]
-    pub fn render(&self, payload: &serde_json::Value) -> Vec<ChromeLine> {
+    pub fn render(&self, payload: &serde_json::Value) -> Option<Vec<ChromeLine>> {
         let key = payload_key(payload);
         let mut cache = lock(&self.cache);
         if let Some(lines) = cache.get(key) {
-            return lines;
+            return Some(lines);
         }
         if cache.pending.contains(&key) {
-            return Vec::new();
+            return None;
         }
         if !self.host.is_idle() {
             self.host.note_missed_render();
-            return Vec::new();
+            return None;
         }
         cache.pending.insert(key);
         drop(cache);
 
         let target = Arc::clone(&self.cache);
         let redraw = self.host.redraw_flag();
+        let blocks = self.host.blocks_flag();
         let kind = self.kind.clone();
         let sink = Arc::clone(&self.sink);
         let handler = Arc::clone(&self.handler_key);
@@ -117,14 +117,15 @@ impl LuaBlockRenderer {
             let mut cache = lock(&target);
             cache.pending.remove(&key);
             cache.insert(key, lines);
+            blocks.store(true, Ordering::SeqCst);
             redraw.store(true, Ordering::SeqCst);
         });
         let Ok(done) = queued else {
             lock(&self.cache).pending.remove(&key);
-            return Vec::new();
+            return None;
         };
         let _ = done.recv_timeout(COLD_WAIT);
-        lock(&self.cache).get(key).unwrap_or_default()
+        lock(&self.cache).get(key)
     }
 }
 
@@ -264,9 +265,11 @@ mod tests {
         assert_eq!(map.len(), 1);
         let r = &map[0];
         assert_eq!(r.kind(), "demo:card");
-        let lines = r.render(&serde_json::json!({
-            "kind": "demo:card", "text": "hello", "width": 42
-        }));
+        let lines = r
+            .render(&serde_json::json!({
+                "kind": "demo:card", "text": "hello", "width": 42
+            }))
+            .unwrap();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].spans[0].text, "[demo:card] hello @42");
     }
@@ -302,7 +305,7 @@ mod tests {
         assert!(
             map[0]
                 .render(&serde_json::json!({ "kind": "b", "text": "t" }))
-                .is_empty()
+                .is_some_and(|lines| lines.is_empty())
         );
     }
 }

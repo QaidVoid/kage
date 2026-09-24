@@ -60,6 +60,7 @@ struct State {
     in_flight: AtomicUsize,
     missed_render: AtomicBool,
     redraw: Arc<AtomicBool>,
+    blocks: Arc<AtomicBool>,
 }
 
 /// Receiving end of a new host, consumed by [`Owner::spawn`] once the
@@ -201,6 +202,12 @@ impl LuaHost {
     pub(crate) fn redraw_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.inner.state.redraw)
     }
+
+    /// Flag set when block renderer output arrived or a skipped block
+    /// render can now run, so block heights may have changed.
+    pub(crate) fn blocks_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.inner.state.blocks)
+    }
 }
 
 impl State {
@@ -208,6 +215,7 @@ impl State {
         if self.in_flight.fetch_sub(1, Ordering::SeqCst) == 1
             && self.missed_render.swap(false, Ordering::SeqCst)
         {
+            self.blocks.store(true, Ordering::SeqCst);
             self.redraw.store(true, Ordering::SeqCst);
         }
     }

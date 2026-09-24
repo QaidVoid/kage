@@ -375,7 +375,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         app.set_plugin_terminal_hooks(hooks);
     }
     if let Some(rt) = plugin_runtime.as_ref() {
-        app.set_plugin_redraw(rt.redraw_flag());
+        app.set_plugin_redraw(rt.redraw_flag(), rt.blocks_flag());
     }
     app.set_plugin_dialog(dialog_rx);
     app.set_plugin_refresh(plugin_refresh_rx);

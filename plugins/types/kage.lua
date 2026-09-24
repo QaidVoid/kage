@@ -602,6 +602,31 @@ function kage.theme.list() end
 ---@param name string
 function kage.theme.set(name) end
 
+--- Run `fn` on the Lua thread once, right after the current
+--- host call and before the next queued one. A raising `fn` is
+--- logged. Reload drops it if it has not run yet.
+--- Since API 2.
+---@param fn fun()
+function kage.schedule(fn) end
+
+--- Run `fn` on the Lua thread once, `ms` milliseconds from now.
+--- Returns `stop`, which cancels it if it has not run yet. A
+--- raising `fn` is logged. Reload cancels it.
+--- Since API 2.
+---@param fn fun()
+---@param ms integer
+---@return fun()
+function kage.defer(fn, ms) end
+
+--- Run `fn` on the Lua thread every `ms` milliseconds (at least
+--- 50) until the returned `stop` is called. A raising `fn` is
+--- logged once and the timer stops. Reload cancels it.
+--- Since API 2.
+---@param fn fun()
+---@param ms integer
+---@return fun()
+function kage.timer(fn, ms) end
+
 --- Low-level primitives the stdlib builds on.
 ---@class kage.api
 kage.api = {}

@@ -778,6 +778,65 @@ pub(super) const FUNCS: &[Func] = &[
     },
     Func {
         doc: &[
+            "Run `fn` on the Lua thread once, right after the current",
+            "host call and before the next queued one. A raising `fn` is",
+            "logged. Reload drops it if it has not run yet.",
+        ],
+        path: "kage.schedule",
+        since: 2,
+        params: &[Field {
+            name: "fn",
+            ty: "fun()",
+            doc: "",
+        }],
+        ret: None,
+    },
+    Func {
+        doc: &[
+            "Run `fn` on the Lua thread once, `ms` milliseconds from now.",
+            "Returns `stop`, which cancels it if it has not run yet. A",
+            "raising `fn` is logged. Reload cancels it.",
+        ],
+        path: "kage.defer",
+        since: 2,
+        params: &[
+            Field {
+                name: "fn",
+                ty: "fun()",
+                doc: "",
+            },
+            Field {
+                name: "ms",
+                ty: "integer",
+                doc: "",
+            },
+        ],
+        ret: Some("fun()"),
+    },
+    Func {
+        doc: &[
+            "Run `fn` on the Lua thread every `ms` milliseconds (at least",
+            "50) until the returned `stop` is called. A raising `fn` is",
+            "logged once and the timer stops. Reload cancels it.",
+        ],
+        path: "kage.timer",
+        since: 2,
+        params: &[
+            Field {
+                name: "fn",
+                ty: "fun()",
+                doc: "",
+            },
+            Field {
+                name: "ms",
+                ty: "integer",
+                doc: "",
+            },
+        ],
+        ret: Some("fun()"),
+    },
+    Func {
+        doc: &[
             "Create an autocmd for `event` and return its id. Raises on",
             "an unknown event, an unknown group, or a pattern other than",
             "`*` for an event without a match key.",

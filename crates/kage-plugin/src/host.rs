@@ -11,7 +11,9 @@
 //! Lua provider stream therefore occupies the owner thread for its
 //! whole duration. Retained render output stays on screen meanwhile,
 //! but commands, keybindings, event dispatch, and render refreshes
-//! queue behind it.
+//! queue behind it. Callbacks queued with `kage.schedule`, `kage.defer`
+//! and `kage.timer` run on the same thread between jobs, never during
+//! one (see [`crate::schedule`]).
 //!
 //! A job must never wait synchronously on another host request: the
 //! owner thread would be waiting on itself.
@@ -31,6 +33,7 @@ use kage_core::CancelFlag;
 use mlua::Lua;
 
 use crate::error::PluginError;
+use crate::schedule;
 
 /// A queued job. It must call [`State::finish`] once its work is done
 /// and before it replies, so a caller woken by the reply already sees
@@ -247,15 +250,36 @@ fn gone() -> PluginError {
 
 impl Owner {
     /// Start the owner thread. It takes `lua` and runs queued jobs until
-    /// every [`LuaHost`] is dropped. A panicking job is contained so the
-    /// thread keeps serving later requests.
+    /// every [`LuaHost`] is dropped, pending callbacks or not. Between
+    /// jobs it waits no longer than the next callback deadline, and after
+    /// each job or wakeup it runs the due callbacks (see
+    /// [`crate::schedule`]). A panicking job or callback pass is contained
+    /// so the thread keeps serving later requests.
     pub(crate) fn spawn(self, lua: Lua) -> Result<(), PluginError> {
         let Owner { rx, state } = self;
         thread::Builder::new()
             .name("kage-lua".to_owned())
             .spawn(move || {
-                for job in rx {
-                    if catch_unwind(AssertUnwindSafe(|| job(&lua, &state))).is_err() {
+                loop {
+                    let job = match schedule::next_wait(&lua) {
+                        None => match rx.recv() {
+                            Ok(job) => Some(job),
+                            Err(_) => break,
+                        },
+                        Some(wait) => match rx.recv_timeout(wait) {
+                            Ok(job) => Some(job),
+                            Err(RecvTimeoutError::Timeout) => None,
+                            Err(RecvTimeoutError::Disconnected) => break,
+                        },
+                    };
+                    if let Some(job) = job
+                        && catch_unwind(AssertUnwindSafe(|| job(&lua, &state))).is_err()
+                    {
+                        state.finish();
+                    }
+                    if schedule::next_wait(&lua) == Some(Duration::ZERO) {
+                        state.in_flight.fetch_add(1, Ordering::SeqCst);
+                        let _ = catch_unwind(AssertUnwindSafe(|| schedule::run_due(&lua)));
                         state.finish();
                     }
                 }
@@ -343,7 +367,15 @@ mod tests {
 
     #[test]
     fn owner_thread_drops_lua_when_the_last_handle_drops() {
-        let host = started();
+        let lua = Lua::new();
+        lua.globals()
+            .set("kage", lua.create_table().unwrap())
+            .unwrap();
+        crate::watchdog::install(&lua).unwrap();
+        let (_, sink) = crate::testing::recording_sink();
+        schedule::install(&lua, sink, Arc::default(), crate::watchdog::BUDGET).unwrap();
+        let (host, owner) = LuaHost::new();
+        owner.spawn(lua).unwrap();
         let (tx, rx) = mpsc::channel::<()>();
         host.call(move |lua| {
             let keep = lua
@@ -353,6 +385,9 @@ mod tests {
                 })
                 .unwrap();
             lua.globals().set("keep", keep).unwrap();
+            lua.load("kage.timer(function() keep() end, 50) kage.defer(keep, 60000)")
+                .exec()
+                .unwrap();
         })
         .unwrap();
         assert_eq!(

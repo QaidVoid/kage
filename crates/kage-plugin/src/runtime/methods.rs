@@ -667,7 +667,8 @@ impl PluginRuntime {
     }
 
     /// Drop every registration that came from Lua (autocmds and groups,
-    /// tools, commands, providers, ACP/MCP declarations), then rerun the
+    /// pending schedule, defer and timer callbacks, tools, commands,
+    /// providers, ACP/MCP declarations), then rerun the
     /// full load: `_defaults.lua`, every `*.lua` file in `plugins_dir`,
     /// and the trusted `init.lua` when a user dir is configured.
     /// Designed for hot reload between turns: a stale plugin snapshot
@@ -712,6 +713,7 @@ impl PluginRuntime {
         let bridge = Arc::clone(&self.bridge);
         let dir = plugins_dir.map(std::path::Path::to_path_buf);
         self.host.call(move |lua| {
+            schedule::clear(lua)?;
             autocmd::clear(lua)?;
             acp::clear_permission_handler(lua)?;
             *lock(&bridge) = None;

@@ -9,7 +9,9 @@
 //!
 //! The runtime is host-driven: nothing runs unless the host calls
 //! [`PluginRuntime::eval`] or one of the typed dispatch helpers. A
-//! plugin cannot start a thread or schedule a callback on its own.
+//! plugin cannot start a thread. It can queue callbacks with
+//! `kage.schedule`, `kage.defer` and `kage.timer`, which run on the
+//! owner thread between host calls (see [`crate::schedule`]).
 //! Before any plugin code, `build` installs the `kage.api` primitives
 //! and evaluates the embedded Lua stdlib (see [`crate::stdlib`]). The
 //! trusted user config (`init.lua`) runs after every plugin, in its own
@@ -72,6 +74,7 @@ pub(crate) use crate::messages::{
     self, PendingMessage, SharedPendingMessages, shared_pending_messages,
 };
 pub(crate) use crate::providers::{self, LuaProvider, RegisteredProviders, registered_providers};
+pub(crate) use crate::schedule;
 pub(crate) use crate::session_write::{
     self, SharedSessionEntries, SharedSwitchRequest, SwitchTarget,
 };

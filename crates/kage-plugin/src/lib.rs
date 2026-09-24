@@ -34,6 +34,7 @@ pub mod messages;
 pub mod providers;
 pub(crate) mod retained;
 pub mod runtime;
+pub(crate) mod schedule;
 pub(crate) mod session_write;
 pub mod sessions;
 pub mod spec;

@@ -21,6 +21,7 @@ mod rpc;
 mod runtime_env;
 mod state;
 mod title;
+mod trust;
 mod tui;
 
 pub(crate) use std::io::{self, Write};
@@ -182,6 +183,15 @@ pub(crate) enum Command {
         #[arg(long = "system", default_value = "")]
         system: String,
     },
+    /// Trust the current directory's `.kage/config.toml`. Until a
+    /// project is trusted, its `mcp`, `permissions` and
+    /// `plugins.capabilities` settings are ignored. Trust covers the
+    /// values as they are now, so editing any of them asks again.
+    Trust {
+        /// Forget the trust recorded for this directory.
+        #[arg(long)]
+        revoke: bool,
+    },
     /// Model Context Protocol server: expose kage's built-in tools to
     /// another agent over stdio (newline-delimited JSON-RPC). Point an
     /// MCP client's server command at `kage mcp serve`.
@@ -265,6 +275,7 @@ pub(crate) fn run_subcommand(command: Command) -> ExitCode {
         Command::GenManpage { out } => run_gen_manpage(&out),
         Command::Completions { shell } => run_completions(shell),
         Command::Rpc { model, system } => rpc::run(model.as_deref(), &system),
+        Command::Trust { revoke } => trust::run(revoke),
         Command::Mcp { action } => match action {
             McpAction::Serve { tools } => mcp::run_serve(&tools),
         },
@@ -467,7 +478,7 @@ pub(crate) fn data_root() -> Result<PathBuf, String> {
 
 /// Resolve `$XDG_STATE_HOME/kage` (default `~/.local/state/kage`).
 pub(crate) fn state_root() -> Result<PathBuf, String> {
-    Ok(xdg_dir("XDG_STATE_HOME", ".local/state")?.join("kage"))
+    kage_core::config::Config::state_dir().ok_or_else(|| "no home directory".to_owned())
 }
 
 /// Resolve the XDG-style directory holding session files:

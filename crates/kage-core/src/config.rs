@@ -92,17 +92,37 @@ impl Config {
         workdir.join(".kage").join("config.toml")
     }
 
+    /// Directory for kage's mutable state, XDG-resolved:
+    /// `$XDG_STATE_HOME/kage`, or `~/.local/state/kage` when
+    /// `XDG_STATE_HOME` is unset. `None` only when there is no home
+    /// directory.
+    #[must_use]
+    pub fn state_dir() -> Option<PathBuf> {
+        let base = match std::env::var("XDG_STATE_HOME") {
+            Ok(v) if !v.is_empty() => PathBuf::from(v),
+            _ => dirs::home_dir()?.join(".local").join("state"),
+        };
+        Some(base.join("kage"))
+    }
+
     /// Load layered configuration: defaults < user file < project file < env.
     ///
     /// The project file is `<workdir>/.kage/config.toml`. Either file may be
     /// absent; only the layers that exist contribute. Env overrides win
     /// over both files just like in [`Self::load`].
+    ///
+    /// The project file's `mcp`, `permissions` and
+    /// `plugins.capabilities` tables are dropped unless the project is
+    /// trusted (see [`crate::trust`]).
     pub fn load_layered(workdir: &Path) -> Result<Self> {
         let mut figment = Figment::new().merge(Serialized::defaults(Self::default()));
         if let Some(user) = Self::default_path() {
             figment = figment.merge(Toml::file(user));
         }
-        figment = figment.merge(Toml::file(Self::project_path(workdir)));
+        figment = match crate::trust::filtered_project(workdir) {
+            Some(filtered) => figment.merge(Toml::string(&filtered)),
+            None => figment.merge(Toml::file(Self::project_path(workdir))),
+        };
         figment = figment.merge(Env::prefixed("KAGE_").split("__"));
         Ok(figment.extract()?)
     }
@@ -561,22 +581,7 @@ pub struct McpServer {
 mod tests {
     use super::*;
 
-    use std::sync::{Mutex, MutexGuard};
-
-    /// Serializes tests that touch figment's process-global state.
-    /// `Jail` mutates the process cwd, and `jail.set_env` mutates the
-    /// process environment, which every `Config::load` merge observes.
-    /// Without this, `env_overrides_file`'s `KAGE_UI__THEME` and
-    /// `project_file_overrides_user_file`'s `HOME`/`XDG_CONFIG_HOME`
-    /// race every concurrent load-asserting test (observed as flaky
-    /// `left: "catppuccin-mocha"` failures in the save tests).
-    static PROCESS_GLOBALS: Mutex<()> = Mutex::new(());
-
-    fn process_globals() -> MutexGuard<'static, ()> {
-        PROCESS_GLOBALS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
+    use crate::test_support::process_globals;
 
     #[test]
     fn default_provider_model_is_anthropic_sonnet() {

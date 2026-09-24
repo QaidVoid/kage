@@ -145,6 +145,7 @@ impl CliAcpAgent {
         } else {
             PathBuf::from(cwd)
         };
+        crate::trust::warn_if_untrusted(&workdir);
         let model = self.default_model.clone();
         let bare = runtime_env::build_system_prompt(&self.system_role, &workdir, &model, &[]);
         let plugins = match crate::plugins_dir() {

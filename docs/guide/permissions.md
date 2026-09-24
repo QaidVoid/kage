@@ -29,6 +29,10 @@ deny = ["rm -rf *"]
 github = "allow"
 ```
 
+A `[permissions]` table in a project's `.kage/config.toml` applies only
+once you trust the project (see
+[project config and trust](/guide/config#project-config-and-trust)).
+
 ## how rules evaluate
 
 Tool names are literal: `bash`, `write`, `edit`, `web_fetch`, or any

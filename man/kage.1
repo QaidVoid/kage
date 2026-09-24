@@ -58,6 +58,9 @@ Print a shell completion script for `kage` to stdout. Pipe to `source` (bash / z
 kage\-rpc(1)
 Agent Client Protocol server: speak JSON\-RPC over stdio so an editor (Zed, Neovim, ...) can drive kage. Messages are newline\-delimited JSON. Each request is answered, and loop progress is streamed back as ACP `session/update` notifications
 .TP
+kage\-trust(1)
+Trust the current directory\*(Aqs `.kage/config.toml`. Until a project is trusted, its `mcp`, `permissions` and `plugins.capabilities` settings are ignored. Trust covers the values as they are now, so editing any of them asks again
+.TP
 kage\-mcp(1)
 Model Context Protocol server: expose kage\*(Aqs built\-in tools to another agent over stdio (newline\-delimited JSON\-RPC). Point an MCP client\*(Aqs server command at `kage mcp serve`
 .TP

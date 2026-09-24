@@ -102,17 +102,21 @@ const MCP_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// named. Plugin-declared servers are not probed here: `doctor` has
 /// no plugin runtime loaded and only validates static config.
 fn check_mcp(workdir: &Path) -> Check {
-    let servers = match Config::load_layered(workdir) {
-        Ok(c) => c.mcp.servers,
-        Err(err) => {
-            return Check {
-                name: "mcp",
-                status: Status::Warn,
-                body: format!("config unreadable: {err} (skipped)"),
-                hint: None,
-            };
-        }
-    };
+    match Config::load_layered(workdir) {
+        Ok(c) => check_mcp_servers(c.mcp.servers),
+        Err(err) => Check {
+            name: "mcp",
+            status: Status::Warn,
+            body: format!("config unreadable: {err} (skipped)"),
+            hint: None,
+        },
+    }
+}
+
+/// Probe `servers` and fold the outcomes into the `mcp` row.
+fn check_mcp_servers(
+    servers: std::collections::BTreeMap<String, kage_core::config::McpServer>,
+) -> Check {
     if servers.is_empty() {
         return Check {
             name: "mcp",
@@ -206,6 +210,18 @@ fn check_config(workdir: &Path) -> Check {
 
     match Config::load_layered(workdir) {
         Ok(_) => {
+            if let Some(summary) = kage_core::trust::untrusted_project(workdir) {
+                return Check {
+                    name: "config",
+                    status: Status::Warn,
+                    body: format!(
+                        "ignoring untrusted {} settings in {}",
+                        summary.keys.join(", "),
+                        summary.path.display()
+                    ),
+                    hint: Some("run `kage trust` in this directory to allow them".into()),
+                };
+            }
             let mut parts = Vec::new();
             if let Some(path) = user.as_deref().filter(|_| user_exists) {
                 parts.push(format!("user={}", path.display()));
@@ -491,30 +507,26 @@ mod tests {
         assert!(check.body.contains("no mcp servers"));
     }
 
+    fn servers(toml: &str) -> std::collections::BTreeMap<String, kage_core::config::McpServer> {
+        toml::from_str::<kage_core::config::McpConfig>(toml)
+            .unwrap()
+            .servers
+    }
+
     #[test]
     fn mcp_check_lists_disabled_without_spawning() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join(".kage")).unwrap();
-        fs::write(
-            dir.path().join(".kage").join("config.toml"),
-            "[mcp.servers.off]\ncommand = \"no-such-binary-xyz\"\ndisabled = true\n",
-        )
-        .unwrap();
-        let check = check_mcp(dir.path());
+        let check = check_mcp_servers(servers(
+            "[servers.off]\ncommand = \"no-such-binary-xyz\"\ndisabled = true\n",
+        ));
         assert_eq!(check.status, Status::Ok, "{}", check.body);
         assert!(check.body.contains("disabled: off"), "{}", check.body);
     }
 
     #[test]
     fn mcp_check_fails_on_unspawnable_server() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join(".kage")).unwrap();
-        fs::write(
-            dir.path().join(".kage").join("config.toml"),
-            "[mcp.servers.broken]\ncommand = \"definitely-not-a-real-binary-xyz\"\n",
-        )
-        .unwrap();
-        let check = check_mcp(dir.path());
+        let check = check_mcp_servers(servers(
+            "[servers.broken]\ncommand = \"definitely-not-a-real-binary-xyz\"\n",
+        ));
         assert_eq!(check.status, Status::Fail, "{}", check.body);
         assert!(check.body.contains("broken"), "{}", check.body);
         assert!(check.hint.is_some());

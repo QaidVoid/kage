@@ -21,6 +21,7 @@ pub(crate) fn execute_print_run(
     use kage_core::protocol::{Command, CommandKind, Delivery, Event, HostEvent, RunOutcome};
 
     let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    crate::trust::warn_if_untrusted(&workdir);
     let layered = match kage_core::config::Config::load_layered(&workdir) {
         Ok(c) => c,
         Err(e) => {

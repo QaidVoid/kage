@@ -34,6 +34,7 @@ pub(crate) fn run_serve(tools: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    crate::trust::warn_if_untrusted(&workdir);
     let permissions = match Config::load_layered(&workdir) {
         Ok(c) => c.permissions,
         Err(e) => {

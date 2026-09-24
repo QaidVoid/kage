@@ -36,6 +36,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
             buf.push_custom("kage:error", format!("state: {err}"), false);
         }
     }
+    crate::trust::confirm_project_trust(&workdir);
     // Load user/project config and map the loop-tunable subset onto
     // the real LoopConfig. A malformed config is surfaced as an inline
     // error block rather than silently falling back to defaults.

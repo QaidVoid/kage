@@ -41,6 +41,14 @@ Setting both `command` and `url`, or neither, is an error. Add
 `disabled = true` to keep a server configured without connecting to
 it.
 
+Servers in your user config start right away. Servers in a
+project's `.kage/config.toml` start only once you trust that project:
+the TUI asks at startup, and print mode, `kage rpc` and
+`kage mcp serve` ignore them with a warning until you run `kage trust`
+in the project directory. The same applies to a project's
+`[mcp] allow_sampling` and `[permissions.mcp]`. See
+[project config and trust](/guide/config#project-config-and-trust).
+
 Each enabled server is connected at startup, handshaked, and its tools
 are registered. A stdio server's `stderr` is inherited so its
 diagnostics reach your terminal. A server that fails to start or to
@@ -159,7 +167,8 @@ kage mcp serve --tools read,grep,find,ls,edit
 ```
 
 Every call is also checked against the `[permissions]` rules of the
-working directory. A `deny` verdict refuses the call, and so does
+working directory. A project's rules count only when the project is
+trusted. A `deny` verdict refuses the call, and so does
 `ask`, because there is no one to ask. `confine_paths = true` keeps
 the file tools inside the working directory.
 

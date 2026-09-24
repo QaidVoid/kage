@@ -10,7 +10,7 @@ kage: a minimal, extensible coding agent in your terminal.
 .SH OPTIONS
 .TP
 \fB\-p\fR, \fB\-\-print\fR \fI<PRINT>\fR
-Run a single prompt through the agent loop and stream the response to stdout. Required in Phase 4 (the interactive TUI lands later)
+Run a single prompt through the agent loop and stream the response to stdout
 .TP
 \fB\-m\fR, \fB\-\-model\fR \fI<MODEL>\fR
 Provider\-qualified model id (`provider:model`). Defaults to `zai:glm\-4.6` when `ZAI_API_KEY` is set, otherwise the first provider with an API key in the environment
@@ -47,13 +47,19 @@ kage\-auth(1)
 Manage saved provider API credentials
 .TP
 kage\-init(1)
-First\-run setup wizard. Creates `~/.kage/config.toml`, scaffolds the data directories, and offers to save a provider API key. Idempotent: rerunning without `\-\-force` keeps any existing config in place
+First\-run setup wizard. Creates `~/.config/kage/config.toml`, scaffolds the data directories, and offers to save a provider API key. Idempotent: rerunning without `\-\-force` keeps any existing config in place
 .TP
 kage\-doctor(1)
 Diagnose the kage install: parses config, lists available providers, validates plugins, reports the active sandbox. Exit code is `0` when no check fails, `1` otherwise
 .TP
 kage\-completions(1)
 Print a shell completion script for `kage` to stdout. Pipe to `source` (bash / zsh) or redirect into your shell\*(Aqs completion directory (fish / elvish). For example:
+.TP
+kage\-rpc(1)
+Agent Client Protocol server: speak JSON\-RPC over stdio so an editor (Zed, Neovim, ...) can drive kage. LSP\-style `Content\-Length` framing; each request is answered and loop progress is streamed back as `event` notifications
+.TP
+kage\-mcp(1)
+Model Context Protocol server: expose kage\*(Aqs built\-in tools to another agent over stdio (newline\-delimited JSON\-RPC). Point an MCP client\*(Aqs server command at `kage mcp serve`
 .TP
 kage\-help(1)
 Print this message or the help of the given subcommand(s)

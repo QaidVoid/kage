@@ -495,7 +495,8 @@ pub struct SandboxConfig {
     pub network_allowlist: Vec<String>,
 }
 
-/// Keybinding overrides expressed as a flat map of chord to command name.
+/// The `[keybindings]` table: chord overrides plus the leader key and
+/// the sequence timeout.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KeybindingsConfig {

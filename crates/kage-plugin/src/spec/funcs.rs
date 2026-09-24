@@ -833,7 +833,7 @@ pub(super) const FUNCS: &[Func] = &[
         ret: None,
     },
     Func {
-        doc: &["The active theme name, or \"\" if none is set yet."],
+        doc: &["The active theme name."],
         path: "kage.theme.current",
         since: 1,
         params: &[],

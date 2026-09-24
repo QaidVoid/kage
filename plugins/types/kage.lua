@@ -770,7 +770,7 @@ function kage.mcp.restart(name) end
 ---@class kage.theme
 kage.theme = {}
 
---- The active theme name, or "" if none is set yet.
+--- The active theme name.
 --- Since API 1.
 ---@return string
 function kage.theme.current() end

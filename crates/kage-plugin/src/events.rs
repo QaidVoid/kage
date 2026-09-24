@@ -49,6 +49,8 @@
 //! * `option_set` - an option changed. Payload: `{ name, old, new,
 //!   source }` where `source` is `"lua"` or `"runtime"`. Matched
 //!   against the option name.
+//! * `color_scheme` - the theme's base groups changed, on a theme
+//!   switch and once after every load. Matched against the theme name.
 //! * `user` - fired only by `kage.api.autocmd_exec("user", { pattern,
 //!   data })`, matched against `pattern`.
 //!

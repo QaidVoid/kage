@@ -348,7 +348,7 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "settings",
         aliases: &[],
-        description: "open the settings dialog (theme, model, mouse, autocompaction)",
+        description: "list every option and change it live",
         category: CommandCategory::Both,
         args: &[],
         subcommands: &[],

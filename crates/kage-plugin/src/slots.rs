@@ -4,10 +4,8 @@
 //! `activity` (the working row above the input, collapsed while
 //! empty), `input_pill` (the input's top rule), `footer` (the bottom
 //! row) and `start` (the start card above the input while the
-//! conversation is empty).
-//! `kage.api.slot_set(name,
-//! spec)` sets one, and `nil` restores the spec `_defaults.lua` set. A
-//! row slot takes `{ left = items, right = items, sep = string? }`, and
+//! conversation is empty). `kage.api.slot_set(name, spec)` sets one,
+//! and `nil` restores the spec `_defaults.lua` set. A row slot takes `{ left = items, right = items, sep = string? }`, and
 //! `start` takes `{ lines = items }`, one line per item. An item is:
 //!
 //! * a built-in component name (see [`BUILTIN_COMPONENTS`]), which the

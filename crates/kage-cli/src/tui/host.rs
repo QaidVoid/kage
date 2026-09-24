@@ -40,7 +40,8 @@ impl Mirror {
 
 /// A bus subscriber that keeps `mirror` and the UI state slot
 /// components read current, records the last used model after a
-/// completed run, and refreshes the plugin view of the session file.
+/// completed run, tracks per-provider auth failures for the start
+/// screen, and refreshes the plugin view of the session file.
 pub(crate) fn mirror(
     mirror: Arc<Mutex<Mirror>>,
     plugins: Option<Arc<PluginRuntime>>,
@@ -73,6 +74,7 @@ pub(crate) fn mirror(
             if *outcome == RunOutcome::Completed {
                 let _ = crate::state::record_last_model(&mirror.state.model);
             }
+            let _ = crate::state::record_run_outcome(&mirror.state.model, outcome);
             refresh_session_entries(plugins.as_ref(), mirror.path.as_deref());
         }
         _ => {}

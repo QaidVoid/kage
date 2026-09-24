@@ -1024,30 +1024,19 @@ fn fallback_model(registry: &ProviderRegistry) -> String {
     String::new()
 }
 
-/// Notice for a `[provider] default_model` the user set explicitly that
-/// does not resolve, naming `using` as the model picked instead. `None`
-/// when the key was not set by the user or it resolves.
-pub(crate) fn default_model_notice(registry: &ProviderRegistry, using: &str) -> Option<String> {
+/// The `[provider] default_model` the user set explicitly, through
+/// `KAGE_PROVIDER__DEFAULT_MODEL` or the user config file. `None` when
+/// it was left at its default or the config does not load.
+pub(crate) fn configured_default_model() -> Option<String> {
     let explicit = std::env::var_os("KAGE_PROVIDER__DEFAULT_MODEL").is_some()
         || kage_core::config::Config::default_path()
             .is_some_and(|path| config_sets_default_model(&path));
     if !explicit {
         return None;
     }
-    let configured = kage_core::config::Config::load_default()
-        .ok()?
-        .provider
-        .default_model;
-    if registry.resolve(&configured).is_ok() {
-        return None;
-    }
-    let provider = configured
-        .split_once(':')
-        .map_or(configured.as_str(), |(p, _)| p);
-    Some(format!(
-        "default_model `{configured}` is unavailable (no credentials for `{provider}`). \
-         Using `{using}`. Run /login {provider} to connect it."
-    ))
+    kage_core::config::Config::load_default()
+        .ok()
+        .map(|config| config.provider.default_model)
 }
 
 /// Whether the TOML file at `path` sets `[provider] default_model`.

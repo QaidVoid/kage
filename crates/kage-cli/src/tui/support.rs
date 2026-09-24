@@ -1,7 +1,13 @@
-//! Session title, bridge, dialog, and listing helpers.
+//! Session title, bridge, dialog, listing, and start notice helpers.
 
 #[allow(clippy::wildcard_imports)] // tui split: shares the parent module scope
 use super::*;
+
+use chrono::{DateTime, Duration, Utc};
+use kage_core::protocol::NoticeLevel;
+
+use crate::auth::AuthStore;
+use crate::state::State;
 
 /// Run a plugin command through the coroutine bridge so its handler
 /// may call blocking `kage.ui.*` dialogs. Drives the suspend/resume
@@ -153,7 +159,7 @@ pub(crate) fn service_dialog(
 
 fn dialog_error(commander: &Commander, text: String) {
     commander.publish(kage_core::protocol::HostEvent::Notice {
-        level: kage_core::protocol::NoticeLevel::Error,
+        level: NoticeLevel::Error,
         text,
         transient: false,
     });
@@ -478,5 +484,176 @@ pub(crate) fn register_block_renderers(rt: &PluginRuntime) {
             Some(builtin) => registry::register_builtin(builtin, factory),
             None => registry::register_custom(kind, factory),
         }
+    }
+}
+
+/// How far ahead an expiring OAuth credential is reported at startup.
+const OAUTH_EXPIRY_WARNING: Duration = Duration::days(3);
+
+/// Notices for the start screen: the version-updated line, a configured
+/// default model that does not resolve, OAuth credentials close to
+/// expiry, and auth failures recorded on earlier runs. `model` is the
+/// model kage picked on its own, `None` when `--model` chose it, which
+/// skips the default-model notice. Records the running version as
+/// seen.
+pub(crate) fn start_notices(
+    registry: &ProviderRegistry,
+    model: Option<&str>,
+    now: DateTime<Utc>,
+) -> Vec<(NoticeLevel, String)> {
+    let mut notices = Vec::new();
+    let current = env!("CARGO_PKG_VERSION");
+    match crate::state::record_version_seen(current) {
+        Ok(Some(prev)) => notices.push((
+            NoticeLevel::Info,
+            format!("kage updated: {prev} -> {current}"),
+        )),
+        Ok(None) => {}
+        Err(err) => notices.push((NoticeLevel::Error, format!("state: {err}"))),
+    }
+    if let Some(using) = model
+        && let Some(configured) = crate::configured_default_model()
+        && let Some(notice) = default_model_notice(registry, &configured, using)
+    {
+        notices.push((NoticeLevel::Warning, notice));
+    }
+    let auth = AuthStore::load().unwrap_or_else(|_| AuthStore::empty());
+    notices.extend(
+        credential_notices(&State::load(), &auth, now)
+            .into_iter()
+            .map(|text| (NoticeLevel::Warning, text)),
+    );
+    notices
+}
+
+/// Notice for a `configured` default model that does not resolve,
+/// naming `using` as the model picked instead.
+fn default_model_notice(
+    registry: &ProviderRegistry,
+    configured: &str,
+    using: &str,
+) -> Option<String> {
+    if registry.resolve(configured).is_ok() {
+        return None;
+    }
+    let provider = configured.split_once(':').map_or(configured, |(p, _)| p);
+    Some(format!(
+        "default_model `{configured}` is unavailable (no credentials for `{provider}`). \
+         Using `{using}`. Run /login {provider} to connect it."
+    ))
+}
+
+/// Warnings for OAuth credentials in `auth` expiring within
+/// [`OAUTH_EXPIRY_WARNING`] and for the auth failures `state` recorded.
+fn credential_notices(state: &State, auth: &AuthStore, now: DateTime<Utc>) -> Vec<String> {
+    let expiring = auth
+        .oauth_expiring(OAUTH_EXPIRY_WARNING, now)
+        .map(|(provider, at)| {
+            let when = match (at - now).num_days() {
+                _ if at <= now => "has expired".to_owned(),
+                0 => "expires within a day".to_owned(),
+                1 => "expires in 1 day".to_owned(),
+                days => format!("expires in {days} days"),
+            };
+            format!("the `{provider}` login {when}. Run /login {provider}.")
+        });
+    let failed = state.auth_failures.iter().map(|(provider, detail)| {
+        format!(
+            "`{provider}` rejected the credentials on the last run ({}). Run /login {provider}.",
+            detail.trim_end_matches('.')
+        )
+    });
+    expiring.chain(failed).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use kage_core::LoopError;
+    use kage_core::protocol::RunOutcome;
+    use kage_provider::testing::MockProvider;
+
+    use super::*;
+    use crate::auth::OAuthCredential;
+
+    fn now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-09-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn oauth_expiring_in(days: i64) -> OAuthCredential {
+        OAuthCredential {
+            access_token: "fake-access".into(),
+            expires_at: Some(now() + Duration::days(days)),
+            ..OAuthCredential::default()
+        }
+    }
+
+    #[test]
+    fn recorded_auth_failure_names_the_login_fix() {
+        let mut state = State::empty();
+        state.note_run(
+            "zai-coding-plan:glm-4.6",
+            &RunOutcome::Failed {
+                error: LoopError::Auth {
+                    message: "status 401".into(),
+                },
+            },
+        );
+        let notices = credential_notices(&state, &AuthStore::empty(), now());
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("status 401"), "{notices:?}");
+        assert!(
+            notices[0].contains("Run /login zai-coding-plan."),
+            "{notices:?}"
+        );
+    }
+
+    #[test]
+    fn completed_run_clears_the_failure_notice() {
+        let mut state = State::empty();
+        let failed = RunOutcome::Failed {
+            error: LoopError::Auth {
+                message: "bad key".into(),
+            },
+        };
+        state.note_run("zai:glm-4.6", &failed);
+        state.note_run("zai:glm-4.6", &RunOutcome::Completed);
+        assert!(credential_notices(&state, &AuthStore::empty(), now()).is_empty());
+    }
+
+    #[test]
+    fn oauth_expiring_soon_warns_and_later_does_not() {
+        let mut auth = AuthStore::empty();
+        auth.set_oauth("anthropic", oauth_expiring_in(1));
+        auth.set_oauth("openai", oauth_expiring_in(10));
+        let notices = credential_notices(&State::empty(), &auth, now());
+        assert_eq!(
+            notices,
+            ["the `anthropic` login expires in 1 day. Run /login anthropic."]
+        );
+    }
+
+    #[test]
+    fn expired_oauth_warns_and_api_keys_do_not() {
+        let mut auth = AuthStore::empty();
+        auth.set_oauth("anthropic", oauth_expiring_in(-1));
+        auth.set_api_key("zai", "fake-key");
+        let notices = credential_notices(&State::empty(), &auth, now());
+        assert_eq!(
+            notices,
+            ["the `anthropic` login has expired. Run /login anthropic."]
+        );
+    }
+
+    #[test]
+    fn default_model_notice_only_when_configured_model_does_not_resolve() {
+        let registry = ProviderRegistry::new().with(Arc::new(MockProvider::replaying(Vec::new())));
+        assert!(default_model_notice(&registry, "mock:m", "mock:m").is_none());
+        let notice = default_model_notice(&registry, "anthropic:claude-sonnet-4-6", "mock:m")
+            .expect("unresolved default warns");
+        assert!(notice.contains("anthropic:claude-sonnet-4-6"), "{notice}");
+        assert!(notice.contains("Using `mock:m`"), "{notice}");
+        assert!(notice.contains("Run /login anthropic"), "{notice}");
     }
 }

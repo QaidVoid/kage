@@ -234,6 +234,24 @@ impl AuthStore {
         self.providers.get(provider).map(Credential::raw_token)
     }
 
+    /// OAuth credentials whose access token expires within `window` of
+    /// `now` (or already has), as `(provider, expires_at)` pairs in
+    /// provider order.
+    pub fn oauth_expiring(
+        &self,
+        window: Duration,
+        now: DateTime<Utc>,
+    ) -> impl Iterator<Item = (&str, DateTime<Utc>)> {
+        self.providers
+            .iter()
+            .filter_map(move |(id, cred)| match cred {
+                Credential::Oauth(o) if o.expires_within(window, now) => {
+                    o.expires_at.map(|at| (id.as_str(), at))
+                }
+                _ => None,
+            })
+    }
+
     /// Insert or replace `provider`'s credential. Returns the previous
     /// value, if any.
     pub fn set(&mut self, provider: &str, credential: Credential) -> Option<Credential> {

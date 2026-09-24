@@ -1,14 +1,18 @@
 //! Persistent UI state, separate from credentials.
 //!
-//! [`State`] currently only remembers the last provider-qualified model
-//! the user picked, but the file format is versioned so future entries
-//! (last session id, layout preferences, etc.) can land without churn.
+//! [`State`] remembers the last provider-qualified model the user
+//! picked, the last binary version seen, and the last authentication
+//! failure per provider. The file format is versioned so future entries
+//! can land without churn.
 //! Persisted at `$XDG_STATE_HOME/kage/state.json` (default
 //! `~/.local/state/kage/state.json`).
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use kage_core::LoopError;
+use kage_core::protocol::RunOutcome;
 use serde::{Deserialize, Serialize};
 
 const FORMAT_VERSION: u32 = 1;
@@ -26,6 +30,11 @@ pub struct State {
     /// the TUI. Compared on startup to detect upgrades.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen_version: Option<String>,
+    /// Detail of the last authentication failure per provider id.
+    /// Cleared by a completed run on that provider or a successful
+    /// `:login <provider>`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub auth_failures: BTreeMap<String, String>,
 }
 
 fn default_version() -> u32 {
@@ -40,6 +49,27 @@ impl State {
             version: FORMAT_VERSION,
             last_model: None,
             last_seen_version: None,
+            auth_failures: BTreeMap::new(),
+        }
+    }
+
+    /// Apply a finished run on the provider-qualified `model` to
+    /// [`Self::auth_failures`]: an authentication failure is recorded
+    /// against its provider and a completed run clears it. Returns
+    /// whether anything changed.
+    pub fn note_run(&mut self, model: &str, outcome: &RunOutcome) -> bool {
+        let provider = model.split_once(':').map_or(model, |(p, _)| p);
+        match outcome {
+            RunOutcome::Completed => self.auth_failures.remove(provider).is_some(),
+            RunOutcome::Failed {
+                error: LoopError::Auth { message },
+            } if !provider.is_empty() => {
+                let prev = self
+                    .auth_failures
+                    .insert(provider.to_owned(), message.clone());
+                prev.as_ref() != Some(message)
+            }
+            _ => false,
         }
     }
 
@@ -123,6 +153,26 @@ pub fn record_version_seen(current: &str) -> Result<Option<String>, String> {
     Ok(prev)
 }
 
+/// Apply a finished run to the saved auth failures (see
+/// [`State::note_run`]), writing the file only when it changed.
+pub fn record_run_outcome(model: &str, outcome: &RunOutcome) -> Result<(), String> {
+    let mut state = State::load();
+    if state.note_run(model, outcome) {
+        state.save()?;
+    }
+    Ok(())
+}
+
+/// Forget the saved auth failure for `provider`, writing the file only
+/// when one was recorded.
+pub fn clear_auth_failure(provider: &str) -> Result<(), String> {
+    let mut state = State::load();
+    if state.auth_failures.remove(provider).is_some() {
+        state.save()?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
@@ -157,6 +207,7 @@ mod tests {
         let raw = fs::read_to_string(&path).unwrap();
         assert!(!raw.contains("last_model"), "raw was: {raw}");
         assert!(!raw.contains("last_seen_version"), "raw was: {raw}");
+        assert!(!raw.contains("auth_failures"), "raw was: {raw}");
     }
 
     #[test]
@@ -178,5 +229,55 @@ mod tests {
         let state = State::load_from(&path).unwrap();
         assert!(state.last_seen_version.is_none());
         assert_eq!(state.last_model.as_deref(), Some("x:y"));
+    }
+
+    fn auth_failed(message: &str) -> RunOutcome {
+        RunOutcome::Failed {
+            error: LoopError::Auth {
+                message: message.into(),
+            },
+        }
+    }
+
+    #[test]
+    fn auth_failure_is_recorded_per_provider_and_persists() {
+        let mut state = State::empty();
+        assert!(state.note_run("zai-coding-plan:glm-4.6", &auth_failed("status 401")));
+        assert!(!state.note_run("zai-coding-plan:glm-4.6", &auth_failed("status 401")));
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        state.save_to(&path).unwrap();
+        let read = State::load_from(&path).unwrap();
+        assert_eq!(
+            read.auth_failures
+                .get("zai-coding-plan")
+                .map(String::as_str),
+            Some("status 401")
+        );
+    }
+
+    #[test]
+    fn completed_run_clears_only_its_provider() {
+        let mut state = State::empty();
+        state.note_run("zai:glm-4.6", &auth_failed("bad key"));
+        state.note_run("openai:gpt-4o", &auth_failed("bad key"));
+        assert!(state.note_run("zai:glm-4.6", &RunOutcome::Completed));
+        assert!(!state.auth_failures.contains_key("zai"));
+        assert!(state.auth_failures.contains_key("openai"));
+        assert!(!state.note_run("zai:glm-4.6", &RunOutcome::Completed));
+    }
+
+    #[test]
+    fn other_outcomes_leave_failures_alone() {
+        let mut state = State::empty();
+        state.note_run("zai:glm-4.6", &auth_failed("bad key"));
+        let provider_error = RunOutcome::Failed {
+            error: LoopError::Provider {
+                message: "boom".into(),
+            },
+        };
+        assert!(!state.note_run("zai:glm-4.6", &provider_error));
+        assert!(!state.note_run("zai:glm-4.6", &RunOutcome::Cancelled));
+        assert!(state.auth_failures.contains_key("zai"));
     }
 }

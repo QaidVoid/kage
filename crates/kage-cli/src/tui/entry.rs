@@ -25,25 +25,6 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     let toasts = shared_toasts();
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-    // First TUI launch after an upgrade gets a one-line scrollback notice.
-    // A read or write failure here is non-fatal: the worst case is missing
-    // the notice on this boot.
-    let current_version = env!("CARGO_PKG_VERSION");
-    match crate::state::record_version_seen(current_version) {
-        Ok(Some(prev)) => {
-            let mut buf = lock(&buffer);
-            buf.push_custom(
-                "kage:notify",
-                format!("kage updated: {prev} -> {current_version}"),
-                false,
-            );
-        }
-        Ok(None) => {}
-        Err(err) => {
-            let mut buf = lock(&buffer);
-            buf.push_custom("kage:error", format!("state: {err}"), false);
-        }
-    }
     crate::trust::confirm_project_trust(&workdir);
     // Load user/project config. A malformed config is surfaced as an
     // inline error block rather than silently falling back to defaults.
@@ -152,10 +133,13 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    if model.is_none()
-        && let Some(notice) = crate::default_model_notice(&registry, &qualified_model)
-    {
-        lock(&buffer).push_custom("kage:notify", notice, false);
+    let defaulted = model.is_none().then_some(qualified_model.as_str());
+    for (level, text) in support::start_notices(&registry, defaulted, chrono::Utc::now()) {
+        let kind = match level {
+            NoticeLevel::Error => "kage:error",
+            NoticeLevel::Info | NoticeLevel::Warning => "kage:notify",
+        };
+        lock(&buffer).push_custom(kind, text, false);
     }
     let registry = Arc::new(registry);
 
@@ -348,7 +332,11 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     {
         let config_for_login = app_config.clone();
         app.set_login_runner(std::sync::Arc::new(move |provider| {
-            crate::auth::run_login(provider, &config_for_login) == ExitCode::SUCCESS
+            let ok = crate::auth::run_login(provider, &config_for_login) == ExitCode::SUCCESS;
+            if ok && let Some(provider) = provider {
+                let _ = crate::state::clear_auth_failure(provider);
+            }
+            ok
         }));
     }
     app.set_workdir(workdir.clone());

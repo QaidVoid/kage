@@ -32,8 +32,8 @@ pub(crate) use std::sync::Arc;
 
 pub(crate) use chrono::Utc;
 pub(crate) use clap::{Parser, Subcommand};
-pub(crate) use kage_core::{CancelFlag, Content, LoopEvent, Message, Role};
-pub(crate) use kage_loop::{AgentContext, Hooks, LoopConfig, run};
+pub(crate) use kage_core::{Content, LoopEvent, Message, Role};
+pub(crate) use kage_loop::{AgentContext, LoopConfig};
 pub(crate) use kage_provider::{
     ProviderRegistry, anthropic, compat, gemini, openai, openai_responses,
 };
@@ -42,8 +42,7 @@ pub(crate) use kage_session::{
 };
 pub(crate) use kage_tools::builtin_registry;
 
-pub(crate) use crate::plugins::{PluginEventHooks, setup_runtime};
-pub(crate) use crate::session::SessionRecordingHooks;
+pub(crate) use crate::plugins::setup_runtime;
 
 /// kage: a minimal, extensible coding agent.
 #[derive(Parser, Debug)]
@@ -393,7 +392,7 @@ fn run_print_mode(cli: Cli) -> ExitCode {
     if let Some(rt) = plugin_runtime.as_ref() {
         apply_plugin_tools(&mut tools, rt);
     }
-    let (_mcp_manager, mcp_errors) =
+    let (mcp_manager, mcp_errors) =
         mcp::spawn_and_register(&mut tools, &workdir, plugin_runtime.as_deref());
     for (server, err) in mcp_errors {
         eprintln!("kage: mcp `{server}`: {err}");
@@ -438,6 +437,7 @@ fn run_print_mode(cli: Cli) -> ExitCode {
         prompt,
         writer,
         plugin_runtime,
+        Some(mcp_manager),
         cli.json,
     );
     if let Err(err) = state::record_last_model(&model) {
@@ -451,7 +451,7 @@ mod cli_printing;
 mod cli_query;
 mod sigint;
 
-pub(crate) use cli_loop_run::{execute_print_run, run_with_hooks};
+pub(crate) use cli_loop_run::execute_print_run;
 pub(crate) use cli_printing::{print_envelope_json, print_event};
 pub(crate) use cli_query::{run_fork, run_resume, run_search};
 
@@ -1108,7 +1108,7 @@ mod tests {
         fn stream(
             &self,
             _req: kage_provider::StreamRequest,
-            _cancel: &CancelFlag,
+            _cancel: &kage_core::CancelFlag,
         ) -> Result<kage_provider::EventStream, kage_provider::ProviderError> {
             Ok(Box::new(std::iter::empty()))
         }

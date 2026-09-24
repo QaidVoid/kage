@@ -123,9 +123,16 @@ pub trait Hooks {
     /// Return `None` to let the tool execute normally. Return `Some(output)`
     /// to short-circuit: the loop skips the real tool and treats the
     /// returned [`ToolOutput`] as if the tool produced it. Use this for
-    /// permission denials, dry-run modes, or test fixtures.
-    fn before_tool_call(&mut self, name: &str, input: &serde_json::Value) -> Option<ToolOutput> {
-        let _ = (name, input);
+    /// permission denials, dry-run modes, or test fixtures. `id` is the
+    /// provider's correlation id for the call, the same id carried by
+    /// [`LoopEvent::ToolCallStart`].
+    fn before_tool_call(
+        &mut self,
+        id: &kage_core::ToolCallId,
+        name: &str,
+        input: &serde_json::Value,
+    ) -> Option<ToolOutput> {
+        let _ = (id, name, input);
         None
     }
 
@@ -301,6 +308,7 @@ mod tests {
     impl Hooks for Recording {
         fn before_tool_call(
             &mut self,
+            _id: &kage_core::ToolCallId,
             name: &str,
             _input: &serde_json::Value,
         ) -> Option<ToolOutput> {
@@ -335,8 +343,12 @@ mod tests {
     fn noop_hooks_compile_with_defaults() {
         let mut h = NoopHooks;
         assert!(
-            h.before_tool_call("read", &serde_json::Value::Null)
-                .is_none()
+            h.before_tool_call(
+                &kage_core::ToolCallId::new("call"),
+                "read",
+                &serde_json::Value::Null
+            )
+            .is_none()
         );
         let out = ToolOutput {
             is_error: false,
@@ -358,7 +370,11 @@ mod tests {
     #[test]
     fn recording_hook_captures_calls() {
         let mut h = Recording::default();
-        h.before_tool_call("bash", &serde_json::json!({}));
+        h.before_tool_call(
+            &kage_core::ToolCallId::new("call"),
+            "bash",
+            &serde_json::json!({}),
+        );
         h.after_tool_call(
             "bash",
             ToolOutput {

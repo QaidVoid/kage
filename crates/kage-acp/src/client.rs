@@ -482,7 +482,7 @@ mod tests {
     struct EchoAgent;
 
     impl Agent for EchoAgent {
-        fn initialize(&mut self, _req: InitializeRequest) -> InitializeResponse {
+        fn initialize(&self, _req: InitializeRequest) -> InitializeResponse {
             InitializeResponse {
                 protocol_version: PROTOCOL_VERSION,
                 agent_capabilities: AgentCapabilities::default(),
@@ -491,14 +491,14 @@ mod tests {
             }
         }
 
-        fn new_session(&mut self, _req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+        fn new_session(&self, _req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
             Ok(NewSessionResponse {
                 session_id: "s1".to_owned(),
             })
         }
 
         fn prompt(
-            &mut self,
+            &self,
             req: PromptRequest,
             ctx: &PromptContext,
         ) -> Result<PromptResponse, RpcError> {
@@ -518,13 +518,16 @@ mod tests {
                 stop_reason: crate::acp::StopReason::EndTurn,
             })
         }
+
+        fn cancel(&self, _session_id: &str) {}
     }
 
     #[test]
     fn consumes_an_upstream_acp_agent() {
         let (srv_r, cli_w) = std::io::pipe().unwrap();
         let (cli_r, srv_w) = std::io::pipe().unwrap();
-        let server = thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, EchoAgent));
+        let server =
+            thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, |_| EchoAgent));
 
         let cancel = CancelFlag::new();
         let stream = run_turn(
@@ -563,7 +566,7 @@ mod tests {
     struct PermissionAgent;
 
     impl Agent for PermissionAgent {
-        fn initialize(&mut self, _req: InitializeRequest) -> InitializeResponse {
+        fn initialize(&self, _req: InitializeRequest) -> InitializeResponse {
             InitializeResponse {
                 protocol_version: PROTOCOL_VERSION,
                 agent_capabilities: AgentCapabilities::default(),
@@ -572,20 +575,28 @@ mod tests {
             }
         }
 
-        fn new_session(&mut self, _req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+        fn new_session(&self, _req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
             Ok(NewSessionResponse {
                 session_id: "s1".to_owned(),
             })
         }
 
         fn prompt(
-            &mut self,
+            &self,
             _req: PromptRequest,
             ctx: &PromptContext,
         ) -> Result<PromptResponse, RpcError> {
-            let decision = ctx
-                .permission()
-                .request("bash", serde_json::json!({"cmd": "ls"}));
+            let decision = crate::agent::request_permission(
+                ctx.peer(),
+                ctx.session_id(),
+                crate::acp::ToolCallUpdate {
+                    tool_call_id: "call-1".to_owned(),
+                    raw_input: Some(serde_json::json!({"cmd": "ls"})),
+                    ..crate::acp::ToolCallUpdate::default()
+                },
+                "bash",
+                &|| false,
+            );
             let verdict = match decision {
                 crate::agent::PermissionDecision::Allow => "allowed",
                 crate::agent::PermissionDecision::Deny(_) => "denied",
@@ -597,6 +608,8 @@ mod tests {
                 stop_reason: crate::acp::StopReason::EndTurn,
             })
         }
+
+        fn cancel(&self, _session_id: &str) {}
     }
 
     #[test]
@@ -604,7 +617,7 @@ mod tests {
         let (srv_r, cli_w) = std::io::pipe().unwrap();
         let (cli_r, srv_w) = std::io::pipe().unwrap();
         let server =
-            thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, PermissionAgent));
+            thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, |_| PermissionAgent));
 
         let cancel = CancelFlag::new();
         let stream = run_turn(
@@ -632,7 +645,7 @@ mod tests {
         let (srv_r, cli_w) = std::io::pipe().unwrap();
         let (cli_r, srv_w) = std::io::pipe().unwrap();
         let server =
-            thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, PermissionAgent));
+            thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, |_| PermissionAgent));
 
         let resolver: PermissionResolver = Arc::new(|_req| PermissionDecision::Allow);
         let cancel = CancelFlag::new();

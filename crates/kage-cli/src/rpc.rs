@@ -1,19 +1,17 @@
 //! `kage rpc`: a spec-conformant Agent Client Protocol agent.
 //!
-//! Speaks real ACP (newline-delimited JSON-RPC 2.0 over stdio,
-//! protocol version 1) so editors that speak ACP - Zed, the bundled
-//! Neovim client, anything built on the spec - can drive kage.
-//! [`kage_acp::agent`] owns the protocol; this module is the
-//! [`Agent`]: it bootstraps a session per `cwd`, runs the loop on
-//! `session/prompt`, maps each [`kage_core::LoopEvent`] to a
-//! `session/update`, and gates every tool call through the client via
-//! `session/request_permission`.
+//! Speaks ACP (newline-delimited JSON-RPC 2.0 over stdio, protocol
+//! version 1) so editors that speak ACP can drive kage. Every ACP session
+//! is an engine session: prompts become engine commands, and a bus
+//! subscriber turns engine events into `session/update` notifications and
+//! `session/request_permission` requests.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 
 use kage_acp::acp::{
     AgentCapabilities, ContentBlock, Implementation, InitializeRequest, InitializeResponse,
@@ -21,31 +19,45 @@ use kage_acp::acp::{
     PromptCapabilities, PromptRequest, PromptResponse, SessionUpdate, StopReason, ToolCall,
     ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
 };
-use kage_acp::agent::{AcpPermission, Agent, PermissionDecision, PromptContext, serve_agent};
-use kage_core::permissions::{PermissionAction, PermissionsConfig};
-use kage_core::{
-    CancelFlag, Content, LoopEvent, Message, Role, StopReason as CoreStopReason, ToolOutput,
+use kage_acp::agent::{Agent, PermissionDecision, PromptContext, send_update, serve_agent};
+use kage_core::permissions::PermissionAction;
+use kage_core::protocol::{
+    Command, CommandKind, Delivery, Envelope, Event, HostEvent, PermissionDecision as Decision,
+    RunOutcome,
 };
-use kage_jsonrpc::RpcError;
-use kage_loop::{AgentContext, Hooks, LoopConfig};
-use kage_plugin::PluginRuntime;
+use kage_core::sync::lock;
+use kage_core::{Content, LoopEvent, Role, SessionId, StopReason as CoreStopReason};
+use kage_jsonrpc::{Peer, RpcError};
+use kage_loop::{AgentContext, LoopConfig};
 use kage_provider::ProviderRegistry;
-use kage_session::{SessionId, SessionWriter};
-use kage_tools::{ToolRegistry, builtin_registry};
+use kage_session::SessionWriter;
+use kage_tools::builtin_registry;
 
+use crate::engine::{Commander, Engine, Recorder, SessionSpec};
+use crate::permissions::PermissionGate;
 use crate::runtime_env;
 
 /// Entry point for the `Rpc` subcommand.
 pub(crate) fn run(model_override: Option<&str>, system_role: &str) -> ExitCode {
-    let agent = match CliAcpAgent::new(model_override, system_role) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("kage: rpc: {e}");
-            return ExitCode::from(1);
-        }
-    };
+    let registry = crate::build_provider_registry();
+    if !crate::has_usable_provider(&registry) && model_override.is_none() {
+        eprintln!(
+            "kage: rpc: no provider credentials found; run `kage auth login` or set an API-key env var"
+        );
+        return ExitCode::from(1);
+    }
+    let default_model =
+        model_override.map_or_else(|| crate::default_model(&registry), str::to_owned);
+    if let Err(e) = registry.resolve(&default_model) {
+        eprintln!("kage: rpc: cannot resolve model {default_model}: {e}");
+        return ExitCode::from(1);
+    }
+    let registry = Arc::new(registry);
     let reader = BufReader::new(std::io::stdin());
-    match serve_agent(reader, std::io::stdout(), agent) {
+    let result = serve_agent(reader, std::io::stdout(), |peer| {
+        CliAcpAgent::new(registry, default_model, system_role.to_owned(), peer)
+    });
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("kage: rpc: {e}");
@@ -54,122 +66,88 @@ pub(crate) fn run(model_override: Option<&str>, system_role: &str) -> ExitCode {
     }
 }
 
-/// The innermost loop hook: `[permissions]` config rules are checked
-/// first (an allow skips the client round-trip, a deny refuses
-/// locally), and an `ask` verdict or a tool with no entry falls
-/// through to the client gate (`session/request_permission`) exactly
-/// as before the config existed. It is the base layer (session and
-/// plugin hooks wrap it and forward `before_tool_call` down), so it
-/// mirrors `NoopHooks` for every other callback.
-struct GateHooks {
-    rules: PermissionsConfig,
-    gate: AcpPermission,
+/// Maps between the session ids a client uses and engine session ids. A
+/// client may load a session by an id prefix, so the two can differ.
+#[derive(Default)]
+struct Ids {
+    by_client: HashMap<String, SessionId>,
+    by_engine: HashMap<SessionId, String>,
 }
 
-impl Hooks for GateHooks {
-    fn before_tool_call(&mut self, name: &str, input: &serde_json::Value) -> Option<ToolOutput> {
-        // No entry for the tool: the client gate stays authoritative,
-        // exactly as before `[permissions]` existed. Only a configured
-        // section can pre-allow (skip the round-trip) or pre-deny.
-        if !self.rules.tools.contains_key(name) {
-            return self.ask_client(name, input.clone());
-        }
-        let subject = PermissionsConfig::subject_for(input);
-        match self.rules.check(name, &subject) {
-            PermissionAction::Allow => None,
-            PermissionAction::Deny => Some(ToolOutput {
-                is_error: true,
-                text: format!("`{name}`: permission denied by [permissions.tools.{name}]"),
-                structured: None,
-                terminate: false,
-            }),
-            PermissionAction::Ask => self.ask_client(name, input.clone()),
-        }
+impl Ids {
+    fn insert(&mut self, client: String, engine: SessionId) {
+        self.by_engine.insert(engine, client.clone());
+        self.by_client.insert(client, engine);
     }
 }
 
-impl GateHooks {
-    /// Forward one call to the client's permission gate and map its
-    /// verdict to the loop's short-circuit shape.
-    fn ask_client(&mut self, name: &str, input: serde_json::Value) -> Option<ToolOutput> {
-        match self.gate.request(name, input) {
-            PermissionDecision::Allow => None,
-            PermissionDecision::Deny(reason) => {
-                let detail = reason.map_or_else(String::new, |r| format!(": {r}"));
-                Some(ToolOutput {
-                    is_error: true,
-                    text: format!("permission denied by client{detail}"),
-                    structured: None,
-                    terminate: false,
-                })
-            }
-        }
-    }
+/// How a prompt's run ended, handed from the bridge to the waiting prompt.
+struct PromptEnd {
+    outcome: RunOutcome,
+    stop: Option<CoreStopReason>,
 }
 
-/// Per-session runtime state, built on `session/new`.
-struct Session {
-    model: String,
-    system_prompt: String,
-    tools: ToolRegistry,
-    plugin_runtime: Option<Arc<PluginRuntime>>,
-    cx: AgentContext,
-    workdir: PathBuf,
-    record_path: Option<PathBuf>,
-    /// `[permissions]` rules resolved from the layered config at
-    /// session construction; consulted before the client gate.
-    permissions: PermissionsConfig,
-    /// Owns the session's MCP child processes; kept alive so their
-    /// tools stay valid, and drained for restart / hot-refresh before
-    /// each prompt.
-    mcp_manager: kage_mcp::McpManager,
-}
+type Waiters = Arc<Mutex<HashMap<SessionId, mpsc::Sender<PromptEnd>>>>;
 
 /// The ACP agent `kage rpc` exposes.
 struct CliAcpAgent {
-    registry: ProviderRegistry,
+    engine: Engine,
+    registry: Arc<ProviderRegistry>,
     default_model: String,
     system_role: String,
-    sessions: HashMap<String, Session>,
+    ids: Arc<Mutex<Ids>>,
+    waiters: Waiters,
 }
 
 impl CliAcpAgent {
-    fn new(model_override: Option<&str>, system_role: &str) -> Result<Self, String> {
-        let registry = crate::build_provider_registry();
-        if registry.ids().count() == 0 {
-            return Err(
-                "no provider credentials found; run `kage auth login` or set an API-key env var"
-                    .to_owned(),
-            );
-        }
-        let default_model =
-            model_override.map_or_else(|| crate::default_model(&registry), str::to_owned);
-        registry
-            .resolve(&default_model)
-            .map_err(|e| format!("cannot resolve model {default_model}: {e}"))?;
-        Ok(Self {
+    fn new(
+        registry: Arc<ProviderRegistry>,
+        default_model: String,
+        system_role: String,
+        peer: Peer,
+    ) -> Self {
+        let engine = Engine::start(Arc::clone(&registry));
+        let ids = Arc::new(Mutex::new(Ids::default()));
+        let waiters = Waiters::default();
+        let mut bridge = Bridge {
+            peer,
+            commander: engine.commander(),
+            ids: Arc::clone(&ids),
+            waiters: Arc::clone(&waiters),
+            seen: HashMap::new(),
+            stops: HashMap::new(),
+            asks: HashMap::new(),
+        };
+        engine.subscribe(Box::new(move |envelope| bridge.handle(envelope)));
+        Self {
+            engine,
             registry,
             default_model,
-            system_role: system_role.to_owned(),
-            sessions: HashMap::new(),
-        })
+            system_role,
+            ids,
+            waiters,
+        }
     }
 
-    fn build_session(&self, cwd: &str) -> Result<Session, RpcError> {
+    fn engine_id(&self, client_id: &str) -> Result<SessionId, RpcError> {
+        lock(&self.ids)
+            .by_client
+            .get(client_id)
+            .copied()
+            .ok_or_else(|| RpcError::new(-32602, format!("unknown session {client_id}")))
+    }
+
+    /// Everything an engine session for `cwd` runs with. The caller fills
+    /// in the history and recorder.
+    fn session_spec(&self, id: SessionId, cwd: &str) -> Result<SessionSpec, RpcError> {
         let workdir = if cwd.is_empty() {
             std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
         } else {
             PathBuf::from(cwd)
         };
         let model = self.default_model.clone();
-        let resolved = self
-            .registry
-            .resolve(&model)
-            .map_err(|e| RpcError::internal(format!("resolve {model}: {e}")))?
-            .model
-            .clone();
         let bare = runtime_env::build_system_prompt(&self.system_role, &workdir, &model, &[]);
-        let plugin_runtime = match crate::plugins_dir() {
+        let plugins = match crate::plugins_dir() {
             Ok(dir) => {
                 crate::plugins::setup_runtime(&dir, &workdir, &model, &bare).unwrap_or_else(|e| {
                     eprintln!("kage: {e}");
@@ -181,159 +159,54 @@ impl CliAcpAgent {
                 None
             }
         };
-        let skills = crate::load_skills(&workdir, plugin_runtime.as_deref());
+        let skills = crate::load_skills(&workdir, plugins.as_deref());
         let system_prompt =
             runtime_env::build_system_prompt(&self.system_role, &workdir, &model, &skills);
         let mut tools = builtin_registry();
-        if let Some(rt) = plugin_runtime.as_ref() {
+        if let Some(rt) = plugins.as_ref() {
             crate::apply_plugin_tools(&mut tools, rt);
         }
-        let (mcp_manager, mcp_errors) =
-            crate::mcp::spawn_and_register(&mut tools, &workdir, plugin_runtime.as_deref());
+        let (mcp, mcp_errors) =
+            crate::mcp::spawn_and_register(&mut tools, &workdir, plugins.as_deref());
         for (server, err) in mcp_errors {
             eprintln!("kage: mcp `{server}`: {err}");
         }
-        // Layered `[permissions]` for this session: validated now so a
-        // broken rule set fails session/new instead of being silently
-        // misapplied, seeded for path confinement, and kept for the
-        // pre-client gate in `prompt`.
-        let permissions = kage_core::config::Config::load_layered(&workdir)
-            .map(|c| c.permissions)
-            .unwrap_or_default();
-        permissions
+        let config = kage_core::config::Config::load_layered(&workdir).unwrap_or_else(|e| {
+            eprintln!("kage: rpc: {e}; using defaults");
+            kage_core::config::Config::default()
+        });
+        config
+            .permissions
             .validate()
             .map_err(|e| RpcError::internal(format!("permissions: {e}")))?;
-        let mut cx = AgentContext::new(resolved, &system_prompt).with_workdir(&workdir);
-        if permissions.confine_paths {
+        let mut cx = AgentContext::new(model.clone(), &system_prompt).with_workdir(&workdir);
+        if config.permissions.confine_paths {
             cx = cx.with_confine_paths();
         }
-        if let Some(w) = runtime_env::context_window_for(&self.registry, &model) {
-            cx = cx.with_context_window(w);
+        if let Some(window) = runtime_env::context_window_for(&self.registry, &model) {
+            cx = cx.with_context_window(window);
         }
-        if let Some(o) = runtime_env::max_output_tokens_for(&self.registry, &model) {
-            cx = cx.with_max_output_tokens(o);
-        }
-        Ok(Session {
+        Ok(SessionSpec {
+            id,
             model,
-            system_prompt,
-            tools,
-            plugin_runtime,
             cx,
-            workdir,
-            record_path: None,
-            permissions,
-            mcp_manager,
+            recorder: None,
+            tools,
+            gate: PermissionGate::new(config.permissions).with_fallback(PermissionAction::Ask),
+            loop_cfg: LoopConfig {
+                compaction_threshold: config.loop_settings.compaction_threshold,
+                parallel_tools: false,
+                ..LoopConfig::default()
+            },
+            plugins,
+            mcp: Some(mcp),
+            interactive: true,
         })
     }
 }
 
-fn loop_config(workdir: &std::path::Path) -> LoopConfig {
-    // Tools run strictly sequentially so the client sees one
-    // permission prompt at a time.
-    match kage_core::config::Config::load_layered(workdir) {
-        Ok(c) => LoopConfig {
-            compaction_threshold: c.loop_settings.compaction_threshold,
-            parallel_tools: false,
-            ..LoopConfig::default()
-        },
-        Err(e) => {
-            eprintln!("kage: rpc: {e}; using defaults");
-            LoopConfig {
-                parallel_tools: false,
-                ..LoopConfig::default()
-            }
-        }
-    }
-}
-
-fn turn_writer(
-    model: &str,
-    system_prompt: &str,
-    path: &mut Option<PathBuf>,
-) -> Option<SessionWriter> {
-    if let Some(existing) = path.clone() {
-        return SessionWriter::open(&existing)
-            .map_err(|e| eprintln!("kage: rpc: session open: {e}"))
-            .ok();
-    }
-    match crate::open_session(model, system_prompt) {
-        Ok(w) => {
-            *path = Some(w.path().to_path_buf());
-            Some(w)
-        }
-        Err(e) => {
-            eprintln!("kage: rpc: session: {e}");
-            None
-        }
-    }
-}
-
-/// Translate a loop event into the matching ACP `session/update`.
-/// `None` for events ACP has no streaming slot for (message
-/// boundaries, compaction, errors handled via the prompt result).
-fn to_update(event: &LoopEvent) -> Option<SessionUpdate> {
-    match event {
-        LoopEvent::TextDelta { delta, .. } => {
-            Some(SessionUpdate::AgentMessageChunk(MessageChunk {
-                content: ContentBlock::text(delta.clone()),
-            }))
-        }
-        LoopEvent::ThinkingDelta { delta, .. } => {
-            Some(SessionUpdate::AgentThoughtChunk(MessageChunk {
-                content: ContentBlock::text(delta.clone()),
-            }))
-        }
-        LoopEvent::ToolCallStart {
-            id,
-            name,
-            input_partial,
-        }
-        | LoopEvent::ToolCallArgsDelta {
-            id,
-            name,
-            input_partial,
-        } => Some(SessionUpdate::ToolCall(ToolCall {
-            tool_call_id: id.to_string(),
-            title: name.clone(),
-            kind: ToolKind::Other,
-            status: ToolCallStatus::InProgress,
-            content: Vec::new(),
-            raw_input: Some(input_partial.clone()),
-        })),
-        LoopEvent::ToolCallEnd { id, output } => {
-            Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
-                tool_call_id: id.to_string(),
-                status: Some(if output.is_error {
-                    ToolCallStatus::Failed
-                } else {
-                    ToolCallStatus::Completed
-                }),
-                content: vec![ToolCallContent::Content(MessageChunk {
-                    content: ContentBlock::text(output.text.clone()),
-                })],
-                raw_output: output.structured.clone(),
-            }))
-        }
-        _ => None,
-    }
-}
-
-/// Map the loop's terminal state onto the ACP prompt stop reason.
-/// Cancellation wins over whatever the stream reported; a turn that hit
-/// the output-token cap surfaces as `MaxTokens` so editors can warn the
-/// user the reply was cut off; every other ending is an ordinary turn.
-fn acp_stop_reason(cancelled: bool, last: Option<CoreStopReason>) -> StopReason {
-    if cancelled {
-        return StopReason::Cancelled;
-    }
-    match last {
-        Some(CoreStopReason::MaxTokens) => StopReason::MaxTokens,
-        _ => StopReason::EndTurn,
-    }
-}
-
 impl Agent for CliAcpAgent {
-    fn initialize(&mut self, _req: InitializeRequest) -> InitializeResponse {
+    fn initialize(&self, _req: InitializeRequest) -> InitializeResponse {
         InitializeResponse {
             protocol_version: PROTOCOL_VERSION,
             agent_capabilities: AgentCapabilities {
@@ -349,34 +222,32 @@ impl Agent for CliAcpAgent {
         }
     }
 
-    fn new_session(&mut self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
-        let session = self.build_session(&req.cwd)?;
-        let id = SessionId::new().to_string();
-        self.sessions.insert(id.clone(), session);
-        Ok(NewSessionResponse { session_id: id })
+    fn new_session(&self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+        let (path, mut header) =
+            crate::plan_session(&self.default_model, "").map_err(RpcError::internal)?;
+        let id = header.session;
+        let mut spec = self.session_spec(id, &req.cwd)?;
+        header.cwd.clone_from(&spec.cx.workdir);
+        header.system_prompt.clone_from(&spec.cx.system_prompt);
+        spec.recorder = Some(Recorder::planned(path, header, spec.plugins.clone()));
+        lock(&self.ids).insert(id.to_string(), id);
+        self.engine.open(spec);
+        Ok(NewSessionResponse {
+            session_id: id.to_string(),
+        })
     }
 
-    fn load_session(
-        &mut self,
-        req: LoadSessionRequest,
-        ctx: &PromptContext,
-    ) -> Result<(), RpcError> {
+    fn load_session(&self, req: LoadSessionRequest, ctx: &PromptContext) -> Result<(), RpcError> {
         let dir = crate::sessions_dir().map_err(RpcError::internal)?;
         let path = kage_session::find_by_prefix(&dir, &req.session_id)
             .map_err(|e| RpcError::internal(e.to_string()))?
             .ok_or_else(|| RpcError::new(-32602, format!("unknown session {}", req.session_id)))?;
+        let id = crate::engine::session_id_of(&path).ok_or_else(|| {
+            RpcError::internal(format!("bad session file name {}", path.display()))
+        })?;
         let replay = kage_session::replay(&path).map_err(|e| RpcError::internal(e.to_string()))?;
-        let mut session = self.build_session(&req.cwd)?;
         for message in &replay.history {
-            let text = message
-                .content
-                .iter()
-                .filter_map(|c| match c {
-                    Content::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            let text = crate::cli_loop_run::first_user_text(message);
             if text.is_empty() {
                 continue;
             }
@@ -389,129 +260,343 @@ impl Agent for CliAcpAgent {
                 _ => {}
             }
         }
-        session.cx.history = replay.history;
-        session.record_path = Some(path);
-        self.sessions.insert(req.session_id, session);
+        if lock(&self.ids).by_engine.contains_key(&id) {
+            lock(&self.ids).insert(req.session_id, id);
+            return Ok(());
+        }
+        let writer = SessionWriter::open(&path).map_err(|e| RpcError::internal(e.to_string()))?;
+        let mut spec = self.session_spec(id, &req.cwd)?;
+        spec.cx.history = replay.history;
+        spec.recorder = Some(Recorder::new(writer, spec.plugins.clone()));
+        lock(&self.ids).insert(req.session_id, id);
+        self.engine.open(spec);
         Ok(())
     }
 
-    fn prompt(
-        &mut self,
-        req: PromptRequest,
-        ctx: &PromptContext,
-    ) -> Result<PromptResponse, RpcError> {
-        let session = self
-            .sessions
-            .get_mut(&req.session_id)
-            .ok_or_else(|| RpcError::new(-32602, format!("unknown session {}", req.session_id)))?;
-
-        if let Some(rt) = session.plugin_runtime.as_ref() {
-            for name in rt.take_mcp_restarts() {
-                if let Err(e) = session.mcp_manager.restart(&name, &mut session.tools) {
-                    eprintln!("kage: mcp restart `{name}`: {e}");
-                }
-            }
-        }
-        for (server, err) in session.mcp_manager.refresh_into(&mut session.tools) {
-            eprintln!("kage: mcp `{server}`: {err}");
-        }
-
+    fn prompt(&self, req: PromptRequest, _ctx: &PromptContext) -> Result<PromptResponse, RpcError> {
+        let id = self.engine_id(&req.session_id)?;
         let text = req
             .prompt
             .iter()
             .filter_map(ContentBlock::as_text)
             .collect::<Vec<_>>()
             .join("\n");
-
-        let (provider, bare_model) = {
-            let resolved = self
-                .registry
-                .resolve(&session.model)
-                .map_err(|e| RpcError::internal(format!("resolve {}: {e}", session.model)))?;
-            (Arc::clone(resolved.provider), resolved.model.clone())
-        };
-        session.cx.model = bare_model;
-
-        let parent = session.cx.history.last().map(|m| m.id);
-        let user_msg = Message::new(Role::User, vec![Content::Text { text }], parent);
-        session.cx.history.push(user_msg.clone());
-
-        let writer = turn_writer(
-            &session.model,
-            &session.system_prompt,
-            &mut session.record_path,
-        );
-        let cfg = loop_config(&session.workdir);
-        let cancel_flag = CancelFlag::new();
-        let emit_cancel = cancel_flag.clone();
-        let mut last_stop: Option<CoreStopReason> = None;
-
-        let res = crate::run_with_hooks(
-            provider.as_ref(),
-            &session.tools,
-            &mut session.cx,
-            cfg,
-            &cancel_flag,
-            GateHooks {
-                rules: session.permissions.clone(),
-                gate: ctx.permission(),
+        let (done, end) = mpsc::channel();
+        lock(&self.waiters).insert(id, done);
+        self.engine.send(Command::to(
+            id,
+            CommandKind::Prompt {
+                content: vec![Content::Text { text }],
+                delivery: Delivery::Queue,
             },
-            &user_msg,
-            writer,
-            session.plugin_runtime.clone(),
-            |event| {
-                if ctx.is_cancelled() {
-                    emit_cancel.cancel();
-                }
-                if let LoopEvent::MessageEnd { stop_reason, .. } = &event {
-                    last_stop = Some(*stop_reason);
-                }
-                if let Some(update) = to_update(&event) {
-                    ctx.update(update);
-                }
-            },
-        );
-
-        match res {
-            Ok(()) => Ok(PromptResponse {
-                stop_reason: acp_stop_reason(ctx.is_cancelled(), last_stop),
+        ));
+        let end = end
+            .recv()
+            .map_err(|_| RpcError::internal("engine stopped"))?;
+        match end.outcome {
+            RunOutcome::Completed => Ok(PromptResponse {
+                stop_reason: stop_reason(end.stop),
             }),
-            Err(e) => Err(RpcError::internal(e.to_string())),
+            RunOutcome::Cancelled => Ok(PromptResponse {
+                stop_reason: StopReason::Cancelled,
+            }),
+            RunOutcome::Failed { error } => Err(RpcError::internal(error.to_string())),
         }
+    }
+
+    fn cancel(&self, session_id: &str) {
+        if let Ok(id) = self.engine_id(session_id) {
+            self.engine.send(Command::to(id, CommandKind::Cancel));
+        }
+    }
+}
+
+/// Turns engine events into ACP traffic for the sessions a client opened.
+struct Bridge {
+    peer: Peer,
+    commander: Commander,
+    ids: Arc<Mutex<Ids>>,
+    waiters: Waiters,
+    seen: HashMap<SessionId, HashSet<String>>,
+    stops: HashMap<SessionId, CoreStopReason>,
+    asks: HashMap<SessionId, Vec<Arc<AtomicBool>>>,
+}
+
+impl Bridge {
+    fn handle(&mut self, envelope: &Envelope) {
+        let session = envelope.session;
+        let Some(client_id) = lock(&self.ids).by_engine.get(&session).cloned() else {
+            return;
+        };
+        match &envelope.event {
+            Event::Loop(event) => {
+                if let LoopEvent::MessageEnd { stop_reason, .. } = event {
+                    self.stops.insert(session, *stop_reason);
+                }
+                let seen = self.seen.entry(session).or_default();
+                if let Some(update) = to_update(seen, event) {
+                    send_update(&self.peer, &client_id, update);
+                }
+            }
+            Event::Host(HostEvent::PermissionRequested {
+                request_id,
+                tool_call_id,
+                tool,
+                input,
+                ..
+            }) => {
+                let answered = Arc::new(AtomicBool::new(false));
+                self.asks
+                    .entry(session)
+                    .or_default()
+                    .push(Arc::clone(&answered));
+                let tool_call = ToolCallUpdate {
+                    tool_call_id: tool_call_id
+                        .as_ref()
+                        .map_or_else(String::new, ToString::to_string),
+                    title: Some(tool.clone()),
+                    kind: Some(tool_kind(tool)),
+                    status: Some(ToolCallStatus::Pending),
+                    raw_input: Some(input.clone()),
+                    ..ToolCallUpdate::default()
+                };
+                let peer = self.peer.clone();
+                let commander = self.commander.clone();
+                let request_id = *request_id;
+                let tool = tool.clone();
+                std::thread::spawn(move || {
+                    let decision = kage_acp::agent::request_permission(
+                        &peer,
+                        &client_id,
+                        tool_call,
+                        &tool,
+                        &|| answered.load(Ordering::SeqCst),
+                    );
+                    let decision = match decision {
+                        PermissionDecision::Allow => Decision::AllowOnce,
+                        PermissionDecision::Deny(_) => Decision::Deny,
+                    };
+                    commander.send(Command::to(
+                        session,
+                        CommandKind::ResolvePermission {
+                            request_id,
+                            decision,
+                        },
+                    ));
+                });
+            }
+            Event::Host(HostEvent::RunEnded { outcome }) => {
+                for answered in self.asks.remove(&session).unwrap_or_default() {
+                    answered.store(true, Ordering::SeqCst);
+                }
+                self.seen.remove(&session);
+                let stop = self.stops.remove(&session);
+                if let Some(waiter) = lock(&self.waiters).remove(&session) {
+                    let _ = waiter.send(PromptEnd {
+                        outcome: outcome.clone(),
+                        stop,
+                    });
+                }
+            }
+            Event::Host(_) => {}
+        }
+    }
+}
+
+/// Translate a loop event into the matching ACP `session/update`. The
+/// first sighting of a tool call id sends `tool_call`; everything after
+/// it for that id is a `tool_call_update`.
+fn to_update(seen: &mut HashSet<String>, event: &LoopEvent) -> Option<SessionUpdate> {
+    match event {
+        LoopEvent::TextDelta { delta, .. } => {
+            Some(SessionUpdate::AgentMessageChunk(MessageChunk {
+                content: ContentBlock::text(delta.clone()),
+            }))
+        }
+        LoopEvent::ThinkingDelta { delta, .. } => {
+            Some(SessionUpdate::AgentThoughtChunk(MessageChunk {
+                content: ContentBlock::text(delta.clone()),
+            }))
+        }
+        LoopEvent::ToolCallArgsDelta {
+            id,
+            name,
+            input_partial,
+        }
+        | LoopEvent::ToolCallStart {
+            id,
+            name,
+            input_partial,
+        } => {
+            let status = if matches!(event, LoopEvent::ToolCallStart { .. }) {
+                ToolCallStatus::InProgress
+            } else {
+                ToolCallStatus::Pending
+            };
+            if seen.insert(id.to_string()) {
+                Some(SessionUpdate::ToolCall(ToolCall {
+                    tool_call_id: id.to_string(),
+                    title: name.clone(),
+                    kind: tool_kind(name),
+                    status,
+                    content: Vec::new(),
+                    raw_input: Some(input_partial.clone()),
+                }))
+            } else {
+                Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
+                    tool_call_id: id.to_string(),
+                    status: Some(status),
+                    raw_input: Some(input_partial.clone()),
+                    ..ToolCallUpdate::default()
+                }))
+            }
+        }
+        LoopEvent::ToolUpdate { id, update } => {
+            Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
+                tool_call_id: id.to_string(),
+                content: vec![text_content(update.content.clone())],
+                ..ToolCallUpdate::default()
+            }))
+        }
+        LoopEvent::ToolCallEnd { id, output } => {
+            Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
+                tool_call_id: id.to_string(),
+                status: Some(if output.is_error {
+                    ToolCallStatus::Failed
+                } else {
+                    ToolCallStatus::Completed
+                }),
+                content: vec![text_content(output.text.clone())],
+                raw_output: output.structured.clone(),
+                ..ToolCallUpdate::default()
+            }))
+        }
+        _ => None,
+    }
+}
+
+fn text_content(text: String) -> ToolCallContent {
+    ToolCallContent::Content(MessageChunk {
+        content: ContentBlock::text(text),
+    })
+}
+
+/// ACP kind hint for a built-in tool name.
+fn tool_kind(name: &str) -> ToolKind {
+    match name {
+        "read" | "ls" => ToolKind::Read,
+        "grep" | "find" => ToolKind::Search,
+        "write" | "edit" => ToolKind::Edit,
+        "bash" => ToolKind::Execute,
+        "web_fetch" => ToolKind::Fetch,
+        _ => ToolKind::Other,
+    }
+}
+
+/// A completed turn that hit the output-token cap surfaces as `MaxTokens`
+/// so editors can warn the reply was cut off; every other ending is an
+/// ordinary turn.
+fn stop_reason(last: Option<CoreStopReason>) -> StopReason {
+    match last {
+        Some(CoreStopReason::MaxTokens) => StopReason::MaxTokens,
+        _ => StopReason::EndTurn,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use kage_core::{MessageId, ToolCallId, ToolOutput, ToolUpdate};
+
     use super::*;
 
+    fn kind(update: &SessionUpdate) -> &'static str {
+        match update {
+            SessionUpdate::ToolCall(_) => "tool_call",
+            SessionUpdate::ToolCallUpdate(_) => "tool_call_update",
+            _ => "other",
+        }
+    }
+
     #[test]
-    fn cancelled_wins_over_stream_stop_reason() {
+    fn a_tool_call_is_announced_once_then_updated() {
+        let id = ToolCallId::new("call_1");
+        let events = [
+            LoopEvent::ToolCallArgsDelta {
+                id: id.clone(),
+                name: "bash".into(),
+                input_partial: serde_json::json!({}),
+            },
+            LoopEvent::ToolCallStart {
+                id: id.clone(),
+                name: "bash".into(),
+                input_partial: serde_json::json!({ "command": "ls" }),
+            },
+            LoopEvent::ToolUpdate {
+                id: id.clone(),
+                update: ToolUpdate {
+                    content: "a.txt".into(),
+                    structured: None,
+                },
+            },
+            LoopEvent::ToolCallEnd {
+                id,
+                output: ToolOutput::default(),
+            },
+        ];
+        let mut seen = HashSet::new();
+        let kinds: Vec<&str> = events
+            .iter()
+            .filter_map(|e| to_update(&mut seen, e))
+            .map(|u| kind(&u))
+            .collect();
         assert_eq!(
-            acp_stop_reason(true, Some(CoreStopReason::MaxTokens)),
-            StopReason::Cancelled
+            kinds,
+            [
+                "tool_call",
+                "tool_call_update",
+                "tool_call_update",
+                "tool_call_update"
+            ]
         );
-        assert_eq!(acp_stop_reason(true, None), StopReason::Cancelled);
+    }
+
+    #[test]
+    fn text_maps_to_agent_message_chunks() {
+        let update = to_update(
+            &mut HashSet::new(),
+            &LoopEvent::TextDelta {
+                id: MessageId::new(),
+                delta: "hi".into(),
+            },
+        );
+        assert!(matches!(update, Some(SessionUpdate::AgentMessageChunk(_))));
     }
 
     #[test]
     fn max_tokens_surfaces_as_max_tokens() {
         assert_eq!(
-            acp_stop_reason(false, Some(CoreStopReason::MaxTokens)),
+            stop_reason(Some(CoreStopReason::MaxTokens)),
             StopReason::MaxTokens
         );
     }
 
     #[test]
     fn ordinary_endings_map_to_end_turn() {
-        assert_eq!(acp_stop_reason(false, None), StopReason::EndTurn);
+        assert_eq!(stop_reason(None), StopReason::EndTurn);
         assert_eq!(
-            acp_stop_reason(false, Some(CoreStopReason::EndTurn)),
+            stop_reason(Some(CoreStopReason::EndTurn)),
             StopReason::EndTurn
         );
         assert_eq!(
-            acp_stop_reason(false, Some(CoreStopReason::ToolUse)),
+            stop_reason(Some(CoreStopReason::ToolUse)),
             StopReason::EndTurn
         );
+    }
+
+    #[test]
+    fn built_in_tools_get_kind_hints() {
+        assert_eq!(tool_kind("bash"), ToolKind::Execute);
+        assert_eq!(tool_kind("grep"), ToolKind::Search);
+        assert_eq!(tool_kind("github__create_issue"), ToolKind::Other);
     }
 }

@@ -1,6 +1,7 @@
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
+use kage_core::permissions::{PermissionAction, PermissionsConfig};
 use kage_core::protocol::{Envelope, Event, RunOutcome};
 use kage_core::{LoopEvent, StopReason, TokenUsage, ToolCallId, ToolOutput};
 use kage_provider::testing::MockProvider;
@@ -89,6 +90,7 @@ struct Harness {
     engine: Engine,
     events: Receiver<Envelope>,
     release: mpsc::Sender<()>,
+    tools: ToolRegistry,
 }
 
 fn harness(mock: MockProvider) -> Harness {
@@ -101,30 +103,39 @@ fn harness(mock: MockProvider) -> Harness {
     let collector: Subscriber = Box::new(move |envelope| {
         let _ = tx.send(envelope.clone());
     });
-    let engine = Engine::start(
-        EngineConfig {
-            registry: Arc::new(ProviderRegistry::new().with(Arc::new(mock))),
-            tools,
-            plugins: None,
-            loop_cfg: LoopConfig::default(),
-            gate: PermissionGate::new(kage_core::permissions::PermissionsConfig::default()),
-        },
-        vec![collector],
-    );
+    let engine = Engine::start(Arc::new(ProviderRegistry::new().with(Arc::new(mock))));
+    engine.subscribe(collector);
     Harness {
         engine,
         events,
         release,
+        tools,
     }
 }
 
-fn open(engine: &Engine, id: SessionId, recorder: Option<Recorder>) {
-    engine.open(SessionSpec {
-        id,
-        model: "mock:m".into(),
-        cx: AgentContext::new("m", "").with_workdir("/tmp"),
-        recorder,
-    });
+impl Harness {
+    fn open(&self, id: SessionId, recorder: Option<Recorder>) {
+        self.open_with(
+            id,
+            recorder,
+            PermissionGate::new(PermissionsConfig::default()),
+        );
+    }
+
+    fn open_with(&self, id: SessionId, recorder: Option<Recorder>, gate: PermissionGate) {
+        self.engine.open(SessionSpec {
+            id,
+            model: "mock:m".into(),
+            cx: AgentContext::new("m", "").with_workdir("/tmp"),
+            recorder,
+            tools: self.tools.clone(),
+            plugins: None,
+            gate,
+            loop_cfg: LoopConfig::default(),
+            mcp: None,
+            interactive: true,
+        });
+    }
 }
 
 fn prompt(engine: &Engine, session: SessionId, text: &str, delivery: Delivery) {
@@ -210,7 +221,7 @@ fn prompt_runs_and_records_the_history() {
     )
     .unwrap();
     let h = harness(MockProvider::replaying(text_turn("hello")));
-    open(&h.engine, id, Some(Recorder::new(writer, None)));
+    h.open(id, Some(Recorder::new(writer, None)));
     prompt(&h.engine, id, "hi", Delivery::Steer);
     let events = until_runs_end(&h.events, 1);
     h.engine.shutdown();
@@ -237,7 +248,7 @@ fn steered_prompt_is_delivered_at_the_next_turn() {
         text_turn("done"),
     ]));
     let id = SessionId::new();
-    open(&h.engine, id, None);
+    h.open(id, None);
     prompt(&h.engine, id, "start", Delivery::Steer);
     wait_for(&h.events, is_tool_start);
     prompt(&h.engine, id, "also this", Delivery::Steer);
@@ -271,7 +282,7 @@ fn queued_prompt_starts_a_new_run() {
         text_turn("second"),
     ]));
     let id = SessionId::new();
-    open(&h.engine, id, None);
+    h.open(id, None);
     prompt(&h.engine, id, "one", Delivery::Steer);
     wait_for(&h.events, is_tool_start);
     prompt(&h.engine, id, "two", Delivery::Queue);
@@ -293,7 +304,7 @@ fn queued_prompt_starts_a_new_run() {
 fn cancel_ends_the_run_as_cancelled() {
     let h = harness(MockProvider::replaying(tool_turn("gate")));
     let id = SessionId::new();
-    open(&h.engine, id, None);
+    h.open(id, None);
     prompt(&h.engine, id, "go", Delivery::Steer);
     wait_for(&h.events, is_tool_start);
     h.engine.send(Command::to(id, CommandKind::Cancel));
@@ -305,7 +316,7 @@ fn cancel_ends_the_run_as_cancelled() {
 fn shutdown_stops_a_running_session() {
     let h = harness(MockProvider::replaying(tool_turn("gate")));
     let id = SessionId::new();
-    open(&h.engine, id, None);
+    h.open(id, None);
     prompt(&h.engine, id, "go", Delivery::Steer);
     wait_for(&h.events, is_tool_start);
 
@@ -321,8 +332,8 @@ fn shutdown_stops_a_running_session() {
 fn sessions_are_sequenced_independently() {
     let h = harness(MockProvider::replaying(text_turn("ok")));
     let (a, b) = (SessionId::new(), SessionId::new());
-    open(&h.engine, a, None);
-    open(&h.engine, b, None);
+    h.open(a, None);
+    h.open(b, None);
     prompt(&h.engine, a, "a", Delivery::Steer);
     prompt(&h.engine, b, "b", Delivery::Steer);
     let events = until_runs_end(&h.events, 2);
@@ -335,4 +346,87 @@ fn sessions_are_sequenced_independently() {
             .collect();
         assert_eq!(seqs, (1..=seqs.len() as u64).collect::<Vec<_>>());
     }
+}
+
+fn ask_for_gate() -> PermissionGate {
+    let mut rules = PermissionsConfig::default();
+    rules.tools.insert(
+        "gate".into(),
+        kage_core::permissions::ToolPermissionRules {
+            default: PermissionAction::Ask,
+            allow: Vec::new(),
+            deny: Vec::new(),
+        },
+    );
+    PermissionGate::new(rules)
+}
+
+fn permission_request(events: &Receiver<Envelope>) -> (RequestId, Option<ToolCallId>) {
+    let seen = wait_for(events, |e| {
+        matches!(e.event, Event::Host(HostEvent::PermissionRequested { .. }))
+    });
+    match &seen.last().unwrap().event {
+        Event::Host(HostEvent::PermissionRequested {
+            request_id,
+            tool_call_id,
+            ..
+        }) => (*request_id, tool_call_id.clone()),
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn permission_asks_travel_over_the_bus() {
+    let h = harness(MockProvider::sequence(vec![
+        tool_turn("gate"),
+        text_turn("done"),
+    ]));
+    let id = SessionId::new();
+    h.open_with(id, None, ask_for_gate());
+    prompt(&h.engine, id, "go", Delivery::Steer);
+
+    let (request_id, call_id) = permission_request(&h.events);
+    assert_eq!(call_id, Some(ToolCallId::new("call_gate")));
+    h.engine.send(Command::to(
+        id,
+        CommandKind::ResolvePermission {
+            request_id,
+            decision: PermissionDecision::AllowOnce,
+        },
+    ));
+    h.release.send(()).unwrap();
+    let events = until_runs_end(&h.events, 1);
+
+    let output = events.iter().find_map(|e| match &e.event {
+        Event::Loop(LoopEvent::ToolCallEnd { output, .. }) => Some(output.clone()),
+        _ => None,
+    });
+    assert_eq!(output.unwrap().text, "released");
+}
+
+#[test]
+fn denied_permission_refuses_the_tool() {
+    let h = harness(MockProvider::sequence(vec![
+        tool_turn("gate"),
+        text_turn("done"),
+    ]));
+    let id = SessionId::new();
+    h.open_with(id, None, ask_for_gate());
+    prompt(&h.engine, id, "go", Delivery::Steer);
+
+    let (request_id, _) = permission_request(&h.events);
+    h.engine.send(Command::to(
+        id,
+        CommandKind::ResolvePermission {
+            request_id,
+            decision: PermissionDecision::Deny,
+        },
+    ));
+    let events = until_runs_end(&h.events, 1);
+
+    let output = events.iter().find_map(|e| match &e.event {
+        Event::Loop(LoopEvent::ToolCallEnd { output, .. }) => Some(output.clone()),
+        _ => None,
+    });
+    assert!(output.unwrap().is_error);
 }

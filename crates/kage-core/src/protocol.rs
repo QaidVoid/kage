@@ -124,6 +124,8 @@ pub enum HostEvent {
         /// What the permission rules matched against: a command line or
         /// compact JSON input.
         subject: String,
+        /// The full tool input.
+        input: serde_json::Value,
     },
     /// A permission request was answered or abandoned. Durable.
     PermissionResolved {
@@ -473,6 +475,7 @@ mod tests {
                 tool_call_id: Some(ToolCallId("call_1".into())),
                 tool: "bash".into(),
                 subject: "ls".into(),
+                input: serde_json::json!({ "command": "ls" }),
             }
             .into(),
             HostEvent::PermissionResolved {

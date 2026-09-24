@@ -237,8 +237,13 @@ impl<H: Hooks> PluginEventHooks<H> {
 }
 
 impl<H: Hooks> Hooks for PluginEventHooks<H> {
-    fn before_tool_call(&mut self, name: &str, input: &serde_json::Value) -> Option<ToolOutput> {
-        self.inner.before_tool_call(name, input)
+    fn before_tool_call(
+        &mut self,
+        id: &kage_core::ToolCallId,
+        name: &str,
+        input: &serde_json::Value,
+    ) -> Option<ToolOutput> {
+        self.inner.before_tool_call(id, name, input)
     }
 
     fn after_tool_call(&mut self, name: &str, output: ToolOutput) -> ToolOutput {

@@ -25,13 +25,17 @@ struct Inner {
 }
 
 impl Bus {
-    pub(crate) fn new(subscribers: Vec<Subscriber>) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             inner: Mutex::new(Inner {
                 seqs: HashMap::new(),
-                subscribers,
+                subscribers: Vec::new(),
             }),
         }
+    }
+
+    pub(crate) fn subscribe(&self, subscriber: Subscriber) {
+        lock(&self.inner).subscribers.push(subscriber);
     }
 
     pub(crate) fn publish(&self, session: SessionId, event: impl Into<Event>) {

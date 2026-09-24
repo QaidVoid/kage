@@ -55,7 +55,7 @@ impl Run {
     pub(super) fn spawn(self, done: mpsc::Sender<Input>) {
         thread::spawn(move || {
             let finished = self.execute();
-            let _ = done.send(Input::Finished(finished));
+            let _ = done.send(Input::Finished(Box::new(finished)));
         });
     }
 
@@ -181,8 +181,13 @@ struct RunHooks {
 }
 
 impl Hooks for RunHooks {
-    fn before_tool_call(&mut self, name: &str, input: &serde_json::Value) -> Option<ToolOutput> {
-        self.gate.before_tool_call(name, input)
+    fn before_tool_call(
+        &mut self,
+        id: &kage_core::ToolCallId,
+        name: &str,
+        input: &serde_json::Value,
+    ) -> Option<ToolOutput> {
+        self.gate.before_tool_call(id, name, input)
     }
 
     fn get_steering(&mut self) -> Option<String> {

@@ -1,35 +1,29 @@
 //! ACP agent server.
 //!
 //! Drives an injected [`Agent`] over the [`kage_jsonrpc`] peer, conformant
-//! with the published ACP spec: it answers `initialize`,
-//! `session/new`, `session/prompt`, and handles the `session/cancel`
-//! notification, streaming progress back as `session/update`
-//! notifications. `session/load` is rejected until that capability
-//! lands.
+//! with the published ACP spec: it answers `initialize`, `session/new`,
+//! `session/load` and `session/prompt`, forwards the `session/cancel`
+//! notification, and lets the agent stream `session/update`
+//! notifications and issue `session/request_permission` requests.
 //!
-//! A prompt turn runs on its own worker thread so the dispatch loop
-//! keeps draining inbound messages - that is what lets a
-//! `session/cancel` take effect mid-turn and (once wired) lets the
-//! agent issue its own `session/request_permission` requests without
-//! deadlocking.
+//! Every request except `initialize` runs on its own thread, so the
+//! dispatch loop keeps draining inbound messages: a `session/cancel`
+//! always lands, and a slow `session/new` never blocks a running prompt.
 
-use std::collections::HashMap;
 use std::io::{BufRead, Write};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 
-use kage_core::sync::lock;
 use kage_jsonrpc::{Inbound, Peer, RpcError, connect};
 
 use crate::acp::{
     InitializeRequest, InitializeResponse, LoadSessionRequest, NewSessionRequest,
     NewSessionResponse, PermissionOption, PermissionOptionKind, PermissionOutcome, PromptRequest,
     PromptResponse, RequestPermissionRequest, RequestPermissionResponse, SessionNotification,
-    SessionUpdate, ToolCallStatus, ToolCallUpdate,
+    SessionUpdate, ToolCallUpdate,
 };
 
-/// The verdict the agent's `before_tool_call` hook acts on.
+/// The client's answer to a `session/request_permission`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermissionDecision {
     /// Run the tool call.
@@ -38,143 +32,104 @@ pub enum PermissionDecision {
     Deny(Option<String>),
 }
 
-/// A cloneable, `'static` handle that asks the client to allow or
-/// deny a tool call via `session/request_permission`. Detached from
-/// [`PromptContext`] so it can live inside the agent's loop hooks.
-#[derive(Clone)]
-pub struct AcpPermission {
-    peer: Peer,
-    session_id: String,
-    cancel: Arc<AtomicBool>,
-    next_id: Arc<std::sync::atomic::AtomicU64>,
-}
-
-impl AcpPermission {
-    /// Ask the client to permit a tool call. Blocks on
-    /// `session/request_permission` until the client answers or the
-    /// turn is cancelled. Never auto-approves: any error, cancel, or
-    /// rejection resolves to [`PermissionDecision::Deny`].
-    #[must_use]
-    pub fn request(&self, title: &str, raw_input: serde_json::Value) -> PermissionDecision {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let req = RequestPermissionRequest {
-            session_id: self.session_id.clone(),
-            tool_call: ToolCallUpdate {
-                tool_call_id: format!("call-{id}"),
-                status: Some(ToolCallStatus::Pending),
-                content: Vec::new(),
-                raw_output: Some(raw_input),
+/// Ask the client to allow or deny `tool_call`. Blocks until the client
+/// answers or `cancelled` returns `true`. Never auto-approves: any error,
+/// cancel, or rejection resolves to [`PermissionDecision::Deny`].
+pub fn request_permission(
+    peer: &Peer,
+    session_id: &str,
+    tool_call: ToolCallUpdate,
+    title: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> PermissionDecision {
+    let req = RequestPermissionRequest {
+        session_id: session_id.to_owned(),
+        tool_call,
+        options: vec![
+            PermissionOption {
+                option_id: "allow".to_owned(),
+                name: format!("Allow {title}"),
+                kind: PermissionOptionKind::AllowOnce,
             },
-            options: vec![
-                PermissionOption {
-                    option_id: "allow".to_owned(),
-                    name: format!("Allow {title}"),
-                    kind: PermissionOptionKind::AllowOnce,
-                },
-                PermissionOption {
-                    option_id: "reject".to_owned(),
-                    name: format!("Reject {title}"),
-                    kind: PermissionOptionKind::RejectOnce,
-                },
-            ],
-        };
-        let Ok(params) = serde_json::to_value(&req) else {
-            return PermissionDecision::Deny(Some("encode permission request".to_owned()));
-        };
-        let cancel = Arc::clone(&self.cancel);
-        let outcome =
-            self.peer
-                .request_cancellable("session/request_permission", params, &move || {
-                    cancel.load(Ordering::SeqCst)
-                });
-        match outcome {
-            Ok(value) => match serde_json::from_value::<RequestPermissionResponse>(value) {
-                Ok(resp) => match resp.outcome {
-                    PermissionOutcome::Selected(sel) if sel.option_id == "allow" => {
-                        PermissionDecision::Allow
-                    }
-                    PermissionOutcome::Selected(_) => {
-                        PermissionDecision::Deny(Some("rejected by client".to_owned()))
-                    }
-                    PermissionOutcome::Cancelled => {
-                        PermissionDecision::Deny(Some("cancelled".to_owned()))
-                    }
-                },
-                Err(e) => PermissionDecision::Deny(Some(format!("decode outcome: {e}"))),
+            PermissionOption {
+                option_id: "reject".to_owned(),
+                name: format!("Reject {title}"),
+                kind: PermissionOptionKind::RejectOnce,
             },
-            Err(e) => PermissionDecision::Deny(Some(e.message)),
-        }
+        ],
+    };
+    let Ok(params) = serde_json::to_value(&req) else {
+        return PermissionDecision::Deny(Some("encode permission request".to_owned()));
+    };
+    match peer.request_cancellable("session/request_permission", params, cancelled) {
+        Ok(value) => match serde_json::from_value::<RequestPermissionResponse>(value) {
+            Ok(resp) => match resp.outcome {
+                PermissionOutcome::Selected(sel) if sel.option_id == "allow" => {
+                    PermissionDecision::Allow
+                }
+                PermissionOutcome::Selected(_) => {
+                    PermissionDecision::Deny(Some("rejected by client".to_owned()))
+                }
+                PermissionOutcome::Cancelled => {
+                    PermissionDecision::Deny(Some("cancelled".to_owned()))
+                }
+            },
+            Err(e) => PermissionDecision::Deny(Some(format!("decode outcome: {e}"))),
+        },
+        Err(e) => PermissionDecision::Deny(Some(e.message)),
     }
 }
 
-/// Per-session cancel flags, keyed by session id.
-type Sessions = Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>;
-
-/// Handed to [`Agent::prompt`]: stream updates and observe
-/// cancellation for the running session.
+/// Handed to [`Agent::prompt`] and [`Agent::load_session`]: streams
+/// updates for one session.
 pub struct PromptContext {
     peer: Peer,
     session_id: String,
-    cancel: Arc<AtomicBool>,
-    next_call_id: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl PromptContext {
     /// Emit a `session/update` notification for this session.
     pub fn update(&self, update: SessionUpdate) {
-        let note = SessionNotification {
-            session_id: self.session_id.clone(),
-            update,
-        };
-        if let Ok(params) = serde_json::to_value(&note) {
-            let _ = self.peer.notify("session/update", params);
-        }
+        send_update(&self.peer, &self.session_id, update);
     }
 
-    /// Whether the client asked to cancel this turn.
-    #[must_use]
-    pub fn is_cancelled(&self) -> bool {
-        self.cancel.load(Ordering::SeqCst)
-    }
-
-    /// The underlying peer, for agent-initiated requests
-    /// (`session/request_permission`).
+    /// The underlying peer, for agent-initiated requests.
     #[must_use]
     pub fn peer(&self) -> &Peer {
         &self.peer
     }
 
-    /// The session this turn belongs to.
+    /// The session this call belongs to.
     #[must_use]
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
+}
 
-    /// A detached, cloneable permission handle for the agent's loop
-    /// hooks. It shares this turn's cancel flag and call-id counter.
-    #[must_use]
-    pub fn permission(&self) -> AcpPermission {
-        AcpPermission {
-            peer: self.peer.clone(),
-            session_id: self.session_id.clone(),
-            cancel: Arc::clone(&self.cancel),
-            next_id: Arc::clone(&self.next_call_id),
-        }
+/// Emit a `session/update` notification for `session_id` on `peer`.
+pub fn send_update(peer: &Peer, session_id: &str, update: SessionUpdate) {
+    let note = SessionNotification {
+        session_id: session_id.to_owned(),
+        update,
+    };
+    if let Ok(params) = serde_json::to_value(&note) {
+        let _ = peer.notify("session/update", params);
     }
 }
 
 /// The host-supplied agent the server drives. The server owns the
-/// protocol; this trait owns the agent.
-pub trait Agent: Send + 'static {
+/// protocol; this trait owns the agent. Methods take `&self` and may run
+/// concurrently on different sessions.
+pub trait Agent: Send + Sync + 'static {
     /// Handshake. Return the agent's capabilities and identity.
-    fn initialize(&mut self, req: InitializeRequest) -> InitializeResponse;
+    fn initialize(&self, req: InitializeRequest) -> InitializeResponse;
 
     /// Create a session for `cwd`.
     ///
     /// # Errors
     ///
     /// Returns an [`RpcError`] if a session cannot be created.
-    fn new_session(&mut self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError>;
+    fn new_session(&self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError>;
 
     /// Resume a previously recorded session, streaming its history
     /// back through `ctx` as `session/update` notifications. The
@@ -185,11 +140,7 @@ pub trait Agent: Send + 'static {
     ///
     /// Returns an [`RpcError`] if the session id is unknown or its
     /// history cannot be replayed.
-    fn load_session(
-        &mut self,
-        _req: LoadSessionRequest,
-        _ctx: &PromptContext,
-    ) -> Result<(), RpcError> {
+    fn load_session(&self, _req: LoadSessionRequest, _ctx: &PromptContext) -> Result<(), RpcError> {
         Err(RpcError::method_not_found("session/load"))
     }
 
@@ -200,11 +151,10 @@ pub trait Agent: Send + 'static {
     ///
     /// Returns an [`RpcError`] if the turn cannot start or fails
     /// irrecoverably (streamed progress already reached the client).
-    fn prompt(
-        &mut self,
-        req: PromptRequest,
-        ctx: &PromptContext,
-    ) -> Result<PromptResponse, RpcError>;
+    fn prompt(&self, req: PromptRequest, ctx: &PromptContext) -> Result<PromptResponse, RpcError>;
+
+    /// The client asked to cancel the running prompt of `session_id`.
+    fn cancel(&self, session_id: &str);
 }
 
 fn parse<T: serde::de::DeserializeOwned>(params: serde_json::Value) -> Result<T, RpcError> {
@@ -213,34 +163,34 @@ fn parse<T: serde::de::DeserializeOwned>(params: serde_json::Value) -> Result<T,
 }
 
 /// Serve the ACP agent protocol over `reader`/`writer` until the peer
-/// disconnects.
+/// disconnects. `make_agent` receives the peer so the agent can send
+/// notifications and requests outside a prompt call.
 ///
 /// # Errors
 ///
 /// Returns an [`RpcError`] only for a fatal transport failure; a
 /// clean disconnect is `Ok(())`.
-pub fn serve_agent<R, W, A>(reader: R, writer: W, agent: A) -> Result<(), RpcError>
+pub fn serve_agent<R, W, A, F>(reader: R, writer: W, make_agent: F) -> Result<(), RpcError>
 where
     R: BufRead + Send + 'static,
     W: Write + Send + 'static,
     A: Agent,
+    F: FnOnce(Peer) -> A,
 {
     let (peer, inbound, _reader) = connect(reader, writer);
-    let agent = Arc::new(Mutex::new(agent));
-    let sessions: Sessions = Arc::new(Mutex::new(HashMap::new()));
+    let agent = Arc::new(make_agent(peer.clone()));
 
     for message in inbound {
         match message {
             Inbound::Notification { method, params } => {
                 if method == "session/cancel"
                     && let Ok(c) = parse::<crate::acp::CancelNotification>(params)
-                    && let Some(flag) = lock(&sessions).get(&c.session_id)
                 {
-                    flag.store(true, Ordering::SeqCst);
+                    agent.cancel(&c.session_id);
                 }
             }
             Inbound::Request { id, method, params } => {
-                handle_request(&peer, &agent, &sessions, id, &method, params);
+                handle_request(&peer, &agent, id, &method, params);
             }
         }
     }
@@ -251,71 +201,48 @@ fn jval<T: serde::Serialize>(value: T) -> serde_json::Value {
     serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
 }
 
-/// Run a per-session operation (prompt or load) on a worker thread so
-/// the dispatch loop keeps draining inbound and the op can issue its
-/// own outgoing requests.
-fn spawn_op<A, F>(
-    peer: &Peer,
-    agent: &Arc<Mutex<A>>,
-    sessions: &Sessions,
-    id: serde_json::Value,
-    session_id: String,
-    op: F,
-) where
+/// Answer request `id` with `op`, run on its own thread.
+fn spawn_op<A, F>(peer: &Peer, agent: &Arc<A>, id: serde_json::Value, op: F)
+where
     A: Agent,
-    F: FnOnce(&mut A, &PromptContext) -> Result<serde_json::Value, RpcError> + Send + 'static,
+    F: FnOnce(&A) -> Result<serde_json::Value, RpcError> + Send + 'static,
 {
-    let flag = lock(sessions)
-        .entry(session_id.clone())
-        .or_insert_with(|| Arc::new(AtomicBool::new(false)))
-        .clone();
-    flag.store(false, Ordering::SeqCst);
-    let ctx = PromptContext {
-        peer: peer.clone(),
-        session_id,
-        cancel: flag,
-        next_call_id: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-    };
     let agent = Arc::clone(agent);
     let peer = peer.clone();
     thread::spawn(move || {
-        let mut guard = lock(&agent);
-        let outcome = op(&mut guard, &ctx);
+        let outcome = op(&agent);
         let _ = peer.respond(&id, outcome);
     });
 }
 
 fn handle_request<A: Agent>(
     peer: &Peer,
-    agent: &Arc<Mutex<A>>,
-    sessions: &Sessions,
+    agent: &Arc<A>,
     id: serde_json::Value,
     method: &str,
     params: serde_json::Value,
 ) {
     match method {
         "initialize" => {
-            let outcome =
-                parse::<InitializeRequest>(params).map(|req| jval(lock(agent).initialize(req)));
+            let outcome = parse::<InitializeRequest>(params).map(|req| jval(agent.initialize(req)));
             let _ = peer.respond(&id, outcome);
         }
-        "session/new" => {
-            let result =
-                parse::<NewSessionRequest>(params).and_then(|req| lock(agent).new_session(req));
-            if let Ok(resp) = &result {
-                lock(sessions).insert(resp.session_id.clone(), Arc::new(AtomicBool::new(false)));
+        "session/new" => match parse::<NewSessionRequest>(params) {
+            Err(e) => {
+                let _ = peer.respond(&id, Err(e));
             }
-            let _ = peer.respond(&id, result.map(jval));
-        }
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.new_session(req).map(jval)),
+        },
         "session/prompt" => match parse::<PromptRequest>(params) {
             Err(e) => {
                 let _ = peer.respond(&id, Err(e));
             }
             Ok(req) => {
-                let sid = req.session_id.clone();
-                spawn_op(peer, agent, sessions, id, sid, move |a, ctx| {
-                    a.prompt(req, ctx).map(jval)
-                });
+                let ctx = PromptContext {
+                    peer: peer.clone(),
+                    session_id: req.session_id.clone(),
+                };
+                spawn_op(peer, agent, id, move |a| a.prompt(req, &ctx).map(jval));
             }
         },
         "session/load" => match parse::<LoadSessionRequest>(params) {
@@ -323,9 +250,12 @@ fn handle_request<A: Agent>(
                 let _ = peer.respond(&id, Err(e));
             }
             Ok(req) => {
-                let sid = req.session_id.clone();
-                spawn_op(peer, agent, sessions, id, sid, move |a, ctx| {
-                    a.load_session(req, ctx).map(|()| serde_json::Value::Null)
+                let ctx = PromptContext {
+                    peer: peer.clone(),
+                    session_id: req.session_id.clone(),
+                };
+                spawn_op(peer, agent, id, move |a| {
+                    a.load_session(req, &ctx).map(|()| serde_json::Value::Null)
                 });
             }
         },
@@ -350,7 +280,7 @@ mod tests {
     struct MockAgent;
 
     impl Agent for MockAgent {
-        fn initialize(&mut self, req: InitializeRequest) -> InitializeResponse {
+        fn initialize(&self, req: InitializeRequest) -> InitializeResponse {
             assert_eq!(req.protocol_version, crate::acp::PROTOCOL_VERSION);
             InitializeResponse {
                 protocol_version: crate::acp::PROTOCOL_VERSION,
@@ -367,14 +297,14 @@ mod tests {
             }
         }
 
-        fn new_session(&mut self, _req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+        fn new_session(&self, _req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
             Ok(NewSessionResponse {
                 session_id: "sess-1".into(),
             })
         }
 
         fn prompt(
-            &mut self,
+            &self,
             req: PromptRequest,
             ctx: &PromptContext,
         ) -> Result<PromptResponse, RpcError> {
@@ -389,20 +319,19 @@ mod tests {
                 content: ContentBlock::text(format!("echo: {echoed}")),
             }));
             Ok(PromptResponse {
-                stop_reason: if ctx.is_cancelled() {
-                    StopReason::Cancelled
-                } else {
-                    StopReason::EndTurn
-                },
+                stop_reason: StopReason::EndTurn,
             })
         }
+
+        fn cancel(&self, _session_id: &str) {}
     }
 
     #[test]
     fn initialize_new_prompt_round_trip() {
         let (srv_r, cli_w) = std::io::pipe().unwrap();
         let (cli_r, srv_w) = std::io::pipe().unwrap();
-        let server = thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, MockAgent));
+        let server =
+            thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, |_| MockAgent));
 
         let (client, inbox, _h) = connect(BufReader::new(cli_r), cli_w);
 
@@ -450,7 +379,7 @@ mod tests {
     struct LoadAgent;
 
     impl Agent for LoadAgent {
-        fn initialize(&mut self, _req: InitializeRequest) -> InitializeResponse {
+        fn initialize(&self, _req: InitializeRequest) -> InitializeResponse {
             InitializeResponse {
                 protocol_version: crate::acp::PROTOCOL_VERSION,
                 agent_capabilities: AgentCapabilities {
@@ -462,14 +391,14 @@ mod tests {
             }
         }
 
-        fn new_session(&mut self, _r: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+        fn new_session(&self, _r: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
             Ok(NewSessionResponse {
                 session_id: "s1".into(),
             })
         }
 
         fn prompt(
-            &mut self,
+            &self,
             _r: PromptRequest,
             _c: &PromptContext,
         ) -> Result<PromptResponse, RpcError> {
@@ -478,8 +407,10 @@ mod tests {
             })
         }
 
+        fn cancel(&self, _session_id: &str) {}
+
         fn load_session(
-            &mut self,
+            &self,
             req: LoadSessionRequest,
             ctx: &PromptContext,
         ) -> Result<(), RpcError> {
@@ -494,7 +425,8 @@ mod tests {
     fn session_load_streams_history_then_resolves() {
         let (srv_r, cli_w) = std::io::pipe().unwrap();
         let (cli_r, srv_w) = std::io::pipe().unwrap();
-        let server = thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, LoadAgent));
+        let server =
+            thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, |_| LoadAgent));
         let (client, inbox, _h) = connect(BufReader::new(cli_r), cli_w);
 
         let res = client
@@ -521,7 +453,8 @@ mod tests {
     fn session_load_default_is_method_not_found() {
         let (srv_r, cli_w) = std::io::pipe().unwrap();
         let (cli_r, srv_w) = std::io::pipe().unwrap();
-        let server = thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, MockAgent));
+        let server =
+            thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, |_| MockAgent));
         let (client, _inbox, _h) = connect(BufReader::new(cli_r), cli_w);
         let err = client
             .request(
@@ -538,7 +471,8 @@ mod tests {
     fn unknown_method_is_method_not_found() {
         let (srv_r, cli_w) = std::io::pipe().unwrap();
         let (cli_r, srv_w) = std::io::pipe().unwrap();
-        let server = thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, MockAgent));
+        let server =
+            thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, |_| MockAgent));
         let (client, _inbox, _h) = connect(BufReader::new(cli_r), cli_w);
         let err = client
             .request("bogus/method", serde_json::Value::Null)

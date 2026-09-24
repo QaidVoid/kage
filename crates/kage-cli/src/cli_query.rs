@@ -94,7 +94,7 @@ pub(crate) fn run_resume(
     if let Some(rt) = plugin_runtime.as_ref() {
         apply_plugin_tools(&mut tools, rt);
     }
-    let (_mcp_manager, mcp_errors) =
+    let (mcp_manager, mcp_errors) =
         mcp::spawn_and_register(&mut tools, &workdir, plugin_runtime.as_deref());
     for (server, err) in mcp_errors {
         eprintln!("kage: mcp `{server}`: {err}");
@@ -133,6 +133,7 @@ pub(crate) fn run_resume(
         prompt.to_owned(),
         Some(writer),
         plugin_runtime,
+        Some(mcp_manager),
         json,
     );
     if let Err(err) = state::record_last_model(&model) {

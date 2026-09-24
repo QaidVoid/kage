@@ -1228,6 +1228,7 @@ struct OrderRecording {
 impl Hooks for OrderRecording {
     fn before_tool_call(
         &mut self,
+        _id: &kage_core::ToolCallId,
         name: &str,
         _input: &serde_json::Value,
     ) -> Option<kage_core::ToolOutput> {

@@ -1,11 +1,14 @@
 //! Persists a session's durable loop events to its JSONL file.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::Utc;
 use kage_core::{LoopEvent, Role, TokenUsage};
 use kage_plugin::PluginRuntime;
-use kage_session::{Compaction, EntryId, MessageEntry, SessionEntry, SessionError, SessionWriter};
+use kage_session::{
+    Compaction, EntryId, Header, MessageEntry, SessionEntry, SessionError, SessionWriter,
+};
 
 /// Writes every appended message and compaction of one session.
 ///
@@ -13,17 +16,54 @@ use kage_session::{Compaction, EntryId, MessageEntry, SessionEntry, SessionError
 /// them. Plugin session operations queued during a turn are written when
 /// the turn ends.
 pub(crate) struct Recorder {
-    writer: SessionWriter,
+    target: Target,
     plugins: Option<Arc<PluginRuntime>>,
     turn_usage: Option<TokenUsage>,
+}
+
+enum Target {
+    Open(SessionWriter),
+    /// Not created yet: the file appears with the first entry, so a
+    /// session nobody prompts leaves nothing on disk.
+    Planned {
+        path: PathBuf,
+        header: Box<Header>,
+    },
 }
 
 impl Recorder {
     pub(crate) fn new(writer: SessionWriter, plugins: Option<Arc<PluginRuntime>>) -> Self {
         Self {
-            writer,
+            target: Target::Open(writer),
             plugins,
             turn_usage: None,
+        }
+    }
+
+    /// Record to a new file at `path`, created on the first write.
+    pub(crate) fn planned(
+        path: PathBuf,
+        header: Header,
+        plugins: Option<Arc<PluginRuntime>>,
+    ) -> Self {
+        Self {
+            target: Target::Planned {
+                path,
+                header: Box::new(header),
+            },
+            plugins,
+            turn_usage: None,
+        }
+    }
+
+    fn writer(&mut self) -> Result<&mut SessionWriter, SessionError> {
+        if let Target::Planned { path, header } = &self.target {
+            let writer = SessionWriter::create(path.clone(), (**header).clone())?;
+            self.target = Target::Open(writer);
+        }
+        match &mut self.target {
+            Target::Open(writer) => Ok(writer),
+            Target::Planned { .. } => unreachable!("planned target was just opened"),
         }
     }
 
@@ -39,7 +79,7 @@ impl Recorder {
                 } else {
                     None
                 };
-                self.writer.append(&SessionEntry::Message(MessageEntry {
+                self.writer()?.append(&SessionEntry::Message(MessageEntry {
                     id: EntryId::new(),
                     ts: Utc::now(),
                     message: message.clone(),
@@ -50,7 +90,7 @@ impl Recorder {
                 kept,
                 summarized,
                 summary,
-            } => self.writer.append(&SessionEntry::Compaction(Compaction {
+            } => self.writer()?.append(&SessionEntry::Compaction(Compaction {
                 id: EntryId::new(),
                 ts: Utc::now(),
                 kept: *kept,
@@ -68,7 +108,7 @@ impl Recorder {
         };
         for op in plugins.take_pending_session_ops() {
             if let Some(entry) = crate::session::plugin_op_entry(op) {
-                self.writer.append(&entry)?;
+                self.writer()?.append(&entry)?;
             }
         }
         Ok(())

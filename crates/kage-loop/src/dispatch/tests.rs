@@ -370,6 +370,7 @@ fn before_tool_call_can_short_circuit_execution() {
     impl Hooks for Allowlist {
         fn before_tool_call(
             &mut self,
+            _id: &kage_core::ToolCallId,
             name: &str,
             _input: &serde_json::Value,
         ) -> Option<ToolOutput> {
@@ -568,6 +569,7 @@ fn parallel_dispatch_honors_before_tool_call_short_circuit() {
     impl Hooks for BlockSecond {
         fn before_tool_call(
             &mut self,
+            _id: &kage_core::ToolCallId,
             _name: &str,
             _input: &serde_json::Value,
         ) -> Option<ToolOutput> {

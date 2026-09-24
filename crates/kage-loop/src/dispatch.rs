@@ -186,7 +186,7 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
     let mut error: Option<LoopError> = None;
     for call in pending {
         let raw = if error.is_none() && !cancel.is_cancelled() {
-            let pre = hooks.before_tool_call(&call.name, &call.input);
+            let pre = hooks.before_tool_call(&call.id, &call.name, &call.input);
             if let Some(out) = pre {
                 Some(out)
             } else {
@@ -279,7 +279,7 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
     let mut slots: Vec<Slot> = Vec::with_capacity(pending.len());
     if !entry_cancelled {
         for call in &pending {
-            match hooks.before_tool_call(&call.name, &call.input) {
+            match hooks.before_tool_call(&call.id, &call.name, &call.input) {
                 Some(out) => slots.push(Slot::Short(out)),
                 None => slots.push(Slot::Run),
             }

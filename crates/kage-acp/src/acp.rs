@@ -356,17 +356,26 @@ pub struct ToolCall {
 }
 
 /// A `tool_call_update` (partial; only changed fields set).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCallUpdate {
     /// Correlation id.
     pub tool_call_id: String,
+    /// New title, if changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// New kind, if changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<ToolKind>,
     /// New status, if changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<ToolCallStatus>,
     /// Replacement content, if any.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content: Vec<ToolCallContent>,
+    /// Raw tool input, if changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_input: Option<serde_json::Value>,
     /// Raw tool output, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_output: Option<serde_json::Value>,

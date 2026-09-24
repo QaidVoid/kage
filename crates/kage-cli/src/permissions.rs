@@ -1,30 +1,41 @@
-//! Tool permission gate (`[permissions]`) for the TUI and print runs.
+//! Tool permission gate (`[permissions]`).
 //!
-//! [`PermissionGate`] implements [`kage_loop::Hooks::before_tool_call`]
-//! and is composed into the hook stack as the innermost layer, where
-//! the ACP client gate sits in `kage rpc`. With no `[permissions]`
-//! config every call returns `None` (allow), so unconfigured behavior
-//! is unchanged. A configured tool resolves through
-//! [`PermissionsConfig::check`]: deny synthesizes an error output,
-//! allow passes through, and ask blocks the worker until the host
-//! answers over the ask channel (TUI overlay) or, without one
-//! (print mode), denies with a message pointing at the config.
-
+//! [`PermissionGate`] implements [`kage_loop::Hooks::before_tool_call`].
+//! A configured tool resolves through [`PermissionsConfig::check`]; a tool
+//! without an entry gets the gate's fallback action (allow by default,
+//! ask for editor sessions). Deny synthesizes an error output, allow
+//! passes through, and ask blocks the run until an [`Asker`] delivers the
+//! answer, or, when there is none (print mode), denies with a message
+//! pointing at the config.
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{RecvTimeoutError, Sender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use kage_core::config::Config;
 use kage_core::permissions::{PermissionAction, PermissionsConfig};
+use kage_core::protocol::PermissionDecision;
 use kage_core::sync::lock;
-use kage_core::{CancelFlag, ToolOutput};
+use kage_core::{CancelFlag, ToolCallId, ToolOutput};
 use kage_loop::Hooks;
-use kage_tui::{PermissionAsk, PermissionDecision};
+use kage_tui::PermissionAsk;
 
 /// How long to wait between cancel-flag checks while parked on an
 /// ask. Same cadence the loop's cancelable sleeps use.
 const ASK_POLL: Duration = Duration::from_millis(100);
+
+/// A tool call waiting for an interactive decision.
+pub(crate) struct PermissionPrompt {
+    pub call_id: ToolCallId,
+    pub tool: String,
+    pub subject: String,
+    pub input: serde_json::Value,
+}
+
+/// Forwards a prompt to whoever can answer it and returns the channel the
+/// answer arrives on, or `None` when nobody is listening anymore.
+pub(crate) type Asker =
+    Arc<dyn Fn(PermissionPrompt) -> Option<Receiver<PermissionDecision>> + Send + Sync>;
 
 /// Allow / ask / deny gate over tool calls, shared across the hook
 /// instances of one session.
@@ -33,10 +44,12 @@ const ASK_POLL: Duration = Duration::from_millis(100);
 /// mutates every clone at once, and so the mutation can be persisted
 /// to the user config before the parked call resumes. Clone it per
 /// hook composition site; the ask channel and cancel flag are shared.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct PermissionGate {
     rules: Arc<Mutex<PermissionsConfig>>,
-    ask: Option<Sender<PermissionAsk>>,
+    ask: Option<Asker>,
+    /// Action for tools with no `[permissions.tools.<name>]` entry.
+    fallback: PermissionAction,
     cancel: CancelFlag,
     /// Session-scoped mode override. `Some(action)` short-circuits
     /// the per-tool rules for every call; `None` (the initial state)
@@ -59,6 +72,7 @@ impl PermissionGate {
         Self {
             rules: Arc::new(Mutex::new(rules)),
             ask: None,
+            fallback: PermissionAction::Allow,
             cancel: CancelFlag::new(),
             mode: Arc::new(Mutex::new(None)),
             config_path: None,
@@ -82,8 +96,30 @@ impl PermissionGate {
     /// verdict parks the worker on the host's decision instead of
     /// denying.
     #[must_use]
-    pub(crate) fn with_ask(mut self, ask: Sender<PermissionAsk>) -> Self {
-        self.ask = Some(ask);
+    pub(crate) fn with_ask(self, ask: Sender<PermissionAsk>) -> Self {
+        self.with_asker(Arc::new(move |prompt: PermissionPrompt| {
+            let (reply, answer) = std::sync::mpsc::channel();
+            ask.send(PermissionAsk {
+                tool: prompt.tool,
+                subject: prompt.subject,
+                reply,
+            })
+            .ok()
+            .map(|()| answer)
+        }))
+    }
+
+    /// Route `ask` verdicts to `asker` instead of denying them.
+    #[must_use]
+    pub(crate) fn with_asker(mut self, asker: Asker) -> Self {
+        self.ask = Some(asker);
+        self
+    }
+
+    /// Use `action` for tools the configured rules do not mention.
+    #[must_use]
+    pub(crate) fn with_fallback(mut self, action: PermissionAction) -> Self {
+        self.fallback = action;
         self
     }
 
@@ -106,24 +142,18 @@ impl PermissionGate {
     /// Resolve an `ask` verdict: forward to the host and park until
     /// it answers, the channel dies, or the run is cancelled. Returns
     /// `None` to run the tool or `Some(output)` to short-circuit.
-    fn ask_user(&self, tool: &str, subject: String) -> Option<ToolOutput> {
+    fn ask_user(&self, prompt: PermissionPrompt) -> Option<ToolOutput> {
         let Some(ask) = self.ask.as_ref() else {
-            return Some(non_interactive_output(tool));
+            return Some(non_interactive_output(&prompt.tool));
         };
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        if ask
-            .send(PermissionAsk {
-                tool: tool.to_owned(),
-                subject,
-                reply: reply_tx,
-            })
-            .is_err()
-        {
+        let tool = prompt.tool.clone();
+        let tool = tool.as_str();
+        let Some(reply_rx) = ask(prompt) else {
             return Some(error_output(
                 tool,
                 "permission prompt unavailable (host went away); denied",
             ));
-        }
+        };
         loop {
             match reply_rx.recv_timeout(ASK_POLL) {
                 Ok(PermissionDecision::AllowOnce) => return None,
@@ -194,26 +224,37 @@ fn save_allow_always(path: &Path, tool: &str) -> Result<(), String> {
 }
 
 impl Hooks for PermissionGate {
-    fn before_tool_call(&mut self, name: &str, input: &serde_json::Value) -> Option<ToolOutput> {
+    fn before_tool_call(
+        &mut self,
+        id: &ToolCallId,
+        name: &str,
+        input: &serde_json::Value,
+    ) -> Option<ToolOutput> {
         let subject = PermissionsConfig::subject_for(input);
-        if let Some(mode) = self.mode() {
-            return match mode {
-                PermissionAction::Allow => None,
-                PermissionAction::Deny => Some(error_output(
-                    name,
-                    "permission mode is deny this session (`:permission default` restores rules)",
-                )),
-                PermissionAction::Ask => self.ask_user(name, subject),
-            };
-        }
-        let action = lock(&self.rules).check(name, &subject);
+        let action = self.mode().unwrap_or_else(|| {
+            let rules = lock(&self.rules);
+            if rules.tools.contains_key(name) {
+                rules.check(name, &subject)
+            } else {
+                self.fallback
+            }
+        });
         match action {
             PermissionAction::Allow => None,
+            PermissionAction::Deny if self.mode().is_some() => Some(error_output(
+                name,
+                "permission mode is deny this session (`/permission default` restores rules)",
+            )),
             PermissionAction::Deny => Some(error_output(
                 name,
                 &format!("permission denied by [permissions.tools.{name}]"),
             )),
-            PermissionAction::Ask => self.ask_user(name, subject),
+            PermissionAction::Ask => self.ask_user(PermissionPrompt {
+                call_id: id.clone(),
+                tool: name.to_owned(),
+                subject,
+                input: input.clone(),
+            }),
         }
     }
 }
@@ -273,10 +314,17 @@ mod tests {
     #[test]
     fn no_config_allows_every_call() {
         let mut gate = PermissionGate::new(PermissionsConfig::default());
-        assert!(gate.before_tool_call("bash", &bash_input()).is_none());
         assert!(
-            gate.before_tool_call("write", &serde_json::json!({}))
+            gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
                 .is_none()
+        );
+        assert!(
+            gate.before_tool_call(
+                &kage_core::ToolCallId::new("call"),
+                "write",
+                &serde_json::json!({})
+            )
+            .is_none()
         );
     }
 
@@ -284,11 +332,16 @@ mod tests {
     fn mode_deny_overrides_allow_rules() {
         let mut gate = PermissionGate::new(rules_for(PermissionAction::Allow));
         gate.set_mode(Some(PermissionAction::Deny));
-        let out = gate.before_tool_call("bash", &bash_input()).unwrap();
+        let out = gate
+            .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+            .unwrap();
         assert!(out.is_error);
         assert!(out.text.contains("permission mode is deny"), "{}", out.text);
         gate.set_mode(None);
-        assert!(gate.before_tool_call("bash", &bash_input()).is_none());
+        assert!(
+            gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+                .is_none()
+        );
     }
 
     #[test]
@@ -299,7 +352,8 @@ mod tests {
         let (done_tx, done_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
             let mut gate = gate;
-            let out = gate.before_tool_call("bash", &bash_input());
+            let out =
+                gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input());
             let _ = done_tx.send(out.is_none());
         });
         let ask = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -313,14 +367,20 @@ mod tests {
         let gate = PermissionGate::new(rules_for(PermissionAction::Deny));
         let mut clone = gate.clone();
         gate.set_mode(Some(PermissionAction::Allow));
-        assert!(clone.before_tool_call("bash", &bash_input()).is_none());
+        assert!(
+            clone
+                .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+                .is_none()
+        );
         assert_eq!(clone.mode(), Some(PermissionAction::Allow));
     }
 
     #[test]
     fn deny_by_rule_synthesizes_error_output() {
         let mut gate = PermissionGate::new(rules_for(PermissionAction::Deny));
-        let out = gate.before_tool_call("bash", &bash_input()).unwrap();
+        let out = gate
+            .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+            .unwrap();
         assert!(out.is_error);
         assert_eq!(
             out.text,
@@ -331,7 +391,9 @@ mod tests {
     #[test]
     fn ask_without_channel_denies_non_interactively() {
         let mut gate = PermissionGate::new(rules_for(PermissionAction::Ask));
-        let out = gate.before_tool_call("bash", &bash_input()).unwrap();
+        let out = gate
+            .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+            .unwrap();
         assert!(out.is_error);
         assert!(out.text.contains("non-interactive"), "{}", out.text);
         assert!(
@@ -348,7 +410,8 @@ mod tests {
         let (done_tx, done_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
             let mut gate = gate;
-            let out = gate.before_tool_call("bash", &bash_input());
+            let out =
+                gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input());
             let _ = done_tx.send(out.is_none());
         });
         let ask = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -366,7 +429,8 @@ mod tests {
         let (done_tx, done_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
             let mut gate = gate;
-            let out = gate.before_tool_call("bash", &bash_input());
+            let out =
+                gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input());
             let _ = done_tx.send(out.map(|o| o.text));
         });
         let ask = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -391,7 +455,9 @@ mod tests {
         let (done_tx, done_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
             let mut gate = gate;
-            let allowed = gate.before_tool_call("bash", &bash_input()).is_none();
+            let allowed = gate
+                .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+                .is_none();
             let _ = done_tx.send(allowed);
         });
         let ask = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -400,7 +466,11 @@ mod tests {
         assert!(done_rx.recv_timeout(Duration::from_secs(5)).unwrap());
         // The in-memory rules flipped for every clone; no further ask.
         let mut gate2 = gate2;
-        assert!(gate2.before_tool_call("bash", &bash_input()).is_none());
+        assert!(
+            gate2
+                .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+                .is_none()
+        );
         assert_eq!(
             lock(&gate2.rules).check("bash", "anything"),
             PermissionAction::Allow
@@ -423,7 +493,8 @@ mod tests {
         let (done_tx, done_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
             let mut gate = gate;
-            let out = gate.before_tool_call("bash", &bash_input());
+            let out =
+                gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input());
             let _ = done_tx.send(out.map(|o| o.text));
         });
         let ask = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -446,7 +517,8 @@ mod tests {
         let (done_tx, done_rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
             let mut gate = gate;
-            let out = gate.before_tool_call("bash", &bash_input());
+            let out =
+                gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input());
             let _ = done_tx.send(out.map(|o| o.text));
         });
         // Receive the ask and drop its reply sender entirely.
@@ -467,8 +539,15 @@ mod tests {
         // the innermost layer under TuiHooks.
         let mut gate = PermissionGate::new(PermissionsConfig::default());
         let hooks: &mut dyn Hooks = &mut gate;
-        assert!(hooks.before_tool_call("bash", &bash_input()).is_none());
+        assert!(
+            hooks
+                .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+                .is_none()
+        );
         let noop: &mut dyn Hooks = &mut NoopHooks;
-        assert!(noop.before_tool_call("bash", &bash_input()).is_none());
+        assert!(
+            noop.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+                .is_none()
+        );
     }
 }

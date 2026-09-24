@@ -171,10 +171,11 @@ impl<H: Hooks> SessionRecordingHooks<H> {
 impl<H: Hooks> Hooks for SessionRecordingHooks<H> {
     fn before_tool_call(
         &mut self,
+        id: &kage_core::ToolCallId,
         name: &str,
         input: &serde_json::Value,
     ) -> Option<kage_core::ToolOutput> {
-        self.inner.before_tool_call(name, input)
+        self.inner.before_tool_call(id, name, input)
     }
 
     fn after_tool_call(
@@ -519,6 +520,7 @@ mod tests {
         impl Hooks for CountingInner {
             fn before_tool_call(
                 &mut self,
+                _id: &kage_core::ToolCallId,
                 _name: &str,
                 _input: &serde_json::Value,
             ) -> Option<ToolOutput> {
@@ -544,7 +546,11 @@ mod tests {
         let (_dir, writer, _) = temp_session();
         let _path = writer.path().to_path_buf();
         let mut hooks = SessionRecordingHooks::new(CountingInner::default(), writer);
-        let _ = hooks.before_tool_call("t", &serde_json::Value::Null);
+        let _ = hooks.before_tool_call(
+            &kage_core::ToolCallId::new("call"),
+            "t",
+            &serde_json::Value::Null,
+        );
         let _ = hooks.after_tool_call(
             "t",
             ToolOutput {

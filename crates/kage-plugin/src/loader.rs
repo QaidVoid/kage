@@ -1,12 +1,15 @@
 //! Discover and execute `*.lua` plugin files in a directory.
 //!
-//! [`load_dir`] first evaluates the embedded `_defaults.lua` in its own
-//! environment, then reads every `*.lua` file in `dir` and evaluates it
-//! inside the given [`PluginRuntime`], in file-name order, so plugins
-//! override the defaults. Each file is loaded independently: a broken
-//! plugin logs an error through the runtime's host log and is skipped
-//! while the next file proceeds. The function returns a summary the
-//! host can surface to the user.
+//! [`load_all`] first evaluates the embedded `_defaults.lua` in its own
+//! environment, then reads every `*.lua` file in the plugins directory
+//! and evaluates it inside the given [`PluginRuntime`], in file-name
+//! order, and finally evaluates the trusted `init.lua` when the runtime
+//! has a user dir (see [`crate::user`]). Each later layer overrides the
+//! earlier ones. Each file is loaded independently: a broken plugin or
+//! `init.lua` logs an error through the runtime's host log and the load
+//! proceeds. The function returns a summary the host can surface to the
+//! user. File stems starting with `@` are reserved for kage's own
+//! environments and are rejected.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,13 +31,16 @@ pub struct LoadReport {
     /// Plugin files skipped because a non-empty `[plugins] enabled`
     /// allowlist did not name them. Reported, never silently dropped.
     pub skipped: Vec<PathBuf>,
+    /// Outcome of the trusted `init.lua`, or `None` when there was none
+    /// to load.
+    pub init: Option<Result<(), String>>,
 }
 
 impl LoadReport {
-    /// True if every plugin file loaded successfully.
+    /// True if every plugin file and `init.lua` loaded successfully.
     #[must_use]
     pub fn all_ok(&self) -> bool {
-        self.failed.is_empty()
+        self.failed.is_empty() && !matches!(self.init, Some(Err(_)))
     }
 }
 
@@ -48,16 +54,41 @@ impl LoadReport {
 /// thread. Files are processed sorted by file name, so a plugin named
 /// `a.lua` always loads before `b.lua`.
 pub fn load_dir(dir: &Path, runtime: &PluginRuntime) -> Result<LoadReport, PluginError> {
-    let eval = Arc::clone(&runtime.eval);
-    let dir = dir.to_path_buf();
-    runtime.host.call(move |lua| load_on(lua, &dir, &eval))?
+    load_all(Some(dir), runtime)
 }
 
-/// Body of [`load_dir`], run on the owner thread.
-pub(crate) fn load_on(lua: &Lua, dir: &Path, eval: &EvalState) -> Result<LoadReport, PluginError> {
+/// Run the full load against `runtime`: `_defaults.lua`, the plugins in
+/// `plugins_dir` as [`load_dir`] does, then the trusted `init.lua` when
+/// the runtime has a user dir. `None` loads no plugins.
+pub fn load_all(
+    plugins_dir: Option<&Path>,
+    runtime: &PluginRuntime,
+) -> Result<LoadReport, PluginError> {
+    let eval = Arc::clone(&runtime.eval);
+    let dir = plugins_dir.map(Path::to_path_buf);
+    runtime
+        .host
+        .call(move |lua| load_on(lua, dir.as_deref(), &eval))?
+}
+
+/// Body of [`load_all`], run on the owner thread.
+pub(crate) fn load_on(
+    lua: &Lua,
+    dir: Option<&Path>,
+    eval: &EvalState,
+) -> Result<LoadReport, PluginError> {
     if let Err(err) = eval.eval_defaults(lua) {
         lock(eval.sink()).log(LogLevel::Error, &format!("_defaults.lua: {err}"));
     }
+    let mut report = match dir {
+        Some(dir) => load_plugins(lua, dir, eval)?,
+        None => LoadReport::default(),
+    };
+    report.init = crate::user::load(lua, eval);
+    Ok(report)
+}
+
+fn load_plugins(lua: &Lua, dir: &Path, eval: &EvalState) -> Result<LoadReport, PluginError> {
     let read_dir = match std::fs::read_dir(dir) {
         Ok(d) => d,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(LoadReport::default()),
@@ -89,6 +120,15 @@ pub(crate) fn load_on(lua: &Lua, dir: &Path, eval: &EvalState) -> Result<LoadRep
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("plugin");
+        if name.starts_with('@') {
+            let err = "names starting with '@' are reserved";
+            lock(sink).log(
+                LogLevel::Error,
+                &format!("plugin '{}': {err}", path.display()),
+            );
+            report.failed.push((path, err.to_owned()));
+            continue;
+        }
         if !eval.is_enabled(name) {
             let mut s = lock(sink);
             s.log(

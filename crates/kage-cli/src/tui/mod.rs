@@ -25,7 +25,7 @@ pub(crate) use kage_tui::{
 };
 
 pub(crate) use crate::engine::Commander;
-pub(crate) use crate::plugins::setup_runtime_with_sink;
+pub(crate) use crate::plugins::setup_tui_runtime;
 
 mod entry;
 mod host;

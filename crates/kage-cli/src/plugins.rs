@@ -1,50 +1,34 @@
 //! Plugin integration for the CLI.
 //!
-//! [`setup_runtime`] builds a [`PluginRuntime`] for the current run, loads
-//! every `*.lua` file in `plugins_dir`, and returns the runtime if any
-//! plugin contributed anything. [`PluginEventHooks`] wraps another `Hooks`
-//! and forwards loop events to subscribed plugin handlers, plus synthesizes
-//! the `agent_start` / `agent_end` events the loop never emits itself.
+//! [`setup_runtime`] builds a [`PluginRuntime`] for print mode and
+//! `kage rpc`, loads every `*.lua` file in `plugins_dir`, and returns
+//! the runtime if any plugin contributed anything. [`setup_tui_runtime`]
+//! always returns a runtime for the TUI and also loads the trusted
+//! `init.lua` from the user config dir. [`PluginEventHooks`] wraps
+//! another `Hooks` and forwards loop events to subscribed plugin
+//! handlers, plus synthesizes the `agent_start` / `agent_end` events the
+//! loop never emits itself.
 
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+use kage_core::config::PluginsConfig;
 use kage_core::{LoopEvent, Message, ToolOutput, sync::lock};
 use kage_loop::{CompactionPrep, Hooks, StreamRequest, TurnSummary};
-use kage_plugin::{LogLevel, PluginRuntime, SharedHostLog, default_host_log};
+use kage_plugin::{LoadReport, LogLevel, PluginRuntime, PluginRuntimeBuilder, SharedHostLog};
 use kage_provider::{Provider, ProviderRegistry};
 use serde_json::json;
 
 /// Construct a plugin runtime, load `*.lua` files from `plugins_dir`, and
 /// return the runtime if at least one plugin loaded successfully. Returns
 /// `Ok(None)` when the directory is missing or empty. Uses the default
-/// stderr-backed sink; use [`setup_runtime_with_sink`] when the host owns
-/// the alt screen and stderr writes would corrupt the rendered frame.
+/// stderr-backed sink and never loads `init.lua`.
 pub fn setup_runtime(
     plugins_dir: &Path,
     workdir: &Path,
     model: &str,
     system_prompt: &str,
-) -> Result<Option<Arc<PluginRuntime>>, String> {
-    setup_runtime_with_sink(
-        plugins_dir,
-        workdir,
-        model,
-        system_prompt,
-        default_host_log(),
-    )
-}
-
-/// Same as [`setup_runtime`] but with a caller-supplied `HostLog` sink.
-/// The TUI uses [`kage_tui::buffer_host_log`] to route plugin output
-/// into the conversation buffer instead of stderr.
-pub fn setup_runtime_with_sink(
-    plugins_dir: &Path,
-    workdir: &Path,
-    model: &str,
-    system_prompt: &str,
-    sink: SharedHostLog,
 ) -> Result<Option<Arc<PluginRuntime>>, String> {
     // Capability grants and the load allowlist come from the same
     // layered config the rest of the host reads. Fail closed: if the
@@ -55,35 +39,17 @@ pub fn setup_runtime_with_sink(
         Ok(c) => c.plugins,
         Err(e) => {
             eprintln!("kage: plugins: {e}; capability grants not applied");
-            kage_core::config::PluginsConfig::default()
+            PluginsConfig::default()
         }
     };
     migrate_plugin_store_dir();
-    let runtime = PluginRuntime::builder()
-        .sink(sink)
-        .workdir(workdir.to_path_buf())
-        .capabilities(plugins_cfg.capabilities)
-        .enabled(plugins_cfg.enabled)
-        .plugin_config(plugins_cfg.config)
+    let runtime = runtime_builder(plugins_cfg, workdir, model, system_prompt)
         .state_dir(crate::data_root().ok().map(|r| r.join("plugin-state")))
-        .config(json!({
-            "model": model,
-            "cwd": workdir.display().to_string(),
-            "system_prompt": system_prompt,
-        }))
         .build()
         .map_err(|e| format!("plugin runtime: {e}"))?;
     let report =
         kage_plugin::load_dir(plugins_dir, &runtime).map_err(|e| format!("plugin load: {e}"))?;
-    for (path, err) in &report.failed {
-        eprintln!("kage: plugin {} failed to load: {err}", path.display());
-    }
-    for path in &report.skipped {
-        eprintln!(
-            "kage: plugin {} skipped (not in [plugins] enabled)",
-            path.display()
-        );
-    }
+    report_plugins(&report);
     if report.loaded.is_empty() {
         return Ok(None);
     }
@@ -94,6 +60,74 @@ pub fn setup_runtime_with_sink(
         plugins_dir.display(),
     );
     Ok(Some(Arc::new(runtime)))
+}
+
+/// Build the TUI's runtime. Unlike [`setup_runtime`] it always returns a
+/// runtime, even with no plugins, so the embedded defaults have a Lua
+/// state. It loads the plugins in `plugins_dir` and then the trusted
+/// `<user_dir>/init.lua`. `plugins_cfg` is the already loaded
+/// `[plugins]` table, and `sink` receives plugin output, so nothing is
+/// written to stderr while the TUI owns the screen.
+pub(crate) fn setup_tui_runtime(
+    plugins_dir: Option<&Path>,
+    user_dir: Option<&Path>,
+    plugins_cfg: PluginsConfig,
+    workdir: &Path,
+    model: &str,
+    system_prompt: &str,
+    sink: SharedHostLog,
+) -> Result<Arc<PluginRuntime>, String> {
+    migrate_plugin_store_dir();
+    let runtime = runtime_builder(plugins_cfg, workdir, model, system_prompt)
+        .sink(sink)
+        .state_dir(crate::data_root().ok().map(|r| r.join("plugin-state")))
+        .user_dir(user_dir.map(Path::to_path_buf))
+        .build()
+        .map_err(|e| format!("plugin runtime: {e}"))?;
+    load_tui_runtime(runtime, plugins_dir)
+}
+
+/// Run the full load on a TUI runtime and hand it back. Failures of
+/// single plugins and of `init.lua` are logged through the runtime's
+/// sink and do not fail the load.
+fn load_tui_runtime(
+    runtime: PluginRuntime,
+    plugins_dir: Option<&Path>,
+) -> Result<Arc<PluginRuntime>, String> {
+    let report =
+        kage_plugin::load_all(plugins_dir, &runtime).map_err(|e| format!("plugin load: {e}"))?;
+    report_plugins(&report);
+    Ok(Arc::new(runtime))
+}
+
+fn runtime_builder(
+    plugins_cfg: PluginsConfig,
+    workdir: &Path,
+    model: &str,
+    system_prompt: &str,
+) -> PluginRuntimeBuilder {
+    PluginRuntime::builder()
+        .workdir(workdir.to_path_buf())
+        .capabilities(plugins_cfg.capabilities)
+        .enabled(plugins_cfg.enabled)
+        .plugin_config(plugins_cfg.config)
+        .config(json!({
+            "model": model,
+            "cwd": workdir.display().to_string(),
+            "system_prompt": system_prompt,
+        }))
+}
+
+fn report_plugins(report: &LoadReport) {
+    for (path, err) in &report.failed {
+        eprintln!("kage: plugin {} failed to load: {err}", path.display());
+    }
+    for path in &report.skipped {
+        eprintln!(
+            "kage: plugin {} skipped (not in [plugins] enabled)",
+            path.display()
+        );
+    }
 }
 
 /// Move the plugin store from its legacy location under the state root
@@ -661,5 +695,34 @@ mod tests {
             std::fs::read_to_string(new.join("nested/b.json")).unwrap(),
             "{}"
         );
+    }
+
+    #[test]
+    fn tui_runtime_loads_init_with_an_empty_plugins_dir() {
+        let plugins = tempdir().unwrap();
+        let user = tempdir().unwrap();
+        let workdir = tempdir().unwrap();
+        std::fs::write(
+            user.path().join("init.lua"),
+            "kage.register_command({ name='mine', description='', handler=function() end })",
+        )
+        .unwrap();
+        std::fs::create_dir_all(workdir.path().join(".kage")).unwrap();
+        std::fs::write(
+            workdir.path().join(".kage/init.lua"),
+            "kage.register_command({ name='project', description='', handler=function() end })",
+        )
+        .unwrap();
+        let runtime = runtime_builder(PluginsConfig::default(), workdir.path(), "m", "")
+            .user_dir(Some(user.path().to_path_buf()))
+            .build()
+            .unwrap();
+        let rt = load_tui_runtime(runtime, Some(plugins.path())).unwrap();
+        let names: Vec<_> = rt
+            .registered_commands()
+            .iter()
+            .map(|c| c.name().to_owned())
+            .collect();
+        assert_eq!(names, ["mine"]);
     }
 }

@@ -16,6 +16,9 @@
 //! request that passes the host safety check. A grant is the whole
 //! capability or nothing.
 //!
+//! The trusted user environment (`init.lua`) is the exception: it gets
+//! every capability attached up front (see [`install_trusted`]).
+//!
 //! This module owns the capability vocabulary, the grant lookup, and
 //! the `request_capabilities` binding. The capabilities themselves
 //! (their actual APIs) register an installer into the
@@ -150,6 +153,34 @@ pub(crate) fn install_request_capabilities(
         })?,
     )?;
     Ok(())
+}
+
+/// Attach every registered capability onto `pkage`, and replace its
+/// `request_capabilities` with one that reports each known capability
+/// as granted. Used for the trusted user environment, which holds every
+/// capability without the request handshake.
+pub(crate) fn install_trusted(
+    lua: &Lua,
+    registry: &CapabilityRegistry,
+    pkage: &Table,
+) -> mlua::Result<()> {
+    let reg = registry
+        .lock()
+        .map_err(|_| mlua::Error::external("capability registry mutex poisoned"))?;
+    for installer in reg.values() {
+        installer(lua, pkage)?;
+    }
+    pkage.set(
+        "request_capabilities",
+        lua.create_function(|lua, requested: Vec<String>| {
+            let result = lua.create_table()?;
+            for name in &requested {
+                Capability::parse(name).map_err(mlua::Error::external)?;
+                result.set(name.as_str(), true)?;
+            }
+            Ok(result)
+        })?,
+    )
 }
 
 /// Run the registered installer for `cap` against the requesting

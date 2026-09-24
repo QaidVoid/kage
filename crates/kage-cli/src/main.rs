@@ -484,6 +484,13 @@ pub(crate) fn sessions_dir() -> Result<PathBuf, String> {
     Ok(data_root()?.join("sessions"))
 }
 
+/// Resolve the kage config directory: `$XDG_CONFIG_HOME/kage` (default
+/// `~/.config/kage`), the same resolution as `Config::default_path`. It
+/// holds `config.toml`, the trusted `init.lua` and its `lua/` modules.
+pub(crate) fn config_dir() -> Result<PathBuf, String> {
+    Ok(xdg_dir("XDG_CONFIG_HOME", ".config")?.join("kage"))
+}
+
 /// Resolve the plugin directory: `[plugins] dir` from the user config
 /// when set (path semantics in [`resolve_plugin_dir`]), else the XDG
 /// default `$XDG_CONFIG_HOME/kage/plugins` (default `~/.config/kage/plugins`).
@@ -493,9 +500,7 @@ pub(crate) fn plugins_dir() -> Result<PathBuf, String> {
     {
         return Ok(resolve_plugin_dir(dir));
     }
-    Ok(xdg_dir("XDG_CONFIG_HOME", ".config")?
-        .join("kage")
-        .join("plugins"))
+    Ok(config_dir()?.join("plugins"))
 }
 
 /// Apply `[plugins] dir` path semantics: absolute paths as-is, `~`
@@ -511,8 +516,8 @@ fn resolve_plugin_dir(dir: PathBuf) -> PathBuf {
     {
         return home.join(rest);
     }
-    match xdg_dir("XDG_CONFIG_HOME", ".config") {
-        Ok(base) => base.join("kage").join(dir),
+    match config_dir() {
+        Ok(base) => base.join(dir),
         Err(_) => dir,
     }
 }
@@ -520,9 +525,7 @@ fn resolve_plugin_dir(dir: PathBuf) -> PathBuf {
 /// Resolve the XDG-style user theme directory:
 /// `$XDG_CONFIG_HOME/kage/themes` (default `~/.config/kage/themes`).
 pub(crate) fn themes_dir() -> Result<PathBuf, String> {
-    Ok(xdg_dir("XDG_CONFIG_HOME", ".config")?
-        .join("kage")
-        .join("themes"))
+    Ok(config_dir()?.join("themes"))
 }
 
 /// Discover and load every SKILL.md under the user config dir
@@ -537,8 +540,8 @@ pub(crate) fn load_skills(
     let mut out: std::collections::BTreeMap<String, kage_core::Skill> =
         std::collections::BTreeMap::new();
     let mut search: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(p) = xdg_dir("XDG_CONFIG_HOME", ".config") {
-        search.push(p.join("kage").join("skills"));
+    if let Ok(p) = config_dir() {
+        search.push(p.join("skills"));
     }
     search.push(workdir.join(".kage").join("skills"));
     if let Some(rt) = plugin_runtime {

@@ -72,6 +72,16 @@ impl PluginRuntimeBuilder {
         self
     }
 
+    /// Set the trusted user config directory. Every load then ends by
+    /// evaluating `<dir>/init.lua` in the user environment, with
+    /// `require` confined to `<dir>/lua/`. Unset (the default), no user
+    /// config is loaded.
+    #[must_use]
+    pub fn user_dir(mut self, user_dir: Option<PathBuf>) -> Self {
+        self.user_dir = user_dir;
+        self
+    }
+
     /// Replace the embedded `_defaults.lua` source.
     #[cfg(test)]
     #[must_use]
@@ -240,6 +250,8 @@ impl PluginRuntimeBuilder {
             state_dir: self.state_dir,
             script_budget: self.script_budget,
             defaults: self.defaults,
+            user_dir: self.user_dir,
+            capabilities: cap_registry,
         });
         Ok(PluginRuntime {
             host,

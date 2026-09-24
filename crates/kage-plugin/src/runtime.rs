@@ -11,7 +11,9 @@
 //! [`PluginRuntime::eval`] or one of the typed dispatch helpers. A
 //! plugin cannot start a thread or schedule a callback on its own.
 //! Before any plugin code, `build` installs the `kage.api` primitives
-//! and evaluates the embedded Lua stdlib (see [`crate::stdlib`]).
+//! and evaluates the embedded Lua stdlib (see [`crate::stdlib`]). The
+//! trusted user config (`init.lua`) runs after every plugin, in its own
+//! environment (see [`crate::user`]).
 //!
 //! See `crates/kage-plugin/src/runtime.rs` source for the exact list of
 //! removed bindings.
@@ -49,7 +51,7 @@ pub(crate) use crate::block_renderers::{
     self, LuaBlockRenderer, SharedBlockRenderers, shared_block_renderers,
 };
 pub(crate) use crate::bridge::{self, BridgeStep, SharedBridge, shared_bridge};
-pub(crate) use crate::capabilities::{self, CurrentPlugin};
+pub(crate) use crate::capabilities::{self, CapabilityRegistry, CurrentPlugin};
 pub(crate) use crate::chrome::{self, LuaChrome, SharedChrome, shared_chrome};
 pub(crate) use crate::commands::{self, LuaCommand, RegisteredCommands, registered_commands};
 pub(crate) use crate::env;
@@ -168,6 +170,11 @@ pub(crate) struct EvalState {
     pub(crate) script_budget: u64,
     /// Source of `_defaults.lua`, evaluated before plugins on every load.
     defaults: &'static str,
+    /// Trusted user config directory holding `init.lua` and `lua/`.
+    /// `None` skips the user phase.
+    pub(crate) user_dir: Option<PathBuf>,
+    /// Capability installers, attached in full to the user environment.
+    pub(crate) capabilities: CapabilityRegistry,
 }
 
 impl EvalState {
@@ -187,21 +194,39 @@ impl EvalState {
         name: &str,
         source: &str,
     ) -> Result<mlua::Value, PluginError> {
+        let env = self.env(lua, name)?;
+        self.eval_in(lua, name, name, env, source)
+    }
+
+    /// Get or create the `_ENV` of plugin `name`. See [`plugin_env`].
+    pub(crate) fn env(&self, lua: &Lua, name: &str) -> mlua::Result<Table> {
         let store_path = self
             .state_dir
             .as_deref()
             .map(|dir| store::store_path(dir, name));
-        let env = plugin_env(
+        plugin_env(
             lua,
             name,
             &self.plugin_envs,
             self.plugin_config.get(name),
             store_path,
-        )?;
+        )
+    }
+
+    /// Evaluate `source` in `env` under the watchdog, with `name` as the
+    /// current plugin and `chunk` as the chunk name.
+    pub(crate) fn eval_in(
+        &self,
+        lua: &Lua,
+        name: &str,
+        chunk: &str,
+        env: Table,
+        source: &str,
+    ) -> Result<mlua::Value, PluginError> {
         *lock(&self.current_plugin) = Some(name.to_owned());
         let result = watchdog::run(lua, self.script_budget, || {
             lua.load(source)
-                .set_name(name)
+                .set_name(chunk)
                 .set_environment(env)
                 .eval::<mlua::Value>()
         });
@@ -245,6 +270,7 @@ pub struct PluginRuntimeBuilder {
     state_dir: Option<PathBuf>,
     script_budget: u64,
     defaults: &'static str,
+    user_dir: Option<PathBuf>,
 }
 
 impl std::fmt::Debug for PluginRuntimeBuilder {
@@ -294,8 +320,8 @@ pub const SANDBOX_REMOVALS: &[(&str, &str)] = &[
     ("", "loadstring"),
     ("string", "dump"),
     // Module loading would execute arbitrary files outside the
-    // workdir; single-file plugins do not need it. A future scoped
-    // capability can re-grant a constrained require.
+    // workdir; single-file plugins do not need it. The trusted user
+    // environment gets a confined `require` instead (see crate::user).
     ("", "require"),
     ("", "package"),
     // Reflection: debug.getregistry reaches the shared handler

@@ -64,7 +64,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     // `resources_discover`.
     let bare_prompt =
         crate::runtime_env::build_system_prompt(system, &workdir, &provisional_model, &[]);
-    // Resolve once up-front so the same path is shared by initial load,
+    // Resolve once up-front so the same paths are shared by initial load,
     // the file-system watcher, and the worker's reload handler.
     let plugins_dir_path = match crate::plugins_dir() {
         Ok(dir) => Some(dir),
@@ -74,22 +74,22 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
             None
         }
     };
-    let plugin_runtime = match plugins_dir_path.as_ref() {
-        Some(dir) => match setup_runtime_with_sink(
-            dir,
-            &workdir,
-            &provisional_model,
-            &bare_prompt,
-            buffer_host_log(buffer.clone(), toasts.clone()),
-        ) {
-            Ok(rt) => rt,
-            Err(e) => {
-                let mut buf = lock(&buffer);
-                buf.push_custom("kage:error", e, false);
-                None
-            }
-        },
-        None => None,
+    let user_dir = crate::config_dir().ok();
+    let plugin_runtime = match setup_tui_runtime(
+        plugins_dir_path.as_deref(),
+        user_dir.as_deref(),
+        app_config.plugins.clone(),
+        &workdir,
+        &provisional_model,
+        &bare_prompt,
+        buffer_host_log(buffer.clone(), toasts.clone()),
+    ) {
+        Ok(rt) => Some(rt),
+        Err(e) => {
+            let mut buf = lock(&buffer);
+            buf.push_custom("kage:error", e, false);
+            None
+        }
     };
     if let Some(rt) = plugin_runtime.as_ref() {
         crate::plugins::merge_plugin_providers(rt, &mut registry);
@@ -285,15 +285,14 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     }
     .spawn(rx);
 
-    // Hot-reload watcher: polls the plugins dir every 150ms and asks
-    // for a reload when a `.lua` file changes. It ends with the process.
-    if plugin_runtime.is_some()
-        && let Some(dir) = plugins_dir_path.as_ref()
-    {
-        let dir = dir.clone();
+    // Hot-reload watcher: polls the plugins dir, `init.lua` and `lua/`
+    // every 150ms and asks for a reload when a Lua file changes. It ends
+    // with the process.
+    if plugin_runtime.is_some() {
+        let (dir, user) = (plugins_dir_path.clone(), user_dir.clone());
         let buf = buffer.clone();
         thread::spawn(move || {
-            let watcher = match kage_plugin::PluginWatcher::new(dir) {
+            let watcher = match kage_plugin::PluginWatcher::for_config(dir, user) {
                 Ok(w) => w,
                 Err(err) => {
                     let mut b = lock(&buf);

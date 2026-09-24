@@ -343,34 +343,45 @@ impl Host {
         active_ok
     }
 
-    /// Re-read plugins from disk and republish everything they
-    /// contribute: tools, block renderers, providers, commands, widgets,
-    /// keybindings, and autocomplete.
+    /// Re-read plugins and `init.lua` from disk and republish everything
+    /// they contribute: tools, block renderers, providers, commands,
+    /// widgets, keybindings, and autocomplete.
     fn reload_plugins(&mut self) {
-        let (Some(rt), Some(dir)) = (self.plugins.clone(), self.plugins_dir.clone()) else {
+        let Some(rt) = self.plugins.clone() else {
             return;
         };
-        let reload = rt.reload_dir(&dir);
+        let reload = rt.reload_all(self.plugins_dir.as_deref());
         self.commander.reload_plugin_tools();
         super::support::register_block_renderers(&rt);
         self.rebuild_registry();
         let active = lock(&self.mirror).state.model.clone();
         self.publish_plugin_refresh(&active);
-        match reload {
-            Ok(report) if report.failed.is_empty() => {
-                self.notify(format!("plugins reloaded ({} loaded)", report.loaded.len()));
+        let report = match reload {
+            Ok(report) => report,
+            Err(err) => {
+                self.error(format!("plugin reload: {err}"));
+                return;
             }
-            Ok(report) => {
-                self.notify(format!(
-                    "plugins reloaded ({} ok, {} failed)",
-                    report.loaded.len(),
-                    report.failed.len()
-                ));
-                for (path, err) in report.failed {
-                    self.error(format!("plugin {}: {err}", path.display()));
-                }
+        };
+        let init = match report.init {
+            Some(Ok(())) => ", init.lua ok",
+            Some(Err(_)) => ", init.lua failed",
+            None => "",
+        };
+        if report.failed.is_empty() {
+            self.notify(format!(
+                "plugins reloaded ({} loaded{init})",
+                report.loaded.len()
+            ));
+        } else {
+            self.notify(format!(
+                "plugins reloaded ({} ok, {} failed{init})",
+                report.loaded.len(),
+                report.failed.len()
+            ));
+            for (path, err) in report.failed {
+                self.error(format!("plugin {}: {err}", path.display()));
             }
-            Err(err) => self.error(format!("plugin reload: {err}")),
         }
     }
 

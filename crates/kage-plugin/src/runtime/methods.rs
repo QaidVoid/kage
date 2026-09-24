@@ -28,6 +28,7 @@ impl PluginRuntime {
             state_dir: None,
             script_budget: watchdog::BUDGET,
             defaults: stdlib::DEFAULTS,
+            user_dir: None,
         }
     }
 
@@ -656,11 +657,21 @@ impl PluginRuntime {
         lock(&self.bridge).is_some()
     }
 
-    /// Drop every registration that came from plugins (autocmds and
-    /// groups, tools, commands, providers, ACP/MCP declarations), rerun
-    /// `_defaults.lua`, and replay every `*.lua` file in `dir`. Designed for hot reload between
-    /// turns: a stale plugin snapshot does not survive after this
-    /// call.
+    /// Reload with `dir` as the plugins directory. Same as
+    /// [`Self::reload_all`] with `Some(dir)`.
+    pub fn reload_dir(
+        &self,
+        dir: &std::path::Path,
+    ) -> Result<crate::loader::LoadReport, PluginError> {
+        self.reload_all(Some(dir))
+    }
+
+    /// Drop every registration that came from Lua (autocmds and groups,
+    /// tools, commands, providers, ACP/MCP declarations), then rerun the
+    /// full load: `_defaults.lua`, every `*.lua` file in `plugins_dir`,
+    /// and the trusted `init.lua` when a user dir is configured.
+    /// Designed for hot reload between turns: a stale plugin snapshot
+    /// does not survive after this call.
     ///
     /// The Lua side of the reload (clearing handlers, dropping plugin
     /// environments, evaluating every file) runs as one job on the
@@ -671,9 +682,9 @@ impl PluginRuntime {
     /// to other registries via [`Self::registered_tools`] etc. continue
     /// to exist; this method only clears the runtime's own snapshot.
     /// The host is responsible for re-publishing the new snapshot.
-    pub fn reload_dir(
+    pub fn reload_all(
         &self,
-        dir: &std::path::Path,
+        plugins_dir: Option<&std::path::Path>,
     ) -> Result<crate::loader::LoadReport, PluginError> {
         lock(&self.tools).clear();
         lock(&self.tool_overrides).clear();
@@ -699,13 +710,13 @@ impl PluginRuntime {
         lock(&self.terminal_hooks).clear();
         let eval = Arc::clone(&self.eval);
         let bridge = Arc::clone(&self.bridge);
-        let dir = dir.to_path_buf();
+        let dir = plugins_dir.map(std::path::Path::to_path_buf);
         self.host.call(move |lua| {
             autocmd::clear(lua)?;
             acp::clear_permission_handler(lua)?;
             *lock(&bridge) = None;
             eval.reset(lua);
-            crate::loader::load_on(lua, &dir, &eval)
+            crate::loader::load_on(lua, dir.as_deref(), &eval)
         })?
     }
 }

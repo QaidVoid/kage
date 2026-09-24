@@ -4,7 +4,9 @@
 //!
 //! Plugins extend kage at runtime in Lua. The host loads a [`PluginRuntime`]
 //! per process, evaluates plugin scripts against it, and dispatches loop
-//! events through the runtime so plugins can react. The Lua state lives
+//! events through the runtime so plugins can react. A host may also
+//! give the runtime a user dir, whose trusted `init.lua` loads after
+//! every plugin. The Lua state lives
 //! on one owner thread; render surfaces read retained output and never
 //! wait on it (see [`PluginRuntime::redraw_flag`]).
 
@@ -44,6 +46,7 @@ pub mod testing;
 pub mod theme;
 pub mod tools;
 pub mod ui;
+pub(crate) mod user;
 pub mod watchdog;
 pub mod watcher;
 pub mod widgets;
@@ -58,7 +61,7 @@ pub use error::PluginError;
 pub use events::{DiscoveryEntries, KNOWN_EVENTS, SessionOpDecision};
 pub use keybindings::LuaKeybinding;
 pub use lifecycle::{SharedCompactRequest, SharedUsage};
-pub use loader::{LoadReport, load_dir};
+pub use loader::{LoadReport, load_all, load_dir};
 pub use messages::{PendingMessage, PendingRole, SharedPendingMessages};
 pub use providers::LuaProvider;
 pub use runtime::{PluginRuntime, PluginRuntimeBuilder, SANDBOX_REMOVALS};

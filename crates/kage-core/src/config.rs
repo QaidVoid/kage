@@ -12,6 +12,8 @@ use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
 use serde::{Deserialize, Serialize};
 
+use crate::permissions::PermissionsConfig;
+
 use crate::error::Result;
 
 /// Top-level configuration for a kage process.
@@ -39,6 +41,10 @@ pub struct Config {
     /// (`[providers.custom.*]` / `[providers.<provider-id>]`).
     #[serde(skip_serializing_if = "ProvidersConfig::is_default")]
     pub providers: ProvidersConfig,
+    /// Tool permission rules (`[permissions]`): allow / ask / deny
+    /// per tool, plus the opt-in path-confinement flag.
+    #[serde(default, skip_serializing_if = "PermissionsConfig::is_default")]
+    pub permissions: crate::permissions::PermissionsConfig,
 }
 
 impl Config {
@@ -266,7 +272,7 @@ impl ProvidersConfig {
     }
 }
 
-fn config_error(message: String) -> crate::error::Error {
+pub(crate) fn config_error(message: String) -> crate::error::Error {
     crate::error::Error::Config(Box::new(figment::Error::from(message)))
 }
 
@@ -372,6 +378,14 @@ pub struct UiConfig {
     /// growing and scrolls internally. Lets a user enlarge the
     /// composing area; clamped to a sane ceiling.
     pub input_max_lines: u16,
+    /// Default thinking level for new sessions: one of the
+    /// `ThinkingLevel` ladder strings (`off`, `minimal`, `low`,
+    /// `medium`, `high`, `xhigh`). Parsed and seeded at session
+    /// start; the Shift+Tab cycle still overrides it per session.
+    /// Kept as a raw string here because the ladder itself lives in
+    /// kage-provider, which sits above kage-core.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
 }
 
 impl Default for UiConfig {
@@ -382,6 +396,7 @@ impl Default for UiConfig {
             editor: EditorMode::default(),
             input_min_lines: 1,
             input_max_lines: 8,
+            thinking_level: None,
         }
     }
 }
@@ -901,6 +916,63 @@ mod tests {
         assert!(cfg.providers.overrides.is_empty());
         let body = toml::to_string(&cfg).unwrap();
         assert!(!body.contains("[providers"), "{body}");
+    }
+
+    #[test]
+    fn permissions_section_defaults_empty_and_hidden() {
+        let cfg = Config::default();
+        assert!(cfg.permissions.is_default());
+        let body = toml::to_string(&cfg).unwrap();
+        assert!(!body.contains("[permissions"), "{body}");
+    }
+
+    #[test]
+    fn permissions_table_parses_under_config() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.toml",
+                r#"
+                [permissions]
+                confine_paths = true
+
+                [permissions.tools.bash]
+                default = "ask"
+                allow = ["git *"]
+                deny = ["rm -rf *"]
+                "#,
+            )?;
+            let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
+            assert!(cfg.permissions.confine_paths);
+            assert_eq!(
+                cfg.permissions.check("bash", "git status"),
+                crate::permissions::PermissionAction::Allow
+            );
+            assert_eq!(
+                cfg.permissions.check("bash", "rm -rf /"),
+                crate::permissions::PermissionAction::Deny
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn thinking_level_parses_and_roundtrips() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.toml",
+                r#"
+                [ui]
+                thinking_level = "medium"
+                "#,
+            )?;
+            let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
+            assert_eq!(cfg.ui.thinking_level.as_deref(), Some("medium"));
+            let body = toml::to_string(&cfg).unwrap();
+            assert!(body.contains("thinking_level = \"medium\""), "{body}");
+            Ok(())
+        });
     }
 
     #[test]

@@ -1504,6 +1504,7 @@ dependencies = [
  "chrono",
  "dirs",
  "figment",
+ "globset",
  "serde",
  "serde_json",
  "tempfile",

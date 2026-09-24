@@ -195,6 +195,21 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     if let Some(out) = crate::runtime_env::max_output_tokens_for(&registry, &qualified_model) {
         initial_cx = initial_cx.with_max_output_tokens(out);
     }
+    // `[ui] thinking_level` seeds new sessions; a bad value is
+    // surfaced as an error line and ignored rather than refusing to
+    // start. Shift+Tab still cycles it per session.
+    if let Some(level) = app_config.ui.thinking_level.as_deref() {
+        if let Some(parsed) = kage_provider::ThinkingLevel::parse(level) {
+            initial_cx = initial_cx.with_thinking_level(parsed);
+        } else {
+            let mut buf = lock(&buffer);
+            buf.push_custom(
+                "kage:error",
+                format!("config: unknown ui.thinking_level `{level}`"),
+                false,
+            );
+        }
+    }
     let cx = Arc::new(Mutex::new(initial_cx));
     let (tx, rx) = mpsc::channel::<RunRequest>();
     // The worker keeps its own sender so it can re-queue any user

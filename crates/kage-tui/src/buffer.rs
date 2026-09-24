@@ -213,7 +213,7 @@ fn truncate_label(label: &str, label_width: usize) -> Option<String> {
 /// Call/result pairing for [`Block::ToolCall`] and
 /// [`Block::ToolResult`] blocks, derived from the block list and
 /// cached between frames. The renderer rebuilds it only when the
-/// block count changes; holding it behind an [`Arc`] lets buffer
+/// block count or structural epoch changes; holding it behind an [`Arc`] lets buffer
 /// snapshots share it instead of copying a map of every call id per
 /// frame.
 #[derive(Debug, Default)]
@@ -293,11 +293,17 @@ pub struct Buffer {
     /// Stored behind `Arc` so the mutex isn't holding a clone of a
     /// possibly-huge vector while the renderer is still using it.
     block_render_lines: Vec<Option<(u16, Arc<Vec<Line<'static>>>)>>,
-    /// Cached call/result block pairing together with the block
-    /// count it was built at, shared behind an [`Arc`]. See
-    /// [`ToolTopology`]. `None` until the first render; rebuilt by
-    /// the renderer whenever the count changed since.
-    tool_topology: Option<(usize, Arc<ToolTopology>)>,
+    /// Cached call/result block pairing together with the
+    /// `(epoch, block count)` it was built at, shared behind an
+    /// [`Arc`]. See [`ToolTopology`]. `None` until the first render;
+    /// rebuilt by the renderer whenever either key changed since.
+    tool_topology: Option<((u64, usize), Arc<ToolTopology>)>,
+    /// Structural generation, bumped by every change that is not a
+    /// pure append (`clear`, `take`, compaction). Block indices from
+    /// one epoch mean nothing in another, so index-keyed caches built
+    /// against a different epoch are discarded. Appends leave it
+    /// alone because existing indices stay valid.
+    epoch: u64,
     /// Monotonically increasing counter bumped by every mutation
     /// (push, append, fold, focus, scroll). The render loop reads
     /// this to decide whether to repaint: an unchanged version means

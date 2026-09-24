@@ -12,7 +12,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
-use kage_core::{Content, LoopEvent, Message, Role, StopReason, ToolOutput, sync::lock};
+use kage_core::{Content, LoopError, LoopEvent, Message, Role, StopReason, ToolOutput, sync::lock};
 use kage_loop::Hooks;
 
 use crate::buffer::Buffer;
@@ -177,7 +177,7 @@ fn apply_event(buf: &mut Buffer, event: &LoopEvent) {
             buf.finish_streaming();
             buf.push_custom(
                 "kage:truncated",
-                "[truncated: reply hit the max output token limit]",
+                "reply hit the max output token limit",
                 false,
             );
         }
@@ -212,9 +212,21 @@ fn apply_event(buf: &mut Buffer, event: &LoopEvent) {
             buf.push_custom("kage:notify", msg, false);
         }
         LoopEvent::Error { kind } => {
-            // The block's `error` chrome already names the severity;
-            // the payload adds nothing but the message.
-            buf.push_custom("kage:error", kind.to_string(), false);
+            buf.finish_streaming();
+            match kind {
+                LoopError::Cancelled => buf.push_custom("kage:notify", "interrupted", false),
+                LoopError::Auth { message } => buf.push_custom(
+                    "kage:error",
+                    format!(
+                        "authentication failed: {}. Run /login to re-authenticate.",
+                        message.trim_end_matches('.')
+                    ),
+                    false,
+                ),
+                // The block's `error` chrome already names the severity;
+                // the payload adds nothing but the message.
+                other => buf.push_custom("kage:error", other.to_string(), false),
+            }
         }
     }
 }
@@ -514,8 +526,9 @@ mod tests {
             other => panic!("expected assistant, got {other:?}"),
         }
         match &blocks[1] {
-            Block::Custom { kind, folded, .. } => {
+            Block::Custom { kind, text, folded } => {
                 assert_eq!(kind, "kage:truncated");
+                assert_eq!(text, "reply hit the max output token limit");
                 assert!(!folded);
             }
             other => panic!("expected Custom, got {other:?}"),
@@ -597,13 +610,57 @@ mod tests {
     fn error_pushes_custom_unfolded_error_block() {
         let (buf, mut hooks) = fresh();
         hooks.on_event(&LoopEvent::Error {
-            kind: LoopError::Cancelled,
+            kind: LoopError::ContextOverflow,
         });
         let buf = buf.lock().unwrap();
         match &buf.blocks()[0] {
             Block::Custom { kind, folded, .. } => {
                 assert_eq!(kind, "kage:error");
                 assert!(!folded, "errors should be visible by default");
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cancel_is_a_quiet_notice_and_finishes_the_live_reply() {
+        let (buf, mut hooks) = fresh();
+        hooks.on_event(&LoopEvent::TextDelta {
+            id: id(),
+            delta: "half an ans".into(),
+        });
+        hooks.on_event(&LoopEvent::Error {
+            kind: LoopError::Cancelled,
+        });
+        let buf = buf.lock().unwrap();
+        let blocks = buf.blocks();
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(blocks[0], Block::Assistant { live: false, .. }));
+        match &blocks[1] {
+            Block::Custom { kind, text, .. } => {
+                assert_eq!(kind, "kage:notify");
+                assert_eq!(text, "interrupted");
+            }
+            other => panic!("expected Custom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn auth_error_points_at_login() {
+        let (buf, mut hooks) = fresh();
+        hooks.on_event(&LoopEvent::Error {
+            kind: LoopError::Auth {
+                message: "token expired.".into(),
+            },
+        });
+        let buf = buf.lock().unwrap();
+        match &buf.blocks()[0] {
+            Block::Custom { kind, text, .. } => {
+                assert_eq!(kind, "kage:error");
+                assert_eq!(
+                    text,
+                    "authentication failed: token expired. Run /login to re-authenticate."
+                );
             }
             other => panic!("expected Custom, got {other:?}"),
         }

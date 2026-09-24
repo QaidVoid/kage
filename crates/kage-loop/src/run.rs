@@ -141,8 +141,11 @@ where
                         Err(TurnFailure::Provider(e)) => {
                             let exhausted = attempt >= config.max_provider_retries;
                             if exhausted || !e.is_transient() || cancel.is_cancelled() {
-                                let kind = LoopError::Provider {
-                                    message: e.to_string(),
+                                let kind = match e {
+                                    ProviderError::Auth(message) => LoopError::Auth { message },
+                                    other => LoopError::Provider {
+                                        message: other.to_string(),
+                                    },
                                 };
                                 emit_one(hooks, &mut emit, LoopEvent::Error { kind: kind.clone() });
                                 return Err(kind);

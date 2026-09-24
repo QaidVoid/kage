@@ -1546,8 +1546,8 @@ fn transient_provider_failure_is_retried_then_succeeds() {
 
 #[test]
 fn non_transient_failure_is_not_retried() {
-    let mock = MockProvider::replaying(vec![Err(kage_provider::ProviderError::Auth(
-        "no key".into(),
+    let mock = MockProvider::replaying(vec![Err(kage_provider::ProviderError::Decode(
+        "bad frame".into(),
     ))]);
     let mut cx = AgentContext::new("mock:m", "");
     cx.history.push(user_msg("hello"));
@@ -1558,6 +1558,29 @@ fn non_transient_failure_is_not_retried() {
 
     let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {});
     assert!(matches!(res, Err(LoopError::Provider { .. })));
+    assert_eq!(mock.call_count(), 1, "decode error must not retry");
+    assert_eq!(hooks.notices(), 0);
+}
+
+#[test]
+fn auth_failure_ends_the_run_with_auth_and_no_retry() {
+    let mock = MockProvider::replaying(vec![Err(kage_provider::ProviderError::Auth(
+        "token expired".into(),
+    ))]);
+    let mut cx = AgentContext::new("mock:m", "");
+    cx.history.push(user_msg("hello"));
+    let cfg = LoopConfig::default();
+    let mut hooks = EventLog::default();
+    let cancel = CancelFlag::new();
+    let registry = ToolRegistry::new();
+
+    let res = run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {});
+    assert_eq!(
+        res,
+        Err(LoopError::Auth {
+            message: "token expired".into()
+        })
+    );
     assert_eq!(mock.call_count(), 1, "auth error must not retry");
     assert_eq!(hooks.notices(), 0);
 }

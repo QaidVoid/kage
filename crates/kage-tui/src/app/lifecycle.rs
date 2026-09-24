@@ -433,6 +433,8 @@ impl App {
     /// draw (and no stream reparse is pending), the parked snapshot
     /// is returned instead of deep-cloning every block again; on a
     /// large resumed session that clone dominates idle-frame cost.
+    /// A fresh clone is already warm: every draw merges its renderer
+    /// caches back into the live buffer before parking.
     pub(crate) fn take_draw_snapshot(&mut self) -> (crate::Buffer, u64) {
         let (live_version, stream_pending) = {
             let live = lock(&self.buffer);
@@ -441,16 +443,7 @@ impl App {
         let reuse = !stream_pending && self.draw_snapshot_version == live_version;
         let buffer = match self.draw_snapshot.take() {
             Some(snap) if reuse => snap,
-            _ => {
-                let mut fresh = lock(&self.buffer).clone();
-                // Carry the parked snapshot's warm renderer caches
-                // into the fresh clone; the merge guard rejects it
-                // when the block list shrank (compaction, `:clear`).
-                if let Some(resident) = self.draw_snapshot.take() {
-                    fresh.merge_render_state(&resident);
-                }
-                fresh
-            }
+            _ => lock(&self.buffer).clone(),
         };
         (buffer, live_version)
     }

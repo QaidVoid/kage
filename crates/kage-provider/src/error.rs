@@ -5,7 +5,9 @@ use std::time::Duration;
 /// Failure modes shared by all providers.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum ProviderError {
-    /// Authentication failed (bad or missing API key).
+    /// Authentication failed: the provider rejected the credentials
+    /// (HTTP 401 or 403, or a bad or missing API key). Carries a short
+    /// detail rather than the raw response body.
     #[error("authentication failed: {0}")]
     Auth(String),
 

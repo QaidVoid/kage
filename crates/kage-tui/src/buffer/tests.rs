@@ -412,6 +412,66 @@ fn merge_render_state_skips_when_live_has_fewer_blocks() {
     assert_eq!(live.blocks().len(), 1);
 }
 
+#[test]
+fn merge_render_state_skips_across_an_epoch_change() {
+    let mut live = Buffer::new();
+    live.push_user("a");
+    live.push_user("b");
+    let mut snap = live.clone();
+    snap.set_cached_height(0, 80, 9);
+    snap.set_scroll(4);
+
+    live.clear();
+    live.push_user("c");
+    live.push_user("d");
+    live.set_cached_height(0, 80, 2);
+    live.merge_render_state(&snap);
+    assert_eq!(live.cached_height(0, 80), Some(2));
+    assert_eq!(live.scroll(), None);
+}
+
+/// Push `n` tool call/result pairs with ids `c{start}` onward.
+fn push_tool_pairs(buf: &mut Buffer, start: usize, n: usize) {
+    for i in start..start + n {
+        let id = format!("c{i}");
+        buf.push_tool_call(&id, "bash", "ls", "{}");
+        buf.push_tool_result_with_duration(&id, "out", false, None);
+    }
+}
+
+#[test]
+fn tool_topology_tracks_new_pairs_at_the_block_cap() {
+    let mut buf = Buffer::new();
+    push_tool_pairs(&mut buf, 0, MAX_BLOCKS / 2);
+    assert_eq!(buf.tool_topology().result_by_call.get("c0"), Some(&1));
+
+    push_tool_pairs(&mut buf, MAX_BLOCKS / 2, 1);
+    assert_eq!(buf.trim_scrollback(), 2);
+    assert_eq!(buf.blocks().len(), MAX_BLOCKS);
+
+    let topo = buf.tool_topology();
+    let new_id = format!("c{}", MAX_BLOCKS / 2);
+    assert_eq!(topo.result_by_call.get(&new_id), Some(&(MAX_BLOCKS - 1)));
+    assert_eq!(
+        topo.call_idx_for_result.get(&(MAX_BLOCKS - 1)),
+        Some(&(MAX_BLOCKS - 2))
+    );
+    assert!(!topo.result_by_call.contains_key("c0"));
+}
+
+#[test]
+fn tool_topology_rebuilds_after_clear_to_the_same_length() {
+    let mut buf = Buffer::new();
+    push_tool_pairs(&mut buf, 0, 2);
+    assert_eq!(buf.tool_topology().result_by_call.get("c0"), Some(&1));
+
+    buf.clear();
+    push_tool_pairs(&mut buf, 10, 2);
+    let topo = buf.tool_topology();
+    assert_eq!(topo.result_by_call.get("c10"), Some(&1));
+    assert!(!topo.result_by_call.contains_key("c0"));
+}
+
 /// Live assistant block with renderer caches primed for the stale
 /// reuse tests.
 fn throttled_stream_fixture() -> Buffer {

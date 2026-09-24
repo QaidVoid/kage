@@ -2,6 +2,7 @@
 
 #[allow(clippy::wildcard_imports)] // split out of main.rs; shares the crate-root scope
 use super::*;
+use kage_core::LoopError;
 
 /// Render one streaming event to stdout. Only text-bearing events produce
 /// visible output; tool calls render a single bracketed status line.
@@ -25,6 +26,16 @@ pub(crate) fn print_event<W: Write>(out: &mut W, event: &LoopEvent) {
             kept, summarized, ..
         } => {
             let _ = writeln!(out, "\n[compacted: kept {kept}, summarized {summarized}]");
+            let _ = out.flush();
+        }
+        LoopEvent::Error {
+            kind: LoopError::Auth { message },
+        } => {
+            let _ = writeln!(
+                out,
+                "\n[error] authentication failed: {}. Run `kage auth login` to re-authenticate.",
+                message.trim_end_matches('.')
+            );
             let _ = out.flush();
         }
         LoopEvent::Error { kind } => {
@@ -54,6 +65,30 @@ pub(crate) fn print_event_json<W: Write>(out: &mut W, event: &LoopEvent) {
             );
             let _ = out.flush();
         }
+    }
+}
+
+#[cfg(test)]
+mod text_print_tests {
+    use super::*;
+
+    #[test]
+    fn auth_error_names_the_login_command() {
+        let mut buf = Vec::new();
+        print_event(
+            &mut buf,
+            &LoopEvent::Error {
+                kind: LoopError::Auth {
+                    message: "token expired".into(),
+                },
+            },
+        );
+        let text = String::from_utf8(buf).unwrap();
+        assert!(
+            text.contains("authentication failed: token expired"),
+            "{text:?}"
+        );
+        assert!(text.contains("kage auth login"), "{text:?}");
     }
 }
 

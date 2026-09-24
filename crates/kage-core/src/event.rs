@@ -173,6 +173,13 @@ pub enum LoopError {
         /// Human-readable detail.
         message: String,
     },
+    /// The provider rejected the credentials (missing, expired, or
+    /// revoked). Re-authenticating is the remedy; retrying is not.
+    #[error("authentication failed: {message}")]
+    Auth {
+        /// Provider-supplied detail, without the raw response body.
+        message: String,
+    },
     /// A tool invocation raised an error the loop could not recover from.
     #[error("tool '{name}' error: {message}")]
     Tool {
@@ -446,5 +453,16 @@ mod tests {
         let json = serde_json::to_value(&err).unwrap();
         assert_eq!(json["kind"], "tool");
         assert_eq!(json["name"], "bash");
+    }
+
+    #[test]
+    fn auth_error_serializes_with_auth_kind() {
+        let err = LoopError::Auth {
+            message: "token expired".into(),
+        };
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["kind"], "auth");
+        assert_eq!(json["message"], "token expired");
+        assert_eq!(err.to_string(), "authentication failed: token expired");
     }
 }

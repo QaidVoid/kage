@@ -374,6 +374,7 @@ impl Buffer {
         self.last_user_focus = self.last_user_focus.and_then(|f| f.checked_sub(k));
         renumber_after_compact(&mut self.last_block_screen_rows, k);
         renumber_after_compact(&mut self.last_block_virtual_rows, k);
+        self.bump_epoch();
         self.bump_version();
         k
     }

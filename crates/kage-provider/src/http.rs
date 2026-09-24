@@ -181,9 +181,10 @@ where
 ///
 /// A 429 becomes [`ProviderError::RateLimited`], carrying the
 /// provider's `Retry-After` hint (delta-seconds or HTTP-date) when one
-/// is present; every other status stays [`ProviderError::Http`] with
-/// the body capped at 8 KiB so a misbehaving upstream cannot blow up
-/// our error strings.
+/// is present. A 401 or 403 becomes [`ProviderError::Auth`] with a
+/// short detail pulled from the body. Every other status stays
+/// [`ProviderError::Http`] with the body capped at 8 KiB so a
+/// misbehaving upstream cannot blow up our error strings.
 pub(crate) fn read_error_body(
     status: u16,
     response: ureq::http::Response<ureq::Body>,
@@ -211,10 +212,38 @@ pub(crate) fn read_error_body(
 /// Pure status-to-error mapping, split out of [`read_error_body`] so
 /// tests can pin it without a live response.
 fn classify_http_error(status: u16, retry_after: Option<Duration>, body: String) -> ProviderError {
-    if status == 429 {
-        return ProviderError::RateLimited { retry_after };
+    match status {
+        429 => ProviderError::RateLimited { retry_after },
+        401 | 403 => ProviderError::Auth(auth_detail(status, &body)),
+        _ => ProviderError::Http { status, body },
     }
-    ProviderError::Http { status, body }
+}
+
+/// Maximum characters of a non-JSON auth error body kept as detail.
+const AUTH_DETAIL_MAX_CHARS: usize = 200;
+
+/// Human-readable detail for an auth failure: the JSON body's
+/// `error.message` or top-level `message`, else the raw body cut to
+/// [`AUTH_DETAIL_MAX_CHARS`], else the bare status.
+fn auth_detail(status: u16, body: &str) -> String {
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    let message = parsed.as_ref().and_then(|json| {
+        json.pointer("/error/message")
+            .or_else(|| json.get("message"))
+            .and_then(serde_json::Value::as_str)
+    });
+    if let Some(message) = message.map(str::trim).filter(|m| !m.is_empty()) {
+        return message.to_owned();
+    }
+    let body = body.trim();
+    if body.is_empty() {
+        return format!("status {status}");
+    }
+    if body.chars().count() <= AUTH_DETAIL_MAX_CHARS {
+        return body.to_owned();
+    }
+    let cut: String = body.chars().take(AUTH_DETAIL_MAX_CHARS).collect();
+    format!("{cut}...")
 }
 
 /// Parse an HTTP `Retry-After` value: a delta in seconds, or an
@@ -351,6 +380,35 @@ mod tests {
                 body
             } if body == "boom"
         ));
+    }
+
+    #[test]
+    fn classify_maps_401_and_403_to_auth_with_the_json_message() {
+        let body = r#"{"error":{"message":"token expired"}}"#;
+        for status in [401, 403] {
+            assert!(matches!(
+                classify_http_error(status, None, body.into()),
+                ProviderError::Auth(detail) if detail == "token expired"
+            ));
+        }
+        assert!(matches!(
+            classify_http_error(401, None, r#"{"message":"bad key"}"#.into()),
+            ProviderError::Auth(detail) if detail == "bad key"
+        ));
+        assert!(matches!(
+            classify_http_error(400, None, body.into()),
+            ProviderError::Http { status: 400, .. }
+        ));
+    }
+
+    #[test]
+    fn auth_detail_falls_back_to_a_truncated_body_or_status() {
+        let long = "x".repeat(500);
+        let detail = auth_detail(401, &long);
+        assert_eq!(detail.chars().count(), AUTH_DETAIL_MAX_CHARS + 3);
+        assert!(detail.ends_with("..."));
+        assert_eq!(auth_detail(401, " denied \n"), "denied");
+        assert_eq!(auth_detail(403, ""), "status 403");
     }
 
     #[test]

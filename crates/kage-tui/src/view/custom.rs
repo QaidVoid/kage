@@ -3,9 +3,9 @@
 //!
 //! Internal `kage:*` kinds get purpose-built chrome instead of a
 //! raw `[kage:...]` label: informational kinds (help, notify, theme,
-//! image) render as quiet muted text with no header at all, errors
-//! get a red `error` tag, and operational kinds (shell, mcp, log,
-//! compaction) get a small muted tag. Unknown kinds - plugin blocks
+//! image, plugin) render as quiet muted text with no header at all,
+//! errors get a red `error` tag, and operational kinds (shell, mcp,
+//! log, compaction, truncated) get a small muted tag. Unknown kinds - plugin blocks
 //! without a registered renderer - keep the `[kind]` header, which
 //! is the useful debugging view for plugin authors.
 
@@ -33,12 +33,13 @@ enum Chrome {
 
 fn chrome_for(kind: &str) -> Chrome {
     match kind {
-        "kage:help" | "kage:notify" | "kage:theme" | "kage:image" => Chrome::Quiet,
+        "kage:help" | "kage:notify" | "kage:theme" | "kage:image" | "kage:plugin" => Chrome::Quiet,
         "kage:error" => Chrome::Tag("error", true),
         "kage:shell" => Chrome::Tag("shell", false),
         "kage:mcp" => Chrome::Tag("mcp", false),
         "kage:compaction" => Chrome::Tag("compaction", false),
         "kage:log" => Chrome::Tag("log", false),
+        "kage:truncated" => Chrome::Tag("truncated", false),
         _ => Chrome::Raw,
     }
 }
@@ -193,7 +194,13 @@ mod tests {
 
     #[test]
     fn informational_kinds_render_quiet_without_a_kind_label() {
-        for kind in ["kage:help", "kage:notify", "kage:theme", "kage:image"] {
+        for kind in [
+            "kage:help",
+            "kage:notify",
+            "kage:theme",
+            "kage:image",
+            "kage:plugin",
+        ] {
             let block = Block::Custom {
                 kind: kind.into(),
                 text: "welcome to kage".into(),
@@ -226,6 +233,7 @@ mod tests {
             ("kage:shell", "shell"),
             ("kage:mcp", "mcp"),
             ("kage:compaction", "compaction"),
+            ("kage:truncated", "truncated"),
         ] {
             let block = Block::Custom {
                 kind: kind.into(),

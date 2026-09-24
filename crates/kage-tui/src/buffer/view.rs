@@ -126,17 +126,19 @@ impl Buffer {
     }
 
     /// Cached call/result block pairing for the current block
-    /// list, rebuilt here when the block count changed since it was
-    /// last built. The returned handle is shared, so this runs at
-    /// most once per block-list change rather than per frame.
+    /// list, rebuilt here when the block count or structural epoch
+    /// changed since it was last built. The returned handle is
+    /// shared, so this runs at most once per block-list change rather
+    /// than per frame.
     pub(crate) fn tool_topology(&mut self) -> Arc<ToolTopology> {
-        if let Some((len, topo)) = &self.tool_topology
-            && *len == self.blocks.len()
+        let key = (self.epoch, self.blocks.len());
+        if let Some((built, topo)) = &self.tool_topology
+            && *built == key
         {
             return Arc::clone(topo);
         }
         let topo = Arc::new(ToolTopology::build(&self.blocks));
-        self.tool_topology = Some((self.blocks.len(), Arc::clone(&topo)));
+        self.tool_topology = Some((key, Arc::clone(&topo)));
         topo
     }
 
@@ -300,12 +302,14 @@ impl Buffer {
     /// Block content is never merged: blocks appended while the
     /// snapshot was being drawn stay in place with their (empty)
     /// cache entries intact. The merge is skipped entirely when the
-    /// live buffer has fewer blocks than the snapshot - stale cache
-    /// indices would mislabel. (Shrinking mutations are UI-thread
-    /// only, so they cannot overlap a draw on that same thread; the
-    /// guard is defensive.)
+    /// live buffer has fewer blocks than the snapshot or went through
+    /// a structural change (clear, take, compaction) since the
+    /// snapshot was taken, because stale cache indices would
+    /// mislabel. (Structural mutations are UI-thread only, so they
+    /// cannot overlap a draw on that same thread; the guard is
+    /// defensive.)
     pub fn merge_render_state(&mut self, snapshot: &Self) {
-        if snapshot.blocks.len() > self.blocks.len() {
+        if snapshot.epoch != self.epoch || snapshot.blocks.len() > self.blocks.len() {
             return;
         }
         for (slot, entry) in self
@@ -341,7 +345,7 @@ impl Buffer {
         // cost of one extra window of staleness, at worst.
         self.stream_dirty_since = snapshot.stream_dirty_since;
         // The pairing cache is shared, not copied: the snapshot's
-        // build length travels with it so a length mismatch here
+        // build key travels with it so a length mismatch here
         // triggers one rebuild on the next render.
         self.tool_topology.clone_from(&snapshot.tool_topology);
     }
@@ -439,7 +443,12 @@ impl Buffer {
     pub(crate) fn clear_block_caches(&mut self) {
         self.block_heights.clear();
         self.block_render_lines.clear();
+        self.bump_epoch();
         self.bump_version();
+    }
+
+    pub(crate) fn bump_epoch(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
     }
 
     pub(crate) fn invalidate_height(&mut self, idx: usize) {

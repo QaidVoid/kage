@@ -42,6 +42,9 @@ impl App {
             if self.drain_plugin_dialog() {
                 needs_redraw = true;
             }
+            if self.drain_permission() {
+                needs_redraw = true;
+            }
             if self.drain_plugin_theme() {
                 needs_redraw = true;
             }
@@ -317,11 +320,13 @@ impl App {
             && self.picker.is_none()
             && self.settings_overlay.is_none()
             && self.session_tree.is_none()
+            && self.permission_overlay.is_none()
             && self.plugin_overlay.is_none();
         let picker = self.picker.as_mut();
         let settings_overlay = self.settings_overlay.as_mut();
         let session_tree = self.session_tree.as_mut();
         let plugin_overlay = self.plugin_overlay.as_mut();
+        let permission_overlay = self.permission_overlay.as_mut();
         let slash_palette = self.slash_palette.as_ref();
         let input_completion = if show_completion {
             self.input_completion.as_ref()
@@ -382,6 +387,16 @@ impl App {
                     viewport: frame.area(),
                 };
                 overlay.render(modal, frame.buffer_mut(), &ctx);
+            }
+            if let Some(permission) = permission_overlay {
+                let modal = crate::overlay::OverlayWidget::measure(permission, frame.area());
+                frame.render_widget(crate::opaque::OpaqueClear, modal);
+                let theme = crate::theme::current();
+                let ctx = crate::overlay::OverlayCtx {
+                    theme: &theme,
+                    viewport: frame.area(),
+                };
+                crate::overlay::OverlayWidget::render(permission, modal, frame.buffer_mut(), &ctx);
             }
         })?;
         // Merge renderer-owned state (caches, clamped scroll, last-frame

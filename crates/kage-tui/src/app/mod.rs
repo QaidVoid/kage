@@ -282,6 +282,35 @@ pub struct PluginRefresh {
     pub widgets: Vec<Arc<kage_plugin::LuaWidget>>,
 }
 
+/// A permission ask the worker's permission gate hands to the App.
+///
+/// A tool configured `ask` under `[permissions.tools.<name>]` suspends
+/// the agent loop on the worker thread; the gate forwards this over a
+/// channel and parks on the carried `reply`. The App hosts the
+/// matching [`crate::overlay::PermissionOverlay`], then sends the
+/// decision back and the worker resumes the loop with it.
+pub struct PermissionAsk {
+    /// Tool name the model invoked.
+    pub tool: String,
+    /// Subject preview: the command line or compact JSON the rules
+    /// matched against.
+    pub subject: String,
+    /// Channel the App answers on.
+    pub reply: std::sync::mpsc::Sender<PermissionDecision>,
+}
+
+/// The App's answer to a [`PermissionAsk`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PermissionDecision {
+    /// Run this one call; the next identical call asks again.
+    AllowOnce,
+    /// Run this call and persist an allow rule so future calls of
+    /// this tool skip the prompt.
+    AllowAlways,
+    /// Refuse the call.
+    Deny,
+}
+
 /// In-flight dialog bookkeeping: the reply channel plus how to turn an
 /// [`OverlayAction`] outcome into the value the parked coroutine is
 /// resumed with. One variant per `kage.ui.*` dialog kind.
@@ -750,6 +779,18 @@ pub struct App {
     /// Session file staged for deletion while the confirm dialog in
     /// [`Self::plugin_overlay`] asks; cleared when the answer arrives.
     pending_tree_delete: Option<std::path::PathBuf>,
+    /// Channel the worker pushes blocking [`PermissionAsk`] requests
+    /// onto (`[permissions.tools.<name>] default = "ask"`). Drained
+    /// between event polls; while the overlay is open the worker
+    /// thread is parked awaiting the decision.
+    permission_rx: Option<std::sync::mpsc::Receiver<PermissionAsk>>,
+    /// The permission prompt currently on screen, if any. A modal
+    /// sibling of [`Self::plugin_overlay`] with the same hosting
+    /// shape: overlay plus the parked ask it must answer.
+    permission_overlay: Option<crate::overlay::PermissionOverlay>,
+    /// The ask whose overlay is in [`Self::permission_overlay`]:
+    /// where to send the decision once the user picks one.
+    pending_permission: Option<PermissionAsk>,
 }
 
 mod actions;

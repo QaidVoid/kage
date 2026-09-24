@@ -22,6 +22,7 @@ use kage_acp::acp::{
     ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 use kage_acp::agent::{AcpPermission, Agent, PermissionDecision, PromptContext, serve_agent};
+use kage_core::permissions::{PermissionAction, PermissionsConfig};
 use kage_core::{
     CancelFlag, Content, LoopEvent, Message, Role, StopReason as CoreStopReason, ToolOutput,
 };
@@ -53,17 +54,45 @@ pub(crate) fn run(model_override: Option<&str>, system_role: &str) -> ExitCode {
     }
 }
 
-/// The innermost loop hook: every tool call is gated by the client
-/// via `session/request_permission`. It is the base layer (session
-/// and plugin hooks wrap it and forward `before_tool_call` down), so
-/// it mirrors `NoopHooks` for every other callback.
+/// The innermost loop hook: `[permissions]` config rules are checked
+/// first (an allow skips the client round-trip, a deny refuses
+/// locally), and an `ask` verdict or a tool with no entry falls
+/// through to the client gate (`session/request_permission`) exactly
+/// as before the config existed. It is the base layer (session and
+/// plugin hooks wrap it and forward `before_tool_call` down), so it
+/// mirrors `NoopHooks` for every other callback.
 struct GateHooks {
+    rules: PermissionsConfig,
     gate: AcpPermission,
 }
 
 impl Hooks for GateHooks {
     fn before_tool_call(&mut self, name: &str, input: &serde_json::Value) -> Option<ToolOutput> {
-        match self.gate.request(name, input.clone()) {
+        // No entry for the tool: the client gate stays authoritative,
+        // exactly as before `[permissions]` existed. Only a configured
+        // section can pre-allow (skip the round-trip) or pre-deny.
+        if !self.rules.tools.contains_key(name) {
+            return self.ask_client(name, input.clone());
+        }
+        let subject = PermissionsConfig::subject_for(input);
+        match self.rules.check(name, &subject) {
+            PermissionAction::Allow => None,
+            PermissionAction::Deny => Some(ToolOutput {
+                is_error: true,
+                text: format!("`{name}`: permission denied by [permissions.tools.{name}]"),
+                structured: None,
+                terminate: false,
+            }),
+            PermissionAction::Ask => self.ask_client(name, input.clone()),
+        }
+    }
+}
+
+impl GateHooks {
+    /// Forward one call to the client's permission gate and map its
+    /// verdict to the loop's short-circuit shape.
+    fn ask_client(&mut self, name: &str, input: serde_json::Value) -> Option<ToolOutput> {
+        match self.gate.request(name, input) {
             PermissionDecision::Allow => None,
             PermissionDecision::Deny(reason) => {
                 let detail = reason.map_or_else(String::new, |r| format!(": {r}"));
@@ -87,6 +116,9 @@ struct Session {
     cx: AgentContext,
     workdir: PathBuf,
     record_path: Option<PathBuf>,
+    /// `[permissions]` rules resolved from the layered config at
+    /// session construction; consulted before the client gate.
+    permissions: PermissionsConfig,
     /// Owns the session's MCP child processes; kept alive so their
     /// tools stay valid, and drained for restart / hot-refresh before
     /// each prompt.
@@ -161,7 +193,20 @@ impl CliAcpAgent {
         for (server, err) in mcp_errors {
             eprintln!("kage: mcp `{server}`: {err}");
         }
+        // Layered `[permissions]` for this session: validated now so a
+        // broken rule set fails session/new instead of being silently
+        // misapplied, seeded for path confinement, and kept for the
+        // pre-client gate in `prompt`.
+        let permissions = kage_core::config::Config::load_layered(&workdir)
+            .map(|c| c.permissions)
+            .unwrap_or_default();
+        permissions
+            .validate()
+            .map_err(|e| RpcError::internal(format!("permissions: {e}")))?;
         let mut cx = AgentContext::new(resolved, &system_prompt).with_workdir(&workdir);
+        if permissions.confine_paths {
+            cx = cx.with_confine_paths();
+        }
         if let Some(w) = runtime_env::context_window_for(&self.registry, &model) {
             cx = cx.with_context_window(w);
         }
@@ -176,6 +221,7 @@ impl CliAcpAgent {
             cx,
             workdir,
             record_path: None,
+            permissions,
             mcp_manager,
         })
     }
@@ -407,6 +453,7 @@ impl Agent for CliAcpAgent {
             cfg,
             &cancel_flag,
             GateHooks {
+                rules: session.permissions.clone(),
                 gate: ctx.permission(),
             },
             &user_msg,

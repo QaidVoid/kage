@@ -24,6 +24,9 @@ mouse = true
 # bigger composing area. min floored at 1, max capped at 64.
 input_min_lines = 1
 input_max_lines = 8
+# default thinking level for new sessions: off, minimal, low,
+# medium, high, or xhigh. shift+tab still cycles it per session.
+# thinking_level = "medium"
 
 [plugins]
 # override the plugin directory (default ~/.config/kage/plugins/).
@@ -39,7 +42,8 @@ backend = "local"
 suppress_warning = false
 
 [keybindings]
-# chord -> builtin command name.
+# chord -> builtin command name, or an `action:<Name>` builtin
+# input action (see the keybindings guide).
 # bindings = { "ctrl+r" = "cancel" }
 
 [loop]
@@ -47,10 +51,20 @@ suppress_warning = false
 # model context window (0.0-1.0). Applies on next launch; also
 # editable in the :settings dialog.
 compaction_threshold = 0.8
+
+[permissions]
+# tool permission rules. everything is allowed unless configured;
+# see the permissions guide for the full reference.
+# confine_paths = false
+# [permissions.tools.bash]
+# default = "ask"
+# allow = ["git *"]
+# deny = ["rm -rf *"]
 ```
 
 Every table and key is optional; omitted values fall back to the
-defaults shown above.
+defaults shown above. See [permissions](/guide/permissions) for the
+rules reference.
 
 ## layering
 

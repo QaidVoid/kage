@@ -103,8 +103,20 @@ pub(crate) fn run_resume(
     for (server, err) in mcp_errors {
         eprintln!("kage: mcp `{server}`: {err}");
     }
+    // Layered config for the path-confinement flag; the permission
+    // gate (and its validation) is built inside `execute_print_run`.
+    let app_config = match kage_core::config::Config::load_layered(&workdir) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("kage: {e}; using defaults");
+            kage_core::config::Config::default()
+        }
+    };
     let mut cx = AgentContext::new(resolved.model.clone(), &replay.header.system_prompt)
         .with_workdir(&workdir);
+    if app_config.permissions.confine_paths {
+        cx = cx.with_confine_paths();
+    }
     if let Some(window) = runtime_env::context_window_for(&registry, &model) {
         cx = cx.with_context_window(window);
     }

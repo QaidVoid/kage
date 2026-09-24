@@ -37,6 +37,7 @@ export default defineConfig({
           { text: "providers", link: "/guide/providers" },
           { text: "themes", link: "/guide/themes" },
           { text: "mcp", link: "/guide/mcp" },
+          { text: "permissions", link: "/guide/permissions" },
         ],
       },
       {

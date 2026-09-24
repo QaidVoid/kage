@@ -47,6 +47,13 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
             kage_core::config::Config::default()
         }
     };
+    // Structurally broken permission rules are a hard error: kage
+    // would silently misapply them otherwise. Mirrors the providers
+    // validation in `build_provider_registry`.
+    if let Err(e) = app_config.permissions.validate() {
+        eprintln!("kage: {e}");
+        return ExitCode::from(1);
+    }
     let loop_cfg = LoopConfig {
         compaction_threshold: app_config.loop_settings.compaction_threshold,
         ..LoopConfig::default()
@@ -189,6 +196,9 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     }
     let cancel = CancelFlag::new();
     let mut initial_cx = AgentContext::new(bare_model, system).with_workdir(&workdir);
+    if app_config.permissions.confine_paths {
+        initial_cx = initial_cx.with_confine_paths();
+    }
     if let Some(window) = crate::runtime_env::context_window_for(&registry, &qualified_model) {
         initial_cx = initial_cx.with_context_window(window);
     }
@@ -223,6 +233,14 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     let steering = kage_tui::shared_steering();
     let (dialog_tx, dialog_rx) = mpsc::channel::<PluginDialog>();
     let (plugin_refresh_tx, plugin_refresh_rx) = mpsc::channel::<PluginRefresh>();
+    // Permission asks: the worker's gate parks on the reply while the
+    // App hosts the overlay. One gate per TUI session, cloned into
+    // every hook stack the worker builds; the shared rules make an
+    // "always allow" stick for the whole session.
+    let (permission_tx, permission_rx) = mpsc::channel::<kage_tui::PermissionAsk>();
+    let permission_gate = crate::permissions::PermissionGate::new(app_config.permissions.clone())
+        .with_ask(permission_tx)
+        .with_cancel(cancel.clone());
 
     // Plan a session up-front but defer creating the file until the
     // first prompt actually lands. Otherwise quitting or resuming
@@ -277,6 +295,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         steering: steering.clone(),
         tx_self: tx_worker,
         plugins_dir: plugins_dir_path.clone(),
+        permission_gate,
     });
 
     // Hot-reload watcher: a small thread owns the FS watcher, polls it
@@ -366,6 +385,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     app.set_plugin_dialog(dialog_rx);
     app.set_plugin_refresh(plugin_refresh_rx);
     app.set_plugin_keybindings(plugin_keybinding_chords);
+    app.set_permission_channel(permission_rx);
     let keybinding_errors = app.set_config_keybindings(
         app_config
             .keybindings

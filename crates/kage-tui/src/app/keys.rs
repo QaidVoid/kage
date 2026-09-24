@@ -13,6 +13,22 @@ impl App {
             .any(|(matcher, _, _)| matcher.matches(key))
     }
 
+    /// Whether a raw plugin terminal-input hook consumed `key`. See
+    /// the call site in [`Self::dispatch_key`] for the ordering
+    /// rationale.
+    fn consumed_by_terminal_hook(&self, key: &ratatui::crossterm::event::KeyEvent) -> bool {
+        let Some(hooks) = self.terminal_hooks.as_ref() else {
+            return false;
+        };
+        let snapshot = lock(hooks).clone();
+        if snapshot.is_empty() {
+            return false;
+        }
+        let descriptor = key_event_to_json(*key);
+        snapshot.iter().any(|hook| hook.handle(&descriptor))
+    }
+
+    /// Drive the state machine forward by one key.
     pub(crate) fn dispatch_key(
         &mut self,
         key: ratatui::crossterm::event::KeyEvent,
@@ -38,20 +54,21 @@ impl App {
         // Raw plugin terminal-input hooks see the key before any modal
         // layer (but never before the global hatches above, so a hook
         // cannot wedge the UI). A truthy return consumes it.
-        if let Some(hooks) = self.terminal_hooks.as_ref() {
-            let snapshot = lock(hooks).clone();
-            if !snapshot.is_empty() {
-                let descriptor = key_event_to_json(key);
-                if snapshot.iter().any(|hook| hook.handle(&descriptor)) {
-                    return None;
-                }
-            }
+        if self.consumed_by_terminal_hook(&key) {
+            return None;
         }
 
         // A blocking plugin dialog is the top-most modal layer: the
         // worker is parked waiting for its answer.
         if self.plugin_overlay.is_some() {
             return self.dispatch_plugin_overlay_key(key);
+        }
+
+        // A permission prompt is equally top-most: the worker is
+        // parked inside the permission gate awaiting the decision.
+        // Ctrl+C already hit the global cancel hatch above.
+        if self.permission_overlay.is_some() {
+            return self.dispatch_permission_key(key);
         }
 
         // The right-click context menu is a light modal layer above

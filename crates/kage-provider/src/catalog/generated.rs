@@ -8441,7 +8441,11 @@ pub static PROVIDERS: &[ProviderInfo] = &[
         id: "gemini",
         name: "Google",
         api: None,
-        env: &["GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY"],
+        env: &[
+            "GOOGLE_API_KEY",
+            "GOOGLE_GENERATIVE_AI_API_KEY",
+            "GEMINI_API_KEY",
+        ],
         models: &[
             ModelInfo {
                 id: "deep-research-max-preview-04-2026",

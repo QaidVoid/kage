@@ -315,12 +315,13 @@ pub(crate) fn first_user_text(msg: &Message) -> String {
     out
 }
 
-/// Run the agent loop with the right hook chain: TUI display innermost,
-/// optional session recording in the middle, optional plugin dispatch
-/// outermost, plus the [`UsageHooks`] wrapper at the very edge so the
-/// modeline updates every `MessageEnd`. Returns whether the loop
-/// completed successfully so the caller knows whether to bump
-/// `last_model` state.
+/// Run the agent loop with the right hook chain: permission gate
+/// innermost, TUI display over it, optional session recording in the
+/// middle, optional plugin dispatch outermost, plus the
+/// [`UsageHooks`] wrapper at the very edge so the modeline updates
+/// every `MessageEnd`. Returns whether the loop completed
+/// successfully so the caller knows whether to bump `last_model`
+/// state.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_with_hooks(
     provider: &dyn kage_provider::Provider,
@@ -328,6 +329,7 @@ pub(crate) fn run_with_hooks(
     cx: &mut AgentContext,
     loop_cfg: LoopConfig,
     cancel: &CancelFlag,
+    gate: crate::permissions::PermissionGate,
     buffer: &SharedBuffer,
     plugin_runtime: Option<&Arc<PluginRuntime>>,
     writer: Option<SessionWriter>,
@@ -338,7 +340,7 @@ pub(crate) fn run_with_hooks(
     steering: kage_tui::SharedSteering,
 ) -> bool {
     use crate::usage_hooks::UsageHooks;
-    let tui_hooks = TuiHooks::new(NoopHooks, buffer.clone()).with_steering(steering);
+    let tui_hooks = TuiHooks::new(gate, buffer.clone()).with_steering(steering);
     match (writer, plugin_runtime) {
         (Some(w), Some(rt)) => {
             let mut recorded =
@@ -383,15 +385,17 @@ pub(crate) fn run_with_hooks(
 /// is mirrored to the buffer and recorded to the session file. The
 /// usage hook is intentionally skipped: compaction does not change
 /// the active model or window, just the saved budget.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_compact_with_hooks(
     provider: &dyn kage_provider::Provider,
     cx: &mut AgentContext,
     cancel: &CancelFlag,
+    gate: crate::permissions::PermissionGate,
     buffer: &SharedBuffer,
     plugin_runtime: Option<&Arc<PluginRuntime>>,
     writer: Option<SessionWriter>,
 ) -> Result<bool, kage_core::LoopError> {
-    let tui_hooks = TuiHooks::new(NoopHooks, buffer.clone());
+    let tui_hooks = TuiHooks::new(gate, buffer.clone());
     match (writer, plugin_runtime) {
         (Some(w), Some(rt)) => {
             let recorded =

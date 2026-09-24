@@ -14,6 +14,7 @@ mod history;
 mod init;
 mod mcp;
 mod oauth;
+mod permissions;
 mod plugins;
 mod rpc;
 mod runtime_env;
@@ -31,7 +32,7 @@ pub(crate) use std::sync::Arc;
 pub(crate) use chrono::Utc;
 pub(crate) use clap::{Parser, Subcommand};
 pub(crate) use kage_core::{CancelFlag, Content, LoopEvent, Message, Role};
-pub(crate) use kage_loop::{AgentContext, Hooks, LoopConfig, NoopHooks, run};
+pub(crate) use kage_loop::{AgentContext, Hooks, LoopConfig, run};
 pub(crate) use kage_provider::{
     ProviderRegistry, anthropic, compat, gemini, openai, openai_responses,
 };
@@ -327,11 +328,20 @@ fn main() -> ExitCode {
         return run_subcommand(command);
     }
 
+    if cli.print.is_some() {
+        return run_print_mode(cli);
+    }
+
+    // No subcommand and no `-p`: drop into the interactive TUI.
+    tui::run_tui(cli.model.as_deref(), &cli.system)
+}
+
+/// One `-p` print-mode run: provider and tool setup, permission gate,
+/// session recording, and the exit code.
+fn run_print_mode(cli: Cli) -> ExitCode {
     let Some(prompt) = cli.print else {
-        // No subcommand and no `-p`: drop into the interactive TUI.
         return tui::run_tui(cli.model.as_deref(), &cli.system);
     };
-
     let mut registry = build_provider_registry();
 
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -388,7 +398,17 @@ fn main() -> ExitCode {
     for (server, err) in mcp_errors {
         eprintln!("kage: mcp `{server}`: {err}");
     }
+    // Layered config for the path-confinement flag; the permission
+    // gate itself (and its validation) is built inside
+    // `execute_print_run` from the same layered load.
+    let app_config = kage_core::config::Config::load_layered(&workdir).unwrap_or_else(|e| {
+        eprintln!("kage: {e}; using defaults");
+        kage_core::config::Config::default()
+    });
     let mut cx = AgentContext::new(resolved.model.clone(), &system_prompt).with_workdir(&workdir);
+    if app_config.permissions.confine_paths {
+        cx = cx.with_confine_paths();
+    }
     if let Some(window) = runtime_env::context_window_for(&registry, &model) {
         cx = cx.with_context_window(window);
     }

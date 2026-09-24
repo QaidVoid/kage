@@ -77,6 +77,9 @@ impl App {
             plugin_overlay: None,
             active_dialog: None,
             pending_tree_delete: None,
+            permission_rx: None,
+            permission_overlay: None,
+            pending_permission: None,
         }
     }
 
@@ -729,5 +732,38 @@ impl App {
             .collect();
         let mut s = lock(slot);
         *s = entries;
+    }
+
+    /// Wire the channel the worker pushes blocking [`PermissionAsk`]
+    /// requests onto (a tool configured `ask` under
+    /// `[permissions.tools.<name>]`). Without this the gate's send
+    /// fails, which it treats as a denial.
+    pub fn set_permission_channel(&mut self, rx: std::sync::mpsc::Receiver<PermissionAsk>) {
+        self.permission_rx = Some(rx);
+    }
+
+    /// Drain one pending [`PermissionAsk`] and open its overlay.
+    /// Skipped while another modal overlay is up: the worker stays
+    /// parked and the ask is taken on a later tick once the screen is
+    /// free (the gate is single-slot, so at most one is queued).
+    pub(crate) fn drain_permission(&mut self) -> bool {
+        if self.picker.is_some()
+            || self.plugin_overlay.is_some()
+            || self.permission_overlay.is_some()
+        {
+            return false;
+        }
+        let Some(rx) = self.permission_rx.as_ref() else {
+            return false;
+        };
+        let Ok(ask) = rx.try_recv() else {
+            return false;
+        };
+        self.permission_overlay = Some(crate::overlay::PermissionOverlay::new(
+            ask.tool.clone(),
+            ask.subject.clone(),
+        ));
+        self.pending_permission = Some(ask);
+        true
     }
 }

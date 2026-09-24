@@ -14,7 +14,7 @@ pub(crate) use std::sync::{Arc, Mutex};
 pub(crate) use std::thread;
 
 pub(crate) use kage_core::{CancelFlag, Content, Message, Role, sync::lock};
-pub(crate) use kage_loop::{AgentContext, LoopConfig, NoopHooks, force_compact, run};
+pub(crate) use kage_loop::{AgentContext, LoopConfig, force_compact, run};
 pub(crate) use kage_mcp::McpManager;
 pub(crate) use kage_plugin::{
     BridgePrep, BridgeStep, CommandOutput, ConfirmRequest, EditorRequest, InputRequest,
@@ -87,6 +87,10 @@ pub(crate) struct WorkerConfig {
     /// `None` when no plugin dir resolved (e.g. `$XDG_CONFIG_HOME`
     /// unset and `$HOME` missing); reloads become no-ops.
     plugins_dir: Option<PathBuf>,
+    /// Tool permission gate built from `[permissions]`. Cloned into
+    /// every hook stack this worker builds; the shared rules make an
+    /// "always allow" answered mid-run stick for the whole session.
+    permission_gate: crate::permissions::PermissionGate,
 }
 
 mod entry;

@@ -25,7 +25,10 @@ pub mod toast;
 pub mod usage;
 pub mod view;
 
-pub use app::{App, AppExit, PluginDialog, PluginRefresh, RunRequest, SessionLister};
+pub use app::{
+    App, AppExit, PermissionAsk, PermissionDecision, PluginDialog, PluginRefresh, RunRequest,
+    SessionLister,
+};
 pub use buffer::{Block, Buffer};
 pub use chord::Chord;
 pub use cmdline::{CommandLine, CommandLineEvent};
@@ -45,8 +48,8 @@ pub use layout::{
     INPUT_MIN_LINES, Regions, STATUS_BOTTOM_LINES_DEFAULT, input_height_for, split,
 };
 pub use overlay::{
-    OverlayAction, OverlayCtx, OverlayPicker, OverlayWidget, SessionNode, SlashContext,
-    SlashPalette,
+    OverlayAction, OverlayCtx, OverlayPicker, OverlayWidget, PermissionChoice, PermissionOverlay,
+    SessionNode, SlashContext, SlashPalette,
 };
 pub use picker::{PickItem, pick};
 pub use terminal::Tui;

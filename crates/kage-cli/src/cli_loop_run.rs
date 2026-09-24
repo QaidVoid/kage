@@ -17,17 +17,29 @@ pub(crate) fn execute_print_run(
     json_mode: bool,
 ) -> ExitCode {
     let workdir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let cfg = match kage_core::config::Config::load_layered(&workdir) {
-        Ok(c) => LoopConfig {
-            compaction_threshold: c.loop_settings.compaction_threshold,
-            ..LoopConfig::default()
-        },
+    let layered = match kage_core::config::Config::load_layered(&workdir) {
+        Ok(c) => c,
         Err(e) => {
             eprintln!("kage: {e}; using defaults");
-            LoopConfig::default()
+            kage_core::config::Config::default()
         }
     };
+    // Structurally broken permission rules are a hard error, mirroring
+    // the providers validation in `build_provider_registry`.
+    if let Err(e) = layered.permissions.validate() {
+        eprintln!("kage: {e}");
+        return ExitCode::from(1);
+    }
+    if layered.permissions.confine_paths {
+        cx.confine_paths = true;
+    }
+    let cfg = LoopConfig {
+        compaction_threshold: layered.loop_settings.compaction_threshold,
+        ..LoopConfig::default()
+    };
     let cancel = CancelFlag::new();
+    let permission_gate =
+        crate::permissions::PermissionGate::new(layered.permissions).with_cancel(cancel.clone());
     if let Err(err) = crate::sigint::install() {
         eprintln!("kage: {err}; Ctrl-C will kill the process");
     }
@@ -38,7 +50,7 @@ pub(crate) fn execute_print_run(
         cx,
         cfg,
         &cancel,
-        NoopHooks,
+        permission_gate,
         user_msg,
         writer,
         plugin_runtime,

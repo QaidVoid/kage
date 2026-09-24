@@ -81,6 +81,7 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
             steering,
             tx_self,
             plugins_dir,
+            permission_gate,
         } = cfg;
 
         // A generated title is written at most once per session per
@@ -166,6 +167,7 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         &mut cx_guard,
                         loop_cfg,
                         &cancel,
+                        permission_gate.clone(),
                         &buffer,
                         plugin_runtime.as_ref(),
                         writer_for_turn,
@@ -353,6 +355,7 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         provider.as_ref(),
                         &mut cx_guard,
                         &cancel,
+                        permission_gate.clone(),
                         &buffer,
                         plugin_runtime.as_ref(),
                         writer_for_turn,

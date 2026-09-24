@@ -41,6 +41,19 @@ impl InputState {
         self.modeless
     }
 
+    /// Whether shell-escape mode is armed (`!` typed on an empty
+    /// prompt). The next submit runs as a shell command.
+    #[must_use]
+    pub fn shell_armed(&self) -> bool {
+        self.shell
+    }
+
+    /// Read and clear the shell-escape flag; the submit path uses
+    /// this to route the line to the shell runner.
+    pub fn take_shell(&mut self) -> bool {
+        std::mem::take(&mut self.shell)
+    }
+
     /// Current prompt-input text.
     #[must_use]
     pub fn text(&self) -> &str {

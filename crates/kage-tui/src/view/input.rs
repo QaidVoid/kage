@@ -13,6 +13,8 @@ pub(crate) const INPUT_GLYPH_WIDTH: u16 = 1;
 /// content. Plain ASCII so it renders the same in every terminal and
 /// doesn't trigger our "no fancy chars" lint when grep'd.
 const INPUT_GLYPH: &str = "|";
+/// Prompt glyph while shell-escape mode is armed.
+const INPUT_GLYPH_SHELL: &str = "!";
 
 /// Default placeholder text shown when the input is empty.
 pub(crate) const INPUT_PLACEHOLDER_INSERT: &str = "Send a message...  (: commands, Ctrl+P models)";
@@ -70,13 +72,26 @@ pub(super) fn render_input(frame: &mut Frame, regions: Regions, input: &InputSta
     let glyph_area = ratatui::layout::Rect::new(inner.x, inner.y, glyph_width, 1);
     if glyph_width >= INPUT_GLYPH_WIDTH {
         let glyph = Paragraph::new(Line::from(Span::styled(
-            INPUT_GLYPH.to_string(),
+            if input.shell_armed() {
+                INPUT_GLYPH_SHELL
+            } else {
+                INPUT_GLYPH
+            }
+            .to_owned(),
             Style::default().fg(theme.input_glyph_fg),
         )));
         frame.render_widget(glyph, glyph_area);
     }
 
-    if input.text().is_empty() {
+    if input.text().is_empty() && input.shell_armed() {
+        let placeholder = Paragraph::new(Line::from(Span::styled(
+            "run a shell command... (Backspace to cancel)",
+            Style::default()
+                .fg(theme.input_placeholder_fg)
+                .add_modifier(Modifier::ITALIC),
+        )));
+        frame.render_widget(placeholder, body_area);
+    } else if input.text().is_empty() {
         if let Some(text) = placeholder_for(mode) {
             let placeholder = Paragraph::new(Line::from(Span::styled(
                 text,

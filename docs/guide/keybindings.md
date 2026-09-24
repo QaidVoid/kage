@@ -28,6 +28,7 @@ switch modes or panes.
 | `Shift+Tab`      | Cycle the thinking level                    |
 | `Ctrl+V`         | Attach an image from the clipboard          |
 | `Ctrl+G`         | Edit the prompt draft in `$VISUAL`/`$EDITOR` |
+| `!`              | Shell escape: `!` on an empty prompt, then Enter runs the line |
 | `?`              | Open the keyboard reference (Normal mode)   |
 
 `Ctrl+O` also expands a collapsed bracketed paste if one is present

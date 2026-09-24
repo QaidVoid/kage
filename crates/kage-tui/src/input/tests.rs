@@ -1426,3 +1426,51 @@ fn alt_b_f_still_move_words_not_scroll() {
     state.handle_key(alt('b'));
     assert_eq!(state.cursor(), 0, "alt+b should move backward one word");
 }
+
+#[test]
+fn bang_on_empty_prompt_arms_shell_mode() {
+    let mut s = InputState::new();
+    s.handle_key(key(KeyCode::Char('!')));
+    assert!(s.shell_armed(), "`!` on an empty prompt arms shell mode");
+    assert_eq!(s.text(), "", "`!` is not inserted");
+    s.handle_key(key(KeyCode::Char('l')));
+    s.handle_key(key(KeyCode::Char('s')));
+    let acts = s.handle_key(key(KeyCode::Enter));
+    match acts.as_slice() {
+        [InputAction::Submit(t)] => assert_eq!(t, "ls"),
+        other => panic!("expected Submit, got {other:?}"),
+    }
+    assert!(!s.shell_armed(), "submit disarms shell mode");
+}
+
+#[test]
+fn bang_inserts_literally_when_prompt_is_not_empty() {
+    let mut s = InputState::new();
+    for c in "say !".chars() {
+        s.handle_key(key(KeyCode::Char(c)));
+    }
+    assert!(!s.shell_armed());
+    assert_eq!(s.text(), "say !");
+}
+
+#[test]
+fn backspace_on_empty_prompt_disarms_shell_mode() {
+    let mut s = InputState::new();
+    s.handle_key(key(KeyCode::Char('!')));
+    assert!(s.shell_armed());
+    s.handle_key(key(KeyCode::Backspace));
+    assert!(!s.shell_armed(), "Backspace on the empty prompt disarms");
+}
+
+#[test]
+fn shell_mode_submit_does_not_feed_prompt_history() {
+    let mut s = InputState::new();
+    s.handle_key(key(KeyCode::Char('!')));
+    s.handle_key(key(KeyCode::Char('l')));
+    s.handle_key(key(KeyCode::Char('s')));
+    let _ = s.handle_key(key(KeyCode::Enter));
+    assert!(
+        !s.history().contains(&"ls".to_owned()),
+        "shell commands stay out of the prompt history"
+    );
+}

@@ -56,6 +56,18 @@ motions, operators, and registers.
 In vim mode, normal-mode keys (`j`/`k`, `G`, `[`/`]`, `zM`/`zR`, `y`)
 work on the buffer once you press `Esc` (`Ctrl+W` cycles panes).
 
+## running shell commands
+
+Type `!` on an empty prompt to switch to shell mode (the prompt glyph
+becomes `!`). Enter runs the line with `sh` in the session working
+directory; the output lands in the conversation as its own block and
+the model sees a summary on the next turn, so follow-up prompts can
+reference it. `Backspace` on the empty prompt (or just submitting)
+returns you to the normal prompt.
+
+Shell runs are conversation-only: they are not re-applied when you
+resume a recorded session.
+
 ## switching models mid-session
 
 Type `:model <provider>:<model>` or open the model picker with

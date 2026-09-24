@@ -58,6 +58,38 @@ fn end_run_span(
     lock(session_usage).working = false;
 }
 
+/// Capture a shell-escape run: combined stdout+stderr, trimmed of
+/// trailing newlines, truncated to [`SHELL_OUTPUT_CAP`] chars so a
+/// chatty command cannot flood the context. Returns the exit code
+/// (`None` when the command was killed by a signal or failed to
+/// spawn) and the truncated output.
+fn run_shell_capture(cmd: &str, workdir: &std::path::Path) -> (Option<i32>, String) {
+    use std::process::Command;
+    const SHELL_OUTPUT_CAP: usize = 8 * 1024;
+    let output = match Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .current_dir(workdir)
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => return (None, format!("failed to run: {e}")),
+    };
+    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.trim().is_empty() {
+        if !combined.is_empty() && !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+        combined.push_str(&stderr);
+    }
+    if combined.chars().count() > SHELL_OUTPUT_CAP {
+        let cut: String = combined.chars().take(SHELL_OUTPUT_CAP).collect();
+        combined = format!("{cut}\n... (output truncated)");
+    }
+    (output.status.code(), combined)
+}
+
 /// Apply a resolved thinking level to the live session: swap the
 /// agent context level, sync the modeline snapshot, toast the label,
 /// fire `thinking_level_select` with `source`, and persist a
@@ -446,6 +478,37 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
                         &buffer,
                     );
                 }
+                RunRequest::RunShell(cmd) => {
+                    let workdir = lock(&cx).workdir.clone();
+                    let (code, output) = run_shell_capture(&cmd, &workdir);
+                    let exit_note = code.map_or_else(|| "signal".to_owned(), |c| c.to_string());
+                    {
+                        let mut buf = lock(&buffer);
+                        buf.push_custom(
+                            "kage:shell",
+                            format!(
+                                "$ {cmd}\n{output}\n(exit code {exit_note})",
+                                output = output.trim_end()
+                            ),
+                            false,
+                        );
+                    }
+                    // Let the model see the run on the next turn:
+                    // a `[shell]` user message appended to the live
+                    // history. Not recorded to the session file, so
+                    // a resumed session does not carry it.
+                    let parent = lock(&cx).history.last().map(|m| m.id);
+                    let body = format!(
+                        "[shell] ran `{cmd}` in the session working directory; \
+                         exit code {exit_note}:\n{output}",
+                        output = output.trim_end()
+                    );
+                    lock(&cx).history.push(Message::new(
+                        Role::User,
+                        vec![Content::Text { text: body }],
+                        parent,
+                    ));
+                }
                 RunRequest::SetThinkingLevel(value) => {
                     if let Some(level) = kage_provider::ThinkingLevel::parse(&value) {
                         apply_thinking_level(
@@ -644,4 +707,51 @@ pub(crate) fn spawn_worker(cfg: WorkerConfig) -> thread::JoinHandle<()> {
             refresh_session_entries(plugin_runtime.as_ref(), session_path.as_ref());
         }
     })
+}
+
+#[cfg(test)]
+mod shell_tests {
+    use super::*;
+
+    #[test]
+    fn run_shell_capture_combines_streams_and_exit_code() {
+        let dir = std::env::temp_dir();
+        let (code, out) = run_shell_capture("echo out; echo err >&2", &dir);
+        assert_eq!(code, Some(0));
+        assert!(out.contains("out"), "{out}");
+        assert!(out.contains("err"), "{out}");
+    }
+
+    #[test]
+    fn run_shell_capture_reports_failure_and_signal() {
+        let dir = std::env::temp_dir();
+        let (code, out) = run_shell_capture("exit 3", &dir);
+        assert_eq!(code, Some(3));
+        assert_eq!(out, "");
+        let (code, _) = run_shell_capture("kill -9 $$", &dir);
+        assert_eq!(code, None);
+    }
+
+    #[test]
+    fn run_shell_capture_truncates_large_output() {
+        let dir = std::env::temp_dir();
+        let (_, out) = run_shell_capture("yes | head -c 100000", &dir);
+        assert!(
+            out.chars().count() <= 8 * 1024 + 64,
+            "truncated, len {}",
+            out.chars().count()
+        );
+        assert!(
+            out.contains("output truncated"),
+            "{:?}",
+            &out[..out.len().min(200)]
+        );
+    }
+
+    #[test]
+    fn run_shell_capture_runs_in_the_given_workdir() {
+        let dir = std::env::temp_dir();
+        let (_, out) = run_shell_capture("pwd", &dir);
+        assert!(out.trim().starts_with(dir.to_str().unwrap()), "{out}");
+    }
 }

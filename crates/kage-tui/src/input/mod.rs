@@ -297,6 +297,10 @@ impl Operator {
 
 /// Tracking the editing mode, the prompt text, the prompt history, and
 /// any pending leader key (e.g. `g` waiting for the second `g` of `gg`).
+// The independent state flags (modeless, awaiting_replace,
+// register_linewise, shell) are the natural encoding here; a bitmask
+// would obscure the doc comments that explain each one.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug)]
 pub struct InputState {
     mode: Mode,
@@ -307,6 +311,10 @@ pub struct InputState {
     history_cursor: Option<usize>,
     history_stash: Option<String>,
     focused_pane: Pane,
+    /// Shell-escape mode: `!` on an empty prompt arms it; the next
+    /// submit runs the line as a shell command instead of a prompt.
+    /// Backspace on the empty prompt disarms it.
+    shell: bool,
     /// Vim operator awaiting a motion or doubled key. When set, the
     /// next keystroke either resolves the operator (motion / linewise
     /// `dd`-style / Esc cancel) or extends the count.
@@ -375,6 +383,7 @@ impl Default for InputState {
             history_cursor: None,
             history_stash: None,
             focused_pane: Pane::default(),
+            shell: false,
             pending_op: None,
             pending_count: None,
             awaiting_replace: false,

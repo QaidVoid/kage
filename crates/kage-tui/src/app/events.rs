@@ -17,6 +17,18 @@ impl App {
     /// flush drains it, or sees the run over and takes the channel
     /// path; it can never strand a prompt between the two.
     pub(crate) fn handle_submit(&mut self, text: String) {
+        // Shell-escape mode: the line is a command, not a prompt.
+        // No images can be attached (the prompt was empty when `!`
+        // armed it), so the path stays text-only.
+        if self.input.take_shell() {
+            let mut buf = lock(&self.buffer);
+            buf.push_user(text.clone());
+            drop(buf);
+            if self.send_request(RunRequest::RunShell(text)).is_err() {
+                self.push_error("shell failed: agent worker has stopped");
+            }
+            return;
+        }
         let images = self.input.take_attached();
         {
             let mut buf = lock(&self.buffer);

@@ -201,6 +201,12 @@ pub enum RunRequest {
     /// firing the plugin event with `"source": "settings"`. Unknown
     /// strings surface an inline error instead of changing anything.
     SetThinkingLevel(String),
+    /// Run a `!`-prefixed shell-escape line. The worker executes the
+    /// command in the session working directory, paints the output as
+    /// a `kage:shell` block, and appends a `[shell]` user message to
+    /// the live context so the model sees the result on the next
+    /// turn. Not recorded to the session file.
+    RunShell(String),
     /// Set the session permission mode override from the `:permission`
     /// command. `Some(action)` forces every tool call through that
     /// action for the rest of the session; `None` (values `default`

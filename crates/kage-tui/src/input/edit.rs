@@ -163,6 +163,8 @@ impl InputState {
                     }
                 } else {
                     let raw = std::mem::take(&mut self.text);
+                    let shell = self.shell;
+                    self.shell = false;
                     let expanded = self.resolve_pastes(&raw);
                     self.pastes.clear();
                     // Keep only images whose `[image #N ...]` marker
@@ -173,7 +175,11 @@ impl InputState {
                     self.attached.retain(|(id, _)| live.contains(id));
                     let text = strip_image_markers(&expanded);
                     self.cursor = 0;
-                    self.push_history(&text);
+                    // Shell commands stay out of the prompt history;
+                    // they are not prompts.
+                    if !shell {
+                        self.push_history(&text);
+                    }
                     self.reset_history_navigation();
                     vec![InputAction::Submit(text)]
                 }
@@ -195,6 +201,10 @@ impl InputState {
             }
             KeyCode::Backspace => {
                 self.reset_history_navigation();
+                if self.shell && self.text.is_empty() {
+                    self.shell = false;
+                    return Vec::new();
+                }
                 self.backspace();
                 Vec::new()
             }
@@ -221,6 +231,10 @@ impl InputState {
             }
             KeyCode::Char('/') if self.text.is_empty() => {
                 vec![InputAction::OpenCommandPalette]
+            }
+            KeyCode::Char('!') if self.text.is_empty() && self.cursor == 0 => {
+                self.shell = true;
+                Vec::new()
             }
             KeyCode::Char(c) => {
                 self.reset_history_navigation();

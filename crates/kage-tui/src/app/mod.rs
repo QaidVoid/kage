@@ -34,9 +34,10 @@ pub(crate) use crate::keymap::{
 };
 pub(crate) use crate::layout::split;
 pub(crate) use crate::overlay::{
-    CompletionAction, ContextAction, ContextMenu, ContextMenuOutcome, InputCompletion,
-    OverlayAction, OverlayPicker, SessionTreeOverlay, SessionTreeSource, SettingsInit,
-    SettingsOverlay, SlashContext, SlashPalette, file_completions, prefix_before_cursor,
+    ApprovalOutcome, CompletionAction, ContextAction, ContextMenu, ContextMenuOutcome,
+    InputCompletion, OverlayAction, OverlayPicker, SessionTreeOverlay, SessionTreeSource,
+    SettingsInit, SettingsOverlay, SlashContext, SlashPalette, file_completions,
+    prefix_before_cursor,
 };
 pub(crate) use crate::picker::PickItem;
 pub(crate) use crate::terminal::Tui;
@@ -808,12 +809,12 @@ pub struct App {
     /// The session whose events the App renders. Learned from the first
     /// envelope and moved by `SessionChanged`.
     active_session: Option<kage_core::SessionId>,
-    /// The permission prompt currently on screen, if any. A modal
-    /// sibling of [`Self::plugin_overlay`].
-    permission_overlay: Option<crate::overlay::PermissionOverlay>,
-    /// The request answered by [`Self::permission_overlay`].
+    /// The approval panel on screen in place of the input, if any. It
+    /// owns the keyboard like a modal sibling of [`Self::plugin_overlay`].
+    approval_panel: Option<crate::overlay::ApprovalPanel>,
+    /// The request answered by [`Self::approval_panel`].
     pending_permission: Option<engine::PendingApproval>,
-    /// Permission requests waiting for the overlay.
+    /// Permission requests waiting for the panel.
     permission_queue: std::collections::VecDeque<engine::PendingApproval>,
     /// When the run in flight started, from the working flag's
     /// transition. `None` while idle.

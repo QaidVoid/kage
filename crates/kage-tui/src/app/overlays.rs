@@ -173,8 +173,11 @@ impl App {
             overlay.handle_paste(text);
             return;
         }
-        if self.permission_overlay.is_some()
-            || self.context_menu.is_some()
+        if let Some(panel) = self.approval_panel.as_mut() {
+            panel.paste(text);
+            return;
+        }
+        if self.context_menu.is_some()
             || self.picker.is_some()
             || self.settings_overlay.is_some()
             || self.session_tree.is_some()
@@ -678,26 +681,29 @@ impl App {
         None
     }
 
-    /// Drive the active permission prompt. The overlay resolves on
-    /// every dismissal path (Esc denies), so the waiting run always gets
-    /// an answer.
+    /// Drive the approval panel. Every answer resolves the waiting
+    /// request, so the parked run always resumes.
     pub(crate) fn dispatch_permission_key(
         &mut self,
         key: ratatui::crossterm::event::KeyEvent,
     ) -> Option<AppExit> {
-        let overlay = self.permission_overlay.as_mut()?;
-        let action = crate::overlay::OverlayWidget::handle_key(overlay, key);
-        let value = match action {
-            OverlayAction::Stay | OverlayAction::PropagateKey => return None,
-            OverlayAction::Resolve(value) => value,
-            OverlayAction::Close => serde_json::Value::String("deny".to_owned()),
-        };
-        self.permission_overlay = None;
-        self.answer_permission(match value.as_str() {
-            Some("allow_once") => PermissionDecision::AllowOnce,
-            Some("allow_always") => PermissionDecision::AllowAlways,
-            _ => PermissionDecision::Deny,
-        });
+        self.approval_key_at(key, Instant::now());
         None
+    }
+
+    /// Feed `key`, pressed at `now`, to the approval panel.
+    pub(crate) fn approval_key_at(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+        now: Instant,
+    ) {
+        let Some(panel) = self.approval_panel.as_mut() else {
+            return;
+        };
+        match panel.handle_key_at(key, now) {
+            ApprovalOutcome::Stay => {}
+            ApprovalOutcome::Decide(decision) => self.answer_permission(decision),
+            ApprovalOutcome::Feedback(text) => self.answer_with_feedback(text),
+        }
     }
 }

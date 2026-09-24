@@ -83,10 +83,10 @@ impl App {
             return self.dispatch_plugin_overlay_key(key);
         }
 
-        // A permission prompt is equally top-most: the worker is
-        // parked inside the permission gate awaiting the decision.
-        // Ctrl+C already hit the global cancel hatch above.
-        if self.permission_overlay.is_some() {
+        // An approval panel is equally top-most: the worker is parked
+        // inside the permission gate awaiting the decision. Ctrl+C
+        // already hit the global cancel hatch above.
+        if self.approval_panel.is_some() {
             return self.dispatch_permission_key(key);
         }
 

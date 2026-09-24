@@ -351,7 +351,7 @@ impl App {
             && self.picker.is_none()
             && self.settings_overlay.is_none()
             && self.session_tree.is_none()
-            && self.permission_overlay.is_none()
+            && self.approval_panel.is_none()
             && self.help_overlay.is_none()
             && self.plugin_overlay.is_none();
         let picker = self.picker.as_mut();
@@ -359,8 +359,14 @@ impl App {
         let session_tree = self.session_tree.as_mut();
         let help_overlay = self.help_overlay.as_mut();
         let plugin_overlay = self.plugin_overlay.as_mut();
-        let permission_overlay = self.permission_overlay.as_mut();
-        let slash_palette = self.slash_palette.as_ref();
+        let approval = self
+            .approval_panel
+            .as_ref()
+            .map(|panel| (panel, self.permission_queue.len()));
+        let slash_palette = self
+            .slash_palette
+            .as_ref()
+            .filter(|_| self.approval_panel.is_none());
         let input_completion = if show_completion {
             self.input_completion.as_ref()
         } else {
@@ -371,12 +377,19 @@ impl App {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                let heights =
+                let mut heights =
                     view::chrome_heights(&status, session_usage.as_ref(), input, area.width);
+                if let Some((panel, _)) = approval {
+                    heights.input = panel.height(area.width).min(area.height * 3 / 5);
+                }
                 let regions = split(area, heights);
+                let mut view_regions = regions;
+                if approval.is_some() {
+                    view_regions.input.height = 0;
+                }
                 view::render(
                     frame,
-                    regions,
+                    view_regions,
                     &mut buffer,
                     input,
                     cmdline,
@@ -386,6 +399,9 @@ impl App {
                     session_usage.as_ref(),
                     &live_toasts,
                 );
+                if let Some((panel, waiting)) = approval {
+                    panel.render(frame, regions.input, waiting);
+                }
                 if let Some(picker) = picker {
                     picker.render(frame, area);
                 }
@@ -430,21 +446,6 @@ impl App {
                         viewport: area,
                     };
                     overlay.render(modal, frame.buffer_mut(), &ctx);
-                }
-                if let Some(permission) = permission_overlay {
-                    let modal = crate::overlay::OverlayWidget::measure(permission, area);
-                    frame.render_widget(crate::opaque::OpaqueClear, modal);
-                    let theme = crate::theme::current();
-                    let ctx = crate::overlay::OverlayCtx {
-                        theme: &theme,
-                        viewport: area,
-                    };
-                    crate::overlay::OverlayWidget::render(
-                        permission,
-                        modal,
-                        frame.buffer_mut(),
-                        &ctx,
-                    );
                 }
             })
             .map_err(|err| TuiError::Io(std::io::Error::other(err.to_string())))?;

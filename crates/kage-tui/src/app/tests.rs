@@ -662,7 +662,7 @@ fn permission_requests_open_a_prompt_and_answer_through_requests() {
         ))
         .unwrap();
     assert!(app.drain_engine_events());
-    assert!(app.permission_overlay.is_some());
+    assert!(app.approval_panel.is_some());
 
     app.answer_permission(PermissionDecision::AllowOnce);
     assert_eq!(
@@ -803,6 +803,160 @@ fn a_request_resolved_elsewhere_resumes_the_call() {
     );
     assert_eq!(tool_phase(&app, "c2"), ToolPhase::Running);
     assert_eq!(tool_phase(&app, "c1"), ToolPhase::Waiting);
+}
+
+/// A moment past the approval panel's type-ahead guard.
+fn past_guard() -> Instant {
+    Instant::now() + crate::overlay::approval::TYPE_AHEAD_GUARD + Duration::from_millis(100)
+}
+
+fn resolutions(rx: &mpsc::Receiver<RunRequest>) -> Vec<RunRequest> {
+    rx.try_iter()
+        .filter(|r| {
+            matches!(
+                r,
+                RunRequest::ResolvePermission { .. } | RunRequest::Submit { .. }
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn the_approval_panel_replaces_the_input_below_the_buffer() {
+    let (mut app, _rx, events) = app_with_events();
+    feed(
+        &mut app,
+        &events,
+        vec![bash_start("c1"), permission_request("c1", 1)],
+    );
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    app.render_into(&mut terminal).unwrap();
+    let rows = snapshot_rows(&terminal);
+    let (top, height) = {
+        let buf = app.buffer.lock().unwrap();
+        (buf.last_area_y(), buf.last_area_height())
+    };
+    let bottom = usize::from(top + height);
+    let title = rows
+        .iter()
+        .position(|r| r.contains("Run this command?"))
+        .expect("panel title");
+    assert!(title >= bottom, "title at {title}, buffer ends at {bottom}");
+    assert_eq!(rows[title + 1], "   $ ls");
+    assert!(rows[title..].iter().any(|r| r == " > 1. Yes"), "{rows:#?}");
+    assert!(
+        rows[..bottom]
+            .iter()
+            .all(|r| !r.contains("1. Yes") && !r.contains("$ ls")),
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn keys_right_after_the_panel_opens_are_dropped() {
+    let (mut app, rx, events) = app_with_events();
+    feed(&mut app, &events, vec![permission_request("c1", 1)]);
+    app.dispatch_key(key('y'));
+    assert!(app.approval_panel.is_some());
+    assert!(resolutions(&rx).is_empty());
+}
+
+#[test]
+fn s_allows_the_tool_for_the_session() {
+    let (mut app, rx, events) = app_with_events();
+    feed(&mut app, &events, vec![permission_request("c1", 1)]);
+    app.approval_key_at(key('s'), past_guard());
+    assert_eq!(
+        resolutions(&rx),
+        [RunRequest::ResolvePermission {
+            request_id: kage_core::protocol::RequestId(1),
+            decision: PermissionDecision::AllowSession,
+        }]
+    );
+    assert!(app.approval_panel.is_none());
+}
+
+#[test]
+fn feedback_denies_then_submits_the_text() {
+    let (mut app, rx, events) = app_with_events();
+    feed(&mut app, &events, vec![permission_request("c1", 1)]);
+    let now = past_guard();
+    app.approval_key_at(key('t'), now);
+    for c in "use ls".chars() {
+        app.approval_key_at(key(c), now);
+    }
+    app.approval_key_at(code(KeyCode::Enter), now);
+    assert_eq!(
+        resolutions(&rx),
+        [
+            RunRequest::ResolvePermission {
+                request_id: kage_core::protocol::RequestId(1),
+                decision: PermissionDecision::Deny,
+            },
+            RunRequest::Submit {
+                text: "use ls".to_owned(),
+                images: Vec::new(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn queued_requests_count_through_the_batch() {
+    let (mut app, _rx, events) = app_with_events();
+    feed(
+        &mut app,
+        &events,
+        vec![
+            permission_request("c1", 1),
+            permission_request("c2", 2),
+            permission_request("c3", 3),
+        ],
+    );
+    let title = |app: &mut App| {
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        app.render_into(&mut terminal).unwrap();
+        snapshot_rows(&terminal)
+            .into_iter()
+            .find(|r| r.contains("Run this command?"))
+            .expect("panel title")
+    };
+    assert!(title(&mut app).contains(" 1 of 3 "));
+    app.approval_key_at(key('1'), past_guard());
+    assert!(title(&mut app).contains(" 2 of 3 "));
+    app.approval_key_at(key('y'), Instant::now());
+    assert!(
+        title(&mut app).contains(" 2 of 3 "),
+        "the next panel guards too"
+    );
+}
+
+#[test]
+fn the_draft_survives_an_approval() {
+    let (mut app, _rx, events) = app_with_events();
+    type_str(&mut app, "half a thought");
+    feed(&mut app, &events, vec![permission_request("c1", 1)]);
+    assert!(app.footer_hint().starts_with("1-5 or y s a n t"));
+    app.approval_key_at(key('t'), past_guard());
+    app.approval_key_at(key('x'), past_guard());
+    app.approval_key_at(code(KeyCode::Esc), past_guard());
+    app.approval_key_at(key('n'), past_guard());
+    assert!(app.approval_panel.is_none());
+    assert_eq!(app.input.text(), "half a thought");
+}
+
+#[test]
+fn answering_moves_the_row_from_waiting_to_running() {
+    use crate::view::tool_view::ToolPhase;
+    let (mut app, _rx, events) = app_with_events();
+    feed(
+        &mut app,
+        &events,
+        vec![bash_start("c1"), permission_request("c1", 1)],
+    );
+    assert_eq!(tool_phase(&app, "c1"), ToolPhase::Waiting);
+    app.approval_key_at(code(KeyCode::Enter), past_guard());
+    assert_eq!(tool_phase(&app, "c1"), ToolPhase::Running);
 }
 
 #[test]

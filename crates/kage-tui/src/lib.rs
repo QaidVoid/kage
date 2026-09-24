@@ -48,8 +48,8 @@ pub use layout::{
     INPUT_MIN_LINES, Regions, input_height_for, split,
 };
 pub use overlay::{
-    OverlayAction, OverlayCtx, OverlayPicker, OverlayWidget, PermissionChoice, PermissionOverlay,
-    SessionNode, SlashContext, SlashPalette,
+    OverlayAction, OverlayCtx, OverlayPicker, OverlayWidget, SessionNode, SlashContext,
+    SlashPalette,
 };
 pub use picker::{PickItem, pick};
 pub use terminal::Tui;

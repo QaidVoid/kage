@@ -82,7 +82,7 @@ impl App {
             pending_tree_delete: None,
             engine_rx: None,
             active_session: None,
-            permission_overlay: None,
+            approval_panel: None,
             pending_permission: None,
             permission_queue: std::collections::VecDeque::new(),
             run_started: None,
@@ -505,6 +505,9 @@ impl App {
         let keys = self.sequencer.pending();
         if !keys.is_empty() {
             return format!("{} ...", kage_core::keymap::display_keys(keys));
+        }
+        if let Some(panel) = &self.approval_panel {
+            return panel.hint();
         }
         let working = self.is_working();
         let draft = !self.input.text().is_empty();

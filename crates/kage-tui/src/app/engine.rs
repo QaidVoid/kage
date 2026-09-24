@@ -17,8 +17,8 @@ pub(crate) struct PendingApproval {
     pub(crate) tool_call_id: Option<String>,
     /// Tool name.
     pub(crate) tool: String,
-    /// What the permission rules matched against.
-    pub(crate) subject: String,
+    /// The full tool input the panel summarizes.
+    pub(crate) input: serde_json::Value,
 }
 
 impl App {
@@ -130,7 +130,7 @@ impl App {
                 request_id,
                 tool_call_id,
                 tool,
-                subject,
+                input,
                 ..
             } => {
                 let tool_call_id = tool_call_id.map(|id| id.to_string());
@@ -141,13 +141,13 @@ impl App {
                     request_id,
                     tool_call_id,
                     tool,
-                    subject,
+                    input,
                 });
             }
             HostEvent::PermissionResolved { request_id } => self.drop_permission(request_id),
             HostEvent::RunEnded { .. } => {
                 self.permission_queue.clear();
-                self.permission_overlay = None;
+                self.approval_panel = None;
                 self.pending_permission = None;
                 let mut buf = lock(&self.buffer);
                 buf.finish_streaming();
@@ -158,20 +158,31 @@ impl App {
     }
 
     /// Show the oldest waiting permission request once the screen is
-    /// free. Returns whether a prompt opened.
+    /// free. Returns whether a panel opened.
     fn open_next_permission(&mut self) -> bool {
-        if self.picker.is_some()
-            || self.plugin_overlay.is_some()
-            || self.permission_overlay.is_some()
-        {
+        if self.picker.is_some() || self.plugin_overlay.is_some() || self.approval_panel.is_some() {
             return false;
         }
+        self.show_next_approval(1)
+    }
+
+    /// Close the panel on screen and show the next waiting request, if
+    /// any, one place further in the count.
+    fn advance_approvals(&mut self) {
+        let position = self.approval_panel.take().map_or(1, |p| p.position() + 1);
+        self.pending_permission = None;
+        self.show_next_approval(position);
+    }
+
+    fn show_next_approval(&mut self, position: usize) -> bool {
         let Some(approval) = self.permission_queue.pop_front() else {
             return false;
         };
-        self.permission_overlay = Some(crate::overlay::PermissionOverlay::new(
-            approval.tool.clone(),
-            approval.subject.clone(),
+        self.approval_panel = Some(crate::overlay::ApprovalPanel::new(
+            &approval.tool,
+            &approval.input,
+            position,
+            Instant::now(),
         ));
         self.pending_permission = Some(approval);
         true
@@ -193,8 +204,8 @@ impl App {
             .as_ref()
             .is_some_and(|a| a.request_id == request_id)
         {
-            self.permission_overlay = None;
             dropped.extend(self.pending_permission.take().map(|a| a.tool_call_id));
+            self.advance_approvals();
         }
         let mut buf = lock(&self.buffer);
         for id in dropped.into_iter().flatten() {
@@ -202,9 +213,9 @@ impl App {
         }
     }
 
-    /// Send the decision for the prompt on screen, then show the next
-    /// one. The tool row moves to running, restarting its timer, or to
-    /// denied.
+    /// Send the decision for the panel on screen, then show the next
+    /// request. The tool row moves to running, restarting its timer, or
+    /// to denied.
     pub(crate) fn answer_permission(&mut self, decision: PermissionDecision) {
         let Some(approval) = self.pending_permission.take() else {
             return;
@@ -220,6 +231,21 @@ impl App {
                 ToolPhase::Running
             };
             lock(&self.buffer).set_tool_phase(id, phase);
+        }
+        self.advance_approvals();
+    }
+
+    /// Deny the request on screen, then send `text` to the model as a
+    /// prompt, so it reads the denial and the instruction together at
+    /// the next turn boundary. The draft and its attachments stay.
+    pub(crate) fn answer_with_feedback(&mut self, text: String) {
+        self.answer_permission(PermissionDecision::Deny);
+        let submit = RunRequest::Submit {
+            text,
+            images: Vec::new(),
+        };
+        if self.send_request(submit).is_err() {
+            self.push_error("submit failed: agent worker has stopped");
         }
     }
 }

@@ -50,11 +50,11 @@ impl super::App {
 
     /// Whether any keyboard-consuming modal layer is on screen. A
     /// superset of the mouse-oriented [`App::modal_open`]: the help
-    /// overlay, permission prompt, and context menu also own keys.
+    /// overlay, approval panel, and context menu also own keys.
     pub(crate) fn keyboard_modal_open(&self) -> bool {
         self.modal_open()
             || self.help_overlay.is_some()
-            || self.permission_overlay.is_some()
+            || self.approval_panel.is_some()
             || self.context_menu.is_some()
     }
 

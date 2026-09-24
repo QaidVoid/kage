@@ -157,7 +157,7 @@ impl App {
             || self.cmdline.is_some()
             || self.search_line.is_some()
             || self.help_overlay.is_some()
-            || self.permission_overlay.is_some()
+            || self.approval_panel.is_some()
     }
 
     /// Dispatch one crossterm mouse event. While a modal overlay is

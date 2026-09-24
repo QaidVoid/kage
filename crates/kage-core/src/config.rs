@@ -407,14 +407,14 @@ impl Default for UiConfig {
 pub enum EditorMode {
     /// Modal editing in the vim style: a normal mode, an insert
     /// mode, and a visual mode, with motions, operators, and
-    /// registers. The historical (and default) behavior.
-    #[default]
+    /// registers. Opt in with `editor = "vim"`.
     Vim,
     /// Always-editable, non-modal editing. Readline / Emacs keys do
     /// all editing (`Ctrl+A`/`E`/`W`/`U`/`K`/`Y`, `Ctrl+/`,
     /// `Alt+B`/`F`); `Esc` cancels the in-flight turn; the buffer
     /// scrolls with `PageUp` / `PageDown` and the mouse. No modal
-    /// states.
+    /// states. The default.
+    #[default]
     Modeless,
 }
 
@@ -763,19 +763,19 @@ mod tests {
     }
 
     #[test]
-    fn editor_mode_defaults_vim_and_parses_modeless() {
-        assert_eq!(Config::default().ui.editor, EditorMode::Vim);
+    fn editor_mode_defaults_modeless_and_parses_vim() {
+        assert_eq!(Config::default().ui.editor, EditorMode::Modeless);
         let _globals = process_globals();
         figment::Jail::expect_with(|jail| {
             jail.create_file(
                 "config.toml",
                 r#"
                 [ui]
-                editor = "modeless"
+                editor = "vim"
                 "#,
             )?;
             let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
-            assert_eq!(cfg.ui.editor, EditorMode::Modeless);
+            assert_eq!(cfg.ui.editor, EditorMode::Vim);
             Ok(())
         });
     }

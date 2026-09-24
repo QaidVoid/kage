@@ -4,8 +4,8 @@ This page covers the keys kage's TUI listens for. It is not the full
 input grammar; refer to `crates/kage-tui/src/input/mod.rs` for the
 authoritative key-to-action map.
 
-The TUI supports two editor modes: **vim** (the default) and
-**modeless** (`editor = "modeless"` in config). Both share the same
+The TUI supports two editor modes: **modeless** (the default) and
+**vim** (`editor = "vim"` in config). Both share the same
 buffer navigation keys.
 
 ## buffer navigation (works in both modes)

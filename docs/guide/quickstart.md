@@ -33,28 +33,27 @@ Press `?` in Normal mode (`Esc`, then `?`) for the keyboard reference
 overlay. Type `:` for the command line, `:settings` for themes,
 model, and thinking defaults.
 
-## modal navigation
+## editing and navigation
 
-kage is modal in the vim sense.
+The prompt is always editable: type, press Enter to send. Readline
+keys work (`Ctrl+A`/`Ctrl+E` line start/end, `Ctrl+U`/`Ctrl+K` kill,
+`Ctrl+/` undo). `Esc` cancels a running turn, `PageUp`/`PageDown`
+scroll the conversation.
 
-| Mode    | Cursor look | Purpose                                        |
-| ------- | ----------- | ---------------------------------------------- |
-| Insert  | thin bar    | edit the input card (default on launch)        |
-| Normal  | block       | navigate, scroll, fold, search                 |
-| Visual  | block       | select text in the buffer or input card        |
-
-`Esc` returns to Normal from anywhere. `i` enters Insert.
+Prefer vim? Set `editor = "vim"` under `[ui]` in config.toml (or
+toggle it in `:settings`) to get normal/insert/visual modes with
+motions, operators, and registers.
 
 ## the conversation buffer
 
-In Normal mode with the buffer pane focused (`Ctrl+W` cycles panes):
-
-- `j` / `k` scroll one line
-- `G` snaps to the bottom and re-arms auto-follow
-- `[` / `]` move focus between blocks
-- `zM` folds every block, `zR` unfolds
+- `PageUp` / `PageDown` scroll ten lines
+- `Ctrl+P` opens the model picker, `Ctrl+S` the session picker
+- `Ctrl+O` folds or unfolds the focused block
 - `/` starts a buffer search, `n` and `N` walk matches
-- `y` yanks the current selection
+- the mouse wheel scrolls
+
+In vim mode, normal-mode keys (`j`/`k`, `G`, `[`/`]`, `zM`/`zR`, `y`)
+work on the buffer once you press `Esc` (`Ctrl+W` cycles panes).
 
 ## switching models mid-session
 

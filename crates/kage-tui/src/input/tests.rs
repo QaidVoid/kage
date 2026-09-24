@@ -1436,10 +1436,7 @@ fn bang_on_empty_prompt_arms_shell_mode() {
     s.handle_key(key(KeyCode::Char('l')));
     s.handle_key(key(KeyCode::Char('s')));
     let acts = s.handle_key(key(KeyCode::Enter));
-    match acts.as_slice() {
-        [InputAction::Submit(t)] => assert_eq!(t, "ls"),
-        other => panic!("expected Submit, got {other:?}"),
-    }
+    assert_eq!(acts, vec![InputAction::RunShell("ls".into())]);
     assert!(!s.shell_armed(), "submit disarms shell mode");
 }
 

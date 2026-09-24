@@ -927,7 +927,10 @@ fn tree_command_without_source_reports_unavailable() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
     let mut app = App::new(buffer.clone(), tx);
-    assert!(app.dispatch_builtin("tree", "").is_none());
+    assert!(
+        app.dispatch_builtin("tree", "", &crate::command::ParsedArgs::new())
+            .is_none()
+    );
     assert!(app.session_tree.is_none());
     let buf = buffer.lock().unwrap();
     assert!(matches!(
@@ -959,7 +962,10 @@ fn tree_command_opens_and_enter_dispatches_resume() {
             },
         ]
     }));
-    assert!(app.dispatch_builtin("tree", "").is_none());
+    assert!(
+        app.dispatch_builtin("tree", "", &crate::command::ParsedArgs::new())
+            .is_none()
+    );
     assert!(app.session_tree.is_some());
     // Selection starts on the current session (root); Enter resumes.
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -987,7 +993,7 @@ fn tree_delete_fixture() -> (App, mpsc::Receiver<RunRequest>) {
             is_current: false,
         }]
     }));
-    app.dispatch_builtin("tree", "");
+    app.dispatch_builtin("tree", "", &crate::command::ParsedArgs::new());
     app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
     (app, rx)
 }
@@ -1077,7 +1083,10 @@ fn settings_command_opens_overlay_and_esc_closes_it() {
     let mut app = App::new(buffer, tx);
     // `:settings` opens the modal (reads config read-only; never
     // writes, so this is safe in a test).
-    assert!(app.dispatch_builtin("settings", "").is_none());
+    assert!(
+        app.dispatch_builtin("settings", "", &crate::command::ParsedArgs::new())
+            .is_none()
+    );
     assert!(app.settings_overlay.is_some());
     // While open it owns the keyboard; Esc cancels without persist.
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
@@ -1284,8 +1293,8 @@ fn validated_unknown_command_returns_error_with_suggestion() {
         CommandResult::ValidationError(msg) => {
             assert!(msg.contains("unknown command: quut"), "got {msg:?}");
             assert!(
-                msg.contains("did you mean"),
-                "should suggest closest match, got {msg:?}"
+                msg.contains("did you mean /quit?"),
+                "should suggest closest match with the / sigil, got {msg:?}"
             );
         }
         other @ CommandResult::Done(_) => {
@@ -2093,6 +2102,10 @@ fn modal_open_reflects_every_modal_field() {
     assert!(app.modal_open());
     app.plugin_overlay = None;
 
+    app.open_help();
+    assert!(app.modal_open());
+    app.help_overlay = None;
+
     assert!(!app.modal_open());
 }
 
@@ -2246,4 +2259,77 @@ fn f3_opens_the_jump_picker_and_resolve_focuses_the_block() {
     app.dispatch_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert!(app.picker.is_none(), "picker closed on resolve");
     assert_eq!(app.buffer.lock().unwrap().effective_focus(), Some(1));
+}
+
+#[test]
+fn shell_submit_sends_run_shell_without_a_user_block() {
+    let buffer = shared_buffer();
+    let (tx, rx) = mpsc::channel();
+    let mut app = App::new(buffer.clone(), tx);
+    app.input.set_modeless(true);
+    for c in "!ls".chars() {
+        app.dispatch_key(key(c));
+    }
+    app.dispatch_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    match rx.recv_timeout(Duration::from_millis(100)).unwrap() {
+        RunRequest::RunShell(cmd) => assert_eq!(cmd, "ls"),
+        other => panic!("expected RunShell, got {other:?}"),
+    }
+    assert!(
+        !buffer
+            .lock()
+            .unwrap()
+            .blocks()
+            .iter()
+            .any(|b| matches!(b, crate::buffer::Block::User { .. })),
+        "shell submit must not paint a user block"
+    );
+}
+
+#[test]
+fn export_uses_the_unquoted_parsed_path() {
+    let buffer = shared_buffer();
+    let (tx, rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    let res = app.run_command_validated("export \"a b.md\"", &builtin_registry());
+    assert!(matches!(res, CommandResult::Done(None)));
+    match rx.recv_timeout(Duration::from_millis(100)).unwrap() {
+        RunRequest::ExportSession(dest) => {
+            assert_eq!(dest, Some(std::path::PathBuf::from("a b.md")));
+        }
+        other => panic!("expected ExportSession, got {other:?}"),
+    }
+}
+
+#[test]
+fn jump_picker_lists_the_newest_target_first() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    {
+        let mut buf = app.buffer.lock().unwrap();
+        buf.push_user("aaa oldest");
+        buf.begin_assistant();
+        buf.append_assistant_delta("middle");
+        buf.push_user("zzz newest");
+    }
+    app.open_jump_picker();
+    app.dispatch_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    assert_eq!(app.buffer.lock().unwrap().effective_focus(), Some(2));
+}
+
+#[test]
+fn model_picker_with_no_models_explains_how_to_connect() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = App::new(buffer, tx);
+    app.set_toasts(crate::toast::shared_toasts());
+    let _ = app.apply(InputAction::OpenModelPicker);
+    assert!(app.picker.is_none());
+    assert!(
+        app.live_toasts()
+            .iter()
+            .any(|t| t.text.contains("Run /login")),
+        "empty model list must explain itself"
+    );
 }

@@ -421,7 +421,7 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "help",
         aliases: &[],
-        description: "show available commands",
+        description: "show the keyboard reference",
         category: CommandCategory::Both,
         args: &[],
         subcommands: &[],

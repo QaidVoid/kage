@@ -4,6 +4,7 @@ use base64::Engine as _;
 
 #[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
+use crate::command::{ArgValue, ParsedArgs};
 
 impl App {
     /// Validated command dispatch. Parses the argument string against
@@ -49,10 +50,11 @@ impl App {
 
         if let Some(spec) = crate::command::find_builtin_command(head) {
             let (target_spec, target_rest) = Self::resolve_subcommand_tree(spec, rest);
-            if let Err(e) = crate::cmdparse::parse_input(target_spec, target_rest) {
-                return CommandResult::ValidationError(e.to_string());
-            }
-            let exit = self.dispatch_builtin(spec.name, rest);
+            let args = match crate::cmdparse::parse_input(target_spec, target_rest) {
+                Ok(args) => args,
+                Err(e) => return CommandResult::ValidationError(e.to_string()),
+            };
+            let exit = self.dispatch_builtin(spec.name, rest, &args);
             return CommandResult::Done(exit);
         }
 
@@ -66,7 +68,7 @@ impl App {
 
         let mut msg = format!("unknown command: {head}");
         if let Some(suggestion) = crate::cmdparse::suggest_command(registry, head) {
-            msg = format!("{msg} (did you mean :{suggestion}?)");
+            msg = format!("{msg} (did you mean /{suggestion}?)");
         }
         CommandResult::ValidationError(msg)
     }
@@ -92,13 +94,18 @@ impl App {
     }
 
     /// Execute a built-in command by canonical name with the
-    /// remaining unparsed argument string. The match is on the
-    /// primary name; aliases were already resolved by
-    /// [`Self::run_command`].
+    /// remaining unparsed argument string and the arguments parsed
+    /// against the matched spec. The match is on the primary name;
+    /// aliases were already resolved by [`Self::run_command`].
     // A flat dispatch table over every builtin command; the line
     // count is the command list, not complexity.
     #[allow(clippy::too_many_lines)]
-    pub(crate) fn dispatch_builtin(&mut self, name: &str, rest: &str) -> Option<AppExit> {
+    pub(crate) fn dispatch_builtin(
+        &mut self,
+        name: &str,
+        rest: &str,
+        args: &ParsedArgs,
+    ) -> Option<AppExit> {
         match name {
             "quit" => Some(AppExit::Quit),
             "cancel" => {
@@ -107,7 +114,7 @@ impl App {
             }
             "model" => {
                 if rest.is_empty() {
-                    self.push_error("model: usage `:model <provider:id>`");
+                    self.push_error("model: usage `/model <provider:id>`");
                 } else {
                     let _ = self.send_request(RunRequest::SwitchModel(rest.to_owned()));
                 }
@@ -117,7 +124,7 @@ impl App {
                 if rest == "all" {
                     self.set_all_folds(true);
                 } else {
-                    self.push_error("fold: usage `:fold all`");
+                    self.push_error("fold: usage `/fold all`");
                 }
                 None
             }
@@ -125,7 +132,7 @@ impl App {
                 if rest == "all" {
                     self.set_all_folds(false);
                 } else {
-                    self.push_error("unfold: usage `:unfold all`");
+                    self.push_error("unfold: usage `/unfold all`");
                 }
                 None
             }
@@ -182,11 +189,9 @@ impl App {
                 None
             }
             "export" => {
-                let trimmed = rest.trim();
-                let dest = if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(std::path::PathBuf::from(trimmed))
+                let dest = match args.get("file") {
+                    Some(ArgValue::Path(path)) => Some(std::path::PathBuf::from(path)),
+                    _ => None,
                 };
                 let _ = self.send_request(RunRequest::ExportSession(dest));
                 None

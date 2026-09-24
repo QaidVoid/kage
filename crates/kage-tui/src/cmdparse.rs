@@ -33,7 +33,7 @@ pub enum ParseError {
     MissingArg(&'static str),
     /// A [`ArgSpec::Choice`] argument received a value not in its
     /// allowed set.
-    #[error("argument `{name}` must be one of {expected:?}, got `{got}`")]
+    #[error("argument `{name}` must be one of: {} (got `{got}`)", .expected.join(", "))]
     InvalidChoice {
         /// Argument name from the spec.
         name: &'static str,

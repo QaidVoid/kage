@@ -136,7 +136,8 @@ impl CommandLine {
         if key.kind != KeyEventKind::Press {
             return CommandLineEvent::Pending;
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        if ctrl && matches!(key.code, KeyCode::Char('c')) {
             return CommandLineEvent::Cancelled;
         }
         match key.code {
@@ -211,6 +212,12 @@ impl CommandLine {
             KeyCode::End => {
                 self.error = None;
                 self.cursor = self.text.len();
+                self.refresh(registry, resolver);
+                CommandLineEvent::Pending
+            }
+            KeyCode::Char(c) if ctrl => {
+                self.error = None;
+                self.readline_edit(c);
                 self.refresh(registry, resolver);
                 CommandLineEvent::Pending
             }
@@ -306,6 +313,26 @@ impl CommandLine {
         self.text.drain(anchor..end);
         self.text.insert_str(anchor, value);
         self.cursor = anchor + value.len();
+    }
+
+    /// Apply a readline-style Ctrl chord. Unbound chords do nothing,
+    /// so they never insert their letter.
+    fn readline_edit(&mut self, c: char) {
+        match c {
+            'u' => {
+                self.text.drain(..self.cursor);
+                self.cursor = 0;
+            }
+            'k' => self.text.truncate(self.cursor),
+            'w' => {
+                let start = crate::input::unix_word_rubout_start(&self.text, self.cursor);
+                self.text.drain(start..self.cursor);
+                self.cursor = start;
+            }
+            'a' => self.cursor = 0,
+            'e' => self.cursor = self.text.len(),
+            _ => {}
+        }
     }
 
     fn insert_char(&mut self, c: char) {
@@ -833,5 +860,56 @@ mod tests {
         cl.paste_str("\n\r\t", &empty_registry(), &EmptyResolver);
         assert_eq!(cl.text(), "a");
         assert_eq!(cl.cursor, 1);
+    }
+
+    fn typed(text: &str) -> CommandLine {
+        let mut cl = CommandLine::new();
+        for c in text.chars() {
+            send(&mut cl, key(KeyCode::Char(c)));
+        }
+        cl
+    }
+
+    #[test]
+    fn ctrl_u_kills_to_start_of_line() {
+        let mut cl = typed("theme set dark");
+        send(&mut cl, key(KeyCode::Left));
+        send(&mut cl, key(KeyCode::Left));
+        assert_eq!(send(&mut cl, ctrl('u')), CommandLineEvent::Pending);
+        assert_eq!(cl.text(), "rk");
+        assert_eq!(cl.cursor(), 0);
+    }
+
+    #[test]
+    fn ctrl_w_kills_previous_word() {
+        let mut cl = typed("theme set dark");
+        send(&mut cl, ctrl('w'));
+        assert_eq!(cl.text(), "theme set ");
+        assert_eq!(cl.cursor(), cl.text().len());
+    }
+
+    #[test]
+    fn ctrl_k_kills_to_end_and_ctrl_a_e_move() {
+        let mut cl = typed("mouse on");
+        send(&mut cl, ctrl('a'));
+        assert_eq!(cl.cursor(), 0);
+        send(&mut cl, ctrl('e'));
+        assert_eq!(cl.cursor(), 8);
+        send(&mut cl, key(KeyCode::Left));
+        send(&mut cl, key(KeyCode::Left));
+        send(&mut cl, ctrl('k'));
+        assert_eq!(cl.text(), "mouse ");
+    }
+
+    #[test]
+    fn no_ctrl_chord_inserts_a_character() {
+        let mut cl = typed("q");
+        for c in 'a'..='z' {
+            if matches!(c, 'c' | 'u' | 'k' | 'w' | 'a' | 'e') {
+                continue;
+            }
+            send(&mut cl, ctrl(c));
+        }
+        assert_eq!(cl.text(), "q");
     }
 }

@@ -69,6 +69,9 @@ pub enum InputAction {
     EnterMode(Mode),
     /// Submit the input buffer as a user prompt; clears the buffer.
     Submit(String),
+    /// Run the input buffer as a shell command (`!` armed on an empty
+    /// prompt); clears the buffer.
+    RunShell(String),
     /// An empty submit dropped a stale attached image (its marker
     /// text no longer existed, e.g. after an undo across the attach).
     /// The host surfaces a warning instead of dropping silently.

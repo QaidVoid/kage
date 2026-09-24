@@ -25,6 +25,9 @@ use crate::picker::{PickItem, compute_window, filter};
 use crate::view::UnicodeWidthStr as _;
 use crate::view::truncate_to_width;
 
+/// Key hint painted on the picker's bottom row.
+const HELP_HINT: &str = "up/down select  enter confirm  type to filter  esc cancel";
+
 /// Stateful picker rendered as a modal overlay.
 #[derive(Debug)]
 pub struct OverlayPicker {
@@ -46,6 +49,14 @@ impl OverlayPicker {
         if items.iter().all(|i| i.group.is_none()) {
             items.sort_by(|a, b| a.label.cmp(&b.label));
         }
+        Self::new_ordered(title, items)
+    }
+
+    /// Construct a picker that keeps the caller's row order, grouped
+    /// or not. Use this when the order carries meaning, such as
+    /// newest-first message targets.
+    #[must_use]
+    pub fn new_ordered(title: impl Into<String>, items: Vec<PickItem>) -> Self {
         Self {
             title: title.into(),
             items,
@@ -74,11 +85,12 @@ impl OverlayPicker {
 impl OverlayWidget for OverlayPicker {
     fn measure(&self, available: Rect) -> Rect {
         // Width: longest label plus a little padding for the
-        // gutter/badge/right-aligned chunk, clamped between a
-        // comfortable minimum and 80% of available so the picker is
-        // big enough to read but small enough that a tiny menu does
-        // not eat the whole screen.
-        let longest = self
+        // gutter/badge/right-aligned chunk, never narrower than the
+        // title or the key hint, clamped between a comfortable
+        // minimum and 80% of available so the picker is big enough
+        // to read but small enough that a tiny menu does not eat the
+        // whole screen.
+        let rows = self
             .items
             .iter()
             .map(|i| {
@@ -94,6 +106,9 @@ impl OverlayWidget for OverlayPicker {
             .max()
             .unwrap_or(20)
             .saturating_add(6); // borders + selection gutter
+        let title = u16::try_from(self.title.width() + 4).unwrap_or(u16::MAX);
+        let hint = u16::try_from(HELP_HINT.width() + 2).unwrap_or(u16::MAX);
+        let longest = rows.max(title).max(hint);
         let max_w = (available.width.saturating_mul(80) / 100).max(30);
         let want_w = longest.clamp(30, max_w);
 
@@ -310,7 +325,7 @@ impl OverlayPicker {
 
     fn render_help(buf: &mut Buffer, area: Rect) {
         let line = Line::from(Span::styled(
-            "up/down select  enter confirm  type to filter  esc cancel",
+            HELP_HINT,
             Style::default().fg(crate::theme::current().muted_fg),
         ));
         Widget::render(Paragraph::new(line), area, buf);
@@ -519,5 +534,24 @@ mod tests {
         assert!(text.contains("Today"), "section header missing:\n{text}");
         assert!(text.contains("Yesterday"), "second header missing");
         assert!(text.contains("alpha") && text.contains("beta"));
+    }
+
+    #[test]
+    fn measure_fits_the_title_and_key_hint() {
+        let title = "Resume session - this dir (Tab toggles all dirs)";
+        let p = OverlayPicker::new(title, vec![PickItem::simple("a")]);
+        let m = p.measure(Rect::new(0, 0, 200, 40));
+        assert!(usize::from(m.width) >= title.width() + 4);
+        assert!(usize::from(m.width) >= HELP_HINT.width() + 2);
+    }
+
+    #[test]
+    fn new_ordered_keeps_caller_order() {
+        let items = ["b", "c", "a"].map(PickItem::simple).to_vec();
+        let mut p = OverlayPicker::new_ordered("Pick", items);
+        assert_eq!(
+            resolved(p.handle_key(key(KeyCode::Enter))),
+            Some("b".into())
+        );
     }
 }

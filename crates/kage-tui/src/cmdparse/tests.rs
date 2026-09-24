@@ -281,6 +281,15 @@ fn parse_choice_invalid_value_errors() {
 }
 
 #[test]
+fn invalid_choice_message_lists_choices_without_brackets() {
+    let err = parse_input(&ONE_CHOICE, "yes").unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "argument `state` must be one of: on, off, toggle (got `yes`)"
+    );
+}
+
+#[test]
 fn parse_required_choice_missing_errors() {
     let err = parse_input(&ONE_CHOICE, "").unwrap_err();
     assert_eq!(err, ParseError::MissingArg("state"));

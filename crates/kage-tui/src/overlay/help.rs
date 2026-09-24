@@ -1,7 +1,8 @@
-//! Scrollable keyboard-reference overlay (`?` / `:help`).
+//! Scrollable keyboard-reference overlay (`?` / `/help`).
 //!
 //! [`HelpOverlay`] is the in-TUI shortcut reference: static grouped
-//! rows (group header, key column, description) with plain scrolling.
+//! rows (group header, key column, description), one set per editor
+//! style, with plain scrolling.
 //! It is a reading surface, not a command surface: every key either
 //! scrolls or closes, so it never swallows something the user meant
 //! for the session underneath.
@@ -25,37 +26,81 @@ enum Row {
     Key(&'static str, &'static str),
 }
 
-/// Static content, shared by the overlay and its tests. Kept in one
-/// place so the overlay and the docs stay in sync.
-fn rows() -> Vec<Row> {
+/// Reference for the modeless editor: always insert-like, with Esc
+/// cancelling the turn and `/`, `!`, `?` as empty-prompt prefixes.
+fn modeless_rows() -> Vec<Row> {
+    use Row::{Header, Key};
+    vec![
+        Header("prompt editing"),
+        Key("Enter", "send the prompt"),
+        Key("Shift+Enter", "insert a newline (Alt+Enter also works)"),
+        Key("Ctrl+A / Ctrl+E", "line start / end"),
+        Key("Ctrl+K / Ctrl+U", "kill to end / start of line"),
+        Key("Ctrl+W", "kill previous word"),
+        Key("Ctrl+Y", "yank last kill"),
+        Key("Ctrl+/", "undo last edit"),
+        Key("Up / Down", "previous / next prompt from history"),
+        Key("Ctrl+G", "edit the prompt in $VISUAL or $EDITOR"),
+        Key("Ctrl+V", "attach image from clipboard"),
+        Header("empty prompt"),
+        Key("/", "command palette"),
+        Key("!", "run a shell command"),
+        Key("?", "this reference"),
+        Header("conversation"),
+        Key("PageUp / PageDown", "scroll ten lines"),
+        Key("Ctrl+Up / Down", "scroll one line"),
+        Key("Ctrl+Home / End", "jump to top / bottom"),
+        Key("Alt+P / Alt+N", "focus previous / next block"),
+        Key("Ctrl+O", "fold / unfold the focused block"),
+        Key("F3", "jump to a message"),
+        Header("pickers & overlays"),
+        Key("Ctrl+P", "model picker"),
+        Key("Ctrl+S", "session picker"),
+        Key("Shift+Tab", "cycle thinking level"),
+        Key("/settings", "theme, model, mouse, thinking"),
+        Header("during a turn"),
+        Key("Esc / Ctrl+C", "cancel the running turn"),
+        Key("/compact", "compact history now"),
+        Header("leave"),
+        Key("Ctrl+Q", "quit kage (cancels a running turn)"),
+        Key("/quit", "quit kage"),
+    ]
+}
+
+/// Reference for the vim-style modal editor.
+fn vim_rows() -> Vec<Row> {
     use Row::{Header, Key};
     vec![
         Header("modes"),
         Key("i", "edit the prompt (from normal mode)"),
         Key("Esc", "normal mode / close popups / cancel turn"),
-        Key("Ctrl+W", "cycle pane focus (input / buffer)"),
-        Key("?", "this reference"),
+        Key("Ctrl+W (normal)", "cycle pane focus (input / buffer)"),
+        Key("?", "this reference (normal mode)"),
         Header("buffer (normal mode)"),
         Key("j / k", "scroll one line"),
         Key("gg / G", "jump to top / bottom"),
         Key("[ / ]", "focus previous / next block"),
         Key("Ctrl+O", "fold / unfold the focused block"),
         Key("zM / zR", "fold all / unfold all"),
-        Key("/", "search the buffer (n / N walk matches)"),
+        Key("/ (normal)", "search the buffer (n / N walk matches)"),
         Key("y / v", "yank selection / start visual select"),
         Header("prompt editing"),
         Key("Enter", "submit"),
+        Key("Shift+Enter", "insert a newline (Alt+Enter also works)"),
         Key("Ctrl+A / Ctrl+E", "line start / end"),
         Key("Ctrl+K / Ctrl+U", "kill to end / start of line"),
-        Key("Ctrl+W", "kill previous word"),
+        Key("Ctrl+W (insert)", "kill previous word"),
         Key("Ctrl+Y", "yank last kill"),
         Key("Ctrl+/", "undo last edit"),
-        Key("/ or ?", "empty prompt: command palette / keys"),
+        Key("Ctrl+G", "edit the prompt in $VISUAL or $EDITOR"),
+        Key("/ (empty prompt)", "command palette"),
+        Key("! (empty prompt)", "run a shell command"),
         Header("pickers & overlays"),
         Key("F3", "jump to a message"),
         Key("Ctrl+P", "model picker"),
         Key("Ctrl+S", "session picker"),
-        Key(": or /", "command line / command palette"),
+        Key("Shift+Tab", "cycle thinking level"),
+        Key(":", "command line (normal mode)"),
         Key(":settings", "theme, model, mouse, thinking"),
         Key("Ctrl+V", "attach image from clipboard"),
         Header("during a turn"),
@@ -80,12 +125,17 @@ pub struct HelpOverlay {
 }
 
 impl HelpOverlay {
-    /// Build the reference with the standard content.
+    /// Build the reference for the active editor style: the modeless
+    /// set when `modeless` is true, the vim set otherwise.
     #[must_use]
-    pub fn new() -> Self {
+    pub fn new(modeless: bool) -> Self {
         Self {
             title: " keyboard shortcuts ".to_owned(),
-            rows: rows(),
+            rows: if modeless {
+                modeless_rows()
+            } else {
+                vim_rows()
+            },
             scroll: 0,
             viewport_rows: 1,
         }
@@ -104,12 +154,6 @@ impl HelpOverlay {
         let moved = current + delta;
         self.scroll = usize::try_from(moved.max(0)).unwrap_or(0);
         self.clamp_scroll();
-    }
-}
-
-impl Default for HelpOverlay {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -230,14 +274,14 @@ mod tests {
     #[test]
     fn esc_enter_and_q_close() {
         for code in [KeyCode::Esc, KeyCode::Enter, KeyCode::Char('q')] {
-            let mut h = HelpOverlay::new();
+            let mut h = HelpOverlay::new(false);
             assert_eq!(h.handle_key(key(code)), OverlayAction::Close);
         }
     }
 
     #[test]
     fn scrolling_clamps_at_both_ends() {
-        let mut h = HelpOverlay::new();
+        let mut h = HelpOverlay::new(false);
         let bottom = h.rows.len();
         for _ in 0..(bottom + 50) {
             h.handle_key(key(KeyCode::Down));
@@ -256,7 +300,7 @@ mod tests {
 
     #[test]
     fn page_down_jumps_by_viewport() {
-        let mut h = HelpOverlay::new();
+        let mut h = HelpOverlay::new(false);
         h.viewport_rows = 10;
         h.handle_key(key(KeyCode::PageDown));
         assert_eq!(h.scroll, 9);
@@ -266,7 +310,7 @@ mod tests {
 
     #[test]
     fn measure_centers_and_caps_height() {
-        let h = HelpOverlay::new();
+        let h = HelpOverlay::new(false);
         let area = Rect::new(0, 0, 200, 100);
         let m = h.measure(area);
         assert!(m.width < area.width, "must not span the full width");
@@ -279,10 +323,43 @@ mod tests {
 
     #[test]
     fn other_keys_propagate() {
-        let mut h = HelpOverlay::new();
+        let mut h = HelpOverlay::new(false);
         assert_eq!(
             h.handle_key(key(KeyCode::Char('x'))),
             OverlayAction::PropagateKey
         );
+    }
+
+    fn key_labels(rows: &[Row]) -> Vec<&'static str> {
+        rows.iter()
+            .filter_map(|row| match row {
+                Row::Key(keys, _) => Some(*keys),
+                Row::Header(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn modeless_rows_cover_modeless_keys_and_skip_vim_motions() {
+        let labels = key_labels(&modeless_rows());
+        for wanted in ["Shift+Enter", "!", "Ctrl+G", "Shift+Tab"] {
+            assert!(labels.contains(&wanted), "missing {wanted}");
+        }
+        assert!(!labels.contains(&"gg / G"));
+    }
+
+    #[test]
+    fn key_labels_are_unique_in_both_sets() {
+        for rows in [modeless_rows(), vim_rows()] {
+            let labels = key_labels(&rows);
+            let mut deduped = labels.clone();
+            deduped.sort_unstable();
+            deduped.dedup();
+            assert_eq!(
+                deduped.len(),
+                labels.len(),
+                "duplicate key label in {labels:?}"
+            );
+        }
     }
 }

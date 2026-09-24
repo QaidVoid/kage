@@ -17,7 +17,8 @@ const INPUT_GLYPH: &str = "|";
 const INPUT_GLYPH_SHELL: &str = "!";
 
 /// Default placeholder text shown when the input is empty.
-pub(crate) const INPUT_PLACEHOLDER_INSERT: &str = "Send a message...  (: commands, Ctrl+P models)";
+pub(crate) const INPUT_PLACEHOLDER_INSERT: &str =
+    "Send a message...  (/ commands, ! shell, ? keys)";
 pub(crate) const INPUT_PLACEHOLDER_NORMAL: &str = "press i to type, ? for keys, / to search";
 
 pub(super) fn render_input(frame: &mut Frame, regions: Regions, input: &InputState) {

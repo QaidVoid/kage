@@ -11,7 +11,7 @@ impl App {
         match sub {
             "" | "current" => {
                 let cur = crate::theme::current().name.clone();
-                self.notify(format!("theme: {cur} (try `:theme list`)"));
+                self.notify(format!("theme: {cur} (try `/theme list`)"));
             }
             "list" => {
                 let cur = crate::theme::current().name.clone();
@@ -31,7 +31,7 @@ impl App {
             }
             "set" => {
                 if sub_rest.is_empty() {
-                    self.push_error("theme set: usage `:theme set <name>`");
+                    self.push_error("theme set: usage `/theme set <name>`");
                     return;
                 }
                 self.apply_theme_by_name(sub_rest);
@@ -256,12 +256,13 @@ impl App {
     }
 
     /// Open the F3 history-jump picker: one row per user prompt,
-    /// assistant reply, tool call, and notice. Resolving scrolls the
-    /// focused block into view.
+    /// assistant reply, tool call, and notice, newest first.
+    /// Resolving scrolls the focused block into view.
     pub(crate) fn open_jump_picker(&mut self) {
         let items: Vec<crate::picker::PickItem> = lock(&self.buffer)
             .jump_targets(72)
             .into_iter()
+            .rev()
             .map(|(idx, label)| crate::picker::PickItem {
                 value: idx.to_string(),
                 label,
@@ -273,7 +274,7 @@ impl App {
         if items.is_empty() {
             return;
         }
-        self.picker = Some(OverlayPicker::new("Jump to message", items));
+        self.picker = Some(OverlayPicker::new_ordered("Jump to message", items));
         self.picker_kind = Some(PickerKind::Jump);
     }
 
@@ -353,7 +354,7 @@ impl App {
     /// Open the `?` keyboard reference. Scroll-only: closing is the
     /// only outcome.
     pub(crate) fn open_help(&mut self) {
-        self.help_overlay = Some(crate::overlay::HelpOverlay::new());
+        self.help_overlay = Some(crate::overlay::HelpOverlay::new(self.input.is_modeless()));
     }
 
     /// Drive the help reference. `Close` and `Resolve` both dismiss:

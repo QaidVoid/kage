@@ -17,18 +17,6 @@ impl App {
     /// flush drains it, or sees the run over and takes the channel
     /// path; it can never strand a prompt between the two.
     pub(crate) fn handle_submit(&mut self, text: String) {
-        // Shell-escape mode: the line is a command, not a prompt.
-        // No images can be attached (the prompt was empty when `!`
-        // armed it), so the path stays text-only.
-        if self.input.take_shell() {
-            let mut buf = lock(&self.buffer);
-            buf.push_user(text.clone());
-            drop(buf);
-            if self.send_request(RunRequest::RunShell(text)).is_err() {
-                self.push_error("shell failed: agent worker has stopped");
-            }
-            return;
-        }
         let images = self.input.take_attached();
         {
             let mut buf = lock(&self.buffer);
@@ -60,9 +48,19 @@ impl App {
         }
     }
 
+    /// Resolve an `InputAction::RunShell`: send the command to the
+    /// worker, which paints its own shell block, so no user block is
+    /// pushed here.
+    pub(crate) fn handle_shell(&mut self, text: String) {
+        if self.send_request(RunRequest::RunShell(text)).is_err() {
+            self.push_error("shell failed: agent worker has stopped");
+        }
+    }
+
     pub(crate) fn apply(&mut self, action: InputAction) -> Option<AppExit> {
         match action {
             InputAction::Submit(text) => self.handle_submit(text),
+            InputAction::RunShell(text) => self.handle_shell(text),
             InputAction::DroppedStaleAttach => {
                 self.notify("dropped stale image attach (the prompt was empty)");
             }
@@ -76,7 +74,9 @@ impl App {
                 self.trip_cancel();
             }
             InputAction::OpenModelPicker => {
-                if !self.model_choices.is_empty() {
+                if self.model_choices.is_empty() {
+                    self.notify("no models available. Run /login to connect a provider");
+                } else {
                     self.picker = Some(OverlayPicker::new(
                         "Switch model",
                         self.model_choices.clone(),
@@ -181,6 +181,8 @@ impl App {
             || self.slash_palette.is_some()
             || self.cmdline.is_some()
             || self.search_line.is_some()
+            || self.help_overlay.is_some()
+            || self.permission_overlay.is_some()
     }
 
     /// Dispatch one crossterm mouse event. While a modal overlay is

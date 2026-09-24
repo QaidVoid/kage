@@ -181,7 +181,11 @@ impl InputState {
                         self.push_history(&text);
                     }
                     self.reset_history_navigation();
-                    vec![InputAction::Submit(text)]
+                    if shell {
+                        vec![InputAction::RunShell(text)]
+                    } else {
+                        vec![InputAction::Submit(text)]
+                    }
                 }
             }
             KeyCode::Up => {

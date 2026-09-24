@@ -95,7 +95,8 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         crate::acp_glue::set_runtime(rt);
     }
 
-    if registry.ids().count() == 0 {
+    let requested_model = model.map_or_else(|| crate::default_model(&registry), str::to_owned);
+    if !crate::has_usable_provider(&registry) && registry.resolve(&requested_model).is_err() {
         // First-run onboarding: with no credentials anywhere, walk the
         // new user through `auth login` (its provider picker and key
         // prompt run in the normal terminal before the TUI starts)
@@ -105,18 +106,14 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         loop {
             let code = crate::auth::run_login(None, &app_config);
             if code != ExitCode::SUCCESS {
-                eprintln!(
-                    "kage: no provider credentials found. Run `kage auth login` to save \
-                     one, or export an env var (ANTHROPIC_API_KEY, OPENAI_API_KEY, \
-                     GEMINI_API_KEY, ZAI_API_KEY, ZAI_CODING_API_KEY)."
-                );
+                eprintln!("{}", crate::NO_CREDENTIALS_MESSAGE);
                 return ExitCode::from(1);
             }
             registry = crate::build_provider_registry();
             if let Some(rt) = plugin_runtime.as_ref() {
                 crate::plugins::merge_plugin_providers(rt, &mut registry);
             }
-            if registry.ids().count() > 0 {
+            if crate::has_usable_provider(&registry) {
                 break;
             }
             eprintln!("kage: credential saved, but no provider is usable yet; add another.");
@@ -129,6 +126,10 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         Some(m) => m.to_owned(),
         None => crate::default_model(&registry),
     };
+    if qualified_model.is_empty() {
+        eprintln!("{}", crate::NO_MODEL_MESSAGE);
+        return ExitCode::from(1);
+    }
     let bare_model = match registry.resolve(&qualified_model) {
         Ok(r) => r.model.clone(),
         Err(e) => {
@@ -136,6 +137,11 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    if model.is_none()
+        && let Some(notice) = crate::default_model_notice(&registry, &qualified_model)
+    {
+        lock(&buffer).push_custom("kage:notify", notice, false);
+    }
     let registry = Arc::new(registry);
 
     let skills = crate::load_skills(&workdir, plugin_runtime.as_deref());
@@ -279,9 +285,8 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
 
     let active_qualified = Arc::new(Mutex::new(qualified_model.clone()));
     // One quiet discoverability hint at the top of every fresh
-    // session: the two entry points (? keys, : commands) are all a
-    // new user needs. Transcript-only; never recorded to the session
-    // file.
+    // session: the entry points (? keys, / commands) are all a new
+    // user needs. Transcript-only; never recorded to the session file.
     {
         let mut buf = lock(&buffer);
         buf.push_custom(

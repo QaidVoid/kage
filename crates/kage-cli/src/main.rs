@@ -173,9 +173,9 @@ pub(crate) enum Command {
         shell: clap_complete::Shell,
     },
     /// Agent Client Protocol server: speak JSON-RPC over stdio so an
-    /// editor (Zed, Neovim, ...) can drive kage. LSP-style
-    /// `Content-Length` framing; each request is answered and loop
-    /// progress is streamed back as `event` notifications.
+    /// editor (Zed, Neovim, ...) can drive kage. Messages are
+    /// newline-delimited JSON. Each request is answered, and loop
+    /// progress is streamed back as ACP `session/update` notifications.
     Rpc {
         /// Provider-qualified model id (`provider:model`). Defaults
         /// to the first authed provider's default model.
@@ -370,16 +370,15 @@ fn run_print_mode(cli: Cli) -> ExitCode {
         acp_glue::set_runtime(rt);
     }
 
-    if registry.ids().count() == 0 {
-        eprintln!(
-            "kage: no provider credentials found. Run `kage auth login` to save \
-             one, or export an env var (ANTHROPIC_API_KEY, OPENAI_API_KEY, \
-             GEMINI_API_KEY, ZAI_API_KEY, ZAI_CODING_API_KEY)."
-        );
+    let model = cli.model.unwrap_or_else(|| default_model(&registry));
+    if !has_usable_provider(&registry) && registry.resolve(&model).is_err() {
+        eprintln!("{NO_CREDENTIALS_MESSAGE}");
         return ExitCode::from(1);
     }
-
-    let model = cli.model.unwrap_or_else(|| default_model(&registry));
+    if model.is_empty() {
+        eprintln!("{NO_MODEL_MESSAGE}");
+        return ExitCode::from(1);
+    }
     let resolved = match registry.resolve(&model) {
         Ok(r) => r,
         Err(e) => {
@@ -975,12 +974,26 @@ const DEFAULT_MODEL_PRIORITY: &[&str] = &[
     "kimi-for-coding",
 ];
 
+/// Printed when no provider other than `acp` is registered and the
+/// requested model does not resolve.
+pub(crate) const NO_CREDENTIALS_MESSAGE: &str = "kage: no provider credentials found. \
+    Run `kage auth login` to save one, or export an env var (ANTHROPIC_API_KEY, \
+    OPENAI_API_KEY, GEMINI_API_KEY, ZAI_API_KEY, ZAI_CODING_API_KEY).";
+
+/// Printed when no model was requested and none could be picked.
+pub(crate) const NO_MODEL_MESSAGE: &str =
+    "kage: no model configured. Set [provider] default_model or pass -m provider:model";
+
+/// Whether any provider other than the always-registered `acp` provider
+/// is available, meaning some credential or custom provider is wired up.
+pub(crate) fn has_usable_provider(registry: &ProviderRegistry) -> bool {
+    registry.ids().any(|id| id != "acp")
+}
+
 /// Pick a sensible default model. A configured `[provider] default_model`
 /// that still resolves (its provider has credentials) wins; otherwise the
 /// last model the user successfully ran (when it still resolves), then
-/// [`DEFAULT_MODEL_PRIORITY`], asking the catalog for each registered
-/// provider's preferred model. Returns an empty string when nothing
-/// is wired up; callers are expected to handle that as "no credentials".
+/// [`fallback_model`]. Returns an empty string when nothing is wired up.
 pub(crate) fn default_model(registry: &ProviderRegistry) -> String {
     if let Ok(cfg) = kage_core::config::Config::load_default()
         && registry.resolve(&cfg.provider.default_model).is_ok()
@@ -992,6 +1005,14 @@ pub(crate) fn default_model(registry: &ProviderRegistry) -> String {
     {
         return model;
     }
+    fallback_model(registry)
+}
+
+/// Walk [`DEFAULT_MODEL_PRIORITY`], asking the catalog for each registered
+/// provider's preferred model, then take the first declared model of the
+/// first non-`acp` provider (by id) that declares any. Returns an empty
+/// string when neither yields a model.
+fn fallback_model(registry: &ProviderRegistry) -> String {
     for candidate in DEFAULT_MODEL_PRIORITY {
         if registry.get(candidate).is_none() {
             continue;
@@ -1000,7 +1021,53 @@ pub(crate) fn default_model(registry: &ProviderRegistry) -> String {
             return format!("{candidate}:{}", model.id);
         }
     }
+    let mut ids: Vec<&str> = registry.ids().filter(|id| *id != "acp").collect();
+    ids.sort_unstable();
+    for id in ids {
+        if let Some(model) = registry.get(id).and_then(|p| p.models().into_iter().next()) {
+            return format!("{id}:{}", model.id);
+        }
+    }
     String::new()
+}
+
+/// Notice for a `[provider] default_model` the user set explicitly that
+/// does not resolve, naming `using` as the model picked instead. `None`
+/// when the key was not set by the user or it resolves.
+pub(crate) fn default_model_notice(registry: &ProviderRegistry, using: &str) -> Option<String> {
+    let explicit = std::env::var_os("KAGE_PROVIDER__DEFAULT_MODEL").is_some()
+        || kage_core::config::Config::default_path()
+            .is_some_and(|path| config_sets_default_model(&path));
+    if !explicit {
+        return None;
+    }
+    let configured = kage_core::config::Config::load_default()
+        .ok()?
+        .provider
+        .default_model;
+    if registry.resolve(&configured).is_ok() {
+        return None;
+    }
+    let provider = configured
+        .split_once(':')
+        .map_or(configured.as_str(), |(p, _)| p);
+    Some(format!(
+        "default_model `{configured}` is unavailable (no credentials for `{provider}`). \
+         Using `{using}`. Run /login {provider} to connect it."
+    ))
+}
+
+/// Whether the TOML file at `path` sets `[provider] default_model`.
+fn config_sets_default_model(path: &std::path::Path) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .is_some_and(|table| {
+            table
+                .get("provider")
+                .and_then(toml::Value::as_table)
+                .is_some_and(|provider| provider.contains_key("default_model"))
+        })
 }
 
 #[cfg(test)]
@@ -1025,5 +1092,86 @@ mod tests {
         let p = resolve_plugin_dir(PathBuf::from("extra-plugins"));
         let base = xdg_dir("XDG_CONFIG_HOME", ".config").expect("test needs a home directory");
         assert_eq!(p, base.join("kage").join("extra-plugins"));
+    }
+
+    #[derive(Debug)]
+    struct StubProvider {
+        meta: kage_provider::ProviderMetadata,
+        models: Vec<kage_provider::ProviderModel>,
+    }
+
+    impl kage_provider::Provider for StubProvider {
+        fn metadata(&self) -> &kage_provider::ProviderMetadata {
+            &self.meta
+        }
+
+        fn stream(
+            &self,
+            _req: kage_provider::StreamRequest,
+            _cancel: &CancelFlag,
+        ) -> Result<kage_provider::EventStream, kage_provider::ProviderError> {
+            Ok(Box::new(std::iter::empty()))
+        }
+
+        fn models(&self) -> Vec<kage_provider::ProviderModel> {
+            self.models.clone()
+        }
+    }
+
+    fn stub(id: &str, models: &[&str]) -> Arc<dyn kage_provider::Provider> {
+        Arc::new(StubProvider {
+            meta: kage_provider::ProviderMetadata {
+                id: id.to_owned(),
+                display_name: id.to_owned(),
+                supports_caching: false,
+                supports_thinking: false,
+                supports_tool_use: true,
+            },
+            models: models
+                .iter()
+                .map(|m| kage_provider::ProviderModel {
+                    id: (*m).to_owned(),
+                    name: (*m).to_owned(),
+                    context: None,
+                    max_output: None,
+                })
+                .collect(),
+        })
+    }
+
+    #[test]
+    fn acp_only_registry_has_no_usable_provider() {
+        let mut registry = ProviderRegistry::new();
+        registry.register(stub("acp", &[]));
+        assert!(!has_usable_provider(&registry));
+        registry.register(stub("custom", &[]));
+        assert!(has_usable_provider(&registry));
+    }
+
+    #[test]
+    fn fallback_model_uses_first_declared_custom_model() {
+        let registry = ProviderRegistry::new()
+            .with(stub("acp", &["agent"]))
+            .with(stub("zeta", &["z-1"]))
+            .with(stub("empty", &[]))
+            .with(stub("local", &["llama-3", "qwen"]));
+        assert_eq!(fallback_model(&registry), "local:llama-3");
+    }
+
+    #[test]
+    fn fallback_model_is_empty_without_models() {
+        let registry = ProviderRegistry::new().with(stub("acp", &["agent"]));
+        assert_eq!(fallback_model(&registry), "");
+    }
+
+    #[test]
+    fn detects_explicit_default_model_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[provider]\ndefault_model = \"openai:gpt-4o\"\n").unwrap();
+        assert!(config_sets_default_model(&path));
+        std::fs::write(&path, "[ui]\ntheme = \"dark\"\n[provider]\n").unwrap();
+        assert!(!config_sets_default_model(&path));
+        assert!(!config_sets_default_model(&dir.path().join("missing.toml")));
     }
 }

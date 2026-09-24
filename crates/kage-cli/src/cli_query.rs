@@ -67,15 +67,11 @@ pub(crate) fn run_resume(
         acp_glue::set_runtime(rt);
     }
 
-    if registry.ids().count() == 0 {
-        eprintln!(
-            "kage: no provider credentials found. Run `kage auth login` to save \
-             one, or export an env var (ANTHROPIC_API_KEY, OPENAI_API_KEY, \
-             GEMINI_API_KEY, ZAI_API_KEY, ZAI_CODING_API_KEY)."
-        );
+    let model = provisional_model;
+    if !has_usable_provider(&registry) && registry.resolve(&model).is_err() {
+        eprintln!("{NO_CREDENTIALS_MESSAGE}");
         return ExitCode::from(1);
     }
-    let model = provisional_model;
     let resolved = match registry.resolve(&model) {
         Ok(r) => r,
         Err(e) => {

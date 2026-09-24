@@ -117,7 +117,13 @@ impl App {
                         Event::Key(key) if key.kind == KeyEventKind::Press => {
                             log_key_event(&key);
                             needs_redraw = true;
-                            if let Some(exit) = self.dispatch_key(key) {
+                            // `Ctrl+G` hands the draft to an external
+                            // editor. Checked here, outside the key
+                            // dispatcher, because it must suspend and
+                            // resume the terminal this loop owns.
+                            if self.external_edit_key(key) {
+                                self.edit_in_external_editor(tui);
+                            } else if let Some(exit) = self.dispatch_key(key) {
                                 if let Some(state) = self.active_dialog.take() {
                                     let _ = state.reply().send(None);
                                 }

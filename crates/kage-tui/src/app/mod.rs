@@ -814,6 +814,7 @@ pub struct App {
 }
 
 mod actions;
+mod editor;
 mod events;
 mod keys;
 mod lifecycle;

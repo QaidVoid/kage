@@ -20,6 +20,7 @@ use ratatui::crossterm::event::{
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::EnterAlternateScreen;
 
 use crate::error::TuiError;
 
@@ -34,11 +35,17 @@ const KITTY_FLAGS: KeyboardEnhancementFlags = KeyboardEnhancementFlags::DISAMBIG
 
 /// Owns the terminal while the TUI is running. Restoring is automatic on
 /// drop and via a panic hook so a crashing run never strands the tty.
+// The three `*_active` flags model independent terminal features
+// (paste, kitty keyboard, mouse); folding them into a bitmask or
+// options buys nothing.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Tui {
     terminal: DefaultTerminal,
     bracketed_paste_active: bool,
     kitty_flags_active: bool,
     mouse_capture_active: bool,
+    /// Between a [`Self::suspend`] and [`Self::resume`] pair.
+    suspended: bool,
 }
 
 impl std::fmt::Debug for Tui {
@@ -73,6 +80,7 @@ impl Tui {
             bracketed_paste_active,
             kitty_flags_active,
             mouse_capture_active,
+            suspended: false,
         })
     }
 
@@ -107,6 +115,57 @@ impl Tui {
     #[must_use]
     pub fn mouse_capture(&self) -> bool {
         self.mouse_capture_active
+    }
+
+    /// Suspend the TUI so an external program can own the tty:
+    /// leaves the alternate screen, disables raw mode, and tears
+    /// down paste/keyboard/mouse state this struct enabled. The
+    /// remembered enablement flags stay untouched so [`Self::resume`]
+    /// can restore exactly what was active. Idempotent; if resume
+    /// never runs, [`Drop`](Self::drop) still restores everything.
+    pub fn suspend(&mut self) {
+        if self.suspended {
+            return;
+        }
+        let _ = self.terminal.flush();
+        let _ = execute!(io::stdout(), SetCursorStyle::DefaultUserShape);
+        if self.mouse_capture_active {
+            let _ = execute!(io::stdout(), DisableMouseCapture);
+        }
+        if self.kitty_flags_active {
+            let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+        }
+        if self.bracketed_paste_active {
+            let _ = execute!(io::stdout(), DisableBracketedPaste);
+        }
+        let _ = io::stdout().flush();
+        ratatui::restore();
+        self.suspended = true;
+    }
+
+    /// Re-enter the TUI after [`Self::suspend`]: raw mode, alternate
+    /// screen, and the remembered paste/keyboard/mouse state come
+    /// back, and the next frame repaints from scratch. Idempotent.
+    pub fn resume(&mut self) {
+        if !self.suspended {
+            return;
+        }
+        if ratatui::crossterm::terminal::enable_raw_mode().is_err() {
+            self.suspended = false;
+            return;
+        }
+        let _ = execute!(io::stdout(), EnterAlternateScreen);
+        if self.bracketed_paste_active {
+            let _ = execute!(io::stdout(), EnableBracketedPaste);
+        }
+        if self.kitty_flags_active {
+            let _ = execute!(io::stdout(), PushKeyboardEnhancementFlags(KITTY_FLAGS));
+        }
+        if self.mouse_capture_active {
+            let _ = execute!(io::stdout(), EnableMouseCapture);
+        }
+        let _ = self.terminal.clear();
+        self.suspended = false;
     }
 }
 

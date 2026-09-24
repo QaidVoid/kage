@@ -38,7 +38,8 @@ model, and thinking defaults.
 The prompt is always editable: type, press Enter to send. Readline
 keys work (`Ctrl+A`/`Ctrl+E` line start/end, `Ctrl+U`/`Ctrl+K` kill,
 `Ctrl+/` undo). `Esc` cancels a running turn, `PageUp`/`PageDown`
-scroll the conversation.
+scroll the conversation. `Ctrl+G` opens the whole draft in an
+external editor (`$VISUAL` or `$EDITOR`) for longer prompts.
 
 Prefer vim? Set `editor = "vim"` under `[ui]` in config.toml (or
 toggle it in `:settings`) to get normal/insert/visual modes with

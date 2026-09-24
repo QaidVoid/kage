@@ -7,7 +7,7 @@ impl App {
     /// True when the user bound `key` explicitly in `[keybindings]`.
     /// Config is authoritative over the global hatches and the
     /// builtin handling alike.
-    fn user_bound(&self, key: &ratatui::crossterm::event::KeyEvent) -> bool {
+    pub(crate) fn user_bound(&self, key: &ratatui::crossterm::event::KeyEvent) -> bool {
         self.config_keybindings
             .iter()
             .any(|(matcher, _, _)| matcher.matches(key))

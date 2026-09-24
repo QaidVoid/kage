@@ -5,7 +5,7 @@
 //! the `Provider::stream` impl reads server-sent events line by line and
 //! yields [`ProviderEvent`]s as they arrive.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufReader, Read};
 
 use kage_core::{CancelFlag, Content, Message, Role, TokenUsage, ToolCallId};
@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    EventStream, Provider, ProviderError, ProviderEvent, ProviderMetadata, StopReason,
-    StreamRequest, ToolSpec,
+    EventStream, Provider, ProviderError, ProviderEvent, ProviderMetadata, ProviderModel,
+    StopReason, StreamRequest, ToolSpec,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -28,6 +28,11 @@ pub struct AnthropicProvider {
     base_url: String,
     metadata: ProviderMetadata,
     client: crate::http::HttpClient,
+    /// Extra headers sent on every request, after the protocol's own.
+    extra_headers: BTreeMap<String, String>,
+    /// Models advertised from `Provider::models` (custom providers);
+    /// empty lets the catalog drive the picker.
+    models: Vec<ProviderModel>,
 }
 
 impl AnthropicProvider {
@@ -51,7 +56,42 @@ impl AnthropicProvider {
                 supports_tool_use: true,
             },
             client: crate::http::HttpClient::new(),
+            extra_headers: BTreeMap::new(),
+            models: Vec::new(),
         }
+    }
+
+    /// Send `headers` on every request, after the protocol's own headers.
+    #[must_use]
+    pub fn with_extra_headers(mut self, headers: BTreeMap<String, String>) -> Self {
+        self.extra_headers = headers;
+        self
+    }
+
+    /// Advertise `models` from [`Provider::models`] instead of relying
+    /// on the catalog.
+    #[must_use]
+    pub fn with_models(mut self, models: Vec<ProviderModel>) -> Self {
+        self.models = models;
+        self
+    }
+
+    /// Headers every request carries: content type, the pinned API
+    /// version, the `x-api-key` credential (skipped when no key is
+    /// configured, e.g. local endpoints), then the configured extras in
+    /// key order.
+    fn request_headers(&self) -> Vec<(String, String)> {
+        let mut headers = vec![
+            ("content-type".to_owned(), "application/json".to_owned()),
+            ("anthropic-version".to_owned(), ANTHROPIC_VERSION.to_owned()),
+        ];
+        if !self.api_key.is_empty() {
+            headers.push(("x-api-key".to_owned(), self.api_key.clone()));
+        }
+        for (name, value) in &self.extra_headers {
+            headers.push((name.clone(), value.clone()));
+        }
+        headers
     }
 
     /// Issue a non-streaming Messages API request.
@@ -70,14 +110,14 @@ impl AnthropicProvider {
 
         let body = build_request_body(req, false);
         let url = format!("{}/v1/messages", self.base_url);
+        let headers = self.request_headers();
 
-        let response = crate::http::send_blocking(&self.client, |agent| {
-            agent
-                .post(&url)
-                .header("x-api-key", &self.api_key)
-                .header("anthropic-version", ANTHROPIC_VERSION)
-                .header("content-type", "application/json")
-                .send_json(&body)
+        let response = crate::http::send_blocking(&self.client, move |agent| {
+            let mut request = agent.post(&url);
+            for (name, value) in &headers {
+                request = request.header(name.as_str(), value.as_str());
+            }
+            request.send_json(&body)
         })?;
 
         let status = response.status().as_u16();
@@ -387,6 +427,10 @@ impl Provider for AnthropicProvider {
         &self.metadata
     }
 
+    fn models(&self) -> Vec<ProviderModel> {
+        self.models.clone()
+    }
+
     fn stream(
         &self,
         req: StreamRequest,
@@ -397,14 +441,13 @@ impl Provider for AnthropicProvider {
         }
         let body = build_request_body(&req, true);
         let url = format!("{}/v1/messages", self.base_url);
-        let api_key = self.api_key.clone();
+        let headers = self.request_headers();
         let response = crate::http::send(&self.client, cancel, move |agent| {
-            agent
-                .post(&url)
-                .header("x-api-key", &api_key)
-                .header("anthropic-version", ANTHROPIC_VERSION)
-                .header("content-type", "application/json")
-                .send_json(&body)
+            let mut request = agent.post(&url);
+            for (name, value) in &headers {
+                request = request.header(name.as_str(), value.as_str());
+            }
+            request.send_json(&body)
         })?;
 
         let status = response.status().as_u16();

@@ -310,9 +310,11 @@ pub fn env_var_for(provider: &str) -> &'static str {
 }
 
 /// `kage auth login [provider]`: read an API key from a hidden prompt
-/// and persist it to the auth store.
-pub fn run_login(provider: Option<&str>) -> ExitCode {
-    let provider = match select_provider(provider) {
+/// and persist it to the auth store. `provider` may name a builtin or
+/// catalog id, or a custom provider declared under
+/// `[providers.custom.*]` in `config`.
+pub fn run_login(provider: Option<&str>, config: &kage_core::config::Config) -> ExitCode {
+    let provider = match select_provider(provider, config) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("kage: {e}");
@@ -409,18 +411,34 @@ pub fn run_list() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn select_provider(arg: Option<&str>) -> Result<String, String> {
+/// `true` when `target` names a provider `kage auth login` can store a
+/// credential for: a builtin or catalog id, or a custom provider
+/// declared under `[providers.custom.*]`.
+fn login_target_is_known(
+    target: &str,
+    custom: &BTreeMap<String, kage_core::config::CustomProviderConfig>,
+) -> bool {
+    KNOWN_PROVIDERS.contains(&target) || custom.contains_key(target)
+}
+
+fn select_provider(
+    arg: Option<&str>,
+    config: &kage_core::config::Config,
+) -> Result<String, String> {
+    let custom = &config.providers.custom;
     if let Some(p) = arg {
-        if KNOWN_PROVIDERS.contains(&p) {
+        if login_target_is_known(p, custom) {
             return Ok(p.to_owned());
         }
+        let mut known: Vec<&str> = KNOWN_PROVIDERS.to_vec();
+        known.extend(custom.keys().map(String::as_str));
         return Err(format!(
             "unknown provider '{p}', expected one of: {}",
-            KNOWN_PROVIDERS.join(", ")
+            known.join(", ")
         ));
     }
     let store = AuthStore::load().unwrap_or_else(|_| AuthStore::empty());
-    let items: Vec<kage_tui::PickItem> = KNOWN_PROVIDERS
+    let mut items: Vec<kage_tui::PickItem> = KNOWN_PROVIDERS
         .iter()
         .map(|p| {
             let badge = if store.credential(p).is_some() {
@@ -439,6 +457,22 @@ fn select_provider(arg: Option<&str>) -> Result<String, String> {
                 .with_badge(badge)
         })
         .collect();
+    items.extend(custom.iter().map(|(id, cfg)| {
+        let badge = if store.credential(id).is_some() {
+            '*'
+        } else {
+            '-'
+        };
+        let label = format!(
+            "{} ({}, {} models)",
+            cfg.display_name.as_deref().unwrap_or(id),
+            id,
+            cfg.models.len()
+        );
+        kage_tui::PickItem::simple(id.clone())
+            .with_label(label)
+            .with_badge(badge)
+    }));
     match kage_tui::pick("Select a provider", &items) {
         Ok(Some(p)) => Ok(p),
         Ok(None) => Err("cancelled".to_owned()),
@@ -637,5 +671,39 @@ mod tests {
     fn deserialize_rejects_object_without_type() {
         let err = serde_json::from_str::<Credential>(r#"{"key":"x"}"#).unwrap_err();
         assert!(err.to_string().contains("type"));
+    }
+
+    #[test]
+    fn login_target_accepts_known_and_custom_ids() {
+        let config = kage_core::config::Config::default();
+        assert!(login_target_is_known("anthropic", &config.providers.custom));
+        assert!(!login_target_is_known("acp", &config.providers.custom));
+        assert!(!login_target_is_known("nope", &config.providers.custom));
+
+        let mut config = kage_core::config::Config::default();
+        config.providers.custom.insert(
+            "llama-local".to_owned(),
+            kage_core::config::CustomProviderConfig {
+                kind: kage_core::config::CustomProviderKind::OpenAi,
+                base_url: "http://localhost:8080/v1".to_owned(),
+                display_name: Some("Llama (local)".to_owned()),
+                api_key_env: None,
+                headers: BTreeMap::new(),
+                models: vec![kage_core::config::CustomProviderModel {
+                    id: "llama-3".to_owned(),
+                    name: "Llama 3".to_owned(),
+                    context: None,
+                    max_output: None,
+                }],
+                tool_use: true,
+                thinking: false,
+                caching: false,
+            },
+        );
+        assert!(login_target_is_known(
+            "llama-local",
+            &config.providers.custom
+        ));
+        assert!(!login_target_is_known("llama", &config.providers.custom));
     }
 }

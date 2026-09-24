@@ -520,3 +520,47 @@ fn stream_error_event_rate_limit_classifies_as_rate_limited() {
         "rate_limit_error should surface as RateLimited, got {first:?}"
     );
 }
+
+#[test]
+fn request_headers_include_version_key_then_extras_in_key_order() {
+    let mut extras = BTreeMap::new();
+    extras.insert("X-B".to_owned(), "2".to_owned());
+    extras.insert("X-A".to_owned(), "1".to_owned());
+    let provider = AnthropicProvider::new("k").with_extra_headers(extras);
+    assert_eq!(
+        provider.request_headers(),
+        vec![
+            ("content-type".to_owned(), "application/json".to_owned()),
+            ("anthropic-version".to_owned(), ANTHROPIC_VERSION.to_owned()),
+            ("x-api-key".to_owned(), "k".to_owned()),
+            ("X-A".to_owned(), "1".to_owned()),
+            ("X-B".to_owned(), "2".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn request_headers_skip_key_when_key_is_empty() {
+    let mut extras = BTreeMap::new();
+    extras.insert("X-A".to_owned(), "1".to_owned());
+    let provider = AnthropicProvider::new("").with_extra_headers(extras);
+    let headers = provider.request_headers();
+    assert!(
+        headers.iter().all(|(name, _)| name != "x-api-key"),
+        "no credential header without a key: {headers:?}"
+    );
+    assert!(headers.contains(&("X-A".to_owned(), "1".to_owned())));
+}
+
+#[test]
+fn with_models_overrides_advertised_models() {
+    let models = vec![ProviderModel {
+        id: "test-model".to_owned(),
+        name: "Test Model".to_owned(),
+        context: Some(128_000),
+        max_output: Some(8_192),
+    }];
+    let provider = AnthropicProvider::new("k").with_models(models.clone());
+    assert_eq!(provider.models(), models);
+    assert!(AnthropicProvider::new("k").models().is_empty());
+}

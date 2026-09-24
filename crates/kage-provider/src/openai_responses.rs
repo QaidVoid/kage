@@ -18,8 +18,8 @@ use kage_core::{CancelFlag, Content, Message, Role, ToolCallId};
 use serde_json::Value;
 
 use crate::{
-    EventStream, Provider, ProviderError, ProviderEvent, ProviderMetadata, StopReason,
-    StreamRequest, ToolSpec,
+    EventStream, Provider, ProviderError, ProviderEvent, ProviderMetadata, ProviderModel,
+    StopReason, StreamRequest, ToolSpec,
 };
 
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -32,6 +32,11 @@ pub struct OpenAiResponsesProvider {
     base_url: String,
     metadata: ProviderMetadata,
     client: crate::http::HttpClient,
+    /// Extra headers sent on every request, after the protocol's own.
+    extra_headers: BTreeMap<String, String>,
+    /// Models advertised from `Provider::models` (custom providers);
+    /// empty lets the catalog drive the picker.
+    models: Vec<ProviderModel>,
 }
 
 impl OpenAiResponsesProvider {
@@ -55,7 +60,41 @@ impl OpenAiResponsesProvider {
                 supports_tool_use: true,
             },
             client: crate::http::HttpClient::new(),
+            extra_headers: BTreeMap::new(),
+            models: Vec::new(),
         }
+    }
+
+    /// Send `headers` on every request, after the protocol's own headers.
+    #[must_use]
+    pub fn with_extra_headers(mut self, headers: BTreeMap<String, String>) -> Self {
+        self.extra_headers = headers;
+        self
+    }
+
+    /// Advertise `models` from [`Provider::models`] instead of relying
+    /// on the catalog.
+    #[must_use]
+    pub fn with_models(mut self, models: Vec<ProviderModel>) -> Self {
+        self.models = models;
+        self
+    }
+
+    /// Headers every request carries: content type, the bearer
+    /// credential (skipped when no key is configured), then the
+    /// configured extras in key order.
+    fn request_headers(&self) -> Vec<(String, String)> {
+        let mut headers = vec![("content-type".to_owned(), "application/json".to_owned())];
+        if !self.api_key.is_empty() {
+            headers.push((
+                "authorization".to_owned(),
+                format!("Bearer {}", self.api_key),
+            ));
+        }
+        for (name, value) in &self.extra_headers {
+            headers.push((name.clone(), value.clone()));
+        }
+        headers
     }
 }
 
@@ -72,6 +111,10 @@ impl Provider for OpenAiResponsesProvider {
         true
     }
 
+    fn models(&self) -> Vec<ProviderModel> {
+        self.models.clone()
+    }
+
     fn stream(
         &self,
         req: StreamRequest,
@@ -82,13 +125,13 @@ impl Provider for OpenAiResponsesProvider {
         }
         let body = build_request_body(&req, true);
         let url = format!("{}/responses", self.base_url);
-        let api_key = self.api_key.clone();
+        let headers = self.request_headers();
         let response = crate::http::send(&self.client, cancel, move |agent| {
-            agent
-                .post(&url)
-                .header("authorization", &format!("Bearer {api_key}"))
-                .header("content-type", "application/json")
-                .send_json(&body)
+            let mut request = agent.post(&url);
+            for (name, value) in &headers {
+                request = request.header(name.as_str(), value.as_str());
+            }
+            request.send_json(&body)
         })?;
 
         let status = response.status().as_u16();
@@ -915,5 +958,48 @@ mod tests {
         let mut s = ResponsesStream::new(Box::new(std::io::Cursor::new(bytes)), cancel);
         assert!(matches!(s.next(), Some(Err(ProviderError::Cancelled))));
         assert!(s.next().is_none());
+    }
+
+    #[test]
+    fn request_headers_include_auth_then_extras_in_key_order() {
+        let mut extras = BTreeMap::new();
+        extras.insert("X-B".to_owned(), "2".to_owned());
+        extras.insert("X-A".to_owned(), "1".to_owned());
+        let provider = OpenAiResponsesProvider::new("k").with_extra_headers(extras);
+        assert_eq!(
+            provider.request_headers(),
+            vec![
+                ("content-type".to_owned(), "application/json".to_owned()),
+                ("authorization".to_owned(), "Bearer k".to_owned()),
+                ("X-A".to_owned(), "1".to_owned()),
+                ("X-B".to_owned(), "2".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn request_headers_skip_auth_when_key_is_empty() {
+        let mut extras = BTreeMap::new();
+        extras.insert("X-A".to_owned(), "1".to_owned());
+        let provider = OpenAiResponsesProvider::new("").with_extra_headers(extras);
+        let headers = provider.request_headers();
+        assert!(
+            headers.iter().all(|(name, _)| name != "authorization"),
+            "no credential header without a key: {headers:?}"
+        );
+        assert!(headers.contains(&("X-A".to_owned(), "1".to_owned())));
+    }
+
+    #[test]
+    fn with_models_overrides_advertised_models() {
+        let models = vec![ProviderModel {
+            id: "test-model".to_owned(),
+            name: "Test Model".to_owned(),
+            context: Some(128_000),
+            max_output: Some(8_192),
+        }];
+        let provider = OpenAiResponsesProvider::new("k").with_models(models.clone());
+        assert_eq!(provider.models(), models);
+        assert!(OpenAiResponsesProvider::new("k").models().is_empty());
     }
 }

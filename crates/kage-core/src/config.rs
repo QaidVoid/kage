@@ -35,6 +35,10 @@ pub struct Config {
     pub acp: AcpConfig,
     /// External MCP tool servers (`[mcp.servers.*]`).
     pub mcp: McpConfig,
+    /// Custom providers and overrides for registered providers
+    /// (`[providers.custom.*]` / `[providers.<provider-id>]`).
+    #[serde(skip_serializing_if = "ProvidersConfig::is_default")]
+    pub providers: ProvidersConfig,
 }
 
 impl Config {
@@ -188,6 +192,166 @@ impl Default for ProviderConfig {
             default_model: "anthropic:claude-sonnet-4-6".into(),
         }
     }
+}
+
+/// Custom providers and overrides for registered providers, loaded from
+/// the `[providers]` section.
+///
+/// Two shapes share the section:
+///
+/// * `[providers.custom.<id>]` defines a brand-new provider with its own
+///   id, base URL, and model list.
+/// * `[providers.<registered-id>]` overrides settings of a provider kage
+///   registers itself (base URL, key variable, extra headers).
+///
+/// The named `custom` field holds the first shape; every other key is
+/// flattened into `overrides`, keyed by provider id.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProvidersConfig {
+    /// Providers defined in this config file, keyed by their id.
+    pub custom: BTreeMap<String, CustomProviderConfig>,
+    /// Overrides for providers kage registers itself, keyed by provider
+    /// id (`[providers.deepseek]`).
+    #[serde(flatten)]
+    pub overrides: BTreeMap<String, BuiltinProviderOverride>,
+}
+
+impl ProvidersConfig {
+    /// True when nothing is configured, so `save` skips the section.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self.custom.is_empty() && self.overrides.is_empty()
+    }
+
+    /// Check the cross-references serde cannot express. `builtin_ids`
+    /// lists the provider ids kage always registers (including `acp`);
+    /// a custom provider must not shadow one. `overridable_ids` lists
+    /// the ids a `[providers.<id>]` override may target: the built-in
+    /// HTTP providers and the OpenAI-compatible ones, but not `acp`.
+    ///
+    /// Structural problems (missing `base_url`, missing `models`) are
+    /// already load errors; this catches the semantic ones so
+    /// `kage` refuses to start on a config it would silently ignore.
+    pub fn validate(&self, builtin_ids: &[&str], overridable_ids: &[&str]) -> Result<()> {
+        for (id, cfg) in &self.custom {
+            if id.is_empty()
+                || !id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            {
+                return Err(config_error(format!(
+                    "[providers.custom.{id}] id must be non-empty lowercase letters, digits, or dashes"
+                )));
+            }
+            if builtin_ids.contains(&id.as_str()) {
+                return Err(config_error(format!(
+                    "[providers.custom.{id}] id conflicts with registered provider `{id}`; use [providers.{id}] to override it instead"
+                )));
+            }
+            if cfg.models.is_empty() {
+                return Err(config_error(format!(
+                    "[providers.custom.{id}] must declare at least one [[providers.custom.{id}.models]] entry"
+                )));
+            }
+        }
+        for id in self.overrides.keys() {
+            if !overridable_ids.contains(&id.as_str()) {
+                return Err(config_error(format!(
+                    "[providers.{id}] does not name a provider that can be overridden"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn config_error(message: String) -> crate::error::Error {
+    crate::error::Error::Config(Box::new(figment::Error::from(message)))
+}
+
+/// Which wire protocol a custom provider speaks.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CustomProviderKind {
+    /// OpenAI-compatible `POST {base_url}/chat/completions`.
+    #[default]
+    OpenAi,
+    /// Anthropic Messages `POST {base_url}/v1/messages`.
+    Anthropic,
+    /// Gemini `POST {base_url}/v1beta/models/<model>:streamGenerateContent`.
+    Gemini,
+}
+
+/// One custom provider definition (`[providers.custom.<id>]`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CustomProviderConfig {
+    /// Which wire protocol the endpoint speaks. Defaults to `openai`.
+    #[serde(default)]
+    pub kind: CustomProviderKind,
+    /// Endpoint base URL, without the protocol-specific path.
+    pub base_url: String,
+    /// Name shown in the model picker. Defaults to the provider id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Environment variable holding the API key. Defaults to
+    /// `<ID>_API_KEY` uppercased; set it to `""` for endpoints that
+    /// need no auth. As everywhere else, a set environment variable
+    /// wins over a key stored via `kage auth login`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    /// Extra HTTP headers sent on every request, e.g. `Authorization`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    /// Models this provider serves. At least one is required.
+    pub models: Vec<CustomProviderModel>,
+    /// Whether the endpoint accepts tool definitions. Defaults to true.
+    #[serde(default = "default_true")]
+    pub tool_use: bool,
+    /// Whether the endpoint preserves thinking blocks across turns.
+    /// Defaults to false.
+    #[serde(default)]
+    pub thinking: bool,
+    /// Whether the endpoint supports prompt caching. Defaults to false.
+    #[serde(default)]
+    pub caching: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// One model a custom provider serves
+/// (`[[providers.custom.<id>.models]]`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CustomProviderModel {
+    /// Model id sent to the endpoint; addressable from kage as
+    /// `<provider-id>:<this id>`.
+    pub id: String,
+    /// Display name shown in the picker.
+    pub name: String,
+    /// Context window in tokens, when known. Surfaces to the modeline
+    /// like a catalog entry's context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<u64>,
+    /// Maximum output tokens per turn, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output: Option<u32>,
+}
+
+/// Settings overriding a provider kage registers itself
+/// (`[providers.<id>]`). Fields left out keep the built-in value.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct BuiltinProviderOverride {
+    /// Replace the provider's default base URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// Replace the environment variable the API key is read from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
+    /// Extra HTTP headers sent on every request to this provider.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
 }
 
 /// User interface configuration.
@@ -708,5 +872,271 @@ mod tests {
         cfg.save(&path).unwrap();
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded.ui.theme, "ayu");
+    }
+
+    fn sample_custom_provider() -> CustomProviderConfig {
+        CustomProviderConfig {
+            kind: CustomProviderKind::OpenAi,
+            base_url: "https://api.together.xyz/v1".into(),
+            display_name: None,
+            api_key_env: None,
+            headers: BTreeMap::new(),
+            models: vec![CustomProviderModel {
+                id: "meta-llama/Llama-3.3-70B-Instruct-Turbo".into(),
+                name: "Llama 3.3 70B".into(),
+                context: Some(131_072),
+                max_output: None,
+            }],
+            tool_use: true,
+            thinking: false,
+            caching: false,
+        }
+    }
+
+    #[test]
+    fn providers_section_defaults_empty() {
+        let cfg = Config::default();
+        assert!(cfg.providers.is_default());
+        assert!(cfg.providers.custom.is_empty());
+        assert!(cfg.providers.overrides.is_empty());
+        let body = toml::to_string(&cfg).unwrap();
+        assert!(!body.contains("[providers"), "{body}");
+    }
+
+    #[test]
+    fn providers_parses_custom_and_override_tables_side_by_side() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.toml",
+                r#"
+                [providers.custom.together]
+                base_url = "https://api.together.xyz/v1"
+
+                [[providers.custom.together.models]]
+                id = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+                name = "Llama 3.3 70B"
+                context = 131072
+
+                [providers.deepseek]
+                base_url = "https://relay.example.com/v1"
+                [providers.deepseek.headers]
+                X-Team = "infra"
+                "#,
+            )?;
+            let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
+            let together = cfg.providers.custom.get("together").expect("custom parsed");
+            assert_eq!(
+                together.kind,
+                CustomProviderKind::OpenAi,
+                "kind defaults to openai"
+            );
+            assert_eq!(together.base_url, "https://api.together.xyz/v1");
+            assert!(together.tool_use, "tool_use defaults to true");
+            assert!(!together.thinking);
+            assert!(!together.caching);
+            assert_eq!(together.models.len(), 1);
+            assert_eq!(
+                together.models[0].id,
+                "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+            );
+            assert_eq!(together.models[0].name, "Llama 3.3 70B");
+            assert_eq!(together.models[0].context, Some(131_072));
+            assert_eq!(together.models[0].max_output, None);
+            let deepseek = cfg
+                .providers
+                .overrides
+                .get("deepseek")
+                .expect("override parsed via flatten");
+            assert_eq!(
+                deepseek.base_url.as_deref(),
+                Some("https://relay.example.com/v1")
+            );
+            assert_eq!(deepseek.api_key_env, None);
+            assert_eq!(
+                deepseek.headers.get("X-Team").map(String::as_str),
+                Some("infra")
+            );
+            assert!(!cfg.providers.custom.contains_key("deepseek"));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn providers_custom_requires_base_url_and_models() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "no-base-url.toml",
+                r#"
+                [providers.custom.broken]
+                display_name = "No base URL"
+                "#,
+            )?;
+            let err = Config::load(jail.directory().join("no-base-url.toml").as_path())
+                .expect_err("missing base_url must fail the load");
+            assert!(err.to_string().contains("base_url"), "{err}");
+
+            jail.create_file(
+                "no-models.toml",
+                r#"
+                [providers.custom.broken]
+                base_url = "https://api.example.com/v1"
+                "#,
+            )?;
+            let err = Config::load(jail.directory().join("no-models.toml").as_path())
+                .expect_err("missing models must fail the load");
+            assert!(err.to_string().contains("models"), "{err}");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn providers_env_overrides_file_values() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.toml",
+                r#"
+                [providers.deepseek]
+                base_url = "https://api.deepseek.com/v1"
+                "#,
+            )?;
+            jail.set_env(
+                "KAGE_PROVIDERS__DEEPSEEK__BASE_URL",
+                "https://relay.example.com/v1",
+            );
+            let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
+            let deepseek = cfg
+                .providers
+                .overrides
+                .get("deepseek")
+                .expect("override parsed");
+            assert_eq!(
+                deepseek.base_url.as_deref(),
+                Some("https://relay.example.com/v1")
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn providers_validate_accepts_well_formed_config() {
+        let providers = ProvidersConfig {
+            custom: BTreeMap::from([("together".to_owned(), sample_custom_provider())]),
+            overrides: BTreeMap::from([(
+                "deepseek".to_owned(),
+                BuiltinProviderOverride {
+                    base_url: Some("https://relay.example.com/v1".into()),
+                    api_key_env: None,
+                    headers: BTreeMap::from([("X-Team".to_owned(), "infra".to_owned())]),
+                },
+            )]),
+        };
+        providers
+            .validate(
+                &["acp", "anthropic", "openai", "openai-responses", "gemini"],
+                &[
+                    "anthropic",
+                    "openai",
+                    "openai-responses",
+                    "gemini",
+                    "deepseek",
+                ],
+            )
+            .expect("well-formed providers validate");
+    }
+
+    #[test]
+    fn providers_validate_rejects_invalid_custom_id() {
+        for id in ["", "DeepSeek", "has_underscore", "has space", "has.dot"] {
+            let providers = ProvidersConfig {
+                custom: BTreeMap::from([(id.to_owned(), sample_custom_provider())]),
+                overrides: BTreeMap::new(),
+            };
+            let err = providers
+                .validate(&["anthropic"], &["anthropic"])
+                .expect_err("invalid custom id must be rejected");
+            assert!(err.to_string().contains("id must be"), "{err}");
+        }
+    }
+
+    #[test]
+    fn providers_validate_rejects_custom_id_shadowing_registered() {
+        let providers = ProvidersConfig {
+            custom: BTreeMap::from([("openai".to_owned(), sample_custom_provider())]),
+            overrides: BTreeMap::new(),
+        };
+        let err = providers
+            .validate(&["openai", "acp"], &["openai"])
+            .expect_err("custom id must not shadow a registered provider");
+        assert!(err.to_string().contains("conflicts"), "{err}");
+    }
+
+    #[test]
+    fn providers_validate_requires_models() {
+        let mut provider = sample_custom_provider();
+        provider.models.clear();
+        let providers = ProvidersConfig {
+            custom: BTreeMap::from([("together".to_owned(), provider)]),
+            overrides: BTreeMap::new(),
+        };
+        let err = providers
+            .validate(&[], &[])
+            .expect_err("custom provider without models must be rejected");
+        assert!(err.to_string().contains("models"), "{err}");
+    }
+
+    #[test]
+    fn providers_validate_rejects_unknown_override_id() {
+        let providers = ProvidersConfig {
+            custom: BTreeMap::new(),
+            overrides: BTreeMap::from([(
+                "not-a-provider".to_owned(),
+                BuiltinProviderOverride::default(),
+            )]),
+        };
+        let err = providers
+            .validate(&["openai"], &["openai"])
+            .expect_err("unknown override id must be rejected");
+        assert!(err.to_string().contains("not-a-provider"), "{err}");
+
+        let providers = ProvidersConfig {
+            custom: BTreeMap::new(),
+            overrides: BTreeMap::from([("acp".to_owned(), BuiltinProviderOverride::default())]),
+        };
+        let err = providers
+            .validate(&["acp"], &["openai"])
+            .expect_err("acp must not be overridable");
+        assert!(err.to_string().contains("acp"), "{err}");
+    }
+
+    #[test]
+    fn providers_save_then_load_roundtrips() {
+        let _globals = process_globals();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut cfg = Config::default();
+        cfg.providers
+            .custom
+            .insert("together".to_owned(), sample_custom_provider());
+        cfg.providers.overrides.insert(
+            "deepseek".to_owned(),
+            BuiltinProviderOverride {
+                base_url: Some("https://relay.example.com/v1".into()),
+                api_key_env: Some("DEEPSEEK_API_KEY".into()),
+                headers: BTreeMap::from([("X-Team".to_owned(), "infra".to_owned())]),
+            },
+        );
+        cfg.save(&path).unwrap();
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("[providers.custom.together]"), "{body}");
+        assert!(
+            body.contains("[[providers.custom.together.models]]"),
+            "{body}"
+        );
+        assert!(body.contains("[providers.deepseek]"), "{body}");
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(loaded, cfg);
     }
 }

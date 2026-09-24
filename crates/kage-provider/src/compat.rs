@@ -30,9 +30,21 @@ impl CompatProvider {
     /// Build the live [`OpenAiProvider`] for this entry with `api_key`.
     #[must_use]
     pub fn build(&self, api_key: impl Into<String>) -> OpenAiProvider {
+        self.build_with_base_url(api_key, self.base_url)
+    }
+
+    /// Build the live [`OpenAiProvider`] for this entry with `api_key`,
+    /// pointed at `base_url` instead of the catalog default. Used by the
+    /// `[providers.<id>]` `base_url` override.
+    #[must_use]
+    pub fn build_with_base_url(
+        &self,
+        api_key: impl Into<String>,
+        base_url: impl Into<String>,
+    ) -> OpenAiProvider {
         OpenAiProvider::compatible(
             api_key,
-            self.base_url,
+            base_url,
             ProviderMetadata {
                 id: self.id.into(),
                 display_name: self.display_name.into(),

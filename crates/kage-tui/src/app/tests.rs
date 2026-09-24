@@ -945,7 +945,14 @@ fn default_slot_specs_paint_exactly_the_built_in_chrome() {
     };
     let rt = kage_plugin::PluginRuntime::new().unwrap();
     kage_plugin::load_all(None, &rt).unwrap();
-    assert_eq!(frame(Some(rt.slots())), frame(None));
+    let (from_specs, built_in) = loop {
+        let tick = crate::view::spinner_frame_index();
+        let pair = (frame(Some(rt.slots())), frame(None));
+        if tick == crate::view::spinner_frame_index() {
+            break pair;
+        }
+    };
+    assert_eq!(from_specs, built_in);
 }
 
 #[test]

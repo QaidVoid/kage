@@ -111,10 +111,11 @@ prompt cannot answer it. When several calls wait, the title shows
 the run, which refuses the call. The tool's row in the conversation
 reads `waiting` until you answer, then runs or reads `denied`.
 
-Both "allow" scopes cover the tool by name, every call of it, for as
-long as kage runs, including sessions you switch to with `/new` or the
-session picker. They are checked before `/permission ask`, so an
-approved tool stops asking even in ask mode. They never lift a refusal:
+Both "allow" scopes cover the tool by name, every call of it, for the
+rest of the session. `/new`, a session opened from the picker and a
+clone start without them. They are checked before `/permission ask`,
+so an approved tool stops asking even in ask mode, and `/permission
+default` keeps them. They never lift a refusal:
 `/permission deny` and the tool's `deny` patterns in `[permissions]`
 still apply.
 
@@ -146,7 +147,8 @@ shows the current mode. An active override shows as `ask mode` or
 conversation is empty.
 
 The override lives for the current session only and is never written
-to the config file. It short-circuits the per-tool rules entirely.
+to the config file. `/new`, a session opened from the picker and a
+clone start with the configured rules again. It short-circuits the per-tool rules entirely.
 While `deny` is active, even allow-listed tools and tools approved in
 the panel refuse. While `ask` is active, even never-configured tools
 prompt, except the tools you approved for the session or always.

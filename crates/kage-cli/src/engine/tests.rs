@@ -576,6 +576,46 @@ fn clone_continues_on_a_copy() {
     assert_eq!(messages.len(), 2);
 }
 
+fn state_of(envelope: &Envelope) -> Option<&SessionState> {
+    match &envelope.event {
+        Event::Host(HostEvent::StateChanged { state }) => Some(state),
+        _ => None,
+    }
+}
+
+#[test]
+fn switching_sessions_drops_the_permission_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::replaying(text_turn("hello")));
+    let id = SessionId::new();
+    let (recorder, _) = recorder_in(dir.path(), id);
+    let gate = PermissionGate::new(PermissionsConfig::default());
+    h.open_with(id, Some(recorder), gate.clone());
+    prompt(&h.engine, id, "hi", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+
+    h.engine.send(Command::to(
+        id,
+        CommandKind::SetPermissionMode {
+            mode: Some(PermissionAction::Ask),
+        },
+    ));
+    h.engine.send(Command::to(id, CommandKind::Clone));
+    let before = wait_for(&h.events, is_session_changed);
+    assert!(
+        before
+            .iter()
+            .filter_map(state_of)
+            .any(|s| s.permission_mode == Some(PermissionAction::Ask))
+    );
+    let after = wait_for(&h.events, |e| state_of(e).is_some());
+    assert_eq!(
+        state_of(after.last().unwrap()).unwrap().permission_mode,
+        None
+    );
+    assert_eq!(gate.mode(), None);
+}
+
 #[test]
 fn fork_export_and_delete_report_through_notices() {
     let dir = tempfile::tempdir().unwrap();

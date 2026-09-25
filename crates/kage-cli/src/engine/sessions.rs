@@ -344,7 +344,8 @@ impl super::Dispatcher {
     }
 
     /// Replace session `old` with a session `new` recorded at `path`,
-    /// keeping its tools, plugins and settings, and tell clients.
+    /// keeping its tools, plugins and settings but not its permission
+    /// mode or approvals, and tell clients.
     fn reseat(
         &mut self,
         old: SessionId,
@@ -362,6 +363,8 @@ impl super::Dispatcher {
         session.title_pending = session.title && !super::has_reply(&cx);
         session.pending_history.clear();
         session.queued.clear();
+        session.gate.reset_session();
+        session.state.permission_mode = None;
         session.path = Some(path.clone());
         session.idle = Some(super::Idle {
             cx,

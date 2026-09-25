@@ -97,6 +97,14 @@ impl PermissionGate {
         *lock(&self.mode) = mode;
     }
 
+    /// Drop the session mode override and the session approvals, for a
+    /// new or switched session. The configured rules stay, including
+    /// the in-memory flips of "always allow".
+    pub(crate) fn reset_session(&self) {
+        *lock(&self.mode) = None;
+        lock(&self.session_allowed).clear();
+    }
+
     /// Current session mode override, `None` when the configured
     /// rules decide.
     #[must_use]
@@ -620,6 +628,68 @@ mod tests {
             saved.permissions.check("bash", "anything"),
             PermissionAction::Allow
         );
+    }
+
+    #[test]
+    fn allow_always_on_an_unconfigured_edit_stops_asking_under_ask_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let edit = |file: &str| serde_json::json!({"path": file, "old_str": "a", "new_str": "b"});
+        let gate =
+            PermissionGate::new(PermissionsConfig::default()).with_persist_path(path.clone());
+        gate.set_mode(Some(PermissionAction::Ask));
+        let (ask_tx, ask_rx) = channel_asker();
+        let mut first = gate.clone().with_asker(ask_tx);
+        let first_input = edit("src/main.rs");
+        let handle = std::thread::spawn(move || {
+            first
+                .before_tool_call(&kage_core::ToolCallId::new("call_1"), "edit", &first_input)
+                .is_none()
+        });
+        let ask = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(ask.tool, "edit");
+        ask.reply.send(PermissionDecision::AllowAlways).unwrap();
+        assert!(handle.join().unwrap());
+        let mut second = gate.with_asker(panicking_asker());
+        assert!(
+            second
+                .before_tool_call(
+                    &kage_core::ToolCallId::new("call_2"),
+                    "edit",
+                    &edit("src/lib.rs")
+                )
+                .is_none()
+        );
+        let saved = Config::load(&path).unwrap();
+        assert_eq!(
+            saved.permissions.check("edit", "anything"),
+            PermissionAction::Allow
+        );
+    }
+
+    #[test]
+    fn reset_session_drops_the_mode_and_approvals_but_keeps_always_allow() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut rules = rules_for(PermissionAction::Ask);
+        rules.tools.insert(
+            "write".to_owned(),
+            ToolPermissionRules {
+                default: PermissionAction::Ask,
+                allow: Vec::new(),
+                deny: Vec::new(),
+            },
+        );
+        let gate = PermissionGate::new(rules).with_persist_path(dir.path().join("config.toml"));
+        assert!(answer_ask(&gate, PermissionDecision::AllowSession));
+        gate.persist_allow_always("write");
+        gate.reset_session();
+        assert_eq!(gate.mode(), None);
+        let mut gate = gate;
+        let out = gate
+            .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+            .unwrap();
+        assert!(out.text.contains("non-interactive"), "{}", out.text);
+        assert!(call(&mut gate, "write").is_none());
     }
 
     #[test]

@@ -557,8 +557,7 @@ mod tests {
 
     #[test]
     fn mcp_check_ok_when_no_servers_configured() {
-        let dir = tempfile::tempdir().unwrap();
-        let check = check_mcp(dir.path());
+        let check = check_mcp_servers(servers(""));
         assert_eq!(check.status, Status::Ok);
         assert!(check.body.contains("no mcp servers"));
     }

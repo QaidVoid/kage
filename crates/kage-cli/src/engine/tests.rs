@@ -626,6 +626,63 @@ fn switching_sessions_drops_the_permission_mode() {
     assert_eq!(gate.mode(), None);
 }
 
+fn set_model(engine: &Engine, id: SessionId, model: &str) {
+    engine.send(Command::to(
+        id,
+        CommandKind::SetModel {
+            model: model.into(),
+        },
+    ));
+}
+
+#[test]
+fn a_model_switch_survives_a_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let first = harness(MockProvider::replaying(text_turn("hello")));
+    let id = SessionId::new();
+    let (recorder, path) = recorder_in(dir.path(), id);
+    first.open(id, Some(recorder));
+    set_model(&first.engine, id, "mock:other");
+    wait_for(&first.events, |e| {
+        state_of(e).is_some_and(|s| s.model == "mock:other")
+    });
+    first.engine.shutdown();
+
+    let h = harness(MockProvider::replaying(text_turn("hello")));
+    let fresh = SessionId::new();
+    h.open(fresh, None);
+    h.engine
+        .send(Command::to(fresh, CommandKind::LoadSession { path }));
+    let seen = wait_for(&h.events, is_session_changed);
+    let loaded = seen.last().unwrap().session;
+    let seen = wait_for(&h.events, |e| e.session == loaded && state_of(e).is_some());
+    assert_eq!(state_of(seen.last().unwrap()).unwrap().model, "mock:other");
+}
+
+#[test]
+fn a_model_switch_during_a_run_is_recorded_at_the_next_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::sequence(vec![
+        tool_turn("gate"),
+        text_turn("done"),
+        text_turn("again"),
+    ]));
+    let id = SessionId::new();
+    let (recorder, path) = recorder_in(dir.path(), id);
+    h.open(id, Some(recorder));
+    prompt(&h.engine, id, "go", Delivery::Steer);
+    wait_for(&h.events, is_tool_start);
+
+    set_model(&h.engine, id, "mock:other");
+    h.release.send(()).unwrap();
+    until_runs_end(&h.events, 1);
+    assert_eq!(kage_session::replay(&path).unwrap().model, "mock:m");
+
+    prompt(&h.engine, id, "again", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+    assert_eq!(kage_session::replay(&path).unwrap().model, "mock:other");
+}
+
 #[test]
 fn fork_export_and_delete_report_through_notices() {
     let dir = tempfile::tempdir().unwrap();
@@ -1738,4 +1795,33 @@ fn restart_while_running_waits_for_the_next_run() {
     assert_eq!(restart_notices(&events).len(), 1);
     assert_eq!(mcp_snapshots(&events).len(), 1);
     assert_eq!(outcomes(&events), [RunOutcome::Completed]);
+}
+
+#[test]
+fn switching_sessions_publishes_the_mcp_catalog() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::replaying(text_turn("hello")));
+    let id = SessionId::new();
+    let (recorder, path) = recorder_in(dir.path(), id);
+    h.open_mcp(id, Some(recorder));
+    prompt(&h.engine, id, "hi", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+
+    let switch = |from: SessionId, kind: CommandKind| {
+        h.engine.send(Command::to(from, kind));
+        let events = wait_for(&h.events, is_mcp_servers);
+        let changed = events.iter().rfind(|e| is_session_changed(e)).unwrap();
+        let catalog = events.last().unwrap();
+        assert_eq!(catalog.session, changed.session);
+        let names: Vec<String> = mcp_snapshots(&events)
+            .remove(0)
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, ["broken", "srv"]);
+        catalog.session
+    };
+    let cloned = switch(id, CommandKind::Clone);
+    let fresh = switch(cloned, CommandKind::NewSession);
+    assert_eq!(switch(fresh, CommandKind::LoadSession { path }), id);
 }

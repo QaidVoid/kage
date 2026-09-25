@@ -218,6 +218,8 @@ struct Session {
     idle: Option<Idle>,
     state: SessionState,
     thinking: Option<ThinkingLevel>,
+    /// A model switched to during a run, recorded at the next run start.
+    model_changed: bool,
     usage: Usage,
     cancel: CancelFlag,
     steering: Steering,
@@ -404,6 +406,7 @@ impl Dispatcher {
                 idle: Some(Idle { cx, recorder }),
                 state,
                 thinking: None,
+                model_changed: false,
                 usage,
                 cancel,
                 steering: Arc::default(),
@@ -500,7 +503,7 @@ impl Dispatcher {
             CommandKind::Clone => self.clone_session(id),
             CommandKind::DeleteSession { path } => self.delete_session(id, &path),
             CommandKind::Export { path } => self.export(id, path),
-            CommandKind::SetModel { model } => self.update_state(id, |s| s.state.model = model),
+            CommandKind::SetModel { model } => self.set_model(id, model),
             CommandKind::SetThinking { level } => self.set_thinking(id, level),
             CommandKind::SetPermissionMode { mode } => self.update_state(id, |s| {
                 s.gate.set_mode(mode);
@@ -519,18 +522,30 @@ impl Dispatcher {
         match session.idle.as_mut() {
             Some(idle) => {
                 idle.cx.thinking_level = Some(level);
-                if let Some(recorder) = idle.recorder.as_mut()
-                    && let Err(err) = recorder.append(&thinking_entry(level))
-                {
-                    notice(
-                        &self.bus,
-                        id,
-                        NoticeLevel::Error,
-                        format!("session write failed: {err}"),
-                    );
+                if let Some(recorder) = idle.recorder.as_mut() {
+                    report_write(&self.bus, id, recorder.append(&thinking_entry(level)));
                 }
             }
             None => session.thinking = Some(level),
+        }
+        let state = session.state.clone();
+        self.bus.publish(id, HostEvent::StateChanged { state });
+    }
+
+    /// Switch models and record the switch now when idle, or at the next
+    /// run start otherwise.
+    fn set_model(&mut self, id: SessionId, model: String) {
+        let session = self.sessions.get_mut(&id).expect("session checked");
+        if session.state.model != model {
+            session.state.model = model;
+            match session.idle.as_mut() {
+                Some(idle) => {
+                    if let Some(recorder) = idle.recorder.as_mut() {
+                        report_write(&self.bus, id, recorder.set_model(&session.state.model));
+                    }
+                }
+                None => session.model_changed = true,
+            }
         }
         let state = session.state.clone();
         self.bus.publish(id, HostEvent::StateChanged { state });
@@ -654,8 +669,13 @@ impl Dispatcher {
                 let outcome = RunOutcome::Failed {
                     error: LoopError::Provider { message },
                 };
+                self.bus.publish(
+                    id,
+                    HostEvent::RunEnded {
+                        outcome: outcome.clone(),
+                    },
+                );
                 self.deliver(id, &outcome, &[]);
-                self.bus.publish(id, HostEvent::RunEnded { outcome });
                 return;
             }
         };
@@ -674,16 +694,14 @@ impl Dispatcher {
         cx.history.append(&mut session.pending_history);
         if let Some(level) = session.thinking.take() {
             cx.thinking_level = Some(level);
-            if let Some(recorder) = recorder.as_mut()
-                && let Err(err) = recorder.append(&thinking_entry(level))
-            {
-                notice(
-                    &self.bus,
-                    id,
-                    NoticeLevel::Error,
-                    format!("session write failed: {err}"),
-                );
+            if let Some(recorder) = recorder.as_mut() {
+                report_write(&self.bus, id, recorder.append(&thinking_entry(level)));
             }
+        }
+        if std::mem::take(&mut session.model_changed)
+            && let Some(recorder) = recorder.as_mut()
+        {
+            report_write(&self.bus, id, recorder.set_model(&model));
         }
         let mcp = if let Some(manager) = session.mcp.take() {
             let mut restarts = session
@@ -759,7 +777,7 @@ impl Dispatcher {
             let model = session.state.model.clone();
             self.generate_title(id, &cx, &model);
         }
-        self.deliver(id, &outcome, &cx.history);
+        let reply = self.take_reply(id, &outcome, &cx.history);
         // Children may not have seen the cancel yet, and this session's
         // own flag resets below, so they get their own.
         if outcome == RunOutcome::Cancelled {
@@ -790,6 +808,9 @@ impl Dispatcher {
         };
         self.bus.publish(id, HostEvent::RunEnded { outcome });
         self.bus.publish(id, HostEvent::StateChanged { state });
+        if let Some((reply, output)) = reply {
+            let _ = reply.send(output);
+        }
         if let Some(content) = next {
             self.start_run(id, Work::Prompt(Message::new(Role::User, content, None)));
         }
@@ -994,14 +1015,29 @@ impl Dispatcher {
         }
     }
 
-    /// Send an agent's result to its `agent` call, once.
+    /// Send an agent's result to its `agent` call, once. Callers publish
+    /// the agent's `RunEnded` first, so clients see the agent end before
+    /// the parent continues.
     fn deliver(&mut self, id: SessionId, outcome: &RunOutcome, history: &[Message]) {
-        let Some(link) = self.sessions.get_mut(&id).and_then(|s| s.link.as_mut()) else {
-            return;
-        };
-        if let Some(reply) = link.reply.take() {
-            let _ = reply.send(agent_tool::agent_result(id, &link.agent, outcome, history));
+        if let Some((reply, output)) = self.take_reply(id, outcome, history) {
+            let _ = reply.send(output);
         }
+    }
+
+    /// Take an agent's `agent` call reply and its result, once, to send
+    /// later.
+    fn take_reply(
+        &mut self,
+        id: SessionId,
+        outcome: &RunOutcome,
+        history: &[Message],
+    ) -> Option<(mpsc::Sender<ToolOutput>, ToolOutput)> {
+        let link = self.sessions.get_mut(&id)?.link.as_mut()?;
+        let reply = link.reply.take()?;
+        Some((
+            reply,
+            agent_tool::agent_result(id, &link.agent, outcome, history),
+        ))
     }
 
     /// Agent runs in flight that hold a slot of the running limit. An
@@ -1052,13 +1088,13 @@ impl Dispatcher {
             session.queued.clear();
             lock(&session.steering).clear();
         }
-        self.deliver(id, &RunOutcome::Cancelled, &[]);
         self.bus.publish(
             id,
             HostEvent::RunEnded {
                 outcome: RunOutcome::Cancelled,
             },
         );
+        self.deliver(id, &RunOutcome::Cancelled, &[]);
     }
 
     fn parent_of(&self, id: SessionId) -> Option<SessionId> {
@@ -1175,6 +1211,18 @@ fn restart_failed(bus: &Bus, id: SessionId, name: &str, err: &McpError) {
         NoticeLevel::Error,
         format!("mcp restart `{name}`: {err}"),
     );
+}
+
+/// Tell the user when writing to the session file failed.
+fn report_write(bus: &Bus, id: SessionId, result: Result<(), kage_session::SessionError>) {
+    if let Err(err) = result {
+        notice(
+            bus,
+            id,
+            NoticeLevel::Error,
+            format!("session write failed: {err}"),
+        );
+    }
 }
 
 fn notice(bus: &Bus, id: SessionId, level: NoticeLevel, text: String) {

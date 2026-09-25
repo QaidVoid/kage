@@ -7,8 +7,8 @@ use chrono::Utc;
 use kage_core::{LoopEvent, Role, TokenUsage};
 use kage_plugin::{PendingSessionOp, PluginRuntime};
 use kage_session::{
-    Compaction, Custom, EntryId, Header, Label, MessageEntry, SessionEntry, SessionError,
-    SessionWriter,
+    Compaction, Custom, EntryId, Header, Label, MessageEntry, ModelChange, SessionEntry,
+    SessionError, SessionWriter,
 };
 
 /// Writes every appended message and compaction of one session.
@@ -67,6 +67,22 @@ impl Recorder {
     /// Append an entry the loop does not produce, such as a title.
     pub(crate) fn append(&mut self, entry: &SessionEntry) -> Result<(), SessionError> {
         self.writer()?.append(entry)
+    }
+
+    /// Record a switch to `model`. A file not created yet gets it in its
+    /// header instead, so a model switch alone writes nothing to disk.
+    pub(crate) fn set_model(&mut self, model: &str) -> Result<(), SessionError> {
+        match &mut self.target {
+            Target::Planned { header, .. } => {
+                model.clone_into(&mut header.model);
+                Ok(())
+            }
+            Target::Open(writer) => writer.append(&SessionEntry::ModelChange(ModelChange {
+                id: EntryId::new(),
+                ts: Utc::now(),
+                model: model.to_owned(),
+            })),
+        }
     }
 
     fn writer(&mut self) -> Result<&mut SessionWriter, SessionError> {
@@ -243,6 +259,21 @@ mod tests {
             .collect();
         assert_eq!(usages, [None, Some(usage)]);
         assert!(matches!(written.last(), Some(SessionEntry::Compaction(_))));
+    }
+
+    #[test]
+    fn a_model_switch_goes_to_the_planned_header_or_an_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let (path, header) = header(dir.path());
+        let mut recorder = Recorder::planned(path.clone(), header, None);
+        recorder.set_model("mock:a").unwrap();
+        assert!(!path.exists());
+        recorder.observe(&appended(Role::User, "hi")).unwrap();
+        recorder.set_model("mock:b").unwrap();
+
+        let written = entries(&path);
+        assert!(matches!(&written[0], SessionEntry::Header(h) if h.model == "mock:a"));
+        assert!(matches!(&written[2], SessionEntry::ModelChange(m) if m.model == "mock:b"));
     }
 
     #[test]

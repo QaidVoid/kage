@@ -385,8 +385,9 @@ impl super::Dispatcher {
     }
 
     /// Replace session `old` with a session `new` recorded at `path`,
-    /// keeping its tools, plugins and settings but not its permission
-    /// mode or approvals, drop the agents of `old`, and tell clients.
+    /// keeping its tools, plugins, MCP servers and settings but not its
+    /// permission mode or approvals, drop the agents of `old`, and tell
+    /// clients, including the MCP catalog for `new`.
     fn reseat(
         &mut self,
         old: SessionId,
@@ -401,6 +402,7 @@ impl super::Dispatcher {
         session.usage = super::usage_of(&cx);
         session.state.thinking = cx.thinking_level.unwrap_or_default();
         session.thinking = None;
+        session.model_changed = false;
         session.title_pending = session.title && !super::has_reply(&cx);
         session.pending_history.clear();
         session.queued.clear();
@@ -413,6 +415,11 @@ impl super::Dispatcher {
         });
         let state = session.state.clone();
         let usage = session.usage;
+        let servers = session
+            .mcp
+            .as_ref()
+            .map(kage_mcp::McpManager::catalog)
+            .unwrap_or_default();
         let agents: Vec<SessionId> = self
             .sessions
             .keys()
@@ -436,6 +443,7 @@ impl super::Dispatcher {
         );
         self.bus.publish(new, HostEvent::StateChanged { state });
         self.bus.publish(new, HostEvent::UsageUpdated { usage });
+        self.bus.publish(new, HostEvent::McpServers { servers });
         self.info(new, message);
     }
 

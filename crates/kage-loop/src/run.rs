@@ -22,7 +22,7 @@ use kage_provider::{Provider, ProviderError, StreamRequest};
 use kage_tools::ToolRegistry;
 
 use crate::compact::maybe_compact;
-use crate::dispatch::{dispatch_tool_calls, dispatch_tool_calls_parallel};
+use crate::dispatch::{dispatch_tool_calls, dispatch_tool_calls_parallel, unrun_results};
 use crate::doom::DoomTracker;
 use crate::stream::{TurnFailure, TurnResult, collect_turn};
 use crate::{AgentContext, Hooks, LoopConfig, SteeringMode};
@@ -173,6 +173,8 @@ where
             };
             turn_index = turn_index.saturating_add(1);
             if hooks.should_stop_after_turn(&summary) {
+                let unrun = unrun_results(pending, assistant_id, &mut emit);
+                append_all(cx, &mut emit, unrun);
                 return Ok(());
             }
 

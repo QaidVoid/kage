@@ -487,14 +487,27 @@ fn should_stop_after_turn_short_circuits_pending_tool_calls() {
     run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {}).unwrap();
     assert_eq!(hooks.polls, 1);
     assert_eq!(mock.call_count(), 1);
-    let saw_tool_result = cx.history.iter().any(|m| {
-        m.content
-            .iter()
-            .any(|c| matches!(c, kage_core::Content::ToolResultBlock { .. }))
-    });
-    assert!(
-        !saw_tool_result,
-        "stop predicate must run before tool dispatch"
+    let results: Vec<_> = cx
+        .history
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|c| match c {
+            kage_core::Content::ToolResultBlock {
+                call_id,
+                output,
+                is_error,
+            } => Some((call_id.to_string(), output.as_str(), *is_error)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        results,
+        vec![(
+            "call_1".to_owned(),
+            "tool did not run: the run stopped after this turn",
+            true
+        )],
+        "the call is answered without running"
     );
 }
 

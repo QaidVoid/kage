@@ -153,6 +153,39 @@ fn synthesized_output(error: &LoopError) -> ToolOutput {
     }
 }
 
+/// Answer every call in `pending` without running it, so history never
+/// carries a dangling tool use when the run stops after a turn.
+pub(crate) fn unrun_results<F: FnMut(LoopEvent)>(
+    pending: Vec<PendingToolCall>,
+    parent: MessageId,
+    emit: &mut F,
+) -> Vec<Message> {
+    pending
+        .into_iter()
+        .map(|call| {
+            let output = ToolOutput {
+                is_error: true,
+                text: "tool did not run: the run stopped after this turn".to_owned(),
+                structured: None,
+                terminate: false,
+            };
+            emit(LoopEvent::ToolCallEnd {
+                id: call.id.clone(),
+                output: output.clone(),
+            });
+            Message::new(
+                Role::ToolResult,
+                vec![Content::ToolResultBlock {
+                    call_id: call.id,
+                    output: output.text,
+                    is_error: true,
+                }],
+                Some(parent),
+            )
+        })
+        .collect()
+}
+
 /// Record the batch-level failure worth surfacing to the caller.
 ///
 /// `Cancelled` wins because the run is aborting by user request; otherwise

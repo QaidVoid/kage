@@ -227,9 +227,13 @@ pub fn find_by_prefix(dir: &Path, prefix: &str) -> Result<Option<PathBuf>, Sessi
     Ok(Some(first.path))
 }
 
-/// Find the most recently created session in `dir`.
+/// Find the most recently created session in `dir`, skipping agent
+/// sessions.
 pub fn find_last(dir: &Path) -> Result<Option<PathBuf>, SessionError> {
-    Ok(list(dir)?.into_iter().next().map(|s| s.path))
+    Ok(list(dir)?
+        .into_iter()
+        .find(|s| s.agent.is_none())
+        .map(|s| s.path))
 }
 
 #[cfg(test)]
@@ -447,5 +451,22 @@ mod tests {
 
         let last = find_last(dir.path()).unwrap().unwrap();
         assert_eq!(last, path_b);
+    }
+
+    #[test]
+    fn find_last_skips_agent_sessions() {
+        let dir = tempdir().unwrap();
+        let main = dir.path().join("a.jsonl");
+        write(&main, fresh_header(), &[]);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let marker = SessionEntry::Custom(crate::entry::Custom {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            kind: crate::list::AGENT_ENTRY_KIND.into(),
+            data: serde_json::json!({ "agent": "explore" }),
+        });
+        write(&dir.path().join("b.jsonl"), fresh_header(), &[marker]);
+
+        assert_eq!(find_last(dir.path()).unwrap().unwrap(), main);
     }
 }

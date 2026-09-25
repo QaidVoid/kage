@@ -248,6 +248,14 @@ pub fn render(
         );
     }
     let sources = slot::Sources::new(status, session_usage, input, frame.area().width);
+    let toast_rows = toast::toast_rows(toasts.len(), regions.buffer);
+    let mut regions = regions;
+    regions.buffer.height -= toast_rows;
+    let toast_area = Rect {
+        y: regions.buffer.bottom(),
+        height: toast_rows,
+        ..regions.buffer
+    };
     slot::render_header(frame, regions.header, &sources);
     render_buffer(
         frame,
@@ -261,10 +269,7 @@ pub fn render(
     }
     slot::render_activity(frame, regions.activity, &sources);
     render_input(frame, regions, input, &sources);
-    if !toasts.is_empty() {
-        let theme = crate::theme::current();
-        render_toasts(frame, regions.buffer, toasts, &theme);
-    }
+    render_toasts(frame, toast_area, toasts, &theme);
     if let Some(cl) = cmdline {
         render_cmdline_line(frame, regions.footer, cl);
         render_cmdline_error(frame, regions, cl);

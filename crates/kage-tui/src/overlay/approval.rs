@@ -26,7 +26,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::cmdline::{CommandLine, CommandLineEvent};
 use crate::cmdparse::EmptyResolver;
 use crate::theme::Theme;
-use crate::view::tool_view::{self, LineKind};
+use crate::view::tool_view::{self, EditDiff, LineKind};
 
 /// How long keys are dropped after a panel opens.
 pub const TYPE_AHEAD_GUARD: Duration = Duration::from_millis(400);
@@ -72,6 +72,9 @@ pub struct ApprovalPanel {
     /// opens it again.
     parked: Option<CommandLine>,
     opened_at: Instant,
+    /// An edit's change as the file shows it, in place of the one its
+    /// input describes.
+    diff: Option<EditDiff>,
 }
 
 impl ApprovalPanel {
@@ -89,7 +92,16 @@ impl ApprovalPanel {
             feedback: None,
             parked: None,
             opened_at,
+            diff: None,
         }
+    }
+
+    /// Show `diff` as an edit's change instead of the one its input
+    /// describes, such as the lines of the file it would change.
+    #[must_use]
+    pub fn with_diff(mut self, diff: Option<EditDiff>) -> Self {
+        self.diff = diff;
+        self
     }
 
     /// Who reads option 5's text: the asking agent, else `kage`.
@@ -241,16 +253,19 @@ impl ApprovalPanel {
         let plain = |s: String| Line::from(Span::styled(s, text));
         let lines = match self.tool.as_str() {
             "bash" => {
-                let wrap = width.saturating_sub(INDENT_WIDTH);
+                let wrap = width.saturating_sub(INDENT_WIDTH + 2);
                 let rows = field("command")
                     .trim()
                     .lines()
                     .enumerate()
                     .flat_map(|(i, line)| {
-                        let line = format!("{}{line}", if i == 0 { "$ " } else { "  " });
-                        crate::view::wrap_input_rows(&line, wrap)
+                        crate::view::wrap_input_rows(line, wrap)
                             .into_iter()
-                            .map(|(s, e)| line[s..e].to_owned())
+                            .enumerate()
+                            .map(|(row, (s, e))| {
+                                let lead = if i == 0 && row == 0 { "$ " } else { "  " };
+                                format!("{lead}{}", &line[s..e])
+                            })
                             .collect::<Vec<_>>()
                     })
                     .map(plain)
@@ -258,7 +273,11 @@ impl ApprovalPanel {
                 capped(rows, BASH_LINES, muted)
             }
             "edit" => {
-                let rows = tool_view::edit_diff(&self.input)
+                let diff = self
+                    .diff
+                    .clone()
+                    .unwrap_or_else(|| tool_view::edit_diff(&self.input));
+                let rows = diff
                     .lines
                     .into_iter()
                     .map(|l| match l.kind {
@@ -269,6 +288,7 @@ impl ApprovalPanel {
                             format!("- {}", l.text),
                             theme.group_style("KageDiffDelete"),
                         ),
+                        LineKind::Context => Line::styled(format!("  {}", l.text), muted),
                         LineKind::Marker => Line::styled(l.text, muted),
                         LineKind::Text => plain(l.text),
                     })
@@ -462,6 +482,17 @@ mod tests {
         assert_eq!(rows[7], "   5. No, and tell kage what to do instead");
         assert!(rows[8].chars().all(|c| c == '\u{2500}'), "{rows:#?}");
         assert!(rows.iter().all(|r| !r.contains('{')), "{rows:#?}");
+    }
+
+    #[test]
+    fn a_wrapped_command_hangs_under_its_first_word() {
+        let at = Instant::now();
+        let command = "cargo test --workspace --all-features --no-fail-fast";
+        let panel = ApprovalPanel::new("bash", &json!({ "command": command }), None, at);
+        let rows = rows(&panel, 30, 0);
+        assert_eq!(rows[1], "   $ cargo test --workspace");
+        assert_eq!(rows[2], "     --all-features");
+        assert_eq!(rows[3], "     --no-fail-fast");
     }
 
     #[test]

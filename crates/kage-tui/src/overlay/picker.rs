@@ -353,9 +353,23 @@ impl OverlayPicker {
         );
     }
 
+    /// Paint the key hint, dropping the parts past the right edge
+    /// whole instead of cutting one.
     fn render_help(buf: &mut Buffer, area: Rect) {
+        let mut hint = String::new();
+        for part in HELP_HINT.split("  ") {
+            let next = if hint.is_empty() {
+                part.to_owned()
+            } else {
+                format!("{hint}  {part}")
+            };
+            if next.width() > usize::from(area.width) {
+                break;
+            }
+            hint = next;
+        }
         let line = Line::from(Span::styled(
-            HELP_HINT,
+            hint,
             Style::default().fg(crate::theme::current().muted_fg),
         ));
         Widget::render(Paragraph::new(line), area, buf);
@@ -573,6 +587,26 @@ mod tests {
         let m = p.measure(Rect::new(0, 0, 200, 40));
         assert!(usize::from(m.width) >= title.width() + 4);
         assert!(usize::from(m.width) >= HELP_HINT.width() + 2);
+    }
+
+    #[test]
+    fn a_narrow_picker_drops_whole_hint_parts() {
+        let mut p = OverlayPicker::new("Sessions", vec![PickItem::simple("a")]);
+        let area = Rect::new(0, 0, 50, 8);
+        let mut buf = Buffer::empty(area);
+        let theme = crate::theme::Theme::default();
+        let ctx = OverlayCtx {
+            theme: &theme,
+            viewport: area,
+        };
+        OverlayWidget::render(&mut p, area, &mut buf, &ctx);
+        let hint_row: String = (0..area.width)
+            .map(|x| buf[(x, area.height - 2)].symbol())
+            .collect();
+        assert!(
+            hint_row.contains("type to filter") && !hint_row.contains("esc"),
+            "{hint_row:?}"
+        );
     }
 
     #[test]

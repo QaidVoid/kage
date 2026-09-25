@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 
 pub(crate) use ratatui::text::Line;
 
-pub(crate) use crate::view::tool_view::ToolPhase;
+pub(crate) use crate::view::tool_view::{EditDiff, ToolPhase};
 
 /// One renderable region of the conversation.
 #[derive(Clone, Debug, PartialEq)]
@@ -80,6 +80,10 @@ pub enum Block {
         /// [`ToolPhase::Running`] resets it, so the duration shown
         /// once the result arrives excludes any approval wait.
         started_at: Instant,
+        /// A finished edit's change as whole lines of its file, set by
+        /// [`Buffer::annotate_edits`]. `None` shows the change its
+        /// input describes.
+        diff: Option<Arc<EditDiff>>,
     },
     /// Output of a previously-issued tool call.
     ToolResult {
@@ -488,6 +492,12 @@ pub struct Buffer {
     /// miss so the renderer rebuilds. Cleared when a rebuild stores
     /// fresh lines and when the stream finishes.
     stream_dirty_since: Option<Instant>,
+    /// Counts appended blocks and streamed deltas.
+    output_serial: u64,
+    /// [`Self::output_serial`] when the view stopped following the
+    /// bottom. A higher serial since means output arrived out of
+    /// sight. `None` while following.
+    detached_at: Option<u64>,
 }
 
 /// What a [`ToolTopology`] was built from: `(epoch, block count, fold

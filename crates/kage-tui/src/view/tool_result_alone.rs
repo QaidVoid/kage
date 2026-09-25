@@ -59,6 +59,7 @@ impl BlockWidget for ToolResultAloneBlockWidget {
             folded: self.folded,
             elapsed_ms: self.duration_ms,
             output: &self.output,
+            diff: None,
         };
         tool_row_lines(&row, width, ctx.emphasis, ctx.row_budget)
     }

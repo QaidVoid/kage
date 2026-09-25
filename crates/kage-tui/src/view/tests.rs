@@ -1745,3 +1745,85 @@ fn input_height_counts_the_pinned_agents() {
     assert_eq!(input_height(&input, 6, 0, 80), bare + 5);
     assert_eq!(input_height(&input, 2, 1, 80), bare + 3);
 }
+
+#[test]
+fn recorded_block_rows_match_the_painted_rows_when_the_top_is_a_gap() {
+    for count in [10, 11] {
+        let mut buffer = Buffer::new();
+        for i in 0..count {
+            buffer.append_assistant_delta(&format!("reply {i}"));
+            buffer.finish_streaming();
+        }
+        let rows = snapshot_lines(&mut buffer, &InputState::new(), Rect::new(0, 0, 40, 12));
+        for (idx, _) in buffer.blocks().iter().enumerate() {
+            let Some((top, _)) = buffer.screen_rows_of(idx) else {
+                continue;
+            };
+            assert_eq!(
+                rows[usize::from(top)].trim(),
+                format!("reply {idx}"),
+                "{count} blocks: {rows:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn wrapped_list_items_hang_under_their_text() {
+    let mut buffer = Buffer::new();
+    buffer.append_assistant_delta(
+        "- the first item is long enough to wrap onto a second row\n\
+         1. an ordered item that also wraps past the edge of the row\n",
+    );
+    buffer.finish_streaming();
+    let rows = snapshot_lines(&mut buffer, &InputState::new(), Rect::new(0, 0, 40, 14));
+    let at = |text: &str| rows.iter().position(|r| r.contains(text)).expect(text);
+    let bullet = at("\u{2022} the first");
+    assert!(rows[bullet + 1].starts_with("    "), "{rows:#?}");
+    assert!(!rows[bullet + 1].starts_with("     "), "{rows:#?}");
+    let ordered = at("1. an ordered");
+    assert!(rows[ordered + 1].starts_with("     "), "{rows:#?}");
+    assert!(!rows[ordered + 1].starts_with("      "), "{rows:#?}");
+}
+
+#[test]
+fn a_pinned_view_shows_when_new_output_arrives_below() {
+    let mut buffer = Buffer::new();
+    for i in 0..30 {
+        buffer.append_assistant_delta(&format!("reply {i}"));
+        buffer.finish_streaming();
+    }
+    let area = Rect::new(0, 0, 40, 14);
+    let input = InputState::new();
+    let marked = |rows: &[String]| rows.iter().any(|r| r.contains("new output below"));
+    assert!(!marked(&snapshot_lines(&mut buffer, &input, area)));
+    buffer.set_scroll(0);
+    assert!(!marked(&snapshot_lines(&mut buffer, &input, area)));
+    buffer.append_assistant_delta("streamed");
+    let rows = snapshot_lines(&mut buffer, &input, area);
+    assert!(marked(&rows), "{rows:#?}");
+    buffer.follow();
+    assert!(!marked(&snapshot_lines(&mut buffer, &input, area)));
+}
+
+#[test]
+fn unfolding_while_scrolled_up_is_not_new_output() {
+    let mut buffer = Buffer::new();
+    buffer.push_tool_call("c1", "bash", json!({"command": "seq 30"}));
+    let out: Vec<String> = (1..=30).map(|i| format!("out {i}")).collect();
+    buffer.push_tool_result("c1", format!("stdout:\n{}\nexit: 0", out.join("\n")), false);
+    for i in 0..30 {
+        buffer.append_assistant_delta(&format!("reply {i}"));
+        buffer.finish_streaming();
+    }
+    let area = Rect::new(0, 0, 40, 14);
+    let input = InputState::new();
+    buffer.set_scroll(0);
+    snapshot_lines(&mut buffer, &input, area);
+    buffer.toggle_fold(0);
+    let rows = snapshot_lines(&mut buffer, &input, area);
+    assert!(
+        !rows.iter().any(|r| r.contains("new output below")),
+        "{rows:#?}"
+    );
+}

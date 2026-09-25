@@ -205,11 +205,13 @@ impl App {
                     self.input_completion = None;
                     return None;
                 }
-                CompletionAction::Accepted(item) => {
+                CompletionAction::Accepted(item)
+                    if key.code != KeyCode::Enter || !self.completion_is_noop(&item) =>
+                {
                     self.accept_completion(&item);
                     return None;
                 }
-                CompletionAction::PassThrough => {}
+                CompletionAction::Accepted(_) | CompletionAction::PassThrough => {}
             }
         }
 
@@ -450,6 +452,11 @@ impl App {
             }
             items.extend(mcp);
         }
+        if let [only] = items.as_slice()
+            && self.completion_is_noop(only)
+        {
+            items.clear();
+        }
         self.input_completion = InputCompletion::new(items);
     }
 
@@ -459,13 +466,7 @@ impl App {
     /// offer a follow-up (e.g. path segments). An MCP resource template
     /// leaves the cursor on its first placeholder instead.
     pub(crate) fn accept_completion(&mut self, item: &kage_plugin::AutocompleteItem) {
-        let cursor = self.input.cursor();
-        let (start, end) = if let Some((from, to)) = item.range {
-            (from, to)
-        } else {
-            let plen = prefix_before_cursor(self.input.text(), cursor).len();
-            (cursor.saturating_sub(plen), cursor)
-        };
+        let (start, end) = self.completion_span(item);
         self.input.splice(start, end, &item.value);
         self.input_completion = None;
         if let Some(at) = self.template_placeholder(&item.value) {
@@ -473,6 +474,23 @@ impl App {
             return;
         }
         self.refresh_input_completion();
+    }
+
+    /// The input span an accepted `item` replaces: its explicit
+    /// `range`, else the prefix before the cursor.
+    fn completion_span(&self, item: &kage_plugin::AutocompleteItem) -> (usize, usize) {
+        item.range.unwrap_or_else(|| {
+            let cursor = self.input.cursor();
+            let plen = prefix_before_cursor(self.input.text(), cursor).len();
+            (cursor.saturating_sub(plen), cursor)
+        })
+    }
+
+    /// Whether accepting `item` would leave the input as it is, so
+    /// Enter sends the prompt instead.
+    fn completion_is_noop(&self, item: &kage_plugin::AutocompleteItem) -> bool {
+        let (start, end) = self.completion_span(item);
+        self.input.text().get(start..end) == Some(item.value.as_str())
     }
 
     /// Byte offset of the first `{...}` placeholder in `value` when it

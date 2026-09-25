@@ -7,8 +7,8 @@
 //! that calls `kage.notify` or `kage.log` therefore needs a sink that
 //! pushes through the same render path as everything else.
 //!
-//! `notify` lands as an ephemeral toast (top-right overlay, auto-
-//! expires) so plugin chatter does not pollute the conversation
+//! `notify` lands as an ephemeral toast (a row below the
+//! conversation, auto-expires) so plugin chatter does not pollute the conversation
 //! pane. `log` (especially error level) keeps the inline path because
 //! the user wants to scroll back and review. Once the engine runs, `log`
 //! goes through a [`LogPublisher`] instead, so a line lands after the

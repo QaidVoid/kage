@@ -17,6 +17,7 @@
 //! theme's base groups and [`Theme::from_groups`] compiles them back
 //! into a [`Theme`].
 
+mod depth;
 mod groups;
 
 use std::path::Path;
@@ -26,6 +27,7 @@ use kage_core::highlight::Highlights;
 use kage_core::sync::{read, write};
 use ratatui::style::Color;
 
+pub use depth::ColorDepth;
 pub use groups::{ROLE_GROUPS, Slot, ThemeGroups, Themes, groups_for};
 
 static CURRENT: RwLock<Option<Arc<Theme>>> = RwLock::new(None);

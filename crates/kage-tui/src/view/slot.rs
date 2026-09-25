@@ -456,13 +456,17 @@ fn paint_row(frame: &mut Frame, area: Rect, spec: &SlotSpec, src: &Sources<'_>, 
     if area.height == 0 || area.width == 0 {
         return;
     }
-    let right = row_spans(&spec.right, &spec.sep, src, styles);
+    let width = usize::from(area.width);
+    let left = row_spans(&spec.left, &spec.sep, src, styles);
+    let left_width: usize = left.iter().map(Span::width).sum();
+    let right_budget = width.saturating_sub(left_width.min(width * 2 / 3) + 2);
+    let right = fit_right(&spec.right, &spec.sep, src, styles, right_budget);
     let right_width: usize = right.iter().map(Span::width).sum();
     let left_budget = match right_width {
-        0 => usize::from(area.width),
-        w => usize::from(area.width).saturating_sub(w + 2),
+        0 => width,
+        w => width.saturating_sub(w + 2),
     };
-    let mut spans = clip_spans(row_spans(&spec.left, &spec.sep, src, styles), left_budget);
+    let mut spans = clip_spans(left, left_budget);
     let used: usize = spans.iter().map(Span::width).sum::<usize>() + right_width;
     let pad = usize::from(area.width).saturating_sub(used);
     if pad > 0 {
@@ -473,6 +477,28 @@ fn paint_row(frame: &mut Frame, area: Rect, spec: &SlotSpec, src: &Sources<'_>, 
         .alignment(Alignment::Left)
         .style(styles.pad);
     frame.render_widget(paragraph, area);
+}
+
+/// The right side of a row in `max` columns. The left side keeps up
+/// to two thirds of the row, so items drop from the front of the
+/// right side while it does not fit, and the last one is cut.
+fn fit_right(
+    items: &[SlotItem],
+    sep: &str,
+    src: &Sources<'_>,
+    styles: &Styles,
+    max: usize,
+) -> Vec<Span<'static>> {
+    for start in 0..items.len() {
+        let spans = row_spans(&items[start..], sep, src, styles);
+        if spans.iter().map(Span::width).sum::<usize>() <= max {
+            return spans;
+        }
+        if start + 1 == items.len() {
+            return clip_spans(spans, max);
+        }
+    }
+    Vec::new()
 }
 
 /// Drop what does not fit in `max` columns, ending on `...` when

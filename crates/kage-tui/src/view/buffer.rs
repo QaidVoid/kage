@@ -175,6 +175,10 @@ pub(super) fn render_buffer(
             0
         } else {
             emitted_any = true;
+            for _ in visible_top..block_top {
+                emitted_lines.push(Line::raw(""));
+                emitted_rows = emitted_rows.saturating_add(1);
+            }
             visible_top.saturating_sub(block_top)
         };
         let emp = emphasis_for(idx, focus, search_match_set, &topology);
@@ -246,6 +250,28 @@ pub(super) fn render_buffer(
     let paragraph = Paragraph::new(emitted_lines).wrap(Wrap { trim: false });
     frame.render_widget(paragraph.scroll((paragraph_scroll, 0)), regions.buffer);
     buffer.set_last_drawn_focus(focus);
+    if buffer.has_unseen_output() {
+        render_new_output_mark(frame, regions.buffer);
+    }
+}
+
+/// Paint a `new output below` mark on the last row of `area`, against
+/// the right edge.
+fn render_new_output_mark(frame: &mut Frame, area: Rect) {
+    const MARK: &str = " \u{2193} new output below ";
+    let width = u16::try_from(MARK.width()).unwrap_or(u16::MAX);
+    if area.height == 0 || area.width < width + 2 {
+        return;
+    }
+    let theme = crate::theme::current();
+    let style = Style::default()
+        .fg(theme.selection_fg)
+        .bg(theme.user_rule)
+        .add_modifier(DECORATION_MARKER);
+    let x = area.right() - width - 2;
+    frame
+        .buffer_mut()
+        .set_string(x, area.bottom() - 1, MARK, style);
 }
 
 /// Compute the emphasis for the displayed block at `idx`. `focus` is

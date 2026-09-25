@@ -4,8 +4,8 @@
 //! card (like the slash palette), driven by the plugin autocomplete
 //! provider stack (`kage.add_autocomplete_provider`). Unlike the slash
 //! palette it never takes full keyboard ownership: only Up / Down /
-//! Ctrl-p / Ctrl-n (navigate), Tab (accept), and Esc (dismiss) are
-//! consumed. Every other key passes through to normal text editing,
+//! Ctrl-p / Ctrl-n (navigate), Tab or Enter (accept), and Esc
+//! (dismiss) are consumed. Every other key passes through to normal text editing,
 //! after which the host re-queries the provider stack and rebuilds the
 //! popup. The host computes the splice range when a candidate is
 //! accepted; this widget only owns selection and painting.
@@ -33,8 +33,8 @@ pub enum CompletionAction {
     Navigated,
     /// User dismissed the popup (Esc); key consumed, no edit.
     Dismissed,
-    /// User accepted a candidate (Tab); key consumed. The host applies
-    /// it via [`crate::input::InputState::splice`].
+    /// User accepted a candidate (Tab or Enter); key consumed. The
+    /// host applies it via [`crate::input::InputState::splice`].
     Accepted(AutocompleteItem),
     /// The popup does not own this key; the host routes it to the
     /// input and then re-queries the provider stack.
@@ -109,6 +109,9 @@ impl InputCompletion {
                 CompletionAction::Navigated
             }
             KeyCode::Tab => CompletionAction::Accepted(self.items[self.selected].clone()),
+            KeyCode::Enter if key.modifiers.is_empty() => {
+                CompletionAction::Accepted(self.items[self.selected].clone())
+            }
             KeyCode::Esc => CompletionAction::Dismissed,
             _ => CompletionAction::PassThrough,
         }

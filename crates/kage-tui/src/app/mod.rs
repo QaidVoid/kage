@@ -733,9 +733,12 @@ pub struct App {
     /// [`RunRequest::CompactNow`] to the worker.
     plugin_compact_request: Option<kage_plugin::SharedCompactRequest>,
     /// Snapshot of resumable sessions exposed to `kage.session.list`.
-    /// Refreshed from [`Self::session_lister`] on the coarse plugin
-    /// snapshot tick.
+    /// Refreshed from [`Self::session_lister`] when
+    /// [`Self::plugin_sessions_stale`] says a session file changed.
     plugin_session_list: Option<kage_plugin::SharedSessionList>,
+    /// Whether a session was written, switched or started since the
+    /// plugin session snapshot was taken.
+    plugin_sessions_stale: bool,
     /// Pending fork-request slot populated by `kage.session.fork`.
     /// Drained between event polls; the worker performs the fork.
     plugin_fork_request: Option<kage_plugin::SharedForkRequest>,
@@ -816,6 +819,10 @@ pub struct App {
     /// The live-buffer version [`Self::draw_snapshot`] was cloned
     /// at. The reuse check in [`Self::draw`] keys on it.
     draw_snapshot_version: u64,
+    /// Colors the terminal shows. Every painted frame is mapped to
+    /// it, so themes written in 24-bit color stay readable without
+    /// truecolor.
+    color_depth: crate::theme::ColorDepth,
     /// Last DECSCUSR cursor shape we emitted to the terminal, keyed
     /// by `(mode, pane_focused_on_input)`. Stored so [`Self::draw`]
     /// can skip the escape on frames where the cursor shape would be
@@ -827,8 +834,8 @@ pub struct App {
     /// the working row read it. Updated by the host worker thread
     /// after every turn.
     session_usage: Option<crate::usage::SharedSessionUsage>,
-    /// Shared queue of ephemeral toast notifications painted as a
-    /// top-right overlay over the conversation buffer. The handle is
+    /// Shared queue of ephemeral toast notifications painted in rows
+    /// of their own below the conversation buffer. The handle is
     /// cloned to whatever sinks need to push (the App's own
     /// `notify`, the host log sink for plugin `kage.notify`, etc.).
     /// When `None`, `notify(...)` is a silent no-op: toasts are

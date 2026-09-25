@@ -37,6 +37,13 @@ pub trait BlockFactory: Send + Sync {
     /// Construct a widget for `block`, or `None` if `block`'s kind
     /// is not handled.
     fn make(&self, block: &Block) -> Option<Box<dyn BlockWidget>>;
+
+    /// Construct a widget for a tool `call` merged with its `result`.
+    /// Only a factory registered under [`BuiltinKind::ToolPair`] is
+    /// asked. The default handles no pairs.
+    fn make_pair(&self, _call: &Block, _result: &Block) -> Option<Box<dyn BlockWidget>> {
+        None
+    }
 }
 
 /// Registry mapping block kinds to widget factories.
@@ -228,29 +235,6 @@ pub enum BuiltinKind {
     Custom,
 }
 
-/// Extension trait implemented by `BlockFactory` for the special
-/// tool-pair case, which receives two blocks instead of one.
-///
-/// Implementations should return `None` for non-tool-pair calls.
-trait ToolPairFactoryExt: BlockFactory {
-    fn make_pair(&self, call: &Block, result: &Block) -> Option<Box<dyn BlockWidget>>;
-}
-
-/// Object-safe shim: `Arc<dyn BlockFactory>` may or may not
-/// internally implement [`ToolPairFactoryExt`]. We expose the pair
-/// constructor on `BlockFactory` itself with a default that returns
-/// `None`, and override it for the built-in tool-pair factory.
-impl dyn BlockFactory {
-    fn make_pair(&self, call: &Block, result: &Block) -> Option<Box<dyn BlockWidget>> {
-        // Try the built-in tool-pair shape; non-pair factories return
-        // None which is the right "I don't handle pairs" answer.
-        BuiltinToolPairFactory.make_pair(call, result).or_else(|| {
-            let _ = self;
-            None
-        })
-    }
-}
-
 /// Built-in factory for [`Block::User`].
 #[derive(Clone, Copy, Debug, Default)]
 pub struct BuiltinUserFactory;
@@ -302,9 +286,7 @@ impl BlockFactory for BuiltinToolPairFactory {
     fn make(&self, _block: &Block) -> Option<Box<dyn BlockWidget>> {
         None
     }
-}
 
-impl ToolPairFactoryExt for BuiltinToolPairFactory {
     fn make_pair(&self, call: &Block, result: &Block) -> Option<Box<dyn BlockWidget>> {
         ToolPairBlockWidget::from_pair(call, result).map(|w| Box::new(w) as Box<dyn BlockWidget>)
     }
@@ -508,6 +490,30 @@ mod tests {
             widget.lines(40, &lines_ctx(&theme)).is_empty(),
             "EmptyBlockWidget reports zero rows"
         );
+    }
+
+    #[test]
+    fn a_registered_tool_pair_factory_takes_effect() {
+        struct PairFactory;
+        impl BlockFactory for PairFactory {
+            fn make(&self, _: &Block) -> Option<Box<dyn BlockWidget>> {
+                None
+            }
+
+            fn make_pair(&self, _: &Block, _: &Block) -> Option<Box<dyn BlockWidget>> {
+                Some(Box::new(super::super::widget::EmptyBlockWidget))
+            }
+        }
+
+        let mut r = BlockRenderer::with_builtins();
+        r.set_builtin(BuiltinKind::ToolPair, Arc::new(PairFactory));
+        let mut buf = crate::buffer::Buffer::new();
+        buf.push_tool_call("c1", "read", serde_json::json!({"path": "x"}));
+        buf.push_tool_result("c1", "x", false);
+        let widget = r
+            .pair_widget_for(&buf.blocks()[0], &buf.blocks()[1])
+            .expect("override should match");
+        assert!(widget.lines(40, &lines_ctx(&Theme::default())).is_empty());
     }
 
     #[test]

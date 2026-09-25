@@ -87,6 +87,8 @@ pub enum LineKind {
     Delete,
     /// A dim marker such as `stderr` or `lines 3-5`.
     Marker,
+    /// An unchanged line around a diff's changes.
+    Context,
 }
 
 /// One display line of a tool body, without any `+`, `-` or indent
@@ -138,6 +140,36 @@ impl EditDiff {
             self.push_lines(LineKind::Delete, field(change, "old_str"));
             self.push_lines(LineKind::Add, field(change, "new_str"));
         }
+    }
+
+    /// Lines `old` becomes `new`: the lines both share at the start
+    /// and the end as context, the rest removed, then added.
+    fn push_line_change(&mut self, old: &str, new: &str) {
+        let old: Vec<&str> = old.lines().collect();
+        let new: Vec<&str> = new.lines().collect();
+        let prefix = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+        let suffix = old[prefix..]
+            .iter()
+            .rev()
+            .zip(new[prefix..].iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let context = |lines: &[&str]| {
+            lines
+                .iter()
+                .map(|l| BodyLine::new(LineKind::Context, *l))
+                .collect::<Vec<_>>()
+        };
+        self.lines.extend(context(&old[..prefix]));
+        for line in &old[prefix..old.len() - suffix] {
+            self.lines.push(BodyLine::new(LineKind::Delete, *line));
+            self.removed += 1;
+        }
+        for line in &new[prefix..new.len() - suffix] {
+            self.lines.push(BodyLine::new(LineKind::Add, *line));
+            self.added += 1;
+        }
+        self.lines.extend(context(&old[old.len() - suffix..]));
     }
 
     fn push_lines(&mut self, kind: LineKind, text: &str) {
@@ -272,6 +304,56 @@ pub fn edit_diff(input: &Value) -> EditDiff {
         None => diff.push_change(input),
     }
     diff
+}
+
+/// Which version of its file an `edit` call is compared against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditSide {
+    /// The file before the edit, which holds `old_str`.
+    Before,
+    /// The file after the edit, which holds `new_str`.
+    After,
+}
+
+/// The change an `edit` call makes as whole lines of its file, where
+/// `content` is the file on `side` of the edit. A substring change
+/// widens to the lines it touches, so both sides keep their
+/// indentation, and lines they share stay as context. `None` when the
+/// text of a substring change is not in `content`.
+#[must_use]
+pub fn file_edit_diff(input: &Value, content: &str, side: EditSide) -> Option<EditDiff> {
+    let changes: Vec<&Value> = match input.get("changes").and_then(Value::as_array) {
+        Some(changes) => changes.iter().collect(),
+        None => vec![input],
+    };
+    let mut diff = EditDiff::default();
+    for change in changes {
+        if change.get("range").is_some() {
+            diff.push_change(change);
+            continue;
+        }
+        let (old, new) = (field(change, "old_str"), field(change, "new_str"));
+        let found = match side {
+            EditSide::Before => old,
+            EditSide::After => new,
+        };
+        if found.is_empty() {
+            return None;
+        }
+        let at = content.find(found)?;
+        let after = at + found.len();
+        let start = content[..at].rfind('\n').map_or(0, |i| i + 1);
+        let end = if found.ends_with('\n') {
+            after
+        } else {
+            content[after..]
+                .find('\n')
+                .map_or(content.len(), |i| after + i)
+        };
+        let (head, tail) = (&content[start..at], &content[after..end]);
+        diff.push_line_change(&format!("{head}{old}{tail}"), &format!("{head}{new}{tail}"));
+    }
+    Some(diff)
 }
 
 /// Split `bash` output text into display lines and the exit status.
@@ -761,6 +843,42 @@ mod tests {
             ]
         );
         assert_eq!((diff.added, diff.removed), (3, 5));
+    }
+
+    #[test]
+    fn file_edit_diff_widens_a_substring_to_whole_lines() {
+        let before = "fn main() {\n    let x = 1;\n    let y = 2;\n}\n";
+        let input = json!({"path": "a.rs", "old_str": "let y = 2;", "new_str": "let y = 3;\n    let z = 4;"});
+        let diff = file_edit_diff(&input, before, EditSide::Before).unwrap();
+        let expected = [
+            (LineKind::Delete, "    let y = 2;"),
+            (LineKind::Add, "    let y = 3;"),
+            (LineKind::Add, "    let z = 4;"),
+        ];
+        assert_eq!(texts(&diff.lines), expected);
+        assert_eq!((diff.added, diff.removed), (2, 1));
+
+        let after = "fn main() {\n    let x = 1;\n    let y = 3;\n    let z = 4;\n}\n";
+        let diff = file_edit_diff(&input, after, EditSide::After).unwrap();
+        assert_eq!(texts(&diff.lines), expected);
+
+        assert_eq!(file_edit_diff(&input, after, EditSide::Before), None);
+    }
+
+    #[test]
+    fn file_edit_diff_keeps_shared_lines_as_context() {
+        let before = "a\nb\nc\n";
+        let input = json!({"path": "f", "old_str": "a\nb\nc\n", "new_str": "a\nB\nc\n"});
+        let diff = file_edit_diff(&input, before, EditSide::Before).unwrap();
+        assert_eq!(
+            texts(&diff.lines),
+            [
+                (LineKind::Context, "a"),
+                (LineKind::Delete, "b"),
+                (LineKind::Add, "B"),
+                (LineKind::Context, "c"),
+            ]
+        );
     }
 
     #[test]

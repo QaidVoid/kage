@@ -8,7 +8,9 @@ use super::*;
 use kage_core::protocol::{AgentState, Envelope, Event, HostEvent, NoticeLevel, RequestId};
 use kage_core::{LoopEvent, Role, SessionId, ToolCallId};
 
-use crate::view::tool_view::{ToolPhase, agent_stats, describe};
+use crate::view::tool_view::{
+    BodyLine, EditDiff, EditSide, LineKind, ToolPhase, agent_stats, describe, file_edit_diff,
+};
 
 /// A permission request waiting for, or shown in, the approval prompt.
 #[derive(Clone, Debug)]
@@ -49,6 +51,15 @@ impl App {
     }
 
     fn apply_envelope(&mut self, envelope: Envelope) {
+        if let Event::Host(
+            HostEvent::SessionChanged { .. }
+            | HostEvent::TitleChanged { .. }
+            | HostEvent::RunEnded { .. }
+            | HostEvent::AgentSpawned { .. },
+        ) = &envelope.event
+        {
+            self.plugin_sessions_stale = true;
+        }
         if let Event::Host(HostEvent::SessionChanged { .. }) = &envelope.event
             && self.agents.get(envelope.session).is_none()
         {
@@ -72,6 +83,7 @@ impl App {
                 crate::events::apply_loop_event(&mut lock(&self.root_buffer), &event);
                 if let LoopEvent::ToolCallEnd { id, .. } = &event {
                     self.card_ended(main, id);
+                    self.annotate_edits(&self.root_buffer);
                 }
             }
             Event::Host(event) => self.apply_host_event(event),
@@ -144,6 +156,7 @@ impl App {
                     buf.clear();
                     crate::events::populate_from_history(&mut buf, &messages, &durations);
                 }
+                self.annotate_edits(&self.root_buffer);
                 self.on_session_changed();
             }
             HostEvent::ShellOutput { command, tail } => {
@@ -204,6 +217,7 @@ impl App {
                 crate::events::apply_loop_event(&mut lock(&buffer), &event);
                 if let LoopEvent::ToolCallEnd { id, .. } = &event {
                     self.card_ended(session, id);
+                    self.annotate_edits(&buffer);
                 }
                 matches!(
                     event,
@@ -329,6 +343,7 @@ impl App {
                 let durations = crate::events::tool_durations(&messages);
                 crate::events::populate_from_history(&mut buf, &messages, &durations);
             }
+            self.annotate_edits(&buffer);
             self.agent_buffers.insert(session, buffer);
         }
         if self.agent_buffers.contains_key(&session) {
@@ -511,17 +526,51 @@ impl App {
         let Some(approval) = self.permission_queue.pop_front() else {
             return false;
         };
-        self.approval_panel = Some(crate::overlay::ApprovalPanel::new(
+        let agent = approval
+            .agent
+            .as_ref()
+            .map(|(name, task)| (name.as_str(), task.as_str()));
+        let panel = crate::overlay::ApprovalPanel::new(
             &approval.tool,
             &approval.input,
-            approval
-                .agent
-                .as_ref()
-                .map(|(name, task)| (name.as_str(), task.as_str())),
+            agent,
             Instant::now(),
-        ));
+        )
+        .with_diff(self.edit_preview(&approval.tool, &approval.input));
+        self.approval_panel = Some(panel);
         self.pending_permission = Some(approval);
         true
+    }
+
+    /// The change a waiting `edit` call would make, as whole lines of
+    /// its file, or a note that the file lacks the text to replace.
+    /// `None` when the file cannot be read.
+    fn edit_preview(&self, tool: &str, input: &serde_json::Value) -> Option<EditDiff> {
+        if tool != "edit" {
+            return None;
+        }
+        let path = input.get("path").and_then(serde_json::Value::as_str)?;
+        let content = self.read_workdir_file(path)?;
+        Some(
+            file_edit_diff(input, &content, EditSide::Before).unwrap_or_else(|| EditDiff {
+                lines: vec![BodyLine {
+                    kind: LineKind::Marker,
+                    text: format!("the text to replace is not in {path}"),
+                }],
+                ..EditDiff::default()
+            }),
+        )
+    }
+
+    /// Give the finished edits in `buffer` line diffs from their files.
+    fn annotate_edits(&self, buffer: &SharedBuffer) {
+        lock(buffer).annotate_edits(|path| self.read_workdir_file(path));
+    }
+
+    /// The text of `path`, relative to the working directory.
+    fn read_workdir_file(&self, path: &str) -> Option<String> {
+        let dir = self.completion_workdir.as_deref()?;
+        std::fs::read_to_string(dir.join(path)).ok()
     }
 
     /// Forget a request that was answered elsewhere or abandoned. Its

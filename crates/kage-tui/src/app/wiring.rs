@@ -48,9 +48,11 @@ impl App {
             plugin_status_cache: Vec::new(),
             draw_snapshot: None,
             draw_snapshot_version: 0,
+            color_depth: crate::theme::ColorDepth::TrueColor,
             plugin_usage: None,
             plugin_compact_request: None,
             plugin_session_list: None,
+            plugin_sessions_stale: true,
             plugin_fork_request: None,
             plugin_switch_request: None,
             highlights: None,
@@ -161,7 +163,7 @@ impl App {
 
     /// Register the shared toast queue. While set, App-internal
     /// `notify(...)` calls and external sinks holding a clone of
-    /// the same handle push into a top-right overlay. Without it
+    /// the same handle push into the toast strip. Without it
     /// `notify(...)` silently drops the message - toasts are
     /// decorative, never load-bearing.
     pub fn set_toasts(&mut self, toasts: SharedToasts) {
@@ -654,17 +656,8 @@ impl App {
         if !keys.is_empty() {
             return format!("{} ...", kage_core::keymap::display_keys(keys));
         }
-        if let Some(panel) = &self.approval_panel {
-            return panel.hint();
-        }
-        if self.slash_palette.is_some() {
-            return ["tab to complete", "enter to run", "esc to close"].join(HINT_SEP);
-        }
-        if self.help_overlay.is_some() {
-            return ["up/down to scroll", "esc to close"].join(HINT_SEP);
-        }
-        if self.modal_open() {
-            return String::new();
+        if let Some(hint) = self.layer_hint() {
+            return hint;
         }
         let now = Instant::now();
         let note = self
@@ -749,6 +742,27 @@ impl App {
             Mode::Visual => parts.push("esc to leave visual mode"),
         }
         parts.join(HINT_SEP)
+    }
+
+    /// The footer hint of the layer above the editor that takes the
+    /// keys: the approval panel, the palette, the help overlay, the
+    /// completion popup, or an empty hint under any other overlay.
+    fn layer_hint(&self) -> Option<String> {
+        if let Some(panel) = &self.approval_panel {
+            return Some(panel.hint());
+        }
+        let parts: &[&str] = if self.slash_palette.is_some() {
+            &["tab to complete", "enter to run", "esc to close"]
+        } else if self.help_overlay.is_some() {
+            &["up/down to scroll", "esc to close"]
+        } else if self.modal_open() {
+            &[]
+        } else if self.input_completion.is_some() {
+            &["enter to complete", "esc to close"]
+        } else {
+            return None;
+        };
+        Some(parts.join(HINT_SEP))
     }
 
     /// The footer hint of an agent view with an empty draft: how to
@@ -1186,7 +1200,10 @@ impl App {
         };
         self.highlights_generation = hl.generation();
         crate::theme::set_current(crate::theme::Theme::from_groups(&hl));
-        lock(&self.buffer).invalidate_all_heights();
+        let buffers = std::iter::once(&self.root_buffer).chain(self.agent_buffers.values());
+        for buffer in buffers {
+            lock(buffer).invalidate_all_heights();
+        }
         true
     }
 
@@ -1294,10 +1311,14 @@ impl App {
         true
     }
 
-    /// Refresh the session-list snapshot read by `kage.session.list`.
-    /// Builds `[{id, value}]` entries from the registered
-    /// [`SessionLister`]; called once per redraw.
-    pub(crate) fn refresh_plugin_session_list(&mut self) {
+    /// Refresh the session-list snapshot read by `kage.session.list`
+    /// when a session changed since the last one. Builds
+    /// `[{id, value}]` entries from the registered [`SessionLister`].
+    pub(crate) fn refresh_plugin_session_list_if_stale(&mut self) {
+        if !self.plugin_sessions_stale {
+            return;
+        }
+        self.plugin_sessions_stale = false;
         let Some(slot) = self.plugin_session_list.as_ref() else {
             return;
         };

@@ -1,6 +1,6 @@
-//! Ephemeral toast notifications: short messages that appear in the
-//! top-right of the buffer area, auto-expire after a duration, and
-//! never occupy buffer scroll space.
+//! Ephemeral toast notifications: short messages that appear in rows
+//! of their own below the conversation, auto-expire after a duration,
+//! and never occupy buffer scroll space.
 //!
 //! Replaces the previous `kage:notify` Custom-block path so the
 //! conversation pane stays focused on actual conversation content.

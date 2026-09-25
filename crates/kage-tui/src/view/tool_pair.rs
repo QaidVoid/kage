@@ -6,7 +6,7 @@ use std::sync::Arc;
 use ratatui::text::Line;
 use serde_json::Value;
 
-use super::tool_view::ToolPhase;
+use super::tool_view::{EditDiff, ToolPhase};
 use super::widget::{BlockWidget, RenderCtx};
 use super::{ToolRow, tool_row_lines};
 use crate::buffer::Block;
@@ -27,6 +27,7 @@ pub struct ToolPairBlockWidget {
     folded: bool,
     output: String,
     duration_ms: Option<u64>,
+    diff: Option<Arc<EditDiff>>,
 }
 
 impl ToolPairBlockWidget {
@@ -42,6 +43,7 @@ impl ToolPairBlockWidget {
             phase,
             folded,
             progress,
+            diff,
             ..
         } = call
         else {
@@ -66,6 +68,7 @@ impl ToolPairBlockWidget {
                 output.clone()
             },
             duration_ms: *duration_ms,
+            diff: diff.clone(),
         })
     }
 }
@@ -79,6 +82,7 @@ impl BlockWidget for ToolPairBlockWidget {
             folded: self.folded,
             elapsed_ms: self.duration_ms,
             output: &self.output,
+            diff: self.diff.as_deref(),
         };
         tool_row_lines(&row, width, ctx.emphasis, ctx.row_budget)
     }

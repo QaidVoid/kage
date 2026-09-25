@@ -67,7 +67,8 @@ pub(crate) fn mark_emphasis(
 }
 
 /// Pre-wrap `lines` to the body width and start every visual row with
-/// `prefix`.
+/// `prefix`. A wrapped list item hangs its continuation rows under
+/// the item's text.
 fn prefix_rows(
     lines: Vec<Line<'static>>,
     width: u16,
@@ -76,7 +77,8 @@ fn prefix_rows(
     let body_width = usize::from(width).saturating_sub(FOCUS_RULE_WIDTH).max(1);
     let mut out: Vec<Line<'static>> = Vec::with_capacity(lines.len());
     for line in lines {
-        for row_spans in split_line_into_rows(line, body_width) {
+        let hang = list_hang(&line);
+        for row_spans in split_line_hanging(line, body_width, hang) {
             let mut spans = Vec::with_capacity(row_spans.len() + 1);
             spans.push(prefix.clone());
             spans.extend(row_spans);
@@ -160,6 +162,41 @@ pub(crate) fn wrap_in_bubble_focused(
 /// minimal sequence of `Span`s, coalescing consecutive chars that
 /// share a style.
 pub(crate) fn split_line_into_rows(line: Line<'static>, max: usize) -> Vec<Vec<Span<'static>>> {
+    split_line_hanging(line, max, 0)
+}
+
+/// Columns a list item's continuation rows indent by: its leading
+/// spaces plus a `\u{2022} ` or `N. ` marker. Zero for other lines.
+fn list_hang(line: &Line<'_>) -> usize {
+    let text: String = line
+        .spans
+        .iter()
+        .flat_map(|span| span.content.chars())
+        .take(16)
+        .collect();
+    let body = text.trim_start_matches(' ');
+    let indent = text.len() - body.len();
+    let marker = if body.starts_with("\u{2022} ") {
+        2
+    } else {
+        let digits = body.bytes().take_while(u8::is_ascii_digit).count();
+        match body.get(digits..digits + 2) {
+            Some(". ") if digits > 0 => digits + 2,
+            _ => return 0,
+        }
+    };
+    indent + marker
+}
+
+/// [`split_line_into_rows`] with every row after the first indented
+/// by `hang` columns of decoration, so it lines up under the text
+/// after a list marker. A hang past half of `max` is dropped.
+pub(crate) fn split_line_hanging(
+    line: Line<'static>,
+    max: usize,
+    hang: usize,
+) -> Vec<Vec<Span<'static>>> {
+    let hang = if hang * 2 > max { 0 } else { hang };
     if max == 0 || line.spans.is_empty() {
         return vec![Vec::new()];
     }
@@ -186,10 +223,12 @@ pub(crate) fn split_line_into_rows(line: Line<'static>, max: usize) -> Vec<Vec<S
     let mut ranges: Vec<(usize, usize)> = Vec::new();
     let mut row_start = 0usize;
     let mut row_used = 0usize;
+    let mut limit = max;
     let mut last_space: Option<usize> = None;
     let mut i = 0;
     while i < chars.len() {
-        if row_used >= max {
+        if row_used >= limit {
+            limit = max - hang;
             if let Some(sp) = last_space.filter(|&s| s > row_start) {
                 ranges.push((row_start, sp));
                 row_start = sp + 1;
@@ -211,8 +250,13 @@ pub(crate) fn split_line_into_rows(line: Line<'static>, max: usize) -> Vec<Vec<S
     ranges.push((row_start, chars.len()));
 
     let mut rows: Vec<Vec<Span<'static>>> = Vec::with_capacity(ranges.len());
-    for (start, end) in ranges {
-        rows.push(spans_for_range(&chars[start..end]));
+    for (n, (start, end)) in ranges.into_iter().enumerate() {
+        let mut row = spans_for_range(&chars[start..end]);
+        if n > 0 && hang > 0 {
+            let pad = Style::default().add_modifier(DECORATION_MARKER);
+            row.insert(0, Span::styled(" ".repeat(hang), pad));
+        }
+        rows.push(row);
     }
     rows
 }

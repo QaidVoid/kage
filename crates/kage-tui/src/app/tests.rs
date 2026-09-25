@@ -1731,6 +1731,37 @@ fn the_help_overlay_never_overlaps_the_input_rows() {
 }
 
 #[test]
+fn pickers_and_settings_never_overlap_the_input_rows() {
+    for (width, height) in [(80, 24), (60, 20)] {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = app_with_defaults(shared_buffer(), tx);
+        app.set_editor_modeless(true);
+        let check = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            app.render_into(&mut terminal).unwrap();
+            let rows = snapshot_rows(&terminal);
+            let bottom = rows.iter().rposition(|r| r.contains('\u{256F}'));
+            let rule = rows
+                .iter()
+                .rposition(|r| r.starts_with('\u{2500}'))
+                .unwrap();
+            let above = rows[..rule].iter().rposition(|r| r.starts_with('\u{2500}'));
+            assert!(bottom < above, "{rows:#?}");
+        };
+        app.dispatch_builtin("settings", "", &crate::command::ParsedArgs::new());
+        assert!(app.settings_overlay.is_some());
+        check(&mut app);
+        app.settings_overlay = None;
+
+        let items = (0..40)
+            .map(|i| PickItem::simple(format!("session {i}")))
+            .collect();
+        app.picker = Some(OverlayPicker::new("sessions", items));
+        check(&mut app);
+    }
+}
+
+#[test]
 fn autocomplete_popup_opens_and_tab_accepts() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
@@ -3284,6 +3315,44 @@ fn a_drag_above_the_top_clamps_and_a_drag_inside_does_not_scroll() {
 }
 
 #[test]
+fn clicking_a_folded_header_unfolds_it_in_place() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer.clone(), tx);
+    {
+        let mut buf = lock(&buffer);
+        for i in 0..20 {
+            buf.append_assistant_delta(&format!("reply {i}"));
+            buf.finish_streaming();
+        }
+        buf.push_tool_call("c1", "bash", serde_json::json!({"command": "seq 30"}));
+        let out: Vec<String> = (1..=30).map(|i| format!("out {i}")).collect();
+        buf.push_tool_result("c1", format!("stdout:\n{}\nexit: 0", out.join("\n")), false);
+        buf.append_assistant_delta("after");
+        buf.finish_streaming();
+    }
+    let mut terminal = Terminal::new(TestBackend::new(50, 20)).unwrap();
+    app.render_into(&mut terminal).unwrap();
+    let header = |terminal: &Terminal<TestBackend>| {
+        snapshot_rows(terminal)
+            .iter()
+            .position(|r| r.contains("Ran seq 30"))
+    };
+    let row = header(&terminal).expect("header on screen");
+    let row = u16::try_from(row).unwrap();
+    app.mouse_down(row, 5);
+    app.mouse_up(row);
+    app.render_into(&mut terminal).unwrap();
+    assert!(
+        snapshot_rows(&terminal)
+            .iter()
+            .any(|r| r.ends_with("out 1")),
+        "the call unfolded"
+    );
+    assert_eq!(header(&terminal), Some(usize::from(row)));
+}
+
+#[test]
 fn a_drag_release_toasts_the_copied_characters() {
     let (mut app, buffer, mut terminal) = drag_fixture();
     app.set_toasts(crate::toast::shared_toasts());
@@ -3987,6 +4056,33 @@ fn common_footer_hints_fit_at_80_columns_beside_the_session_facts() {
         child,
         vec![run_ended(kage_core::protocol::RunOutcome::Completed)],
     );
+    check(&mut app);
+}
+
+#[test]
+fn at_60_columns_the_session_facts_give_way_to_the_hint() {
+    let (mut app, _rx, events) = app_with_events();
+    app.set_editor_modeless(true);
+    app.set_model_choices(vec![PickItem::simple("fake:m").with_label("Fake")]);
+    {
+        let mut usage = lock(app.session_usage.as_ref().unwrap());
+        usage.model = "fake:m".into();
+        usage.input_tokens = 57;
+        usage.context_window = 200_000;
+        usage.permission_mode = Some(kage_core::permissions::PermissionAction::Ask);
+    }
+    let check = |app: &mut App| {
+        let hint = app.footer_hint();
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        app.render_into(&mut terminal).unwrap();
+        let footer = snapshot_rows(&terminal).pop().unwrap();
+        assert!(footer.starts_with(&format!("  {hint}")), "{footer:?}");
+        assert!(footer.ends_with("0% ctx \u{B7} 57 tok"), "{footer:?}");
+    };
+    check(&mut app);
+    type_str(&mut app, "check the snapshot tests too");
+    check(&mut app);
+    feed(&mut app, &events, vec![permission_request("c1", 1)]);
     check(&mut app);
 }
 
@@ -5833,4 +5929,321 @@ fn the_palette_lists_mcp() {
         description.starts_with("[restart|login]  list MCP servers"),
         "{description}"
     );
+}
+
+#[test]
+fn a_theme_switch_repaints_existing_notice_rows() {
+    let _guard = crate::theme::theme_test_lock();
+    let rt = kage_plugin::PluginRuntime::builder()
+        .themes(Arc::new(crate::theme::Themes::new(None)))
+        .build()
+        .unwrap();
+    let buffer = shared_buffer();
+    lock(&buffer).push_custom("kage:notify", "Interrupted", false);
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer, tx);
+    app.set_highlights(rt.highlights());
+    let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+    let notice_fg = |terminal: &Terminal<TestBackend>| {
+        let buf = terminal.backend().buffer();
+        let row = (0..buf.area.height)
+            .find(|&y| snapshot_rows(terminal)[usize::from(y)].contains("Interrupted"))
+            .expect("notice row");
+        let x = (0..buf.area.width)
+            .find(|&x| buf[(x, row)].symbol() == "I")
+            .expect("notice text");
+        buf[(x, row)].fg
+    };
+    app.render_into(&mut terminal).unwrap();
+    assert_eq!(notice_fg(&terminal), crate::theme::current().muted_fg);
+
+    rt.eval("kage.theme.set('tokyo-night')").unwrap();
+    assert!(app.refresh_highlights());
+    app.render_into(&mut terminal).unwrap();
+    let tokyo = crate::theme::current().muted_fg;
+    crate::theme::reset_current_for_tests();
+    assert_ne!(tokyo, crate::theme::Theme::default().muted_fg);
+    assert_eq!(notice_fg(&terminal), tokyo);
+}
+
+#[test]
+fn without_truecolor_no_frame_cell_keeps_a_24_bit_color() {
+    use ratatui::style::Color;
+    let buffer = shared_buffer();
+    {
+        let mut buf = lock(&buffer);
+        buf.push_user("hello");
+        buf.append_assistant_delta("a reply with `code`");
+        buf.finish_streaming();
+        buf.push_custom("kage:error", "boom", false);
+    }
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer, tx);
+    let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+    let colors = |terminal: &Terminal<TestBackend>| {
+        let cells = &terminal.backend().buffer().content;
+        cells
+            .iter()
+            .flat_map(|c| [c.fg, c.bg])
+            .collect::<Vec<Color>>()
+    };
+    app.render_into(&mut terminal).unwrap();
+    assert!(
+        colors(&terminal)
+            .iter()
+            .any(|c| matches!(c, Color::Rgb(..)))
+    );
+
+    app.color_depth = crate::theme::ColorDepth::Ansi256;
+    app.render_into(&mut terminal).unwrap();
+    let colors256 = colors(&terminal);
+    assert!(!colors256.iter().any(|c| matches!(c, Color::Rgb(..))));
+    assert!(colors256.iter().any(|c| matches!(c, Color::Indexed(_))));
+
+    app.color_depth = crate::theme::ColorDepth::Ansi16;
+    app.render_into(&mut terminal).unwrap();
+    assert!(
+        !colors(&terminal)
+            .iter()
+            .any(|c| matches!(c, Color::Rgb(..) | Color::Indexed(_)))
+    );
+}
+
+#[test]
+fn enter_accepts_the_highlighted_completion_before_sending() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("README.md"), "x").unwrap();
+    let buffer = shared_buffer();
+    let (tx, rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer, tx);
+    app.set_workdir(dir.path().to_path_buf());
+    for c in "check @RE".chars() {
+        app.handle_key(key(c));
+    }
+    assert!(app.input_completion.is_some());
+    assert!(
+        app.footer_hint().contains("enter to complete"),
+        "{}",
+        app.footer_hint()
+    );
+
+    app.handle_key(code(KeyCode::Enter));
+    assert_eq!(app.input().text(), "check @README.md");
+    assert!(rx.try_recv().is_err(), "the partial path was sent");
+    assert!(
+        app.input_completion.is_none(),
+        "a complete path offers nothing"
+    );
+
+    app.handle_key(code(KeyCode::Enter));
+    assert!(rx.try_recv().is_ok(), "a completed path sends");
+}
+
+const SAMPLE_BEFORE: &str = "fn main() {\n    let x = 1;\n    let y = 2;\n}\n";
+const SAMPLE_AFTER: &str = "fn main() {\n    let x = 1;\n    let y = 3;\n    let z = 4;\n}\n";
+
+fn sample_edit(old: &str) -> serde_json::Value {
+    serde_json::json!({"path": "sample.rs", "old_str": old, "new_str": "let y = 3;\n    let z = 4;"})
+}
+
+fn edit_events(id: &str, old: &str, is_error: bool) -> Vec<kage_core::protocol::Event> {
+    let id = kage_core::ToolCallId::new(id);
+    vec![
+        kage_core::LoopEvent::ToolCallStart {
+            id: id.clone(),
+            name: "edit".into(),
+            input_partial: sample_edit(old),
+        }
+        .into(),
+        kage_core::LoopEvent::ToolExecutionStart { id: id.clone() }.into(),
+        kage_core::LoopEvent::ToolCallEnd {
+            id,
+            output: kage_core::ToolOutput {
+                is_error,
+                text: if is_error {
+                    "`old_str` not found in sample.rs"
+                } else {
+                    "edited"
+                }
+                .into(),
+                structured: None,
+                terminate: false,
+            },
+        }
+        .into(),
+    ]
+}
+
+fn edit_rows(app: &mut App) -> Vec<String> {
+    let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+    app.render_into(&mut terminal).unwrap();
+    snapshot_rows(&terminal)
+}
+
+#[test]
+fn a_finished_edit_shows_whole_lines_of_its_file() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("sample.rs"), SAMPLE_AFTER).unwrap();
+    let (mut app, _rx, events) = app_with_events();
+    app.set_workdir(dir.path().to_path_buf());
+    feed(&mut app, &events, edit_events("c1", "let y = 2;", false));
+    let rows = edit_rows(&mut app);
+    let has = |tail: &str| rows.iter().any(|r| r.ends_with(tail));
+    assert!(
+        rows.iter().any(|r| r.contains("Edited sample.rs (+2 -1)")),
+        "{rows:#?}"
+    );
+    assert!(has("-     let y = 2;"), "{rows:#?}");
+    assert!(has("+     let y = 3;"), "{rows:#?}");
+    assert!(has("+     let z = 4;"), "{rows:#?}");
+}
+
+#[test]
+fn a_resumed_session_shows_line_diffs_and_no_diff_for_a_failed_edit() {
+    use kage_core::{Content, Message, Role, ToolCallId};
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("sample.rs"), SAMPLE_AFTER).unwrap();
+    let (mut app, _rx, events) = app_with_events();
+    app.set_workdir(dir.path().to_path_buf());
+    let turn = |id: &str, old: &str, is_error: bool| {
+        [
+            Message::new(
+                Role::Assistant,
+                vec![Content::ToolCall {
+                    id: ToolCallId::new(id),
+                    name: "edit".into(),
+                    input: sample_edit(old),
+                }],
+                None,
+            ),
+            Message::new(
+                Role::ToolResult,
+                vec![Content::ToolResultBlock {
+                    call_id: ToolCallId::new(id),
+                    output: if is_error {
+                        "`old_str` not found"
+                    } else {
+                        "edited"
+                    }
+                    .into(),
+                    is_error,
+                }],
+                None,
+            ),
+        ]
+    };
+    let messages = turn("c1", "let y = 2;", false)
+        .into_iter()
+        .chain(turn("c2", "let q = 9;", true))
+        .collect();
+    let changed = kage_core::protocol::HostEvent::SessionChanged {
+        path: dir.path().join("s.jsonl"),
+        title: None,
+        messages,
+    };
+    feed(&mut app, &events, vec![changed.into()]);
+    app.set_all_folds(false);
+    let rows = edit_rows(&mut app);
+    let count = |tail: &str| rows.iter().filter(|r| r.ends_with(tail)).count();
+    assert_eq!(count("-     let y = 2;"), 1, "{rows:#?}");
+    assert_eq!(count("- let q = 9;"), 0, "{rows:#?}");
+    assert_eq!(count("`old_str` not found"), 1, "{rows:#?}");
+}
+
+#[test]
+fn the_edit_approval_previews_the_file_lines_or_says_the_text_is_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("sample.rs"), SAMPLE_BEFORE).unwrap();
+    let (mut app, _rx, events) = app_with_events();
+    app.set_workdir(dir.path().to_path_buf());
+    let request = |old: &str, request: u64| -> kage_core::protocol::Event {
+        kage_core::protocol::HostEvent::PermissionRequested {
+            request_id: kage_core::protocol::RequestId(request),
+            tool_call_id: None,
+            tool: "edit".into(),
+            subject: "sample.rs".into(),
+            input: sample_edit(old),
+        }
+        .into()
+    };
+    feed(&mut app, &events, vec![request("let y = 2;", 1)]);
+    let rows = edit_rows(&mut app);
+    assert!(rows.iter().any(|r| r == "   -     let y = 2;"), "{rows:#?}");
+    assert!(rows.iter().any(|r| r == "   +     let z = 4;"), "{rows:#?}");
+    app.answer_permission(PermissionDecision::Deny);
+
+    feed(&mut app, &events, vec![request("let q = 9;", 2)]);
+    let rows = edit_rows(&mut app);
+    assert!(
+        rows.iter()
+            .any(|r| r == "   the text to replace is not in sample.rs"),
+        "{rows:#?}"
+    );
+    assert!(!rows.iter().any(|r| r.contains("let q = 9;")), "{rows:#?}");
+}
+
+#[test]
+fn a_toast_never_covers_the_conversation() {
+    let buffer = shared_buffer();
+    lock(&buffer).push_custom(
+        "kage:error",
+        "init.lua: lua error: syntax error: [string \"init.lua\"]:3: unexpected symbol near 'end' \
+         while loading the user configuration",
+        false,
+    );
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer, tx);
+    let toasts = crate::toast::shared_toasts();
+    app.set_toasts(toasts.clone());
+    let render = |app: &mut App| {
+        let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+        app.render_into(&mut terminal).unwrap();
+        snapshot_rows(&terminal)
+    };
+    let plain = render(&mut app);
+    crate::toast::push_toast(&toasts, Toast::info("switched to fake:m"));
+    let rows = render(&mut app);
+    let notice = plain.iter().take_while(|r| !r.is_empty()).count();
+    assert!(notice >= 2, "{plain:#?}");
+    assert_eq!(rows[..notice], plain[..notice], "{rows:#?}");
+    assert!(
+        rows.iter().any(|r| r.contains("switched to fake:m")),
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn the_plugin_session_list_refreshes_only_when_sessions_change() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (mut app, _rx, events) = app_with_events();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&calls);
+    app.set_session_lister(Box::new(move |_| {
+        counter.fetch_add(1, Ordering::SeqCst);
+        vec![PickItem::simple("s1")]
+    }));
+    let list = kage_plugin::sessions::shared_session_list();
+    app.set_plugin_session_list(list.clone());
+
+    app.refresh_plugin_session_list_if_stale();
+    app.refresh_plugin_session_list_if_stale();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(lock(&list).len(), 1);
+
+    feed(&mut app, &events, vec![bash_start("c1")]);
+    app.refresh_plugin_session_list_if_stale();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    feed(
+        &mut app,
+        &events,
+        vec![
+            kage_core::protocol::HostEvent::RunEnded {
+                outcome: kage_core::protocol::RunOutcome::Completed,
+            }
+            .into(),
+        ],
+    );
+    app.refresh_plugin_session_list_if_stale();
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
 }

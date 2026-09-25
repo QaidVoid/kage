@@ -62,6 +62,7 @@ impl BlockWidget for ToolCallAloneBlockWidget {
             folded: self.folded,
             elapsed_ms: (self.phase == ToolPhase::Running).then_some(elapsed),
             output: &self.progress,
+            diff: None,
         };
         tool_row_lines(&row, width, ctx.emphasis, ctx.row_budget)
     }

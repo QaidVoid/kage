@@ -1,21 +1,15 @@
-//! Render the toast overlay above the conversation buffer.
+//! Render the toast strip below the conversation buffer.
 //!
-//! Toasts paint top-right inside the buffer area, newest-on-top,
-//! stacked vertically with a one-row gap. Each toast is a three-row
-//! card: a colored vertical accent bar on the left, a top pad row,
-//! a content row with a kind-icon + message, and a bottom pad row.
-//! The right margin beside a card is blanked too, so no text under it
-//! peeks out at the edge.
-//! Widths adapt to text up to a sensible cap so long notifications
-//! do not eclipse the conversation pane.
-//!
-//! The renderer is exposed behind a small trait so hosts and plugins
-//! can swap the implementation entirely.
+//! Toasts take rows of their own at the bottom of the conversation
+//! area, one per toast with the newest at the bottom, so they never
+//! cover conversation text, the start card or a notice. Each toast is
+//! a one-row card against the right edge: a colored accent bar, a
+//! kind icon and the message, cut to fit.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use ratatui::widgets::{Block as RtBlock, Clear};
+use ratatui::widgets::Block as RtBlock;
 use unicode_width::UnicodeWidthStr;
 
 use super::DECORATION_MARKER;
@@ -25,24 +19,13 @@ use crate::toast::{Toast, ToastKind};
 
 /// Maximum cell width of a toast, irrespective of buffer width.
 /// Chosen so a sentence-long notification reads comfortably without
-/// eating the conversation.
+/// eating the row.
 const MAX_TOAST_WIDTH: u16 = 60;
 /// Smallest meaningful toast width; below this the renderer skips
-/// painting (the buffer area is too narrow to add chrome on top).
+/// painting.
 const MIN_TOAST_WIDTH: u16 = 18;
-/// Cells of right margin between the toast block and the buffer's
-/// right edge, so the overlay does not sit flush against the
-/// terminal frame.
+/// Cells of right margin between a toast and the area's right edge.
 const RIGHT_MARGIN: u16 = 2;
-/// Cells of top margin between the buffer's top edge and the first
-/// toast row.
-const TOP_MARGIN: u16 = 1;
-/// Vertical gap (rows) between stacked toasts.
-const ROW_GAP: u16 = 1;
-/// Height of every toast card: top pad row, content row, bottom pad
-/// row. Three rows is enough to feel substantial without dominating
-/// the conversation pane.
-const TOAST_HEIGHT: u16 = 3;
 /// Cells of chrome to the left of the message text:
 /// 1 accent bar + 1 pad + 1 icon + 1 pad. Kept in sync with the
 /// painter below.
@@ -50,48 +33,40 @@ const LEFT_CHROME: u16 = 4;
 /// Cells of chrome to the right of the message text (right pad).
 const RIGHT_CHROME: u16 = 1;
 
-/// Paints `toasts` (newest last in the slice) as an overlay onto
-/// `buffer_area`, top-right.
-///
-/// Returns silently when `toasts` is empty, the buffer area is too
-/// narrow, or the lock-acquired snapshot is empty.
-pub fn render_toasts(frame: &mut Frame, buffer_area: Rect, toasts: &[Toast], theme: &Theme) {
-    if toasts.is_empty() {
-        return;
+/// Rows the toast strip takes from a conversation area `height` rows
+/// tall: one per toast, leaving at least half the area to the
+/// conversation. Zero when the area is too narrow to paint a toast.
+#[must_use]
+pub fn toast_rows(toasts: usize, area: Rect) -> u16 {
+    if area.width.saturating_sub(RIGHT_MARGIN * 2) < MIN_TOAST_WIDTH {
+        return 0;
     }
-    let max_width = buffer_area.width.saturating_sub(RIGHT_MARGIN * 2);
-    if max_width < MIN_TOAST_WIDTH || buffer_area.height < TOP_MARGIN + TOAST_HEIGHT {
+    u16::try_from(toasts)
+        .unwrap_or(u16::MAX)
+        .min(area.height / 2)
+}
+
+/// Paints the newest `toasts` (newest last in the slice) into `area`,
+/// one per row, newest at the bottom.
+pub fn render_toasts(frame: &mut Frame, area: Rect, toasts: &[Toast], theme: &Theme) {
+    let max_width = area.width.saturating_sub(RIGHT_MARGIN * 2);
+    if toasts.is_empty() || area.height == 0 || max_width < MIN_TOAST_WIDTH {
         return;
     }
     let toast_width = compute_toast_width(toasts, max_width);
-
-    // Newest at top: iterate the slice in reverse so the most
-    // recent push lands closest to the buffer's top edge.
-    let mut row_cursor = buffer_area.top().saturating_add(TOP_MARGIN);
-    let bottom_limit = buffer_area.bottom();
-    for toast in toasts.iter().rev() {
-        if row_cursor.saturating_add(TOAST_HEIGHT) > bottom_limit {
-            break;
-        }
-        let area = Rect {
-            x: buffer_area
+    let shown = toasts.len().min(usize::from(area.height));
+    let rows = (area.y..area.bottom()).rev();
+    for (y, toast) in rows.zip(toasts.iter().rev().take(shown)) {
+        let card = Rect {
+            x: area
                 .right()
                 .saturating_sub(RIGHT_MARGIN)
                 .saturating_sub(toast_width),
-            y: row_cursor,
+            y,
             width: toast_width,
-            height: TOAST_HEIGHT,
+            height: 1,
         };
-        let margin = Rect {
-            x: area.right(),
-            width: buffer_area.right().saturating_sub(area.right()),
-            ..area
-        };
-        frame.render_widget(crate::opaque::OpaqueClear, margin);
-        paint_toast(frame, area, toast, theme);
-        row_cursor = row_cursor
-            .saturating_add(TOAST_HEIGHT)
-            .saturating_add(ROW_GAP);
+        paint_toast(frame, card, toast, theme);
     }
 }
 
@@ -108,61 +83,32 @@ fn compute_toast_width(toasts: &[Toast], max: u16) -> u16 {
 fn paint_toast(frame: &mut Frame, area: Rect, toast: &Toast, theme: &Theme) {
     let accent_fg = accent_for(theme, toast.kind);
     let card_bg = theme.modeline_bg;
-    let text_fg = theme.assistant_fg;
     let chrome_style = Style::default().bg(card_bg).add_modifier(DECORATION_MARKER);
-
-    // A wide glyph starting just left of the card would paint over its
-    // first cell.
-    let buf = frame.buffer_mut();
-    if area.x > buf.area.x {
-        for y in area.y..area.bottom() {
-            let cell = &mut buf[(area.x - 1, y)];
-            if cell.symbol().width() > 1 {
-                cell.set_symbol(" ");
-            }
-        }
-    }
     // The decoration marker makes cell-based selection skip the card.
-    frame.render_widget(Clear, area);
     frame.render_widget(RtBlock::default().style(chrome_style), area);
 
-    let accent_style = Style::default()
+    let buf = frame.buffer_mut();
+    let accent = Style::default()
         .fg(accent_fg)
         .bg(card_bg)
         .add_modifier(DECORATION_MARKER);
-    let buf = frame.buffer_mut();
-    for y in area.y..area.bottom() {
-        buf.set_string(area.x, y, "\u{258E}", accent_style);
-    }
-
-    // Content row sits in the vertical middle of the toast (row 1
-    // of 3). Top and bottom rows are filled by the bg block above.
-    let content_row = area.y.saturating_add(area.height / 2);
-    let mut x = area.x.saturating_add(2); // accent (1) + left pad (1)
-
-    let icon = icon_for(toast.kind);
+    buf.set_string(area.x, area.y, "\u{258E}", accent);
     buf.set_string(
-        x,
-        content_row,
-        icon,
-        Style::default()
-            .fg(accent_fg)
-            .bg(card_bg)
-            .add_modifier(Modifier::BOLD)
-            .add_modifier(DECORATION_MARKER),
+        area.x.saturating_add(2),
+        area.y,
+        icon_for(toast.kind),
+        accent.add_modifier(Modifier::BOLD),
     );
-    x = x.saturating_add(2); // icon (1) + pad (1)
-
     let body_width = area
         .width
         .saturating_sub(LEFT_CHROME)
         .saturating_sub(RIGHT_CHROME);
-    let truncated = truncate_to_width(&toast.text, usize::from(body_width), "\u{2026}");
+    let text = truncate_to_width(&toast.text, usize::from(body_width), "\u{2026}");
     buf.set_string(
-        x,
-        content_row,
-        truncated,
-        Style::default().fg(text_fg).bg(card_bg),
+        area.x.saturating_add(LEFT_CHROME),
+        area.y,
+        text,
+        Style::default().fg(theme.assistant_fg).bg(card_bg),
     );
 }
 
@@ -192,210 +138,82 @@ mod tests {
     use crate::theme::Theme;
     use crate::toast::Toast;
 
-    fn render_into(width: u16, height: u16, toasts: &[Toast]) -> String {
+    fn render_into(width: u16, height: u16, toasts: &[Toast]) -> Vec<String> {
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         let theme = Theme::default();
         terminal
-            .draw(|f| {
-                let area = Rect::new(0, 0, width, height);
-                render_toasts(f, area, toasts, &theme);
-            })
+            .draw(|f| render_toasts(f, Rect::new(0, 0, width, height), toasts, &theme))
             .unwrap();
         let buf = terminal.backend().buffer().clone();
-        let mut out = String::new();
-        for y in 0..height {
-            for x in 0..width {
-                out.push_str(buf[(x, y)].symbol());
-            }
-            out.push('\n');
-        }
-        out
+        (0..height)
+            .map(|y| (0..width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    fn blank(rows: &[String]) -> bool {
+        rows.iter().all(|row| row.chars().all(|c| c == ' '))
     }
 
     #[test]
     fn empty_toasts_paint_nothing() {
-        let painted = render_into(40, 6, &[]);
-        for line in painted.lines() {
-            assert!(line.chars().all(|c| c == ' '), "got {line:?}");
-        }
+        assert!(blank(&render_into(40, 3, &[])));
     }
 
     #[test]
-    fn wide_char_toast_paints_full_message_inside_card() {
-        // 12 CJK glyphs occupy 24 cells. Sizing the card by char
-        // count (12) made it half as wide as the text and clipped
-        // the message; the card must adapt to display width.
-        let msg = "\u{4f60}\u{597d}\u{4e16}\u{754c}\u{4f60}\u{597d}\u{4e16}\u{754c}\u{4f60}\u{597d}\u{4e16}\u{754c}";
-        let painted = render_into(60, 6, &[Toast::info(msg)]);
-        let rows: Vec<&str> = painted.lines().collect();
-        // Wide glyphs carry a reset spacer cell in the test buffer,
-        // so compare with the spacer cells stripped out.
-        let compact: String = rows[2].chars().filter(|c| !c.is_whitespace()).collect();
-        assert!(
-            compact.contains(msg),
-            "row 2 should contain the full message, got {:?}",
-            rows[2]
-        );
+    fn a_toast_is_one_row_against_the_right_edge() {
+        let rows = render_into(40, 1, &[Toast::info("hello")]);
+        let row = rows[0].trim_end();
+        assert!(row.contains("\u{258E} \u{2022} hello"), "{row:?}");
+        let bar = row.chars().position(|c| c == '\u{258E}');
+        assert_eq!(bar, Some(usize::from(40 - RIGHT_MARGIN - MIN_TOAST_WIDTH)));
     }
 
     #[test]
-    fn toast_paints_three_row_card_with_accent_and_icon() {
-        let painted = render_into(40, 6, &[Toast::info("hello")]);
-        let rows: Vec<&str> = painted.lines().collect();
-        // Row 0 is the top margin (blank). Rows 1..=3 are the toast.
-        assert!(rows[0].chars().all(|c| c == ' '), "row 0 margin");
-        assert!(
-            rows[1].contains('\u{258E}'),
-            "row 1 should contain accent block, got {:?}",
-            rows[1]
-        );
-        // Middle (content) row carries the message and icon.
-        assert!(
-            rows[2].contains("hello"),
-            "row 2 should contain message, got {:?}",
-            rows[2]
-        );
-        assert!(
-            rows[2].contains('\u{2022}'),
-            "row 2 should contain info icon, got {:?}",
-            rows[2]
-        );
-        // Bottom row of the toast still has the accent bar (full
-        // height) but no text.
-        assert!(
-            rows[3].contains('\u{258E}'),
-            "row 3 should still have accent bar, got {:?}",
-            rows[3]
-        );
+    fn wide_char_toast_paints_the_full_message() {
+        let msg = "\u{4f60}\u{597d}\u{4e16}\u{754c}\u{4f60}\u{597d}\u{4e16}\u{754c}";
+        let rows = render_into(60, 1, &[Toast::info(msg)]);
+        let compact: String = rows[0].chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains(msg), "{:?}", rows[0]);
     }
 
     #[test]
-    fn toast_hides_the_text_below_it() {
-        let backend = TestBackend::new(40, 6);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let theme = Theme::default();
-        terminal
-            .draw(|f| {
-                let area = Rect::new(0, 0, 40, 6);
-                for y in 0..6 {
-                    f.buffer_mut()
-                        .set_string(0, y, "x".repeat(40), Style::default());
-                }
-                render_toasts(f, area, &[Toast::info("hi")], &theme);
-            })
-            .unwrap();
-        let buf = terminal.backend().buffer();
-        let toast_cells = (20..38).map(|x| buf[(x, 1)].symbol()).collect::<String>();
-        assert!(!toast_cells.contains('x'), "{toast_cells:?}");
-    }
-
-    #[test]
-    fn no_text_under_a_toast_shows_beside_it() {
-        let wide = "\u{4f60}\u{597d}".repeat(20);
-        for (under, width) in [("x".repeat(80), 80), (wide.clone(), 80), (wide, 79)] {
-            let backend = TestBackend::new(width, 6);
-            let mut terminal = Terminal::new(backend).unwrap();
-            let theme = Theme::default();
-            let toast = Toast::info("no agents in this session yet");
-            terminal
-                .draw(|f| {
-                    let area = Rect::new(0, 0, width, 6);
-                    for y in 0..6 {
-                        f.buffer_mut().set_string(0, y, &under, Style::default());
-                    }
-                    render_toasts(f, area, &[toast], &theme);
-                })
-                .unwrap();
-            let buf = terminal.backend().buffer();
-            let left = (0..width)
-                .find(|&x| buf[(x, 2)].symbol() == "\u{258E}")
-                .expect("accent bar");
-            for y in 1..4 {
-                let tail: String = (left..width).map(|x| buf[(x, y)].symbol()).collect();
-                assert!(
-                    !tail.contains('x') && !tail.contains('\u{4f60}') && !tail.contains('\u{597d}'),
-                    "row {y} at width {width}: {tail:?}"
-                );
-            }
-            assert!(
-                buf[(left - 1, 2)].symbol().width() < 2,
-                "no wide glyph reaches into the card at width {width}"
-            );
-        }
-    }
-
-    #[test]
-    fn newest_toast_paints_above_older_ones_with_row_gap() {
-        let painted = render_into(40, 10, &[Toast::info("older"), Toast::info("newer")]);
-        let rows: Vec<&str> = painted.lines().collect();
-        // Newer toast: rows 1..=3, content row 2.
-        assert!(
-            rows[2].contains("newer"),
-            "row 2 should be the newer toast, got {:?}",
-            rows[2]
-        );
-        // Row gap at row 4.
-        assert!(
-            rows[4].chars().all(|c| c == ' '),
-            "row 4 should be blank gap"
-        );
-        // Older toast: rows 5..=7, content row 6.
-        assert!(
-            rows[6].contains("older"),
-            "row 6 should be the older toast, got {:?}",
-            rows[6]
-        );
+    fn the_newest_toast_is_on_the_bottom_row() {
+        let rows = render_into(40, 2, &[Toast::info("older"), Toast::info("newer")]);
+        assert!(rows[0].contains("older"), "{rows:?}");
+        assert!(rows[1].contains("newer"), "{rows:?}");
+        let rows = render_into(40, 1, &[Toast::info("older"), Toast::info("newer")]);
+        assert!(rows[0].contains("newer"), "{rows:?}");
     }
 
     #[test]
     fn long_message_is_truncated_with_ellipsis() {
-        let long = "a".repeat(200);
-        let painted = render_into(40, 6, &[Toast::info(long)]);
-        assert!(painted.contains('\u{2026}'));
+        let rows = render_into(40, 1, &[Toast::info("a".repeat(200))]);
+        assert!(rows[0].contains('\u{2026}'));
     }
 
     #[test]
-    fn skips_painting_when_buffer_too_narrow() {
-        let painted = render_into(8, 6, &[Toast::info("hi")]);
-        for line in painted.lines() {
-            assert!(line.chars().all(|c| c == ' '), "got {line:?}");
-        }
+    fn skips_painting_when_the_area_is_too_narrow() {
+        assert!(blank(&render_into(8, 2, &[Toast::info("hi")])));
+        assert_eq!(toast_rows(1, Rect::new(0, 0, 8, 10)), 0);
     }
 
     #[test]
-    fn skips_painting_when_buffer_too_short_for_any_toast() {
-        let painted = render_into(40, 2, &[Toast::info("hi")]);
-        for line in painted.lines() {
-            assert!(line.chars().all(|c| c == ' '), "got {line:?}");
-        }
+    fn the_strip_takes_one_row_per_toast_up_to_half_the_area() {
+        let area = Rect::new(0, 0, 60, 10);
+        assert_eq!(toast_rows(0, area), 0);
+        assert_eq!(toast_rows(2, area), 2);
+        assert_eq!(toast_rows(9, area), 5);
     }
 
     #[test]
-    fn warning_kind_uses_warning_icon() {
-        let painted = render_into(
-            40,
-            6,
-            &[Toast::with_kind(
-                "heads up",
-                ToastKind::Warning,
-                std::time::Duration::from_secs(60),
-            )],
-        );
-        assert!(painted.contains('\u{26a0}'));
-    }
-
-    #[test]
-    fn error_kind_uses_error_icon() {
-        let painted = render_into(
-            40,
-            6,
-            &[Toast::with_kind(
-                "boom",
-                ToastKind::Error,
-                std::time::Duration::from_secs(60),
-            )],
-        );
-        assert!(painted.contains('\u{2717}'));
+    fn kinds_use_their_icons() {
+        let with = |kind| {
+            let toast = Toast::with_kind("x", kind, std::time::Duration::from_secs(60));
+            render_into(40, 1, &[toast]).concat()
+        };
+        assert!(with(ToastKind::Warning).contains('\u{26a0}'));
+        assert!(with(ToastKind::Error).contains('\u{2717}'));
+        assert!(with(ToastKind::Success).contains('\u{2713}'));
     }
 }

@@ -32,6 +32,7 @@ use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{self, EnterAlternateScreen};
 
 use crate::error::TuiError;
+use crate::theme::ColorDepth;
 
 static PANIC_HOOK: Once = Once::new();
 
@@ -58,6 +59,8 @@ pub struct Tui {
     mouse_capture_active: bool,
     /// Between a [`Self::suspend`] and [`Self::resume`] pair.
     suspended: bool,
+    /// Colors the terminal shows, detected once on entry.
+    color_depth: ColorDepth,
 }
 
 impl std::fmt::Debug for Tui {
@@ -93,7 +96,15 @@ impl Tui {
             kitty_flags_active,
             mouse_capture_active,
             suspended: false,
+            color_depth: ColorDepth::detect(),
         })
+    }
+
+    /// Colors the terminal shows, read from `COLORTERM` and `TERM`
+    /// when the TUI started.
+    #[must_use]
+    pub fn color_depth(&self) -> ColorDepth {
+        self.color_depth
     }
 
     /// Borrow the wrapped ratatui terminal so the caller can `draw` to it.

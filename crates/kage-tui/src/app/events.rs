@@ -340,6 +340,8 @@ impl App {
     /// header row toggles fold and clears the just-anchored
     /// zero-width selection; a dragged release copies the highlighted
     /// selection straight to the clipboard without waiting for `y`.
+    /// The toggle pins the viewport, so the header stays under the
+    /// pointer instead of the bottom-anchored view pushing it up.
     pub(crate) fn mouse_up(&mut self, row: u16) {
         let Some((_down_row, anchor_idx, dragged)) = self.mouse_drag_anchor.take() else {
             return;
@@ -356,6 +358,10 @@ impl App {
         self.clear_selection();
         let mut buf = lock(&self.buffer);
         if buf.screen_top_of(anchor_idx) == Some(row) {
+            if buf.is_following() {
+                let top = buf.last_virtual_top();
+                buf.set_scroll(top);
+            }
             buf.toggle_fold(anchor_idx);
         }
     }

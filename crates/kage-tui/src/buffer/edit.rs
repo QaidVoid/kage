@@ -87,6 +87,7 @@ impl Buffer {
     /// wakes and repaints from the (possibly stale) cache.
     pub(crate) fn mark_stream_dirty(&mut self) {
         self.stream_dirty_since.get_or_insert_with(Instant::now);
+        self.output_serial += 1;
         self.bump_version();
     }
 
@@ -109,6 +110,7 @@ impl Buffer {
             phase: ToolPhase::Streaming,
             progress: String::new(),
             started_at: Instant::now(),
+            diff: None,
         });
     }
 
@@ -216,6 +218,44 @@ impl Buffer {
                 *phase = ToolPhase::Interrupted;
                 changed.push(i);
             }
+        }
+        for i in changed {
+            self.invalidate_height(i);
+        }
+    }
+
+    /// Give every finished `edit` call without a line diff one, from
+    /// its file as `read` returns it by path. Each file is read once.
+    /// A call whose file does not hold its new text shows the change
+    /// its input describes.
+    pub fn annotate_edits(&mut self, read: impl Fn(&str) -> Option<String>) {
+        use crate::view::tool_view::{EditSide, edit_diff, file_edit_diff};
+        let mut files: HashMap<String, Option<String>> = HashMap::new();
+        let mut changed = Vec::new();
+        for (i, block) in self.blocks.iter_mut().enumerate() {
+            let Block::ToolCall {
+                name,
+                input,
+                phase: ToolPhase::Done,
+                diff: diff @ None,
+                ..
+            } = block
+            else {
+                continue;
+            };
+            if name != "edit" {
+                continue;
+            }
+            let path = input.get("path").and_then(serde_json::Value::as_str);
+            let content = path.and_then(|path| {
+                files
+                    .entry(path.to_owned())
+                    .or_insert_with(|| read(path))
+                    .as_deref()
+            });
+            let lines = content.and_then(|c| file_edit_diff(input, c, EditSide::After));
+            *diff = Some(Arc::new(lines.unwrap_or_else(|| edit_diff(input))));
+            changed.push(i);
         }
         for i in changed {
             self.invalidate_height(i);

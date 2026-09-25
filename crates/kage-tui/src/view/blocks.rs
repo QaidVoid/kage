@@ -7,8 +7,8 @@ use serde_json::Value;
 
 use super::modeline::spinner_frame;
 use super::tool_view::{
-    AgentEnd, BashExit, BodyLine, LineKind, ToolBody, ToolLabel, ToolPhase, agent_output, arg_rows,
-    bash_output, describe, edit_diff, format_elapsed, format_seconds, group_summary,
+    AgentEnd, BashExit, BodyLine, EditDiff, LineKind, ToolBody, ToolLabel, ToolPhase, agent_output,
+    arg_rows, bash_output, describe, edit_diff, format_elapsed, format_seconds, group_summary,
 };
 
 /// Output lines a folded row shows for bash, errors and unknown tools.
@@ -42,6 +42,8 @@ pub(crate) struct ToolRow<'a> {
     pub(crate) elapsed_ms: Option<u64>,
     /// The result text once finished, otherwise the latest progress.
     pub(crate) output: &'a str,
+    /// An edit's change as whole lines of its file, when known.
+    pub(crate) diff: Option<&'a EditDiff>,
 }
 
 /// Render one tool call as a verb-first row on its state-tinted band:
@@ -66,7 +68,10 @@ pub(crate) fn tool_row_lines(
     row_budget: Option<usize>,
 ) -> Vec<Line<'static>> {
     let theme = crate::theme::current();
-    let label = describe(row.name, row.input);
+    let mut label = describe(row.name, row.input);
+    if let Some(diff) = row.diff {
+        label.stats = format!("(+{} -{})", diff.added, diff.removed);
+    }
     let max = bubble_content_width(width);
     let (output, exit, end) = match row.name {
         "bash" => {
@@ -297,11 +302,9 @@ fn folded_body(row: &ToolRow<'_>, label: &ToolLabel, output: Vec<BodyLine>) -> V
             .into_iter()
             .collect(),
         (ToolPhase::Failed, _) => head(output, FOLDED_BODY_LINES, tool_error_style()),
-        (ToolPhase::Done, ToolBody::Diff) => head(
-            edit_diff(row.input).lines,
-            FOLDED_DIFF_LINES,
-            tool_result_style(),
-        ),
+        (ToolPhase::Done, ToolBody::Diff) => {
+            head(diff_lines(row), FOLDED_DIFF_LINES, tool_result_style())
+        }
         (ToolPhase::Done, ToolBody::Head) => head(output, FOLDED_BODY_LINES, tool_result_style()),
         _ => Vec::new(),
     }
@@ -346,11 +349,13 @@ fn unfolded_body(
 ) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     if label.body == ToolBody::Diff {
-        out.extend(head(
-            edit_diff(row.input).lines,
-            UNFOLDED_MAX_LINES,
-            tool_result_style(),
-        ));
+        if row.phase != ToolPhase::Failed {
+            out.extend(head(
+                diff_lines(row),
+                UNFOLDED_MAX_LINES,
+                tool_result_style(),
+            ));
+        }
     } else if label.verb_done == "Called" || output.is_empty() {
         let key = Style::default().fg(crate::theme::current().muted_fg);
         out.extend(arg_rows(row.input).into_iter().map(|(k, v)| {
@@ -371,6 +376,13 @@ fn unfolded_body(
         },
     }
     out
+}
+
+/// The lines of an edit's change: from its file when known, else from
+/// its input.
+fn diff_lines(row: &ToolRow<'_>) -> Vec<BodyLine> {
+    row.diff
+        .map_or_else(|| edit_diff(row.input).lines, |diff| diff.lines.clone())
 }
 
 /// The file extension of a successful `read`, whose output is syntax
@@ -464,6 +476,7 @@ fn body_line(line: BodyLine, text: Style) -> Line<'static> {
     let group = |name| crate::theme::current().group_style(name);
     let span = match line.kind {
         LineKind::Text => Span::styled(line.text, text),
+        LineKind::Context => Span::styled(format!("  {}", line.text), group("KageMuted")),
         LineKind::Add => Span::styled(format!("+ {}", line.text), group("KageDiffAdd")),
         LineKind::Delete => Span::styled(format!("- {}", line.text), group("KageDiffDelete")),
         LineKind::Marker => Span::styled(line.text, group("KageMuted")),

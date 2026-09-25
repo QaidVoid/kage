@@ -270,8 +270,9 @@ impl Buffer {
         }
     }
 
-    /// Drop every cached height. Called by the renderer when it sees
-    /// a width change, since wrap counts depend on width.
+    /// Drop every cached height and rendered line, for a width or
+    /// palette change. Bumps the version so the renderer does not
+    /// reuse a snapshot that still holds the old caches.
     pub fn invalidate_all_heights(&mut self) {
         for slot in &mut self.block_heights {
             *slot = None;
@@ -279,6 +280,7 @@ impl Buffer {
         for slot in &mut self.block_render_lines {
             *slot = None;
         }
+        self.bump_version();
     }
 
     /// Cached rendered lines for the block at `idx`, but only if the
@@ -414,10 +416,21 @@ impl Buffer {
         // delta landing mid-draw re-arms on the next frame at the
         // cost of one extra window of staleness, at worst.
         self.stream_dirty_since = snapshot.stream_dirty_since;
+        self.detached_at = snapshot.detached_at;
         // The pairing cache is shared, not copied: the snapshot's
         // build key travels with it so a length mismatch here
         // triggers one rebuild on the next render.
         self.tool_topology.clone_from(&snapshot.tool_topology);
+    }
+
+    /// Renderer hook: whether blocks or deltas arrived since the view
+    /// stopped following the bottom. Called once per frame.
+    pub(crate) fn has_unseen_output(&mut self) -> bool {
+        if self.is_following() {
+            self.detached_at = None;
+            return false;
+        }
+        self.output_serial > *self.detached_at.get_or_insert(self.output_serial)
     }
 
     /// Width of the last-painted buffer area, in cells.
@@ -497,6 +510,7 @@ impl Buffer {
     pub(crate) fn push_block_caches(&mut self) {
         self.block_heights.push(None);
         self.block_render_lines.push(None);
+        self.output_serial += 1;
         self.bump_version();
     }
 

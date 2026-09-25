@@ -11,15 +11,15 @@ impl App {
     /// the worker. Long by nature: it is the whole event loop.
     #[allow(clippy::too_many_lines)]
     pub fn run(&mut self, tui: &mut Tui) -> Result<AppExit, TuiError> {
-        // Plugin-read snapshots rescan the filesystem; at human
-        // timescale a coarse cadence is indistinguishable and saves
-        // a directory read per wake.
-        const PLUGIN_SNAPSHOT_INTERVAL: Duration = Duration::from_millis(500);
+        // Longest a waiting engine event, such as a streamed delta,
+        // sits before the loop applies it: crossterm's poll cannot
+        // wake on the engine channel, so the wait is sliced.
+        const ENGINE_POLL: Duration = Duration::from_millis(16);
         // Always paint once before the steady-state loop.
         let mut last_buffer_version = self.buffer_version();
         let mut last_spinner_idx = crate::view::spinner_frame_index();
         let mut needs_redraw = true;
-        let mut last_plugin_snapshot: Option<Instant> = None;
+        self.color_depth = tui.color_depth();
         loop {
             if self.apply_option_changes() {
                 needs_redraw = true;
@@ -65,10 +65,7 @@ impl App {
                 }
                 self.refresh_input_completion();
             }
-            if last_plugin_snapshot.is_none_or(|t| t.elapsed() >= PLUGIN_SNAPSHOT_INTERVAL) {
-                self.refresh_plugin_session_list();
-                last_plugin_snapshot = Some(Instant::now());
-            }
+            self.refresh_plugin_session_list_if_stale();
             if needs_redraw {
                 self.draw(tui)?;
                 last_buffer_version = self.buffer_version();
@@ -129,7 +126,7 @@ impl App {
                 let remaining = deadline
                     .checked_duration_since(Instant::now())
                     .unwrap_or_default();
-                if event::poll(remaining)? {
+                if event::poll(remaining.min(ENGINE_POLL))? {
                     // Only events that can change the screen set the
                     // redraw flag. `Moved` mouse events (the terminal
                     // reports one per pixel of travel while capture is
@@ -177,9 +174,13 @@ impl App {
                     }
                     break;
                 }
-                // No event arrived; check the worker thread for
-                // buffer mutations (streaming deltas, tool results)
-                // and break out to repaint if the version moved.
+                // No input: apply engine events that arrived
+                // meanwhile, and repaint when they or another thread
+                // changed the buffer.
+                if self.drain_engine_events() {
+                    needs_redraw = true;
+                    break;
+                }
                 let v = self.buffer_version();
                 if v != last_buffer_version {
                     needs_redraw = true;
@@ -427,6 +428,7 @@ impl App {
         };
         let context_menu = self.context_menu.as_ref();
         let input = &self.input;
+        let color_depth = self.color_depth;
         let mut pinned_area = ratatui::layout::Rect::default();
         terminal
             .draw(|frame| {
@@ -464,21 +466,21 @@ impl App {
                 if let Some((panel, waiting)) = approval {
                     panel.render(frame, regions.input, waiting);
                 }
-                if let Some(picker) = picker {
-                    picker.render(frame, area);
-                }
-                if let Some(settings) = settings_overlay {
-                    settings.render(frame, area);
-                }
-                if let Some(tree) = session_tree {
-                    tree.render(frame, area);
-                }
                 let above_input = ratatui::layout::Rect::new(
                     area.x,
                     area.y,
                     area.width,
                     regions.input.y.saturating_sub(area.y),
                 );
+                if let Some(picker) = picker {
+                    picker.render(frame, above_input);
+                }
+                if let Some(settings) = settings_overlay {
+                    settings.render(frame, above_input);
+                }
+                if let Some(tree) = session_tree {
+                    tree.render(frame, above_input);
+                }
                 if let Some(agents) = agents_overlay {
                     agents.render(frame, above_input);
                 }
@@ -512,6 +514,7 @@ impl App {
                     };
                     overlay.render(modal, frame.buffer_mut(), &ctx);
                 }
+                color_depth.apply(frame.buffer_mut());
             })
             .map_err(|err| TuiError::Io(std::io::Error::other(err.to_string())))?;
         // Merge renderer-owned state (caches, clamped scroll, last-frame

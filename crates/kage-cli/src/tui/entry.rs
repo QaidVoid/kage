@@ -90,8 +90,12 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>) -> Ex
             None
         }
     };
+    let mut reported_shadows = std::collections::HashSet::new();
     if let Some(rt) = plugin_runtime.as_ref() {
-        crate::plugins::merge_plugin_providers(rt, &mut registry);
+        for id in crate::plugins::merge_plugin_providers(rt, &mut registry) {
+            eprintln!("kage: plugin provider `{id}` shadows the built-in registration");
+            reported_shadows.insert(id);
+        }
         crate::acp_glue::set_runtime(rt);
     }
 
@@ -117,7 +121,10 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>) -> Ex
                 }
             };
             if let Some(rt) = plugin_runtime.as_ref() {
-                crate::plugins::merge_plugin_providers(rt, &mut registry);
+                for id in crate::plugins::merge_plugin_providers(rt, &mut registry) {
+                    eprintln!("kage: plugin provider `{id}` shadows the built-in registration");
+                    reported_shadows.insert(id);
+                }
             }
             if crate::has_usable_provider(&registry) {
                 break;
@@ -275,6 +282,7 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>) -> Ex
         dialog_tx,
         plugin_refresh_tx,
         mirror: Arc::clone(&mirror),
+        reported_shadows,
     }
     .spawn(rx);
 

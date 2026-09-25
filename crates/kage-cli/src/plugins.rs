@@ -216,16 +216,24 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// Register every provider a plugin contributed via
 /// `kage.register_provider` into `registry`. A plugin can shadow a
 /// built-in id (the registry overwrites prior entries with the same
-/// id); we log that case so the user sees the override deliberately.
-pub fn merge_plugin_providers(runtime: &PluginRuntime, registry: &mut ProviderRegistry) {
+/// id); the shadowed ids are returned so the caller can surface the
+/// override on a channel the user actually sees. This must not print:
+/// mid-TUI callers share the terminal with the alternate screen, where
+/// a stderr write paints over the drawn UI.
+pub fn merge_plugin_providers(
+    runtime: &PluginRuntime,
+    registry: &mut ProviderRegistry,
+) -> Vec<String> {
     let existing: std::collections::HashSet<String> = registry.ids().map(str::to_owned).collect();
+    let mut shadowed = Vec::new();
     for provider in runtime.registered_providers() {
         let id = provider.metadata().id.clone();
         if existing.contains(&id) {
-            eprintln!("kage: plugin provider `{id}` shadows the built-in registration");
+            shadowed.push(id.clone());
         }
         registry.register(provider);
     }
+    shadowed
 }
 
 /// Fire `before_agent_start` and `agent_start` before a run's first turn,

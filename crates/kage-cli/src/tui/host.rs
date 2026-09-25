@@ -103,6 +103,10 @@ pub(crate) struct Host {
     pub dialog_tx: mpsc::Sender<PluginDialog>,
     pub plugin_refresh_tx: mpsc::Sender<PluginRefresh>,
     pub mirror: Arc<Mutex<Mirror>>,
+    /// Shadow ids already surfaced this session. Rebuilds run on every
+    /// refresh and reload, so without this the same override would toast
+    /// again each time.
+    pub(crate) reported_shadows: std::collections::HashSet<String>,
 }
 
 impl Host {
@@ -412,7 +416,13 @@ impl Host {
     fn rebuild_registry(&mut self) -> Result<bool, String> {
         let mut fresh = crate::build_provider_registry()?;
         if let Some(rt) = &self.plugins {
-            crate::plugins::merge_plugin_providers(rt, &mut fresh);
+            for id in crate::plugins::merge_plugin_providers(rt, &mut fresh) {
+                if self.reported_shadows.insert(id.clone()) {
+                    self.notify(format!(
+                        "plugin provider `{id}` shadows the built-in registration"
+                    ));
+                }
+            }
         }
         let active_ok = fresh.resolve(&lock(&self.mirror).state.model).is_ok();
         self.registry = Arc::new(fresh);

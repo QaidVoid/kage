@@ -618,7 +618,9 @@ fn run_print_mode(cli: Cli) -> ExitCode {
         }
     };
     if let Some(rt) = plugin_runtime.as_ref() {
-        plugins::merge_plugin_providers(rt, &mut registry);
+        for id in plugins::merge_plugin_providers(rt, &mut registry) {
+            eprintln!("kage: plugin provider `{id}` shadows the built-in registration");
+        }
         acp_glue::set_runtime(rt);
     }
 

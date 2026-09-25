@@ -83,7 +83,9 @@ pub(crate) fn run_resume(
     };
 
     if let Some(rt) = plugin_runtime.as_ref() {
-        plugins::merge_plugin_providers(rt, &mut registry);
+        for id in plugins::merge_plugin_providers(rt, &mut registry) {
+            eprintln!("kage: plugin provider `{id}` shadows the built-in registration");
+        }
         acp_glue::set_runtime(rt);
     }
 

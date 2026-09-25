@@ -272,7 +272,7 @@ impl App {
 
     /// Run on a session change: drop the old conversation's search
     /// and list the start card's recent sessions again.
-    pub(crate) fn refresh_start_sessions(&mut self) {
+    pub(crate) fn on_session_changed(&mut self) {
         self.search_pattern = None;
         let (Some(info), Some(lister)) = (self.start_info.as_mut(), &self.session_lister) else {
             return;

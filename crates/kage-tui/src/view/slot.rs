@@ -456,7 +456,7 @@ fn paint_row(frame: &mut Frame, area: Rect, spec: &SlotSpec, src: &Sources<'_>, 
     let right_width: usize = right.iter().map(Span::width).sum();
     let left_budget = match right_width {
         0 => usize::from(area.width),
-        w => usize::from(area.width).saturating_sub(w + 1),
+        w => usize::from(area.width).saturating_sub(w + 2),
     };
     let mut spans = clip_spans(row_spans(&spec.left, &spec.sep, src, styles), left_budget);
     let used: usize = spans.iter().map(Span::width).sum::<usize>() + right_width;

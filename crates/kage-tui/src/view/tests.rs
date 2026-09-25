@@ -814,7 +814,7 @@ fn a_long_hint_is_clipped_before_the_session_facts() {
         Rect::new(0, 0, 40, 6),
     );
     let footer = rows.last().unwrap();
-    assert!(footer.ends_with("... Fake"), "{footer:?}");
+    assert!(footer.ends_with("...  Fake"), "{footer:?}");
     assert_eq!(footer.width(), 40, "{footer:?}");
 }
 

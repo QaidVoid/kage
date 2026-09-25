@@ -131,7 +131,7 @@ impl App {
                     buf.clear();
                     crate::events::populate_from_history(&mut buf, &messages, &durations);
                 }
-                self.refresh_start_sessions();
+                self.on_session_changed();
             }
             HostEvent::ShellFinished {
                 command,

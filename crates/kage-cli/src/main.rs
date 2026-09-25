@@ -585,13 +585,14 @@ pub(crate) fn run_list() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let summaries = match kage_session::list(&dir) {
+    let mut summaries = match kage_session::list(&dir) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("kage: failed to list sessions: {e}");
             return ExitCode::from(1);
         }
     };
+    summaries.retain(|s| s.agent.is_none());
     if summaries.is_empty() {
         eprintln!("kage: no sessions found in {}", dir.display());
         return ExitCode::SUCCESS;

@@ -129,10 +129,55 @@ pub(crate) fn print_envelope<W: io::Write>(
         return;
     }
     match &envelope.event {
-        Event::Loop(event) if envelope.session == session => print_event(out, event),
+        Event::Loop(event) if envelope.session == session => print_loop_event(out, event),
         Event::Host(HostEvent::Notice { text, .. }) => eprintln!("kage: {text}"),
         _ => {}
     }
+}
+
+/// Print a loop event as text. An `agent` call prints the agent and its
+/// description when it starts and how the agent ended, instead of the
+/// generic tool lines and the wrapper the model reads.
+fn print_loop_event<W: io::Write>(out: &mut W, event: &LoopEvent) {
+    match event {
+        LoopEvent::ToolCallStart {
+            name,
+            input_partial,
+            ..
+        } if name == "agent" => {
+            let field = |key| input_partial.get(key).and_then(serde_json::Value::as_str);
+            let agent = field("agent").unwrap_or("general");
+            let description = field("description").unwrap_or_default();
+            let _ = writeln!(out, "\n[agent {agent}: {description}]");
+            let _ = out.flush();
+        }
+        LoopEvent::ToolCallEnd { output, .. } => match agent_end(&output.text) {
+            Some((agent, "failed", error)) => {
+                let _ = writeln!(out, "[agent {agent} failed] {error}");
+                let _ = out.flush();
+            }
+            Some((agent, state, _)) => {
+                let _ = writeln!(out, "[agent {agent} {state}]");
+                let _ = out.flush();
+            }
+            None => print_event(out, event),
+        },
+        _ => print_event(out, event),
+    }
+}
+
+/// The agent name, end state and body of an `agent` call result, or
+/// `None` when the text is not wrapped in an `<agent>` element.
+fn agent_end(text: &str) -> Option<(&str, &str, &str)> {
+    let (attrs, rest) = text.strip_prefix("<agent ")?.split_once(">\n")?;
+    let body = rest.strip_suffix("\n</agent>")?;
+    let attr = |key: &str| {
+        attrs
+            .split_once(&format!("{key}=\""))
+            .and_then(|(_, value)| value.split_once('"'))
+            .map(|(value, _)| value)
+    };
+    Some((attr("name")?, attr("state")?, body))
 }
 
 /// Extract the first text block from a user message, joined with newlines

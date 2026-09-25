@@ -322,7 +322,8 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
 /// Hooks (`before_tool_call`, `after_tool_call`) stay on the calling thread;
 /// only the tool's `execute` runs concurrently. Each call is finished on
 /// the calling thread as soon as it completes: `after_tool_call` runs and
-/// its [`LoopEvent::ToolCallEnd`] is emitted in completion order. Result
+/// its [`LoopEvent::ToolCallEnd`] is emitted and its result message built in
+/// completion order, so each message carries its own call's end time. Result
 /// message order is preserved to match the input order, regardless of
 /// completion order.
 ///
@@ -336,7 +337,7 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
 /// `is_error` result; every call that did produce an output keeps it. The
 /// batch-level failure (cancel preferred over panic, first otherwise) is
 /// carried in [`DispatchOutcome::error`].
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)] // matches dispatch_tool_calls
 pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
     pending: Vec<PendingToolCall>,
     tools: &ToolRegistry,
@@ -362,7 +363,7 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
 
     let mut error = entry_cancelled.then_some(LoopError::Cancelled);
     let mut all_terminate = !pending.is_empty();
-    let mut outputs: Vec<Option<ToolOutput>> = std::iter::repeat_with(|| None)
+    let mut results: Vec<Option<Message>> = std::iter::repeat_with(|| None)
         .take(pending.len())
         .collect();
     let mut finish = |emit: &mut F, index: usize, raw: Result<ToolOutput, LoopError>| {
@@ -379,7 +380,15 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
             id: call.id.clone(),
             output: output.clone(),
         });
-        outputs[index] = Some(output);
+        results[index] = Some(Message::new(
+            Role::ToolResult,
+            vec![Content::ToolResultBlock {
+                call_id: call.id.clone(),
+                output: output.text,
+                is_error: output.is_error,
+            }],
+            Some(parent),
+        ));
     };
 
     if entry_cancelled {
@@ -406,24 +415,11 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
         );
     }
 
-    let results = pending
-        .into_iter()
-        .zip(outputs)
-        .map(|(call, output)| {
-            let output = output.expect("every call is finished");
-            Message::new(
-                Role::ToolResult,
-                vec![Content::ToolResultBlock {
-                    call_id: call.id,
-                    output: output.text,
-                    is_error: output.is_error,
-                }],
-                Some(parent),
-            )
-        })
-        .collect();
     DispatchOutcome {
-        results,
+        results: results
+            .into_iter()
+            .map(|result| result.expect("every call is finished"))
+            .collect(),
         all_terminate,
         error,
     }

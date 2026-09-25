@@ -1357,3 +1357,81 @@ fn print_mode_text_shows_only_the_main_session() {
     assert!(json.contains("\"agent_spawned\""), "{json}");
     assert!(json.contains("child reply"), "{json}");
 }
+
+#[test]
+fn cancel_during_a_child_ask_returns_the_cancelled_wrapper() {
+    for stop in [CommandKind::Cancel, CommandKind::Shutdown] {
+        let h = harness(MockProvider::sequence(vec![
+            agent_turn(&[("call_a", task("ask"))]),
+            tool_turn("gate"),
+        ]));
+        let parent = h.open_parent(None, ask_for_gate(), Some(agent_setup(1, 1)));
+        prompt(&h.engine, parent, "go", Delivery::Steer);
+        let child = wait_for(&h.events, |e| {
+            matches!(e.event, Event::Host(HostEvent::PermissionRequested { .. }))
+        })
+        .last()
+        .unwrap()
+        .session;
+        h.engine.send(Command::to(parent, stop));
+        let events = until_runs_end(&h.events, 2);
+        let output = tool_output(&events, parent, "call_a");
+        assert!(output.is_error);
+        assert!(
+            output.text.starts_with(&format!(
+                "<agent name=\"general\" session=\"{child}\" state=\"cancelled\">"
+            )),
+            "{}",
+            output.text
+        );
+        assert_eq!(outcome_of(&events, parent), [RunOutcome::Cancelled]);
+    }
+}
+
+#[test]
+fn print_mode_text_names_agents_and_how_they_ended() {
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[
+            ("call_a", task("look")),
+            (
+                "call_b",
+                serde_json::json!({"agent": "explore", "description": "map it", "prompt": "p"}),
+            ),
+        ]),
+        text_turn("child reply"),
+        vec![Err(ProviderError::Auth("bad key".into()))],
+        text_turn("parent done"),
+    ]));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(1, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 3);
+
+    let mut text = Vec::new();
+    for envelope in &events {
+        crate::cli_loop_run::print_envelope(&mut text, envelope, parent, false);
+    }
+    let text = String::from_utf8(text).unwrap();
+    let name = |call: &ToolCallId| {
+        if call.0 == "call_a" {
+            "general"
+        } else {
+            "explore"
+        }
+    };
+    let children = spawned(&events);
+    let (first, second) = (name(&children[0].1), name(&children[1].1));
+    assert_eq!(
+        text,
+        format!(
+            "\n[agent general: a task]\n\
+             \n[agent explore: map it]\n\
+             [agent {first} completed]\n\
+             [agent {second} failed] authentication failed: bad key\n\
+             parent done"
+        ),
+    );
+}

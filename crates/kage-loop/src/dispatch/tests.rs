@@ -1128,6 +1128,10 @@ fn parallel_dispatch_ends_each_call_when_it_finishes() {
     assert_eq!(blocks[0], ("call_waits".into(), "live".into(), false));
     assert_eq!(blocks[1].0, "call_echo");
     assert!(!blocks[1].2 && blocks[1].1.contains("\"i\":1"));
+    assert!(
+        outcome.results[1].ts < outcome.results[0].ts,
+        "each result is stamped when its call finishes"
+    );
 }
 
 #[test]

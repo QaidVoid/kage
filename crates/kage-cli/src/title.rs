@@ -8,6 +8,8 @@
 //! heuristic derived from the first user message, so a session always
 //! gets a usable title and the picker never has to show a raw prompt.
 
+use std::fmt::Write as _;
+
 use kage_core::{CancelFlag, Content, Message, Role};
 use kage_provider::{Provider, ProviderEvent, StreamRequest};
 
@@ -21,8 +23,10 @@ const TITLE_SYSTEM: &str = "You write terse conversation titles. Reply with ONLY
  at most 6 words, no quotes, no trailing punctuation, no preamble.";
 
 /// Produce a title for the session whose first exchange is
-/// `user_text` -> `assistant_text`. Tries the model; on any failure
-/// returns the heuristic. Never returns an empty string.
+/// `user_text` -> `assistant_text`. A blank `assistant_text`, as when the
+/// first reply only calls tools, is left out of the request. Tries the
+/// model; on any failure returns the heuristic. Never returns an empty
+/// string.
 #[must_use]
 pub(crate) fn generate(
     provider: &dyn Provider,
@@ -73,11 +77,15 @@ fn model_title(
     assistant_text: &str,
     cancel: &CancelFlag,
 ) -> Option<String> {
-    let prompt = format!(
-        "User asked:\n{}\n\nAssistant replied:\n{}\n\nTitle:",
-        clip(user_text, 800),
-        clip(assistant_text, 800),
-    );
+    let mut prompt = format!("User asked:\n{}\n\n", clip(user_text, 800));
+    if !assistant_text.trim().is_empty() {
+        let _ = write!(
+            prompt,
+            "Assistant replied:\n{}\n\n",
+            clip(assistant_text, 800)
+        );
+    }
+    prompt.push_str("Title:");
     let mut req = StreamRequest::new(
         model,
         vec![Message::new(
@@ -154,5 +162,27 @@ mod tests {
             &cancel,
         );
         assert_eq!(title, "Add a retry to the HTTP client");
+    }
+
+    #[test]
+    fn blank_reply_is_left_out_of_the_request() {
+        use kage_core::{StopReason, TokenUsage};
+        use kage_provider::testing::MockProvider;
+        let provider = MockProvider::replaying(vec![
+            Ok(ProviderEvent::TextDelta {
+                delta: "Fix the parser".into(),
+            }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        ]);
+        let title = generate(&provider, "m", "fix it", " \n", &CancelFlag::new());
+        assert_eq!(title, "Fix the parser");
+        let requests = provider.requests();
+        let Content::Text { text } = &requests[0].messages[0].content[0] else {
+            panic!("text prompt expected");
+        };
+        assert_eq!(text, "User asked:\nfix it\n\nTitle:");
     }
 }

@@ -336,7 +336,10 @@ and its result, which names the agent's session id.
 `[agents]` table. Print mode cannot ask, so an agent's approval
 request is refused the same way the main session's is. Text output
 shows only the main session's replies and tool calls. Notices from
-any session go to stderr.
+any session go to stderr. An `agent` call prints
+`[agent explore: map exports]` when it starts and
+`[agent explore completed]` when it ends. A cancelled agent prints
+`cancelled`, and a failed one prints `failed` followed by its error.
 
 `kage -p --json` prints every envelope, the agents' included. Each
 envelope names its session, and an agent's first envelope is

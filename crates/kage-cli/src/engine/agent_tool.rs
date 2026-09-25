@@ -20,6 +20,10 @@ pub(super) const AGENT_TOOL: &str = "agent";
 /// How often a waiting call checks its cancel flag.
 const POLL: Duration = Duration::from_millis(100);
 
+/// How long a cancelled call waits for the child's cancelled result, which
+/// carries its session id and partial reply.
+const CANCEL_GRACE: Duration = Duration::from_millis(300);
+
 /// Longest reply passed back to the parent, in characters.
 const RESULT_CAP: usize = 20_000;
 
@@ -146,7 +150,9 @@ impl Tool for AgentTool {
                 Ok(output) => return Ok(output),
                 Err(RecvTimeoutError::Timeout) => {
                     if cx.is_cancelled() {
-                        return Err(ToolError::Cancelled);
+                        return result
+                            .recv_timeout(CANCEL_GRACE)
+                            .map_err(|_| ToolError::Cancelled);
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => return Ok(engine_stopped()),

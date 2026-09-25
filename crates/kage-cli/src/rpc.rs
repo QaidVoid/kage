@@ -5,6 +5,10 @@
 //! is an engine session: prompts become engine commands, and a bus
 //! subscriber turns engine events into `session/update` notifications and
 //! `session/request_permission` requests.
+//!
+//! Agent sessions started by the `agent` tool are not ACP sessions. Their
+//! permission requests and progress go to the client session at the root
+//! of their tree, on that session's top-level `agent` call.
 
 use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
@@ -22,8 +26,8 @@ use kage_acp::acp::{
 use kage_acp::agent::{Agent, PermissionDecision, PromptContext, send_update, serve_agent};
 use kage_core::permissions::PermissionAction;
 use kage_core::protocol::{
-    Command, CommandKind, Delivery, Envelope, Event, HostEvent, PermissionDecision as Decision,
-    RunOutcome,
+    AgentNode, AgentTree, Command, CommandKind, Delivery, Envelope, Event, HostEvent,
+    PermissionDecision as Decision, RequestId, RunOutcome,
 };
 use kage_core::sync::lock;
 use kage_core::{Content, LoopEvent, Role, SessionId, StopReason as CoreStopReason};
@@ -33,7 +37,7 @@ use kage_provider::ProviderRegistry;
 use kage_session::SessionWriter;
 use kage_tools::builtin_registry;
 
-use crate::engine::{Commander, Engine, Recorder, SessionSpec};
+use crate::engine::{AgentSetup, Commander, Engine, Recorder, SessionSpec};
 use crate::permissions::PermissionGate;
 use crate::runtime_env;
 
@@ -117,6 +121,7 @@ impl CliAcpAgent {
             seen: HashMap::new(),
             stops: HashMap::new(),
             asks: HashMap::new(),
+            tree: AgentTree::default(),
         };
         engine.subscribe(Box::new(move |envelope| bridge.handle(envelope)));
         Self {
@@ -173,6 +178,11 @@ impl CliAcpAgent {
             eprintln!("kage: rpc: {e}; using defaults");
             kage_core::config::Config::default()
         });
+        let (defs, agent_errors) = crate::agents::load(&workdir);
+        for err in agent_errors {
+            eprintln!("kage: {err}");
+        }
+        let agents = AgentSetup::from_config(defs, &config);
         config
             .permissions
             .validate()
@@ -202,7 +212,7 @@ impl CliAcpAgent {
             mcp: Some(mcp),
             interactive: true,
             title: true,
-            agents: None,
+            agents: Some(agents),
         })
     }
 }
@@ -313,7 +323,8 @@ impl Agent for CliAcpAgent {
     }
 }
 
-/// Turns engine events into ACP traffic for the sessions a client opened.
+/// Turns engine events into ACP traffic for the sessions a client opened
+/// and the agents under them.
 struct Bridge {
     peer: Peer,
     commander: Commander,
@@ -322,15 +333,23 @@ struct Bridge {
     seen: HashMap<SessionId, HashSet<String>>,
     stops: HashMap<SessionId, CoreStopReason>,
     asks: HashMap<SessionId, Vec<Arc<AtomicBool>>>,
+    tree: AgentTree,
 }
 
 impl Bridge {
     fn handle(&mut self, envelope: &Envelope) {
         let session = envelope.session;
-        let Some(client_id) = lock(&self.ids).by_engine.get(&session).cloned() else {
-            return;
-        };
-        match &envelope.event {
+        let is_agent = self.tree.apply(envelope);
+        let client_id = lock(&self.ids).by_engine.get(&session).cloned();
+        match client_id {
+            Some(client_id) => self.handle_client(session, client_id, &envelope.event),
+            None if is_agent => self.handle_agent(session, &envelope.event),
+            None => {}
+        }
+    }
+
+    fn handle_client(&mut self, session: SessionId, client_id: String, event: &Event) {
+        match event {
             Event::Loop(event) => {
                 if let LoopEvent::MessageEnd { stop_reason, .. } = event {
                     self.stops.insert(session, *stop_reason);
@@ -347,11 +366,6 @@ impl Bridge {
                 input,
                 ..
             }) => {
-                let answered = Arc::new(AtomicBool::new(false));
-                self.asks
-                    .entry(session)
-                    .or_default()
-                    .push(Arc::clone(&answered));
                 let tool_call = ToolCallUpdate {
                     tool_call_id: tool_call_id
                         .as_ref()
@@ -362,35 +376,10 @@ impl Bridge {
                     raw_input: Some(input.clone()),
                     ..ToolCallUpdate::default()
                 };
-                let peer = self.peer.clone();
-                let commander = self.commander.clone();
-                let request_id = *request_id;
-                let tool = tool.clone();
-                std::thread::spawn(move || {
-                    let decision = kage_acp::agent::request_permission(
-                        &peer,
-                        &client_id,
-                        tool_call,
-                        &tool,
-                        &|| answered.load(Ordering::SeqCst),
-                    );
-                    let decision = match decision {
-                        PermissionDecision::Allow => Decision::AllowOnce,
-                        PermissionDecision::Deny(_) => Decision::Deny,
-                    };
-                    commander.send(Command::to(
-                        session,
-                        CommandKind::ResolvePermission {
-                            request_id,
-                            decision,
-                        },
-                    ));
-                });
+                self.ask(session, *request_id, client_id, tool_call);
             }
             Event::Host(HostEvent::RunEnded { outcome }) => {
-                for answered in self.asks.remove(&session).unwrap_or_default() {
-                    answered.store(true, Ordering::SeqCst);
-                }
+                self.end_asks(session);
                 self.seen.remove(&session);
                 let stop = self.stops.remove(&session);
                 if let Some(waiter) = lock(&self.waiters).remove(&session) {
@@ -402,6 +391,136 @@ impl Bridge {
             }
             Event::Host(_) => {}
         }
+    }
+
+    /// Shows an agent's activity as the content of the root session's
+    /// top-level `agent` call, and forwards its permission requests to
+    /// that session.
+    fn handle_agent(&mut self, session: SessionId, event: &Event) {
+        let Some(top) = top_agent(&self.tree, session) else {
+            return;
+        };
+        let Some(client_id) = lock(&self.ids).by_engine.get(&top.parent).cloned() else {
+            return;
+        };
+        let call_id = top.tool_call_id.to_string();
+        let agent = self
+            .tree
+            .get(session)
+            .map_or_else(String::new, |node| node.agent.clone());
+        let progress = |text: String| {
+            let update = ToolCallUpdate {
+                tool_call_id: call_id.clone(),
+                content: vec![text_content(format!("{agent}: {text}"))],
+                ..ToolCallUpdate::default()
+            };
+            send_update(
+                &self.peer,
+                &client_id,
+                SessionUpdate::ToolCallUpdate(update),
+            );
+        };
+        match event {
+            Event::Loop(LoopEvent::ToolCallStart {
+                name,
+                input_partial,
+                ..
+            }) => progress(describe_call(name, input_partial)),
+            Event::Host(HostEvent::PermissionRequested {
+                request_id,
+                tool,
+                input,
+                ..
+            }) => {
+                progress(format!(
+                    "Waiting for approval: {}",
+                    describe_call(tool, input)
+                ));
+                let tool_call = ToolCallUpdate {
+                    tool_call_id: call_id.clone(),
+                    title: Some(format!("{agent}: {tool}")),
+                    kind: Some(tool_kind(tool)),
+                    raw_input: Some(input.clone()),
+                    ..ToolCallUpdate::default()
+                };
+                self.ask(session, *request_id, client_id, tool_call);
+            }
+            Event::Host(HostEvent::RunEnded { outcome }) => {
+                progress(
+                    match outcome {
+                        RunOutcome::Completed => "done",
+                        RunOutcome::Cancelled => "stopped",
+                        RunOutcome::Failed { .. } => "failed",
+                    }
+                    .to_owned(),
+                );
+                self.end_asks(session);
+            }
+            _ => {}
+        }
+    }
+
+    /// Asks the client on `client_id` and resolves `request_id` of
+    /// `session` with the answer. The ask is dropped when that session's
+    /// run ends first.
+    fn ask(
+        &mut self,
+        session: SessionId,
+        request_id: RequestId,
+        client_id: String,
+        tool_call: ToolCallUpdate,
+    ) {
+        let answered = Arc::new(AtomicBool::new(false));
+        self.asks
+            .entry(session)
+            .or_default()
+            .push(Arc::clone(&answered));
+        let peer = self.peer.clone();
+        let commander = self.commander.clone();
+        std::thread::spawn(move || {
+            let title = tool_call.title.clone().unwrap_or_default();
+            let decision =
+                kage_acp::agent::request_permission(&peer, &client_id, tool_call, &title, &|| {
+                    answered.load(Ordering::SeqCst)
+                });
+            let decision = match decision {
+                PermissionDecision::Allow => Decision::AllowOnce,
+                PermissionDecision::Deny(_) => Decision::Deny,
+            };
+            commander.send(Command::to(
+                session,
+                CommandKind::ResolvePermission {
+                    request_id,
+                    decision,
+                },
+            ));
+        });
+    }
+
+    fn end_asks(&mut self, session: SessionId) {
+        for answered in self.asks.remove(&session).unwrap_or_default() {
+            answered.store(true, Ordering::SeqCst);
+        }
+    }
+}
+
+/// The agent that a client session's own `agent` call started, at the top
+/// of `session`'s branch.
+fn top_agent(tree: &AgentTree, session: SessionId) -> Option<&AgentNode> {
+    let mut node = tree.get(session)?;
+    while let Some(parent) = tree.get(node.parent) {
+        node = parent;
+    }
+    Some(node)
+}
+
+/// One line naming what a tool call does, such as `Read src/lib.rs`.
+fn describe_call(name: &str, input: &serde_json::Value) -> String {
+    let label = kage_tui::view::tool_view::describe(name, input);
+    if label.target.is_empty() {
+        label.verb.to_owned()
+    } else {
+        format!("{} {}", label.verb, label.target)
     }
 }
 
@@ -509,9 +628,191 @@ fn stop_reason(last: Option<CoreStopReason>) -> StopReason {
 
 #[cfg(test)]
 mod tests {
-    use kage_core::{MessageId, ToolCallId, ToolOutput, ToolUpdate};
+    use std::time::Duration;
+
+    use kage_core::agents::AgentDefs;
+    use kage_core::permissions::{PermissionsConfig, ToolPermissionRules};
+    use kage_core::{MessageId, TokenUsage, ToolCallId, ToolOutput, ToolUpdate};
+    use kage_jsonrpc::Inbound;
+    use kage_provider::testing::MockProvider;
+    use kage_provider::{ProviderError, ProviderEvent};
 
     use super::*;
+
+    const WAIT: Duration = Duration::from_secs(5);
+
+    type Script = Vec<Result<ProviderEvent, ProviderError>>;
+
+    fn tool_turn(id: &str, name: &str, input: serde_json::Value) -> Script {
+        let id = ToolCallId::new(id);
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::ToolCallStart {
+                id: id.clone(),
+                name: name.into(),
+            }),
+            Ok(ProviderEvent::ToolCallEnd { id, input }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: CoreStopReason::ToolUse,
+                usage: TokenUsage::default(),
+            }),
+        ]
+    }
+
+    fn text_turn(text: &str) -> Script {
+        vec![
+            Ok(ProviderEvent::MessageStart),
+            Ok(ProviderEvent::TextDelta { delta: text.into() }),
+            Ok(ProviderEvent::MessageEnd {
+                stop_reason: CoreStopReason::EndTurn,
+                usage: TokenUsage::default(),
+            }),
+        ]
+    }
+
+    /// Serves `kage rpc` over pipes with one open session whose `ls` calls
+    /// ask, and returns the client side and that session's id.
+    fn serve(
+        scripts: Vec<Script>,
+        workdir: &std::path::Path,
+    ) -> (Peer, mpsc::Receiver<Inbound>, String) {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let id = SessionId::new();
+        let workdir = workdir.to_path_buf();
+        std::thread::spawn(move || {
+            serve_agent(BufReader::new(srv_r), srv_w, |peer| {
+                let mock = MockProvider::sequence(scripts);
+                let registry = Arc::new(ProviderRegistry::new().with(Arc::new(mock)));
+                let agent = CliAcpAgent::new(registry, "mock:m".into(), String::new(), peer);
+                let mut rules = PermissionsConfig::default();
+                rules.tools.insert(
+                    "ls".into(),
+                    ToolPermissionRules {
+                        default: PermissionAction::Ask,
+                        allow: Vec::new(),
+                        deny: Vec::new(),
+                    },
+                );
+                agent.engine.open(SessionSpec {
+                    id,
+                    model: "mock:m".into(),
+                    cx: AgentContext::new("m", "").with_workdir(&workdir),
+                    recorder: None,
+                    tools: builtin_registry(),
+                    gate: PermissionGate::new(rules),
+                    loop_cfg: LoopConfig::default(),
+                    plugins: None,
+                    mcp: None,
+                    interactive: true,
+                    title: false,
+                    agents: Some(AgentSetup {
+                        defs: Arc::new(AgentDefs::builtin()),
+                        max_depth: 1,
+                        max_running: 4,
+                    }),
+                });
+                lock(&agent.ids).insert(id.to_string(), id);
+                agent
+            })
+        });
+        let (client, inbox, _reader) = kage_jsonrpc::connect(BufReader::new(cli_r), cli_w);
+        (client, inbox, id.to_string())
+    }
+
+    /// Collects `session/update` params until a permission request
+    /// arrives, and returns them with that request's id and params.
+    fn until_ask(
+        inbox: &mpsc::Receiver<Inbound>,
+        updates: &mut Vec<serde_json::Value>,
+    ) -> (serde_json::Value, serde_json::Value) {
+        loop {
+            match inbox.recv_timeout(WAIT).expect("no permission request") {
+                Inbound::Notification { params, .. } => updates.push(params),
+                Inbound::Request { id, method, params } => {
+                    assert_eq!(method, "session/request_permission");
+                    return (id, params);
+                }
+            }
+        }
+    }
+
+    fn allow(client: &Peer, id: &serde_json::Value) {
+        let outcome = serde_json::json!({"outcome": {"outcome": "selected", "optionId": "allow"}});
+        client.respond(id, Ok(outcome)).unwrap();
+    }
+
+    fn contents_of(updates: &[serde_json::Value], call: &str) -> Vec<String> {
+        updates
+            .iter()
+            .map(|p| &p["update"])
+            .filter(|u| u["toolCallId"] == call)
+            .filter_map(|u| u["content"][0]["content"]["text"].as_str())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn agent_asks_and_progress_reach_the_root_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().display().to_string();
+        let task = serde_json::json!({"description": "list files", "prompt": "list"});
+        let (client, inbox, session) = serve(
+            vec![
+                tool_turn("call_agent", "agent", task),
+                tool_turn("call_child", "ls", serde_json::json!({ "path": path })),
+                text_turn("child done"),
+                tool_turn("call_root", "ls", serde_json::json!({ "path": path })),
+                text_turn("parent done"),
+            ],
+            dir.path(),
+        );
+        let (done, prompt_end) = mpsc::channel();
+        let prompter = client.clone();
+        let params = serde_json::json!({
+            "sessionId": session,
+            "prompt": [{"type": "text", "text": "go"}],
+        });
+        std::thread::spawn(move || {
+            let _ = done.send(prompter.request("session/prompt", params));
+        });
+
+        let mut updates = Vec::new();
+        let (child_ask, params) = until_ask(&inbox, &mut updates);
+        assert_eq!(params["sessionId"], session);
+        assert_eq!(params["toolCall"]["toolCallId"], "call_agent");
+        assert_eq!(params["toolCall"]["title"], "general: ls");
+        assert_eq!(params["toolCall"]["rawInput"]["path"], path);
+        allow(&client, &child_ask);
+
+        let (root_ask, params) = until_ask(&inbox, &mut updates);
+        assert_eq!(params["sessionId"], session);
+        assert_eq!(params["toolCall"]["toolCallId"], "call_root");
+        assert!(prompt_end.recv_timeout(Duration::from_millis(100)).is_err());
+        allow(&client, &root_ask);
+
+        let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+        assert_eq!(response["stopReason"], "end_turn");
+        while let Ok(Inbound::Notification { params, .. }) = inbox.try_recv() {
+            updates.push(params);
+        }
+        assert!(updates.iter().all(|p| p["sessionId"] == session));
+        let announced = updates
+            .iter()
+            .find(|p| p["update"]["toolCallId"] == "call_agent");
+        assert_eq!(announced.unwrap()["update"]["sessionUpdate"], "tool_call");
+        let progress = contents_of(&updates, "call_agent");
+        assert_eq!(
+            progress[..3],
+            [
+                format!("general: List {path}"),
+                format!("general: Waiting for approval: List {path}"),
+                "general: done".to_owned(),
+            ]
+        );
+        assert!(contents_of(&updates, "call_child").is_empty());
+        assert!(progress[3].contains("child done"), "{progress:?}");
+    }
 
     fn kind(update: &SessionUpdate) -> &'static str {
         match update {

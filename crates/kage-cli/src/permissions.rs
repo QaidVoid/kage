@@ -12,20 +12,15 @@
 //! ask, but never a deny mode or a configured deny.
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
+use crossbeam_channel::{Receiver, select_biased};
 use kage_core::config::Config;
 use kage_core::permissions::{PermissionAction, PermissionsConfig};
 use kage_core::protocol::PermissionDecision;
 use kage_core::sync::lock;
 use kage_core::{CancelFlag, ToolCallId, ToolOutput};
 use kage_loop::Hooks;
-
-/// How long to wait between cancel-flag checks while parked on an
-/// ask. Same cadence the loop's cancelable sleeps use.
-const ASK_POLL: Duration = Duration::from_millis(100);
 
 /// A tool call waiting for an interactive decision.
 pub(crate) struct PermissionPrompt {
@@ -179,32 +174,27 @@ impl PermissionGate {
                 "permission prompt unavailable (host went away); denied",
             ));
         };
-        loop {
-            match reply_rx.recv_timeout(ASK_POLL) {
-                Ok(PermissionDecision::AllowOnce) => return None,
+        let watch = self.cancel.watch();
+        select_biased! {
+            recv(reply_rx) -> decision => match decision {
+                Ok(PermissionDecision::AllowOnce) => None,
                 Ok(PermissionDecision::AllowSession) => {
                     self.allow_for_session(tool);
-                    return None;
+                    None
                 }
                 Ok(PermissionDecision::AllowAlways) => {
                     self.allow_for_session(tool);
                     self.persist_allow_always(tool);
-                    return None;
+                    None
                 }
-                Ok(PermissionDecision::Deny) => {
-                    return Some(error_output(tool, "denied by user"));
-                }
-                Err(RecvTimeoutError::Timeout) => {
-                    if self.cancel.is_cancelled() {
-                        return Some(error_output(tool, "permission prompt cancelled"));
-                    }
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Some(error_output(
-                        tool,
-                        "permission prompt dropped (host went away); denied",
-                    ));
-                }
+                Ok(PermissionDecision::Deny) => Some(error_output(tool, "denied by user")),
+                Err(_) => Some(error_output(
+                    tool,
+                    "permission prompt dropped (host went away); denied",
+                )),
+            },
+            recv(watch.receiver()) -> _ => {
+                Some(error_output(tool, "permission prompt cancelled"))
             }
         }
     }
@@ -355,6 +345,7 @@ fn non_interactive_output(tool: &str, rule: &Rule) -> ToolOutput {
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
+    use std::time::Duration;
 
     use kage_core::permissions::{PermissionAction, ToolPermissionRules};
     use kage_loop::NoopHooks;
@@ -364,14 +355,14 @@ mod tests {
     struct Ask {
         tool: String,
         subject: String,
-        reply: mpsc::Sender<PermissionDecision>,
+        reply: crossbeam_channel::Sender<PermissionDecision>,
     }
 
     /// An asker that hands each prompt to the test over a channel.
     fn channel_asker() -> (Asker, mpsc::Receiver<Ask>) {
         let (tx, rx) = mpsc::channel();
         let asker: Asker = Arc::new(move |prompt: PermissionPrompt| {
-            let (reply, answer) = mpsc::channel();
+            let (reply, answer) = crossbeam_channel::bounded(1);
             tx.send(Ask {
                 tool: prompt.tool,
                 subject: prompt.subject,

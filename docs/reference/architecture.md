@@ -64,7 +64,7 @@ turns it into ACP traffic (see [the ACP projection](#the-acp-projection)).
 
 An agent is an engine session with a parent link. The `agent` tool
 never touches sessions itself. It sends a spawn request to the
-dispatcher and waits on a reply channel, polling its cancel flag.
+dispatcher and waits on its reply channel and its cancel flag.
 
 ```text
 parent runner thread          dispatcher                     agent runner thread

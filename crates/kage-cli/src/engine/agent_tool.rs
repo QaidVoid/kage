@@ -2,9 +2,10 @@
 //! waits for it, and returns its final reply as the tool result.
 
 use std::fmt::Write as _;
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::mpsc;
 use std::time::Duration;
 
+use crossbeam_channel::select_biased;
 use kage_core::agents::AgentDefs;
 use kage_core::event::AGENT_NO_REPLY_TEXT as NO_REPLY;
 use kage_core::protocol::RunOutcome;
@@ -16,9 +17,6 @@ use super::Input;
 
 /// Name the model calls the tool by.
 pub(super) const AGENT_TOOL: &str = "agent";
-
-/// How often a waiting call checks its cancel flag.
-const POLL: Duration = Duration::from_millis(100);
 
 /// How long a cancelled call waits for the child's cancelled result, which
 /// carries its session id and partial reply.
@@ -35,7 +33,7 @@ pub(super) struct Spawn {
     pub description: String,
     pub prompt: String,
     /// Receives the child's result once its first run finishes.
-    pub reply: mpsc::Sender<ToolOutput>,
+    pub reply: crossbeam_channel::Sender<ToolOutput>,
 }
 
 #[derive(Deserialize)]
@@ -133,7 +131,7 @@ impl Tool for AgentTool {
             .call_id()
             .cloned()
             .ok_or_else(|| ToolError::InvalidInput("the agent tool needs a call id".into()))?;
-        let (reply, result) = mpsc::channel();
+        let (reply, result) = crossbeam_channel::bounded(1);
         let spawn = Spawn {
             parent: self.parent,
             tool_call_id,
@@ -145,18 +143,12 @@ impl Tool for AgentTool {
         if self.engine.send(Input::Spawn(Box::new(spawn))).is_err() {
             return Ok(engine_stopped());
         }
-        loop {
-            match result.recv_timeout(POLL) {
-                Ok(output) => return Ok(output),
-                Err(RecvTimeoutError::Timeout) => {
-                    if cx.is_cancelled() {
-                        return result
-                            .recv_timeout(CANCEL_GRACE)
-                            .map_err(|_| ToolError::Cancelled);
-                    }
-                }
-                Err(RecvTimeoutError::Disconnected) => return Ok(engine_stopped()),
-            }
+        let watch = cx.cancel_flag().watch();
+        select_biased! {
+            recv(result) -> output => Ok(output.unwrap_or_else(|_| engine_stopped())),
+            recv(watch.receiver()) -> _ => result
+                .recv_timeout(CANCEL_GRACE)
+                .map_err(|_| ToolError::Cancelled),
         }
     }
 }
@@ -310,5 +302,27 @@ mod tests {
             "[truncated: 5 more characters. The full transcript is session {id}.]"
         )));
         assert_eq!(out.text.matches('\u{e9}').count(), RESULT_CAP);
+    }
+
+    #[test]
+    fn cancel_ends_a_call_the_engine_never_answers() {
+        let (engine, spawns) = mpsc::channel();
+        let tool = AgentTool::new(SessionId::new(), engine, &AgentDefs::builtin());
+        let cancel = kage_core::CancelFlag::new();
+        let flag = cancel.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let workdir = std::env::temp_dir();
+            let id = ToolCallId::new("call");
+            let cx = ToolContext::new(&workdir, &flag).with_call_id(&id);
+            let input = serde_json::json!({"description": "d", "prompt": "p"});
+            let _ = done_tx.send(tool.execute(input, &cx));
+        });
+        let spawn = spawns.recv_timeout(Duration::from_secs(5)).unwrap();
+        cancel.cancel();
+        let result = done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(result, Err(ToolError::Cancelled)), "{result:?}");
+        handle.join().unwrap();
+        drop(spawn);
     }
 }

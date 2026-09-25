@@ -1511,16 +1511,19 @@ fn print_mode_text_names_agents_and_how_they_ended() {
     };
     let children = spawned(&events);
     let (first, second) = (name(&children[0].1), name(&children[1].1));
-    assert_eq!(
-        text,
-        format!(
-            "\n[agent general: a task]\n\
-             \n[agent explore: map it]\n\
-             [agent {first} completed]\n\
-             [agent {second} failed] authentication failed: bad key\n\
-             parent done"
-        ),
-    );
+    let (ends, last) = text
+        .strip_prefix("\n[agent general: a task]\n\n[agent explore: map it]\n")
+        .and_then(|rest| rest.rsplit_once('\n'))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert_eq!(last, "parent done");
+    let mut ends: Vec<&str> = ends.lines().collect();
+    ends.sort_unstable();
+    let mut expected = [
+        format!("[agent {first} completed]"),
+        format!("[agent {second} failed] authentication failed: bad key"),
+    ];
+    expected.sort_unstable();
+    assert_eq!(ends, expected, "{text}");
 }
 
 /// An in-process MCP server with tool `t`, resource `test://doc` whose

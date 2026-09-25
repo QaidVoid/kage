@@ -261,7 +261,7 @@ struct AgentLink {
     /// Delivers the result to the waiting `agent` call. Taken by the
     /// first run that finishes, so later runs a user starts in the
     /// agent never answer the parent twice.
-    reply: Option<mpsc::Sender<ToolOutput>>,
+    reply: Option<crossbeam_channel::Sender<ToolOutput>>,
 }
 
 /// What a session holds while no run owns it.
@@ -316,7 +316,8 @@ impl ToolDelta {
 }
 
 /// Open permission requests with the session that asked.
-type Asks = Arc<Mutex<HashMap<RequestId, (SessionId, mpsc::Sender<PermissionDecision>)>>>;
+type Asks =
+    Arc<Mutex<HashMap<RequestId, (SessionId, crossbeam_channel::Sender<PermissionDecision>)>>>;
 
 struct Dispatcher {
     bus: Arc<Bus>,
@@ -1030,7 +1031,7 @@ impl Dispatcher {
         id: SessionId,
         outcome: &RunOutcome,
         history: &[Message],
-    ) -> Option<(mpsc::Sender<ToolOutput>, ToolOutput)> {
+    ) -> Option<(crossbeam_channel::Sender<ToolOutput>, ToolOutput)> {
         let link = self.sessions.get_mut(&id)?.link.as_mut()?;
         let reply = link.reply.take()?;
         Some((
@@ -1150,7 +1151,7 @@ fn asker(bus: &Arc<Bus>, asks: &Asks, next: &Arc<AtomicU64>, session: SessionId)
     let next = Arc::clone(next);
     Arc::new(move |prompt: PermissionPrompt| {
         let request_id = RequestId(next.fetch_add(1, Ordering::Relaxed));
-        let (reply, answer) = mpsc::channel();
+        let (reply, answer) = crossbeam_channel::bounded(1);
         lock(&asks).insert(request_id, (session, reply));
         bus.publish(
             session,

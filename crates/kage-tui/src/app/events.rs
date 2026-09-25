@@ -174,6 +174,7 @@ impl App {
             }
             InputAction::OpenHelp => self.open_help(),
             InputAction::OpenJumpPicker => self.open_jump_picker(),
+            InputAction::OpenAgents => self.open_agents(),
             InputAction::AttachClipboardImage => self.request_clipboard_attach(),
         }
         None
@@ -204,6 +205,7 @@ impl App {
             || self.picker.is_some()
             || self.settings_overlay.is_some()
             || self.session_tree.is_some()
+            || self.agents_overlay.is_some()
             || self.slash_palette.is_some()
             || self.cmdline.is_some()
             || self.search_line.is_some()

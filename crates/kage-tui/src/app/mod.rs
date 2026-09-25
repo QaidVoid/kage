@@ -578,6 +578,10 @@ pub struct App {
     /// Open `?` / `:help` keyboard reference, a modal sibling of the
     /// picker. Scroll-only; every key either scrolls or closes.
     help_overlay: Option<crate::overlay::HelpOverlay>,
+    /// Open agents overlay (`Ctrl+T`, `/agents`), a modal sibling of
+    /// the picker. Its rows are rebuilt from [`Self::agents`] every
+    /// frame.
+    agents_overlay: Option<crate::overlay::AgentsOverlay>,
     /// Open right-click context menu, if any. A light modal layer:
     /// while present it owns the keyboard and intercepts mouse clicks
     /// (a click on a row runs its action, a click off it dismisses).

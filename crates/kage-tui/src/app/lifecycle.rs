@@ -346,6 +346,13 @@ impl App {
         let model_id = self.model_id(session_usage.as_ref());
         let model_label = self.model_label(model_id.as_deref());
         let start_keys = self.start_keys();
+        let agents_key = self.key_label("OpenAgents");
+        if self.agents_overlay.is_some() {
+            let rows = self.agents_overlay_rows();
+            if let Some(overlay) = self.agents_overlay.as_mut() {
+                overlay.set_rows(rows);
+            }
+        }
         let cwd = self
             .completion_workdir
             .as_ref()
@@ -379,6 +386,7 @@ impl App {
             start_keys,
             pending: &pending,
             agents: &agent_rows,
+            agents_key: agents_key.as_deref(),
             breadcrumb: breadcrumb.as_ref(),
             placeholder: placeholder.as_deref(),
         };
@@ -394,6 +402,7 @@ impl App {
             && self.picker.is_none()
             && self.settings_overlay.is_none()
             && self.session_tree.is_none()
+            && self.agents_overlay.is_none()
             && self.approval_panel.is_none()
             && self.help_overlay.is_none()
             && self.plugin_overlay.is_none();
@@ -401,6 +410,7 @@ impl App {
         let settings_overlay = self.settings_overlay.as_mut();
         let session_tree = self.session_tree.as_mut();
         let help_overlay = self.help_overlay.as_mut();
+        let agents_overlay = self.agents_overlay.as_mut();
         let plugin_overlay = self.plugin_overlay.as_mut();
         let approval = self
             .approval_panel
@@ -463,13 +473,16 @@ impl App {
                 if let Some(tree) = session_tree {
                     tree.render(frame, area);
                 }
+                let above_input = ratatui::layout::Rect::new(
+                    area.x,
+                    area.y,
+                    area.width,
+                    regions.input.y.saturating_sub(area.y),
+                );
+                if let Some(agents) = agents_overlay {
+                    agents.render(frame, above_input);
+                }
                 if let Some(help) = help_overlay {
-                    let above_input = ratatui::layout::Rect::new(
-                        area.x,
-                        area.y,
-                        area.width,
-                        regions.input.y.saturating_sub(area.y),
-                    );
                     let modal = crate::overlay::OverlayWidget::measure(help, above_input);
                     frame.render_widget(crate::opaque::OpaqueClear, modal);
                     let theme = crate::theme::current();

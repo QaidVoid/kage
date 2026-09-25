@@ -182,6 +182,7 @@ impl App {
             || self.picker.is_some()
             || self.settings_overlay.is_some()
             || self.session_tree.is_some()
+            || self.agents_overlay.is_some()
         {
             return;
         }
@@ -540,6 +541,47 @@ impl App {
                             "Delete session",
                             "Delete this session? This cannot be undone.",
                         )));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
+    /// Open the agents overlay over the main session's agents, with the
+    /// agent on screen selected. A session without agents only says so.
+    pub(crate) fn open_agents(&mut self) {
+        let rows = self.agents_overlay_rows();
+        if rows.len() < 2 {
+            self.notify("no agents in this session yet");
+            return;
+        }
+        self.agents_overlay = Some(crate::overlay::AgentsOverlay::new(rows, self.focus));
+    }
+
+    /// Drive the agents overlay. Enter closes it on the selected
+    /// session's view, `x` stops the selected agent and keeps it open.
+    pub(crate) fn dispatch_agents_key(
+        &mut self,
+        key: ratatui::crossterm::event::KeyEvent,
+    ) -> Option<AppExit> {
+        let overlay = self.agents_overlay.as_mut()?;
+        match crate::overlay::OverlayWidget::handle_key(overlay, key) {
+            OverlayAction::Stay | OverlayAction::PropagateKey => {}
+            OverlayAction::Close => self.agents_overlay = None,
+            OverlayAction::Resolve(action) => {
+                let session = overlay.selected();
+                match action.as_str() {
+                    Some("open") => {
+                        self.agents_overlay = None;
+                        match session {
+                            Some(session) => self.focus_agent(session),
+                            None => self.set_focus(None),
+                        }
+                    }
+                    Some("stop") => {
+                        let _ = self.send_request(RunRequest::Cancel { session });
                     }
                     _ => {}
                 }

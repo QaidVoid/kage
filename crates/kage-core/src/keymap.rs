@@ -488,6 +488,10 @@ pub const ACTIONS: &[ActionDef] = &[
         "QueuePrompt",
         "Queue the prompt until the run ends. Does nothing while idle.",
     ),
+    action(
+        "OpenAgents",
+        "Open the agents overlay: every agent of the session.",
+    ),
 ];
 
 /// Look up an action by name.
@@ -940,7 +944,7 @@ mod tests {
 
     #[test]
     fn actions_hold_the_rebindable_names() {
-        assert_eq!(ACTIONS.len(), 26);
+        assert_eq!(ACTIONS.len(), 27);
         for (i, a) in ACTIONS.iter().enumerate() {
             assert!(
                 ACTIONS[..i].iter().all(|b| b.name != a.name),

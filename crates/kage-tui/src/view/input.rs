@@ -112,7 +112,7 @@ pub(super) fn render_input(
     if area.height < crate::layout::INPUT_CHROME_LINES || area.width == 0 {
         return;
     }
-    paint_agents(frame, agents_area, status.agents);
+    paint_agents(frame, agents_area, status.agents, status.agents_key);
     paint_pending(frame, pending_area, status.pending);
     let theme = crate::theme::current();
     let mode = input.mode();
@@ -225,8 +225,9 @@ pub(crate) fn split_input(input: Rect, agents: usize, pending: usize) -> (Rect, 
 }
 
 /// Paint the pinned agents in tree order, with names in one column
-/// and what each does right-aligned.
-fn paint_agents(frame: &mut Frame, area: Rect, agents: &[AgentRow]) {
+/// and what each does right-aligned. The `+N more` row names `key`,
+/// the key that lists them all.
+fn paint_agents(frame: &mut Frame, area: Rect, agents: &[AgentRow], key: Option<&str>) {
     if area.height == 0 {
         return;
     }
@@ -243,7 +244,11 @@ fn paint_agents(frame: &mut Frame, area: Rect, agents: &[AgentRow]) {
         .collect();
     if let Some(more) = agents.len().checked_sub(AGENT_MAX_ROWS).filter(|n| *n > 0) {
         let muted = Style::default().fg(crate::theme::current().muted_fg);
-        lines.push(Line::from(Span::styled(format!("  +{more} more"), muted)));
+        let more = match key {
+            Some(key) => format!("  +{more} more \u{b7} {key} for agents"),
+            None => format!("  +{more} more"),
+        };
+        lines.push(Line::from(Span::styled(more, muted)));
     }
     frame.render_widget(Paragraph::new(lines), area);
 }

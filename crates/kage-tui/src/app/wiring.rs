@@ -22,6 +22,7 @@ impl App {
             settings_overlay: None,
             session_tree: None,
             help_overlay: None,
+            agents_overlay: None,
             session_tree_source: None,
             session_lister: None,
             cmdline: None,
@@ -532,7 +533,9 @@ impl App {
     /// The footer hint: the pending keys of a mapping sequence, else
     /// the keys of the open panel or overlay, else what the next keys
     /// do in the current state. Kept short so it fits at 80 columns
-    /// next to the session facts.
+    /// next to the session facts: while the main session has agents,
+    /// the key that lists them takes the place of the queue or help
+    /// hint of a run in flight.
     pub(crate) fn footer_hint(&mut self) -> String {
         let keys = self.sequencer.pending();
         if !keys.is_empty() {
@@ -578,11 +581,18 @@ impl App {
             |app: &mut Self, action, what| app.key_label(action).map(|key| format!("{key} {what}"));
         let queue = label(self, "QueuePrompt", "to queue").filter(|_| working);
         let queues = label(self, "QueuePrompt", "queues").filter(|_| working);
-        let (queue, queues) = (queue.as_deref(), queues.as_deref());
+        let has_agents = working
+            && self
+                .active_session
+                .is_some_and(|main| !self.agents.under(main).is_empty());
+        let agents = label(self, "OpenAgents", "for agents").filter(|_| has_agents);
+        let (queue, queues, agents) = (queue.as_deref(), queues.as_deref(), agents.as_deref());
         let mut parts: Vec<&str> = Vec::new();
         if self.input.is_modeless() {
             match (working, draft) {
-                (true, false) => parts.extend(queue.into_iter().chain(["esc to interrupt"])),
+                (true, false) => {
+                    parts.extend(agents.or(queue).into_iter().chain(["esc to interrupt"]));
+                }
                 (true, true) => {
                     parts.push("enter steers");
                     parts.extend(queues);
@@ -606,13 +616,15 @@ impl App {
                     (false, false) => {}
                 }
                 parts.push("i to type");
-                parts.extend(help.as_deref());
+                parts.extend(agents.filter(|_| !draft).or(help.as_deref()));
                 if !working && !draft {
                     parts.extend(commands.as_deref());
                 }
             }
             Mode::Insert => match (working, draft) {
-                (true, false) => parts.extend(queue.into_iter().chain(["ctrl+c to interrupt"])),
+                (true, false) => {
+                    parts.extend(agents.or(queue).into_iter().chain(["ctrl+c to interrupt"]));
+                }
                 (true, true) => {
                     parts.push("enter steers");
                     parts.extend(queues);
@@ -769,6 +781,74 @@ impl App {
                 })
             })
             .collect()
+    }
+
+    /// The agents overlay's rows: the main session, then every agent
+    /// under it in tree order, live or finished.
+    pub(crate) fn agents_overlay_rows(&self) -> Vec<crate::overlay::AgentsRow> {
+        use crate::overlay::{AgentsRow, AgentsRowState};
+        use kage_core::protocol::AgentState;
+        let Some(main) = self.active_session else {
+            return Vec::new();
+        };
+        let ms = |d: std::time::Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+        let usage = self.session_usage_snapshot().unwrap_or_default();
+        let running = self.session_running(None);
+        let title = self
+            .slots
+            .as_ref()
+            .and_then(|slots| lock(&slots.ui_state()).session_title.clone())
+            .unwrap_or_else(|| "main session".to_owned());
+        let mut rows = vec![AgentsRow {
+            session: None,
+            depth: 0,
+            name: "kage".to_owned(),
+            title,
+            state: if running {
+                AgentsRowState::Running
+            } else {
+                AgentsRowState::Idle
+            },
+            activity: String::new(),
+            elapsed_ms: self
+                .run_started
+                .filter(|_| running)
+                .map(|t| ms(t.elapsed())),
+            tokens: usage.total_tokens(),
+            cost: usage.total_cost,
+        }];
+        rows.extend(self.agents.under(main).into_iter().map(|(depth, node)| {
+            let state = match node.state {
+                AgentState::Queued => AgentsRowState::Queued,
+                AgentState::Running if node.waiting > 0 => AgentsRowState::Waiting,
+                AgentState::Running => AgentsRowState::Running,
+                AgentState::Done => AgentsRowState::Done,
+                AgentState::Failed => AgentsRowState::Failed,
+                AgentState::Cancelled => AgentsRowState::Stopped,
+            };
+            let activity = match (state, self.agent_buffers.get(&node.session)) {
+                (AgentsRowState::Running, Some(buffer)) => {
+                    super::engine::agent_activity(&lock(buffer))
+                }
+                _ => String::new(),
+            };
+            let elapsed = match node.state {
+                AgentState::Running => node.started.map(|t| t.elapsed()),
+                _ => node.took,
+            };
+            AgentsRow {
+                session: Some(node.session),
+                depth,
+                name: node.agent.clone(),
+                title: node.description.clone(),
+                state,
+                activity,
+                elapsed_ms: elapsed.map(ms),
+                tokens: node.usage.total.input + node.usage.total.output,
+                cost: node.usage.cost,
+            }
+        }));
+        rows
     }
 
     /// What the `breadcrumb` component shows for the agent on screen:

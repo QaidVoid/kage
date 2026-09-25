@@ -159,6 +159,8 @@ pub enum InputAction {
     OpenHelp,
     /// Open the message jump picker.
     OpenJumpPicker,
+    /// Open the agents overlay.
+    OpenAgents,
     /// Attach an image from the OS clipboard.
     AttachClipboardImage,
 }

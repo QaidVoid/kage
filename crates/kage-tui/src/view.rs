@@ -106,6 +106,9 @@ pub struct StatusCtx<'a> {
     /// Live agents under the session on screen, pinned above the
     /// pending prompts.
     pub agents: &'a [AgentRow],
+    /// Key that opens the agents overlay, named in the pinned list's
+    /// `+N more` row.
+    pub agents_key: Option<&'a str>,
     /// The agent on screen, for the `breadcrumb` component. `None` in
     /// the main view, where the `title` component and the start card
     /// paint instead.
@@ -440,7 +443,7 @@ pub(crate) use modeline::{
 #[cfg(test)]
 pub(crate) use bubble::split_line_into_rows;
 #[cfg(test)]
-pub(crate) use modeline::{format_token_count, input_visual_cursor};
+pub(crate) use modeline::input_visual_cursor;
 
 // Re-exports so sibling block widgets keep resolving `super::*` helpers
 // and the host (`app`) keeps its `view::*` entry points after the split.
@@ -459,7 +462,9 @@ pub(crate) use input::{
 };
 pub use input::{AgentRow, AgentRowState, PendingPrompt};
 pub use modeline::input_visual_row_count;
-pub(crate) use modeline::{chrome_lines_to_ratatui, spinner_frame_index};
+pub(crate) use modeline::{
+    chrome_lines_to_ratatui, format_token_count, spinner_frame, spinner_frame_index,
+};
 pub(crate) use slot::START_SESSIONS;
 
 #[cfg(test)]

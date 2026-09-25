@@ -180,6 +180,10 @@ impl App {
                 self.open_session_tree();
                 None
             }
+            "agents" => {
+                self.open_agents();
+                None
+            }
             "clone" => {
                 let _ = self.send_request(RunRequest::CloneSession);
                 None

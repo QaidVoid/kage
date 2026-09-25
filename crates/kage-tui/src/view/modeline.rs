@@ -123,7 +123,7 @@ pub(crate) fn spinner_frame_index() -> usize {
     }
 }
 
-pub(super) fn spinner_frame() -> &'static str {
+pub(crate) fn spinner_frame() -> &'static str {
     SPINNER_FRAMES[spinner_frame_index()]
 }
 

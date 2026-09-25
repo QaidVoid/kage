@@ -2,9 +2,9 @@
 //!
 //! Overlays are interactive modals painted over the conversation
 //! buffer: model picker, session picker, slash command palette,
-//! settings dialog, login dialog. Every one of them implements
-//! [`OverlayWidget`], the shared render/input contract the App drives
-//! directly.
+//! settings dialog, login dialog, agents overlay. Every one of them
+//! implements [`OverlayWidget`], the shared render/input contract the
+//! App drives directly.
 //!
 //! Unlike the standalone [`crate::picker::pick`] (which owns the
 //! terminal in raw mode for one-shot prompts like `kage auth login`),
@@ -15,6 +15,7 @@
 //! The [`ApprovalPanel`] is the exception: it paints into the input
 //! region in place of the input box, never over the conversation.
 
+pub mod agents;
 pub mod approval;
 pub mod completion;
 pub mod confirm;
@@ -28,6 +29,7 @@ pub mod settings;
 pub mod slash;
 pub mod widget;
 
+pub use agents::{AgentsOverlay, AgentsRow, AgentsRowState};
 pub use approval::{ApprovalOutcome, ApprovalPanel};
 pub use completion::{CompletionAction, InputCompletion, file_completions, prefix_before_cursor};
 pub use confirm::{Choice, ConfirmOverlay};

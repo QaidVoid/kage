@@ -4890,3 +4890,200 @@ fn another_agents_approval_still_opens_while_focused() {
         "{rows:#?}"
     );
 }
+
+/// An App with a running `general` agent that started a `test` agent,
+/// and a finished `explore` agent. Returns the three sessions in that
+/// order.
+fn agents_app() -> (
+    App,
+    mpsc::Receiver<RunRequest>,
+    mpsc::Sender<kage_core::protocol::Envelope>,
+    [kage_core::SessionId; 3],
+) {
+    let (mut app, rx, events) = app_with_events();
+    app.set_editor_modeless(true);
+    let general = spawn_agent(&mut app, &events, "a1", "general");
+    let explore = spawn_agent(&mut app, &events, "a2", "explore");
+    let test = kage_core::SessionId::new();
+    let spawned = kage_core::protocol::HostEvent::AgentSpawned {
+        parent: general,
+        tool_call_id: kage_core::ToolCallId::new("n1"),
+        agent: "test".into(),
+        description: "run the provider tests".into(),
+    };
+    send_to(&mut app, &events, test, vec![spawned.into()]);
+    for session in [general, test] {
+        send_to(
+            &mut app,
+            &events,
+            session,
+            vec![kage_core::protocol::HostEvent::RunStarted.into()],
+        );
+    }
+    send_to(
+        &mut app,
+        &events,
+        explore,
+        vec![
+            kage_core::protocol::HostEvent::RunStarted.into(),
+            run_ended(kage_core::protocol::RunOutcome::Completed),
+        ],
+    );
+    (app, rx, events, [general, test, explore])
+}
+
+#[test]
+fn agents_overlay_rows_list_the_main_session_then_the_tree() {
+    use crate::overlay::AgentsRowState;
+    let (app, _rx, _events, [general, test, explore]) = agents_app();
+    let rows: Vec<_> = app
+        .agents_overlay_rows()
+        .into_iter()
+        .map(|r| (r.session, r.depth, r.name, r.state))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (None, 0, "kage".to_owned(), AgentsRowState::Idle),
+            (
+                Some(general),
+                1,
+                "general".to_owned(),
+                AgentsRowState::Running
+            ),
+            (Some(test), 2, "test".to_owned(), AgentsRowState::Running),
+            (Some(explore), 1, "explore".to_owned(), AgentsRowState::Done),
+        ]
+    );
+}
+
+#[test]
+fn enter_in_the_agents_overlay_opens_an_agent_or_the_main_view() {
+    let (mut app, _rx, _events, [_, _, explore]) = agents_app();
+    app.handle_key(ctrl('t'));
+    assert!(app.agents_overlay.is_some());
+    for _ in 0..3 {
+        app.handle_key(code(KeyCode::Down));
+    }
+    app.handle_key(code(KeyCode::Enter));
+    assert!(app.agents_overlay.is_none());
+    assert_eq!(app.focus, Some(explore), "a finished agent opens too");
+
+    app.handle_key(ctrl('t'));
+    let overlay = app.agents_overlay.as_ref().unwrap();
+    assert_eq!(overlay.selected(), Some(explore));
+    app.handle_key(code(KeyCode::Home));
+    app.handle_key(code(KeyCode::Enter));
+    assert_eq!(app.focus, None);
+    assert!(Arc::ptr_eq(&app.buffer, &app.root_buffer));
+}
+
+#[test]
+fn x_in_the_agents_overlay_stops_the_selected_agent_and_esc_closes() {
+    let (mut app, rx, _events, [general, _, _]) = agents_app();
+    app.handle_key(ctrl('t'));
+    app.handle_key(key('j'));
+    app.handle_key(key('x'));
+    assert_eq!(
+        rx.try_recv(),
+        Ok(RunRequest::Cancel {
+            session: Some(general)
+        })
+    );
+    assert!(app.agents_overlay.is_some(), "stopping keeps the list open");
+    app.handle_key(code(KeyCode::Esc));
+    assert!(app.agents_overlay.is_none());
+    assert_eq!(app.focus, None);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn slash_agents_opens_the_overlay_and_help_lists_its_key() {
+    let (mut app, _rx, _events, _) = agents_app();
+    let registry: Vec<&CommandSpec> = BUILTIN_COMMANDS.iter().collect();
+    let result = app.run_command_validated("agents", &registry);
+    assert!(matches!(result, CommandResult::Done(None)), "{result:?}");
+    assert!(app.agents_overlay.is_some());
+    app.agents_overlay = None;
+
+    app.open_help();
+    let rows = app.help_overlay.as_ref().unwrap().mapped_rows();
+    assert!(rows.contains(&("<C-t>", "agents")), "{rows:?}");
+}
+
+#[test]
+fn a_session_without_agents_opens_no_overlay() {
+    let (mut app, _rx, events) = app_with_events();
+    feed(&mut app, &events, vec![text_delta("hi")]);
+    app.handle_key(ctrl('t'));
+    assert!(app.agents_overlay.is_none());
+}
+
+#[test]
+fn the_agents_overlay_fits_80_by_24_and_stays_live() {
+    let (mut app, _rx, events, [general, _, _]) = agents_app();
+    app.handle_key(ctrl('t'));
+    let rows = rendered(&mut app, 80, 24);
+    let top = rows.iter().position(|r| r.contains("Agents")).unwrap();
+    assert!(rows[top].contains("2 running \u{b7} 1 done"), "{rows:#?}");
+    assert!(rows[top + 1].contains("> kage"), "{rows:#?}");
+    assert!(rows[top + 1].contains("idle"), "{rows:#?}");
+    assert!(rows[top + 2].contains("general task"), "{rows:#?}");
+    assert!(rows[top + 3].contains("test "), "{rows:#?}");
+    assert!(rows[top + 4].contains("\u{2022} explore"), "{rows:#?}");
+    assert!(rows[top + 4].contains("done"), "{rows:#?}");
+    assert!(rows[top + 5].contains("enter to open"), "{rows:#?}");
+
+    send_to(
+        &mut app,
+        &events,
+        general,
+        vec![bash_start("c1"), permission_request("c1", 5)],
+    );
+    let rows = rendered(&mut app, 80, 24);
+    assert!(
+        rows.iter().any(|r| r.contains("waiting for approval")),
+        "{rows:#?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("general \u{b7} Run this command?")),
+        "the approval panel shows under the overlay: {rows:#?}"
+    );
+}
+
+#[test]
+fn the_more_row_and_the_working_hint_name_the_agents_key() {
+    let check = |mut app: App, events: &mpsc::Sender<kage_core::protocol::Envelope>, key: &str| {
+        app.set_editor_modeless(true);
+        app.set_session_usage(crate::usage::shared_session_usage());
+        lock(app.session_usage.as_ref().unwrap()).working = true;
+        for n in 1..=6 {
+            let child = spawn_agent(&mut app, events, &format!("a{n}"), "explore");
+            send_to(
+                &mut app,
+                events,
+                child,
+                vec![kage_core::protocol::HostEvent::RunStarted.into()],
+            );
+        }
+        let rows = rendered(&mut app, 80, 24);
+        let more = format!("  +2 more \u{b7} {key} for agents");
+        assert!(rows.contains(&more), "{rows:#?}");
+        assert_eq!(
+            app.footer_hint(),
+            format!("{key} for agents \u{b7} esc to interrupt")
+        );
+    };
+    let (app, _rx, events) = app_with_events();
+    check(app, &events, "ctrl+t");
+
+    let (mut app, _rx, _) = app_with_config(
+        "kage.keymap.del('g', '<C-t>')
+         kage.keymap.set('g', '<M-a>', kage.action.OpenAgents)",
+        &[],
+    );
+    let (events, events_rx) = mpsc::channel();
+    app.set_engine_events(events_rx);
+    check(app, &events, "alt+a");
+}

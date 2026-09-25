@@ -37,6 +37,7 @@ local map, act = kage.keymap.set, kage.action
 map("g", "<C-p>", act.OpenModelPicker, { desc = "model picker", group = "general" })
 map("g", "<C-s>", act.OpenSessionPicker, { desc = "session picker", group = "general" })
 map("g", "<F3>", act.OpenJumpPicker, { desc = "jump to a message", group = "general" })
+map("g", "<C-t>", act.OpenAgents, { desc = "agents", group = "general" })
 map("g", "<S-Tab>", act.CycleThinkingLevel, { desc = "cycle thinking level", group = "general" })
 map("g", "<C-v>", act.AttachClipboardImage, { desc = "attach image from clipboard", group = "general" })
 map("i", "<Tab>", act.QueuePrompt, { desc = "queue the prompt until the run ends", group = "general" })

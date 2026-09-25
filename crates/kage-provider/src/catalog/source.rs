@@ -49,6 +49,7 @@ pub const SUPPORTED_PROVIDERS: &[ProviderMap] = &[
     },
     ProviderMap::same("zai"),
     ProviderMap::same("zai-coding-plan"),
+    ProviderMap::same("zhipuai-coding-plan"),
     ProviderMap::same("deepseek"),
     ProviderMap::same("groq"),
     ProviderMap::same("mistral"),

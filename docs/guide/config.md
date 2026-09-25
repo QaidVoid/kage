@@ -177,7 +177,7 @@ API keys are read from environment variables:
 | `OPENAI_API_KEY`        | OpenAI                                        |
 | `GEMINI_API_KEY`        | Google Gemini                                 |
 | `ZAI_API_KEY`           | Z.AI                                          |
-| `ZAI_CODING_API_KEY`    | Z.AI Coding                                   |
+| `ZAI_CODING_API_KEY`    | Z.AI and Zhipu AI coding plans                |
 | `DEEPSEEK_API_KEY`      | DeepSeek                                      |
 | `GROQ_API_KEY`          | Groq                                          |
 | `MISTRAL_API_KEY`       | Mistral                                       |

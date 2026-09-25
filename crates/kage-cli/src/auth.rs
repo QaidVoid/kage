@@ -248,10 +248,15 @@ impl AuthStore {
         self.save_to(&Self::default_path()?)
     }
 
-    /// Look up a provider's full [`Credential`].
+    /// Look up a provider's full [`Credential`]. `zhipuai-coding-plan`
+    /// falls back to the credential saved for `zai-coding-plan`, since
+    /// one coding plan key works on both endpoints.
     #[must_use]
     pub fn credential(&self, provider: &str) -> Option<&Credential> {
-        self.providers.get(provider)
+        self.providers.get(provider).or_else(|| match provider {
+            "zhipuai-coding-plan" => self.providers.get("zai-coding-plan"),
+            _ => None,
+        })
     }
 
     /// Look up a single bearer token for `provider`, regardless of
@@ -260,7 +265,7 @@ impl AuthStore {
     /// expired because kage does not refresh provider OAuth tokens.
     #[must_use]
     pub fn access_token(&self, provider: &str) -> Option<&str> {
-        self.providers.get(provider).map(Credential::raw_token)
+        self.credential(provider).map(Credential::raw_token)
     }
 
     /// OAuth credentials whose access token expires within `window` of
@@ -308,15 +313,17 @@ impl AuthStore {
 }
 
 /// Provider ids the auth subcommand can target. The list mirrors the
-/// catalog (and our hardcoded `Provider` impls). `zai` and
-/// `zai-coding-plan` are billed separately so each takes its own key;
-/// the four `xiaomi*` ids in contrast all share `XIAOMI_API_KEY`.
+/// catalog (and our hardcoded `Provider` impls). `zai` and the two
+/// coding plans are billed separately, so `zai` takes its own key;
+/// the coding plans share `ZAI_CODING_API_KEY` and the four `xiaomi*`
+/// ids all share `XIAOMI_API_KEY`.
 pub const KNOWN_PROVIDERS: &[&str] = &[
     "anthropic",
     "openai",
     "gemini",
     "zai",
     "zai-coding-plan",
+    "zhipuai-coding-plan",
     "deepseek",
     "groq",
     "mistral",
@@ -340,7 +347,7 @@ pub fn env_var_for(provider: &str) -> &'static str {
         "openai" => "OPENAI_API_KEY",
         "gemini" => "GEMINI_API_KEY",
         "zai" => "ZAI_API_KEY",
-        "zai-coding-plan" => "ZAI_CODING_API_KEY",
+        "zai-coding-plan" | "zhipuai-coding-plan" => "ZAI_CODING_API_KEY",
         "deepseek" => "DEEPSEEK_API_KEY",
         "groq" => "GROQ_API_KEY",
         "mistral" => "MISTRAL_API_KEY",
@@ -627,6 +634,18 @@ mod tests {
                 entry.id
             );
         }
+    }
+
+    #[test]
+    fn china_coding_plan_shares_the_coding_plan_key_unless_it_has_its_own() {
+        let mut store = AuthStore::empty();
+        store.set_api_key("zai-coding-plan", "shared");
+        assert_eq!(store.access_token("zhipuai-coding-plan"), Some("shared"));
+        assert_eq!(env_var_for("zhipuai-coding-plan"), "ZAI_CODING_API_KEY");
+        store.set_api_key("zhipuai-coding-plan", "own");
+        assert_eq!(store.access_token("zhipuai-coding-plan"), Some("own"));
+        assert_eq!(store.access_token("zai-coding-plan"), Some("shared"));
+        assert_eq!(AuthStore::empty().access_token("zhipuai-coding-plan"), None);
     }
 
     #[test]

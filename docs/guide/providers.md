@@ -27,26 +27,60 @@ Each catalog entry is an OpenAI-compatible endpoint. kage registers it
 when a credential is available, and its models become addressable as
 `<id>:<model>`:
 
-| id                      | provider         | credential env       | default base URL                           |
-| ----------------------- | ---------------- | -------------------- | ------------------------------------------ |
-| `zai`                   | Z.AI             | `ZAI_API_KEY`        | `https://api.z.ai/api/paas/v4`             |
-| `zai-coding-plan`       | Z.AI Coding Plan | `ZAI_CODING_API_KEY` | `https://api.z.ai/api/coding/paas/v4`      |
-| `deepseek`              | DeepSeek         | `DEEPSEEK_API_KEY`   | `https://api.deepseek.com/v1`              |
-| `groq`                  | Groq             | `GROQ_API_KEY`       | `https://api.groq.com/openai/v1`           |
-| `mistral`               | Mistral          | `MISTRAL_API_KEY`    | `https://api.mistral.ai/v1`                |
-| `cerebras`              | Cerebras         | `CEREBRAS_API_KEY`   | `https://api.cerebras.ai/v1`               |
-| `xai`                   | xAI              | `XAI_API_KEY`        | `https://api.x.ai/v1`                      |
-| `openrouter`            | OpenRouter       | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1`             |
-| `fireworks-ai`          | Fireworks AI     | `FIREWORKS_API_KEY`  | `https://api.fireworks.ai/inference/v1`    |
-| `moonshotai`            | Moonshot         | `MOONSHOT_API_KEY`   | `https://api.moonshot.ai/v1`               |
-| `kimi-for-coding`       | Kimi for Coding  | `KIMI_API_KEY`       | `https://api.kimi.com/coding/v1`           |
-| `xiaomi`                | Xiaomi           | `XIAOMI_API_KEY`     | `https://api.xiaomimimo.com/v1`            |
-| `xiaomi-token-plan-ams` | Xiaomi AMS plan  | `XIAOMI_API_KEY`     | `https://token-plan-ams.xiaomimimo.com/v1` |
-| `xiaomi-token-plan-cn`  | Xiaomi CN plan   | `XIAOMI_API_KEY`     | `https://token-plan-cn.xiaomimimo.com/v1`  |
-| `xiaomi-token-plan-sgp` | Xiaomi SGP plan  | `XIAOMI_API_KEY`     | `https://token-plan-sgp.xiaomimimo.com/v1` |
+| id                      | provider             | credential env       | default base URL                              |
+| ----------------------- | -------------------- | -------------------- | --------------------------------------------- |
+| `zai`                   | Z.AI                 | `ZAI_API_KEY`        | `https://api.z.ai/api/paas/v4`                |
+| `zai-coding-plan`       | Z.AI Coding Plan     | `ZAI_CODING_API_KEY` | `https://api.z.ai/api/coding/paas/v4`         |
+| `zhipuai-coding-plan`   | Zhipu AI Coding Plan | `ZAI_CODING_API_KEY` | `https://open.bigmodel.cn/api/coding/paas/v4` |
+| `deepseek`              | DeepSeek             | `DEEPSEEK_API_KEY`   | `https://api.deepseek.com/v1`                 |
+| `groq`                  | Groq                 | `GROQ_API_KEY`       | `https://api.groq.com/openai/v1`              |
+| `mistral`               | Mistral              | `MISTRAL_API_KEY`    | `https://api.mistral.ai/v1`                   |
+| `cerebras`              | Cerebras             | `CEREBRAS_API_KEY`   | `https://api.cerebras.ai/v1`                  |
+| `xai`                   | xAI                  | `XAI_API_KEY`        | `https://api.x.ai/v1`                         |
+| `openrouter`            | OpenRouter           | `OPENROUTER_API_KEY` | `https://openrouter.ai/api/v1`                |
+| `fireworks-ai`          | Fireworks AI         | `FIREWORKS_API_KEY`  | `https://api.fireworks.ai/inference/v1`       |
+| `moonshotai`            | Moonshot             | `MOONSHOT_API_KEY`   | `https://api.moonshot.ai/v1`                  |
+| `kimi-for-coding`       | Kimi for Coding      | `KIMI_API_KEY`       | `https://api.kimi.com/coding/v1`              |
+| `xiaomi`                | Xiaomi               | `XIAOMI_API_KEY`     | `https://api.xiaomimimo.com/v1`               |
+| `xiaomi-token-plan-ams` | Xiaomi AMS plan      | `XIAOMI_API_KEY`     | `https://token-plan-ams.xiaomimimo.com/v1`    |
+| `xiaomi-token-plan-cn`  | Xiaomi CN plan       | `XIAOMI_API_KEY`     | `https://token-plan-cn.xiaomimimo.com/v1`     |
+| `xiaomi-token-plan-sgp` | Xiaomi SGP plan      | `XIAOMI_API_KEY`     | `https://token-plan-sgp.xiaomimimo.com/v1`    |
 
-The four `xiaomi*` ids share one key. `zai` and `zai-coding-plan` are
-billed separately and need their own keys.
+The four `xiaomi*` ids share one key, and so do the two coding plans.
+`zai` is billed apart from the coding plans and needs its own key.
+
+### Z.AI and Zhipu AI
+
+Z.AI sells a GLM coding plan in two regions, and kage has a provider
+for each:
+
+| id                    | plan                         | endpoint                                      |
+| --------------------- | ---------------------------- | --------------------------------------------- |
+| `zai-coding-plan`     | Z.AI coding plan (global)    | `https://api.z.ai/api/coding/paas/v4`         |
+| `zhipuai-coding-plan` | Zhipu AI coding plan (China) | `https://open.bigmodel.cn/api/coding/paas/v4` |
+
+Both read the same key: `ZAI_CODING_API_KEY`, or the key saved with
+`kage auth login zai-coding-plan`. A key saved with
+`kage auth login zhipuai-coding-plan` is used for the China plan
+instead, when there is one. Each plan lists the models models.dev
+publishes for it. `zai` is the pay-as-you-go API with its own key.
+
+If only one endpoint is reachable from your network, point the other
+plan at it with a `base_url` override (see below), for example:
+
+```toml
+[providers.zhipuai-coding-plan]
+base_url = "https://api.z.ai/api/coding/paas/v4"
+```
+
+kage shapes requests to `zai`, both coding plans and any custom
+provider whose `base_url` is on `api.z.ai` or `open.bigmodel.cn` the
+way Z.AI expects: `max_tokens` for the output limit, the system prompt as a
+`system` message, `thinking` with `type` `enabled` or `disabled` (and
+`clear_thinking: false` when enabled), `reasoning_effort` only for
+models that list effort values, and `tool_stream: true` when tools
+are sent (except to `glm-4.5` models). kage sends its own
+`User-Agent`.
 
 ## credentials
 
@@ -80,6 +114,24 @@ X-Team = "infra"
 ```
 
 Fields left out keep the provider's default.
+
+## request headers
+
+`headers` adds HTTP headers to every request a provider sends. It
+works on built-in and catalog providers under `[providers.<id>]` and
+on custom providers under `[providers.custom.<id>]`, and the headers
+go out after kage's own:
+
+```toml
+[providers.zhipuai-coding-plan.headers]
+X-Team = "infra"
+
+[providers.custom.relay.headers]
+Authorization = "Basic c2VydmljZTpwdW5jdWF0aW9u"
+```
+
+The inline form works too:
+`headers = { X-Team = "infra" }` inside the provider's table.
 
 ## custom providers
 
@@ -185,9 +237,10 @@ level onto it:
 On the wire: Anthropic effort models get adaptive thinking with
 `output_config.effort` and budget models `budget_tokens`; OpenAI
 models get `reasoning_effort` (`reasoning.effort` on the Responses
-API); Gemini models get `thinkingLevel` or `thinkingBudget`; and
+API); Gemini models get `thinkingLevel` or `thinkingBudget`;
 OpenAI-compatible models with an on/off switch get
-`thinking.type` `enabled` or `disabled`.
+`thinking.type` `enabled` or `disabled`; and Z.AI endpoints get the
+shape described under [Z.AI and Zhipu AI](#z-ai-and-zhipu-ai).
 
 Reasoning goes back to the model that produced it, so thinking carries
 across tool calls:

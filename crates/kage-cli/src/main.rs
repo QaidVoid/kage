@@ -1144,6 +1144,7 @@ const DEFAULT_MODEL_PRIORITY: &[&str] = &[
     "anthropic",
     "openai",
     "zai-coding-plan",
+    "zhipuai-coding-plan",
     "zai",
     "gemini",
     "deepseek",
@@ -1276,6 +1277,79 @@ mod tests {
         assert!(registry.resolve("my-gemini:g-1").is_ok());
         assert!(registry.get("anthropic").is_none());
         assert!(registry.get("gemini").is_none());
+    }
+
+    #[test]
+    fn china_coding_plan_override_sends_configured_headers_and_the_shared_key() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 4096];
+            while !raw.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = conn.read(&mut buf).unwrap();
+                raw.extend_from_slice(&buf[..n]);
+            }
+            let head = String::from_utf8_lossy(&raw).to_lowercase();
+            let length: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .map_or(0, |v| v.trim().parse().unwrap());
+            let body_start = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+            while raw.len() < body_start + length {
+                let n = conn.read(&mut buf).unwrap();
+                raw.extend_from_slice(&buf[..n]);
+            }
+            conn.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: [DONE]\n\n",
+            )
+            .unwrap();
+            String::from_utf8(raw).unwrap()
+        });
+        let config: kage_core::config::Config = toml::from_str(&format!(
+            r#"
+            [providers.zhipuai-coding-plan]
+            base_url = "http://{addr}/api/coding/paas/v4"
+            api_key_env = ""
+            headers = {{ X-Team = "kage-test" }}
+            "#
+        ))
+        .unwrap();
+        let mut store = auth::AuthStore::empty();
+        store.set_api_key("zai-coding-plan", "fake-shared-key");
+        let mut registry = ProviderRegistry::new();
+        register_compat_providers(&config, &store, &mut registry);
+        let resolved = registry.resolve("zhipuai-coding-plan:glm-5.3").unwrap();
+        let req = kage_provider::StreamRequest::new(
+            resolved.model.clone(),
+            vec![kage_core::Message::new(
+                kage_core::Role::User,
+                vec![kage_core::Content::Text { text: "hi".into() }],
+                None,
+            )],
+        );
+        let events: Vec<_> = resolved
+            .provider
+            .stream(req, &kage_core::CancelFlag::new())
+            .unwrap()
+            .collect();
+        assert!(events.iter().all(Result::is_ok), "{events:?}");
+        let request = server.join().unwrap();
+        let lower = request.to_lowercase();
+        assert!(
+            lower.starts_with("post /api/coding/paas/v4/chat/completions "),
+            "{request}"
+        );
+        assert!(lower.contains("\r\nx-team: kage-test\r\n"), "{request}");
+        assert!(lower.contains("\r\nuser-agent: kage/"), "{request}");
+        assert!(
+            lower.contains("\r\nauthorization: bearer fake-shared-key\r\n"),
+            "{request}"
+        );
+        assert!(request.contains("\"max_tokens\""), "{request}");
     }
 
     fn summary(title: Option<&str>, prompt: Option<&str>) -> SessionSummary {

@@ -5,7 +5,8 @@
 //! base URL differ (caching and thinking are off for all). They are
 //! described once in the [`COMPAT_PROVIDERS`] table and built on demand
 //! with [`CompatProvider::build`]; [`crate::catalog`] carries the
-//! matching model lists.
+//! matching model lists. [`OpenAiProvider`] detects the Z.AI and Zhipu
+//! endpoints and shapes their requests the way those upstreams expect.
 //!
 //! When an upstream is *not* OpenAI-compatible (Anthropic Messages API,
 //! Gemini's `:streamGenerateContent`, Bedrock Converse, etc.) it gets
@@ -68,6 +69,11 @@ pub const COMPAT_PROVIDERS: &[CompatProvider] = &[
         id: "zai-coding-plan",
         display_name: "Z.AI Coding Plan",
         base_url: "https://api.z.ai/api/coding/paas/v4",
+    },
+    CompatProvider {
+        id: "zhipuai-coding-plan",
+        display_name: "Zhipu AI Coding Plan",
+        base_url: "https://open.bigmodel.cn/api/coding/paas/v4",
     },
     CompatProvider {
         id: "deepseek",

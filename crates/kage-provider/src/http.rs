@@ -38,10 +38,13 @@ use crate::ProviderError;
 /// auto-retry backstops a genuine stall, so the grace is generous on
 /// purpose to avoid killing a slow-but-alive generation. `global`
 /// stays unset so an active generation is never capped by total time.
+///
+/// Every request names kage and its version as the `User-Agent`.
 fn build_agent() -> ureq::Agent {
     use std::time::Duration;
     ureq::Agent::config_builder()
         .http_status_as_error(false)
+        .user_agent(concat!("kage/", env!("CARGO_PKG_VERSION")))
         .timeout_resolve(Some(Duration::from_secs(15)))
         .timeout_connect(Some(Duration::from_secs(30)))
         .timeout_send_request(Some(Duration::from_secs(600)))

@@ -30,6 +30,31 @@ pub struct OpenAiProvider {
     /// Models advertised from `Provider::models` (custom providers);
     /// empty lets the catalog drive the picker.
     models: Vec<ProviderModel>,
+    /// Request shape the upstream expects.
+    dialect: Dialect,
+}
+
+/// Request shape of an OpenAI-compatible upstream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Dialect {
+    /// Chat Completions as `OpenAI` documents it.
+    OpenAi,
+    /// Z.AI and Zhipu: `max_tokens` instead of `max_completion_tokens`,
+    /// thinking as `thinking`, and `tool_stream` for streamed tool
+    /// call arguments.
+    Zai,
+}
+
+impl Dialect {
+    /// The dialect of provider `id` at `base_url`: Z.AI for the `zai`,
+    /// `zai-coding-plan` and `zhipuai-coding-plan` ids and for any
+    /// `api.z.ai` or `open.bigmodel.cn` endpoint.
+    fn detect(id: &str, base_url: &str) -> Self {
+        let zai = matches!(id, "zai" | "zai-coding-plan" | "zhipuai-coding-plan")
+            || base_url.contains("api.z.ai")
+            || base_url.contains("open.bigmodel.cn");
+        if zai { Self::Zai } else { Self::OpenAi }
+    }
 }
 
 impl OpenAiProvider {
@@ -67,9 +92,11 @@ impl OpenAiProvider {
         base_url: impl Into<String>,
         metadata: ProviderMetadata,
     ) -> Self {
+        let base_url = base_url.into();
         Self {
             api_key: api_key.into(),
-            base_url: base_url.into(),
+            dialect: Dialect::detect(&metadata.id, &base_url),
+            base_url,
             metadata,
             client: crate::http::HttpClient::new(),
             extra_headers: BTreeMap::new(),
@@ -144,7 +171,7 @@ impl Provider for OpenAiProvider {
             return Err(ProviderError::Cancelled);
         }
         let interleaved = self.interleaved(&req.model);
-        let body = build_request_body(&req, true, interleaved);
+        let body = build_request_body(&req, true, interleaved, self.dialect);
         let url = format!("{}/chat/completions", self.base_url);
         let headers = self.request_headers();
         let response = crate::http::send(&self.client, cancel, url, move |agent, url| {
@@ -188,10 +215,11 @@ enum ThinkingReplay {
 /// current turn (everything after the last user message) carries its
 /// thinking there and earlier turns leave it out, as the providers
 /// ask. Without it, thinking goes as `<thinking>` text.
-pub(crate) fn build_request_body(
+fn build_request_body(
     req: &StreamRequest,
     stream: bool,
     interleaved: Option<ReasoningField>,
+    dialect: Dialect,
 ) -> Value {
     let mut messages: Vec<Value> = Vec::new();
     if let Some(system) = &req.system {
@@ -216,19 +244,27 @@ pub(crate) fn build_request_body(
         }
     }
 
+    let max_tokens_field = match dialect {
+        Dialect::OpenAi => "max_completion_tokens",
+        Dialect::Zai => "max_tokens",
+    };
     let mut body = serde_json::json!({
         "model": req.model,
         "messages": messages,
-        "max_completion_tokens": req.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
         "stream": stream,
     });
+    body[max_tokens_field] =
+        serde_json::json!(req.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS));
     if stream {
         body["stream_options"] = serde_json::json!({"include_usage": true});
     }
     if let Some(temp) = req.temperature {
         body["temperature"] = serde_json::json!(temp);
     }
-    apply_reasoning(&mut body, req);
+    match dialect {
+        Dialect::OpenAi => apply_reasoning(&mut body, req),
+        Dialect::Zai => apply_zai_thinking(&mut body, req),
+    }
     if !req.tools.is_empty() {
         body["tools"] = serde_json::to_value(
             req.tools
@@ -237,6 +273,9 @@ pub(crate) fn build_request_body(
                 .collect::<Vec<_>>(),
         )
         .expect("tool spec serializes");
+        if dialect == Dialect::Zai && !req.model.starts_with("glm-4.5") {
+            body["tool_stream"] = Value::Bool(true);
+        }
     }
     body
 }
@@ -265,6 +304,27 @@ fn apply_reasoning(body: &mut Value, req: &StreamRequest) {
                 body["reasoning_effort"] = serde_json::json!(effort);
             }
         }
+    }
+}
+
+/// Set the reasoning fields for `req` on a Z.AI upstream: `thinking`
+/// switched on (keeping earlier reasoning, `clear_thinking: false`)
+/// for every level but off, plus the model's own `reasoning_effort`
+/// on effort models.
+fn apply_zai_thinking(body: &mut Value, req: &StreamRequest) {
+    let Some(level) = req.level else {
+        return;
+    };
+    if matches!(req.reasoning, Reasoning::None | Reasoning::Fixed) {
+        return;
+    }
+    if level.is_off() {
+        body["thinking"] = serde_json::json!({"type": "disabled"});
+        return;
+    }
+    body["thinking"] = serde_json::json!({"type": "enabled", "clear_thinking": false});
+    if let Some(effort) = req.reasoning.effort(level) {
+        body["reasoning_effort"] = serde_json::json!(effort.as_str());
     }
 }
 
@@ -716,7 +776,7 @@ mod tests {
     #[test]
     fn body_includes_model_and_messages() {
         let req = StreamRequest::new("gpt-4o", vec![user_msg("hi")]);
-        let body = build_request_body(&req, false, None);
+        let body = build_request_body(&req, false, None, Dialect::OpenAi);
         assert_eq!(body["model"], "gpt-4o");
         // max_tokens is deprecated on Chat Completions (and rejected for
         // reasoning models); the replacement must be sent instead.
@@ -731,7 +791,7 @@ mod tests {
     fn body_prepends_system_message() {
         let mut req = StreamRequest::new("m", vec![user_msg("hi")]);
         req.system = Some("you are kage".into());
-        let body = build_request_body(&req, false, None);
+        let body = build_request_body(&req, false, None, Dialect::OpenAi);
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages[0]["role"], "system");
         assert_eq!(messages[0]["content"], "you are kage");
@@ -746,7 +806,7 @@ mod tests {
             description: "read a file".into(),
             schema: serde_json::json!({"type":"object"}),
         }];
-        let body = build_request_body(&req, false, None);
+        let body = build_request_body(&req, false, None, Dialect::OpenAi);
         let tools = body["tools"].as_array().unwrap();
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["function"]["name"], "read");
@@ -757,7 +817,7 @@ mod tests {
     fn body_translates_thinking_level_to_reasoning_effort() {
         let mut req = StreamRequest::new("gpt-5", vec![user_msg("hi")]);
         req.level = Some(crate::ThinkingLevel::Medium);
-        let body = build_request_body(&req, false, None);
+        let body = build_request_body(&req, false, None, Dialect::OpenAi);
         assert_eq!(body["reasoning_effort"], "medium");
     }
 
@@ -765,7 +825,7 @@ mod tests {
     fn body_caps_xhigh_at_high_for_openai() {
         let mut req = StreamRequest::new("gpt-5", vec![user_msg("hi")]);
         req.level = Some(crate::ThinkingLevel::XHigh);
-        let body = build_request_body(&req, false, None);
+        let body = build_request_body(&req, false, None, Dialect::OpenAi);
         assert_eq!(body["reasoning_effort"], "high");
     }
 
@@ -773,16 +833,16 @@ mod tests {
     fn body_omits_reasoning_effort_when_level_off() {
         let mut req = StreamRequest::new("gpt-5", vec![user_msg("hi")]);
         req.level = Some(crate::ThinkingLevel::Off);
-        let body = build_request_body(&req, false, None);
+        let body = build_request_body(&req, false, None, Dialect::OpenAi);
         assert!(body.get("reasoning_effort").is_none());
     }
 
     #[test]
     fn body_includes_stream_options_only_when_streaming() {
         let req = StreamRequest::new("m", vec![user_msg("hi")]);
-        let body = build_request_body(&req, false, None);
+        let body = build_request_body(&req, false, None, Dialect::OpenAi);
         assert!(body.get("stream_options").is_none());
-        let body = build_request_body(&req, true, None);
+        let body = build_request_body(&req, true, None, Dialect::OpenAi);
         assert_eq!(body["stream_options"]["include_usage"], true);
     }
 
@@ -798,7 +858,7 @@ mod tests {
             None,
         );
         let req = StreamRequest::new("m", vec![user_msg("read"), assistant]);
-        let body = build_request_body(&req, false, None);
+        let body = build_request_body(&req, false, None, Dialect::OpenAi);
         let messages = body["messages"].as_array().unwrap();
         let last = &messages[messages.len() - 1];
         assert_eq!(last["role"], "assistant");
@@ -823,7 +883,7 @@ mod tests {
             None,
         );
         let req = StreamRequest::new("m", vec![result]);
-        let body = build_request_body(&req, false, None);
+        let body = build_request_body(&req, false, None, Dialect::OpenAi);
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages[0]["role"], "tool");
         assert_eq!(messages[0]["tool_call_id"], "call_1");
@@ -1062,7 +1122,12 @@ mod tests {
     #[test]
     fn interleaved_models_get_only_the_current_turns_reasoning() {
         let req = StreamRequest::new("glm", tool_loop_history());
-        let body = build_request_body(&req, true, Some(ReasoningField::ReasoningContent));
+        let body = build_request_body(
+            &req,
+            true,
+            Some(ReasoningField::ReasoningContent),
+            Dialect::OpenAi,
+        );
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages[1]["content"], "answer");
         assert!(messages[1].get("reasoning_content").is_none());
@@ -1074,7 +1139,7 @@ mod tests {
     #[test]
     fn other_models_get_thinking_as_text_and_no_reasoning_field() {
         let req = StreamRequest::new("gpt", tool_loop_history());
-        let body = build_request_body(&req, true, None);
+        let body = build_request_body(&req, true, None, Dialect::OpenAi);
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(
             messages[1]["content"],
@@ -1103,13 +1168,23 @@ mod tests {
         let mut history = tool_loop_history();
         history[3].content[0] = thinking("need a file", signed);
         let req = StreamRequest::new("gemini-3", history.clone());
-        let body = build_request_body(&req, true, Some(ReasoningField::ReasoningDetails));
+        let body = build_request_body(
+            &req,
+            true,
+            Some(ReasoningField::ReasoningDetails),
+            Dialect::OpenAi,
+        );
         assert_eq!(
             body["messages"][3]["reasoning_details"],
             serde_json::json!([{"type": "reasoning.encrypted", "data": "enc"}])
         );
         let req = StreamRequest::new("kimi", history);
-        let body = build_request_body(&req, true, Some(ReasoningField::ReasoningDetails));
+        let body = build_request_body(
+            &req,
+            true,
+            Some(ReasoningField::ReasoningDetails),
+            Dialect::OpenAi,
+        );
         assert_eq!(
             body["messages"][3]["reasoning_details"],
             serde_json::json!([{"type": "reasoning.text", "text": "need a file"}])
@@ -1174,6 +1249,128 @@ mod tests {
     }
 
     #[test]
+    fn zai_endpoints_are_detected_by_id_or_base_url() {
+        for id in ["zai", "zai-coding-plan", "zhipuai-coding-plan"] {
+            let entry = crate::compat::COMPAT_PROVIDERS
+                .iter()
+                .find(|p| p.id == id)
+                .unwrap();
+            assert_eq!(entry.build("k").dialect, Dialect::Zai, "{id}");
+            let moved = entry.build_with_base_url("k", "http://127.0.0.1:1/v4");
+            assert_eq!(moved.dialect, Dialect::Zai, "{id} with base_url");
+        }
+        let custom = |url: &str| {
+            let metadata = ProviderMetadata {
+                id: "mine".into(),
+                display_name: "Mine".into(),
+                supports_caching: false,
+                supports_thinking: false,
+                supports_tool_use: true,
+            };
+            OpenAiProvider::compatible("k", url, metadata).dialect
+        };
+        assert_eq!(custom("https://open.bigmodel.cn/api/paas/v4"), Dialect::Zai);
+        assert_eq!(custom("https://api.z.ai/api/paas/v4"), Dialect::Zai);
+        assert_eq!(custom("https://api.deepseek.com/v1"), Dialect::OpenAi);
+        assert_eq!(OpenAiProvider::new("k").dialect, Dialect::OpenAi);
+    }
+
+    #[test]
+    fn zai_body_uses_max_tokens_and_a_system_role() {
+        let mut req = StreamRequest::new("glm-5.3", vec![user_msg("hi")]);
+        req.system = Some("you are kage".into());
+        let body = build_request_body(&req, true, None, Dialect::Zai);
+        assert_eq!(body["max_tokens"], 4_096);
+        assert!(body.get("max_completion_tokens").is_none());
+        assert!(body.get("store").is_none());
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert!(
+            body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|m| m["role"] != "developer")
+        );
+    }
+
+    #[test]
+    fn zai_streams_tool_arguments_except_on_glm_4_5() {
+        let tools = vec![ToolSpec {
+            name: "read".into(),
+            description: "read a file".into(),
+            schema: serde_json::json!({"type":"object"}),
+        }];
+        let body_for = |model: &str, tools: &[ToolSpec], dialect| {
+            let mut req = StreamRequest::new(model, vec![user_msg("hi")]);
+            req.tools = tools.to_vec();
+            build_request_body(&req, true, None, dialect)
+        };
+        assert_eq!(
+            body_for("glm-5.3", &tools, Dialect::Zai)["tool_stream"],
+            true
+        );
+        assert!(
+            body_for("glm-4.5-air", &tools, Dialect::Zai)
+                .get("tool_stream")
+                .is_none()
+        );
+        assert!(
+            body_for("glm-5.3", &[], Dialect::Zai)
+                .get("tool_stream")
+                .is_none()
+        );
+        assert!(
+            body_for("glm-5.3", &tools, Dialect::OpenAi)
+                .get("tool_stream")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn stream_assembles_zai_tool_stream_deltas() {
+        // Z.AI's `tool_stream` shape: every chunk repeats the call's id,
+        // index and type, only the first names the function, and the
+        // arguments arrive in pieces; parallel calls interleave by index.
+        let bytes: &[u8] = b"data: {\"id\":\"r1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"look\"}}]}\n\n\
+data: {\"id\":\"r1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_a\",\"index\":0,\"type\":\"function\",\"function\":{\"name\":\"read\",\"arguments\":\"\"}}]}}]}\n\n\
+data: {\"id\":\"r1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_a\",\"index\":0,\"type\":\"function\",\"function\":{\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n\n\
+data: {\"id\":\"r1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_b\",\"index\":1,\"type\":\"function\",\"function\":{\"name\":\"ls\",\"arguments\":\"{}\"}}]}}]}\n\n\
+data: {\"id\":\"r1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"tool_calls\":[{\"id\":\"call_a\",\"index\":0,\"type\":\"function\",\"function\":{\"arguments\":\"\\\"/x\\\"}\"}}]}}]}\n\n\
+data: {\"id\":\"r1\",\"choices\":[{\"index\":0,\"finish_reason\":\"tool_calls\",\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":4}}\n\n\
+data: [DONE]\n\n";
+        let events = collect_ok(stream_from_bytes(bytes));
+        let starts: Vec<(&str, &str)> = events
+            .iter()
+            .filter_map(|e| match e {
+                ProviderEvent::ToolCallStart { id, name } => Some((id.0.as_str(), name.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(starts, [("call_a", "read"), ("call_b", "ls")]);
+        let ends: Vec<(&str, Value)> = events
+            .iter()
+            .filter_map(|e| match e {
+                ProviderEvent::ToolCallEnd { id, input } => Some((id.0.as_str(), input.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            ends,
+            [
+                ("call_a", serde_json::json!({"path": "/x"})),
+                ("call_b", serde_json::json!({})),
+            ]
+        );
+        assert!(matches!(
+            events.last(),
+            Some(ProviderEvent::MessageEnd {
+                stop_reason: StopReason::ToolUse,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn with_models_overrides_advertised_models() {
         let models = vec![ProviderModel {
             id: "test-model".to_owned(),
@@ -1215,28 +1412,86 @@ mod thinking_tests {
             &[Effort::None, Effort::Low, Effort::High, Effort::Max],
             false,
         );
-        let body = build_request_body(&request(r, ThinkingLevel::XHigh), true, None);
+        let body = build_request_body(
+            &request(r, ThinkingLevel::XHigh),
+            true,
+            None,
+            Dialect::OpenAi,
+        );
         assert_eq!(body["reasoning_effort"], "max");
-        let body = build_request_body(&request(r, ThinkingLevel::Off), true, None);
+        let body = build_request_body(&request(r, ThinkingLevel::Off), true, None, Dialect::OpenAi);
         assert_eq!(body["reasoning_effort"], "none");
     }
 
     #[test]
     fn toggle_models_switch_thinking_on_and_off() {
-        let on = build_request_body(&request(Reasoning::Toggle, ThinkingLevel::High), true, None);
+        let on = build_request_body(
+            &request(Reasoning::Toggle, ThinkingLevel::High),
+            true,
+            None,
+            Dialect::OpenAi,
+        );
         assert_eq!(on["thinking"]["type"], "enabled");
         assert!(on.get("reasoning_effort").is_none());
-        let off = build_request_body(&request(Reasoning::Toggle, ThinkingLevel::Off), true, None);
+        let off = build_request_body(
+            &request(Reasoning::Toggle, ThinkingLevel::Off),
+            true,
+            None,
+            Dialect::OpenAi,
+        );
         assert_eq!(off["thinking"]["type"], "disabled");
         let r = effort(&[Effort::Low, Effort::High], true);
-        let off = build_request_body(&request(r, ThinkingLevel::Off), true, None);
+        let off = build_request_body(&request(r, ThinkingLevel::Off), true, None, Dialect::OpenAi);
         assert_eq!(off["thinking"]["type"], "disabled");
         assert!(off.get("reasoning_effort").is_none());
     }
 
     #[test]
+    fn zai_effort_models_send_thinking_and_their_own_effort() {
+        let r = effort(&[Effort::Low, Effort::High, Effort::Max], false);
+        let body = build_request_body(&request(r, ThinkingLevel::XHigh), true, None, Dialect::Zai);
+        assert_eq!(
+            body["thinking"],
+            serde_json::json!({"type": "enabled", "clear_thinking": false})
+        );
+        assert_eq!(body["reasoning_effort"], "max");
+        let body = build_request_body(&request(r, ThinkingLevel::Low), true, None, Dialect::Zai);
+        assert_eq!(body["reasoning_effort"], "low");
+        let r = effort(&[Effort::None, Effort::High], false);
+        let off = build_request_body(&request(r, ThinkingLevel::Off), true, None, Dialect::Zai);
+        assert_eq!(off["thinking"], serde_json::json!({"type": "disabled"}));
+        assert!(off.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn zai_toggle_models_send_only_thinking() {
+        let on = request(Reasoning::Toggle, ThinkingLevel::High);
+        let on = build_request_body(&on, true, None, Dialect::Zai);
+        assert_eq!(
+            on["thinking"],
+            serde_json::json!({"type": "enabled", "clear_thinking": false})
+        );
+        assert!(on.get("reasoning_effort").is_none());
+        let off = request(Reasoning::Toggle, ThinkingLevel::Off);
+        let off = build_request_body(&off, true, None, Dialect::Zai);
+        assert_eq!(off["thinking"], serde_json::json!({"type": "disabled"}));
+        let unknown = request(Reasoning::Unknown, ThinkingLevel::Medium);
+        let unknown = build_request_body(&unknown, true, None, Dialect::Zai);
+        assert_eq!(unknown["thinking"]["type"], "enabled");
+        assert!(unknown.get("reasoning_effort").is_none());
+        let fixed = request(Reasoning::Fixed, ThinkingLevel::High);
+        let fixed = build_request_body(&fixed, true, None, Dialect::Zai);
+        assert!(fixed.get("thinking").is_none());
+    }
+
+    #[test]
     fn fixed_models_send_nothing() {
-        let body = build_request_body(&request(Reasoning::Fixed, ThinkingLevel::High), true, None);
+        let body = build_request_body(
+            &request(Reasoning::Fixed, ThinkingLevel::High),
+            true,
+            None,
+            Dialect::OpenAi,
+        );
         assert!(body.get("reasoning_effort").is_none());
         assert!(body.get("thinking").is_none());
     }

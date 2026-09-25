@@ -98,10 +98,12 @@ pub fn build_system_prompt(role: &str, workdir: &Path, model: &str, skills: &[Sk
 
 /// Instruction files that apply to `workdir`, user level first.
 ///
-/// `<config dir>/AGENTS.md` always applies. `<workdir>/.kage/AGENTS.md`
-/// applies only once the project is trusted: a cloned repo's
-/// instructions are third-party input, so they wait for `kage trust`
-/// exactly like the project's agent files. Both files are optional.
+/// `<config dir>/AGENTS.md` always applies. The project files apply
+/// only once the project is trusted: a cloned repo's instructions are
+/// third-party input, so they wait for `kage trust` exactly like the
+/// project's agent files. `.kage/AGENTS.md` is kage's own project home;
+/// `.agents/AGENTS.md` is the cross-tool standard location and loads
+/// alongside it, after it. Every file is optional.
 fn instruction_files(workdir: &Path) -> Vec<(std::path::PathBuf, &'static str)> {
     let mut files = Vec::new();
     if let Ok(dir) = crate::config_dir() {
@@ -110,6 +112,10 @@ fn instruction_files(workdir: &Path) -> Vec<(std::path::PathBuf, &'static str)> 
     if kage_core::trust::project_agents_trusted(workdir) {
         files.push((
             workdir.join(".kage").join("AGENTS.md"),
+            "project_instructions",
+        ));
+        files.push((
+            workdir.join(".agents").join("AGENTS.md"),
             "project_instructions",
         ));
     }
@@ -190,6 +196,37 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let out = instructions_block(&[(dir.path().join("nope.md"), "user_instructions")]);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn instruction_files_lists_both_project_homes_when_trusted() {
+        let work = tempfile::tempdir().unwrap();
+        std::fs::create_dir(work.path().join(".kage")).unwrap();
+        std::fs::create_dir(work.path().join(".agents")).unwrap();
+        let project: Vec<_> = instruction_files(work.path())
+            .into_iter()
+            .filter(|(_, tag)| *tag == "project_instructions")
+            .map(|(path, _)| path)
+            .collect();
+        assert_eq!(
+            project,
+            vec![
+                work.path().join(".kage").join("AGENTS.md"),
+                work.path().join(".agents").join("AGENTS.md"),
+            ]
+        );
+        // Both blocks render, kage home first.
+        std::fs::write(&project[0], "Kage rules.").unwrap();
+        std::fs::write(&project[1], "Shared rules.").unwrap();
+        let files: Vec<_> = project
+            .into_iter()
+            .map(|path| (path, "project_instructions"))
+            .collect();
+        let out = instructions_block(&files);
+        assert!(
+            out.find("Kage rules.").unwrap() < out.find("Shared rules.").unwrap(),
+            "{out}"
+        );
     }
 
     #[test]

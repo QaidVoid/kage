@@ -344,11 +344,11 @@ fn paint_pending(frame: &mut Frame, area: Rect, pending: &[PendingPrompt]) {
 }
 
 /// One pending row: the lead, the prompt clipped to fit, and `when`
-/// right-aligned two cells from the edge, dropped when the row is too
+/// right-aligned one cell from the edge, dropped when the row is too
 /// narrow for both.
 fn pending_line(text: &str, when: &str, width: usize, muted: Style) -> Line<'static> {
     const MIN_TEXT: usize = 8;
-    let room = width.saturating_sub(PENDING_LEAD.len() + 2);
+    let room = width.saturating_sub(PENDING_LEAD.len() + 1);
     let with_when = room.checked_sub(when.len() + 2).filter(|r| *r >= MIN_TEXT);
     let text = truncate_to_width(text, with_when.unwrap_or(room), "\u{2026}");
     let mut spans = vec![Span::styled(PENDING_LEAD, muted)];

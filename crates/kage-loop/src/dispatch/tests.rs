@@ -101,8 +101,8 @@ impl Tool for ProgressTool {
     }
 }
 
-/// Emits one update, then waits until the dispatcher has forwarded it.
-/// Fails if updates are only delivered after the tool returns.
+/// Emits one update, then waits until the test signals that the dispatcher
+/// delivered an event. Fails if the signal only comes after it returns.
 #[derive(Debug)]
 struct WaitsForDeliveryTool {
     delivered: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
@@ -1071,6 +1071,110 @@ fn parallel_execution_start_skips_short_circuited_calls() {
     );
     assert_eq!(
         execution_trace(&emitted),
-        ["start call_echo", "end call_echo", "end call_err"]
+        ["end call_err", "start call_echo", "end call_echo"]
     );
+}
+
+#[test]
+fn parallel_dispatch_ends_each_call_when_it_finishes() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let tools = ToolRegistry::new()
+        .with(Arc::new(WaitsForDeliveryTool {
+            delivered: std::sync::Mutex::new(rx),
+        }))
+        .with(Arc::new(EchoTool));
+    let mut emitted = Vec::new();
+
+    let outcome = dispatch_tool_calls_parallel(
+        vec![
+            pending("waits", serde_json::json!({})),
+            pending("echo", serde_json::json!({"i": 1})),
+        ],
+        &tools,
+        std::path::Path::new("/tmp"),
+        &CancelFlag::new(),
+        false,
+        MessageId::new(),
+        &mut NoopHooks,
+        &mut |ev| {
+            if matches!(&ev, LoopEvent::ToolCallEnd { id, .. } if id.to_string() == "call_echo") {
+                let _ = tx.send(());
+            }
+            emitted.push(ev);
+        },
+    );
+
+    assert_eq!(
+        execution_trace(&emitted),
+        [
+            "start call_waits",
+            "start call_echo",
+            "end call_echo",
+            "end call_waits",
+        ]
+    );
+    let blocks: Vec<_> = outcome
+        .results
+        .iter()
+        .map(|m| match &m.content[0] {
+            Content::ToolResultBlock {
+                call_id,
+                output,
+                is_error,
+            } => (call_id.to_string(), output.clone(), *is_error),
+            other => panic!("unexpected content: {other:?}"),
+        })
+        .collect();
+    assert_eq!(blocks[0], ("call_waits".into(), "live".into(), false));
+    assert_eq!(blocks[1].0, "call_echo");
+    assert!(!blocks[1].2 && blocks[1].1.contains("\"i\":1"));
+}
+
+#[test]
+fn parallel_panic_yields_an_error_for_its_own_call() {
+    let tools = ToolRegistry::new()
+        .with(Arc::new(EchoTool))
+        .with(Arc::new(ErrTool))
+        .with(Arc::new(PanicTool));
+    let mut emitted = Vec::new();
+
+    let outcome = dispatch_tool_calls_parallel(
+        vec![
+            pending("err", serde_json::json!({})),
+            pending("panic", serde_json::json!({})),
+            pending("echo", serde_json::json!({"i": 2})),
+        ],
+        &tools,
+        std::path::Path::new("/tmp"),
+        &CancelFlag::new(),
+        false,
+        MessageId::new(),
+        &mut BlockErr,
+        &mut |ev| emitted.push(ev),
+    );
+
+    assert!(matches!(outcome.error, Some(LoopError::Other { .. })));
+    let blocks: Vec<_> = outcome
+        .results
+        .iter()
+        .map(|m| match &m.content[0] {
+            Content::ToolResultBlock {
+                call_id,
+                output,
+                is_error,
+            } => (call_id.to_string(), output.clone(), *is_error),
+            other => panic!("unexpected content: {other:?}"),
+        })
+        .collect();
+    assert_eq!(blocks[0], ("call_err".into(), "blocked".into(), true));
+    assert_eq!(blocks[1].0, "call_panic");
+    assert!(blocks[1].2 && blocks[1].1.contains("panicked"));
+    assert_eq!(blocks[2].0, "call_echo");
+    assert!(!blocks[2].2 && blocks[2].1.contains("\"i\":2"));
+
+    let panic_end = emitted.iter().find_map(|e| match e {
+        LoopEvent::ToolCallEnd { id, output } if id.to_string() == "call_panic" => Some(output),
+        _ => None,
+    });
+    assert!(panic_end.is_some_and(|output| output.is_error));
 }

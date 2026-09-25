@@ -635,7 +635,7 @@ impl App {
         let doing = if approving {
             "Waiting for your approval".to_owned()
         } else {
-            current_work(buffer)
+            current_work(buffer, self.live_agents())
         };
         let elapsed = started.elapsed();
         let elapsed = if elapsed.as_secs() < 60 {
@@ -656,6 +656,18 @@ impl App {
         let room = usize::from(width).saturating_sub(ACTIVITY_INDENT + tail.len());
         let doing = view::truncate_to_width(&doing, room, "...");
         Some(format!("{doing}{tail}"))
+    }
+
+    /// How many agents under the main session are queued or running.
+    fn live_agents(&self) -> usize {
+        use kage_core::protocol::AgentState;
+        self.active_session.map_or(0, |main| {
+            self.agents
+                .under(main)
+                .into_iter()
+                .filter(|(_, node)| matches!(node.state, AgentState::Queued | AgentState::Running))
+                .count()
+        })
     }
 
     /// The pinned list: the queued, running and waiting agents under
@@ -1037,11 +1049,10 @@ fn key_chord(key: &kage_core::keymap::Key) -> String {
 }
 
 /// What the current run is doing, from the newest blocks back to the
-/// prompt that started it: running a tool, thinking, waiting for the
-/// agents its running `agent` calls started, or just working.
-fn current_work(buffer: &crate::Buffer) -> String {
+/// prompt that started it: running a tool, thinking, waiting for its
+/// `agents` live agents, or just working.
+fn current_work(buffer: &crate::Buffer, agents: usize) -> String {
     use crate::view::tool_view::{ToolPhase, describe};
-    let mut agents = 0;
     for block in buffer.blocks().iter().rev() {
         match block {
             crate::Block::User { .. } => break,
@@ -1049,7 +1060,7 @@ fn current_work(buffer: &crate::Buffer) -> String {
                 name,
                 phase: ToolPhase::Running,
                 ..
-            } if name == "agent" => agents += 1,
+            } if name == "agent" => {}
             crate::Block::ToolCall {
                 name,
                 input,

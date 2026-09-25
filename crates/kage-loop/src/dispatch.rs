@@ -1,11 +1,14 @@
-//! Sequential dispatch of tool calls produced by one assistant turn.
+//! Dispatch of tool calls produced by one assistant turn.
 //!
 //! Walks the [`PendingToolCall`] list from [`crate::stream::collect_turn`],
 //! consults [`Hooks::before_tool_call`] for short-circuit, emits a
 //! [`LoopEvent::ToolExecutionStart`] and executes the tool through the
 //! registry, runs the result through [`Hooks::after_tool_call`],
 //! emits a [`LoopEvent::ToolCallEnd`], and produces one tool-result message
-//! per call to append to history.
+//! per call to append to history. Calls run one at a time or, for a
+//! parallel batch, concurrently. A parallel call is finished as soon as it
+//! completes, so its `ToolCallEnd` follows completion order, while the
+//! result messages always keep input order.
 //!
 //! Dispatch is infallible: a call that never produced an output (cancel, or
 //! a tool failure the loop cannot recover from) gets a synthesized
@@ -29,7 +32,7 @@ use crate::stream::PendingToolCall;
 /// Message from a tool thread to the dispatching loop thread.
 enum Progress {
     Update(ToolCallId, ToolUpdate),
-    Done,
+    Done(usize, Result<ToolOutput, LoopError>),
 }
 
 /// Progress sink handed to one tool call. Forwards each update to the loop
@@ -46,30 +49,54 @@ impl ProgressSink for ChannelSink {
     }
 }
 
-/// Reports a tool thread as finished when dropped, including on panic.
-struct DoneOnDrop(mpsc::Sender<Progress>);
+/// Reports the result of the call at `index`. When dropped without a
+/// report, as on panic, it reports an error for that call instead.
+struct DoneOnDrop {
+    index: usize,
+    tx: mpsc::Sender<Progress>,
+    reported: bool,
+}
+
+impl DoneOnDrop {
+    fn report(mut self, result: Result<ToolOutput, LoopError>) {
+        self.reported = true;
+        let _ = self.tx.send(Progress::Done(self.index, result));
+    }
+}
 
 impl Drop for DoneOnDrop {
     fn drop(&mut self) {
-        let _ = self.0.send(Progress::Done);
+        if !self.reported {
+            let _ = self.tx.send(Progress::Done(
+                self.index,
+                Err(LoopError::Other {
+                    message: "tool thread panicked".into(),
+                }),
+            ));
+        }
     }
 }
 
 /// Execute `calls` on scoped threads and emit their progress live.
 ///
 /// Emits a [`LoopEvent::ToolExecutionStart`] per call first. The calling
-/// thread forwards every update as a [`LoopEvent::ToolUpdate`]
-/// until all threads finish, so `emit` stays on the loop thread.
-/// Results come back in input order. A panicking tool yields an error.
+/// thread forwards every update as a [`LoopEvent::ToolUpdate`] and hands
+/// each result to `done` with the call's index in `calls` as soon as that
+/// call completes, so `emit` and `done` stay on the loop thread. A
+/// panicking tool yields an error for its own call.
 #[allow(clippy::too_many_arguments)]
-fn execute_live<F: FnMut(LoopEvent)>(
+fn execute_live<F, D>(
     calls: &[&PendingToolCall],
     tools: &ToolRegistry,
     workdir: &Path,
     cancel: &CancelFlag,
     confine_paths: bool,
     emit: &mut F,
-) -> Vec<Result<ToolOutput, LoopError>> {
+    mut done: D,
+) where
+    F: FnMut(LoopEvent),
+    D: FnMut(&mut F, usize, Result<ToolOutput, LoopError>),
+{
     for call in calls {
         emit(LoopEvent::ToolExecutionStart {
             id: call.id.clone(),
@@ -79,15 +106,26 @@ fn execute_live<F: FnMut(LoopEvent)>(
     std::thread::scope(|scope| {
         let handles: Vec<_> = calls
             .iter()
-            .map(|&call| {
+            .enumerate()
+            .map(|(index, &call)| {
                 let sink = Arc::new(ChannelSink {
                     id: call.id.clone(),
                     tx: tx.clone(),
                 });
-                let done = DoneOnDrop(tx.clone());
+                let reporter = DoneOnDrop {
+                    index,
+                    tx: tx.clone(),
+                    reported: false,
+                };
                 scope.spawn(move || {
-                    let _done = done;
-                    execute(tools, call, workdir, cancel, confine_paths, Some(sink))
+                    reporter.report(execute(
+                        tools,
+                        call,
+                        workdir,
+                        cancel,
+                        confine_paths,
+                        Some(sink),
+                    ));
                 })
             })
             .collect();
@@ -98,22 +136,18 @@ fn execute_live<F: FnMut(LoopEvent)>(
                 Ok(Progress::Update(id, update)) => {
                     emit(LoopEvent::ToolUpdate { id, update });
                 }
-                Ok(Progress::Done) => running -= 1,
+                Ok(Progress::Done(index, result)) => {
+                    running -= 1;
+                    done(emit, index, result);
+                }
                 Err(_) => break,
             }
         }
 
-        handles
-            .into_iter()
-            .map(|handle| {
-                handle.join().unwrap_or_else(|_| {
-                    Err(LoopError::Other {
-                        message: "tool thread panicked".into(),
-                    })
-                })
-            })
-            .collect()
-    })
+        for handle in handles {
+            let _ = handle.join();
+        }
+    });
 }
 
 /// Outcome of [`Hooks::before_tool_call`] for one entry: either a
@@ -229,10 +263,17 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
             if let Some(out) = pre {
                 Some(out)
             } else {
-                let result = execute_live(&[&call], tools, workdir, cancel, confine_paths, emit)
-                    .pop()
-                    .expect("one call yields one result");
-                match result {
+                let mut result = None;
+                execute_live(
+                    &[&call],
+                    tools,
+                    workdir,
+                    cancel,
+                    confine_paths,
+                    emit,
+                    |_, _, done| result = Some(done),
+                );
+                match result.expect("one call yields one result") {
                     Ok(out) => Some(out),
                     Err(kind) => {
                         record_batch_error(&mut error, &kind);
@@ -279,13 +320,17 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
 /// Dispatch tool calls in parallel via [`std::thread::scope`].
 ///
 /// Hooks (`before_tool_call`, `after_tool_call`) stay on the calling thread;
-/// only the tool's `execute` runs concurrently. Result message order is
-/// preserved to match the input order, regardless of completion order.
+/// only the tool's `execute` runs concurrently. Each call is finished on
+/// the calling thread as soon as it completes: `after_tool_call` runs and
+/// its [`LoopEvent::ToolCallEnd`] is emitted in completion order. Result
+/// message order is preserved to match the input order, regardless of
+/// completion order.
 ///
 /// Calls that get short-circuited by `before_tool_call` skip thread
-/// dispatch entirely. The remaining calls all run on dedicated threads
-/// inside one [`std::thread::scope`] block; the function blocks until the
-/// last one completes.
+/// dispatch entirely and are finished before the others start. The
+/// remaining calls all run on dedicated threads inside one
+/// [`std::thread::scope`] block; the function blocks until the last one
+/// completes.
 ///
 /// A call whose thread reports cancel or panic gets a synthesized
 /// `is_error` result; every call that did produce an output keeps it. The
@@ -302,14 +347,9 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
     hooks: &mut dyn Hooks,
     emit: &mut F,
 ) -> DispatchOutcome {
-    let mut error: Option<LoopError> = None;
-
     // Resolve hook short-circuits up front, single-threaded. Skipped
     // entirely when the batch is already cancelled: nothing will run.
     let entry_cancelled = cancel.is_cancelled();
-    if entry_cancelled {
-        error = Some(LoopError::Cancelled);
-    }
     let mut slots: Vec<Slot> = Vec::with_capacity(pending.len());
     if !entry_cancelled {
         for call in &pending {
@@ -320,54 +360,68 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
         }
     }
 
-    // Per-call outcome: `None` when the call never ran (entry cancel),
-    // otherwise the tool's output or its unrecoverable error.
-    let raw_outputs: Vec<Option<Result<ToolOutput, LoopError>>> = if entry_cancelled {
-        std::iter::repeat_n(None, pending.len()).collect()
-    } else {
-        let to_run: Vec<&PendingToolCall> = pending
-            .iter()
-            .zip(&slots)
-            .filter(|(_, slot)| matches!(slot, Slot::Run))
-            .map(|(call, _)| call)
-            .collect();
-        let mut ran =
-            execute_live(&to_run, tools, workdir, cancel, confine_paths, emit).into_iter();
-        slots
-            .into_iter()
-            .map(|slot| match slot {
-                Slot::Short(out) => Some(Ok(out)),
-                Slot::Run => ran.next(),
-            })
-            .collect()
-    };
-
-    let mut results = Vec::with_capacity(pending.len());
+    let mut error = entry_cancelled.then_some(LoopError::Cancelled);
     let mut all_terminate = !pending.is_empty();
-    for (call, raw) in pending.into_iter().zip(raw_outputs) {
+    let mut outputs: Vec<Option<ToolOutput>> = std::iter::repeat_with(|| None)
+        .take(pending.len())
+        .collect();
+    let mut finish = |emit: &mut F, index: usize, raw: Result<ToolOutput, LoopError>| {
+        let call = &pending[index];
         let output = match raw {
-            Some(Ok(out)) => hooks.after_tool_call(&call.name, out),
-            Some(Err(kind)) => {
+            Ok(out) => hooks.after_tool_call(&call.name, out),
+            Err(kind) => {
                 record_batch_error(&mut error, &kind);
                 hooks.after_tool_call(&call.name, synthesized_output(&kind))
             }
-            None => hooks.after_tool_call(&call.name, synthesized_output(&LoopError::Cancelled)),
         };
         all_terminate &= output.terminate;
         emit(LoopEvent::ToolCallEnd {
             id: call.id.clone(),
             output: output.clone(),
         });
-        results.push(Message::new(
-            Role::ToolResult,
-            vec![Content::ToolResultBlock {
-                call_id: call.id,
-                output: output.text,
-                is_error: output.is_error,
-            }],
-            Some(parent),
-        ));
+        outputs[index] = Some(output);
+    };
+
+    if entry_cancelled {
+        for index in 0..pending.len() {
+            finish(emit, index, Err(LoopError::Cancelled));
+        }
+    } else {
+        let mut to_run = Vec::new();
+        for (index, slot) in slots.into_iter().enumerate() {
+            match slot {
+                Slot::Short(out) => finish(emit, index, Ok(out)),
+                Slot::Run => to_run.push(index),
+            }
+        }
+        let calls: Vec<&PendingToolCall> = to_run.iter().map(|&index| &pending[index]).collect();
+        execute_live(
+            &calls,
+            tools,
+            workdir,
+            cancel,
+            confine_paths,
+            emit,
+            |emit, index, raw| finish(emit, to_run[index], raw),
+        );
     }
+
+    let results = pending
+        .into_iter()
+        .zip(outputs)
+        .map(|(call, output)| {
+            let output = output.expect("every call is finished");
+            Message::new(
+                Role::ToolResult,
+                vec![Content::ToolResultBlock {
+                    call_id: call.id,
+                    output: output.text,
+                    is_error: output.is_error,
+                }],
+                Some(parent),
+            )
+        })
+        .collect();
     DispatchOutcome {
         results,
         all_terminate,

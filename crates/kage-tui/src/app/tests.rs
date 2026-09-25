@@ -1202,8 +1202,8 @@ fn pending_rows_show_until_delivered_steers_first() {
         app.handle_key(key(c));
     }
     app.handle_key(code(KeyCode::Enter));
-    let steer = format!("  > now{}after the current tool call", " ".repeat(24));
-    let queue = format!("  > later{}when this run ends", " ".repeat(31));
+    let steer = format!("  > now{}after the current tool call", " ".repeat(25));
+    let queue = format!("  > later{}when this run ends", " ".repeat(32));
     assert_eq!(pending_rows(&mut app), [steer, queue.clone()]);
     feed(&mut app, &events, vec![user_message("now")]);
     assert_eq!(pending_rows(&mut app), [queue]);
@@ -4374,23 +4374,28 @@ fn agent_state_and_usage_leave_the_footer_alone() {
 }
 
 #[test]
-fn the_working_row_counts_running_agents() {
-    let buffer = shared_buffer();
-    lock(&buffer).push_user("map both");
-    let (tx, _rx) = mpsc::channel();
-    let mut app = app_with_defaults(buffer.clone(), tx);
+fn the_working_row_counts_live_agents() {
+    let (mut app, _rx, events) = app_with_events();
     app.set_editor_modeless(true);
     app.run_started = Instant::now().checked_sub(Duration::from_secs(41));
-    for id in ["a1", "a2"] {
-        let input = serde_json::json!({ "agent": "explore", "description": "map", "prompt": "go" });
-        lock(&buffer).push_tool_call(id, "agent", input);
-        lock(&buffer).set_tool_phase(id, crate::view::tool_view::ToolPhase::Running);
-    }
-    let label = app.activity_label(&lock(&buffer), 80).unwrap();
-    assert_eq!(label, "Waiting for 2 agents (41s, esc to interrupt)");
-    lock(&buffer).set_tool_phase("a2", crate::view::tool_view::ToolPhase::Done);
-    let label = app.activity_label(&lock(&buffer), 80).unwrap();
-    assert!(label.starts_with("Waiting for 1 agent ("), "{label}");
+    spawn_agent(&mut app, &events, "a1", "explore");
+    let second = spawn_agent(&mut app, &events, "a2", "explore");
+    let label = |app: &App| app.activity_label(&lock(&app.buffer), 80).unwrap();
+    assert_eq!(label(&app), "Waiting for 2 agents (41s, esc to interrupt)");
+    send_to(
+        &mut app,
+        &events,
+        second,
+        vec![
+            kage_core::protocol::HostEvent::RunStarted.into(),
+            run_ended(kage_core::protocol::RunOutcome::Completed),
+        ],
+    );
+    assert!(
+        label(&app).starts_with("Waiting for 1 agent ("),
+        "{}",
+        label(&app)
+    );
 }
 
 #[test]

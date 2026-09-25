@@ -8,16 +8,19 @@
 //!   plugin declared via `kage.mcp.add_server`) and registers their
 //!   tools into the loop's [`ToolRegistry`], keeping the returned
 //!   [`McpManager`] alive for the session.
+//! - [`spawn_and_register_with`] also takes the servers an editor passes
+//!   over ACP, which count as the user's own configuration.
 //! - `kage mcp login` and `logout` live in [`crate::mcp_auth`].
 //!
 //! Diagnostics for `serve` go to stderr so they do not corrupt the
 //! JSON-RPC stream on stdout.
 
+use std::collections::BTreeMap;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use kage_core::config::{Config, McpConfig};
+use kage_core::config::{Config, McpConfig, McpServer};
 use kage_core::permissions::{PermissionAction, PermissionsConfig};
 use kage_mcp::{McpError, McpManager};
 use kage_plugin::PluginRuntime;
@@ -143,7 +146,20 @@ pub(crate) fn spawn_and_register(
     workdir: &Path,
     runtime: Option<&PluginRuntime>,
 ) -> (McpManager, Vec<(String, McpError)>) {
-    let cfg = merged_config(workdir, runtime);
+    spawn_and_register_with(tools, workdir, runtime, BTreeMap::new())
+}
+
+/// [`spawn_and_register`] plus `extra`, the servers an editor passed
+/// for this session. They are user level, so no trust prompt applies,
+/// and each replaces a configured or plugin server of the same name.
+pub(crate) fn spawn_and_register_with(
+    tools: &mut ToolRegistry,
+    workdir: &Path,
+    runtime: Option<&PluginRuntime>,
+    extra: BTreeMap<String, McpServer>,
+) -> (McpManager, Vec<(String, McpError)>) {
+    let mut cfg = merged_config(workdir, runtime);
+    merge_extra(&mut cfg, extra);
     let handler = sampling_handler(&cfg);
     let (mut manager, mut errors) = McpManager::spawn_all_with(
         &cfg,
@@ -153,6 +169,16 @@ pub(crate) fn spawn_and_register(
     );
     errors.extend(manager.register_into(tools));
     (manager, errors)
+}
+
+/// Adds `extra` to `cfg`. An entry replaces the server of the same name,
+/// and stderr says so.
+fn merge_extra(cfg: &mut McpConfig, extra: BTreeMap<String, McpServer>) {
+    for (name, server) in extra {
+        if cfg.servers.insert(name.clone(), server).is_some() {
+            eprintln!("kage: mcp `{name}`: the editor's server replaces the configured one");
+        }
+    }
 }
 
 /// Build the server-request handler when `[mcp] allow_sampling` is set,
@@ -266,10 +292,42 @@ mod tests {
 
     use kage_core::permissions::{PermissionAction, PermissionsConfig, ToolPermissionRules};
 
-    use super::{SamplingHandler, serve_registry, serve_verdict};
+    use super::{SamplingHandler, merge_extra, serve_registry, serve_verdict};
 
     fn names(tools: &[&str]) -> Vec<String> {
         tools.iter().map(|t| (*t).to_owned()).collect()
+    }
+
+    fn stdio(command: &str) -> kage_core::config::McpServer {
+        kage_core::config::McpServer {
+            command: Some(command.to_owned()),
+            args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            url: None,
+            headers: std::collections::BTreeMap::new(),
+            disabled: false,
+            oauth: None,
+        }
+    }
+
+    #[test]
+    fn extra_servers_join_and_win_a_name_clash() {
+        let mut cfg = kage_core::config::McpConfig::default();
+        cfg.servers.insert("both".into(), stdio("configured"));
+        cfg.servers.insert("kept".into(), stdio("kept"));
+        let extra = [("both", "editor"), ("new", "new")]
+            .map(|(name, command)| (name.to_owned(), stdio(command)))
+            .into();
+        merge_extra(&mut cfg, extra);
+        let commands: Vec<_> = cfg
+            .servers
+            .iter()
+            .map(|(name, s)| (name.as_str(), s.command.as_deref().unwrap()))
+            .collect();
+        assert_eq!(
+            commands,
+            [("both", "editor"), ("kept", "kept"), ("new", "new")]
+        );
     }
 
     #[test]

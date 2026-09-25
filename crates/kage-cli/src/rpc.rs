@@ -9,7 +9,9 @@
 //! session offers its model, thinking level and permission mode as config
 //! options, and the prompts of its live MCP servers as slash commands
 //! named `<server>:<prompt>`, which the engine expands when they come back
-//! as prompt text.
+//! as prompt text. The MCP servers a client passes when it opens a session
+//! run for that session like the user's own configured servers, and win a
+//! name clash with them.
 //!
 //! Agent sessions started by the `agent` tool are shown as subagent
 //! sessions (draft RFD PR #1992) to a client that advertises the
@@ -20,7 +22,7 @@
 //! tree, on that session's top-level `agent` call.
 
 use std::cmp::Reverse;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -30,16 +32,17 @@ use std::sync::{Arc, Mutex, mpsc};
 use kage_acp::acp::{
     AgentCapabilities, AvailableCommandsUpdate, BlobContent, ConfigOptionUpdate, ContentBlock,
     Cost, Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
-    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, MessageChunk, NewSessionRequest,
-    NewSessionResponse, PROTOCOL_VERSION, PromptCapabilities, PromptRequest, PromptResponse,
-    ResourceLink, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
-    SessionConfigCategory, SessionConfigKind, SessionConfigOption, SessionConfigSelectOption,
-    SessionInfo, SessionInfoUpdate, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, StopReason, SubagentSessionCapabilities, SubagentState,
-    SubagentUpdate, Supported, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
-    UsageUpdate,
+    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, McpCapabilities, McpServer,
+    MessageChunk, NewSessionRequest, NewSessionResponse, PROTOCOL_VERSION, PromptCapabilities,
+    PromptRequest, PromptResponse, ResourceLink, ResumeSessionRequest, ResumeSessionResponse,
+    SessionCapabilities, SessionConfigCategory, SessionConfigKind, SessionConfigOption,
+    SessionConfigSelectOption, SessionInfo, SessionInfoUpdate, SessionUpdate,
+    SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
+    SubagentSessionCapabilities, SubagentState, SubagentUpdate, Supported, ToolCall,
+    ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind, UsageUpdate,
 };
 use kage_acp::agent::{Agent, PermissionDecision, PromptContext, send_update, serve_agent};
+use kage_core::config::McpServer as McpSpec;
 use kage_core::permissions::PermissionAction;
 use kage_core::protocol::{
     AgentNode, AgentTree, Command, CommandKind, Delivery, Envelope, Event, HostEvent,
@@ -87,8 +90,8 @@ pub(crate) fn run(model_override: Option<&str>, system_role: &str) -> ExitCode {
     let spec = {
         let registry = Arc::clone(&registry);
         let system_role = system_role.to_owned();
-        Box::new(move |id, cwd: &str, model: &str| {
-            session_spec(&registry, &system_role, id, cwd, model)
+        Box::new(move |id, cwd: &str, model: &str, servers| {
+            session_spec(&registry, &system_role, id, cwd, model, servers)
         })
     };
     let reader = BufReader::new(std::io::stdin());
@@ -246,9 +249,13 @@ const MODES: [(&str, Option<PermissionAction>, &str, &str); 4] = [
 ];
 
 /// Builds the engine session for a client session from its id, working
-/// directory and model. The caller fills in the history and recorder.
-type SpecBuilder =
-    Box<dyn Fn(SessionId, &str, &str) -> Result<SessionSpec, RpcError> + Send + Sync>;
+/// directory, model and the MCP servers the client passed. The caller
+/// fills in the history and recorder.
+type SpecBuilder = Box<
+    dyn Fn(SessionId, &str, &str, BTreeMap<String, McpSpec>) -> Result<SessionSpec, RpcError>
+        + Send
+        + Sync,
+>;
 
 /// Sessions per `session/list` page.
 const LIST_PAGE: usize = 50;
@@ -300,6 +307,8 @@ impl CliAcpAgent {
             live: HashSet::new(),
             ended: HashMap::new(),
             commands: HashMap::new(),
+            usage: HashMap::new(),
+            prompted: HashSet::new(),
         };
         engine.subscribe(Box::new(move |envelope| bridge.handle(envelope)));
         Self {
@@ -341,14 +350,17 @@ impl CliAcpAgent {
 
     /// Opens the recorded session `client_id` names the way the TUI resumes
     /// one: on its recorded model when that resolves, with its thinking
-    /// level and token totals. With `ctx`, first replays its history and
-    /// title to the client. Returns the session's config options.
+    /// level and token totals, and with the client's MCP `servers`. With
+    /// `ctx`, first replays its history and title to the client. Returns
+    /// the session's config options.
     fn open_recorded(
         &self,
         client_id: &str,
         cwd: &str,
+        servers: &[McpServer],
         ctx: Option<&PromptContext>,
     ) -> Result<Vec<SessionConfigOption>, RpcError> {
+        let servers = editor_servers(servers)?;
         let path = kage_session::find_by_prefix(&self.sessions, client_id)
             .map_err(|e| RpcError::internal(e.to_string()))?
             .ok_or_else(|| RpcError::new(-32602, format!("unknown session {client_id}")))?;
@@ -385,7 +397,7 @@ impl CliAcpAgent {
             );
             self.default_model.clone()
         };
-        let mut spec = (self.spec)(id, cwd, &model)?;
+        let mut spec = (self.spec)(id, cwd, &model, servers)?;
         spec.cx.history = replay.history;
         spec.cx.budget = TokenBudget {
             used_input: replay.usage_total.input,
@@ -403,14 +415,16 @@ impl CliAcpAgent {
     }
 }
 
-/// Everything an engine session for `cwd` on `model` runs with. The caller
-/// fills in the history and recorder.
+/// Everything an engine session for `cwd` on `model` runs with, including
+/// the client's MCP `servers`. The caller fills in the history and
+/// recorder.
 fn session_spec(
     registry: &ProviderRegistry,
     system_role: &str,
     id: SessionId,
     cwd: &str,
     model: &str,
+    servers: BTreeMap<String, McpSpec>,
 ) -> Result<SessionSpec, RpcError> {
     let workdir = if cwd.is_empty() {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -436,7 +450,7 @@ fn session_spec(
     let system_prompt = runtime_env::build_system_prompt(system_role, &workdir, &model, &skills);
     let mut tools = builtin_registry();
     let (mcp, mcp_errors) =
-        crate::mcp::spawn_and_register(&mut tools, &workdir, plugins.as_deref());
+        crate::mcp::spawn_and_register_with(&mut tools, &workdir, plugins.as_deref(), servers);
     for (server, err) in mcp_errors {
         eprintln!("kage: mcp `{server}`: {err}");
     }
@@ -497,11 +511,14 @@ impl Agent for CliAcpAgent {
                     embedded_context: true,
                     ..PromptCapabilities::default()
                 },
+                mcp_capabilities: McpCapabilities {
+                    http: true,
+                    sse: false,
+                },
                 session_capabilities: SessionCapabilities {
                     list: Some(Supported {}),
                     resume: Some(Supported {}),
                 },
-                ..AgentCapabilities::default()
             },
             agent_info: Some(Implementation {
                 name: "kage".to_owned(),
@@ -513,10 +530,11 @@ impl Agent for CliAcpAgent {
     }
 
     fn new_session(&self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+        let servers = editor_servers(&req.mcp_servers)?;
         let (path, mut header) =
             crate::plan_session(&self.default_model, "").map_err(RpcError::internal)?;
         let id = header.session;
-        let mut spec = (self.spec)(id, &req.cwd, &self.default_model)?;
+        let mut spec = (self.spec)(id, &req.cwd, &self.default_model, servers)?;
         header.cwd.clone_from(&spec.cx.workdir);
         header.system_prompt.clone_from(&spec.cx.system_prompt);
         spec.recorder = Some(Recorder::planned(path, header, spec.plugins.clone()));
@@ -532,7 +550,8 @@ impl Agent for CliAcpAgent {
         req: LoadSessionRequest,
         ctx: &PromptContext,
     ) -> Result<LoadSessionResponse, RpcError> {
-        let config_options = self.open_recorded(&req.session_id, &req.cwd, Some(ctx))?;
+        let config_options =
+            self.open_recorded(&req.session_id, &req.cwd, &req.mcp_servers, Some(ctx))?;
         Ok(LoadSessionResponse { config_options })
     }
 
@@ -541,7 +560,8 @@ impl Agent for CliAcpAgent {
     }
 
     fn resume_session(&self, req: ResumeSessionRequest) -> Result<ResumeSessionResponse, RpcError> {
-        let config_options = self.open_recorded(&req.session_id, &req.cwd, None)?;
+        let config_options =
+            self.open_recorded(&req.session_id, &req.cwd, &req.mcp_servers, None)?;
         Ok(ResumeSessionResponse { config_options })
     }
 
@@ -626,6 +646,10 @@ struct Bridge {
     ended: HashMap<SessionId, PromptEnd>,
     /// The commands last sent to each client session.
     commands: HashMap<SessionId, Vec<serde_json::Value>>,
+    /// The usage last sent to each session.
+    usage: HashMap<SessionId, SessionUpdate>,
+    /// Client sessions whose first run has started.
+    prompted: HashSet<SessionId>,
 }
 
 /// A permission question in flight on its own thread.
@@ -672,8 +696,14 @@ impl Bridge {
             }
             Event::Host(HostEvent::UsageUpdated { usage }) => {
                 if let Some(update) = usage_update(usage) {
+                    self.usage.insert(session, update.clone());
                     send_update(&self.peer, &client_id, update);
                 }
+            }
+            Event::Host(HostEvent::RunStarted)
+                if !self.live.contains(&session) && self.prompted.insert(session) =>
+            {
+                self.resend(session, &client_id);
             }
             Event::Host(HostEvent::StateChanged { state }) => {
                 let settings = Settings::from(state);
@@ -728,6 +758,25 @@ impl Bridge {
                 self.settle(session);
             }
             Event::Host(_) => {}
+        }
+    }
+
+    /// Sends the command list and usage of `session` again. They are first
+    /// sent while the session opens, which can be before the client has
+    /// the response naming the session, so a client may have dropped them.
+    fn resend(&self, session: SessionId, client_id: &str) {
+        if let Some(commands) = self.commands.get(&session).filter(|c| !c.is_empty()) {
+            let update = AvailableCommandsUpdate {
+                available_commands: commands.clone(),
+            };
+            send_update(
+                &self.peer,
+                client_id,
+                SessionUpdate::AvailableCommandsUpdate(update),
+            );
+        }
+        if let Some(update) = self.usage.get(&session) {
+            send_update(&self.peer, client_id, update.clone());
         }
     }
 
@@ -1178,6 +1227,59 @@ fn usage_update(usage: &Usage) -> Option<SessionUpdate> {
     }))
 }
 
+/// The MCP servers a client passed, as specs by name.
+///
+/// # Errors
+///
+/// Invalid params for an `sse` server, since kage has no SSE transport.
+fn editor_servers(servers: &[McpServer]) -> Result<BTreeMap<String, McpSpec>, RpcError> {
+    servers
+        .iter()
+        .map(|server| match server {
+            McpServer::Stdio(stdio) => Ok((
+                stdio.name.clone(),
+                McpSpec {
+                    command: Some(stdio.command.clone()),
+                    args: stdio.args.clone(),
+                    env: stdio
+                        .env
+                        .iter()
+                        .map(|v| (v.name.clone(), v.value.clone()))
+                        .collect(),
+                    url: None,
+                    headers: BTreeMap::new(),
+                    disabled: false,
+                    oauth: None,
+                },
+            )),
+            McpServer::Http(http) => Ok((
+                http.name.clone(),
+                McpSpec {
+                    command: None,
+                    args: Vec::new(),
+                    env: BTreeMap::new(),
+                    url: Some(http.url.clone()),
+                    headers: http
+                        .headers
+                        .iter()
+                        .map(|h| (h.name.clone(), h.value.clone()))
+                        .collect(),
+                    disabled: false,
+                    oauth: None,
+                },
+            )),
+            McpServer::Sse(sse) => Err(RpcError::new(
+                -32602,
+                format!(
+                    "MCP server `{}` uses the sse transport, which kage does not \
+                     support. Use http instead.",
+                    sse.name
+                ),
+            )),
+        })
+        .collect()
+}
+
 /// One `available_commands_update` entry per prompt of a live server in
 /// `servers`, named `<server>:<prompt>`. The input hint lists required
 /// arguments as `<name>` and optional ones as `[name]`, and a prompt
@@ -1455,7 +1557,8 @@ mod tests {
     }
 
     /// [`serve`], where every session also has the MCP server of
-    /// [`mcp_connection`] as `srv` when `mcp` is set.
+    /// [`mcp_connection`] as `srv` when `mcp` is set. Servers a client
+    /// passes are spawned, and the tools of every server ask.
     fn serve_with(scripts: Vec<Script>, workdir: &Path, sessions: &Path, mcp: bool) -> Harness {
         let (srv_r, cli_w) = std::io::pipe().unwrap();
         let (cli_r, srv_w) = std::io::pipe().unwrap();
@@ -1468,7 +1571,7 @@ mod tests {
         std::thread::spawn(move || {
             serve_agent(BufReader::new(srv_r), srv_w, |peer| {
                 let registry = Arc::new(ProviderRegistry::new().with(Arc::new(provider)));
-                let spec = Box::new(move |id, _cwd: &str, model: &str| {
+                let spec = Box::new(move |id, _cwd: &str, model: &str, servers| {
                     let mut rules = PermissionsConfig::default();
                     rules.tools.insert(
                         "ls".into(),
@@ -1479,7 +1582,10 @@ mod tests {
                         },
                     );
                     let mut tools = builtin_registry();
-                    let mcp = mcp.then(|| mcp_manager(&mut tools));
+                    let mcp = mcp_manager(&mut tools, servers, mcp);
+                    let names = mcp.iter().flat_map(kage_mcp::McpManager::server_names);
+                    let gate = PermissionGate::new(rules)
+                        .with_mcp_servers(names.map(str::to_owned).collect());
                     Ok(SessionSpec {
                         id,
                         model: model.to_owned(),
@@ -1488,7 +1594,7 @@ mod tests {
                             .with_context_window(WINDOW),
                         recorder: None,
                         tools,
-                        gate: PermissionGate::new(rules),
+                        gate,
                         loop_cfg: LoopConfig::default(),
                         plugins: None,
                         mcp,
@@ -1502,7 +1608,8 @@ mod tests {
                     })
                 });
                 let agent = CliAcpAgent::new(registry, "mock:m".into(), sessions, spec, peer);
-                agent.open(id.to_string(), (agent.spec)(id, "", "mock:m").unwrap());
+                let spec = (agent.spec)(id, "", "mock:m", BTreeMap::new()).unwrap();
+                agent.open(id.to_string(), spec);
                 let _ = commander_tx.send(agent.engine.commander());
                 agent
             })
@@ -1557,12 +1664,65 @@ mod tests {
         Arc::new(conn)
     }
 
-    fn mcp_manager(tools: &mut kage_tools::ToolRegistry) -> kage_mcp::McpManager {
-        let cfg = kage_core::config::McpConfig::default();
-        let (mut mcp, _errors) = kage_mcp::McpManager::spawn_all(&cfg, Vec::new(), None);
-        mcp.adopt("srv", mcp_connection());
+    /// The manager of `servers`, with the server of [`mcp_connection`] as
+    /// `srv` when `adopt` is set, or `None` when it would have no server.
+    fn mcp_manager(
+        tools: &mut kage_tools::ToolRegistry,
+        servers: BTreeMap<String, McpSpec>,
+        adopt: bool,
+    ) -> Option<kage_mcp::McpManager> {
+        if servers.is_empty() && !adopt {
+            return None;
+        }
+        let cfg = kage_core::config::McpConfig {
+            servers,
+            ..kage_core::config::McpConfig::default()
+        };
+        let (mut mcp, errors) = kage_mcp::McpManager::spawn_all(&cfg, Vec::new(), None);
+        assert!(errors.is_empty(), "{errors:?}");
+        if adopt {
+            mcp.adopt("srv", mcp_connection());
+        }
         assert!(mcp.register_into(tools).is_empty());
-        mcp
+        Some(mcp)
+    }
+
+    /// A stdio MCP server script in `dir` with the tool `show`, which
+    /// answers `ED_VAR=<$ED_VAR>`, and the prompt `greet`.
+    fn editor_server(dir: &Path) -> String {
+        let script = dir.join("server.sh");
+        let body = r#"while IFS= read -r line; do
+  id=$(printf '%s\n' "$line" | sed -n 's/^{"id":\([0-9]*\),.*/\1/p')
+  [ -z "$id" ] && continue
+  case "$line" in
+    *'"method":"initialize"'*)
+      result='{"protocolVersion":"2025-06-18","capabilities":{"tools":{},"prompts":{}}}' ;;
+    *'"method":"tools/list"'*)
+      result='{"tools":[{"name":"show","inputSchema":{"type":"object"}}]}' ;;
+    *'"method":"tools/call"'*)
+      result="{\"content\":[{\"type\":\"text\",\"text\":\"ED_VAR=$ED_VAR\"}]}" ;;
+    *'"method":"prompts/list"'*)
+      result='{"prompts":[{"name":"greet","description":"Say hi"}]}' ;;
+    *)
+      printf '{"jsonrpc":"2.0","id":%s,"error":{"code":-32601,"message":"no"}}\n' "$id"
+      continue ;;
+  esac
+  printf '{"jsonrpc":"2.0","id":%s,"result":%s}\n' "$id" "$result"
+done
+"#;
+        std::fs::write(&script, body).unwrap();
+        script.display().to_string()
+    }
+
+    /// The `mcpServers` entry of [`editor_server`] as `ed`, with `ED_VAR`
+    /// set to `hello`.
+    fn editor_entry(dir: &Path) -> serde_json::Value {
+        serde_json::json!({
+            "name": "ed",
+            "command": "sh",
+            "args": [editor_server(dir)],
+            "env": [{"name": "ED_VAR", "value": "hello"}],
+        })
     }
 
     /// Collects `session/update` params until a permission request
@@ -2483,6 +2643,158 @@ mod tests {
             "end_turn"
         );
         assert_eq!(h.mock.requests()[0].messages[0].content, [text("p a=x")]);
+    }
+
+    #[test]
+    fn editor_entries_become_server_specs_and_sse_is_refused() {
+        let entries: Vec<McpServer> = serde_json::from_value(serde_json::json!([
+            {
+                "name": "local",
+                "command": "srv",
+                "args": ["--stdio"],
+                "env": [{"name": "TOKEN", "value": "t"}],
+            },
+            {
+                "type": "http",
+                "name": "remote",
+                "url": "https://mcp.example.com/mcp",
+                "headers": [{"name": "Authorization", "value": "Bearer x"}],
+            },
+        ]))
+        .unwrap();
+        let specs = editor_servers(&entries).unwrap();
+        let local = &specs["local"];
+        assert_eq!(local.command.as_deref(), Some("srv"));
+        assert_eq!(local.args, ["--stdio"]);
+        assert_eq!(local.env["TOKEN"], "t");
+        assert!(local.url.is_none());
+        let remote = &specs["remote"];
+        assert!(remote.command.is_none());
+        assert_eq!(remote.url.as_deref(), Some("https://mcp.example.com/mcp"));
+        assert_eq!(remote.headers["Authorization"], "Bearer x");
+        assert!(!remote.disabled && remote.oauth.is_none());
+
+        let sse: Vec<McpServer> = serde_json::from_value(serde_json::json!([
+            {"type": "sse", "name": "old", "url": "https://mcp.example.com/sse", "headers": []},
+        ]))
+        .unwrap();
+        let err = editor_servers(&sse).unwrap_err();
+        assert_eq!(err.code, -32602);
+        assert!(
+            err.message.contains("`old` uses the sse transport"),
+            "{}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn initialize_advertises_http_mcp_servers_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = serve(Vec::new(), dir.path(), dir.path());
+        let params =
+            serde_json::json!({"protocolVersion": PROTOCOL_VERSION, "clientCapabilities": {}});
+        let init = h.client.request("initialize", params).unwrap();
+        let caps = &init["agentCapabilities"]["mcpCapabilities"];
+        assert_eq!(caps["http"], true);
+        assert_eq!(caps["sse"], false);
+    }
+
+    #[test]
+    fn a_new_session_connects_the_editor_servers() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = serve(Vec::new(), dir.path(), dir.path());
+
+        let params =
+            serde_json::json!({"cwd": dir.path(), "mcpServers": [editor_entry(dir.path())]});
+        let created = h.client.request("session/new", params).unwrap();
+        let session = created["sessionId"].as_str().unwrap();
+        let updates = updates_until(&h.inbox, session, "available_commands_update");
+        let update = &updates.last().unwrap()["update"];
+        assert_eq!(
+            update["availableCommands"],
+            serde_json::json!([{ "name": "ed:greet", "description": "Say hi" }])
+        );
+
+        let sse =
+            serde_json::json!({"type": "sse", "name": "old", "url": "http://x", "headers": []});
+        let params = serde_json::json!({"cwd": dir.path(), "mcpServers": [sse]});
+        let err = h.client.request("session/new", params).unwrap_err();
+        assert_eq!(err.code, -32602);
+    }
+
+    #[test]
+    fn a_tool_of_an_editor_server_asks_and_sees_its_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().display().to_string();
+        let session = record(dir.path(), &cwd, "mock:m", 1, &[]);
+        let h = serve(
+            vec![
+                tool_turn("call_1", "ed__show", serde_json::json!({})),
+                text_turn("done"),
+                text_turn("title"),
+            ],
+            dir.path(),
+            dir.path(),
+        );
+        let params = serde_json::json!({
+            "sessionId": session,
+            "cwd": cwd,
+            "mcpServers": [editor_entry(dir.path())],
+        });
+        h.client.request("session/resume", params).unwrap();
+        let prompt_end = prompt_async(&h.client, &session, "show it");
+
+        let (ask, params) = until_ask(&h.inbox, &mut Vec::new());
+        assert_eq!(params["sessionId"], session);
+        assert_eq!(params["toolCall"]["title"], "ed__show");
+        allow(&h.client, &ask);
+
+        let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+        assert_eq!(response["stopReason"], "end_turn");
+        let requests = h.mock.requests();
+        assert!(requests[0].tools.iter().any(|t| t.name == "ed__show"));
+        let results: Vec<_> = requests[1]
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|c| match c {
+                Content::ToolResultBlock {
+                    output, is_error, ..
+                } => Some((output.as_str(), *is_error)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results, [("ED_VAR=hello", false)]);
+    }
+
+    #[test]
+    fn the_first_prompt_resends_commands_and_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = serve_with(
+            vec![text_turn("one"), text_turn("title"), text_turn("two")],
+            dir.path(),
+            dir.path(),
+            true,
+        );
+        let opened = updates_until(&h.inbox, &h.session, "available_commands_update");
+        if !update_kinds(&opened).contains(&"usage_update") {
+            updates_until(&h.inbox, &h.session, "usage_update");
+        }
+
+        prompt(&h.client, &h.session, "hi");
+        let updates = drain(&h.inbox);
+        let kinds = update_kinds(&updates);
+        let first = |kind: &str| kinds.iter().position(|k| *k == kind).expect(kind);
+        let commands = first("available_commands_update");
+        let chunk = first("agent_message_chunk");
+        assert!(commands < chunk, "{kinds:?}");
+        assert!(first("usage_update") < chunk, "{kinds:?}");
+        let resent = &updates[commands]["update"]["availableCommands"];
+        assert_eq!(resent[0]["name"], "srv:p");
+
+        prompt(&h.client, &h.session, "again");
+        let kinds = update_kinds(&drain(&h.inbox)).join(" ");
+        assert!(!kinds.contains("available_commands_update"), "{kinds}");
     }
 
     #[test]

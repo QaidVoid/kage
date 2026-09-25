@@ -1,0 +1,555 @@
+//! The provider registry and the default model.
+
+use std::sync::Arc;
+
+use kage_provider::{ProviderRegistry, anthropic, compat, gemini, openai, openai_responses};
+
+use crate::{acp_glue, auth, state};
+
+/// Builtin provider ids `kage -m <id>:<model>` can address directly.
+/// `acp` is listed because it is a valid `-m` prefix, but it is not
+/// overridable: its configuration lives under `[acp.*]`.
+pub(crate) const BUILTIN_PROVIDER_IDS: &[&str] =
+    &["acp", "anthropic", "gemini", "openai", "openai-responses"];
+
+/// Provider ids whose `[providers.<id>]` override kage honours: every
+/// builtin except `acp`, plus each OpenAI-compatible catalog entry.
+fn overridable_provider_ids() -> Vec<&'static str> {
+    let mut ids: Vec<&'static str> = BUILTIN_PROVIDER_IDS
+        .iter()
+        .copied()
+        .filter(|id| *id != "acp")
+        .collect();
+    ids.extend(compat::COMPAT_PROVIDERS.iter().map(|entry| entry.id));
+    ids
+}
+
+/// Build a registry holding every configured provider: builtins and
+/// catalog entries whose API key is reachable through either an env var
+/// (priority) or the saved auth store, with `[providers.<id>]`
+/// overrides for base URL and extra headers, plus every custom
+/// provider declared under `[providers.custom.*]`.
+///
+/// A config that fails `[providers]` validation is a hard error: the
+/// message prints and the process exits with status 1 rather than
+/// silently running against a subset of the declared providers.
+pub(crate) fn build_provider_registry() -> ProviderRegistry {
+    let config = match kage_core::config::Config::load_default() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("kage: config: {e}; using defaults");
+            kage_core::config::Config::default()
+        }
+    };
+    if let Err(e) = config
+        .providers
+        .validate(BUILTIN_PROVIDER_IDS, &overridable_provider_ids())
+    {
+        eprintln!("kage: {e}");
+        std::process::exit(1);
+    }
+    let store = auth::AuthStore::load().unwrap_or_else(|_| auth::AuthStore::empty());
+    let mut registry = ProviderRegistry::new();
+    register_openai_family(&config, &store, &mut registry);
+    register_compat_providers(&config, &store, &mut registry);
+    register_custom_providers(&config, &store, &mut registry);
+    let ov = config.providers.overrides.get("anthropic");
+    let env = ov
+        .and_then(|o| o.api_key_env.as_deref())
+        .unwrap_or_else(|| auth::env_var_for("anthropic"));
+    if let Some(key) = lookup_key_with_env("anthropic", env, &store) {
+        let mut provider = match ov.and_then(|o| o.base_url.clone()) {
+            Some(base) => anthropic::AnthropicProvider::with_base_url(key, base),
+            None => anthropic::AnthropicProvider::new(key),
+        };
+        if let Some(o) = ov
+            && !o.headers.is_empty()
+        {
+            provider = provider.with_extra_headers(o.headers.clone());
+        }
+        registry.register(Arc::new(provider));
+    }
+    let ov = config.providers.overrides.get("gemini");
+    let env = ov
+        .and_then(|o| o.api_key_env.as_deref())
+        .unwrap_or_else(|| auth::env_var_for("gemini"));
+    if let Some(key) = lookup_key_with_env("gemini", env, &store) {
+        let mut provider = match ov.and_then(|o| o.base_url.clone()) {
+            Some(base) => gemini::GeminiProvider::with_base_url(key, base),
+            None => gemini::GeminiProvider::new(key),
+        };
+        if let Some(o) = ov
+            && !o.headers.is_empty()
+        {
+            provider = provider.with_extra_headers(o.headers.clone());
+        }
+        registry.register(Arc::new(provider));
+    }
+    // The `acp` provider: `kage -m acp:<name>` drives an external ACP
+    // agent declared in `[acp.agents.*]` or via `kage.acp.add_agent`.
+    // Always registered (plugin-declared agents are resolved lazily);
+    // its permission resolver defers to `kage.on_acp_permission` and
+    // denies otherwise.
+    registry.register(Arc::new(
+        kage_acp::client::AcpProvider::from_config(&config.acp)
+            .with_permission(acp_glue::permission_resolver())
+            .with_agent_source(acp_glue::agent_source()),
+    ));
+    registry
+}
+
+/// Register the `openai` and `openai-responses` providers, which
+/// share one credential: `kage auth login openai` stores a single
+/// entry both use.
+fn register_openai_family(
+    config: &kage_core::config::Config,
+    store: &auth::AuthStore,
+    registry: &mut ProviderRegistry,
+) {
+    let ov = config.providers.overrides.get("openai");
+    let env = ov
+        .and_then(|o| o.api_key_env.as_deref())
+        .unwrap_or_else(|| auth::env_var_for("openai"));
+    let Some(key) = lookup_key_with_env("openai", env, store) else {
+        return;
+    };
+    let mut provider = match ov.and_then(|o| o.base_url.clone()) {
+        Some(base) => openai::OpenAiProvider::with_base_url(&key, base),
+        None => openai::OpenAiProvider::new(&key),
+    };
+    if let Some(o) = ov
+        && !o.headers.is_empty()
+    {
+        provider = provider.with_extra_headers(o.headers.clone());
+    }
+    registry.register(Arc::new(provider));
+    // The Responses API shares OpenAI auth: any user with an OpenAI
+    // key automatically gets `openai-responses:` model addressing. An
+    // `api_key_env` on the `openai-responses` override redirects just
+    // this provider's env lookup; otherwise the OpenAI key is reused.
+    let rov = config.providers.overrides.get("openai-responses");
+    let response_key = rov
+        .and_then(|o| o.api_key_env.as_deref())
+        .filter(|env| !env.is_empty())
+        .and_then(|env| lookup_key_with_env("openai-responses", env, store))
+        .unwrap_or_else(|| key.clone());
+    let mut responses = match rov.and_then(|o| o.base_url.clone()) {
+        Some(base) => openai_responses::OpenAiResponsesProvider::with_base_url(response_key, base),
+        None => openai_responses::OpenAiResponsesProvider::new(response_key),
+    };
+    if let Some(o) = rov
+        && !o.headers.is_empty()
+    {
+        responses = responses.with_extra_headers(o.headers.clone());
+    }
+    registry.register(Arc::new(responses));
+}
+
+/// Register each OpenAI-compatible catalog entry the user has a key
+/// for. Every entry is described once in `compat::COMPAT_PROVIDERS`;
+/// adding a provider is a single table entry there.
+fn register_compat_providers(
+    config: &kage_core::config::Config,
+    store: &auth::AuthStore,
+    registry: &mut ProviderRegistry,
+) {
+    for entry in compat::COMPAT_PROVIDERS {
+        let ov = config.providers.overrides.get(entry.id);
+        let env = ov
+            .and_then(|o| o.api_key_env.as_deref())
+            .unwrap_or_else(|| auth::env_var_for(entry.id));
+        if let Some(key) = lookup_key_with_env(entry.id, env, store) {
+            let mut provider = match ov.and_then(|o| o.base_url.clone()) {
+                Some(base) => entry.build_with_base_url(key, base),
+                None => entry.build(key),
+            };
+            if let Some(o) = ov
+                && !o.headers.is_empty()
+            {
+                provider = provider.with_extra_headers(o.headers.clone());
+            }
+            registry.register(Arc::new(provider));
+        }
+    }
+}
+
+/// Register every custom provider declared under
+/// `[providers.custom.<id>]`. A provider with an explicitly empty
+/// `api_key_env` needs no key at all (local gateways); any other
+/// missing key skips registration.
+fn register_custom_providers(
+    config: &kage_core::config::Config,
+    store: &auth::AuthStore,
+    registry: &mut ProviderRegistry,
+) {
+    for (id, cfg) in &config.providers.custom {
+        let env = cfg
+            .api_key_env
+            .clone()
+            .unwrap_or_else(|| format!("{}_API_KEY", id.to_uppercase()));
+        let key = if env.is_empty() {
+            String::new()
+        } else {
+            match lookup_key_with_env(id, &env, store) {
+                Some(key) => key,
+                None => continue,
+            }
+        };
+        let metadata = kage_provider::ProviderMetadata {
+            id: id.clone(),
+            display_name: cfg.display_name.clone().unwrap_or_else(|| id.clone()),
+            supports_caching: cfg.caching,
+            supports_thinking: cfg.thinking,
+            supports_tool_use: cfg.tool_use,
+        };
+        let models: Vec<kage_provider::ProviderModel> = cfg
+            .models
+            .iter()
+            .map(|m| kage_provider::ProviderModel {
+                id: m.id.clone(),
+                name: m.name.clone(),
+                context: m.context,
+                max_output: m.max_output,
+                reasoning: m.reasoning(),
+                input: m.input,
+                interleaved: m.interleaved,
+            })
+            .collect();
+        let provider: Arc<dyn kage_provider::Provider> = match cfg.kind {
+            kage_core::config::CustomProviderKind::OpenAi => Arc::new(
+                openai::OpenAiProvider::compatible(key, cfg.base_url.clone(), metadata)
+                    .with_extra_headers(cfg.headers.clone())
+                    .with_models(models),
+            ),
+            kage_core::config::CustomProviderKind::Anthropic => Arc::new(
+                anthropic::AnthropicProvider::with_base_url(key, cfg.base_url.clone())
+                    .with_metadata(metadata)
+                    .with_extra_headers(cfg.headers.clone())
+                    .with_models(models),
+            ),
+            kage_core::config::CustomProviderKind::Gemini => Arc::new(
+                gemini::GeminiProvider::with_base_url(key, cfg.base_url.clone())
+                    .with_metadata(metadata)
+                    .with_extra_headers(cfg.headers.clone())
+                    .with_models(models),
+            ),
+        };
+        registry.register(provider);
+    }
+}
+
+/// Look up `provider`'s bearer credential from `env_var` (when
+/// non-empty and set), falling back to the auth store. Returns the API
+/// key string for [`auth::Credential::ApiKey`] entries and the access
+/// token for [`auth::Credential::Oauth`] entries. `env_var` defaults to
+/// [`auth::env_var_for`]'s name for the provider; `[providers.<id>]`
+/// `api_key_env` overrides can redirect the lookup.
+pub(crate) fn lookup_key_with_env(
+    provider: &str,
+    env_var: &str,
+    store: &auth::AuthStore,
+) -> Option<String> {
+    if !env_var.is_empty() {
+        if let Ok(v) = std::env::var(env_var) {
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    store.access_token(provider).map(str::to_owned)
+}
+
+/// Order in which `default_model` falls back when there is no saved
+/// last-used model: most-popular providers first.
+const DEFAULT_MODEL_PRIORITY: &[&str] = &[
+    "anthropic",
+    "openai",
+    "zai-coding-plan",
+    "zhipuai-coding-plan",
+    "zai",
+    "gemini",
+    "deepseek",
+    "groq",
+    "mistral",
+    "cerebras",
+    "xai",
+    "openrouter",
+    "fireworks-ai",
+    "moonshotai",
+    "kimi-for-coding",
+];
+
+/// Printed when no provider other than `acp` is registered and the
+/// requested model does not resolve.
+pub(crate) const NO_CREDENTIALS_MESSAGE: &str = "kage: no provider credentials found. \
+    Run `kage auth login` to save one, or export one of ANTHROPIC_API_KEY, \
+    OPENAI_API_KEY, GEMINI_API_KEY, ZAI_API_KEY, ZAI_CODING_API_KEY, DEEPSEEK_API_KEY, \
+    GROQ_API_KEY, MISTRAL_API_KEY, CEREBRAS_API_KEY, XAI_API_KEY, OPENROUTER_API_KEY, \
+    FIREWORKS_API_KEY, MOONSHOT_API_KEY, KIMI_API_KEY or XIAOMI_API_KEY.";
+
+/// Printed when no model was requested and none could be picked.
+pub(crate) const NO_MODEL_MESSAGE: &str =
+    "kage: no model configured. Set [provider] default_model or pass -m provider:model";
+
+/// Whether any provider other than the always-registered `acp` provider
+/// is available, meaning some credential or custom provider is wired up.
+pub(crate) fn has_usable_provider(registry: &ProviderRegistry) -> bool {
+    registry.ids().any(|id| id != "acp")
+}
+
+/// Pick a sensible default model. A configured `[provider] default_model`
+/// that still resolves (its provider has credentials) wins; otherwise the
+/// last model the user successfully ran (when it still resolves), then
+/// [`fallback_model`]. Returns an empty string when nothing is wired up.
+pub(crate) fn default_model(registry: &ProviderRegistry) -> String {
+    if let Ok(cfg) = kage_core::config::Config::load_default()
+        && registry.resolve(&cfg.provider.default_model).is_ok()
+    {
+        return cfg.provider.default_model;
+    }
+    if let Some(model) = state::State::load().last_model
+        && registry.resolve(&model).is_ok()
+    {
+        return model;
+    }
+    fallback_model(registry)
+}
+
+/// Walk [`DEFAULT_MODEL_PRIORITY`], asking the catalog for each registered
+/// provider's preferred model, then take the first declared model of the
+/// first non-`acp` provider (by id) that declares any. Returns an empty
+/// string when neither yields a model.
+fn fallback_model(registry: &ProviderRegistry) -> String {
+    for candidate in DEFAULT_MODEL_PRIORITY {
+        if registry.get(candidate).is_none() {
+            continue;
+        }
+        if let Some(model) = kage_provider::catalog::preferred_model(candidate) {
+            return format!("{candidate}:{}", model.id);
+        }
+    }
+    let mut ids: Vec<&str> = registry.ids().filter(|id| *id != "acp").collect();
+    ids.sort_unstable();
+    for id in ids {
+        if let Some(model) = registry.get(id).and_then(|p| p.models().into_iter().next()) {
+            return format!("{id}:{}", model.id);
+        }
+    }
+    String::new()
+}
+
+/// The `[provider] default_model` the user set explicitly, through
+/// `KAGE_PROVIDER__DEFAULT_MODEL` or the user config file. `None` when
+/// it was left at its default or the config does not load.
+pub(crate) fn configured_default_model() -> Option<String> {
+    let explicit = std::env::var_os("KAGE_PROVIDER__DEFAULT_MODEL").is_some()
+        || kage_core::config::Config::default_path()
+            .is_some_and(|path| config_sets_default_model(&path));
+    if !explicit {
+        return None;
+    }
+    kage_core::config::Config::load_default()
+        .ok()
+        .map(|config| config.provider.default_model)
+}
+
+/// Whether the TOML file at `path` sets `[provider] default_model`.
+fn config_sets_default_model(path: &std::path::Path) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .is_some_and(|table| {
+            table
+                .get("provider")
+                .and_then(toml::Value::as_table)
+                .is_some_and(|provider| provider.contains_key("default_model"))
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_anthropic_and_gemini_providers_register_under_their_own_ids() {
+        let config: kage_core::config::Config = toml::from_str(
+            r#"
+            [providers.custom.zhipu-anthropic]
+            kind = "anthropic"
+            base_url = "http://127.0.0.1:1/anthropic"
+            api_key_env = ""
+            [[providers.custom.zhipu-anthropic.models]]
+            id = "glm-5.3"
+            name = "GLM-5.3"
+
+            [providers.custom.my-gemini]
+            kind = "gemini"
+            base_url = "http://127.0.0.1:1/gemini"
+            api_key_env = ""
+            [[providers.custom.my-gemini.models]]
+            id = "g-1"
+            name = "G 1"
+            "#,
+        )
+        .unwrap();
+        let mut registry = ProviderRegistry::new();
+        register_custom_providers(&config, &auth::AuthStore::empty(), &mut registry);
+        assert!(registry.resolve("zhipu-anthropic:glm-5.3").is_ok());
+        assert!(registry.resolve("my-gemini:g-1").is_ok());
+        assert!(registry.get("anthropic").is_none());
+        assert!(registry.get("gemini").is_none());
+    }
+
+    #[test]
+    fn china_coding_plan_override_sends_configured_headers_and_the_shared_key() {
+        use std::io::{Read as _, Write as _};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 4096];
+            while !raw.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = conn.read(&mut buf).unwrap();
+                raw.extend_from_slice(&buf[..n]);
+            }
+            let head = String::from_utf8_lossy(&raw).to_lowercase();
+            let length: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .map_or(0, |v| v.trim().parse().unwrap());
+            let body_start = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+            while raw.len() < body_start + length {
+                let n = conn.read(&mut buf).unwrap();
+                raw.extend_from_slice(&buf[..n]);
+            }
+            conn.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\ndata: [DONE]\n\n",
+            )
+            .unwrap();
+            String::from_utf8(raw).unwrap()
+        });
+        let config: kage_core::config::Config = toml::from_str(&format!(
+            r#"
+            [providers.zhipuai-coding-plan]
+            base_url = "http://{addr}/api/coding/paas/v4"
+            api_key_env = ""
+            headers = {{ X-Team = "kage-test" }}
+            "#
+        ))
+        .unwrap();
+        let mut store = auth::AuthStore::empty();
+        store.set_api_key("zai-coding-plan", "fake-shared-key");
+        let mut registry = ProviderRegistry::new();
+        register_compat_providers(&config, &store, &mut registry);
+        let resolved = registry.resolve("zhipuai-coding-plan:glm-5.3").unwrap();
+        let req = kage_provider::StreamRequest::new(
+            resolved.model.clone(),
+            vec![kage_core::Message::new(
+                kage_core::Role::User,
+                vec![kage_core::Content::Text { text: "hi".into() }],
+                None,
+            )],
+        );
+        let events: Vec<_> = resolved
+            .provider
+            .stream(req, &kage_core::CancelFlag::new())
+            .unwrap()
+            .collect();
+        assert!(events.iter().all(Result::is_ok), "{events:?}");
+        let request = server.join().unwrap();
+        let lower = request.to_lowercase();
+        assert!(
+            lower.starts_with("post /api/coding/paas/v4/chat/completions "),
+            "{request}"
+        );
+        assert!(lower.contains("\r\nx-team: kage-test\r\n"), "{request}");
+        assert!(lower.contains("\r\nuser-agent: kage/"), "{request}");
+        assert!(
+            lower.contains("\r\nauthorization: bearer fake-shared-key\r\n"),
+            "{request}"
+        );
+        assert!(request.contains("\"max_tokens\""), "{request}");
+    }
+
+    #[derive(Debug)]
+    struct StubProvider {
+        meta: kage_provider::ProviderMetadata,
+        models: Vec<kage_provider::ProviderModel>,
+    }
+
+    impl kage_provider::Provider for StubProvider {
+        fn metadata(&self) -> &kage_provider::ProviderMetadata {
+            &self.meta
+        }
+
+        fn stream(
+            &self,
+            _req: kage_provider::StreamRequest,
+            _cancel: &kage_core::CancelFlag,
+        ) -> Result<kage_provider::EventStream, kage_provider::ProviderError> {
+            Ok(Box::new(std::iter::empty()))
+        }
+
+        fn models(&self) -> Vec<kage_provider::ProviderModel> {
+            self.models.clone()
+        }
+    }
+
+    fn stub(id: &str, models: &[&str]) -> Arc<dyn kage_provider::Provider> {
+        Arc::new(StubProvider {
+            meta: kage_provider::ProviderMetadata {
+                id: id.to_owned(),
+                display_name: id.to_owned(),
+                supports_caching: false,
+                supports_thinking: false,
+                supports_tool_use: true,
+            },
+            models: models
+                .iter()
+                .map(|m| kage_provider::ProviderModel {
+                    id: (*m).to_owned(),
+                    name: (*m).to_owned(),
+                    ..kage_provider::ProviderModel::default()
+                })
+                .collect(),
+        })
+    }
+
+    #[test]
+    fn acp_only_registry_has_no_usable_provider() {
+        let mut registry = ProviderRegistry::new();
+        registry.register(stub("acp", &[]));
+        assert!(!has_usable_provider(&registry));
+        registry.register(stub("custom", &[]));
+        assert!(has_usable_provider(&registry));
+    }
+
+    #[test]
+    fn fallback_model_uses_first_declared_custom_model() {
+        let registry = ProviderRegistry::new()
+            .with(stub("acp", &["agent"]))
+            .with(stub("zeta", &["z-1"]))
+            .with(stub("empty", &[]))
+            .with(stub("local", &["llama-3", "qwen"]));
+        assert_eq!(fallback_model(&registry), "local:llama-3");
+    }
+
+    #[test]
+    fn fallback_model_is_empty_without_models() {
+        let registry = ProviderRegistry::new().with(stub("acp", &["agent"]));
+        assert_eq!(fallback_model(&registry), "");
+    }
+
+    #[test]
+    fn detects_explicit_default_model_key() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[provider]\ndefault_model = \"openai:gpt-4o\"\n").unwrap();
+        assert!(config_sets_default_model(&path));
+        std::fs::write(&path, "[ui]\ntheme = \"dark\"\n[provider]\n").unwrap();
+        assert!(!config_sets_default_model(&path));
+        assert!(!config_sets_default_model(&dir.path().join("missing.toml")));
+    }
+}

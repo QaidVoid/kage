@@ -16,11 +16,11 @@ use std::collections::HashMap;
 use std::io::BufReader;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use kage_core::CancelFlag;
 use kage_core::config::McpServer;
 
 use kage_jsonrpc::{CancelNotice, Inbound, Peer, RpcError, connect_with};
@@ -188,14 +188,17 @@ struct ListsChanged {
     prompts: AtomicBool,
 }
 
-/// Open progress tokens, each routed to the call waiting on it.
-type ProgressRoutes = Arc<Mutex<HashMap<String, Sender<serde_json::Value>>>>;
+/// Callback that emits the `notifications/progress` params of one token.
+type ProgressEmit = Box<dyn Fn(serde_json::Value) + Send>;
 
-/// One registered progress token. `notifications/progress` params for
-/// the token arrive on `updates` until the ticket is dropped.
+/// Open progress tokens, each with the callback of the call that owns it.
+type ProgressRoutes = Arc<Mutex<HashMap<String, ProgressEmit>>>;
+
+/// One registered progress token. Its callback runs on the drain thread,
+/// under the routes lock, until the ticket is dropped. Dropping takes the
+/// same lock, so no update is emitted once the drop returns.
 pub(crate) struct ProgressTicket {
     pub(crate) token: String,
-    pub(crate) updates: Receiver<serde_json::Value>,
     routes: ProgressRoutes,
 }
 
@@ -224,8 +227,8 @@ impl McpConnection {
     /// handshake on an already-connected `peer`, then spawn a thread
     /// that drains server-initiated traffic: the tools, resources and
     /// prompts `list_changed` notifications each flip their own flag,
-    /// `notifications/progress`
-    /// goes to the call that registered its token, `roots/list`
+    /// `notifications/progress` runs the callback of the call that
+    /// registered its token, `roots/list`
     /// requests are answered from `roots` (advertised as a client
     /// capability), `ping` gets an empty result, and any other server
     /// request is answered with `method not found` so a server that
@@ -391,15 +394,19 @@ impl McpConnection {
     }
 
     /// Register a fresh progress token, `<label>#<n>`, for one call.
-    /// Progress for it is delivered until the ticket is dropped.
-    pub(crate) fn track_progress(&self, label: &str) -> ProgressTicket {
+    /// `emit` runs on the drain thread with the params of each progress
+    /// notification for it until the ticket is dropped, so it must not
+    /// block.
+    pub(crate) fn track_progress(
+        &self,
+        label: &str,
+        emit: impl Fn(serde_json::Value) + Send + 'static,
+    ) -> ProgressTicket {
         let n = self.next_progress.fetch_add(1, Ordering::Relaxed);
         let token = format!("{label}#{n}");
-        let (tx, updates) = std::sync::mpsc::channel();
-        kage_core::sync::lock(&self.progress).insert(token.clone(), tx);
+        kage_core::sync::lock(&self.progress).insert(token.clone(), Box::new(emit));
         ProgressTicket {
             token,
-            updates,
             routes: Arc::clone(&self.progress),
         }
     }
@@ -498,9 +505,9 @@ impl McpConnection {
             .map_err(|source| self.failure(source))
     }
 
-    /// Like [`Self::request`] but abandons the call when
-    /// `should_cancel` trips, so a long-running `tools/call` honors
-    /// the agent loop's cancel flag.
+    /// Like [`Self::request`] but without a deadline, abandoning the call
+    /// as soon as `cancel` is cancelled, so a long-running `tools/call`
+    /// honors the agent loop's cancel flag.
     ///
     /// # Errors
     ///
@@ -511,22 +518,22 @@ impl McpConnection {
         &self,
         method: &str,
         params: serde_json::Value,
-        should_cancel: &dyn Fn() -> bool,
+        cancel: &CancelFlag,
     ) -> Result<serde_json::Value, McpError> {
         self.peer
-            .request_cancellable(method, params, should_cancel)
+            .request_cancellable(method, params, cancel)
             .map_err(|source| self.failure(source))
     }
 }
 
-/// Hand `notifications/progress` params to the call that owns their
-/// token. Unknown and finished tokens are dropped.
+/// Emit `notifications/progress` params through the callback of the call
+/// that owns their token. Unknown and finished tokens are dropped.
 fn route_progress(routes: &ProgressRoutes, params: serde_json::Value) {
     let Some(token) = params.get("progressToken").and_then(|t| t.as_str()) else {
         return;
     };
-    if let Some(tx) = kage_core::sync::lock(routes).get(token) {
-        let _ = tx.send(params);
+    if let Some(emit) = kage_core::sync::lock(routes).get(token) {
+        emit(params);
     }
 }
 
@@ -1054,19 +1061,16 @@ mod tests {
             }
         });
         let conn = McpConnection::initialize("slow", cli_peer, cli_in, &[], None).unwrap();
-        let cancel = AtomicBool::new(false);
+        let cancel = CancelFlag::new();
         thread::scope(|scope| {
-            let call = scope.spawn(|| {
-                conn.request_cancellable("tools/call", serde_json::json!({}), &|| {
-                    cancel.load(Ordering::SeqCst)
-                })
-            });
+            let call = scope
+                .spawn(|| conn.request_cancellable("tools/call", serde_json::json!({}), &cancel));
             let timeout = Duration::from_secs(5);
             let Ok(Inbound::Request { id, method, .. }) = seen.recv_timeout(timeout) else {
                 panic!("server must see the call");
             };
             assert_eq!(method, "tools/call");
-            cancel.store(true, Ordering::SeqCst);
+            cancel.cancel();
             match seen.recv_timeout(timeout) {
                 Ok(Inbound::Notification { method, params }) => {
                     assert_eq!(method, "notifications/cancelled");

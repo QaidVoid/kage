@@ -179,22 +179,21 @@ impl Tool for McpTool {
         } else {
             input
         };
-        let progress = self.conn.track_progress(&self.exposed_name);
+        let sink = cx.progress_sink();
+        let progress = self.conn.track_progress(&self.exposed_name, move |params| {
+            if let Some(sink) = &sink {
+                sink.emit(progress_update(&params));
+            }
+        });
         let params = serde_json::json!({
             "name": self.original_name,
             "arguments": arguments,
             "_meta": { "progressToken": progress.token },
         });
-        let relay = || {
-            for update in progress.updates.try_iter() {
-                cx.update(progress_update(&update));
-            }
-        };
-        let outcome = self.conn.request_cancellable("tools/call", params, &|| {
-            relay();
-            cx.is_cancelled()
-        });
-        relay();
+        let outcome = self
+            .conn
+            .request_cancellable("tools/call", params, cx.cancel_flag());
+        drop(progress);
         match outcome {
             Ok(result) => Ok(Self::render_result(&result)),
             Err(McpError::Rpc { source, .. }) if source.code == -32800 => Err(ToolError::Cancelled),

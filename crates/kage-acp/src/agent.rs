@@ -18,6 +18,7 @@ use std::io::{BufRead, Write};
 use std::sync::Arc;
 use std::thread;
 
+use kage_core::CancelFlag;
 use kage_jsonrpc::{CancelNotice, Inbound, Peer, RpcError, connect_with};
 
 use crate::acp::{
@@ -41,15 +42,16 @@ pub enum PermissionDecision {
 }
 
 /// Ask the client to allow `tool_call` once or for the session, or to
-/// deny it. Blocks until the client answers or `cancelled` returns
-/// `true`. Never auto-approves: any error, cancel, or rejection resolves
-/// to [`PermissionDecision::Deny`].
+/// deny it. Blocks until the client answers or `cancel` is cancelled,
+/// and withdraws the ask on a cancel. Never auto-approves: any error,
+/// cancel, or rejection resolves to [`PermissionDecision::Deny`].
+#[must_use]
 pub fn request_permission(
     peer: &Peer,
     session_id: &str,
     tool_call: ToolCallUpdate,
     title: &str,
-    cancelled: &dyn Fn() -> bool,
+    cancel: &CancelFlag,
 ) -> PermissionDecision {
     let req = RequestPermissionRequest {
         session_id: session_id.to_owned(),
@@ -75,7 +77,7 @@ pub fn request_permission(
     let Ok(params) = serde_json::to_value(&req) else {
         return PermissionDecision::Deny(Some("encode permission request".to_owned()));
     };
-    match peer.request_cancellable("session/request_permission", params, cancelled) {
+    match peer.request_cancellable("session/request_permission", params, cancel) {
         Ok(value) => match serde_json::from_value::<RequestPermissionResponse>(value) {
             Ok(resp) => match resp.outcome {
                 PermissionOutcome::Selected(sel) => match sel.option_id.as_str() {
@@ -650,7 +652,7 @@ mod tests {
     /// Asks permission on every prompt and gives up once cancelled.
     #[derive(Default)]
     struct AskAgent {
-        cancelled: std::sync::atomic::AtomicBool,
+        cancel: CancelFlag,
     }
 
     impl Agent for AskAgent {
@@ -672,9 +674,7 @@ mod tests {
                 ..ToolCallUpdate::default()
             };
             let decision =
-                request_permission(ctx.peer(), &req.session_id, tool_call, "bash", &|| {
-                    self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
-                });
+                request_permission(ctx.peer(), &req.session_id, tool_call, "bash", &self.cancel);
             assert!(matches!(decision, PermissionDecision::Deny(_)));
             Ok(PromptResponse {
                 stop_reason: StopReason::Cancelled,
@@ -682,8 +682,7 @@ mod tests {
         }
 
         fn cancel(&self, _session_id: &str) {
-            self.cancelled
-                .store(true, std::sync::atomic::Ordering::SeqCst);
+            self.cancel.cancel();
         }
     }
 

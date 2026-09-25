@@ -200,6 +200,14 @@ impl<'a> ToolContext<'a> {
         self.cancel
     }
 
+    /// The attached progress sink, for a tool whose progress arrives on
+    /// another thread that cannot borrow this context. `None` when no
+    /// sink is attached.
+    #[must_use]
+    pub fn progress_sink(&self) -> Option<Arc<dyn ProgressSink>> {
+        self.progress.clone()
+    }
+
     /// Report mid-execution progress to the host. Long-running tools call
     /// this with structured progress (e.g. `12/45 crates compiled`); the
     /// dispatcher wraps each call in a `LoopEvent::ToolUpdate`. Without an

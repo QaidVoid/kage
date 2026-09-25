@@ -51,7 +51,7 @@ use kage_core::protocol::{
 };
 use kage_core::sync::lock;
 use kage_core::{
-    Content, ImageSource, LoopError, LoopEvent, Message, MessageId, Role, SessionId,
+    CancelFlag, Content, ImageSource, LoopError, LoopEvent, Message, MessageId, Role, SessionId,
     StopReason as CoreStopReason, ThinkingLevel, ToolCallId, ToolOutput,
 };
 use kage_jsonrpc::{Peer, RpcError};
@@ -663,7 +663,7 @@ struct Bridge {
 
 /// A permission question in flight on its own thread.
 struct Ask {
-    answered: Arc<AtomicBool>,
+    withdraw: CancelFlag,
     thread: std::thread::JoinHandle<()>,
 }
 
@@ -959,16 +959,14 @@ impl Bridge {
         client_id: String,
         tool_call: ToolCallUpdate,
     ) {
-        let answered = Arc::new(AtomicBool::new(false));
-        let flag = Arc::clone(&answered);
+        let withdraw = CancelFlag::new();
+        let flag = withdraw.clone();
         let peer = self.peer.clone();
         let commander = self.commander.clone();
         let thread = std::thread::spawn(move || {
             let title = tool_call.title.clone().unwrap_or_default();
             let decision =
-                kage_acp::agent::request_permission(&peer, &client_id, tool_call, &title, &|| {
-                    answered.load(Ordering::SeqCst)
-                });
+                kage_acp::agent::request_permission(&peer, &client_id, tool_call, &title, &flag);
             let decision = match decision {
                 PermissionDecision::Allow => Decision::AllowOnce,
                 PermissionDecision::AllowSession => Decision::AllowSession,
@@ -982,10 +980,10 @@ impl Bridge {
                 },
             ));
         });
-        self.asks.entry(session).or_default().push(Ask {
-            answered: flag,
-            thread,
-        });
+        self.asks
+            .entry(session)
+            .or_default()
+            .push(Ask { withdraw, thread });
     }
 
     /// Withdraws the open asks of `session` and waits until each is
@@ -993,7 +991,7 @@ impl Bridge {
     fn end_asks(&mut self, session: SessionId) {
         let asks = self.asks.remove(&session).unwrap_or_default();
         for ask in &asks {
-            ask.answered.store(true, Ordering::SeqCst);
+            ask.withdraw.cancel();
         }
         for ask in asks {
             let _ = ask.thread.join();

@@ -213,6 +213,7 @@ struct AcpClientStream {
     child: Option<Child>,
     finished: bool,
     shutdown: Arc<AtomicBool>,
+    stop: CancelFlag,
 }
 
 impl Iterator for AcpClientStream {
@@ -235,9 +236,10 @@ impl Iterator for AcpClientStream {
 
 impl Drop for AcpClientStream {
     fn drop(&mut self) {
-        // Tear the turn down: the drain/prompt threads observe this
+        // Tear the turn down: the drain and prompt threads observe this
         // and unwind even when there is no child to kill.
         self.shutdown.store(true, Ordering::SeqCst);
+        self.stop.cancel();
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -314,21 +316,18 @@ fn spawn_drain(
     });
 }
 
-/// Drive `session/prompt`; park its outcome for the drain thread to
-/// emit in order, then mark the turn done.
+/// Drive `session/prompt` until it resolves or `stop` is cancelled, which
+/// happens on the turn's cancel or when the stream is dropped. Park the
+/// outcome for the drain thread to emit in order, then mark the turn done.
 fn spawn_prompt(
     peer: Peer,
     params: serde_json::Value,
-    cancel: CancelFlag,
-    shutdown: Arc<AtomicBool>,
+    stop: CancelFlag,
     done: Arc<AtomicBool>,
     terminal: Terminal,
 ) {
     thread::spawn(move || {
-        let poll_shutdown = Arc::clone(&shutdown);
-        let outcome = peer.request_cancellable("session/prompt", params, &move || {
-            cancel.is_cancelled() || poll_shutdown.load(Ordering::SeqCst)
-        });
+        let outcome = peer.request_cancellable("session/prompt", params, &stop);
         let item = match outcome {
             Ok(_) => Ok(ProviderEvent::MessageEnd {
                 stop_reason: StopReason::EndTurn,
@@ -392,6 +391,7 @@ where
 
     let (tx, rx) = mpsc::channel();
     let shutdown = Arc::new(AtomicBool::new(false));
+    let stop = cancel.child();
     let done = Arc::new(AtomicBool::new(false));
     let terminal: Terminal = Arc::new(std::sync::Mutex::new(None));
 
@@ -411,20 +411,14 @@ where
         Arc::clone(&terminal),
         resolver,
     );
-    spawn_prompt(
-        peer,
-        params,
-        cancel.clone(),
-        Arc::clone(&shutdown),
-        done,
-        terminal,
-    );
+    spawn_prompt(peer, params, stop.clone(), done, terminal);
 
     Ok(AcpClientStream {
         rx,
         child: None,
         finished: false,
         shutdown,
+        stop,
     })
 }
 
@@ -695,7 +689,7 @@ mod tests {
                     ..crate::acp::ToolCallUpdate::default()
                 },
                 "bash",
-                &|| false,
+                &CancelFlag::new(),
             );
             let verdict = match decision {
                 crate::agent::PermissionDecision::Allow

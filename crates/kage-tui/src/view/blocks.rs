@@ -7,14 +7,17 @@ use serde_json::Value;
 
 use super::modeline::spinner_frame;
 use super::tool_view::{
-    BashExit, BodyLine, LineKind, ToolBody, ToolLabel, ToolPhase, arg_rows, bash_output, describe,
-    edit_diff, format_elapsed, group_summary,
+    AgentEnd, BashExit, BodyLine, LineKind, ToolBody, ToolLabel, ToolPhase, agent_output, arg_rows,
+    bash_output, describe, edit_diff, format_elapsed, group_summary,
 };
 
 /// Output lines a folded row shows for bash, errors and unknown tools.
 const FOLDED_BODY_LINES: usize = 5;
 /// Diff lines a folded edit row shows.
 const FOLDED_DIFF_LINES: usize = 10;
+/// Reply lines a folded finished agent row shows, so a finished card
+/// stays as tall as the live one.
+const FOLDED_AGENT_LINES: usize = 1;
 /// Max body lines shown for an unfolded tool row. Bounds the
 /// worst-case line construction cost without affecting typical
 /// outputs.
@@ -64,15 +67,27 @@ pub(crate) fn tool_row_lines(
     let theme = crate::theme::current();
     let label = describe(row.name, row.input);
     let max = bubble_content_width(width);
-    let (output, exit) = if row.name == "bash" {
-        bash_output(row.output)
-    } else {
-        (text_lines(row.output), None)
+    let (output, exit, end) = match row.name {
+        "bash" => {
+            let (output, exit) = bash_output(row.output);
+            (output, exit, None)
+        }
+        "agent" => {
+            let (output, end) = agent_output(row.output);
+            (output, None, end)
+        }
+        _ => (text_lines(row.output), None, None),
     };
-    let (bullet, bullet_style) = phase_bullet(row.phase, &theme);
+    // A stopped agent reads like an interrupted call, not a failure.
+    let look = if end == Some(AgentEnd::Stopped) {
+        ToolPhase::Interrupted
+    } else {
+        row.phase
+    };
+    let (bullet, bullet_style) = phase_bullet(look, &theme);
     let verb = label.verb_for(row.phase, exit.is_some());
-    let right = right_text(row, exit);
-    let right_style = if row.phase == ToolPhase::Failed {
+    let right = right_text(row, exit, end);
+    let right_style = if look == ToolPhase::Failed {
         tool_error_style()
     } else {
         Style::default().fg(theme.muted_fg)
@@ -85,14 +100,16 @@ pub(crate) fn tool_row_lines(
         (&right, right_style),
         max,
     )];
-    let body = if row.folded {
+    let body = if row.folded && row.name == "agent" {
+        folded_agent_body(row.phase, end, output)
+    } else if row.folded {
         folded_body(row, &label, output)
     } else {
         unfolded_body(row, &label, output, row_budget)
     };
     let clip = row.folded.then_some(max.saturating_sub(BODY_INDENT.len()));
     content.extend(body.into_iter().map(|line| indent_body(line, clip)));
-    let (rule, bg) = match row.phase {
+    let (rule, bg) = match look {
         ToolPhase::Failed => (theme.tool_error_rule, theme.tool_error_bg),
         ToolPhase::Streaming | ToolPhase::Queued | ToolPhase::Waiting | ToolPhase::Running => {
             (theme.tool_pending_rule, theme.tool_pending_bg)
@@ -164,9 +181,19 @@ fn phase_bullet(phase: ToolPhase, theme: &crate::theme::Theme) -> (&'static str,
 }
 
 /// The right-aligned part of a tool header: the duration, a failed
-/// command's exit status, or the state word.
-fn right_text(row: &ToolRow<'_>, exit: Option<BashExit>) -> String {
+/// command's exit status, or the state word. A finished agent shows
+/// how it ended before its duration.
+fn right_text(row: &ToolRow<'_>, exit: Option<BashExit>, end: Option<AgentEnd>) -> String {
     let elapsed = row.elapsed_ms.map(format_elapsed);
+    if let Some(end) = end
+        && matches!(row.phase, ToolPhase::Done | ToolPhase::Failed)
+    {
+        return [Some(end.word().to_owned()), elapsed]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" \u{b7} ");
+    }
     match row.phase {
         ToolPhase::Streaming => String::new(),
         ToolPhase::Queued => "queued".to_owned(),
@@ -255,6 +282,28 @@ fn folded_body(row: &ToolRow<'_>, label: &ToolLabel, output: Vec<BodyLine>) -> V
         ),
         (ToolPhase::Done, ToolBody::Head) => head(output, FOLDED_BODY_LINES, tool_result_style()),
         _ => Vec::new(),
+    }
+}
+
+/// The body of a folded `agent` row: the live card the App writes as
+/// progress while the agent works, else the head of its reply.
+fn folded_agent_body(
+    phase: ToolPhase,
+    end: Option<AgentEnd>,
+    output: Vec<BodyLine>,
+) -> Vec<Line<'static>> {
+    match (phase, end) {
+        (ToolPhase::Streaming | ToolPhase::Denied, _) => Vec::new(),
+        (
+            ToolPhase::Queued | ToolPhase::Waiting | ToolPhase::Running | ToolPhase::Interrupted,
+            _,
+        ) => head(output, FOLDED_BODY_LINES, tool_result_style()),
+        (ToolPhase::Failed, Some(AgentEnd::Failed) | None) => {
+            head(output, FOLDED_AGENT_LINES, tool_error_style())
+        }
+        (ToolPhase::Done | ToolPhase::Failed, _) => {
+            head(output, FOLDED_AGENT_LINES, tool_result_style())
+        }
     }
 }
 

@@ -534,6 +534,7 @@ fn submitting_a_prompt_sends_it_without_painting() {
             text: "hi".into(),
             images: Vec::new(),
             queue: false,
+            session: None,
         }
     );
     assert!(
@@ -564,6 +565,7 @@ fn submit_while_a_run_is_in_flight_is_still_sent() {
             text: "later".into(),
             images: Vec::new(),
             queue: false,
+            session: None,
         }
     );
 }
@@ -914,6 +916,7 @@ fn feedback_denies_then_submits_the_text() {
                 text: "use ls".to_owned(),
                 images: Vec::new(),
                 queue: false,
+                session: None,
             },
         ]
     );
@@ -1162,6 +1165,7 @@ fn tab_queues_only_while_working() {
             text: "a".into(),
             images: Vec::new(),
             queue: true,
+            session: None,
         })
     );
     assert_eq!(app.input().text(), "");
@@ -4033,4 +4037,380 @@ fn a_long_start_tip_wraps_instead_of_clipping() {
         "{rows:#?}"
     );
     assert!(rows.iter().any(|r| r == "   seven eight nine"), "{rows:#?}");
+}
+
+/// Send `batch` as envelopes of `session` and drain them.
+fn send_to(
+    app: &mut App,
+    events: &mpsc::Sender<kage_core::protocol::Envelope>,
+    session: kage_core::SessionId,
+    batch: Vec<kage_core::protocol::Event>,
+) {
+    for (seq, event) in batch.into_iter().enumerate() {
+        events
+            .send(envelope(session, seq as u64 + 1, event))
+            .unwrap();
+    }
+    app.drain_engine_events();
+}
+
+/// Run the main session's `agent` call `call` and announce the agent it
+/// starts, which has not run yet. Returns the agent's session.
+fn spawn_agent(
+    app: &mut App,
+    events: &mpsc::Sender<kage_core::protocol::Envelope>,
+    call: &str,
+    agent: &str,
+) -> kage_core::SessionId {
+    let input = serde_json::json!({
+        "agent": agent,
+        "description": format!("{agent} task"),
+        "prompt": "go",
+    });
+    feed(
+        app,
+        events,
+        vec![
+            kage_core::LoopEvent::ToolCallStart {
+                id: kage_core::ToolCallId::new(call),
+                name: "agent".into(),
+                input_partial: input,
+            }
+            .into(),
+            kage_core::LoopEvent::ToolExecutionStart {
+                id: kage_core::ToolCallId::new(call),
+            }
+            .into(),
+        ],
+    );
+    let child = kage_core::SessionId::new();
+    let spawned = kage_core::protocol::HostEvent::AgentSpawned {
+        parent: app.active_session.unwrap(),
+        tool_call_id: kage_core::ToolCallId::new(call),
+        agent: agent.into(),
+        description: format!("{agent} task"),
+    };
+    send_to(app, events, child, vec![spawned.into()]);
+    child
+}
+
+/// The progress text of the tool call `id` in `buffer`.
+fn progress_of(buffer: &SharedBuffer, id: &str) -> String {
+    let buf = buffer.lock().unwrap();
+    buf.blocks()
+        .iter()
+        .find_map(|b| match b {
+            crate::buffer::Block::ToolCall {
+                call_id, progress, ..
+            } if call_id == id => Some(progress.clone()),
+            _ => None,
+        })
+        .expect("tool call present")
+}
+
+fn run_ended(outcome: kage_core::protocol::RunOutcome) -> kage_core::protocol::Event {
+    kage_core::protocol::HostEvent::RunEnded { outcome }.into()
+}
+
+#[test]
+fn agent_deltas_land_in_the_agent_buffer_only() {
+    let (mut app, _rx, events) = app_with_events();
+    let child = spawn_agent(&mut app, &events, "a1", "explore");
+    let delta = kage_core::LoopEvent::TextDelta {
+        id: kage_core::MessageId::new(),
+        delta: "child reply".into(),
+    };
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![
+            kage_core::protocol::HostEvent::RunStarted.into(),
+            delta.into(),
+        ],
+    );
+    let has_reply = |buffer: &SharedBuffer| {
+        buffer.lock().unwrap().blocks().iter().any(
+            |b| matches!(b, crate::buffer::Block::Assistant { text, .. } if text == "child reply"),
+        )
+    };
+    assert!(has_reply(&app.agent_buffers[&child]));
+    assert!(!has_reply(&app.buffer));
+}
+
+#[test]
+fn an_agent_card_follows_its_latest_tool_and_asks() {
+    let (mut app, _rx, events) = app_with_events();
+    let child = spawn_agent(&mut app, &events, "a1", "explore");
+    assert_eq!(progress_of(&app.buffer, "a1"), "queued\n0 tools");
+
+    let grep = kage_core::LoopEvent::ToolCallStart {
+        id: kage_core::ToolCallId::new("c1"),
+        name: "grep".into(),
+        input_partial: serde_json::json!({ "pattern": "export ", "path": "src/components" }),
+    };
+    let usage = kage_core::protocol::Usage {
+        total: kage_core::TokenUsage {
+            input: 20_000,
+            output: 2_000,
+            ..kage_core::TokenUsage::default()
+        },
+        ..kage_core::protocol::Usage::default()
+    };
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![
+            kage_core::protocol::HostEvent::RunStarted.into(),
+            grep.into(),
+            kage_core::LoopEvent::ToolExecutionStart {
+                id: kage_core::ToolCallId::new("c1"),
+            }
+            .into(),
+            kage_core::protocol::HostEvent::UsageUpdated { usage }.into(),
+        ],
+    );
+    assert_eq!(
+        progress_of(&app.buffer, "a1"),
+        "Searching \"export \" in src/components\n1 tool \u{b7} 22k tok"
+    );
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![
+            kage_core::LoopEvent::ToolCallEnd {
+                id: kage_core::ToolCallId::new("c1"),
+                output: kage_core::ToolOutput::default(),
+            }
+            .into(),
+        ],
+    );
+    assert!(
+        progress_of(&app.buffer, "a1").starts_with("Searched \"export \" in src/components\n"),
+        "{}",
+        progress_of(&app.buffer, "a1")
+    );
+
+    let input = serde_json::json!({ "command": "cargo test -p router" });
+    let bash = kage_core::LoopEvent::ToolCallStart {
+        id: kage_core::ToolCallId::new("c2"),
+        name: "bash".into(),
+        input_partial: input.clone(),
+    };
+    let ask = kage_core::protocol::HostEvent::PermissionRequested {
+        request_id: kage_core::protocol::RequestId(9),
+        tool_call_id: Some(kage_core::ToolCallId::new("c2")),
+        tool: "bash".into(),
+        subject: "cargo test -p router".into(),
+        input,
+    };
+    send_to(&mut app, &events, child, vec![bash.into(), ask.into()]);
+    assert_eq!(
+        progress_of(&app.buffer, "a1"),
+        "Waiting for approval: $ cargo test -p router\n2 tools \u{b7} 22k tok"
+    );
+    let agent_buffer = Arc::clone(&app.agent_buffers[&child]);
+    let phase = agent_buffer
+        .lock()
+        .unwrap()
+        .blocks()
+        .iter()
+        .find_map(|b| match b {
+            crate::buffer::Block::ToolCall { call_id, phase, .. } if call_id == "c2" => {
+                Some(*phase)
+            }
+            _ => None,
+        });
+    assert_eq!(phase, Some(crate::view::tool_view::ToolPhase::Waiting));
+    assert_eq!(
+        tool_phase(&app, "a1"),
+        crate::view::tool_view::ToolPhase::Running
+    );
+}
+
+#[test]
+fn an_agent_ask_is_labeled_and_its_feedback_goes_to_the_agent() {
+    let (mut app, rx, events) = app_with_events();
+    lock(app.session_usage.as_ref().unwrap()).working = true;
+    let child = spawn_agent(&mut app, &events, "a1", "explore");
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![
+            kage_core::protocol::HostEvent::RunStarted.into(),
+            bash_start("c1"),
+            permission_request("c1", 5),
+        ],
+    );
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    app.render_into(&mut terminal).unwrap();
+    let rows = snapshot_rows(&terminal);
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("explore \u{b7} Run this command?")),
+        "{rows:#?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("5. No, and tell explore what to do instead")),
+        "{rows:#?}"
+    );
+    let now = past_guard();
+    app.approval_key_at(key('t'), now);
+    for c in "use ls".chars() {
+        app.approval_key_at(key(c), now);
+    }
+    app.approval_key_at(code(KeyCode::Enter), now);
+    assert_eq!(
+        resolutions(&rx),
+        [
+            RunRequest::ResolvePermission {
+                request_id: kage_core::protocol::RequestId(5),
+                decision: PermissionDecision::Deny,
+            },
+            RunRequest::Submit {
+                text: "use ls".to_owned(),
+                images: Vec::new(),
+                queue: false,
+                session: Some(child),
+            },
+        ]
+    );
+    assert!(app.pending.is_empty(), "no main pending row for the agent");
+}
+
+#[test]
+fn run_ends_drop_only_their_own_session_approvals() {
+    let (mut app, _rx, events) = app_with_events();
+    let first = spawn_agent(&mut app, &events, "a1", "explore");
+    let second = spawn_agent(&mut app, &events, "a2", "general");
+    send_to(
+        &mut app,
+        &events,
+        first,
+        vec![bash_start("c1"), permission_request("c1", 1)],
+    );
+    send_to(
+        &mut app,
+        &events,
+        second,
+        vec![bash_start("c1"), permission_request("c1", 2)],
+    );
+    let shown = |app: &App| app.pending_permission.as_ref().map(|a| a.session);
+    assert_eq!(shown(&app), Some(first));
+    feed(
+        &mut app,
+        &events,
+        vec![run_ended(kage_core::protocol::RunOutcome::Cancelled)],
+    );
+    assert_eq!(
+        shown(&app),
+        Some(first),
+        "the main run end keeps agent asks"
+    );
+    assert_eq!(app.permission_queue.len(), 1);
+    send_to(
+        &mut app,
+        &events,
+        first,
+        vec![run_ended(kage_core::protocol::RunOutcome::Cancelled)],
+    );
+    assert_eq!(shown(&app), Some(second));
+    assert!(app.permission_queue.is_empty());
+    send_to(
+        &mut app,
+        &events,
+        second,
+        vec![run_ended(kage_core::protocol::RunOutcome::Completed)],
+    );
+    assert!(app.approval_panel.is_none());
+    assert!(app.pending_permission.is_none());
+}
+
+#[test]
+fn agent_prompts_leave_the_main_pending_rows_alone() {
+    let (mut app, _rx, events) = app_with_events();
+    let child = spawn_agent(&mut app, &events, "a1", "explore");
+    lock(app.session_usage.as_ref().unwrap()).working = true;
+    app.handle_submit("later".into(), true);
+    assert_eq!(app.pending.len(), 1);
+    send_to(&mut app, &events, child, vec![user_message("the task")]);
+    assert_eq!(app.pending.len(), 1);
+}
+
+#[test]
+fn agent_state_and_usage_leave_the_footer_alone() {
+    let (mut app, _rx, events) = app_with_events();
+    let status = Arc::new(Mutex::new("main:m".to_owned()));
+    app.set_status_model(Arc::clone(&status));
+    let child = spawn_agent(&mut app, &events, "a1", "explore");
+    let state = kage_core::protocol::SessionState {
+        model: "agent:m".into(),
+        thinking: kage_core::ThinkingLevel::Off,
+        permission_mode: None,
+        working: false,
+    };
+    let usage = kage_core::protocol::Usage {
+        context_used: 99,
+        ..kage_core::protocol::Usage::default()
+    };
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![
+            kage_core::protocol::HostEvent::StateChanged { state }.into(),
+            kage_core::protocol::HostEvent::UsageUpdated { usage }.into(),
+        ],
+    );
+    assert_eq!(*status.lock().unwrap(), "main:m");
+    let usage = app.session_usage_snapshot().unwrap();
+    assert_eq!(usage.model, "");
+    assert_eq!(usage.current_context, 0);
+    assert_eq!(app.agents.get(child).unwrap().model, "agent:m");
+}
+
+#[test]
+fn the_working_row_counts_running_agents() {
+    let buffer = shared_buffer();
+    lock(&buffer).push_user("map both");
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer.clone(), tx);
+    app.set_editor_modeless(true);
+    app.run_started = Instant::now().checked_sub(Duration::from_secs(41));
+    for id in ["a1", "a2"] {
+        let input = serde_json::json!({ "agent": "explore", "description": "map", "prompt": "go" });
+        lock(&buffer).push_tool_call(id, "agent", input);
+        lock(&buffer).set_tool_phase(id, crate::view::tool_view::ToolPhase::Running);
+    }
+    let label = app.activity_label(&lock(&buffer), 80).unwrap();
+    assert_eq!(label, "Waiting for 2 agents (41s, esc to interrupt)");
+    lock(&buffer).set_tool_phase("a2", crate::view::tool_view::ToolPhase::Done);
+    let label = app.activity_label(&lock(&buffer), 80).unwrap();
+    assert!(label.starts_with("Waiting for 1 agent ("), "{label}");
+}
+
+#[test]
+fn the_main_session_change_forgets_its_agents() {
+    let (mut app, _rx, events) = app_with_events();
+    let child = spawn_agent(&mut app, &events, "a1", "explore");
+    assert!(app.agents.get(child).is_some());
+    assert!(app.agent_buffers.contains_key(&child));
+    feed(
+        &mut app,
+        &events,
+        vec![
+            kage_core::protocol::HostEvent::SessionChanged {
+                path: std::path::PathBuf::from("/tmp/s.jsonl"),
+                title: None,
+                messages: Vec::new(),
+            }
+            .into(),
+        ],
+    );
+    assert!(app.agents.get(child).is_none());
+    assert!(app.agent_buffers.is_empty());
 }

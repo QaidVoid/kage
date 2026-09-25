@@ -187,7 +187,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     if let Some(out) = crate::runtime_env::max_output_tokens_for(&registry, &qualified_model) {
         cx = cx.with_max_output_tokens(out);
     }
-    let (loop_cfg, thinking_level) = startup_options(&options);
+    let (loop_cfg, thinking_level, max_depth, max_running) = startup_options(&options);
     if let Some(level) = thinking_level {
         cx = cx.with_thinking_level(level);
     }
@@ -197,6 +197,17 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
     let (plugin_refresh_tx, plugin_refresh_rx) = mpsc::channel::<PluginRefresh>();
     let gate = crate::permissions::PermissionGate::new(app_config.permissions.clone())
         .with_mcp_servers(mcp_manager.server_names().map(str::to_owned).collect());
+
+    let (agent_defs, agent_errors) = crate::agents::load(&workdir);
+    for err in agent_errors {
+        let mut buf = lock(&buffer);
+        buf.push_custom("kage:error", err, false);
+    }
+    let agents = crate::engine::AgentSetup {
+        defs: Arc::new(agent_defs),
+        max_depth,
+        max_running,
+    };
 
     let model_choices = available_model_items(&registry, &qualified_model);
     if let Err(err) = crate::state::record_last_model(&qualified_model) {
@@ -247,7 +258,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         mcp: Some(mcp_manager),
         interactive: true,
         title: true,
-        agents: None,
+        agents: Some(agents),
     });
     let log_commander = engine.commander();
     let _ = log_publisher.set(Box::new(move |level, message| {
@@ -434,12 +445,13 @@ fn print_exit_summary(
     }
 }
 
-/// Read the options that apply when a session starts. Called after the
-/// runtime loaded `init.lua`, so values set there reach the first
-/// session.
+/// Read the options that apply when a session starts: the loop config,
+/// the thinking level, and the agent depth and running limits. Called
+/// after the runtime loaded `init.lua`, so values set there reach the
+/// first session.
 pub(crate) fn startup_options(
     options: &kage_plugin::SharedOptions,
-) -> (LoopConfig, Option<ThinkingLevel>) {
+) -> (LoopConfig, Option<ThinkingLevel>, u8, usize) {
     let store = lock(options);
     let mut loop_cfg = LoopConfig::default();
     if let Some(threshold) = store
@@ -455,5 +467,13 @@ pub(crate) fn startup_options(
         .get("thinking_level")
         .and_then(OptionValue::as_str)
         .and_then(ThinkingLevel::parse);
-    (loop_cfg, thinking)
+    let int = |name: &str| store.get(name).and_then(OptionValue::as_int);
+    let max_depth = int("agent_max_depth").and_then(|n| u8::try_from(n).ok());
+    let max_running = int("agent_max_running").and_then(|n| usize::try_from(n).ok());
+    (
+        loop_cfg,
+        thinking,
+        max_depth.unwrap_or(0),
+        max_running.unwrap_or(1),
+    )
 }

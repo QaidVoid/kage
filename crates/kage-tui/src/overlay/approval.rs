@@ -4,7 +4,9 @@
 //! user's decision. The title names the action, the summary shows what
 //! the call does (a command, a diff, a file head, or its arguments),
 //! and five numbered options answer it. Option 5 turns the panel into
-//! a one-line field whose text goes to the model with the denial.
+//! a one-line field whose text goes to the model with the denial. A
+//! request from an agent carries the agent's name in the title and in
+//! option 5, since the text goes to that agent.
 //!
 //! Keys typed in the first [`TYPE_AHEAD_GUARD`] after the panel opens
 //! are dropped, so type-ahead meant for the prompt cannot answer it.
@@ -59,6 +61,8 @@ pub struct ApprovalPanel {
     tool: String,
     input: Value,
     title: String,
+    /// Who reads option 5's text: the asking agent, else `kage`.
+    asker: String,
     position: usize,
     selected: usize,
     feedback: Option<CommandLine>,
@@ -69,15 +73,27 @@ pub struct ApprovalPanel {
 }
 
 impl ApprovalPanel {
-    /// Build the panel for a call to `tool` with `input`. `position` is
-    /// the request's 1-based place among the requests shown since the
-    /// queue was last empty. "Yes" starts selected.
+    /// Build the panel for a call to `tool` with `input`, asked by
+    /// `agent` or, with `None`, by the main session. `position` is the
+    /// request's 1-based place among the requests shown since the queue
+    /// was last empty. "Yes" starts selected.
     #[must_use]
-    pub fn new(tool: &str, input: &Value, position: usize, opened_at: Instant) -> Self {
+    pub fn new(
+        tool: &str,
+        input: &Value,
+        agent: Option<&str>,
+        position: usize,
+        opened_at: Instant,
+    ) -> Self {
+        let question = tool_view::question(tool, input);
         Self {
             tool: tool.to_owned(),
             input: input.clone(),
-            title: tool_view::question(tool, input),
+            title: match agent {
+                Some(agent) => format!("{agent}{SEP}{question}"),
+                None => question,
+            },
+            asker: agent.unwrap_or("kage").to_owned(),
             position,
             selected: 0,
             feedback: None,
@@ -295,7 +311,8 @@ impl ApprovalPanel {
                 "call"
             };
             let help = format!(
-                "Tell kage what to do instead. Enter sends it and denies the {what}, esc goes back."
+                "Tell {} what to do instead. Enter sends it and denies the {what}, esc goes back.",
+                self.asker
             );
             let muted = theme.group_style("KageMuted");
             let wrap = width.saturating_sub(INDENT_WIDTH);
@@ -317,7 +334,7 @@ impl ApprovalPanel {
             format!("Yes, and allow {tool} for the rest of this session"),
             format!("Yes, and always allow {tool} (saved to config.toml)"),
             "No".to_owned(),
-            "No, and tell kage what to do instead".to_owned(),
+            format!("No, and tell {} what to do instead", self.asker),
         ];
         lines.extend(labels.into_iter().enumerate().map(|(idx, label)| {
             let label = format!("{}. {label}", idx + 1);
@@ -401,7 +418,7 @@ mod tests {
     fn opened() -> (ApprovalPanel, Instant) {
         let at = Instant::now();
         (
-            ApprovalPanel::new("bash", &json!({"command": "ls"}), 1, at),
+            ApprovalPanel::new("bash", &json!({"command": "ls"}), None, 1, at),
             at + Duration::from_millis(500),
         )
     }
@@ -424,7 +441,7 @@ mod tests {
     #[test]
     fn bash_shows_the_command_and_five_options() {
         let at = Instant::now();
-        let panel = ApprovalPanel::new("bash", &json!({"command": "cargo test"}), 1, at);
+        let panel = ApprovalPanel::new("bash", &json!({"command": "cargo test"}), None, 1, at);
         let rows = rows(&panel, 80, 0);
         assert!(rows[0].contains("Run this command?"), "{rows:#?}");
         assert_eq!(rows[1], "   $ cargo test");
@@ -446,7 +463,8 @@ mod tests {
     fn long_bash_commands_wrap_to_six_lines() {
         let at = Instant::now();
         let command = (0..10).map(|i| format!("step{i}")).collect::<Vec<_>>();
-        let panel = ApprovalPanel::new("bash", &json!({"command": command.join("\n")}), 1, at);
+        let panel =
+            ApprovalPanel::new("bash", &json!({"command": command.join("\n")}), None, 1, at);
         let rows = rows(&panel, 40, 0);
         assert_eq!(rows[1], "   $ step0");
         assert_eq!(rows[6], "     step5");
@@ -457,7 +475,7 @@ mod tests {
     fn edit_shows_diff_lines_in_the_diff_groups() {
         let at = Instant::now();
         let input = json!({"path": "a.rs", "old_str": "old", "new_str": "new"});
-        let panel = ApprovalPanel::new("edit", &input, 1, at);
+        let panel = ApprovalPanel::new("edit", &input, None, 1, at);
         assert!(rows(&panel, 60, 0)[0].contains("Edit a.rs?"));
         let groups = crate::theme::groups_for("default", None).unwrap();
         let theme = Theme::from_groups(&groups.into_highlights("default"));
@@ -482,7 +500,7 @@ mod tests {
         let at = Instant::now();
         let new: Vec<String> = (0..14).map(|i| format!("n{i}")).collect();
         let input = json!({"path": "a", "old_str": "x", "new_str": new.join("\n")});
-        let rows = rows(&ApprovalPanel::new("edit", &input, 1, at), 60, 0);
+        let rows = rows(&ApprovalPanel::new("edit", &input, None, 1, at), 60, 0);
         assert_eq!(rows[10], "   + n8");
         assert_eq!(rows[11], "   ... +5 more lines");
     }
@@ -491,7 +509,7 @@ mod tests {
     fn write_shows_the_path_and_its_head() {
         let at = Instant::now();
         let input = json!({"path": "b.txt", "content": "one\ntwo"});
-        let rows = rows(&ApprovalPanel::new("write", &input, 1, at), 60, 0);
+        let rows = rows(&ApprovalPanel::new("write", &input, None, 1, at), 60, 0);
         assert_eq!(&rows[1..4], ["   b.txt", "   one", "   two"]);
     }
 
@@ -499,7 +517,7 @@ mod tests {
     fn mcp_tools_show_key_value_rows() {
         let at = Instant::now();
         let input = json!({"repo": "qaidvoid/kage", "title": "Palette"});
-        let panel = ApprovalPanel::new("github__create_issue", &input, 1, at);
+        let panel = ApprovalPanel::new("github__create_issue", &input, None, 1, at);
         let rows = rows(&panel, 80, 0);
         assert!(rows[0].contains("Allow github.create_issue?"), "{rows:#?}");
         assert_eq!(rows[1], "   repo    qaidvoid/kage");
@@ -509,7 +527,7 @@ mod tests {
     #[test]
     fn keys_inside_the_guard_are_dropped() {
         let at = Instant::now();
-        let mut panel = ApprovalPanel::new("bash", &json!({"command": "ls"}), 1, at);
+        let mut panel = ApprovalPanel::new("bash", &json!({"command": "ls"}), None, 1, at);
         let early = at + Duration::from_millis(100);
         assert_eq!(
             panel.handle_key_at(key(KeyCode::Char('y')), early),
@@ -627,17 +645,37 @@ mod tests {
     #[test]
     fn the_count_shows_only_with_a_queue() {
         let at = Instant::now();
-        let panel = ApprovalPanel::new("bash", &json!({"command": "ls"}), 2, at);
+        let panel = ApprovalPanel::new("bash", &json!({"command": "ls"}), None, 2, at);
         assert!(rows(&panel, 80, 1)[0].ends_with(" 2 of 3 \u{2500}\u{2500}"));
-        let alone = ApprovalPanel::new("bash", &json!({"command": "ls"}), 1, at);
+        let alone = ApprovalPanel::new("bash", &json!({"command": "ls"}), None, 1, at);
         assert!(!rows(&alone, 80, 0)[0].contains(" of "));
+    }
+
+    #[test]
+    fn an_agent_request_names_the_agent() {
+        let at = Instant::now();
+        let input = json!({"command": "cargo test"});
+        let mut panel = ApprovalPanel::new("bash", &input, Some("explore"), 1, at);
+        let options = rows(&panel, 80, 0);
+        assert!(
+            options[0].starts_with("\u{2500}\u{2500} explore \u{B7} Run this command? \u{2500}"),
+            "{options:#?}"
+        );
+        assert_eq!(options[7], "   5. No, and tell explore what to do instead");
+        panel.handle_key_at(key(KeyCode::Char('t')), at + Duration::from_millis(500));
+        let field = rows(&panel, 100, 0);
+        assert!(
+            field[3].starts_with("   Tell explore what to do instead."),
+            "{field:#?}"
+        );
     }
 
     #[test]
     fn a_short_area_drops_summary_lines_first() {
         let at = Instant::now();
         let command = (0..6).map(|i| format!("s{i}")).collect::<Vec<_>>();
-        let panel = ApprovalPanel::new("bash", &json!({"command": command.join("\n")}), 1, at);
+        let panel =
+            ApprovalPanel::new("bash", &json!({"command": command.join("\n")}), None, 1, at);
         let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
         terminal
             .draw(|frame| panel.render(frame, frame.area(), 0))

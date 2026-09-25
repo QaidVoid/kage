@@ -130,6 +130,9 @@ pub enum RunRequest {
         /// the run ends, `false` steers it into the run at the next
         /// turn boundary. Ignored while idle.
         queue: bool,
+        /// The agent session the prompt goes to. `None` sends it to the
+        /// main session.
+        session: Option<kage_core::SessionId>,
     },
     /// Trip the agent loop's cancellation flag.
     Cancel,
@@ -816,6 +819,12 @@ pub struct App {
     /// The session whose events the App renders. Learned from the first
     /// envelope and moved by `SessionChanged`.
     active_session: Option<kage_core::SessionId>,
+    /// Every agent session started under the main session, folded from
+    /// their envelopes. Cleared when the main session changes.
+    agents: kage_core::protocol::AgentTree,
+    /// The transcript of each agent in [`Self::agents`], fed by that
+    /// agent's loop events.
+    agent_buffers: std::collections::HashMap<kage_core::SessionId, SharedBuffer>,
     /// The approval panel on screen in place of the input, if any. It
     /// owns the keyboard like a modal sibling of [`Self::plugin_overlay`].
     approval_panel: Option<crate::overlay::ApprovalPanel>,

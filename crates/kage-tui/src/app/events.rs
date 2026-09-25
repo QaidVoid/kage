@@ -9,7 +9,7 @@ impl App {
     /// until it ends.
     pub(crate) fn handle_submit(&mut self, text: String, queue: bool) {
         let images = self.input.take_attached();
-        self.send_prompt(text, images, queue);
+        self.send_prompt(text, images, queue, None);
     }
 
     /// Resolve an `InputAction::QueuePrompt`: send the draft to run
@@ -27,14 +27,17 @@ impl App {
     /// end. The user block appears when the engine delivers it. During
     /// a run that happens later, so until then it shows as a pending
     /// row above the input. Steers are listed before queued prompts,
-    /// the order the engine delivers them in.
+    /// the order the engine delivers them in. A prompt for an agent
+    /// `session` goes to that agent and gets no pending row.
     pub(crate) fn send_prompt(
         &mut self,
         text: String,
         images: Vec<crate::image::AttachedImage>,
         queue: bool,
+        session: Option<kage_core::SessionId>,
     ) {
-        let pending = self.is_run_in_flight().then(|| view::PendingPrompt {
+        let main = session.is_none() && self.is_run_in_flight();
+        let pending = main.then(|| view::PendingPrompt {
             text: text
                 .lines()
                 .map(str::trim)
@@ -49,6 +52,7 @@ impl App {
             text,
             images,
             queue,
+            session,
         };
         if self.send_request(submit).is_err() {
             self.push_error("submit failed: agent worker has stopped");

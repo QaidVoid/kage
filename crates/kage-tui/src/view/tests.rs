@@ -1347,3 +1347,91 @@ fn clicking_a_partly_visible_block_focuses_it_without_scrolling() {
     snapshot_lines(&mut buffer, &input, area);
     assert_eq!(buffer.scroll(), Some(0), "a keyboard move still scrolls");
 }
+
+fn agent_call(buffer: &mut Buffer, id: &str, description: &str) {
+    let input = json!({"agent": "explore", "description": description, "prompt": "go"});
+    buffer.push_tool_call(id, "agent", input);
+}
+
+fn agent_result(state: &str, body: &str) -> String {
+    format!("<agent name=\"explore\" session=\"01K62W8Q\" state=\"{state}\">\n{body}\n</agent>")
+}
+
+#[test]
+fn a_running_agent_row_shows_its_card() {
+    let mut buffer = Buffer::new();
+    agent_call(&mut buffer, "a1", "map exports");
+    buffer.set_tool_phase("a1", tool_view::ToolPhase::Running);
+    buffer.set_tool_progress("a1", "Read src/lib.rs\n3 tools \u{b7} 9k tok");
+    let input = InputState::new();
+    let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 80, 10));
+    let header = lines
+        .iter()
+        .position(|l| l.contains("Agent explore: map exports"))
+        .unwrap_or_else(|| panic!("{lines:#?}"));
+    assert!(lines[header + 1].contains("Read src/lib.rs"), "{lines:#?}");
+    assert!(
+        lines[header + 2].contains("3 tools \u{b7} 9k tok"),
+        "{lines:#?}"
+    );
+}
+
+#[test]
+fn finished_agent_rows_show_their_end_and_never_the_wrapper() {
+    let mut buffer = Buffer::new();
+    agent_call(&mut buffer, "a1", "map exports");
+    buffer.push_tool_result_with_duration(
+        "a1",
+        agent_result(
+            "completed",
+            "{\"Button.tsx\": [\"Button\"]}\nline two\nline three",
+        ),
+        false,
+        Some(52_000),
+    );
+    agent_call(&mut buffer, "a2", "find dead code");
+    buffer.push_tool_result_with_duration(
+        "a2",
+        agent_result("cancelled", "two unused helpers"),
+        true,
+        Some(12_000),
+    );
+    agent_call(&mut buffer, "a3", "check the router tests");
+    buffer.push_tool_result_with_duration(
+        "a3",
+        agent_result("failed", "provider error: rate limited (429)"),
+        true,
+        Some(3_000),
+    );
+    let input = InputState::new();
+    let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 100, 20));
+    let row = |needle: &str| {
+        lines
+            .iter()
+            .position(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("{needle}: {lines:#?}"))
+    };
+    let done = row("Agent explore: map exports");
+    assert!(lines[done].contains("\u{2022} Agent"), "{lines:#?}");
+    assert!(lines[done].ends_with("done \u{b7} 52s"), "{lines:#?}");
+    assert!(lines[done + 1].contains("{\"Button.tsx\""), "{lines:#?}");
+    assert!(lines[done + 2].contains("... 2 more lines"), "{lines:#?}");
+
+    let stopped = row("Agent explore: find dead code");
+    assert!(lines[stopped].contains("\u{2298} Agent"), "{lines:#?}");
+    assert!(lines[stopped].ends_with("stopped \u{b7} 12s"), "{lines:#?}");
+    assert!(
+        lines[stopped + 1].contains("Stopped by you. Partial reply: two unused helpers"),
+        "{lines:#?}"
+    );
+
+    let failed = row("Agent explore: check the router tests");
+    assert!(lines[failed].contains("\u{2717} Agent"), "{lines:#?}");
+    assert!(lines[failed].ends_with("failed \u{b7} 3.0s"), "{lines:#?}");
+    assert!(
+        lines[failed + 1].contains("provider error: rate limited (429)"),
+        "{lines:#?}"
+    );
+    assert!(lines.iter().all(|l| !l.contains("<agent")), "{lines:#?}");
+    assert!(lines.iter().all(|l| !l.contains("</agent")), "{lines:#?}");
+}

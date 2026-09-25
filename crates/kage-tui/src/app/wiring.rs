@@ -83,6 +83,8 @@ impl App {
             pending_tree_delete: None,
             engine_rx: None,
             active_session: None,
+            agents: kage_core::protocol::AgentTree::default(),
+            agent_buffers: std::collections::HashMap::new(),
             approval_panel: None,
             pending_permission: None,
             permission_queue: std::collections::VecDeque::new(),
@@ -993,12 +995,19 @@ fn key_chord(key: &kage_core::keymap::Key) -> String {
 }
 
 /// What the current run is doing, from the newest blocks back to the
-/// prompt that started it: running a tool, thinking, or just working.
+/// prompt that started it: running a tool, thinking, waiting for the
+/// agents its running `agent` calls started, or just working.
 fn current_work(buffer: &crate::Buffer) -> String {
     use crate::view::tool_view::{ToolPhase, describe};
+    let mut agents = 0;
     for block in buffer.blocks().iter().rev() {
         match block {
             crate::Block::User { .. } => break,
+            crate::Block::ToolCall {
+                name,
+                phase: ToolPhase::Running,
+                ..
+            } if name == "agent" => agents += 1,
             crate::Block::ToolCall {
                 name,
                 input,
@@ -1010,9 +1019,15 @@ fn current_work(buffer: &crate::Buffer) -> String {
                     .trim_end()
                     .to_owned();
             }
-            crate::Block::Thinking { live: true, .. } => return "Thinking".to_owned(),
+            crate::Block::Thinking { live: true, .. } if agents == 0 => {
+                return "Thinking".to_owned();
+            }
             _ => {}
         }
     }
-    "Working".to_owned()
+    match agents {
+        0 => "Working".to_owned(),
+        1 => "Waiting for 1 agent".to_owned(),
+        n => format!("Waiting for {n} agents"),
+    }
 }

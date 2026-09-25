@@ -41,7 +41,8 @@ impl Mirror {
 /// A bus subscriber that keeps `mirror` and the UI state slot
 /// components read current, records the last used model after a
 /// completed run, tracks per-provider auth failures for the start
-/// screen, and refreshes the plugin view of the session file.
+/// screen, and refreshes the plugin view of the session file. Sessions
+/// announced by `AgentSpawned` are agents and never reach any of it.
 pub(crate) fn mirror(
     mirror: Arc<Mutex<Mirror>>,
     plugins: Option<Arc<PluginRuntime>>,
@@ -52,32 +53,44 @@ pub(crate) fn mirror(
             f(&mut lock(ui));
         }
     };
-    move |envelope| match &envelope.event {
-        Event::Host(HostEvent::StateChanged { state }) => {
-            lock(&mirror).state = state.clone();
-            update_ui(&|ui| ui.state = state.clone());
+    let mut agents = std::collections::HashSet::new();
+    move |envelope| {
+        if let Event::Host(HostEvent::AgentSpawned { .. }) = &envelope.event {
+            agents.insert(envelope.session);
         }
-        Event::Host(HostEvent::UsageUpdated { usage }) => update_ui(&|ui| ui.usage = Some(*usage)),
-        Event::Host(HostEvent::TitleChanged { title }) => {
-            update_ui(&|ui| ui.session_title = Some(title.clone()));
+        if agents.contains(&envelope.session) {
+            return;
         }
-        Event::Host(HostEvent::SessionChanged { path, title, .. }) => {
-            lock(&mirror).path = Some(path.clone());
-            update_ui(&|ui| {
-                ui.session_id = envelope.session.to_string();
-                ui.session_title.clone_from(title);
-            });
-            refresh_session_entries(plugins.as_ref(), Some(path));
-        }
-        Event::Host(HostEvent::RunEnded { outcome }) => {
-            let mirror = lock(&mirror);
-            if *outcome == RunOutcome::Completed {
-                let _ = crate::state::record_last_model(&mirror.state.model);
+        match &envelope.event {
+            Event::Host(HostEvent::StateChanged { state }) => {
+                lock(&mirror).state = state.clone();
+                update_ui(&|ui| ui.state = state.clone());
             }
-            let _ = crate::state::record_run_outcome(&mirror.state.model, outcome);
-            refresh_session_entries(plugins.as_ref(), mirror.path.as_deref());
+            Event::Host(HostEvent::UsageUpdated { usage }) => {
+                update_ui(&|ui| ui.usage = Some(*usage));
+            }
+            Event::Host(HostEvent::TitleChanged { title }) => {
+                update_ui(&|ui| ui.session_title = Some(title.clone()));
+            }
+            Event::Host(HostEvent::SessionChanged { path, title, .. }) => {
+                agents.clear();
+                lock(&mirror).path = Some(path.clone());
+                update_ui(&|ui| {
+                    ui.session_id = envelope.session.to_string();
+                    ui.session_title.clone_from(title);
+                });
+                refresh_session_entries(plugins.as_ref(), Some(path));
+            }
+            Event::Host(HostEvent::RunEnded { outcome }) => {
+                let mirror = lock(&mirror);
+                if *outcome == RunOutcome::Completed {
+                    let _ = crate::state::record_last_model(&mirror.state.model);
+                }
+                let _ = crate::state::record_run_outcome(&mirror.state.model, outcome);
+                refresh_session_entries(plugins.as_ref(), mirror.path.as_deref());
+            }
+            _ => {}
         }
-        _ => {}
     }
 }
 
@@ -144,6 +157,7 @@ impl Host {
                 text,
                 images,
                 queue,
+                session,
             } => {
                 if let Err(err) = crate::history::append(&text) {
                     self.error(format!("history: {err}"));
@@ -161,7 +175,11 @@ impl Host {
                 } else {
                     Delivery::Steer
                 };
-                self.send(CommandKind::Prompt { content, delivery });
+                let kind = CommandKind::Prompt { content, delivery };
+                match session {
+                    Some(session) => self.commander.send(Command::to(session, kind)),
+                    None => self.send(kind),
+                }
             }
             RunRequest::Cancel => self.send(CommandKind::Cancel),
             RunRequest::ResolvePermission {
@@ -433,5 +451,43 @@ impl Host {
                 .unwrap_or_default(),
             models: available_model_items(&self.registry, active_model),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use kage_core::SessionId;
+
+    use super::*;
+
+    fn state(model: &str) -> Event {
+        Event::Host(HostEvent::StateChanged {
+            state: SessionState {
+                model: model.into(),
+                ..SessionState::default()
+            },
+        })
+    }
+
+    #[test]
+    fn agent_sessions_never_reach_the_mirror() {
+        let shared = Arc::new(Mutex::new(Mirror::new(None)));
+        let mut apply = mirror(Arc::clone(&shared), None);
+        let (main, child) = (SessionId::new(), SessionId::new());
+        let envelope = |session, seq, event| Envelope {
+            session,
+            seq,
+            event,
+        };
+        apply(&envelope(main, 1, state("main:m")));
+        let spawned = Event::Host(HostEvent::AgentSpawned {
+            parent: main,
+            tool_call_id: kage_core::ToolCallId::new("call_1"),
+            agent: "explore".into(),
+            description: "map".into(),
+        });
+        apply(&envelope(child, 1, spawned));
+        apply(&envelope(child, 2, state("agent:m")));
+        assert_eq!(lock(&shared).state.model, "main:m");
     }
 }

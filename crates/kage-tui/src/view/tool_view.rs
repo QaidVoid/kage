@@ -7,11 +7,12 @@
 //! calls through this module, so a tool reads the same everywhere.
 //!
 //! Everything here is a display transform. The text the model receives
-//! is never touched: [`bash_output`] strips the model-facing labels
-//! from a copy for painting only.
+//! is never touched: [`bash_output`] and [`agent_output`] strip the
+//! model-facing labels and wrapper from a copy for painting only.
 
 use serde_json::Value;
 
+use super::modeline::format_token_count;
 use super::{UnicodeWidthStr, pad_to_width};
 
 /// Lifecycle of one tool call as the conversation shows it.
@@ -156,6 +157,29 @@ pub enum BashExit {
     Signal,
 }
 
+/// How an agent's run ended, read from its `agent` call result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentEnd {
+    /// The agent completed its task.
+    Done,
+    /// The agent was stopped before it finished.
+    Stopped,
+    /// The agent's run failed.
+    Failed,
+}
+
+impl AgentEnd {
+    /// The state word a finished row paints on the right.
+    #[must_use]
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::Stopped => "stopped",
+            Self::Failed => "failed",
+        }
+    }
+}
+
 /// Describe a tool call from its name and (possibly partial) input.
 ///
 /// Built-in tools get a tailored verb and target. MCP tools
@@ -209,6 +233,13 @@ pub fn describe(name: &str, input: &Value) -> ToolLabel {
             field(input, "url").to_owned(),
             String::new(),
         ),
+        "agent" => {
+            let target = match one_line(field(input, "description")) {
+                description if description.is_empty() => agent_name(input).to_owned(),
+                description => format!("{}: {description}", agent_name(input)),
+            };
+            label(["Agent", "Agent", "Agent"], target, String::new())
+        }
         _ => label(
             ["Call", "Calling", "Called"],
             display_name(name),
@@ -278,12 +309,72 @@ pub fn bash_output(text: &str) -> (Vec<BodyLine>, Option<BashExit>) {
     (lines, exit)
 }
 
+/// The body the engine writes for an agent that ended without a reply.
+const NO_REPLY: &str = "(the agent produced no reply)";
+
+/// Split an `agent` call result into display lines and how the agent
+/// ended.
+///
+/// Drops the `<agent ...>` wrapper the model reads. A stopped agent's
+/// first line says so before its partial reply. Text without the
+/// wrapper, such as a refused start, comes back whole with no end.
+#[must_use]
+pub fn agent_output(text: &str) -> (Vec<BodyLine>, Option<AgentEnd>) {
+    let unwrapped = text.strip_prefix("<agent ").and_then(|rest| {
+        let (attrs, rest) = rest.split_once(">\n")?;
+        let body = rest.strip_suffix("\n</agent>")?;
+        let state = attrs.split_once("state=\"")?.1.split_once('"')?.0;
+        let end = match state {
+            "completed" => AgentEnd::Done,
+            "cancelled" => AgentEnd::Stopped,
+            "failed" => AgentEnd::Failed,
+            _ => return None,
+        };
+        Some((body, end))
+    });
+    let Some((body, end)) = unwrapped else {
+        let lines = text.lines().map(|l| BodyLine::new(LineKind::Text, l));
+        return (lines.collect(), None);
+    };
+    let mut lines: Vec<BodyLine> = body
+        .lines()
+        .map(|l| BodyLine::new(LineKind::Text, l))
+        .collect();
+    if end == AgentEnd::Stopped {
+        match lines.first_mut() {
+            Some(first) if body != NO_REPLY => {
+                first.text = format!("Stopped by you. Partial reply: {}", first.text);
+            }
+            _ => {
+                let text = "Stopped by you before it replied.";
+                lines = vec![BodyLine::new(LineKind::Text, text)];
+            }
+        }
+    }
+    (lines, Some(end))
+}
+
+/// The stat line of an agent card: the tool count and, once the agent
+/// used any, its tokens (`14 tools`, a middle dot, `22k tok`).
+#[must_use]
+pub fn agent_stats(tool_calls: u32, tokens: u64) -> String {
+    let tools = usize::try_from(tool_calls).unwrap_or(usize::MAX);
+    let tools = format!("{tools} {}", plural(tools, "tool", "tools"));
+    if tokens == 0 {
+        return tools;
+    }
+    format!("{tools} \u{b7} {} tok", format_token_count(tokens))
+}
+
 /// The approval title for a call, such as `Run this command?` or
 /// `Edit src/lib.rs?`.
 #[must_use]
 pub fn question(name: &str, input: &Value) -> String {
     if name == "bash" {
         return "Run this command?".to_owned();
+    }
+    if name == "agent" {
+        return format!("Start agent {}?", agent_name(input));
     }
     let label = describe(name, input);
     if label.target.is_empty() {
@@ -407,6 +498,15 @@ impl ToolLabel {
 
 fn field<'a>(input: &'a Value, key: &str) -> &'a str {
     input.get(key).and_then(Value::as_str).unwrap_or_default()
+}
+
+/// The definition an `agent` call starts. The tool defaults to
+/// `general`.
+fn agent_name(input: &Value) -> &str {
+    match field(input, "agent") {
+        "" => "general",
+        name => name,
+    }
 }
 
 fn read_range(input: &Value) -> String {
@@ -731,6 +831,60 @@ mod tests {
             "Allow github.create_issue?"
         );
         assert_eq!(question("edit", &json!({})), "Allow edit?");
+    }
+
+    #[test]
+    fn agent_calls_read_as_the_agent_and_its_task() {
+        let input = json!({"agent": "explore", "description": "map exports", "prompt": "p"});
+        let l = describe("agent", &input);
+        assert_eq!((l.verb_live, l.verb_done), ("Agent", "Agent"));
+        assert_eq!(l.target, "explore: map exports");
+        assert_eq!(l.body, ToolBody::Head);
+        assert!(!l.read_only);
+        assert_eq!(describe("agent", &json!({})).target, "general");
+        assert_eq!(question("agent", &input), "Start agent explore?");
+        assert_eq!(question("agent", &json!({})), "Start agent general?");
+    }
+
+    #[test]
+    fn agent_output_strips_the_wrapper() {
+        let wrap = |state: &str, body: &str| {
+            format!("<agent name=\"explore\" session=\"01K\" state=\"{state}\">\n{body}\n</agent>")
+        };
+        let (lines, end) = agent_output(&wrap("completed", "one\ntwo"));
+        assert_eq!(
+            texts(&lines),
+            [(LineKind::Text, "one"), (LineKind::Text, "two")]
+        );
+        assert_eq!(end, Some(AgentEnd::Done));
+
+        let (lines, end) = agent_output(&wrap("cancelled", "so far"));
+        assert_eq!(
+            texts(&lines),
+            [(LineKind::Text, "Stopped by you. Partial reply: so far")]
+        );
+        assert_eq!(end, Some(AgentEnd::Stopped));
+
+        let (lines, _) = agent_output(&wrap("cancelled", NO_REPLY));
+        assert_eq!(
+            texts(&lines),
+            [(LineKind::Text, "Stopped by you before it replied.")]
+        );
+
+        let (lines, end) = agent_output(&wrap("failed", "rate limited"));
+        assert_eq!(texts(&lines), [(LineKind::Text, "rate limited")]);
+        assert_eq!(end, Some(AgentEnd::Failed));
+
+        let (lines, end) = agent_output("unknown agent x (valid agents: explore)");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(end, None);
+    }
+
+    #[test]
+    fn agent_stats_show_tokens_once_used() {
+        assert_eq!(agent_stats(0, 0), "0 tools");
+        assert_eq!(agent_stats(1, 0), "1 tool");
+        assert_eq!(agent_stats(14, 22_000), "14 tools \u{b7} 22k tok");
     }
 
     #[test]

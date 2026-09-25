@@ -36,9 +36,9 @@ use kage_provider::{
 
 use crate::acp::{
     ClientCapabilities, ContentBlock, Implementation, InitializeRequest, NewSessionRequest,
-    NewSessionResponse, PROTOCOL_VERSION, PermissionOption, PermissionOptionKind,
-    PermissionOutcome, PromptRequest, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedOption, SessionNotification, SessionUpdate,
+    PROTOCOL_VERSION, PermissionOption, PermissionOptionKind, PermissionOutcome, PromptRequest,
+    RequestPermissionRequest, RequestPermissionResponse, SelectedOption, SessionNotification,
+    SessionUpdate,
 };
 use crate::agent::PermissionDecision;
 
@@ -149,9 +149,18 @@ fn rpc_to_provider(e: RpcError) -> ProviderError {
     }
 }
 
+/// The part of a `session/new` result the client reads. The rest (such
+/// as config options in shapes kage does not model) is ignored.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionCreated {
+    session_id: String,
+}
+
 /// Translate one `session/update` payload into a provider event.
 /// `None` for updates kage's loop has no slot for (the upstream
-/// agent's own tool calls, plans, mode changes).
+/// agent's own tool calls, plans, mode changes, usage, subagents and
+/// unknown kinds).
 fn translate(update: &SessionUpdate) -> Option<ProviderEvent> {
     let chunk = match update {
         SessionUpdate::AgentMessageChunk(c) => {
@@ -368,7 +377,7 @@ where
         cwd,
         mcp_servers: vec![],
     };
-    let session: NewSessionResponse = serde_json::from_value(
+    let session: SessionCreated = serde_json::from_value(
         peer.request_timeout(
             "session/new",
             serde_json::to_value(&new_session).map_err(|e| ProviderError::Decode(e.to_string()))?,
@@ -494,6 +503,7 @@ mod tests {
         fn new_session(&self, _req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
             Ok(NewSessionResponse {
                 session_id: "s1".to_owned(),
+                config_options: vec![],
             })
         }
 
@@ -520,6 +530,92 @@ mod tests {
         }
 
         fn cancel(&self, _session_id: &str) {}
+    }
+
+    /// Sends an update kind kage does not know, then a text chunk.
+    struct NewKindAgent;
+
+    impl Agent for NewKindAgent {
+        fn initialize(&self, req: InitializeRequest) -> InitializeResponse {
+            EchoAgent.initialize(req)
+        }
+
+        fn new_session(&self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+            EchoAgent.new_session(req)
+        }
+
+        fn prompt(
+            &self,
+            _req: PromptRequest,
+            ctx: &PromptContext,
+        ) -> Result<PromptResponse, RpcError> {
+            ctx.peer()
+                .notify(
+                    "session/update",
+                    serde_json::json!({
+                        "sessionId": ctx.session_id(),
+                        "update": {"sessionUpdate": "compaction_update", "phase": "started"}
+                    }),
+                )
+                .unwrap();
+            ctx.update(SessionUpdate::UsageUpdate(crate::acp::UsageUpdate {
+                used: 1,
+                size: 2,
+                cost: None,
+            }));
+            ctx.update(SessionUpdate::AgentMessageChunk(MessageChunk {
+                content: ContentBlock::text("still here"),
+            }));
+            Ok(PromptResponse {
+                stop_reason: crate::acp::StopReason::EndTurn,
+            })
+        }
+
+        fn cancel(&self, _session_id: &str) {}
+    }
+
+    #[test]
+    fn unknown_and_new_update_kinds_keep_the_stream() {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let server =
+            thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, |_| NewKindAgent));
+
+        let cancel = CancelFlag::new();
+        let stream = run_turn(
+            BufReader::new(cli_r),
+            cli_w,
+            "hi".to_owned(),
+            "/tmp".to_owned(),
+            &cancel,
+            None,
+            Duration::from_secs(10),
+        )
+        .expect("turn starts");
+
+        let events: Vec<_> = stream.take(2).map(Result::unwrap).collect();
+        assert!(matches!(
+            &events[0],
+            ProviderEvent::TextDelta { delta } if delta == "still here"
+        ));
+        assert!(matches!(events[1], ProviderEvent::MessageEnd { .. }));
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn session_new_tolerates_unmodelled_config_options() {
+        let created: SessionCreated = serde_json::from_value(serde_json::json!({
+            "sessionId": "s1",
+            "configOptions": [{
+                "id": "fast",
+                "name": "Fast",
+                "category": "model_config",
+                "type": "boolean",
+                "currentValue": true
+            }]
+        }))
+        .unwrap();
+        assert_eq!(created.session_id, "s1");
     }
 
     #[test]
@@ -578,6 +674,7 @@ mod tests {
         fn new_session(&self, _req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
             Ok(NewSessionResponse {
                 session_id: "s1".to_owned(),
+                config_options: vec![],
             })
         }
 

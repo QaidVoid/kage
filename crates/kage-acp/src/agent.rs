@@ -2,7 +2,9 @@
 //!
 //! Drives an injected [`Agent`] over the [`kage_jsonrpc`] peer, conformant
 //! with the published ACP spec: it answers `initialize`, `session/new`,
-//! `session/load` and `session/prompt`, forwards the `session/cancel`
+//! `session/load`, `session/list`, `session/resume`,
+//! `session/set_config_option` and `session/prompt`, forwards the
+//! `session/cancel`
 //! notification, and lets the agent stream `session/update`
 //! notifications and issue `session/request_permission` requests. A
 //! request the agent abandons (a permission ask outlived by its run) is
@@ -19,10 +21,12 @@ use std::thread;
 use kage_jsonrpc::{CancelNotice, Inbound, Peer, RpcError, connect_with};
 
 use crate::acp::{
-    InitializeRequest, InitializeResponse, LoadSessionRequest, NewSessionRequest,
-    NewSessionResponse, PermissionOption, PermissionOptionKind, PermissionOutcome, PromptRequest,
-    PromptResponse, RequestPermissionRequest, RequestPermissionResponse, SessionNotification,
-    SessionUpdate, ToolCallUpdate,
+    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, LoadSessionResponse, NewSessionRequest, NewSessionResponse,
+    PermissionOption, PermissionOptionKind, PermissionOutcome, PromptRequest, PromptResponse,
+    RequestPermissionRequest, RequestPermissionResponse, ResumeSessionRequest,
+    ResumeSessionResponse, SessionNotification, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, ToolCallUpdate,
 };
 
 /// The client's answer to a `session/request_permission`.
@@ -142,8 +146,52 @@ pub trait Agent: Send + Sync + 'static {
     ///
     /// Returns an [`RpcError`] if the session id is unknown or its
     /// history cannot be replayed.
-    fn load_session(&self, _req: LoadSessionRequest, _ctx: &PromptContext) -> Result<(), RpcError> {
+    fn load_session(
+        &self,
+        _req: LoadSessionRequest,
+        _ctx: &PromptContext,
+    ) -> Result<LoadSessionResponse, RpcError> {
         Err(RpcError::method_not_found("session/load"))
+    }
+
+    /// List recorded sessions, one page at a time. The default rejects:
+    /// only agents that advertise `sessionCapabilities.list` override
+    /// it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the sessions cannot be listed.
+    fn list_sessions(&self, _req: ListSessionsRequest) -> Result<ListSessionsResponse, RpcError> {
+        Err(RpcError::method_not_found("session/list"))
+    }
+
+    /// Reopen a recorded session without replaying its history. The
+    /// default rejects: only agents that advertise
+    /// `sessionCapabilities.resume` override it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the session id is unknown or cannot
+    /// be reopened.
+    fn resume_session(
+        &self,
+        _req: ResumeSessionRequest,
+    ) -> Result<ResumeSessionResponse, RpcError> {
+        Err(RpcError::method_not_found("session/resume"))
+    }
+
+    /// Change one config option of a session. The default rejects:
+    /// only agents that return config options override it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`RpcError`] if the session, option or value is
+    /// unknown.
+    fn set_config_option(
+        &self,
+        _req: SetSessionConfigOptionRequest,
+    ) -> Result<SetSessionConfigOptionResponse, RpcError> {
+        Err(RpcError::method_not_found("session/set_config_option"))
     }
 
     /// Run one prompt turn to completion, streaming `session/update`
@@ -267,9 +315,27 @@ fn handle_request<A: Agent>(
                     session_id: req.session_id.clone(),
                 };
                 spawn_op(peer, agent, id, move |a| {
-                    a.load_session(req, &ctx).map(|()| serde_json::Value::Null)
+                    a.load_session(req, &ctx).map(jval)
                 });
             }
+        },
+        "session/list" => match parse::<ListSessionsRequest>(params) {
+            Err(e) => {
+                let _ = peer.respond(&id, Err(e));
+            }
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.list_sessions(req).map(jval)),
+        },
+        "session/resume" => match parse::<ResumeSessionRequest>(params) {
+            Err(e) => {
+                let _ = peer.respond(&id, Err(e));
+            }
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.resume_session(req).map(jval)),
+        },
+        "session/set_config_option" => match parse::<SetSessionConfigOptionRequest>(params) {
+            Err(e) => {
+                let _ = peer.respond(&id, Err(e));
+            }
+            Ok(req) => spawn_op(peer, agent, id, move |a| a.set_config_option(req).map(jval)),
         },
         other => {
             let _ = peer.respond(&id, Err(RpcError::method_not_found(other)));
@@ -286,7 +352,7 @@ mod tests {
 
     use crate::acp::{
         AgentCapabilities, ContentBlock, Implementation, MessageChunk, PromptCapabilities,
-        StopReason,
+        SessionInfo, StopReason,
     };
 
     struct MockAgent;
@@ -299,6 +365,7 @@ mod tests {
                 agent_capabilities: AgentCapabilities {
                     load_session: false,
                     prompt_capabilities: PromptCapabilities::default(),
+                    ..AgentCapabilities::default()
                 },
                 agent_info: Some(Implementation {
                     name: "mock".into(),
@@ -312,6 +379,7 @@ mod tests {
         fn new_session(&self, _req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
             Ok(NewSessionResponse {
                 session_id: "sess-1".into(),
+                config_options: vec![],
             })
         }
 
@@ -397,6 +465,7 @@ mod tests {
                 agent_capabilities: AgentCapabilities {
                     load_session: true,
                     prompt_capabilities: PromptCapabilities::default(),
+                    ..AgentCapabilities::default()
                 },
                 agent_info: None,
                 auth_methods: vec![],
@@ -406,6 +475,7 @@ mod tests {
         fn new_session(&self, _r: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
             Ok(NewSessionResponse {
                 session_id: "s1".into(),
+                config_options: vec![],
             })
         }
 
@@ -425,11 +495,43 @@ mod tests {
             &self,
             req: LoadSessionRequest,
             ctx: &PromptContext,
-        ) -> Result<(), RpcError> {
+        ) -> Result<LoadSessionResponse, RpcError> {
             ctx.update(SessionUpdate::AgentMessageChunk(MessageChunk {
                 content: ContentBlock::text(format!("history of {}", req.session_id)),
             }));
-            Ok(())
+            Ok(LoadSessionResponse::default())
+        }
+
+        fn list_sessions(
+            &self,
+            req: ListSessionsRequest,
+        ) -> Result<ListSessionsResponse, RpcError> {
+            Ok(ListSessionsResponse {
+                sessions: vec![SessionInfo {
+                    session_id: "s1".into(),
+                    cwd: req.cwd.unwrap_or_default(),
+                    title: None,
+                    updated_at: None,
+                }],
+                next_cursor: None,
+            })
+        }
+
+        fn resume_session(
+            &self,
+            _req: ResumeSessionRequest,
+        ) -> Result<ResumeSessionResponse, RpcError> {
+            Ok(ResumeSessionResponse::default())
+        }
+
+        fn set_config_option(
+            &self,
+            req: SetSessionConfigOptionRequest,
+        ) -> Result<SetSessionConfigOptionResponse, RpcError> {
+            Err(RpcError::new(
+                -32602,
+                format!("unknown option {}", req.config_id),
+            ))
         }
     }
 
@@ -447,7 +549,7 @@ mod tests {
                 serde_json::json!({"sessionId": "s9", "cwd": "/tmp", "mcpServers": []}),
             )
             .unwrap();
-        assert_eq!(res, serde_json::Value::Null);
+        assert_eq!(res, serde_json::json!({}));
 
         match inbox.recv().unwrap() {
             Inbound::Notification { method, params } => {
@@ -458,6 +560,65 @@ mod tests {
         }
         drop(client);
         drop(inbox);
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn session_methods_dispatch_to_the_agent() {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let server =
+            thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, |_| LoadAgent));
+        let (client, _inbox, _h) = connect(BufReader::new(cli_r), cli_w);
+
+        let list = client
+            .request("session/list", serde_json::json!({"cwd": "/w"}))
+            .unwrap();
+        assert_eq!(
+            list,
+            serde_json::json!({"sessions": [{"sessionId": "s1", "cwd": "/w"}]})
+        );
+        let resume = client
+            .request(
+                "session/resume",
+                serde_json::json!({"sessionId": "s1", "cwd": "/w", "mcpServers": []}),
+            )
+            .unwrap();
+        assert_eq!(resume, serde_json::json!({}));
+        let err = client
+            .request(
+                "session/set_config_option",
+                serde_json::json!({"sessionId": "s1", "configId": "nope", "value": "x"}),
+            )
+            .unwrap_err();
+        assert_eq!(err.code, -32602);
+        assert_eq!(err.message, "unknown option nope");
+        drop(client);
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn new_session_methods_default_to_method_not_found() {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let server =
+            thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, |_| MockAgent));
+        let (client, _inbox, _h) = connect(BufReader::new(cli_r), cli_w);
+        for (method, params) in [
+            ("session/list", serde_json::json!({})),
+            (
+                "session/resume",
+                serde_json::json!({"sessionId": "x", "cwd": "/", "mcpServers": []}),
+            ),
+            (
+                "session/set_config_option",
+                serde_json::json!({"sessionId": "x", "configId": "model", "value": "m"}),
+            ),
+        ] {
+            let err = client.request(method, params).unwrap_err();
+            assert_eq!(err.code, -32601, "{method}");
+        }
+        drop(client);
         server.join().unwrap().unwrap();
     }
 

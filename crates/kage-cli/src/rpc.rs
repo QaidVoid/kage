@@ -19,9 +19,9 @@ use std::sync::{Arc, Mutex, mpsc};
 
 use kage_acp::acp::{
     AgentCapabilities, ContentBlock, Implementation, InitializeRequest, InitializeResponse,
-    LoadSessionRequest, MessageChunk, NewSessionRequest, NewSessionResponse, PROTOCOL_VERSION,
-    PromptCapabilities, PromptRequest, PromptResponse, SessionUpdate, StopReason, ToolCall,
-    ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
+    LoadSessionRequest, LoadSessionResponse, MessageChunk, NewSessionRequest, NewSessionResponse,
+    PROTOCOL_VERSION, PromptCapabilities, PromptRequest, PromptResponse, SessionUpdate, StopReason,
+    ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
 };
 use kage_acp::agent::{Agent, PermissionDecision, PromptContext, send_update, serve_agent};
 use kage_core::permissions::PermissionAction;
@@ -224,6 +224,7 @@ impl Agent for CliAcpAgent {
             agent_capabilities: AgentCapabilities {
                 load_session: true,
                 prompt_capabilities: PromptCapabilities::default(),
+                ..AgentCapabilities::default()
             },
             agent_info: Some(Implementation {
                 name: "kage".to_owned(),
@@ -246,10 +247,15 @@ impl Agent for CliAcpAgent {
         self.engine.open(spec);
         Ok(NewSessionResponse {
             session_id: id.to_string(),
+            config_options: vec![],
         })
     }
 
-    fn load_session(&self, req: LoadSessionRequest, ctx: &PromptContext) -> Result<(), RpcError> {
+    fn load_session(
+        &self,
+        req: LoadSessionRequest,
+        ctx: &PromptContext,
+    ) -> Result<LoadSessionResponse, RpcError> {
         let dir = crate::sessions_dir().map_err(RpcError::internal)?;
         let path = kage_session::find_by_prefix(&dir, &req.session_id)
             .map_err(|e| RpcError::internal(e.to_string()))?
@@ -274,7 +280,7 @@ impl Agent for CliAcpAgent {
         }
         if lock(&self.ids).by_engine.contains_key(&id) {
             lock(&self.ids).insert(req.session_id, id);
-            return Ok(());
+            return Ok(LoadSessionResponse::default());
         }
         let writer = SessionWriter::open(&path).map_err(|e| RpcError::internal(e.to_string()))?;
         let mut spec = self.session_spec(id, &req.cwd)?;
@@ -282,7 +288,7 @@ impl Agent for CliAcpAgent {
         spec.recorder = Some(Recorder::new(writer, spec.plugins.clone()));
         lock(&self.ids).insert(req.session_id, id);
         self.engine.open(spec);
-        Ok(())
+        Ok(LoadSessionResponse::default())
     }
 
     fn prompt(&self, req: PromptRequest, _ctx: &PromptContext) -> Result<PromptResponse, RpcError> {

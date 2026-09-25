@@ -13,7 +13,9 @@ use crate::buffer::Block;
 
 /// Renders one [`Block::ToolCall`] paired with its matching
 /// [`Block::ToolResult`] as a finished tool row: state bullet, verb,
-/// target, duration and a body chosen by the tool's kind.
+/// target, duration and a body chosen by the tool's kind. An
+/// interrupted call shows the last progress it streamed instead of the
+/// cancellation text.
 ///
 /// Unpaired tool calls (still running) and unpaired tool results stay
 /// on the standalone widgets.
@@ -39,6 +41,7 @@ impl ToolPairBlockWidget {
             input,
             phase,
             folded,
+            progress,
             ..
         } = call
         else {
@@ -57,7 +60,11 @@ impl ToolPairBlockWidget {
             input: Arc::clone(input),
             phase: *phase,
             folded: *folded,
-            output: output.clone(),
+            output: if *phase == ToolPhase::Interrupted {
+                progress.clone()
+            } else {
+                output.clone()
+            },
             duration_ms: *duration_ms,
         })
     }
@@ -208,6 +215,25 @@ mod tests {
             rows[1].ends_with("- x") && rows[2].ends_with("+ y"),
             "{rows:?}"
         );
+    }
+
+    #[test]
+    fn failed_and_denied_edits_do_not_claim_the_edit() {
+        let input = json!({"path": "a.rs", "old_str": "x", "new_str": "y"});
+        let failed = rows("edit", input.clone(), "`old_str` not found", true);
+        assert!(failed[0].contains("\u{2717} Edit a.rs"), "{failed:?}");
+        assert!(!failed[0].contains("(+1 -1)"), "{failed:?}");
+        assert!(failed[1].ends_with("`old_str` not found"), "{failed:?}");
+
+        let mut buf = Buffer::new();
+        buf.push_tool_call("c1", "edit", input);
+        buf.set_tool_phase("c1", ToolPhase::Denied);
+        buf.push_tool_result("c1", "denied by user", true);
+        let w = ToolPairBlockWidget::from_pair(&buf.blocks()[0], &buf.blocks()[1]).unwrap();
+        let denied = rows_of(&w.lines(80, &ctx(&Theme::default())));
+        assert!(denied[0].contains("\u{2298} Edit a.rs"), "{denied:?}");
+        assert!(denied[0].ends_with("denied"), "{denied:?}");
+        assert!(!denied[0].contains("Edited"), "{denied:?}");
     }
 
     #[test]

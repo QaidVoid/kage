@@ -15,8 +15,8 @@ use ratatui::text::{Line, Span};
 
 use super::widget::{BlockWidget, RenderCtx};
 use super::{
-    Emphasis, custom_style, fold_indicator, header_line, mark_emphasis, mark_emphasis_bare,
-    plain_lines, tool_call_style,
+    Emphasis, custom_style, fold_indicator, header_line, mark_emphasis, plain_lines,
+    tool_call_style,
 };
 use crate::buffer::Block;
 use crate::theme::current;
@@ -124,12 +124,10 @@ impl CustomBlockWidget {
                 if !self.folded {
                     out.extend(plain_lines(&self.text, custom_style()));
                 }
-                return mark_emphasis(out, width, emphasis);
+                out
             }
         };
-        // Notices skip the reserved rule column: they sit flush with
-        // the terminal edge.
-        mark_emphasis_bare(out, width, emphasis)
+        mark_emphasis(out, width, emphasis)
     }
 }
 
@@ -223,7 +221,10 @@ mod tests {
         let w = CustomBlockWidget::from_block(&block).unwrap();
         w.lines(60, &ctx(&Theme::default()))
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .map(|l| {
+                let row: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+                row.strip_prefix("  ").unwrap_or(&row).to_owned()
+            })
             .collect()
     }
 
@@ -277,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn quiet_blocks_have_no_margin() {
+    fn quiet_blocks_indent_like_assistant_text() {
         let block = Block::Custom {
             kind: "kage:help".into(),
             text: "welcome to kage".into(),
@@ -290,6 +291,6 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect::<String>();
-        assert_eq!(text, "welcome to kage", "flush left, no prefix");
+        assert_eq!(text, "  welcome to kage", "indented past the rule column");
     }
 }

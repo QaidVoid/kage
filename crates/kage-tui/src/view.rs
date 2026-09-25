@@ -418,8 +418,8 @@ pub(crate) use blocks::{
     thinking_style, tool_call_style, tool_group_lines, tool_row_lines,
 };
 pub(crate) use bubble::{
-    FOCUS_RULE_WIDTH, bubble_content_width, mark_emphasis, mark_emphasis_bare, plain_lines,
-    user_block_lines, wrap_in_bubble_focused,
+    FOCUS_RULE_WIDTH, bubble_content_width, mark_emphasis, plain_lines, user_block_lines,
+    wrap_in_bubble_focused,
 };
 pub use buffer::CapturedCell;
 pub(crate) use buffer::build_block_lines;

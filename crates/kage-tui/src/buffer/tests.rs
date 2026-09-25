@@ -445,33 +445,37 @@ fn push_tool_pairs(buf: &mut Buffer, start: usize, n: usize) {
 fn tool_topology_tracks_new_pairs_at_the_block_cap() {
     let mut buf = Buffer::new();
     push_tool_pairs(&mut buf, 0, MAX_BLOCKS / 2);
-    assert_eq!(buf.tool_topology().result_by_call.get("c0"), Some(&1));
+    assert_eq!(buf.tool_topology().result_of_call.get(&0), Some(&1));
 
     push_tool_pairs(&mut buf, MAX_BLOCKS / 2, 1);
     assert_eq!(buf.trim_scrollback(), 2);
     assert_eq!(buf.blocks().len(), MAX_BLOCKS);
 
     let topo = buf.tool_topology();
-    let new_id = format!("c{}", MAX_BLOCKS / 2);
-    assert_eq!(topo.result_by_call.get(&new_id), Some(&(MAX_BLOCKS - 1)));
+    assert_eq!(
+        topo.result_of_call.get(&(MAX_BLOCKS - 2)),
+        Some(&(MAX_BLOCKS - 1))
+    );
     assert_eq!(
         topo.call_idx_for_result.get(&(MAX_BLOCKS - 1)),
         Some(&(MAX_BLOCKS - 2))
     );
-    assert!(!topo.result_by_call.contains_key("c0"));
+    assert_eq!(topo.result_of_call.len(), MAX_BLOCKS / 2);
 }
 
 #[test]
 fn tool_topology_rebuilds_after_clear_to_the_same_length() {
     let mut buf = Buffer::new();
     push_tool_pairs(&mut buf, 0, 2);
-    assert_eq!(buf.tool_topology().result_by_call.get("c0"), Some(&1));
+    assert_eq!(buf.tool_topology().result_of_call.get(&0), Some(&1));
 
     buf.clear();
-    push_tool_pairs(&mut buf, 10, 2);
+    buf.push_user("next");
+    push_tool_pairs(&mut buf, 10, 1);
+    buf.push_user("again");
     let topo = buf.tool_topology();
-    assert_eq!(topo.result_by_call.get("c10"), Some(&1));
-    assert!(!topo.result_by_call.contains_key("c0"));
+    assert_eq!(topo.result_of_call.get(&1), Some(&2));
+    assert!(!topo.result_of_call.contains_key(&0));
 }
 
 /// Live assistant block with renderer caches primed for the stale
@@ -497,9 +501,30 @@ fn streaming_delta_keeps_caches_inside_throttle_window() {
     assert!(buf.stream_edits_pending());
     assert_ne!(buf.version(), v0);
 
-    // Non-last blocks are never throttled.
+    // A block pushed after the stream finishes it and drops the stale
+    // render, since only the last block's throttled cache is refreshed.
     buf.push_user("done");
-    assert_eq!(buf.cached_height(0, 80), Some(3));
+    assert_eq!(buf.cached_height(0, 80), None);
+    assert!(buf.cached_render_lines(0, 80).is_none());
+    assert!(matches!(
+        buf.blocks()[0],
+        Block::Assistant { live: false, .. }
+    ));
+}
+
+#[test]
+fn a_tool_call_after_streamed_text_finishes_the_text() {
+    let mut buf = throttled_stream_fixture();
+    buf.append_assistant_delta(" and the rest");
+    buf.push_tool_call("c1", "read", json!({"path": "a.rs"}));
+    buf.push_tool_call("c2", "read", json!({"path": "b.rs"}));
+    buf.finish_streaming();
+    assert!(matches!(
+        &buf.blocks()[0],
+        Block::Assistant { text, live: false } if text == "hello world and the rest"
+    ));
+    assert!(buf.cached_render_lines(0, 80).is_none());
+    assert!(!buf.stream_edits_pending());
 }
 
 #[test]
@@ -744,4 +769,42 @@ fn jump_targets_truncate_and_skip_empty() {
     assert_eq!(targets.len(), 1, "empty labels are skipped");
     assert_eq!(targets[0].1.chars().count(), 20);
     assert!(targets[0].1.ends_with("..."));
+}
+
+#[test]
+fn focus_moves_bump_the_version() {
+    let mut buf = Buffer::new();
+    buf.push_user("q");
+    buf.push_thinking("t");
+    buf.push_tool_call("c1", "bash", json!({"command": "ls"}));
+    buf.push_tool_result_with_duration("c1", "out", false, None);
+    buf.append_assistant_delta("a");
+    buf.finish_streaming();
+
+    let moves: [fn(&mut Buffer) -> bool; 5] = [
+        Buffer::focus_prev_any,
+        Buffer::focus_next_any,
+        Buffer::focus_prev,
+        Buffer::focus_prev,
+        Buffer::focus_next,
+    ];
+    for step in moves {
+        let v = buf.version();
+        assert!(step(&mut buf));
+        assert_ne!(buf.version(), v, "a focus move must repaint");
+    }
+}
+
+#[test]
+fn the_first_fold_acts_on_the_last_foldable_block() {
+    let mut buf = Buffer::new();
+    buf.push_user("q");
+    buf.push_tool_call("c1", "bash", json!({"command": "ls"}));
+    buf.push_tool_result_with_duration("c1", "out", false, None);
+    buf.append_assistant_delta("done");
+    buf.finish_streaming();
+    assert_eq!(buf.effective_focus(), Some(3));
+    assert_eq!(buf.fold_target(), Some(1));
+    buf.set_focus(Some(0));
+    assert_eq!(buf.fold_target(), Some(0));
 }

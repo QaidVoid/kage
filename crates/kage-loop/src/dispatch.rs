@@ -1,8 +1,9 @@
 //! Sequential dispatch of tool calls produced by one assistant turn.
 //!
 //! Walks the [`PendingToolCall`] list from [`crate::stream::collect_turn`],
-//! consults [`Hooks::before_tool_call`] for short-circuit, executes the tool
-//! through the registry, runs the result through [`Hooks::after_tool_call`],
+//! consults [`Hooks::before_tool_call`] for short-circuit, emits a
+//! [`LoopEvent::ToolExecutionStart`] and executes the tool through the
+//! registry, runs the result through [`Hooks::after_tool_call`],
 //! emits a [`LoopEvent::ToolCallEnd`], and produces one tool-result message
 //! per call to append to history.
 //!
@@ -15,6 +16,7 @@
 use std::path::Path;
 use std::sync::{Arc, mpsc};
 
+use kage_core::event::TOOL_CANCELLED_TEXT;
 use kage_core::{
     CancelFlag, Content, LoopError, LoopEvent, Message, MessageId, Role, ToolCallId, ToolOutput,
     ToolUpdate,
@@ -55,7 +57,8 @@ impl Drop for DoneOnDrop {
 
 /// Execute `calls` on scoped threads and emit their progress live.
 ///
-/// The calling thread forwards every update as a [`LoopEvent::ToolUpdate`]
+/// Emits a [`LoopEvent::ToolExecutionStart`] per call first. The calling
+/// thread forwards every update as a [`LoopEvent::ToolUpdate`]
 /// until all threads finish, so `emit` stays on the loop thread.
 /// Results come back in input order. A panicking tool yields an error.
 #[allow(clippy::too_many_arguments)]
@@ -67,6 +70,11 @@ fn execute_live<F: FnMut(LoopEvent)>(
     confine_paths: bool,
     emit: &mut F,
 ) -> Vec<Result<ToolOutput, LoopError>> {
+    for call in calls {
+        emit(LoopEvent::ToolExecutionStart {
+            id: call.id.clone(),
+        });
+    }
     let (tx, rx) = mpsc::channel();
     std::thread::scope(|scope| {
         let handles: Vec<_> = calls
@@ -134,7 +142,7 @@ pub(crate) struct DispatchOutcome {
 /// sees the call did not run; the text says why.
 fn synthesized_output(error: &LoopError) -> ToolOutput {
     let text = match error {
-        LoopError::Cancelled => "tool call cancelled before completion".to_owned(),
+        LoopError::Cancelled => TOOL_CANCELLED_TEXT.to_owned(),
         other => format!("tool did not run: {other}"),
     };
     ToolOutput {

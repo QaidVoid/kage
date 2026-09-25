@@ -178,14 +178,17 @@ impl Buffer {
     }
 
     /// Whether any tool call is still in flight: streaming its
-    /// arguments, waiting for approval, or running.
+    /// arguments, queued, waiting for approval, or running.
     #[must_use]
     pub fn has_running_tool_call(&self) -> bool {
         self.blocks.iter().any(|b| {
             matches!(
                 b,
                 Block::ToolCall {
-                    phase: ToolPhase::Streaming | ToolPhase::Waiting | ToolPhase::Running,
+                    phase: ToolPhase::Streaming
+                        | ToolPhase::Queued
+                        | ToolPhase::Waiting
+                        | ToolPhase::Running,
                     ..
                 }
             )
@@ -635,6 +638,26 @@ impl Buffer {
         }
     }
 
+    /// Focus block `idx` without scrolling to it, for a click on a
+    /// block that is already on screen. Out-of-range indices are
+    /// dropped.
+    pub fn focus_in_place(&mut self, idx: usize) {
+        self.set_focus(Some(idx));
+        self.last_user_focus = self.focus;
+    }
+
+    /// The block a fold gesture acts on: the explicit focus, else the
+    /// last foldable block, so the first fold works while the reply
+    /// that ends the conversation (which cannot fold) is last.
+    #[must_use]
+    pub fn fold_target(&self) -> Option<usize> {
+        self.focus.or_else(|| {
+            (0..self.blocks.len())
+                .rev()
+                .find(|&i| self.is_selectable(i) && self.blocks[i].is_foldable())
+        })
+    }
+
     /// Move focus to the previous (older) foldable block, skipping
     /// non-foldable kinds (User/Assistant). Returns `true` if focus
     /// changed.
@@ -644,6 +667,7 @@ impl Buffer {
         match self.foldable_index_before(idx) {
             Some(n) if Some(n) != current => {
                 self.focus = Some(n);
+                self.bump_version();
                 true
             }
             _ => false,
@@ -658,6 +682,7 @@ impl Buffer {
         match self.foldable_index_after(idx) {
             Some(n) if Some(n) != current => {
                 self.focus = Some(n);
+                self.bump_version();
                 true
             }
             _ => false,
@@ -673,6 +698,7 @@ impl Buffer {
         match self.selectable_index_before(idx) {
             Some(n) if Some(n) != current => {
                 self.focus = Some(n);
+                self.bump_version();
                 true
             }
             _ => false,
@@ -687,6 +713,7 @@ impl Buffer {
         match self.selectable_index_after(idx) {
             Some(n) if Some(n) != current => {
                 self.focus = Some(n);
+                self.bump_version();
                 true
             }
             _ => false,

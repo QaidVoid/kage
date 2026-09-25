@@ -70,14 +70,7 @@ pub(crate) fn tool_row_lines(
         (text_lines(row.output), None)
     };
     let (bullet, bullet_style) = phase_bullet(row.phase, &theme);
-    let verb = if matches!(
-        row.phase,
-        ToolPhase::Streaming | ToolPhase::Waiting | ToolPhase::Running
-    ) {
-        label.verb_live
-    } else {
-        label.verb_done
-    };
+    let verb = label.verb_for(row.phase, exit.is_some());
     let right = right_text(row, exit);
     let right_style = if row.phase == ToolPhase::Failed {
         tool_error_style()
@@ -88,7 +81,7 @@ pub(crate) fn tool_row_lines(
         (bullet, bullet_style),
         verb,
         &label.target,
-        &label.stats,
+        label.stats_for(row.phase),
         (&right, right_style),
         max,
     )];
@@ -101,7 +94,7 @@ pub(crate) fn tool_row_lines(
     content.extend(body.into_iter().map(|line| indent_body(line, clip)));
     let (rule, bg) = match row.phase {
         ToolPhase::Failed => (theme.tool_error_rule, theme.tool_error_bg),
-        ToolPhase::Streaming | ToolPhase::Waiting | ToolPhase::Running => {
+        ToolPhase::Streaming | ToolPhase::Queued | ToolPhase::Waiting | ToolPhase::Running => {
             (theme.tool_pending_rule, theme.tool_pending_bg)
         }
         ToolPhase::Done | ToolPhase::Denied | ToolPhase::Interrupted => {
@@ -161,7 +154,7 @@ pub(crate) fn tool_group_lines(
 fn phase_bullet(phase: ToolPhase, theme: &crate::theme::Theme) -> (&'static str, Style) {
     let fg = |c| Style::default().fg(c);
     match phase {
-        ToolPhase::Streaming => ("\u{2022}", fg(theme.tool_pending_rule)),
+        ToolPhase::Streaming | ToolPhase::Queued => ("\u{2022}", fg(theme.tool_pending_rule)),
         ToolPhase::Running => (spinner_frame(), fg(theme.tool_pending_rule)),
         ToolPhase::Waiting => ("\u{2022}", theme.group_style("KageApproval")),
         ToolPhase::Done => ("\u{2022}", fg(theme.success_fg)),
@@ -176,6 +169,7 @@ fn right_text(row: &ToolRow<'_>, exit: Option<BashExit>) -> String {
     let elapsed = row.elapsed_ms.map(format_elapsed);
     match row.phase {
         ToolPhase::Streaming => String::new(),
+        ToolPhase::Queued => "queued".to_owned(),
         ToolPhase::Waiting => "waiting".to_owned(),
         ToolPhase::Denied => "denied".to_owned(),
         ToolPhase::Interrupted => "interrupted".to_owned(),

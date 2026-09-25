@@ -445,8 +445,8 @@ pub(crate) fn build_block_lines(
         let calls: Vec<&Block> = members.iter().map(|&m| &blocks[m]).collect();
         return tool_group_lines(&calls, width, emphasis);
     }
-    if let Block::ToolCall { call_id, .. } = cur
-        && let Some(&result_idx) = topology.result_by_call.get(call_id)
+    if let Block::ToolCall { .. } = cur
+        && let Some(&result_idx) = topology.result_of_call.get(&idx)
         && let Some(w) = registry.pair_widget_for(cur, &blocks[result_idx])
     {
         return w.lines(width, &ctx);

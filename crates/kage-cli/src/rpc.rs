@@ -429,28 +429,30 @@ fn to_update(seen: &mut HashSet<String>, event: &LoopEvent) -> Option<SessionUpd
             name,
             input_partial,
         } => {
-            let status = if matches!(event, LoopEvent::ToolCallStart { .. }) {
-                ToolCallStatus::InProgress
-            } else {
-                ToolCallStatus::Pending
-            };
             if seen.insert(id.to_string()) {
                 Some(SessionUpdate::ToolCall(ToolCall {
                     tool_call_id: id.to_string(),
                     title: name.clone(),
                     kind: tool_kind(name),
-                    status,
+                    status: ToolCallStatus::Pending,
                     content: Vec::new(),
                     raw_input: Some(input_partial.clone()),
                 }))
             } else {
                 Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
                     tool_call_id: id.to_string(),
-                    status: Some(status),
+                    status: Some(ToolCallStatus::Pending),
                     raw_input: Some(input_partial.clone()),
                     ..ToolCallUpdate::default()
                 }))
             }
+        }
+        LoopEvent::ToolExecutionStart { id } => {
+            Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
+                tool_call_id: id.to_string(),
+                status: Some(ToolCallStatus::InProgress),
+                ..ToolCallUpdate::default()
+            }))
         }
         LoopEvent::ToolUpdate { id, update } => {
             Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
@@ -518,6 +520,14 @@ mod tests {
         }
     }
 
+    fn status(update: &SessionUpdate) -> Option<ToolCallStatus> {
+        match update {
+            SessionUpdate::ToolCall(call) => Some(call.status),
+            SessionUpdate::ToolCallUpdate(update) => update.status,
+            _ => None,
+        }
+    }
+
     #[test]
     fn a_tool_call_is_announced_once_then_updated() {
         let id = ToolCallId::new("call_1");
@@ -532,6 +542,7 @@ mod tests {
                 name: "bash".into(),
                 input_partial: serde_json::json!({ "command": "ls" }),
             },
+            LoopEvent::ToolExecutionStart { id: id.clone() },
             LoopEvent::ToolUpdate {
                 id: id.clone(),
                 update: ToolUpdate {
@@ -545,18 +556,30 @@ mod tests {
             },
         ];
         let mut seen = HashSet::new();
-        let kinds: Vec<&str> = events
+        let updates: Vec<SessionUpdate> = events
             .iter()
             .filter_map(|e| to_update(&mut seen, e))
-            .map(|u| kind(&u))
             .collect();
+        let kinds: Vec<&str> = updates.iter().map(kind).collect();
         assert_eq!(
             kinds,
             [
                 "tool_call",
                 "tool_call_update",
                 "tool_call_update",
+                "tool_call_update",
                 "tool_call_update"
+            ]
+        );
+        let statuses: Vec<Option<ToolCallStatus>> = updates.iter().map(status).collect();
+        assert_eq!(
+            statuses,
+            [
+                Some(ToolCallStatus::Pending),
+                Some(ToolCallStatus::Pending),
+                Some(ToolCallStatus::InProgress),
+                None,
+                Some(ToolCallStatus::Completed)
             ]
         );
     }

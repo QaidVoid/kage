@@ -66,30 +66,6 @@ pub(crate) fn mark_emphasis(
     prefix_rows(lines, width, &prefix)
 }
 
-/// Like [`mark_emphasis`], but the unfocused gutter is empty so
-/// chrome-light custom blocks (system notices, errors) sit flush
-/// with the terminal edge. Focused or search-matched blocks still
-/// get the rule glyph, and the pre-wrap is kept so height measurement
-/// behaves identically.
-pub(crate) fn mark_emphasis_bare(
-    lines: Vec<Line<'static>>,
-    width: u16,
-    emphasis: Emphasis,
-) -> Vec<Line<'static>> {
-    let prefix: Span<'static> = if emphasis == Emphasis::None {
-        Span::raw("")
-    } else {
-        Span::styled(
-            format!("{} ", emphasis.rule_glyph()),
-            Style::default()
-                .fg(emphasis.rule_color(crate::theme::current().focus_color))
-                .add_modifier(Modifier::BOLD)
-                .add_modifier(DECORATION_MARKER),
-        )
-    };
-    prefix_rows(lines, width, &prefix)
-}
-
 /// Pre-wrap `lines` to the body width and start every visual row with
 /// `prefix`.
 fn prefix_rows(

@@ -212,7 +212,7 @@ impl App {
     }
 
     /// Forget a request that was answered elsewhere or abandoned. Its
-    /// tool call goes on running.
+    /// tool call goes back to the queue until the loop runs it.
     fn drop_permission(&mut self, request_id: RequestId) {
         let mut dropped = Vec::new();
         self.permission_queue.retain(|a| {
@@ -232,13 +232,13 @@ impl App {
         }
         let mut buf = lock(&self.buffer);
         for id in dropped.into_iter().flatten() {
-            buf.set_tool_phase(&id, ToolPhase::Running);
+            buf.set_tool_phase(&id, ToolPhase::Queued);
         }
     }
 
     /// Send the decision for the panel on screen, then show the next
-    /// request. The tool row moves to running, restarting its timer, or
-    /// to denied.
+    /// request. The tool row moves to denied, or back to the queue until
+    /// the loop reports that it runs.
     pub(crate) fn answer_permission(&mut self, decision: PermissionDecision) {
         let Some(approval) = self.pending_permission.take() else {
             return;
@@ -251,7 +251,7 @@ impl App {
             let phase = if decision == PermissionDecision::Deny {
                 ToolPhase::Denied
             } else {
-                ToolPhase::Running
+                ToolPhase::Queued
             };
             lock(&self.buffer).set_tool_phase(id, phase);
         }

@@ -15,7 +15,7 @@ use std::time::Instant;
 use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 
-use super::tool_view::format_elapsed;
+use super::tool_view::format_seconds;
 use super::widget::{BlockWidget, RenderCtx};
 use super::{Emphasis, FOCUS_RULE_WIDTH, mark_emphasis, thinking_style, truncate_to_width};
 use crate::buffer::Block;
@@ -61,10 +61,10 @@ impl ThinkingBlockWidget {
     fn header(&self) -> String {
         if self.live {
             let ms = u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-            format!("Thinking ({})", seconds(ms))
+            format!("Thinking ({})", format_seconds(ms))
         } else {
             match self.duration_ms {
-                Some(ms) => format!("Thought for {}", seconds(ms)),
+                Some(ms) => format!("Thought for {}", format_seconds(ms.max(1000))),
                 None => "Thought".to_owned(),
             }
         }
@@ -98,15 +98,6 @@ impl ThinkingBlockWidget {
             }));
         }
         mark_emphasis(out, width, emphasis)
-    }
-}
-
-/// Whole seconds, at least one, then minutes past a minute.
-fn seconds(ms: u64) -> String {
-    if ms < 60_000 {
-        format!("{}s", (ms.saturating_add(500) / 1000).max(1))
-    } else {
-        format_elapsed(ms)
     }
 }
 
@@ -156,7 +147,7 @@ mod tests {
     #[test]
     fn live_thinking_shows_a_timer_and_its_last_three_lines() {
         let buf = live("one\ntwo\n\nthree\nfour");
-        assert_eq!(rows(&buf), ["Thinking (1s)", "two", "three", "four"]);
+        assert_eq!(rows(&buf), ["Thinking (0s)", "two", "three", "four"]);
     }
 
     #[test]
@@ -211,9 +202,18 @@ mod tests {
     }
 
     #[test]
-    fn seconds_round_and_switch_to_minutes() {
-        assert_eq!(seconds(200), "1s");
-        assert_eq!(seconds(3_400), "3s");
-        assert_eq!(seconds(65_000), "1m 05s");
+    fn the_timer_floors_seconds_like_the_working_row() {
+        let block = Block::Thinking {
+            text: "one".into(),
+            folded: true,
+            live: true,
+            started_at: Instant::now()
+                .checked_sub(std::time::Duration::from_millis(1_700))
+                .unwrap(),
+            duration_ms: None,
+            pinned: false,
+        };
+        let widget = ThinkingBlockWidget::from_block(&block).unwrap();
+        assert_eq!(widget.header(), "Thinking (1s)");
     }
 }

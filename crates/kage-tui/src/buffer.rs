@@ -287,8 +287,10 @@ fn truncate_label(label: &str, label_width: usize) -> Option<String> {
 /// of every call id per frame.
 #[derive(Debug, Default)]
 pub struct ToolTopology {
-    /// Result block index for each call id; the first result wins.
-    pub(crate) result_by_call: HashMap<String, usize>,
+    /// Result block index for each call block index. A result pairs
+    /// with the newest earlier call of its id that has no result yet,
+    /// so a reused id never pairs with an older turn's call.
+    pub(crate) result_of_call: HashMap<usize, usize>,
     /// Result block indexes already merged into their call block.
     pub(crate) consumed_results: HashSet<usize>,
     /// Result block index to its call block index.
@@ -304,17 +306,20 @@ impl ToolTopology {
     /// Derive the pairing and grouping from an append-only block list.
     pub(crate) fn build(blocks: &[Block]) -> Self {
         let mut topo = Self::default();
+        let mut open: HashMap<&str, usize> = HashMap::new();
         for (i, block) in blocks.iter().enumerate() {
-            if let Block::ToolResult { call_id, .. } = block {
-                topo.result_by_call.entry(call_id.clone()).or_insert(i);
-            }
-        }
-        for (i, block) in blocks.iter().enumerate() {
-            if let Block::ToolCall { call_id, .. } = block
-                && let Some(&rid) = topo.result_by_call.get(call_id)
-            {
-                topo.consumed_results.insert(rid);
-                topo.call_idx_for_result.insert(rid, i);
+            match block {
+                Block::ToolCall { call_id, .. } => {
+                    open.insert(call_id, i);
+                }
+                Block::ToolResult { call_id, .. } => {
+                    if let Some(call) = open.remove(call_id.as_str()) {
+                        topo.result_of_call.insert(call, i);
+                        topo.consumed_results.insert(i);
+                        topo.call_idx_for_result.insert(i, call);
+                    }
+                }
+                _ => {}
             }
         }
         topo.group_read_only_runs(blocks);
@@ -331,7 +336,7 @@ impl ToolTopology {
             if self.consumed_results.contains(&i) {
                 continue;
             }
-            if self.groupable(block) {
+            if self.groupable(i, block) {
                 run.push(i);
             } else {
                 self.close_run(&mut run, blocks);
@@ -340,16 +345,15 @@ impl ToolTopology {
         self.close_run(&mut run, blocks);
     }
 
-    fn groupable(&self, block: &Block) -> bool {
+    fn groupable(&self, idx: usize, block: &Block) -> bool {
         matches!(
             block,
             Block::ToolCall {
-                call_id,
                 name,
                 phase: ToolPhase::Done,
                 ..
             } if crate::view::tool_view::is_read_only(name)
-                && self.result_by_call.contains_key(call_id)
+                && self.result_of_call.contains_key(&idx)
         )
     }
 

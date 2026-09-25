@@ -52,7 +52,10 @@ pub fn apply_loop_event(buf: &mut Buffer, event: &LoopEvent) {
         } => {
             let id = id.to_string();
             buf.upsert_tool_call(id.clone(), name, input_partial.clone());
-            buf.set_tool_phase(&id, ToolPhase::Running);
+            buf.set_tool_phase(&id, ToolPhase::Queued);
+        }
+        LoopEvent::ToolExecutionStart { id } => {
+            buf.set_tool_phase(&id.to_string(), ToolPhase::Running);
         }
         LoopEvent::ToolUpdate { id, update } => {
             buf.set_tool_progress(&id.to_string(), update.content.clone());
@@ -493,12 +496,173 @@ mod tests {
             name: "bash".into(),
             input_partial: json!({"command": "make"}),
         });
+        assert_eq!(phase(&buf), ToolPhase::Queued);
+        hooks.on_event(&LoopEvent::ToolExecutionStart { id: cid.clone() });
         assert_eq!(phase(&buf), ToolPhase::Running);
         hooks.on_event(&LoopEvent::ToolCallEnd {
             id: cid,
             output: bash_output("stderr:\nno\nexit: 2", true),
         });
         assert_eq!(phase(&buf), ToolPhase::Failed);
+    }
+
+    fn bash_start(id: &str, command: &str) -> LoopEvent {
+        LoopEvent::ToolCallStart {
+            id: ToolCallId::new(id),
+            name: "bash".into(),
+            input_partial: json!({ "command": command }),
+        }
+    }
+
+    fn phases(buf: &SharedBuffer) -> Vec<ToolPhase> {
+        phases_of(&lock(buf))
+    }
+
+    #[test]
+    fn only_the_executing_call_runs_and_its_time_excludes_the_queue() {
+        let (buf, mut hooks) = fresh();
+        hooks.on_event(&bash_start("c1", "echo one"));
+        hooks.on_event(&bash_start("c2", "echo two"));
+        assert_eq!(phases(&buf), [ToolPhase::Queued, ToolPhase::Queued]);
+
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        hooks.on_event(&LoopEvent::ToolExecutionStart {
+            id: ToolCallId::new("c1"),
+        });
+        assert_eq!(phases(&buf), [ToolPhase::Running, ToolPhase::Queued]);
+        assert!(!lock(&buf).is_timed(1), "a queued call has no timer");
+
+        hooks.on_event(&LoopEvent::ToolCallEnd {
+            id: ToolCallId::new("c1"),
+            output: bash_output("stdout:\none\nexit: 0", false),
+        });
+        let durations: Vec<Option<u64>> = lock(&buf)
+            .blocks()
+            .iter()
+            .filter_map(|b| match b {
+                Block::ToolResult { duration_ms, .. } => Some(*duration_ms),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            matches!(durations[..], [Some(ms)] if ms < 80),
+            "{durations:?}"
+        );
+    }
+
+    #[test]
+    fn a_cancelled_call_reads_interrupted_and_keeps_its_progress() {
+        let (buf, mut hooks) = fresh();
+        let cid = ToolCallId::new("c1");
+        hooks.on_event(&bash_start("c1", "for i in 1 2 3"));
+        hooks.on_event(&LoopEvent::ToolExecutionStart { id: cid.clone() });
+        hooks.on_event(&LoopEvent::ToolUpdate {
+            id: cid.clone(),
+            update: kage_core::ToolUpdate {
+                content: "1\n2".into(),
+                structured: None,
+            },
+        });
+        hooks.on_event(&LoopEvent::ToolCallEnd {
+            id: cid,
+            output: bash_output(kage_core::event::TOOL_CANCELLED_TEXT, true),
+        });
+        assert_eq!(phases(&buf), [ToolPhase::Interrupted]);
+        let mut buf = lock(&buf);
+        let topo = buf.tool_topology();
+        let registry = kage_core::sync::read(crate::view::registry::global());
+        let lines = crate::view::build_block_lines(
+            &buf,
+            0,
+            60,
+            &topo,
+            crate::view::Emphasis::None,
+            &registry,
+            None,
+        );
+        let rows: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert!(rows[0].contains("\u{2298} Run for i in 1 2 3"), "{rows:?}");
+        assert!(rows[0].trim_end().ends_with("interrupted"), "{rows:?}");
+        assert!(rows.iter().any(|r| r.trim_end().ends_with('2')), "{rows:?}");
+        assert!(!rows.iter().any(|r| r.contains("cancelled")), "{rows:?}");
+    }
+
+    #[test]
+    fn a_cancelled_approval_reads_interrupted_without_a_duration() {
+        let (buf, mut hooks) = fresh();
+        hooks.on_event(&bash_start("c1", "ls"));
+        lock(&buf).set_tool_phase("c1", ToolPhase::Waiting);
+        hooks.on_event(&LoopEvent::ToolCallEnd {
+            id: ToolCallId::new("c1"),
+            output: bash_output("`bash`: permission prompt cancelled", true),
+        });
+        assert_eq!(phases(&buf), [ToolPhase::Interrupted]);
+        assert!(matches!(
+            lock(&buf).blocks()[1],
+            Block::ToolResult {
+                duration_ms: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_reused_call_id_opens_a_new_block() {
+        let (buf, mut hooks) = fresh();
+        hooks.on_event(&bash_start("call_0", "echo first"));
+        hooks.on_event(&LoopEvent::ToolCallEnd {
+            id: ToolCallId::new("call_0"),
+            output: bash_output("stdout:\nfirst\nexit: 0", false),
+        });
+        hooks.on_event(&LoopEvent::MessageAppended {
+            message: Message::new(
+                Role::User,
+                vec![Content::Text {
+                    text: "again".into(),
+                }],
+                None,
+            ),
+        });
+        hooks.on_event(&LoopEvent::ToolCallArgsDelta {
+            id: ToolCallId::new("call_0"),
+            name: "bash".into(),
+            input_partial: json!({}),
+        });
+        hooks.on_event(&bash_start("call_0", "echo second"));
+        hooks.on_event(&LoopEvent::ToolExecutionStart {
+            id: ToolCallId::new("call_0"),
+        });
+        hooks.on_event(&LoopEvent::ToolCallEnd {
+            id: ToolCallId::new("call_0"),
+            output: bash_output("stdout:\nsecond\nexit: 0", false),
+        });
+        let mut buf = lock(&buf);
+        let commands: Vec<String> = buf
+            .blocks()
+            .iter()
+            .filter_map(|b| match b {
+                Block::ToolCall { input, .. } => Some(input["command"].to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(commands, ["\"echo first\"", "\"echo second\""]);
+        assert_eq!(phases_of(&buf), [ToolPhase::Done, ToolPhase::Done]);
+        let topo = buf.tool_topology();
+        assert_eq!(topo.result_of_call.get(&0), Some(&1));
+        assert_eq!(topo.result_of_call.get(&3), Some(&4));
+    }
+
+    fn phases_of(buf: &Buffer) -> Vec<ToolPhase> {
+        buf.blocks()
+            .iter()
+            .filter_map(|b| match b {
+                Block::ToolCall { phase, .. } => Some(*phase),
+                _ => None,
+            })
+            .collect()
     }
 
     #[test]

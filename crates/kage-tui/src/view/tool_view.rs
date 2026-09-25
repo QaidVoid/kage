@@ -19,6 +19,8 @@ use super::{UnicodeWidthStr, pad_to_width};
 pub enum ToolPhase {
     /// The model is still streaming the call's arguments.
     Streaming,
+    /// The arguments are complete and the call waits its turn to run.
+    Queued,
     /// The call waits for the user's approval.
     Waiting,
     /// The tool is executing.
@@ -49,6 +51,9 @@ pub enum ToolBody {
 /// Verb-first description of one tool call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolLabel {
+    /// Plain verb for a call that has not run or did not do its work,
+    /// such as `Read` or `Edit`.
+    pub verb: &'static str,
     /// Verb while the call runs, such as `Reading`.
     pub verb_live: &'static str,
     /// Verb once the call finished, such as `Read`.
@@ -161,7 +166,9 @@ pub enum BashExit {
 pub fn describe(name: &str, input: &Value) -> ToolLabel {
     let path = || field(input, "path").to_owned();
     let mut described = match name {
-        "read" => label("Reading", "Read", path(), read_range(input)).body(ToolBody::Hidden),
+        "read" => {
+            label(["Read", "Reading", "Read"], path(), read_range(input)).body(ToolBody::Hidden)
+        }
         "write" => {
             let lines = field(input, "content").lines().count();
             let stats = if lines == 0 {
@@ -169,7 +176,7 @@ pub fn describe(name: &str, input: &Value) -> ToolLabel {
             } else {
                 format!("({lines} {})", plural(lines, "line", "lines"))
             };
-            label("Writing", "Wrote", path(), stats)
+            label(["Write", "Writing", "Wrote"], path(), stats)
         }
         "edit" => {
             let diff = edit_diff(input);
@@ -178,28 +185,35 @@ pub fn describe(name: &str, input: &Value) -> ToolLabel {
             } else {
                 format!("(+{} -{})", diff.added, diff.removed)
             };
-            label("Editing", "Edited", path(), stats).body(ToolBody::Diff)
+            label(["Edit", "Editing", "Edited"], path(), stats).body(ToolBody::Diff)
         }
         "bash" => label(
-            "Running",
-            "Ran",
+            ["Run", "Running", "Ran"],
             one_line(field(input, "command")),
             String::new(),
         )
         .body(ToolBody::Tail),
         "ls" => {
             let dir = input.get("path").and_then(Value::as_str).unwrap_or(".");
-            label("Listing", "Listed", dir.to_owned(), String::new()).body(ToolBody::Hidden)
+            label(["List", "Listing", "Listed"], dir.to_owned(), String::new())
+                .body(ToolBody::Hidden)
         }
-        "find" | "grep" => label("Searching", "Searched", search_target(input), String::new())
-            .body(ToolBody::Hidden),
+        "find" | "grep" => label(
+            ["Search", "Searching", "Searched"],
+            search_target(input),
+            String::new(),
+        )
+        .body(ToolBody::Hidden),
         "web_fetch" => label(
-            "Fetching",
-            "Fetched",
+            ["Fetch", "Fetching", "Fetched"],
             field(input, "url").to_owned(),
             String::new(),
         ),
-        _ => label("Calling", "Called", display_name(name), arg_summary(input)),
+        _ => label(
+            ["Call", "Calling", "Called"],
+            display_name(name),
+            arg_summary(input),
+        ),
     };
     described.read_only = is_read_only(name);
     described
@@ -271,20 +285,16 @@ pub fn question(name: &str, input: &Value) -> String {
     if name == "bash" {
         return "Run this command?".to_owned();
     }
-    let target = describe(name, input).target;
-    if target.is_empty() {
+    let label = describe(name, input);
+    if label.target.is_empty() {
         return format!("Allow {}?", display_name(name));
     }
-    let verb = match name {
-        "read" => "Read",
-        "write" => "Write",
-        "edit" => "Edit",
-        "ls" => "List",
-        "find" | "grep" => "Search",
-        "web_fetch" => "Fetch",
-        _ => "Allow",
+    let verb = if label.verb == "Call" {
+        "Allow"
+    } else {
+        label.verb
     };
-    format!("{verb} {target}?")
+    format!("{verb} {}?", label.target)
 }
 
 /// The arguments of a call as `(key, value)` rows. Keys are padded to
@@ -319,6 +329,18 @@ pub fn group_summary(labels: &[ToolLabel]) -> String {
     .join(", ")
 }
 
+/// Format elapsed time in whole seconds (`0s`, `14s`), then minutes and
+/// seconds (`1m 05s`). The working row and the thinking block share it,
+/// so their clocks read alike.
+#[must_use]
+pub fn format_seconds(ms: u64) -> String {
+    if ms < 60_000 {
+        format!("{}s", ms / 1000)
+    } else {
+        format_elapsed(ms)
+    }
+}
+
 /// Format a duration for a tool row: tenths below ten seconds (`0.1s`,
 /// `4.9s`), whole seconds below a minute (`14s`), then minutes and
 /// seconds (`1m 05s`).
@@ -336,13 +358,14 @@ pub fn format_elapsed(ms: u64) -> String {
     }
 }
 
+/// A label from its `[plain, live, done]` verbs.
 fn label(
-    verb_live: &'static str,
-    verb_done: &'static str,
+    [verb, verb_live, verb_done]: [&'static str; 3],
     target: String,
     stats: String,
 ) -> ToolLabel {
     ToolLabel {
+        verb,
         verb_live,
         verb_done,
         target,
@@ -356,6 +379,29 @@ impl ToolLabel {
     fn body(mut self, body: ToolBody) -> Self {
         self.body = body;
         self
+    }
+
+    /// The verb for a call in `phase`: live while it runs, past once it
+    /// did its work, plain otherwise. `ran` says a failed call still did
+    /// its work, like a command that exited non-zero.
+    #[must_use]
+    pub fn verb_for(&self, phase: ToolPhase, ran: bool) -> &'static str {
+        match phase {
+            ToolPhase::Running => self.verb_live,
+            ToolPhase::Done => self.verb_done,
+            ToolPhase::Failed if ran => self.verb_done,
+            _ => self.verb,
+        }
+    }
+
+    /// The stats for a call in `phase`. A call that failed, was denied
+    /// or was interrupted shows none, since it made no such change.
+    #[must_use]
+    pub fn stats_for(&self, phase: ToolPhase) -> &str {
+        match phase {
+            ToolPhase::Failed | ToolPhase::Denied | ToolPhase::Interrupted => "",
+            _ => &self.stats,
+        }
     }
 }
 
@@ -724,6 +770,35 @@ mod tests {
             "2 files, 2 directories, 2 searches"
         );
         assert_eq!(group_summary(&[]), "");
+    }
+
+    #[test]
+    fn seconds_floor_then_switch_to_minutes() {
+        assert_eq!(format_seconds(900), "0s");
+        assert_eq!(format_seconds(1_700), "1s");
+        assert_eq!(format_seconds(59_999), "59s");
+        assert_eq!(format_seconds(65_000), "1m 05s");
+    }
+
+    #[test]
+    fn verbs_follow_the_phase() {
+        let edit = describe(
+            "edit",
+            &json!({"path": "a.rs", "old_str": "x", "new_str": "y"}),
+        );
+        let bash = describe("bash", &json!({"command": "make"}));
+        for phase in [ToolPhase::Streaming, ToolPhase::Queued, ToolPhase::Waiting] {
+            assert_eq!(bash.verb_for(phase, false), "Run");
+        }
+        assert_eq!(bash.verb_for(ToolPhase::Running, false), "Running");
+        assert_eq!(bash.verb_for(ToolPhase::Done, false), "Ran");
+        assert_eq!(bash.verb_for(ToolPhase::Failed, true), "Ran");
+        assert_eq!(edit.verb_for(ToolPhase::Failed, false), "Edit");
+        assert_eq!(edit.verb_for(ToolPhase::Denied, false), "Edit");
+        assert_eq!(edit.verb_for(ToolPhase::Interrupted, false), "Edit");
+        assert_eq!(edit.stats_for(ToolPhase::Done), "(+1 -1)");
+        assert_eq!(edit.stats_for(ToolPhase::Failed), "");
+        assert_eq!(edit.stats_for(ToolPhase::Denied), "");
     }
 
     #[test]

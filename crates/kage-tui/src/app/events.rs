@@ -276,7 +276,7 @@ impl App {
             .saturating_add(usize::from(row - area_y));
         self.screen_selection = Some(((vrow, col), (vrow, col)));
         if let Some(idx) = buf.block_at_screen_row(row) {
-            buf.set_focus(Some(idx));
+            buf.focus_in_place(idx);
             self.mouse_drag_anchor = Some((row, idx, false));
         } else {
             self.mouse_drag_anchor = None;
@@ -366,7 +366,7 @@ impl App {
 
     pub(crate) fn toggle_last_fold(&mut self) {
         let mut buf = lock(&self.buffer);
-        if let Some(idx) = buf.effective_focus() {
+        if let Some(idx) = buf.fold_target() {
             buf.toggle_fold(idx);
         }
     }

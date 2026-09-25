@@ -117,11 +117,16 @@ mod tests {
     fn header_text_follows_the_phase() {
         let mut buf = bash_call();
         let rows = header(&buf);
-        assert!(rows[0].ends_with("\u{2022} Running cargo test"), "{rows:?}");
+        assert!(rows[0].ends_with("\u{2022} Run cargo test"), "{rows:?}");
+
+        buf.set_tool_phase("c1", ToolPhase::Queued);
+        let rows = header(&buf);
+        assert!(rows[0].contains("\u{2022} Run cargo test"), "{rows:?}");
+        assert!(rows[0].ends_with("queued"), "{rows:?}");
 
         buf.set_tool_phase("c1", ToolPhase::Waiting);
         let rows = header(&buf);
-        assert!(rows[0].contains("\u{2022} Running cargo test"), "{rows:?}");
+        assert!(rows[0].contains("\u{2022} Run cargo test"), "{rows:?}");
         assert!(rows[0].ends_with("waiting"), "{rows:?}");
 
         buf.set_tool_phase("c1", ToolPhase::Running);
@@ -131,7 +136,7 @@ mod tests {
 
         buf.set_tool_phase("c1", ToolPhase::Denied);
         let rows = header(&buf);
-        assert!(rows[0].contains("\u{2298} Ran cargo test"), "{rows:?}");
+        assert!(rows[0].contains("\u{2298} Run cargo test"), "{rows:?}");
         assert!(rows[0].ends_with("denied"), "{rows:?}");
 
         buf.set_tool_phase("c1", ToolPhase::Interrupted);
@@ -153,6 +158,7 @@ mod tests {
     fn read_only_calls_show_live_verbs() {
         let mut buf = Buffer::new();
         buf.push_tool_call("c1", "read", json!({"path": "a.rs"}));
-        assert!(header(&buf)[0].ends_with("Reading a.rs"));
+        buf.set_tool_phase("c1", ToolPhase::Running);
+        assert!(header(&buf)[0].contains("Reading a.rs"));
     }
 }

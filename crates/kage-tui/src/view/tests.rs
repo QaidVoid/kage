@@ -296,7 +296,7 @@ fn streaming_tool_call_reads_verb_first() {
         .iter()
         .find(|l| l.contains("ls -la"))
         .expect("tool header present");
-    assert!(header.contains("\u{2022} Running ls -la"), "{header:?}");
+    assert!(header.contains("\u{2022} Run ls -la"), "{header:?}");
     assert!(
         !header.contains('[') && !header.contains("bash"),
         "{header:?}"
@@ -443,6 +443,7 @@ fn a_read_finishing_after_a_group_joins_it() {
     push_read(&mut buffer, "r1", "a.rs");
     push_read(&mut buffer, "r2", "b.rs");
     buffer.push_tool_call("r3", "read", json!({"path": "c.rs"}));
+    buffer.set_tool_phase("r3", tool_view::ToolPhase::Running);
     let input = InputState::new();
     let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 20));
     assert!(
@@ -1320,4 +1321,29 @@ fn notices_paint_in_the_warning_style() {
     let warning = crate::theme::current().warning_fg;
     assert_eq!(buf[(3, y)].fg, warning);
     assert_eq!(buf[(10, y)].fg, warning);
+}
+
+#[test]
+fn clicking_a_partly_visible_block_focuses_it_without_scrolling() {
+    let mut buffer = Buffer::new();
+    let long: Vec<String> = (0..30).map(|i| format!("row {i}")).collect();
+    buffer.append_assistant_delta(&long.join("\n\n"));
+    buffer.finish_streaming();
+    buffer.push_user("tail");
+    let input = InputState::new();
+    let area = Rect::new(0, 0, 40, 16);
+    snapshot_lines(&mut buffer, &input, area);
+    let top = buffer.last_virtual_top();
+    assert!(top > 0, "the long reply starts above the viewport");
+
+    buffer.focus_in_place(0);
+    snapshot_lines(&mut buffer, &input, area);
+    assert!(buffer.is_following());
+    assert_eq!(buffer.last_virtual_top(), top);
+
+    buffer.set_focus(Some(1));
+    snapshot_lines(&mut buffer, &input, area);
+    buffer.set_focus(Some(0));
+    snapshot_lines(&mut buffer, &input, area);
+    assert_eq!(buffer.scroll(), Some(0), "a keyboard move still scrolls");
 }

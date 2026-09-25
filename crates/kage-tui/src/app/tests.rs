@@ -745,11 +745,15 @@ fn tool_timing_excludes_the_approval_wait() {
     assert_eq!(tool_phase(&app, "c1"), ToolPhase::Waiting);
     std::thread::sleep(std::time::Duration::from_millis(60));
     app.answer_permission(PermissionDecision::AllowOnce);
-    assert_eq!(tool_phase(&app, "c1"), ToolPhase::Running);
+    assert_eq!(tool_phase(&app, "c1"), ToolPhase::Queued);
     feed(
         &mut app,
         &events,
         vec![
+            kage_core::LoopEvent::ToolExecutionStart {
+                id: kage_core::ToolCallId::new("c1"),
+            }
+            .into(),
             kage_core::LoopEvent::ToolCallEnd {
                 id: kage_core::ToolCallId::new("c1"),
                 output: kage_core::ToolOutput {
@@ -814,7 +818,7 @@ fn a_request_resolved_elsewhere_resumes_the_call() {
             .into(),
         ],
     );
-    assert_eq!(tool_phase(&app, "c2"), ToolPhase::Running);
+    assert_eq!(tool_phase(&app, "c2"), ToolPhase::Queued);
     assert_eq!(tool_phase(&app, "c1"), ToolPhase::Waiting);
 }
 
@@ -970,7 +974,7 @@ fn answering_moves_the_row_from_waiting_to_running() {
     );
     assert_eq!(tool_phase(&app, "c1"), ToolPhase::Waiting);
     app.approval_key_at(code(KeyCode::Enter), past_guard());
-    assert_eq!(tool_phase(&app, "c1"), ToolPhase::Running);
+    assert_eq!(tool_phase(&app, "c1"), ToolPhase::Queued);
 }
 
 #[test]

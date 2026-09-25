@@ -1285,7 +1285,6 @@ fn end_to_end_event_ordering_and_hook_callbacks() {
 
     let mut cx = AgentContext::new("mock:m", "be helpful").with_workdir("/tmp");
     cx.history.push(user_msg("kick off"));
-    let cfg = LoopConfig::default();
     let mut hooks = OrderRecording::default();
     let log = std::rc::Rc::clone(&hooks.order);
     let cancel = CancelFlag::new();
@@ -1294,7 +1293,7 @@ fn end_to_end_event_ordering_and_hook_callbacks() {
         &mock,
         &registry,
         &mut cx,
-        cfg,
+        LoopConfig::default(),
         &mut hooks,
         &cancel,
         |event| {
@@ -1344,6 +1343,7 @@ fn end_to_end_event_ordering_and_hook_callbacks() {
             "message_end",
             "message_appended",
             "turn_ended",
+            "tool_execution_start",
             "tool_call_end",
             "message_appended",
             "turn_started",

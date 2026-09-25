@@ -911,3 +911,87 @@ fn dispatch_propagates_confine_flag_to_tool_context() {
         other => panic!("unexpected content: {other:?}"),
     }
 }
+
+/// Short-circuits every `err` call.
+struct BlockErr;
+
+impl Hooks for BlockErr {
+    fn before_tool_call(
+        &mut self,
+        _id: &kage_core::ToolCallId,
+        name: &str,
+        _input: &serde_json::Value,
+    ) -> Option<ToolOutput> {
+        (name == "err").then(|| ToolOutput {
+            is_error: true,
+            text: "blocked".into(),
+            structured: None,
+            terminate: false,
+        })
+    }
+}
+
+/// The ids of `ToolExecutionStart` and `ToolCallEnd` events, tagged.
+fn execution_trace(events: &[LoopEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            LoopEvent::ToolExecutionStart { id } => Some(format!("start {id}")),
+            LoopEvent::ToolCallEnd { id, .. } => Some(format!("end {id}")),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn execution_start_marks_each_call_right_before_it_runs() {
+    let tools = registry_with_echo();
+    let mut emitted = Vec::new();
+    dispatch_tool_calls(
+        vec![
+            pending("echo", serde_json::json!({})),
+            pending("err", serde_json::json!({})),
+            pending("progress", serde_json::json!({})),
+        ],
+        &tools,
+        std::path::Path::new("/tmp"),
+        &CancelFlag::new(),
+        false,
+        MessageId::new(),
+        &mut BlockErr,
+        &mut |ev| emitted.push(ev),
+    );
+    assert_eq!(
+        execution_trace(&emitted),
+        [
+            "start call_echo",
+            "end call_echo",
+            "end call_err",
+            "start call_progress",
+            "end call_progress",
+        ]
+    );
+}
+
+#[test]
+fn parallel_execution_start_skips_short_circuited_calls() {
+    let tools = registry_with_echo();
+    let mut emitted = Vec::new();
+    dispatch_tool_calls_parallel(
+        vec![
+            pending("echo", serde_json::json!({})),
+            pending("err", serde_json::json!({})),
+        ],
+        &tools,
+        std::path::Path::new("/tmp"),
+        &CancelFlag::new(),
+        false,
+        MessageId::new(),
+        &mut BlockErr,
+        &mut |ev| emitted.push(ev),
+    );
+    assert_eq!(
+        execution_trace(&emitted),
+        ["start call_echo", "end call_echo", "end call_err"]
+    );
+}

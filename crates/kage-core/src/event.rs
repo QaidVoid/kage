@@ -213,11 +213,16 @@ pub enum LoopError {
     },
 }
 
+/// Text of the error result the loop records for a tool call that was
+/// cancelled before it produced an output. Hosts match it to show the
+/// call as interrupted rather than failed.
+pub const TOOL_CANCELLED_TEXT: &str = "tool call cancelled before completion";
+
 /// One event in the loop's output stream.
 ///
 /// `MessageStart` opens a logical message; `TextDelta` and `ThinkingDelta`
 /// carry incremental text; `ToolCallStart` / `ToolCallEnd` bracket each tool
-/// invocation; `MessageEnd` closes the message with usage accounting.
+/// invocation, with `ToolExecutionStart` marking when the tool runs; `MessageEnd` closes the message with usage accounting.
 /// `Compaction` reports a context summarization; `Error` is terminal.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -241,8 +246,10 @@ pub enum LoopEvent {
         /// Thinking chunk to append.
         delta: String,
     },
-    /// A tool call has begun. May be followed by zero or more partial-input
-    /// updates before [`LoopEvent::ToolCallEnd`].
+    /// The model finished streaming a tool call's arguments. The call
+    /// has not started executing: it may still wait for approval or for
+    /// earlier calls. [`LoopEvent::ToolExecutionStart`] marks the start
+    /// of execution and [`LoopEvent::ToolCallEnd`] its result.
     ToolCallStart {
         /// Provider-issued correlation id for this call.
         id: ToolCallId,
@@ -265,6 +272,13 @@ pub enum LoopEvent {
         /// Arguments parsed so far. An empty object until the first
         /// fragment forms valid JSON.
         input_partial: serde_json::Value,
+    },
+    /// A tool call passed `before_tool_call`, including any approval,
+    /// and its tool begins executing now. Not emitted for a call the
+    /// host short-circuited. Live.
+    ToolExecutionStart {
+        /// Correlation id matching the prior [`LoopEvent::ToolCallStart`].
+        id: ToolCallId,
     },
     /// Mid-execution progress update from a running tool.
     ToolUpdate {

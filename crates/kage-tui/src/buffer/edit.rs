@@ -3,11 +3,14 @@
 #[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
 
+use kage_core::event::TOOL_CANCELLED_TEXT;
+
 impl Buffer {
-    /// Append `block`, first finishing a live thinking block it
-    /// follows: a thinking stream ends when anything else begins.
+    /// Append `block`, first finishing a live assistant or thinking
+    /// block it follows: a stream ends when anything else begins, and
+    /// only the last block's throttled render cache is ever refreshed.
     fn push_block(&mut self, block: Block) {
-        if self.last_is_live_thinking() {
+        if self.last_is_live_assistant() || self.last_is_live_thinking() {
             self.finish_streaming();
         }
         self.blocks.push(block);
@@ -109,8 +112,8 @@ impl Buffer {
         });
     }
 
-    /// Insert a tool-call block, or refresh the input of the existing
-    /// one with the same `call_id` in place. Used for progressive
+    /// Insert a tool-call block, or refresh the input of the open one
+    /// (no result yet) with the same `call_id` in place. Used for progressive
     /// argument streaming: the placeholder created from the first
     /// [`kage_core::LoopEvent::ToolCallArgsDelta`] is updated as more
     /// arguments arrive and finalized by the authoritative
@@ -130,7 +133,7 @@ impl Buffer {
             input_pretty,
             input: i,
             ..
-        }) = self.tool_call_mut(&call_id)
+        }) = self.open_tool_call_mut(&call_id)
         else {
             self.push_tool_call(call_id, name, input);
             return;
@@ -151,7 +154,7 @@ impl Buffer {
             phase: p,
             started_at,
             ..
-        }) = self.tool_call_mut(call_id)
+        }) = self.open_tool_call_mut(call_id)
         else {
             return;
         };
@@ -166,7 +169,7 @@ impl Buffer {
     /// Replace the progress text of the call `call_id` with the latest
     /// tool update. No-op for an unknown id.
     pub fn set_tool_progress(&mut self, call_id: &str, text: impl Into<String>) {
-        let Some(Block::ToolCall { progress, .. }) = self.tool_call_mut(call_id) else {
+        let Some(Block::ToolCall { progress, .. }) = self.open_tool_call_mut(call_id) else {
             return;
         };
         *progress = text.into();
@@ -183,7 +186,10 @@ impl Buffer {
             if let Block::ToolCall { phase, .. } = block
                 && matches!(
                     phase,
-                    ToolPhase::Streaming | ToolPhase::Waiting | ToolPhase::Running
+                    ToolPhase::Streaming
+                        | ToolPhase::Queued
+                        | ToolPhase::Waiting
+                        | ToolPhase::Running
                 )
             {
                 *phase = ToolPhase::Interrupted;
@@ -195,17 +201,23 @@ impl Buffer {
         }
     }
 
-    fn tool_call_mut(&mut self, call_id: &str) -> Option<&mut Block> {
-        self.blocks
-            .iter_mut()
-            .rev()
-            .find(|b| matches!(b, Block::ToolCall { call_id: cid, .. } if cid == call_id))
+    /// The newest call `call_id` that has no result yet. Providers may
+    /// reuse ids across turns, so a call already answered never matches.
+    fn open_tool_call_mut(&mut self, call_id: &str) -> Option<&mut Block> {
+        let idx = self.blocks.iter().rposition(|b| match b {
+            Block::ToolCall { call_id: cid, .. } | Block::ToolResult { call_id: cid, .. } => {
+                cid == call_id
+            }
+            _ => false,
+        })?;
+        let block = &mut self.blocks[idx];
+        matches!(block, Block::ToolCall { .. }).then_some(block)
     }
 
-    /// Add a tool-result block. Looks up the matching tool call (by id)
-    /// to copy its name, record the time since the call started
-    /// running, and move it to [`ToolPhase::Done`] or
-    /// [`ToolPhase::Failed`]. A denied call keeps its phase.
+    /// Add a tool-result block. Looks up the open tool call with the
+    /// same id to copy its name, record how long it ran, and move it to
+    /// its final phase: done, failed, denied or interrupted. A call
+    /// that never started running records no duration.
     pub fn push_tool_result(
         &mut self,
         call_id: impl Into<String>,
@@ -213,8 +225,12 @@ impl Buffer {
         is_error: bool,
     ) {
         let call_id = call_id.into();
-        let duration_ms = match self.tool_call_mut(&call_id) {
-            Some(Block::ToolCall { started_at, .. }) => Some(elapsed_ms(*started_at)),
+        let duration_ms = match self.open_tool_call_mut(&call_id) {
+            Some(Block::ToolCall {
+                phase: ToolPhase::Running,
+                started_at,
+                ..
+            }) => Some(elapsed_ms(*started_at)),
             _ => None,
         };
         self.push_tool_result_with_duration(call_id, output, is_error, duration_ms);
@@ -231,15 +247,10 @@ impl Buffer {
         duration_ms: Option<u64>,
     ) {
         let call_id = call_id.into();
-        let name = match self.tool_call_mut(&call_id) {
+        let output = output.into();
+        let name = match self.open_tool_call_mut(&call_id) {
             Some(Block::ToolCall { name, phase, .. }) => {
-                if *phase != ToolPhase::Denied {
-                    *phase = if is_error {
-                        ToolPhase::Failed
-                    } else {
-                        ToolPhase::Done
-                    };
-                }
+                *phase = result_phase(*phase, &output, is_error);
                 name.clone()
             }
             _ => String::new(),
@@ -247,7 +258,7 @@ impl Buffer {
         self.push_block(Block::ToolResult {
             call_id: call_id.clone(),
             name,
-            output: output.into(),
+            output,
             is_error,
             folded: true,
             duration_ms,
@@ -495,6 +506,19 @@ impl Buffer {
 
     pub(crate) fn last_is_live_thinking(&self) -> bool {
         matches!(self.blocks.last(), Some(Block::Thinking { live: true, .. }))
+    }
+}
+
+/// The phase a call in `phase` moves to when its result arrives. A
+/// denied call stays denied. A call the loop cancelled, or whose
+/// approval ended without an answer, reads as interrupted.
+fn result_phase(phase: ToolPhase, output: &str, is_error: bool) -> ToolPhase {
+    match phase {
+        ToolPhase::Denied => ToolPhase::Denied,
+        _ if is_error && output == TOOL_CANCELLED_TEXT => ToolPhase::Interrupted,
+        ToolPhase::Waiting if is_error => ToolPhase::Interrupted,
+        _ if is_error => ToolPhase::Failed,
+        _ => ToolPhase::Done,
     }
 }
 

@@ -5,10 +5,72 @@
 //! (loopback, private, link-local, multicast, documentation, etc.). This
 //! refuses common SSRF attacks where a malicious URL points at internal
 //! services like `http://169.254.169.254/`.
+//!
+//! [`check`] vets the caller-supplied URL up front for a clear error.
+//! [`guarded_agent`] builds an HTTP agent that re-applies the same policy
+//! to every DNS resolution, so redirect hops and rebinding DNS answers
+//! cannot reach a non-routable address either.
 
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+
+use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
+use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 
 use crate::ToolError;
+
+/// Build a ureq agent from `config` whose every DNS lookup (the first
+/// dial and each redirect hop) goes through [`is_unsafe`], so only
+/// routable addresses can ever be dialed.
+///
+/// A refused hop fails the request with a
+/// [`std::io::ErrorKind::PermissionDenied`] I/O error.
+#[must_use]
+pub fn guarded_agent(config: ureq::config::Config) -> ureq::Agent {
+    ureq::Agent::with_parts(config, DefaultConnector::new(), SsrfResolver::default())
+}
+
+/// Like [`guarded_agent`], but also lets `allowed` through so tests can
+/// serve from a loopback listener while every other address stays vetted.
+#[cfg(test)]
+pub(crate) fn guarded_agent_allowing(
+    config: ureq::config::Config,
+    allowed: SocketAddr,
+) -> ureq::Agent {
+    let resolver = SsrfResolver {
+        inner: DefaultResolver::default(),
+        allowed: Some(allowed),
+    };
+    ureq::Agent::with_parts(config, DefaultConnector::new(), resolver)
+}
+
+/// Wraps ureq's [`DefaultResolver`] to enforce the SSRF policy at
+/// resolution time, so the transport only ever sees vetted addresses.
+#[derive(Debug, Default)]
+struct SsrfResolver {
+    inner: DefaultResolver,
+    allowed: Option<SocketAddr>,
+}
+
+impl Resolver for SsrfResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        config: &ureq::config::Config,
+        timeout: NextTimeout,
+    ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+        let addrs = self.inner.resolve(uri, config, timeout)?;
+        let refused = addrs
+            .iter()
+            .any(|addr| Some(*addr) != self.allowed && is_unsafe(&addr.ip()));
+        if refused {
+            return Err(ureq::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("ssrf guard: refusing {uri}, it resolves to a non-routable address"),
+            )));
+        }
+        Ok(addrs)
+    }
+}
 
 /// Resolve `url` and reject if any returned address is non-routable.
 ///
@@ -110,6 +172,36 @@ mod tests {
     #[test]
     fn loopback_v6_is_unsafe() {
         assert!(is_unsafe(&IpAddr::V6(Ipv6Addr::LOCALHOST)));
+    }
+
+    #[test]
+    fn ssrf_resolver_refuses_disallowed_addrs() {
+        let resolver = SsrfResolver::default();
+        let config = ureq::config::Config::default();
+        let timeout = NextTimeout {
+            after: ureq::unversioned::transport::time::Duration::from_secs(2),
+            reason: ureq::Timeout::Resolve,
+        };
+        let resolve = |uri: &'static str| {
+            Resolver::resolve(&resolver, &uri.parse().unwrap(), &config, timeout)
+        };
+
+        let addrs = resolve("http://1.1.1.1/x").unwrap();
+        assert!(addrs.iter().any(|a| a.ip() == IpAddr::from([1, 1, 1, 1])));
+
+        for uri in [
+            "http://127.0.0.1/x",
+            "http://10.0.0.1/x",
+            "http://169.254.169.254/x",
+            "http://[::1]/x",
+        ] {
+            let err = resolve(uri).unwrap_err();
+            let ureq::Error::Io(io) = &err else {
+                panic!("{uri}: {err:?}");
+            };
+            assert_eq!(io.kind(), std::io::ErrorKind::PermissionDenied, "{uri}");
+            assert!(io.to_string().contains("ssrf guard"), "{uri}: {io}");
+        }
     }
 
     #[test]

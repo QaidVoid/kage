@@ -20,6 +20,7 @@ workspace = true
 
 [dependencies]
 chrono.workspace = true
+crossbeam-channel.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
 clap_mangen.workspace = true

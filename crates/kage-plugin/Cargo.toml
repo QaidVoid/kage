@@ -21,6 +21,7 @@ workspace = true
 testing = []
 
 [dependencies]
+crossbeam-channel.workspace = true
 kage-core.workspace = true
 kage-provider.workspace = true
 kage-tools.workspace = true

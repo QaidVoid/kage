@@ -169,10 +169,14 @@ where
 ///
 /// A 429 becomes [`ProviderError::RateLimited`], carrying the
 /// provider's `Retry-After` hint (delta-seconds or HTTP-date) when one
-/// is present. A 401 or 403 becomes [`ProviderError::Auth`] with a
-/// short detail pulled from the body. Every other status stays
-/// [`ProviderError::Http`] with the body capped at 8 KiB so a
-/// misbehaving upstream cannot blow up our error strings.
+/// is present. A 401 means the credentials were rejected and becomes
+/// [`ProviderError::Auth`] with a short detail pulled from the body. A
+/// 403 means valid credentials that may not do this (a model the key
+/// is not allowed to use), so it stays [`ProviderError::Http`] with
+/// that same short detail instead of asking the user to log in again.
+/// Every other status stays [`ProviderError::Http`] with the body
+/// capped at 8 KiB so a misbehaving upstream cannot blow up our error
+/// strings.
 pub(crate) fn read_error_body(
     status: u16,
     response: ureq::http::Response<ureq::Body>,
@@ -202,7 +206,11 @@ pub(crate) fn read_error_body(
 fn classify_http_error(status: u16, retry_after: Option<Duration>, body: String) -> ProviderError {
     match status {
         429 => ProviderError::RateLimited { retry_after },
-        401 | 403 => ProviderError::Auth(auth_detail(status, &body)),
+        401 => ProviderError::Auth(auth_detail(status, &body)),
+        403 => ProviderError::Http {
+            status,
+            body: auth_detail(status, &body),
+        },
         _ => ProviderError::Http { status, body },
     }
 }
@@ -406,14 +414,17 @@ mod tests {
     }
 
     #[test]
-    fn classify_maps_401_and_403_to_auth_with_the_json_message() {
+    fn classify_maps_401_to_auth_and_403_to_a_forbidden_detail() {
         let body = r#"{"error":{"message":"token expired"}}"#;
-        for status in [401, 403] {
-            assert!(matches!(
-                classify_http_error(status, None, body.into()),
-                ProviderError::Auth(detail) if detail == "token expired"
-            ));
-        }
+        assert!(matches!(
+            classify_http_error(401, None, body.into()),
+            ProviderError::Auth(detail) if detail == "token expired"
+        ));
+        let denied = r#"{"error":{"message":"This key may not use \"x\"."}}"#;
+        assert!(matches!(
+            classify_http_error(403, None, denied.into()),
+            ProviderError::Http { status: 403, body } if body == r#"This key may not use "x"."#
+        ));
         assert!(matches!(
             classify_http_error(401, None, r#"{"message":"bad key"}"#.into()),
             ProviderError::Auth(detail) if detail == "bad key"

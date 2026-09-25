@@ -6,7 +6,7 @@ use std::time::Duration;
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum ProviderError {
     /// Authentication failed: the provider rejected the credentials
-    /// (HTTP 401 or 403, or a bad or missing API key). Carries a short
+    /// (HTTP 401, or a bad or missing API key). Carries a short
     /// detail rather than the raw response body.
     #[error("authentication failed: {0}")]
     Auth(String),

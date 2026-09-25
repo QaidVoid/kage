@@ -270,8 +270,10 @@ impl App {
         self.start_info = Some(info);
     }
 
-    /// List the start card's recent sessions again.
+    /// Run on a session change: drop the old conversation's search
+    /// and list the start card's recent sessions again.
     pub(crate) fn refresh_start_sessions(&mut self) {
+        self.search_pattern = None;
         let (Some(info), Some(lister)) = (self.start_info.as_mut(), &self.session_lister) else {
             return;
         };
@@ -495,7 +497,9 @@ impl App {
     }
 
     /// The footer hint: the pending keys of a mapping sequence, else
-    /// what the next keys do in the current state.
+    /// the keys of the open panel or overlay, else what the next keys
+    /// do in the current state. Kept short so it fits at 80 columns
+    /// next to the session facts.
     pub(crate) fn footer_hint(&mut self) -> String {
         let keys = self.sequencer.pending();
         if !keys.is_empty() {
@@ -503,6 +507,15 @@ impl App {
         }
         if let Some(panel) = &self.approval_panel {
             return panel.hint();
+        }
+        if self.slash_palette.is_some() {
+            return ["tab to complete", "enter to run", "esc to close"].join(HINT_SEP);
+        }
+        if self.help_overlay.is_some() {
+            return ["up/down to scroll", "esc to close"].join(HINT_SEP);
+        }
+        if self.modal_open() {
+            return String::new();
         }
         let now = Instant::now();
         let note = self
@@ -517,20 +530,32 @@ impl App {
         }
         let working = self.is_working();
         let draft = !self.input.text().is_empty();
+        if self.input.shell_armed() {
+            return if draft {
+                "enter to run the command"
+            } else {
+                "backspace to leave shell mode"
+            }
+            .to_owned();
+        }
         let label =
             |app: &mut Self, action, what| app.key_label(action).map(|key| format!("{key} {what}"));
         let queue = label(self, "QueuePrompt", "to queue").filter(|_| working);
-        let queue = queue.as_deref();
+        let queues = label(self, "QueuePrompt", "queues").filter(|_| working);
+        let (queue, queues) = (queue.as_deref(), queues.as_deref());
         let mut parts: Vec<&str> = Vec::new();
         if self.input.is_modeless() {
             match (working, draft) {
                 (true, false) => parts.extend(queue.into_iter().chain(["esc to interrupt"])),
                 (true, true) => {
-                    parts.push("enter to steer");
-                    parts.extend(queue);
-                    parts.push("esc to clear the draft");
+                    parts.push("enter steers");
+                    parts.extend(queues);
+                    parts.push("esc clears");
                 }
                 (false, true) => parts.extend(["enter to send", "shift+enter for a newline"]),
+                (false, false) if self.search_pattern.is_some() => {
+                    parts.extend(["esc to clear the search", "? for shortcuts"]);
+                }
                 (false, false) => parts.extend(["? for shortcuts", "/ for commands"]),
             }
             return parts.join(HINT_SEP);
@@ -540,26 +565,26 @@ impl App {
         match self.input.mode() {
             Mode::Normal => {
                 match (working, draft) {
-                    (_, true) => parts.push("ctrl+c to clear the draft"),
+                    (_, true) => parts.push("ctrl+c to clear"),
                     (true, false) => parts.push("ctrl+c to interrupt"),
                     (false, false) => {}
                 }
                 parts.push("i to type");
                 parts.extend(help.as_deref());
-                parts.extend(commands.as_deref());
-            }
-            Mode::Insert => {
-                match (working, draft) {
-                    (true, false) => parts.extend(queue.into_iter().chain(["ctrl+c to interrupt"])),
-                    (true, true) => {
-                        parts.push("enter to steer");
-                        parts.extend(queue);
-                    }
-                    (false, true) => parts.push("enter to send"),
-                    (false, false) => {}
+                if !working && !draft {
+                    parts.extend(commands.as_deref());
                 }
-                parts.push("esc for normal mode");
             }
+            Mode::Insert => match (working, draft) {
+                (true, false) => parts.extend(queue.into_iter().chain(["ctrl+c to interrupt"])),
+                (true, true) => {
+                    parts.push("enter steers");
+                    parts.extend(queues);
+                    parts.push("ctrl+c clears");
+                }
+                (false, true) => parts.extend(["enter to send", "esc for normal mode"]),
+                (false, false) => parts.push("esc for normal mode"),
+            },
             Mode::Visual => parts.push("esc to leave visual mode"),
         }
         parts.join(HINT_SEP)
@@ -600,8 +625,9 @@ impl App {
     /// The working row text while a run is in flight: what kage is
     /// doing, the run's elapsed time and, when the next key would
     /// reach the editor with an empty draft, the key that interrupts
-    /// the run.
-    pub(crate) fn activity_label(&self, buffer: &crate::Buffer) -> Option<String> {
+    /// the run. At `width` columns what kage is doing is cut first, so
+    /// the time and the key stay.
+    pub(crate) fn activity_label(&self, buffer: &crate::Buffer, width: u16) -> Option<String> {
         let started = self.run_started?;
         let approving = self.pending_permission.is_some();
         let doing = if approving {
@@ -615,15 +641,19 @@ impl App {
         } else {
             view::tool_view::format_elapsed(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
         };
-        if approving || !self.input.text().is_empty() {
-            return Some(format!("{doing} ({elapsed})"));
-        }
-        let key = if self.input.is_modeless() {
-            "esc"
+        let tail = if approving || !self.input.text().is_empty() {
+            format!(" ({elapsed})")
         } else {
-            "ctrl+c"
+            let key = if self.input.is_modeless() {
+                "esc"
+            } else {
+                "ctrl+c"
+            };
+            format!(" ({elapsed}, {key} to interrupt)")
         };
-        Some(format!("{doing} ({elapsed}, {key} to interrupt)"))
+        let room = usize::from(width).saturating_sub(ACTIVITY_INDENT + tail.len());
+        let doing = view::truncate_to_width(&doing, room, "...");
+        Some(format!("{doing}{tail}"))
     }
 
     /// The active model's id: the engine's last report, else the
@@ -923,6 +953,9 @@ impl App {
 
 /// Separator between the parts of a footer hint.
 const HINT_SEP: &str = " \u{B7} ";
+
+/// Columns the `activity` component paints before its text.
+const ACTIVITY_INDENT: usize = 2;
 
 /// Labels from [`App::key_label`], valid for one keymap generation and
 /// editing state.

@@ -8,8 +8,9 @@
 //! immediately above the input card, with a tight completion list
 //! stacked above it on a tinted `KageOverlay` panel under a top rule.
 //! As the user types, the list filters and the first row is
-//! highlighted again. Aliases stay hidden until the typed name reaches
-//! one. Tab applies the longest common prefix and opens cycling,
+//! highlighted again. An alias shows only when the typed name reaches
+//! it and its command is not listed already. Tab applies the longest
+//! common prefix, then inserts the highlighted row and cycles,
 //! Down/Up navigate at once, and Enter dispatches the highlighted
 //! command. Once a command name is
 //! committed, continued typing edits the arguments inline with per-arg

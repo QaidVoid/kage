@@ -197,8 +197,9 @@ impl App {
     }
 
     /// One step of the Esc and Ctrl+C escalation: clear the draft (Up
-    /// restores it), else interrupt the run in flight, else, for
-    /// Ctrl+C, arm quit, which a second press within
+    /// restores it), else interrupt the run in flight, else, for Esc,
+    /// clear the search highlight, else, for Ctrl+C, arm quit, which a
+    /// second press within
     /// [`ESCALATION_WINDOW`] carries out. Over an open overlay Ctrl+C
     /// only interrupts, since the draft is out of sight.
     pub(crate) fn escalate(&mut self, trigger: Trigger) -> Option<AppExit> {
@@ -218,6 +219,8 @@ impl App {
             self.escalation = Some((Escalation::DraftCleared, now + ESCALATION_WINDOW));
         } else if self.is_run_in_flight() {
             self.trip_cancel();
+        } else if trigger == Trigger::Esc {
+            self.search_pattern = None;
         } else if trigger == Trigger::CtrlC {
             if previous == Some(Escalation::QuitArmed) {
                 return Some(AppExit::Quit);

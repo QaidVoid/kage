@@ -950,7 +950,7 @@ fn the_draft_survives_an_approval() {
     let (mut app, _rx, events) = app_with_events();
     type_str(&mut app, "half a thought");
     feed(&mut app, &events, vec![permission_request("c1", 1)]);
-    assert!(app.footer_hint().starts_with("1-5 or y s a n t"));
+    assert!(app.footer_hint().starts_with("y/s/a/n/t or 1-5"));
     app.approval_key_at(key('t'), past_guard());
     app.approval_key_at(key('x'), past_guard());
     app.approval_key_at(code(KeyCode::Esc), past_guard());
@@ -1196,7 +1196,7 @@ fn pending_rows_show_until_delivered_steers_first() {
     app.handle_key(code(KeyCode::Enter));
     let steer = format!("  > now{}after the current tool call", " ".repeat(24));
     let queue = format!("  > later{}when this run ends", " ".repeat(31));
-    assert_eq!(pending_rows(&mut app), [queue.clone(), steer]);
+    assert_eq!(pending_rows(&mut app), [steer, queue.clone()]);
     feed(&mut app, &events, vec![user_message("now")]);
     assert_eq!(pending_rows(&mut app), [queue]);
     feed(
@@ -1545,24 +1545,21 @@ fn the_footer_hint_follows_the_editor_state() {
     lock(&usage).working = true;
     assert_eq!(
         app.footer_hint(),
-        "enter to steer \u{B7} tab to queue \u{B7} esc to clear the draft"
+        "enter steers \u{B7} tab queues \u{B7} esc clears"
     );
     app.handle_key(code(KeyCode::Backspace));
     assert_eq!(app.footer_hint(), "tab to queue \u{B7} esc to interrupt");
     app.set_editor_modeless(false);
-    assert_eq!(
-        app.footer_hint(),
-        "tab to queue \u{B7} ctrl+c to interrupt \u{B7} esc for normal mode"
-    );
+    assert_eq!(app.footer_hint(), "tab to queue \u{B7} ctrl+c to interrupt");
     app.handle_key(key('x'));
     assert_eq!(
         app.footer_hint(),
-        "enter to steer \u{B7} tab to queue \u{B7} esc for normal mode"
+        "enter steers \u{B7} tab queues \u{B7} ctrl+c clears"
     );
     app.handle_key(code(KeyCode::Esc));
     assert_eq!(
         app.footer_hint(),
-        "ctrl+c to clear the draft \u{B7} i to type \u{B7} ? for shortcuts \u{B7} : for commands"
+        "ctrl+c to clear \u{B7} i to type \u{B7} ? for shortcuts"
     );
     lock(&usage).working = false;
     app.handle_key(ctrl('c'));
@@ -1713,8 +1710,13 @@ fn the_help_overlay_never_overlaps_the_input_rows() {
     app.handle_key(key('?'));
     assert!(app.help_overlay.is_some());
     let rows = snapshot_rows(&render_app(&mut app));
-    let input_top = blank.len() - 4;
-    assert_eq!(rows[input_top..], blank[input_top..], "{rows:?}");
+    let (input_top, footer) = (blank.len() - 4, blank.len() - 1);
+    assert_eq!(
+        rows[input_top..footer],
+        blank[input_top..footer],
+        "{rows:?}"
+    );
+    assert_eq!(rows[footer], "  up/down to scroll \u{B7} esc to close");
     assert_ne!(rows[..input_top], blank[..input_top], "{rows:?}");
 }
 
@@ -2464,7 +2466,30 @@ fn slash_tab_completes_to_lcp_and_opens_popup() {
     let sp = app.slash_palette.as_ref().expect("palette open");
     let cl = sp.cmdline();
     assert_eq!(cl.text(), "mo", "tab should extend to LCP of model/mouse");
-    assert!(cl.popup_open(), "popup should be visible after LCP step");
+    assert_eq!(palette_selected(&app).as_deref(), Some("model"));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    let cl = app.slash_palette.as_ref().expect("palette open").cmdline();
+    assert_eq!(
+        cl.text(),
+        "model",
+        "the next tab inserts the highlighted row"
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    let cl = app.slash_palette.as_ref().expect("palette open").cmdline();
+    assert_eq!(cl.text(), "mouse", "then tab cycles");
+}
+
+#[test]
+fn palette_tab_completes_a_typed_alias_to_its_command() {
+    let mut app = defaults_app();
+    app.handle_key(key('/'));
+    type_str(&mut app, "perm");
+    assert_eq!(palette_values(&app), ["permission"]);
+    assert_eq!(palette_selected(&app).as_deref(), Some("permission"));
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    let cl = app.slash_palette.as_ref().expect("palette open").cmdline();
+    assert_eq!(cl.text(), "permission");
+    assert_eq!(palette_selected(&app).as_deref(), Some("permission"));
 }
 
 #[test]
@@ -2521,13 +2546,17 @@ fn palette_opens_with_model_selected_on_top() {
 }
 
 #[test]
-fn palette_hides_aliases_until_typed() {
+fn palette_shows_an_alias_only_without_its_command() {
     let mut app = defaults_app();
     app.handle_key(key('/'));
     assert!(!palette_values(&app).iter().any(|v| v == "q"));
     app.handle_key(key('q'));
-    assert!(palette_values(&app).iter().any(|v| v == "q"));
-    assert_eq!(palette_selected(&app).as_deref(), Some("q"));
+    assert!(!palette_values(&app).iter().any(|v| v == "q"));
+    assert_eq!(palette_selected(&app).as_deref(), Some("quit"));
+    app.handle_key(code(KeyCode::Backspace));
+    app.handle_key(key('/'));
+    type_str(&mut app, "img");
+    assert_eq!(palette_values(&app), ["img"]);
 }
 
 #[test]
@@ -3865,4 +3894,139 @@ fn help_rows_come_from_the_live_keymap() {
     let rows = app.help_overlay.as_ref().unwrap().mapped_rows();
     assert!(rows.contains(&("<C-t>", "dark theme")), "{rows:?}");
     assert!(!rows.iter().any(|(lhs, _)| *lhs == "<C-s>"), "{rows:?}");
+}
+
+#[test]
+fn the_footer_hint_names_the_keys_of_the_open_overlay() {
+    let mut app = defaults_app();
+    app.set_editor_modeless(true);
+    app.handle_key(key('/'));
+    assert_eq!(
+        app.footer_hint(),
+        "tab to complete \u{B7} enter to run \u{B7} esc to close"
+    );
+    app.handle_key(code(KeyCode::Esc));
+    assert!(app.slash_palette.is_none());
+    app.handle_key(key('?'));
+    assert_eq!(app.footer_hint(), "up/down to scroll \u{B7} esc to close");
+    app.handle_key(code(KeyCode::Esc));
+    assert!(app.help_overlay.is_none());
+    app.handle_key(key('!'));
+    assert_eq!(app.footer_hint(), "backspace to leave shell mode");
+    type_str(&mut app, "ls");
+    assert_eq!(app.footer_hint(), "enter to run the command");
+}
+
+#[test]
+fn common_footer_hints_fit_at_80_columns_beside_the_session_facts() {
+    let (mut app, _rx, events) = app_with_events();
+    app.set_editor_modeless(true);
+    app.set_model_choices(vec![PickItem::simple("fake:m").with_label("Fake")]);
+    {
+        let mut usage = lock(app.session_usage.as_ref().unwrap());
+        usage.model = "fake:m".into();
+        usage.input_tokens = 14_000;
+        usage.current_context = 24_000;
+        usage.context_window = 200_000;
+        usage.permission_mode = Some(kage_core::permissions::PermissionAction::Ask);
+        usage.working = true;
+    }
+    let facts = "  Fake \u{B7} ask mode \u{B7} 12% ctx \u{B7} 14k tok";
+    let check = |app: &mut App| {
+        let hint = app.footer_hint();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        app.render_into(&mut terminal).unwrap();
+        let footer = snapshot_rows(&terminal).pop().unwrap();
+        assert!(footer.starts_with(&format!("  {hint}")), "{footer:?}");
+        assert!(footer.ends_with(facts), "{footer:?}");
+    };
+    check(&mut app);
+    type_str(&mut app, "check the snapshot tests too");
+    check(&mut app);
+    feed(&mut app, &events, vec![permission_request("c1", 1)]);
+    assert!(app.approval_panel.is_some());
+    check(&mut app);
+}
+
+#[test]
+fn idle_esc_clears_the_search_and_a_session_change_drops_it() {
+    let (mut app, _rx, events) = app_with_events();
+    app.set_editor_modeless(true);
+    app.search_pattern = Some("needle".into());
+    assert!(app.footer_hint().starts_with("esc to clear the search"));
+    app.handle_key(code(KeyCode::Esc));
+    assert_eq!(app.search_pattern, None);
+    app.search_pattern = Some("needle".into());
+    feed(
+        &mut app,
+        &events,
+        vec![
+            kage_core::protocol::HostEvent::SessionChanged {
+                path: std::path::PathBuf::from("/tmp/s.jsonl"),
+                title: None,
+                messages: Vec::new(),
+            }
+            .into(),
+        ],
+    );
+    assert_eq!(app.search_pattern, None);
+    assert_eq!(app.compute_search_match_count(), None);
+}
+
+#[test]
+fn sending_a_prompt_while_scrolled_up_follows_the_conversation() {
+    let (mut app, _rx, _events) = app_with_events();
+    app.set_editor_modeless(true);
+    {
+        let mut buf = lock(&app.buffer);
+        for _ in 0..40 {
+            buf.push_user("earlier");
+        }
+        buf.set_scroll(0);
+        assert!(!buf.is_following());
+    }
+    type_str(&mut app, "hi");
+    app.handle_key(code(KeyCode::Enter));
+    assert!(lock(&app.buffer).is_following());
+}
+
+#[test]
+fn the_working_row_cuts_the_command_before_its_time_and_key() {
+    let buffer = shared_buffer();
+    lock(&buffer).push_user("hello");
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer.clone(), tx);
+    app.set_editor_modeless(true);
+    app.run_started = Instant::now().checked_sub(Duration::from_secs(2));
+    let command = "for i in 1 2 3 4 5 6 7 8 9 10; do echo $i; sleep 1; done; echo all done";
+    lock(&buffer).push_tool_call("c1", "bash", serde_json::json!({ "command": command }));
+    lock(&buffer).set_tool_phase("c1", crate::view::tool_view::ToolPhase::Running);
+    let label = app.activity_label(&lock(&buffer), 80).unwrap();
+    assert!(label.starts_with("Running for i in"), "{label}");
+    assert!(label.ends_with("... (2s, esc to interrupt)"), "{label}");
+    assert_eq!(label.len(), 78, "{label}");
+}
+
+#[test]
+fn a_long_start_tip_wraps_instead_of_clipping() {
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(shared_buffer(), tx);
+    let rt = kage_plugin::PluginRuntime::new().unwrap();
+    kage_plugin::load_all(None, &rt).unwrap();
+    app.set_slots(rt.slots());
+    rt.eval(
+        "kage.ui.set_slot('start', { lines = {
+             { text = 'Tip: one two three four five six seven eight nine' },
+         } })",
+    )
+    .unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+    app.render_into(&mut terminal).unwrap();
+    let rows = snapshot_rows(&terminal);
+    assert!(
+        rows.iter()
+            .any(|r| r == "   Tip: one two three four five six"),
+        "{rows:#?}"
+    );
+    assert!(rows.iter().any(|r| r == "   seven eight nine"), "{rows:#?}");
 }

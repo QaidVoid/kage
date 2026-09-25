@@ -538,8 +538,8 @@ fn default_model_notice(
     }
     let provider = configured.split_once(':').map_or(configured, |(p, _)| p);
     Some(format!(
-        "default_model `{configured}` is unavailable (no credentials for `{provider}`). \
-         Using `{using}`. Run /login {provider} to connect it."
+        "default_model {configured} is unavailable (no credentials for {provider}). \
+         Using {using}. Run /login {provider} to connect it."
     ))
 }
 
@@ -555,11 +555,11 @@ fn credential_notices(state: &State, auth: &AuthStore, now: DateTime<Utc>) -> Ve
                 1 => "expires in 1 day".to_owned(),
                 days => format!("expires in {days} days"),
             };
-            format!("the `{provider}` login {when}. Run /login {provider}.")
+            format!("the {provider} login {when}. Run /login {provider}.")
         });
     let failed = state.auth_failures.iter().map(|(provider, detail)| {
         format!(
-            "`{provider}` rejected the credentials on the last run ({}). Run /login {provider}.",
+            "{provider} rejected the credentials on the last run ({}). Run /login {provider}.",
             detail.trim_end_matches('.')
         )
     });
@@ -630,7 +630,7 @@ mod tests {
         let notices = credential_notices(&State::empty(), &auth, now());
         assert_eq!(
             notices,
-            ["the `anthropic` login expires in 1 day. Run /login anthropic."]
+            ["the anthropic login expires in 1 day. Run /login anthropic."]
         );
     }
 
@@ -642,7 +642,7 @@ mod tests {
         let notices = credential_notices(&State::empty(), &auth, now());
         assert_eq!(
             notices,
-            ["the `anthropic` login has expired. Run /login anthropic."]
+            ["the anthropic login has expired. Run /login anthropic."]
         );
     }
 
@@ -653,7 +653,7 @@ mod tests {
         let notice = default_model_notice(&registry, "anthropic:claude-sonnet-4-6", "mock:m")
             .expect("unresolved default warns");
         assert!(notice.contains("anthropic:claude-sonnet-4-6"), "{notice}");
-        assert!(notice.contains("Using `mock:m`"), "{notice}");
+        assert!(notice.contains("Using mock:m."), "{notice}");
         assert!(notice.contains("Run /login anthropic"), "{notice}");
     }
 }

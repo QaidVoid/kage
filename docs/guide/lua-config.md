@@ -453,6 +453,8 @@ Slots are the fixed chrome regions, from top to bottom:
 
 `kage.ui.set_slot(name, spec)` replaces a slot's spec, and
 `kage.ui.set_slot(name, nil)` restores the one `_defaults.lua` set.
+To remove a row, give it an empty spec, such as
+`kage.ui.set_slot("activity", { left = {} })`.
 `left` items paint from the left edge and `right` items against the
 right edge. `sep` goes between two items that both have output. The
 `:` command line and the `/` search line paint over the footer row
@@ -461,7 +463,8 @@ while they are open.
 `start` paints while the conversation holds nothing but notices: no
 prompt, reply, thinking, tool call or shell command yet. Errors such
 as a broken `config.toml` stay above it. The card is bottom-aligned
-directly above the input, and each item is one line, indented. When
+directly above the input, and each item is one line, indented. Span
+lines, such as the tip, wrap at the card width instead. When
 the rows do not fit, the tip and other span or Lua lines go first,
 then the recent sessions, then notices past the first two.
 `{ lines = {} }` turns the card off.
@@ -518,7 +521,7 @@ An item is one of:
 | `thinking` | the thinking level, such as `thinking high`, hidden when off |
 | `permission` | a session permission override, such as `ask mode`, hidden when there is none |
 | `mode` | `NORMAL`, `INSERT` or `VISUAL` in vim mode, `shell` while `!` shell mode is armed, nothing otherwise |
-| `hint` | what the next keys do: the pending keys of a mapping sequence, the approval panel's keys, `ctrl+c again to quit` or `draft cleared, up restores it`, else a hint for the current state such as `? for shortcuts` or `tab to queue` |
+| `hint` | what the next keys do: the pending keys of a mapping sequence, the keys of the approval panel, the `/` palette or the `?` help, `ctrl+c again to quit` or `draft cleared, up restores it`, else a hint for the current state such as `? for shortcuts` or `tab to queue` |
 | `cwd` | the working directory |
 | `version` | the kage version |
 | `sessions` | `start` only: the three most recent sessions with their times |

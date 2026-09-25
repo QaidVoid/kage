@@ -599,8 +599,9 @@ impl App {
         for row in [
             "vim motions, operators, counts, registers, r, undo, redo",
             "readline edits and the kill ring (<C-a/e/w/u/k/y>, <C-/>, <M-b/f/d>, <M-BS>)",
-            "<CR> submit, <S-CR> and <M-CR> newline, <Up> and <Down> history",
-            "<Esc>, insert <C-o> (expand a paste or fold), <C-g> external editor",
+            "<CR> submit (steers a running turn), <S-CR> and <M-CR> newline, <Up> and <Down> history",
+            "modeless <Esc> clears the draft (<Up> restores it), else interrupts the turn",
+            "vim <Esc>, insert <C-o> (expand a paste or fold), <C-g> external editor",
             "modeless empty-prompt /, ! and ?, conversation pane i and a",
         ] {
             lines.push(format!("  {row}"));
@@ -610,7 +611,10 @@ impl App {
             "hatches (above every layer; they yield only to init.lua or config.toml):".to_owned(),
         );
         lines.push("  <C-q>        quit".to_owned());
-        lines.push("  <C-c>        interrupt the running turn".to_owned());
+        lines.push(
+            "  <C-c>        clear the draft, else interrupt the turn, else twice to quit"
+                .to_owned(),
+        );
 
         let body = lines.join("\n");
         let mut buf = lock(&self.buffer);

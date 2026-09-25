@@ -23,9 +23,11 @@ impl App {
         }
     }
 
-    /// Send a prompt to the engine. The user block appears when the
-    /// engine delivers it. During a run that happens later, so until
-    /// then it shows as a pending row above the input.
+    /// Send a prompt to the engine and follow the conversation to its
+    /// end. The user block appears when the engine delivers it. During
+    /// a run that happens later, so until then it shows as a pending
+    /// row above the input. Steers are listed before queued prompts,
+    /// the order the engine delivers them in.
     pub(crate) fn send_prompt(
         &mut self,
         text: String,
@@ -50,17 +52,27 @@ impl App {
         };
         if self.send_request(submit).is_err() {
             self.push_error("submit failed: agent worker has stopped");
-        } else if let Some(pending) = pending {
-            self.pending.push(pending);
+            return;
+        }
+        self.follow();
+        if let Some(pending) = pending {
+            let at = if pending.queued {
+                self.pending.len()
+            } else {
+                self.pending.partition_point(|p| !p.queued)
+            };
+            self.pending.insert(at, pending);
         }
     }
 
     /// Resolve an `InputAction::RunShell`: send the command to the
     /// worker, which paints its own shell block, so no user block is
-    /// pushed here.
+    /// pushed here, and follow the conversation to its end.
     pub(crate) fn handle_shell(&mut self, text: String) {
         if self.send_request(RunRequest::RunShell(text)).is_err() {
             self.push_error("shell failed: agent worker has stopped");
+        } else {
+            self.follow();
         }
     }
 

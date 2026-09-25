@@ -172,8 +172,9 @@ enum Keep {
 }
 
 /// Paint the start slot bottom-aligned in `area`, the rows between the
-/// last notice block and the input. Lines drop when it does not fit:
-/// the tip first, then the sessions, then notices past the first two.
+/// last notice block and the input. Span lines, such as the tip, wrap
+/// at the card width. Lines drop when it does not fit: the tip first,
+/// then the sessions, then notices past the first two.
 pub(super) fn render_start(frame: &mut Frame, area: Rect, src: &Sources<'_>) {
     let spec = src.status.slots.get(SlotName::Start);
     if spec.lines.is_empty() || area.height == 0 || area.width == 0 {
@@ -244,9 +245,19 @@ fn start_lines(spec: &SlotSpec, src: &Sources<'_>, width: usize) -> Vec<(Keep, L
                 out.push((Keep::Always, Line::default()));
             }
             SlotItem::Text(_) => {
-                let mut spans = vec![indent()];
+                let mut spans = Vec::new();
                 push_item(item, src, &styles, &mut spans);
-                out.push((Keep::Tip, Line::from(spans)));
+                let style = spans.first().map_or(styles.base, |span| span.style);
+                let text: String = spans.iter().map(|span| span.content.as_ref()).collect();
+                let body = width.saturating_sub(START_INDENT * 2);
+                let body = u16::try_from(body).unwrap_or(u16::MAX);
+                for (from, to) in wrap_input_rows(&text, body) {
+                    let row = text[from..to].trim_end().to_owned();
+                    out.push((
+                        Keep::Tip,
+                        Line::from(vec![indent(), Span::styled(row, style)]),
+                    ));
+                }
             }
             SlotItem::Lua(component) => {
                 let base = with_hl(styles.base, component.hl());

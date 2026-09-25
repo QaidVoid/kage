@@ -32,9 +32,10 @@ enum Row {
 }
 
 /// Grammar keys of the modeless editor: always insert-like, with Esc
-/// cancelling the turn and `/`, `!`, `?` as empty-prompt prefixes.
+/// clearing the draft or interrupting the turn and `/`, `!`, `?` as
+/// empty-prompt prefixes.
 const MODELESS_BUILTIN: &[(&str, &str)] = &[
-    ("Enter", "send the prompt"),
+    ("Enter", "send the prompt, or steer the running turn"),
     ("Shift+Enter", "insert a newline (Alt+Enter also works)"),
     ("Up / Down", "previous / next prompt from history"),
     ("Ctrl+A / Ctrl+E", "line start / end"),
@@ -50,7 +51,11 @@ const MODELESS_BUILTIN: &[(&str, &str)] = &[
     ("/ (empty prompt)", "command palette"),
     ("! (empty prompt)", "run a shell command"),
     ("? (empty prompt)", "this reference"),
-    ("Esc / Ctrl+C", "cancel the running turn"),
+    ("Esc", "clear the draft (Up restores it), else interrupt"),
+    (
+        "Ctrl+C",
+        "clear the draft, else interrupt, else twice to quit",
+    ),
     ("Ctrl+Q", "quit kage (cancels a running turn)"),
 ];
 
@@ -70,7 +75,7 @@ const VIM_BUILTIN: &[(&str, &str)] = &[
     ("x X r D C o O", "single-character and line edits"),
     ("p P u Ctrl+R", "paste, undo, redo"),
     ("v", "visual select in the prompt"),
-    ("Enter", "submit"),
+    ("Enter", "send the prompt, or steer the running turn"),
     ("Shift+Enter", "insert a newline (Alt+Enter also works)"),
     ("Up / Down", "prompt history (insert mode)"),
     ("Ctrl+A / Ctrl+E", "line start / end (insert mode)"),
@@ -89,7 +94,10 @@ const VIM_BUILTIN: &[(&str, &str)] = &[
     ("Ctrl+G", "edit the prompt in $VISUAL or $EDITOR"),
     ("/ (empty prompt)", "command palette (insert mode)"),
     ("! (empty prompt)", "run a shell command (insert mode)"),
-    ("Ctrl+C", "cancel the running turn"),
+    (
+        "Ctrl+C",
+        "clear the draft, else interrupt, else twice to quit",
+    ),
     ("Ctrl+Q", "quit kage"),
 ];
 
@@ -376,6 +384,25 @@ mod tests {
         assert!(!labels.iter().any(|l| l.contains("gg")));
         let vim = HelpOverlay::new(&[], false);
         assert!(key_labels(&vim.rows).contains(&"0 $ ^ gg G"));
+    }
+
+    #[test]
+    fn builtin_rows_describe_the_escalation_and_steering() {
+        for modeless in [true, false] {
+            let rows = HelpOverlay::new(&[], modeless).rows;
+            let desc = |label: &str| {
+                rows.iter().find_map(|row| match row {
+                    Row::Key(keys, desc) if keys == label => Some(desc.clone()),
+                    _ => None,
+                })
+            };
+            assert!(desc("Ctrl+C").unwrap().contains("twice to quit"));
+            assert!(desc("Enter").unwrap().contains("steer"));
+        }
+        let modeless = HelpOverlay::new(&[], true).rows;
+        assert!(modeless.iter().any(
+            |row| matches!(row, Row::Key(keys, desc) if keys == "Esc" && desc.contains("clear the draft"))
+        ));
     }
 
     #[test]

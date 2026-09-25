@@ -62,6 +62,9 @@ pub struct ApprovalPanel {
     position: usize,
     selected: usize,
     feedback: Option<CommandLine>,
+    /// The feedback field closed with `Esc`, restored when option 5
+    /// opens it again.
+    parked: Option<CommandLine>,
     opened_at: Instant,
 }
 
@@ -78,6 +81,7 @@ impl ApprovalPanel {
             position,
             selected: 0,
             feedback: None,
+            parked: None,
             opened_at,
         }
     }
@@ -101,12 +105,7 @@ impl ApprovalPanel {
         let parts: &[&str] = if self.in_feedback() {
             &["enter to send", "esc to go back"]
         } else {
-            &[
-                "1-5 or y s a n t",
-                "up/down",
-                "enter to confirm",
-                "esc for no",
-            ]
+            &["y/s/a/n/t or 1-5", "enter", "esc no"]
         };
         parts.join(SEP)
     }
@@ -121,7 +120,7 @@ impl ApprovalPanel {
         }
         if let Some(field) = self.feedback.as_mut() {
             if key.code == KeyCode::Esc {
-                self.feedback = None;
+                self.parked = self.feedback.take();
                 return ApprovalOutcome::Stay;
             }
             return match field.handle_key(key, &[], &EmptyResolver) {
@@ -159,7 +158,7 @@ impl ApprovalPanel {
             1 => ApprovalOutcome::Decide(PermissionDecision::AllowSession),
             2 => ApprovalOutcome::Decide(PermissionDecision::AllowAlways),
             TELL => {
-                self.feedback = Some(CommandLine::new());
+                self.feedback = Some(self.parked.take().unwrap_or_default());
                 ApprovalOutcome::Stay
             }
             _ => ApprovalOutcome::Decide(PermissionDecision::Deny),
@@ -617,6 +616,12 @@ mod tests {
                 .iter()
                 .any(|r| r.contains("5. No, and tell"))
         );
+        panel.handle_key_at(key(KeyCode::Char('5')), now);
+        panel.handle_key_at(key(KeyCode::Char('y')), now);
+        assert_eq!(
+            panel.handle_key_at(key(KeyCode::Enter), now),
+            ApprovalOutcome::Feedback("xy".to_owned())
+        );
     }
 
     #[test]
@@ -648,7 +653,7 @@ mod tests {
     #[test]
     fn hint_follows_the_mode() {
         let (mut panel, now) = opened();
-        assert!(panel.hint().starts_with("1-5 or y s a n t"));
+        assert_eq!(panel.hint(), "y/s/a/n/t or 1-5 \u{B7} enter \u{B7} esc no");
         panel.handle_key_at(key(KeyCode::Char('t')), now);
         assert!(panel.hint().contains("esc to go back"));
     }

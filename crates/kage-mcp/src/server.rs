@@ -138,6 +138,15 @@ pub trait ServerRequestHandler: Send + Sync {
     }
 }
 
+/// The "list changed" notices a server sent since the last take, one
+/// flag per list.
+#[derive(Default)]
+struct ListsChanged {
+    tools: AtomicBool,
+    resources: AtomicBool,
+    prompts: AtomicBool,
+}
+
 /// Open progress tokens, each routed to the call waiting on it.
 type ProgressRoutes = Arc<Mutex<HashMap<String, Sender<serde_json::Value>>>>;
 
@@ -160,7 +169,7 @@ impl Drop for ProgressTicket {
 pub struct McpConnection {
     server: String,
     peer: Peer,
-    tools_changed: Arc<AtomicBool>,
+    changed: Arc<ListsChanged>,
     progress: ProgressRoutes,
     next_progress: AtomicU64,
     drain: JoinHandle<()>,
@@ -171,8 +180,9 @@ pub struct McpConnection {
 impl McpConnection {
     /// Drive the MCP `initialize` / `notifications/initialized`
     /// handshake on an already-connected `peer`, then spawn a thread
-    /// that drains server-initiated traffic: `tools/list_changed`
-    /// notifications flip an internal flag, `notifications/progress`
+    /// that drains server-initiated traffic: the tools, resources and
+    /// prompts `list_changed` notifications each flip their own flag,
+    /// `notifications/progress`
     /// goes to the call that registered its token, `roots/list`
     /// requests are answered from `roots` (advertised as a client
     /// capability), `ping` gets an empty result, and any other server
@@ -257,26 +267,28 @@ impl McpConnection {
                 source,
             })?;
 
-        let tools_changed = Arc::new(AtomicBool::new(false));
+        let changed = Arc::new(ListsChanged::default());
         let progress = ProgressRoutes::default();
         let drain = {
-            let flag = Arc::clone(&tools_changed);
+            let changed = Arc::clone(&changed);
             let progress = Arc::clone(&progress);
             let peer = peer.clone();
             std::thread::spawn(move || {
                 for msg in inbound {
                     match msg {
-                        Inbound::Notification { method, .. }
-                            if method == "notifications/tools/list_changed" =>
-                        {
-                            flag.store(true, Ordering::SeqCst);
-                        }
-                        Inbound::Notification { method, params }
-                            if method == "notifications/progress" =>
-                        {
-                            route_progress(&progress, params);
-                        }
-                        Inbound::Notification { .. } => {}
+                        Inbound::Notification { method, params } => match method.as_str() {
+                            "notifications/tools/list_changed" => {
+                                changed.tools.store(true, Ordering::SeqCst);
+                            }
+                            "notifications/resources/list_changed" => {
+                                changed.resources.store(true, Ordering::SeqCst);
+                            }
+                            "notifications/prompts/list_changed" => {
+                                changed.prompts.store(true, Ordering::SeqCst);
+                            }
+                            "notifications/progress" => route_progress(&progress, params),
+                            _ => {}
+                        },
                         Inbound::Request { id, method, .. } if method == "roots/list" => {
                             let _ = peer.respond(&id, Ok(roots_result.clone()));
                         }
@@ -303,7 +315,7 @@ impl McpConnection {
         Ok(Self {
             server,
             peer,
-            tools_changed,
+            changed,
             progress,
             next_progress: AtomicU64::new(0),
             drain,
@@ -396,7 +408,21 @@ impl McpConnection {
     /// it both loses the signal and clears the flag.
     #[must_use]
     pub fn take_tools_changed(&self) -> bool {
-        self.tools_changed.swap(false, Ordering::SeqCst)
+        self.changed.tools.swap(false, Ordering::SeqCst)
+    }
+
+    /// Take the "server announced its resource list changed" flag,
+    /// resetting it to `false`. Resource templates reload with it.
+    #[must_use]
+    pub fn take_resources_changed(&self) -> bool {
+        self.changed.resources.swap(false, Ordering::SeqCst)
+    }
+
+    /// Take the "server announced its prompt list changed" flag,
+    /// resetting it to `false`.
+    #[must_use]
+    pub fn take_prompts_changed(&self) -> bool {
+        self.changed.prompts.swap(false, Ordering::SeqCst)
     }
 
     /// Issue a request to the server, tagging failures with the
@@ -574,9 +600,8 @@ impl McpServerHandle {
             .map(|status| status.to_string())
     }
 
-    /// Test-only: wrap a bare connection as a childless handle so
-    /// manager tests can inject an in-process transport.
-    #[cfg(test)]
+    /// Wrap an already initialized connection as a childless handle, so
+    /// the manager can adopt an in-process transport.
     pub(crate) fn from_connection(conn: Arc<McpConnection>) -> Self {
         Self { conn, child: None }
     }
@@ -787,6 +812,28 @@ mod tests {
         }
         assert!(seen, "tools_changed flag should latch");
         assert!(!conn.take_tools_changed(), "flag clears after take");
+    }
+
+    #[test]
+    fn each_list_changed_notice_sets_only_its_own_flag() {
+        let (conn, srv) = stub_server();
+        srv.notify(
+            "notifications/resources/list_changed",
+            serde_json::Value::Null,
+        )
+        .unwrap();
+        srv.notify(
+            "notifications/prompts/list_changed",
+            serde_json::Value::Null,
+        )
+        .unwrap();
+        srv.request("ping", serde_json::json!({}))
+            .expect("the drain thread handled both notices before the ping");
+        assert!(conn.take_resources_changed());
+        assert!(conn.take_prompts_changed());
+        assert!(!conn.take_tools_changed());
+        assert!(!conn.take_resources_changed(), "flag clears after take");
+        assert!(!conn.take_prompts_changed(), "flag clears after take");
     }
 
     #[test]

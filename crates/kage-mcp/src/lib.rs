@@ -2,12 +2,14 @@
 //!
 //! Layering: depends on `kage-core`, `kage-jsonrpc`, and `kage-tools`.
 
+pub mod catalog;
 mod http;
 pub mod manager;
 pub mod serve;
 pub mod server;
 pub mod tools;
 
+pub use catalog::{PromptMessage, ResourceContents};
 pub use manager::McpManager;
 pub use serve::{ServeGate, serve};
 pub use server::{

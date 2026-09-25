@@ -10,8 +10,12 @@
 //! which class it belongs to.
 
 mod agent_tree;
+mod mcp;
 
 pub use agent_tree::{AgentNode, AgentState, AgentTree};
+pub use mcp::{
+    McpPrompt, McpPromptArgument, McpResource, McpResourceTemplate, McpServerInfo, McpServerStatus,
+};
 
 use std::fmt;
 use std::path::PathBuf;

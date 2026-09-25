@@ -6,6 +6,11 @@
 //! pushed a `notifications/tools/list_changed`, swapping its adapters
 //! in place (stale tools are unregistered, not left dangling).
 //!
+//! The manager also caches each server's resources, resource templates
+//! and prompts, listed only when the server advertises the capability
+//! and reloaded when it announces a change, so [`McpManager::catalog`]
+//! never touches the network.
+//!
 //! [`McpManager::refresh_into`] also notices a server whose transport
 //! has died: it unregisters that server's tools, evicts the handle,
 //! and reports a [`McpError::Crashed`] failure, while the launch spec
@@ -21,6 +26,9 @@
 use std::sync::Arc;
 
 use kage_core::config::{McpConfig, McpServer};
+use kage_core::protocol::{
+    McpPrompt, McpResource, McpResourceTemplate, McpServerInfo, McpServerStatus,
+};
 use kage_tools::ToolRegistry;
 
 use crate::server::{McpConnection, McpError, McpServerHandle};
@@ -29,13 +37,94 @@ use crate::tools::tools_from_connection;
 /// One configured server: its launch spec (kept so it can be
 /// respawned by `restart`, including after an eviction), the live
 /// handle (`None` when it failed to spawn or was evicted as dead), the
-/// last error of a server that is not live, and the tool names it
-/// currently contributes.
+/// last error of a server that is not live, the tool names it
+/// currently contributes, and its cached catalog lists.
 struct Managed {
     spec: McpServer,
     handle: Option<McpServerHandle>,
     error: Option<String>,
     registered: Vec<String>,
+    resources: Vec<McpResource>,
+    templates: Vec<McpResourceTemplate>,
+    prompts: Vec<McpPrompt>,
+}
+
+impl Managed {
+    fn new(spec: McpServer, handle: Option<McpServerHandle>, error: Option<String>) -> Self {
+        Self {
+            spec,
+            handle,
+            error,
+            registered: Vec::new(),
+            resources: Vec::new(),
+            templates: Vec::new(),
+            prompts: Vec::new(),
+        }
+    }
+
+    fn connection(&self) -> Option<Arc<McpConnection>> {
+        self.handle.as_ref().map(|h| Arc::clone(h.connection()))
+    }
+
+    /// Reload the cached resources and templates. A failure keeps the
+    /// previous lists.
+    fn load_resources(&mut self) -> Result<(), McpError> {
+        let Some(conn) = self.connection() else {
+            return Ok(());
+        };
+        let resources = conn.list_resources()?;
+        self.templates = conn.list_resource_templates()?;
+        self.resources = resources;
+        Ok(())
+    }
+
+    /// Reload the cached prompts. A failure keeps the previous list.
+    fn load_prompts(&mut self) -> Result<(), McpError> {
+        let Some(conn) = self.connection() else {
+            return Ok(());
+        };
+        self.prompts = conn.list_prompts()?;
+        Ok(())
+    }
+
+    /// Reload tools, resources and prompts, returning every failure. A
+    /// failing catalog list leaves the tools registered.
+    fn load_all(&mut self, reg: &mut ToolRegistry) -> Vec<McpError> {
+        [
+            McpManager::reload(self, reg),
+            self.load_resources(),
+            self.load_prompts(),
+        ]
+        .into_iter()
+        .filter_map(Result::err)
+        .collect()
+    }
+
+    /// Forget the cached catalog of a server that is no longer live or
+    /// is about to be replaced.
+    fn clear_catalog(&mut self) {
+        self.resources.clear();
+        self.templates.clear();
+        self.prompts.clear();
+    }
+
+    fn info(&self, name: &str) -> McpServerInfo {
+        let status = if self.handle.is_some() {
+            McpServerStatus::Connected
+        } else {
+            McpServerStatus::Failed {
+                error: self.error.clone().unwrap_or_default(),
+            }
+        };
+        McpServerInfo {
+            name: name.to_owned(),
+            status,
+            tools: u32::try_from(self.registered.len()).unwrap_or(u32::MAX),
+            resources: self.resources.clone(),
+            templates: self.templates.clone(),
+            prompts: self.prompts.clone(),
+        }
+    }
 }
 
 /// Owns the spawned MCP servers and mediates their tools into a
@@ -83,15 +172,7 @@ impl McpManager {
                         (None, Some(detail))
                     }
                 };
-            servers.push((
-                name.clone(),
-                Managed {
-                    spec: spec.clone(),
-                    handle,
-                    error,
-                    registered: Vec::new(),
-                },
-            ));
+            servers.push((name.clone(), Managed::new(spec.clone(), handle, error)));
         }
         (
             Self {
@@ -137,28 +218,67 @@ impl McpManager {
             .and_then(|(_, m)| m.error.as_deref())
     }
 
-    /// Discover and register every live server's tools. Returns the
-    /// per-server discovery failures; a failing server simply
-    /// contributes no tools.
+    /// Every configured, enabled server with its status, tool count and
+    /// cached resources, templates and prompts, in registration order. A
+    /// server that is not live reports its error and empty lists. Never
+    /// touches the network.
+    #[must_use]
+    pub fn catalog(&self) -> Vec<McpServerInfo> {
+        self.servers.iter().map(|(n, m)| m.info(n)).collect()
+    }
+
+    /// The live connections, by server name, for the calls that read
+    /// resources and fetch prompts.
+    #[must_use]
+    pub fn clients(&self) -> Vec<(String, Arc<McpConnection>)> {
+        self.servers
+            .iter()
+            .filter_map(|(n, m)| Some((n.clone(), m.connection()?)))
+            .collect()
+    }
+
+    /// Manage an already initialized connection as server `name`, for
+    /// hosts and tests that run a server in process. The server has no
+    /// launch spec, so [`Self::restart`] reports a config error for it.
+    /// Call [`Self::register_into`] afterwards to list its tools and
+    /// catalog.
+    pub fn adopt(&mut self, name: &str, conn: Arc<McpConnection>) {
+        let spec = McpServer {
+            command: None,
+            args: Vec::new(),
+            env: std::collections::BTreeMap::new(),
+            url: None,
+            headers: std::collections::BTreeMap::new(),
+            disabled: false,
+        };
+        let handle = McpServerHandle::from_connection(conn);
+        self.servers
+            .push((name.to_owned(), Managed::new(spec, Some(handle), None)));
+    }
+
+    /// Discover and register every live server's tools, and list the
+    /// resources, templates and prompts of servers that advertise them.
+    /// Returns the per-server failures; a failing tool list simply
+    /// contributes no tools, and a failing catalog list leaves the
+    /// tools registered.
     pub fn register_into(&mut self, reg: &mut ToolRegistry) -> Vec<(String, McpError)> {
         let mut errors = Vec::new();
         for (name, managed) in &mut self.servers {
             if managed.handle.is_none() {
                 continue;
             }
-            if let Err(e) = Self::reload(managed, reg) {
-                errors.push((name.clone(), e));
-            }
+            errors.extend(managed.load_all(reg).into_iter().map(|e| (name.clone(), e)));
         }
         errors
     }
 
-    /// Re-list only the servers that announced a tool-list change
-    /// since the last call, swapping their adapters in place. A
-    /// server whose transport has died is evicted instead: its tools
-    /// are unregistered and a [`McpError::Crashed`] failure is
-    /// reported (the launch spec is kept for a later `restart`).
-    /// Returns per-server failures.
+    /// Re-list only the lists each server announced a change for since
+    /// the last call: tools (swapping their adapters in place),
+    /// resources with their templates, or prompts. A server whose
+    /// transport has died is evicted instead: its tools are
+    /// unregistered, its catalog is cleared and a [`McpError::Crashed`]
+    /// failure is reported (the launch spec is kept for a later
+    /// `restart`). Returns per-server failures.
     pub fn refresh_into(&mut self, reg: &mut ToolRegistry) -> Vec<(String, McpError)> {
         let mut errors = Vec::new();
         for (name, managed) in &mut self.servers {
@@ -176,16 +296,29 @@ impl McpManager {
                     reg.unregister(&stale);
                 }
                 managed.handle = None;
+                managed.clear_catalog();
                 let crash = McpError::Crashed {
                     server: name.clone(),
                     detail,
                 };
                 managed.error = Some(crash.to_string());
                 errors.push((name.clone(), crash));
-            } else if conn.take_tools_changed() {
-                if let Err(e) = Self::reload(managed, reg) {
-                    errors.push((name.clone(), e));
-                }
+                continue;
+            }
+            if conn.take_tools_changed()
+                && let Err(e) = Self::reload(managed, reg)
+            {
+                errors.push((name.clone(), e));
+            }
+            if conn.take_resources_changed()
+                && let Err(e) = managed.load_resources()
+            {
+                errors.push((name.clone(), e));
+            }
+            if conn.take_prompts_changed()
+                && let Err(e) = managed.load_prompts()
+            {
+                errors.push((name.clone(), e));
             }
         }
         errors
@@ -193,17 +326,18 @@ impl McpManager {
 
     /// Restart one server by name: spawn a fresh process from its
     /// original spec, and only on success swap it in (killing the old
-    /// child, if any) and re-register its tools. The name is looked
-    /// up across every entry, including servers that failed to spawn or
-    /// were evicted as dead, so `restart` can bring them up from the
-    /// retained spec. A failed respawn leaves a live server untouched,
+    /// child, if any), re-register its tools and reload its catalog.
+    /// The name is looked up across every entry, including servers
+    /// that failed to spawn or were evicted as dead, so `restart` can
+    /// bring them up from the retained spec. A failed respawn leaves a live server untouched,
     /// so `restart` never causes downtime on its own failure, and
     /// records the new error for a server that is not live.
     ///
     /// # Errors
     ///
-    /// [`McpError::Unknown`] if no server has that name, or the spawn
-    /// / discovery error from bringing the replacement up.
+    /// [`McpError::Unknown`] if no server has that name, the spawn
+    /// error, or the first discovery error from bringing the
+    /// replacement up (the server stays live).
     pub fn restart(&mut self, name: &str, reg: &mut ToolRegistry) -> Result<(), McpError> {
         let roots = self.roots.clone();
         let handler = self.handler.clone();
@@ -227,7 +361,8 @@ impl McpManager {
         }
         managed.handle = Some(fresh);
         managed.error = None;
-        Self::reload(managed, reg)
+        managed.clear_catalog();
+        managed.load_all(reg).into_iter().next().map_or(Ok(()), Err)
     }
 
     /// Drop this server's previously registered tools and register
@@ -407,23 +542,6 @@ mod tests {
         );
     }
 
-    impl McpManager {
-        /// Test-only injection: build a `Managed` around an
-        /// in-process connection, since `spawn_all` launches real
-        /// processes.
-        fn inject(&mut self, name: &str, spec: McpServer, conn: Arc<McpConnection>) {
-            self.servers.push((
-                name.to_owned(),
-                Managed {
-                    spec,
-                    handle: Some(McpServerHandle::from_connection(conn)),
-                    error: None,
-                    registered: Vec::new(),
-                },
-            ));
-        }
-    }
-
     /// A server that answers `initialize` and `tools/list` (one tool
     /// named `t`) and exits once `kill` is set, dropping the
     /// transport so the client sees EOF.
@@ -474,7 +592,8 @@ mod tests {
             disabled: false,
         };
         let mut mgr = McpManager::default();
-        mgr.inject("x", spec, Arc::clone(&conn));
+        mgr.adopt("x", Arc::clone(&conn));
+        mgr.servers[0].1.spec = spec;
         let mut reg = ToolRegistry::new();
         assert!(
             mgr.register_into(&mut reg).is_empty(),
@@ -516,5 +635,132 @@ mod tests {
             matches!(&err, McpError::Spawn { command, .. } if command == "definitely-not-a-real-binary-xyz"),
             "spec must survive eviction: {err}"
         );
+    }
+
+    /// A server with one tool, one resource, one template and one
+    /// prompt, advertising `resources` and `prompts`. `resources/list`
+    /// fails while `fail_resources` is set.
+    fn catalog_server(
+        fail_resources: Arc<AtomicBool>,
+    ) -> (
+        Arc<McpConnection>,
+        kage_jsonrpc::Peer,
+        crate::catalog::tests::Seen,
+    ) {
+        let caps = serde_json::json!({ "tools": {}, "resources": {}, "prompts": {} });
+        crate::catalog::tests::scripted("srv", caps, move |method, _| {
+            Ok(match method {
+                "tools/list" => {
+                    serde_json::json!({ "tools": [{ "name": "t", "inputSchema": {} }] })
+                }
+                "resources/list" if fail_resources.load(Ordering::SeqCst) => {
+                    return Err(kage_jsonrpc::RpcError::internal("boom"));
+                }
+                "resources/list" => {
+                    serde_json::json!({ "resources": [{ "uri": "test://r", "name": "R" }] })
+                }
+                "resources/templates/list" => serde_json::json!({
+                    "resourceTemplates": [{ "uriTemplate": "test://r/{id}", "name": "T" }]
+                }),
+                "prompts/list" => serde_json::json!({ "prompts": [{ "name": "p" }] }),
+                other => return Err(kage_jsonrpc::RpcError::method_not_found(other)),
+            })
+        })
+    }
+
+    fn methods(seen: &crate::catalog::tests::Seen) -> Vec<String> {
+        seen.lock().unwrap().drain(..).map(|(m, _)| m).collect()
+    }
+
+    #[test]
+    fn catalog_reports_live_counts_and_failed_errors() {
+        let mut cfg = McpConfig::default();
+        cfg.servers.insert(
+            "broken".to_owned(),
+            McpServer {
+                command: Some("definitely-not-a-real-binary-xyz".to_owned()),
+                args: vec![],
+                env: std::collections::BTreeMap::new(),
+                url: None,
+                headers: std::collections::BTreeMap::new(),
+                disabled: false,
+            },
+        );
+        let (mut mgr, _errors) = McpManager::spawn_all(&cfg, vec![], None);
+        let (conn, _srv, _seen) = catalog_server(Arc::new(AtomicBool::new(false)));
+        mgr.adopt("srv", conn);
+        let mut reg = ToolRegistry::new();
+        assert!(mgr.register_into(&mut reg).is_empty());
+
+        let catalog = mgr.catalog();
+        assert_eq!(catalog.len(), 2);
+        assert_eq!(catalog[0].name, "broken");
+        let McpServerStatus::Failed { error } = &catalog[0].status else {
+            panic!("broken must be failed: {:?}", catalog[0].status);
+        };
+        assert!(
+            error.contains("definitely-not-a-real-binary-xyz"),
+            "{error}"
+        );
+        assert_eq!(catalog[0].tools, 0);
+        assert!(catalog[0].resources.is_empty());
+
+        let live = &catalog[1];
+        assert_eq!(live.name, "srv");
+        assert_eq!(live.status, McpServerStatus::Connected);
+        assert_eq!(live.tools, 1);
+        assert_eq!(live.resources[0].uri, "test://r");
+        assert_eq!(live.templates[0].uri_template, "test://r/{id}");
+        assert_eq!(live.prompts[0].name, "p");
+
+        let clients = mgr.clients();
+        assert_eq!(clients.len(), 1);
+        assert_eq!(clients[0].0, "srv");
+        assert_eq!(clients[0].1.name(), "srv");
+    }
+
+    #[test]
+    fn a_failing_catalog_list_leaves_tools_registered() {
+        let fail = Arc::new(AtomicBool::new(true));
+        let (conn, _srv, _seen) = catalog_server(Arc::clone(&fail));
+        let mut mgr = McpManager::default();
+        mgr.adopt("srv", conn);
+        let mut reg = ToolRegistry::new();
+        let errors = mgr.register_into(&mut reg);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].0, "srv");
+        assert!(errors[0].1.to_string().contains("boom"), "{}", errors[0].1);
+        assert!(reg.get("srv__t").is_some());
+        let info = &mgr.catalog()[0];
+        assert_eq!(info.tools, 1);
+        assert!(info.resources.is_empty());
+        assert_eq!(info.prompts.len(), 1, "prompts still load");
+    }
+
+    #[test]
+    fn a_resources_list_changed_notice_reloads_resources_only() {
+        let (conn, srv, seen) = catalog_server(Arc::new(AtomicBool::new(false)));
+        let mut mgr = McpManager::default();
+        mgr.adopt("srv", conn);
+        let mut reg = ToolRegistry::new();
+        assert!(mgr.register_into(&mut reg).is_empty());
+        methods(&seen);
+
+        assert!(mgr.refresh_into(&mut reg).is_empty());
+        assert!(methods(&seen).is_empty(), "no notice, no request");
+
+        srv.notify(
+            "notifications/resources/list_changed",
+            serde_json::json!({}),
+        )
+        .unwrap();
+        srv.request("ping", serde_json::json!({}))
+            .expect("the drain thread handled the notice before the ping");
+        assert!(mgr.refresh_into(&mut reg).is_empty());
+        assert_eq!(
+            methods(&seen),
+            ["resources/list", "resources/templates/list"]
+        );
+        assert_eq!(mgr.catalog()[0].resources.len(), 1);
     }
 }

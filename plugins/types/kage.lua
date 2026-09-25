@@ -774,8 +774,8 @@ function kage.mcp.add_server(spec) end
 ---@return string[]
 function kage.mcp.list_servers() end
 
---- Ask the host to restart a declared MCP server. Applied
---- between turns against the live manager.
+--- Ask the host to restart a configured MCP server, including
+--- one that failed to start. Applied at the next run start.
 --- Since API 1.
 ---@param name string
 function kage.mcp.restart(name) end

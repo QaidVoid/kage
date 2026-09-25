@@ -820,8 +820,8 @@ pub(super) const FUNCS: &[Func] = &[
     },
     Func {
         doc: &[
-            "Ask the host to restart a declared MCP server. Applied",
-            "between turns against the live manager.",
+            "Ask the host to restart a configured MCP server, including",
+            "one that failed to start. Applied at the next run start.",
         ],
         path: "kage.mcp.restart",
         since: 1,

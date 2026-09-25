@@ -1,10 +1,10 @@
-//! Spawn and handshake one external MCP server over stdio.
+//! Spawn and handshake one external MCP server over stdio or HTTP.
 //!
-//! [`McpServerHandle::spawn`] launches the child described by a
-//! `[mcp.servers.<name>]` config block, wires its stdin/stdout into
-//! the shared [`kage_jsonrpc`] peer, performs the MCP `initialize`
+//! [`McpServerHandle::spawn`] connects the server described by a
+//! `[mcp.servers.<name>]` config block, wires its transport into the
+//! shared [`kage_jsonrpc`] peer, performs the MCP `initialize`
 //! handshake, and then keeps the connection live for tool discovery
-//! and calls. Dropping the handle kills the child so a crashed kage
+//! and calls. Dropping a stdio handle kills the child so a crashed kage
 //! never leaves orphaned server processes.
 //!
 //! The handshake is intentionally split from process spawning:

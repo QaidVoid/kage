@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use kage_core::config::McpServer;
 
-use kage_jsonrpc::{Inbound, Peer, RpcError, connect};
+use kage_jsonrpc::{CancelNotice, Inbound, Peer, RpcError, connect_with};
 
 /// Protocol revision kage advertises in `initialize`. The server
 /// replies with the revision it wants to speak; kage records it
@@ -37,6 +37,19 @@ const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(10);
 /// giving up on a silent server. Long-running `tools/call` is exempt:
 /// it goes through [`Self::request_cancellable`] instead.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// The `notifications/cancelled` notice MCP expects when kage abandons
+/// a request. MCP forbids cancelling `initialize`, so that one gets none.
+pub(crate) fn cancel_notice() -> CancelNotice {
+    Arc::new(|id, method| {
+        (method != "initialize").then(|| {
+            (
+                "notifications/cancelled".to_owned(),
+                serde_json::json!({"requestId": id, "reason": "cancelled by client"}),
+            )
+        })
+    })
+}
 
 /// A failure spawning or talking to an MCP server.
 #[derive(Debug, thiserror::Error)]
@@ -430,7 +443,8 @@ impl McpServerHandle {
             .stdout
             .take()
             .ok_or_else(|| McpError::NoStdio(name.clone()))?;
-        let (peer, inbound, _reader) = connect(BufReader::new(stdout), stdin);
+        let (peer, inbound, _reader) =
+            connect_with(BufReader::new(stdout), stdin, Some(cancel_notice()));
         let conn = Arc::new(McpConnection::initialize(
             name, peer, inbound, roots, handler,
         )?);
@@ -502,6 +516,8 @@ mod tests {
     use std::io::BufReader;
     use std::sync::Mutex;
     use std::thread;
+
+    use kage_jsonrpc::connect;
 
     use super::*;
 
@@ -786,5 +802,85 @@ mod tests {
         let err = conn.err().expect("missing protocolVersion must fail");
         assert!(matches!(err, McpError::Protocol { .. }), "got {err:?}");
         assert!(err.to_string().contains("protocolVersion"), "got {err}");
+    }
+
+    #[test]
+    fn cancelled_call_notifies_the_server() {
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_peer, cli_in, _c) =
+            connect_with(BufReader::new(cli_r), cli_w, Some(cancel_notice()));
+        let (srv_peer, srv_in, _s) = connect(BufReader::new(srv_r), srv_w);
+        let (seen_tx, seen) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            for msg in srv_in {
+                match msg {
+                    Inbound::Request { id, method, .. } if method == "initialize" => {
+                        let _ = srv_peer.respond(
+                            &id,
+                            Ok(serde_json::json!({
+                                "protocolVersion": PROTOCOL_VERSION,
+                                "capabilities": { "tools": {} },
+                            })),
+                        );
+                    }
+                    Inbound::Notification { method, .. }
+                        if method == "notifications/initialized" => {}
+                    other => {
+                        let _ = seen_tx.send(other);
+                    }
+                }
+            }
+        });
+        let conn = McpConnection::initialize("slow", cli_peer, cli_in, &[], None).unwrap();
+        let cancel = AtomicBool::new(false);
+        thread::scope(|scope| {
+            let call = scope.spawn(|| {
+                conn.request_cancellable("tools/call", serde_json::json!({}), &|| {
+                    cancel.load(Ordering::SeqCst)
+                })
+            });
+            let timeout = Duration::from_secs(5);
+            let Ok(Inbound::Request { id, method, .. }) = seen.recv_timeout(timeout) else {
+                panic!("server must see the call");
+            };
+            assert_eq!(method, "tools/call");
+            cancel.store(true, Ordering::SeqCst);
+            match seen.recv_timeout(timeout) {
+                Ok(Inbound::Notification { method, params }) => {
+                    assert_eq!(method, "notifications/cancelled");
+                    assert_eq!(params["requestId"], id);
+                    assert_eq!(params["reason"], "cancelled by client");
+                }
+                other => panic!("expected a cancel notice, got {other:?}"),
+            }
+            assert!(call.join().unwrap().is_err());
+        });
+    }
+
+    #[test]
+    fn abandoned_initialize_sends_no_notice() {
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_peer, cli_in, _c) =
+            connect_with(BufReader::new(cli_r), cli_w, Some(cancel_notice()));
+        let (_srv_peer, srv_in, _s) = connect(BufReader::new(srv_r), srv_w);
+        let err = McpConnection::initialize_with_timeout(
+            "silent",
+            cli_peer,
+            cli_in,
+            &[],
+            None,
+            Duration::from_millis(50),
+        )
+        .err()
+        .expect("silent server must fail the handshake");
+        assert!(err.to_string().contains("timed out"), "got {err}");
+        let seen: Vec<Inbound> = srv_in.iter().collect();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert!(
+            matches!(&seen[0], Inbound::Request { method, .. } if method == "initialize"),
+            "{seen:?}"
+        );
     }
 }

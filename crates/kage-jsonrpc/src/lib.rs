@@ -19,6 +19,10 @@
 //! long-running inbound request (a prompt turn) issue its own outgoing
 //! requests without deadlocking the reader.
 //!
+//! A request abandoned by its cancel closure (a user cancel or a
+//! deadline) can tell the other side: [`connect_with`] takes a
+//! [`CancelNotice`] that builds the protocol's cancel notification.
+//!
 //! Malformed inbound lines get spec error replies (`-32700` for
 //! unparseable or oversized input, `-32600` for a structurally invalid
 //! request) instead of being dropped silently, and a single line may
@@ -115,6 +119,12 @@ pub enum Inbound {
 
 type Pending = Arc<Mutex<HashMap<i64, mpsc::Sender<Result<serde_json::Value, RpcError>>>>>;
 
+/// Builds the notification a [`Peer`] sends when one of its requests is
+/// abandoned by its cancel closure. It receives the request id and
+/// method and returns the notification's method and params, or `None`
+/// to send nothing for that request.
+pub type CancelNotice = Arc<dyn Fn(i64, &str) -> Option<(String, serde_json::Value)> + Send + Sync>;
+
 /// The outgoing half of a JSON-RPC connection. Cloneable; every clone
 /// shares the same writer and pending-response table.
 #[derive(Clone)]
@@ -122,6 +132,7 @@ pub struct Peer {
     writer: Arc<Mutex<dyn Write + Send>>,
     pending: Pending,
     next_id: Arc<AtomicI64>,
+    cancel_notice: Option<CancelNotice>,
 }
 
 impl Peer {
@@ -167,6 +178,9 @@ impl Peer {
     /// Send a request and block until the peer responds, the
     /// connection drops, or `should_cancel` returns `true`.
     ///
+    /// A cancelled request that was still pending sends the
+    /// connection's [`CancelNotice`], if any, on a best-effort basis.
+    ///
     /// # Errors
     ///
     /// Returns the peer's [`RpcError`], or a synthetic one when the
@@ -191,7 +205,17 @@ impl Peer {
         }
         loop {
             if should_cancel() {
-                lock(&self.pending).remove(&id);
+                // A missing entry means the reader already answered or
+                // closed it, so there is nothing left to cancel.
+                let abandoned = lock(&self.pending).remove(&id).is_some();
+                if abandoned
+                    && let Some((notice, params)) = self
+                        .cancel_notice
+                        .as_ref()
+                        .and_then(|build| build(id, method))
+                {
+                    let _ = self.notify(&notice, params);
+                }
                 return Err(RpcError::new(-32800, "request cancelled"));
             }
             match rx.recv_timeout(Duration::from_millis(150)) {
@@ -304,9 +328,25 @@ impl ReaderPeer {
 /// [`Inbound`] receiver the owner drains on its own thread, and the
 /// reader's join handle. When the peer disconnects, the reader fails
 /// every in-flight [`Peer::request`] and drops the inbound sender so
-/// the receiver ends.
+/// the receiver ends. Abandoned requests send no notice; use
+/// [`connect_with`] for that.
 #[must_use]
 pub fn connect<R, W>(reader: R, writer: W) -> (Peer, mpsc::Receiver<Inbound>, JoinHandle<()>)
+where
+    R: BufRead + Send + 'static,
+    W: Write + Send + 'static,
+{
+    connect_with(reader, writer, None)
+}
+
+/// [`connect`] with an optional [`CancelNotice`] that the [`Peer`] sends
+/// whenever a request is abandoned by its cancel closure.
+#[must_use]
+pub fn connect_with<R, W>(
+    reader: R,
+    writer: W,
+    cancel_notice: Option<CancelNotice>,
+) -> (Peer, mpsc::Receiver<Inbound>, JoinHandle<()>)
 where
     R: BufRead + Send + 'static,
     W: Write + Send + 'static,
@@ -317,6 +357,7 @@ where
         writer: Arc::clone(&writer),
         pending: Arc::clone(&pending),
         next_id: Arc::new(AtomicI64::new(1)),
+        cancel_notice,
     };
     let (in_tx, in_rx) = mpsc::channel();
     let reader_peer = ReaderPeer {
@@ -566,6 +607,105 @@ mod tests {
             .request_timeout("ping", serde_json::Value::Null, Duration::from_secs(5))
             .unwrap();
         assert_eq!(res["ok"], true);
+    }
+
+    fn test_notice() -> CancelNotice {
+        Arc::new(|id, method| {
+            Some((
+                "test/cancelled".to_owned(),
+                serde_json::json!({"requestId": id, "method": method}),
+            ))
+        })
+    }
+
+    /// A peer whose outgoing lines land in the returned reader. The
+    /// input writer stays with the caller so the connection stays open.
+    fn recorded(
+        notice: Option<CancelNotice>,
+    ) -> (
+        Peer,
+        std::io::PipeWriter,
+        BufReader<std::io::PipeReader>,
+        JoinHandle<()>,
+    ) {
+        let (in_r, in_w) = std::io::pipe().unwrap();
+        let (out_r, out_w) = std::io::pipe().unwrap();
+        let (peer, _inbound, handle) = connect_with(BufReader::new(in_r), out_w, notice);
+        (peer, in_w, BufReader::new(out_r), handle)
+    }
+
+    /// Every line written until the last [`Peer`] clone is dropped.
+    fn written(out: BufReader<std::io::PipeReader>) -> Vec<serde_json::Value> {
+        out.lines()
+            .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn cancelled_request_sends_one_notice() {
+        let (peer, _in_w, out, _h) = recorded(Some(test_notice()));
+        let err = peer
+            .request_cancellable("tools/call", serde_json::Value::Null, &|| true)
+            .unwrap_err();
+        assert_eq!(err.code, -32800);
+        drop(peer);
+        let lines = written(out);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[1]["method"], "test/cancelled");
+        assert_eq!(lines[1]["params"]["requestId"], lines[0]["id"]);
+        assert_eq!(lines[1]["params"]["method"], "tools/call");
+        assert!(lines[1].get("id").is_none(), "a notice is a notification");
+    }
+
+    #[test]
+    fn timed_out_request_sends_one_notice() {
+        let (peer, _in_w, out, _h) = recorded(Some(test_notice()));
+        let err = peer
+            .request_timeout("slow", serde_json::Value::Null, Duration::from_millis(50))
+            .unwrap_err();
+        assert_eq!(err.code, -32000);
+        drop(peer);
+        let lines = written(out);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[1]["params"]["requestId"], lines[0]["id"]);
+        assert_eq!(lines[1]["params"]["method"], "slow");
+    }
+
+    #[test]
+    fn closed_connection_sends_no_notice() {
+        let (peer, in_w, out, handle) = recorded(Some(test_notice()));
+        let closing = Mutex::new(Some((in_w, handle)));
+        let err = peer
+            .request_cancellable("x", serde_json::Value::Null, &|| {
+                if let Some((in_w, handle)) = lock(&closing).take() {
+                    drop(in_w);
+                    handle.join().unwrap();
+                }
+                true
+            })
+            .unwrap_err();
+        assert_eq!(err.code, -32800);
+        drop(peer);
+        assert_eq!(written(out).len(), 1);
+    }
+
+    #[test]
+    fn peer_without_notice_sends_nothing_on_cancel() {
+        let (peer, _in_w, out, _h) = recorded(None);
+        peer.request_cancellable("x", serde_json::Value::Null, &|| true)
+            .unwrap_err();
+        drop(peer);
+        assert_eq!(written(out).len(), 1);
+    }
+
+    #[test]
+    fn notice_builder_may_decline() {
+        let decline: CancelNotice = Arc::new(|_, _| None);
+        let (peer, _in_w, out, _h) = recorded(Some(decline));
+        peer.request_cancellable("x", serde_json::Value::Null, &|| true)
+            .unwrap_err();
+        drop(peer);
+        assert_eq!(written(out).len(), 1);
     }
 
     #[test]

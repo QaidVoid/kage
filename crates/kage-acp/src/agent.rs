@@ -4,7 +4,9 @@
 //! with the published ACP spec: it answers `initialize`, `session/new`,
 //! `session/load` and `session/prompt`, forwards the `session/cancel`
 //! notification, and lets the agent stream `session/update`
-//! notifications and issue `session/request_permission` requests.
+//! notifications and issue `session/request_permission` requests. A
+//! request the agent abandons (a permission ask outlived by its run) is
+//! withdrawn with `$/cancel_request`, so the client can close its dialog.
 //!
 //! Every request except `initialize` runs on its own thread, so the
 //! dispatch loop keeps draining inbound messages: a `session/cancel`
@@ -14,7 +16,7 @@ use std::io::{BufRead, Write};
 use std::sync::Arc;
 use std::thread;
 
-use kage_jsonrpc::{Inbound, Peer, RpcError, connect};
+use kage_jsonrpc::{CancelNotice, Inbound, Peer, RpcError, connect_with};
 
 use crate::acp::{
     InitializeRequest, InitializeResponse, LoadSessionRequest, NewSessionRequest,
@@ -157,6 +159,16 @@ pub trait Agent: Send + Sync + 'static {
     fn cancel(&self, session_id: &str);
 }
 
+/// The `$/cancel_request` notice ACP expects for an abandoned request.
+fn cancel_notice() -> CancelNotice {
+    Arc::new(|id, _method| {
+        Some((
+            "$/cancel_request".to_owned(),
+            serde_json::json!({"requestId": id}),
+        ))
+    })
+}
+
 fn parse<T: serde::de::DeserializeOwned>(params: serde_json::Value) -> Result<T, RpcError> {
     serde_json::from_value(params)
         .map_err(|e| RpcError::new(-32602, format!("invalid params: {e}")))
@@ -177,7 +189,7 @@ where
     A: Agent,
     F: FnOnce(Peer) -> A,
 {
-    let (peer, inbound, _reader) = connect(reader, writer);
+    let (peer, inbound, _reader) = connect_with(reader, writer, Some(cancel_notice()));
     let agent = Arc::new(make_agent(peer.clone()));
 
     for message in inbound {
@@ -464,6 +476,85 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.code, -32601);
         drop(client);
+        server.join().unwrap().unwrap();
+    }
+
+    /// Asks permission on every prompt and gives up once cancelled.
+    #[derive(Default)]
+    struct AskAgent {
+        cancelled: std::sync::atomic::AtomicBool,
+    }
+
+    impl Agent for AskAgent {
+        fn initialize(&self, req: InitializeRequest) -> InitializeResponse {
+            MockAgent.initialize(req)
+        }
+
+        fn new_session(&self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+            MockAgent.new_session(req)
+        }
+
+        fn prompt(
+            &self,
+            req: PromptRequest,
+            ctx: &PromptContext,
+        ) -> Result<PromptResponse, RpcError> {
+            let tool_call = ToolCallUpdate {
+                tool_call_id: "call-1".into(),
+                ..ToolCallUpdate::default()
+            };
+            let decision =
+                request_permission(ctx.peer(), &req.session_id, tool_call, "bash", &|| {
+                    self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+                });
+            assert!(matches!(decision, PermissionDecision::Deny(_)));
+            Ok(PromptResponse {
+                stop_reason: StopReason::Cancelled,
+            })
+        }
+
+        fn cancel(&self, _session_id: &str) {
+            self.cancelled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn abandoned_permission_ask_sends_cancel_request() {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let server = thread::spawn(move || {
+            serve_agent(BufReader::new(srv_r), srv_w, |_| AskAgent::default())
+        });
+        let (client, inbox, _h) = connect(BufReader::new(cli_r), cli_w);
+        let prompt = {
+            let client = client.clone();
+            thread::spawn(move || {
+                client.request(
+                    "session/prompt",
+                    serde_json::json!({"sessionId": "sess-1", "prompt": []}),
+                )
+            })
+        };
+        let timeout = std::time::Duration::from_secs(5);
+        let Ok(Inbound::Request { id, method, .. }) = inbox.recv_timeout(timeout) else {
+            panic!("expected the permission request");
+        };
+        assert_eq!(method, "session/request_permission");
+        client
+            .notify("session/cancel", serde_json::json!({"sessionId": "sess-1"}))
+            .unwrap();
+        match inbox.recv_timeout(timeout) {
+            Ok(Inbound::Notification { method, params }) => {
+                assert_eq!(method, "$/cancel_request");
+                assert_eq!(params, serde_json::json!({"requestId": id}));
+            }
+            other => panic!("expected $/cancel_request, got {other:?}"),
+        }
+        let res = prompt.join().unwrap().unwrap();
+        assert_eq!(res["stopReason"], "cancelled");
+        drop(client);
+        drop(inbox);
         server.join().unwrap().unwrap();
     }
 

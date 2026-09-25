@@ -44,9 +44,9 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use kage_jsonrpc::{Inbound, Peer, connect};
+use kage_jsonrpc::{Inbound, Peer, connect_with};
 
-use crate::server::PROTOCOL_VERSION;
+use crate::server::{PROTOCOL_VERSION, cancel_notice};
 
 /// How long the GET pump waits for the first successful POST before
 /// giving up on the server-initiated stream. Generous: this only
@@ -77,7 +77,7 @@ type OutSlot = Arc<Mutex<Option<io::PipeWriter>>>;
 
 /// Open a Streamable HTTP connection to `url`, sending `headers` on
 /// every request, and hand the adapted pipe to
-/// [`kage_jsonrpc::connect`].
+/// [`kage_jsonrpc::connect_with`] with the MCP cancel notice.
 ///
 /// # Errors
 ///
@@ -114,7 +114,11 @@ fn open_http(
         out,
         buf: Vec::new(),
     };
-    Ok(connect(BufReader::new(pipe_reader), writer))
+    Ok(connect_with(
+        BufReader::new(pipe_reader),
+        writer,
+        Some(cancel_notice()),
+    ))
 }
 
 /// Write one newline-terminated JSON-RPC message into the pipe, or

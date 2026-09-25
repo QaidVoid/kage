@@ -81,7 +81,15 @@ pub fn check(url: &url::Url) -> Result<(), ToolError> {
         .host_str()
         .ok_or_else(|| ToolError::InvalidInput("url has no host".into()))?;
     let port = url.port_or_known_default().unwrap_or(0);
-    let addrs: Vec<_> = (host, port)
+    // An IPv6 literal arrives bracketed (`[::1]`); the brackets are URI
+    // syntax, not part of the address, and the resolver rejects them.
+    // Strip one pair before resolving. Policy is unchanged: the
+    // resolved address still goes through `is_unsafe` below.
+    let dial_host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    let addrs: Vec<_> = (dial_host, port)
         .to_socket_addrs()
         .map_err(|e| ToolError::Other(format!("dns resolve failed for {host}: {e}")))?
         .collect();
@@ -172,6 +180,19 @@ mod tests {
     #[test]
     fn loopback_v6_is_unsafe() {
         assert!(is_unsafe(&IpAddr::V6(Ipv6Addr::LOCALHOST)));
+    }
+
+    #[test]
+    fn bracketed_global_ipv6_literal_passes_check() {
+        let url =
+            url::Url::parse("http://[2400:1a00:5b2f:6cb2:869e:56ff:fe03:2b71]:18080/x").unwrap();
+        assert!(check(&url).is_ok());
+    }
+
+    #[test]
+    fn bracketed_loopback_ipv6_literal_stays_refused() {
+        let url = url::Url::parse("http://[::1]:18080/x").unwrap();
+        assert!(check(&url).is_err());
     }
 
     #[test]

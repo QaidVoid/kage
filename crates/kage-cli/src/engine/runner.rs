@@ -16,9 +16,10 @@ use kage_plugin::PluginRuntime;
 use kage_provider::Provider;
 use kage_tools::ToolRegistry;
 
+use super::Input;
 use super::bus::Bus;
+use super::mcp::{McpDone, ToolDelta};
 use super::recorder::Recorder;
-use super::{Input, McpDone, ToolDelta};
 use crate::permissions::PermissionGate;
 use crate::plugins::PluginEventHooks;
 
@@ -59,7 +60,7 @@ impl McpLease {
             restarts,
         } = self;
         let before = tools.clone();
-        let catalog = super::refresh_mcp(bus, session, &mut manager, &restarts, tools);
+        let catalog = super::mcp::refresh_mcp(bus, session, &mut manager, &restarts, tools);
         let clients = manager.clients();
         let _ = done.send(Input::McpDone(Box::new(McpDone {
             session,

@@ -10,6 +10,7 @@ use kage_provider::{ProviderError, ProviderEvent};
 use kage_session::{EntryId, FORMAT_VERSION, Header, SessionWriter};
 use kage_tools::{Tool, ToolContext, ToolError};
 
+use super::shell::run_shell;
 use super::*;
 
 const WAIT: Duration = Duration::from_secs(5);

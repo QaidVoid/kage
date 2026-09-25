@@ -10,47 +10,50 @@
 //! a client answers with `ResolvePermission`.
 
 mod agent_tool;
+mod agents;
 mod bus;
+mod mcp;
 mod plugin_tools;
 mod recorder;
 mod runner;
 mod sessions;
+mod shell;
 
 use std::collections::{HashMap, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
 
-use kage_core::agents::{AgentDef, AgentDefs};
+use kage_core::agents::AgentDefs;
 use kage_core::config::Config;
-use kage_core::message::ShellRun;
 use kage_core::options::{OptionStore, OptionValue};
 use kage_core::protocol::{
-    Command, CommandKind, Delivery, HostEvent, McpServerInfo, NoticeLevel, PermissionDecision,
-    RequestId, RunOutcome, SessionState, Usage,
+    Command, CommandKind, Delivery, HostEvent, NoticeLevel, PermissionDecision, RequestId,
+    RunOutcome, SessionState, Usage,
 };
 use kage_core::sync::lock;
 use kage_core::{
     CancelFlag, Content, LoopError, Message, Role, SessionId, ThinkingLevel, TokenUsage,
-    ToolOutput, ToolUpdate,
 };
 use kage_loop::{AgentContext, LoopConfig};
 use kage_mcp::{McpError, McpManager};
 use kage_plugin::PluginRuntime;
 use kage_provider::ProviderRegistry;
-use kage_tools::{ProgressSink, Tool, ToolContext, ToolError, ToolRegistry};
+use kage_tools::ToolRegistry;
 
 pub(crate) use bus::Subscriber;
 pub(crate) use recorder::Recorder;
 #[cfg(test)]
 pub(crate) use sessions::render_session_markdown;
 
-use agent_tool::{AGENT_TOOL, AgentTool, Spawn};
+use agent_tool::{AgentTool, Spawn};
+use agents::{AgentLink, depth_of};
 use bus::Bus;
+use mcp::{McpDone, restart_failed};
 use plugin_tools::PluginTools;
 use runner::{Finished, McpLease, Run, Steering, Work};
+use shell::ShellDone;
 
 use crate::permissions::{Asker, PermissionGate, PermissionPrompt};
 
@@ -254,101 +257,10 @@ struct Session {
     confine_paths: bool,
 }
 
-/// How an agent session hangs off the session that started it.
-struct AgentLink {
-    parent: SessionId,
-    agent: String,
-    /// 1 for agents of the main session, 2 for theirs, and so on.
-    depth: u8,
-    /// Delivers the result to the waiting `agent` call. Taken by the
-    /// first run that finishes, so later runs a user starts in the
-    /// agent never answer the parent twice.
-    reply: Option<crossbeam_channel::Sender<ToolOutput>>,
-}
-
 /// What a session holds while no run owns it.
 struct Idle {
     cx: AgentContext,
     recorder: Option<Recorder>,
-}
-
-/// The manager back from MCP maintenance off the dispatcher, with the
-/// tool changes to apply to the session's registry.
-struct McpDone {
-    session: SessionId,
-    manager: McpManager,
-    tools: ToolDelta,
-    /// What an idle restart took from the session, so no run started
-    /// while the manager was away.
-    idle: Option<Idle>,
-}
-
-/// A user shell command that ended, with what it took from the session.
-struct ShellDone {
-    session: SessionId,
-    command: String,
-    output: String,
-    exit_code: Option<i32>,
-    /// The idle state a command started on an idle session held, so no
-    /// run started while it ran.
-    idle: Option<Idle>,
-}
-
-/// Publishes the tail of a running user shell command and keeps the
-/// latest one, which stands in for the output when the command is
-/// cancelled.
-struct ShellProgress {
-    bus: Arc<Bus>,
-    session: SessionId,
-    command: String,
-    tail: Mutex<String>,
-}
-
-impl ProgressSink for ShellProgress {
-    fn emit(&self, update: ToolUpdate) {
-        lock(&self.tail).clone_from(&update.content);
-        self.bus.publish(
-            self.session,
-            HostEvent::ShellOutput {
-                command: self.command.clone(),
-                tail: update.content,
-            },
-        );
-    }
-}
-
-/// The tools an MCP refresh added, replaced or removed.
-struct ToolDelta {
-    removed: Vec<String>,
-    changed: Vec<Arc<dyn Tool>>,
-}
-
-impl ToolDelta {
-    fn between(before: &ToolRegistry, after: &ToolRegistry) -> Self {
-        let removed = before
-            .names()
-            .filter(|name| after.get(name).is_none())
-            .map(str::to_owned)
-            .collect();
-        let changed = after
-            .names()
-            .filter_map(|name| {
-                let tool = after.get(name)?;
-                let same = before.get(name).is_some_and(|old| Arc::ptr_eq(old, tool));
-                (!same).then(|| Arc::clone(tool))
-            })
-            .collect();
-        Self { removed, changed }
-    }
-
-    fn apply(self, tools: &mut ToolRegistry) {
-        for name in &self.removed {
-            tools.unregister(name);
-        }
-        for tool in self.changed {
-            tools.register(tool);
-        }
-    }
 }
 
 /// Open permission requests with the session that asked.
@@ -596,106 +508,6 @@ impl Dispatcher {
         self.bus.publish(id, HostEvent::StateChanged { state });
     }
 
-    /// Run a user shell command on a worker thread. On an idle session it
-    /// holds the session like a run, so prompts wait for it and a cancel
-    /// stops it. During a run it runs alongside, and the run's cancel
-    /// stops it too.
-    fn shell(&mut self, id: SessionId, command: String) {
-        let session = self.sessions.get_mut(&id).expect("session checked");
-        let idle = session.idle.take();
-        if idle.is_some() {
-            session.cancel.reset();
-        }
-        session.shells += 1;
-        session.state.working = true;
-        let state = session.state.clone();
-        self.bus.publish(id, HostEvent::StateChanged { state });
-        let cancel = session.cancel.child();
-        let workdir = session.workdir.clone();
-        let progress = Arc::new(ShellProgress {
-            bus: Arc::clone(&self.bus),
-            session: id,
-            command,
-            tail: Mutex::default(),
-        });
-        let tx = self.tx.clone();
-        thread::spawn(move || {
-            progress.emit(ToolUpdate {
-                content: String::new(),
-                structured: None,
-            });
-            let cx = ToolContext::new(&workdir, &cancel).with_progress(progress.clone());
-            let (exit_code, output) = run_shell(&progress.command, &cx).unwrap_or_else(|_| {
-                let tail = lock(&progress.tail);
-                let output = if tail.trim().is_empty() {
-                    "cancelled".to_owned()
-                } else {
-                    format!("{}\ncancelled", tail.trim_end())
-                };
-                (None, output)
-            });
-            let _ = tx.send(Input::ShellDone(Box::new(ShellDone {
-                session: id,
-                command: progress.command.clone(),
-                output,
-                exit_code,
-                idle,
-            })));
-        });
-    }
-
-    /// Show a finished shell command and add its output to the history,
-    /// recorded, for the model's next turn. A command that held the
-    /// session gives it back and starts what was submitted meanwhile.
-    fn shell_done(&mut self, done: ShellDone) {
-        let ShellDone {
-            session: id,
-            command,
-            output,
-            exit_code,
-            idle,
-        } = done;
-        let Some(session) = self.sessions.get_mut(&id) else {
-            return;
-        };
-        session.shells -= 1;
-        let text = ShellRun {
-            command: command.clone(),
-            exit_code,
-            output: output.clone(),
-        }
-        .to_text();
-        session
-            .pending_history
-            .push(Message::new(Role::User, vec![Content::Text { text }], None));
-        let held = idle.is_some();
-        if let Some(idle) = idle {
-            session.idle = Some(idle);
-            session.cancel.reset();
-            record_late_title(&self.bus, id, session);
-        }
-        flush_pending(&self.bus, id, session);
-        self.bus.publish(
-            id,
-            HostEvent::ShellFinished {
-                command,
-                output,
-                exit_code,
-            },
-        );
-        settle_working(&self.bus, id, session);
-        if !held || self.shutting_down {
-            return;
-        }
-        let steered: Vec<String> = lock(&session.steering).drain(..).collect();
-        for text in steered.into_iter().rev() {
-            session.queued.push_front(vec![Content::Text { text }]);
-        }
-        if let Some(content) = session.queued.pop_front() {
-            self.start_run(id, Work::Prompt(Message::new(Role::User, content, None)));
-        }
-    }
-
     fn record_title(&mut self, id: SessionId, title: String) {
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
@@ -937,295 +749,6 @@ impl Dispatcher {
         self.start_waiting();
     }
 
-    /// Restart MCP server `server` now when the session is idle, or at
-    /// the next run start when a run or another restart is in flight.
-    fn restart_mcp(&mut self, id: SessionId, server: String) {
-        let session = self.sessions.get_mut(&id).expect("session checked");
-        if !session.mcp_restarts.contains(&server) {
-            session.mcp_restarts.push(server);
-        }
-        if session.idle.is_some() {
-            self.restart_now(id);
-        }
-    }
-
-    /// Apply the idle session's pending restarts on a worker thread. The
-    /// session stays busy until [`Self::mcp_done`] gives it back.
-    fn restart_now(&mut self, id: SessionId) {
-        let session = self.sessions.get_mut(&id).expect("session checked");
-        let restarts = std::mem::take(&mut session.mcp_restarts);
-        let Some(mut manager) = session.mcp.take() else {
-            for name in restarts {
-                restart_failed(&self.bus, id, &name, &McpError::Unknown(name.clone()));
-            }
-            return;
-        };
-        let idle = session.idle.take();
-        let before = session.tools.clone();
-        let bus = Arc::clone(&self.bus);
-        let tx = self.tx.clone();
-        thread::spawn(move || {
-            let mut tools = before.clone();
-            refresh_mcp(&bus, id, &mut manager, &restarts, &mut tools);
-            let _ = tx.send(Input::McpDone(Box::new(McpDone {
-                session: id,
-                manager,
-                tools: ToolDelta::between(&before, &tools),
-                idle,
-            })));
-        });
-    }
-
-    /// Take back the MCP manager and its tool changes. After an idle
-    /// restart, also give the session back and start what was submitted
-    /// meanwhile: a prompt, else the restarts that arrived.
-    fn mcp_done(&mut self, done: McpDone) {
-        let McpDone {
-            session: id,
-            manager,
-            tools,
-            idle,
-        } = done;
-        let Some(session) = self.sessions.get_mut(&id) else {
-            return;
-        };
-        tools.apply(&mut session.tools);
-        session.mcp = Some(manager);
-        let Some(idle) = idle else {
-            return;
-        };
-        session.idle = Some(idle);
-        record_late_title(&self.bus, id, session);
-        settle_working(&self.bus, id, session);
-        let steered: Vec<String> = lock(&session.steering).drain(..).collect();
-        for text in steered.into_iter().rev() {
-            session.queued.push_front(vec![Content::Text { text }]);
-        }
-        if self.shutting_down {
-            return;
-        }
-        if let Some(content) = session.queued.pop_front() {
-            self.start_run(id, Work::Prompt(Message::new(Role::User, content, None)));
-        } else if !session.mcp_restarts.is_empty() {
-            self.restart_now(id);
-        }
-    }
-
-    /// Open a child session for an `agent` call and start it, or queue it
-    /// when the running limit is reached. Errors reply at once.
-    fn spawn(&mut self, spawn: Spawn) {
-        let Spawn {
-            parent,
-            tool_call_id,
-            agent,
-            description,
-            prompt,
-            reply,
-        } = spawn;
-        let fail = |text: String| {
-            let _ = reply.send(agent_tool::error_output(text));
-        };
-        let Some(from) = self.sessions.get(&parent) else {
-            return fail(format!("session {parent} is gone"));
-        };
-        let Some(setup) = from.agents.clone() else {
-            return fail("agents are turned off".to_owned());
-        };
-        let depth = depth_of(from) + 1;
-        if depth > setup.max_depth {
-            return fail(format!(
-                "agents may nest {} level(s) deep (agent_max_depth)",
-                setup.max_depth
-            ));
-        }
-        let Some(def) = setup.defs.get(&agent) else {
-            let names: Vec<&str> = setup.defs.iter().map(|d| d.name.as_str()).collect();
-            return fail(format!(
-                "unknown agent `{agent}`. Available agents: {}",
-                names.join(", ")
-            ));
-        };
-
-        let id = SessionId::new();
-        let (spec, missing) = agent_spec(from, parent, id, def, &setup);
-        let cancel = from.cancel.child();
-        let link = AgentLink {
-            parent,
-            agent: agent.clone(),
-            depth,
-            reply: Some(reply),
-        };
-        let marker = serde_json::json!({
-            "parent": parent,
-            "tool_call_id": tool_call_id,
-            "agent": agent,
-            "description": description,
-        });
-
-        self.bus.publish(
-            id,
-            HostEvent::AgentSpawned {
-                parent,
-                tool_call_id,
-                agent,
-                description: description.clone(),
-            },
-        );
-        self.open(spec, cancel, Some(link));
-        self.record_agent_entries(id, marker, description);
-        for name in missing {
-            notice(
-                &self.bus,
-                id,
-                NoticeLevel::Warning,
-                format!("agent tools: no tool named `{name}`"),
-            );
-        }
-        let content = vec![Content::Text { text: prompt }];
-        if self.running_agents() < setup.max_running {
-            self.start_run(id, Work::Prompt(Message::new(Role::User, content, None)));
-        } else {
-            let session = self.sessions.get_mut(&id).expect("session opened");
-            session.queued.push_back(content);
-            self.waiting.push_back(id);
-        }
-    }
-
-    /// Write the `kage:agent` marker and the title right after the header.
-    fn record_agent_entries(&mut self, id: SessionId, marker: serde_json::Value, title: String) {
-        let Some(recorder) = self
-            .sessions
-            .get_mut(&id)
-            .and_then(|s| s.idle.as_mut())
-            .and_then(|i| i.recorder.as_mut())
-        else {
-            return;
-        };
-        let ts = chrono::Utc::now();
-        let entries = [
-            kage_session::SessionEntry::Custom(kage_session::Custom {
-                id: kage_session::EntryId::new(),
-                ts,
-                kind: kage_session::list::AGENT_ENTRY_KIND.to_owned(),
-                data: marker,
-            }),
-            kage_session::SessionEntry::Title(kage_session::SessionTitle {
-                id: kage_session::EntryId::new(),
-                ts,
-                title,
-            }),
-        ];
-        for entry in &entries {
-            if let Err(err) = recorder.append(entry) {
-                notice(
-                    &self.bus,
-                    id,
-                    NoticeLevel::Error,
-                    format!("session write failed: {err}"),
-                );
-                return;
-            }
-        }
-    }
-
-    /// Send an agent's result to its `agent` call, once. Callers publish
-    /// the agent's `RunEnded` first, so clients see the agent end before
-    /// the parent continues.
-    fn deliver(&mut self, id: SessionId, outcome: &RunOutcome, history: &[Message]) {
-        if let Some((reply, output)) = self.take_reply(id, outcome, history) {
-            let _ = reply.send(output);
-        }
-    }
-
-    /// Take an agent's `agent` call reply and its result, once, to send
-    /// later.
-    fn take_reply(
-        &mut self,
-        id: SessionId,
-        outcome: &RunOutcome,
-        history: &[Message],
-    ) -> Option<(crossbeam_channel::Sender<ToolOutput>, ToolOutput)> {
-        let link = self.sessions.get_mut(&id)?.link.as_mut()?;
-        let reply = link.reply.take()?;
-        Some((
-            reply,
-            agent_tool::agent_result(id, &link.agent, outcome, history),
-        ))
-    }
-
-    /// Agent runs in flight that hold a slot of the running limit. An
-    /// agent waiting on its own agents holds none, so nesting cannot
-    /// deadlock the limit.
-    fn running_agents(&self) -> usize {
-        let waits_on_agents = |id: &SessionId| {
-            self.sessions.values().any(|s| {
-                s.link
-                    .as_ref()
-                    .is_some_and(|l| l.parent == *id && l.reply.is_some())
-            })
-        };
-        self.sessions
-            .iter()
-            .filter(|(id, s)| s.link.is_some() && s.idle.is_none() && !waits_on_agents(id))
-            .count()
-    }
-
-    /// Start waiting agents while the running limit allows.
-    fn start_waiting(&mut self) {
-        while !self.shutting_down
-            && let Some(&id) = self.waiting.front()
-        {
-            let max = self
-                .sessions
-                .get(&id)
-                .and_then(|s| s.agents.as_ref())
-                .map_or(usize::MAX, |a| a.max_running);
-            if self.running_agents() >= max {
-                return;
-            }
-            self.waiting.pop_front();
-            let next = self
-                .sessions
-                .get_mut(&id)
-                .and_then(|s| s.queued.pop_front());
-            if let Some(content) = next {
-                self.start_run(id, Work::Prompt(Message::new(Role::User, content, None)));
-            }
-        }
-    }
-
-    /// End a waiting agent that never started as cancelled.
-    fn end_waiting(&mut self, id: SessionId) {
-        self.waiting.retain(|w| *w != id);
-        if let Some(session) = self.sessions.get_mut(&id) {
-            session.queued.clear();
-            lock(&session.steering).clear();
-        }
-        self.bus.publish(
-            id,
-            HostEvent::RunEnded {
-                outcome: RunOutcome::Cancelled,
-            },
-        );
-        self.deliver(id, &RunOutcome::Cancelled, &[]);
-    }
-
-    fn parent_of(&self, id: SessionId) -> Option<SessionId> {
-        self.sessions.get(&id)?.link.as_ref().map(|l| l.parent)
-    }
-
-    /// Whether `id` is an agent somewhere below `ancestor`.
-    fn descends_from(&self, id: SessionId, ancestor: SessionId) -> bool {
-        let mut current = self.parent_of(id);
-        while let Some(parent) = current {
-            if parent == ancestor {
-                return true;
-            }
-            current = self.parent_of(parent);
-        }
-        false
-    }
-
     /// Ask the model for a short title for the session's first exchange,
     /// off the dispatcher thread.
     fn generate_title(&self, id: SessionId, cx: &AgentContext, model: &str) {
@@ -1280,52 +803,6 @@ fn asker(bus: &Arc<Bus>, asks: &Asks, next: &Arc<AtomicU64>, session: SessionId)
     })
 }
 
-/// Restart `restarts`, then reload the lists `mcp`'s servers announced
-/// changes for, updating `tools`. Publishes `McpServers` after a restart
-/// or when the catalog changed, and returns the catalog.
-fn refresh_mcp(
-    bus: &Bus,
-    id: SessionId,
-    mcp: &mut McpManager,
-    restarts: &[String],
-    tools: &mut ToolRegistry,
-) -> Vec<McpServerInfo> {
-    let before = mcp.catalog();
-    for name in restarts {
-        match mcp.restart(name, tools) {
-            Ok(()) => notice(bus, id, NoticeLevel::Info, format!("restarted `{name}`")),
-            Err(err) => restart_failed(bus, id, name, &err),
-        }
-    }
-    for (server, err) in mcp.refresh_into(tools) {
-        notice(
-            bus,
-            id,
-            NoticeLevel::Error,
-            format!("mcp `{server}`: {err}"),
-        );
-    }
-    let catalog = mcp.catalog();
-    if !restarts.is_empty() || catalog != before {
-        bus.publish(
-            id,
-            HostEvent::McpServers {
-                servers: catalog.clone(),
-            },
-        );
-    }
-    catalog
-}
-
-fn restart_failed(bus: &Bus, id: SessionId, name: &str, err: &McpError) {
-    notice(
-        bus,
-        id,
-        NoticeLevel::Error,
-        format!("mcp restart `{name}`: {err}"),
-    );
-}
-
 /// Tell the user when writing to the session file failed.
 fn report_write(bus: &Bus, id: SessionId, result: Result<(), kage_session::SessionError>) {
     if let Err(err) = result {
@@ -1347,81 +824,6 @@ fn notice(bus: &Bus, id: SessionId, level: NoticeLevel, text: String) {
             transient: false,
         },
     );
-}
-
-/// The session an agent of `from` runs in: the definition's model,
-/// thinking, role and tools over `from`'s, `from`'s gate and loop
-/// settings, no plugins or MCP of its own, and a file next to `from`'s
-/// when `from` records. Also returns listed tools that match nothing.
-fn agent_spec(
-    from: &Session,
-    parent: SessionId,
-    id: SessionId,
-    def: &AgentDef,
-    setup: &AgentSetup,
-) -> (SessionSpec, Vec<String>) {
-    let model = def
-        .model
-        .clone()
-        .unwrap_or_else(|| from.state.model.clone());
-    let system_prompt =
-        crate::runtime_env::build_system_prompt(&def.body, &from.workdir, &model, &[]);
-    let mut cx = AgentContext::new(model.clone(), &system_prompt).with_workdir(&from.workdir);
-    cx.confine_paths = from.confine_paths;
-    cx.thinking_level = def.thinking.or(from.state.thinking);
-    let (tools, missing) = agent_tools(&from.tools, def.tools.as_deref());
-    let recorder = from.path.as_deref().and_then(Path::parent).map(|dir| {
-        let header = kage_session::Header {
-            version: kage_session::FORMAT_VERSION,
-            session: id,
-            id: kage_session::EntryId::new(),
-            ts: chrono::Utc::now(),
-            cwd: from.workdir.clone(),
-            model: model.clone(),
-            system_prompt,
-            parent_session: Some(parent),
-            parent_entry: None,
-        };
-        Recorder::planned(crate::build_session_path(dir, id), header, None)
-    });
-    let spec = SessionSpec {
-        id,
-        model,
-        cx,
-        recorder,
-        tools,
-        plugins: None,
-        gate: from.gate.clone(),
-        loop_cfg: from.loop_cfg,
-        mcp: None,
-        interactive: from.interactive,
-        title: false,
-        agents: Some(setup.clone()),
-    };
-    (spec, missing)
-}
-
-/// 0 for a main session, 1 for its agents, and so on.
-fn depth_of(session: &Session) -> u8 {
-    session.link.as_ref().map_or(0, |l| l.depth)
-}
-
-/// The tools an agent gets: `parent`'s, narrowed to `only` when the
-/// definition lists tools. Also returns listed names that match nothing.
-fn agent_tools(parent: &ToolRegistry, only: Option<&[String]>) -> (ToolRegistry, Vec<String>) {
-    let Some(only) = only else {
-        return (parent.clone(), Vec::new());
-    };
-    let mut tools = ToolRegistry::new();
-    let mut missing = Vec::new();
-    for name in only {
-        match parent.get(name) {
-            Some(tool) => tools.register(Arc::clone(tool)),
-            None if name == AGENT_TOOL => {}
-            None => missing.push(name.clone()),
-        }
-    }
-    (tools, missing)
 }
 
 /// Usage totals carried by a context's token budget.
@@ -1543,41 +945,6 @@ pub(crate) fn fit_to_model(state: &mut SessionState, registry: &ProviderRegistry
     state.thinking_effective = reasoning.resolve(state.thinking);
     state.thinking_levels = reasoning.levels();
     state.input = crate::runtime_env::input_for(registry, &state.model);
-}
-
-/// Run a user shell command with the bash tool's runner in `cx`'s
-/// workdir, streaming its tail to `cx`'s progress sink, and capture stdout
-/// and stderr together, truncated so a chatty command cannot flood the
-/// context. Returns the exit code (`None` when a signal ended the command
-/// or it failed to spawn) and the output.
-///
-/// # Errors
-///
-/// [`ToolError::Cancelled`] when `cx` was cancelled and the command
-/// killed.
-pub(crate) fn run_shell(
-    command: &str,
-    cx: &ToolContext<'_>,
-) -> Result<(Option<i32>, String), ToolError> {
-    const OUTPUT_CAP: usize = 8 * 1024;
-    let output = match kage_tools::builtin::bash::run(command, cx.workdir(), Duration::MAX, cx) {
-        Ok(output) => output,
-        Err(ToolError::Cancelled) => return Err(ToolError::Cancelled),
-        Err(err) => return Ok((None, format!("failed to run: {err}"))),
-    };
-    let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if !stderr.trim().is_empty() {
-        if !combined.is_empty() && !combined.ends_with('\n') {
-            combined.push('\n');
-        }
-        combined.push_str(&stderr);
-    }
-    if combined.chars().count() > OUTPUT_CAP {
-        let cut: String = combined.chars().take(OUTPUT_CAP).collect();
-        combined = format!("{cut}\n... (output truncated)");
-    }
-    Ok((output.exit_code, combined))
 }
 
 /// The session id encoded in a session file name, `<id>.jsonl`.

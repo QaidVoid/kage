@@ -126,7 +126,10 @@ Prompts that were sent but not delivered yet show above the input,
 each with `after the current tool call` or `when this run ends`. Up to
 three rows show, then `+N more`. A row disappears when kage delivers
 its prompt. A prompt with an attached image always waits for the run
-to end.
+to end. So does a prompt that mentions an MCP resource
+(`@server:uri`) or starts with an MCP prompt command
+(`/server:prompt`), because kage expands those only when a run starts
+(see [mcp](/guide/mcp#resources-and-mentions)).
 
 While kage works, the working row above the input shows what it is
 doing and for how long, such as

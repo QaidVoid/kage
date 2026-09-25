@@ -84,12 +84,23 @@ max_running = 4
 # deny = ["rm -rf *"]
 # [permissions.mcp]
 # github = "allow"   # action for every tool of one MCP server
+
+[mcp]
+# let MCP servers ask your default model for completions. default false.
+allow_sampling = false
+# one table per server. see the mcp guide for the full reference.
+# [mcp.servers.linear]
+# url = "https://mcp.linear.app/mcp"
+# optional OAuth settings for a server that needs a login:
+# [mcp.servers.linear.oauth]
+# client_id = "kage-4f2c"   # pre-registered client, skips registration
+# scope = "read write"      # overrides the scope the server advertises
 ```
 
 Every table and key is optional. Omitted values fall back to the
 defaults shown above. See [permissions](/guide/permissions) for the
-rules reference and [agents](/guide/agents#limits) for the `[agents]`
-limits.
+rules reference, [agents](/guide/agents#limits) for the `[agents]`
+limits, and [mcp](/guide/mcp) for MCP servers and OAuth logins.
 
 ## layering
 
@@ -112,7 +123,8 @@ as `kage.opt.theme`, wins over every layer above.
 A project can start processes and loosen your tool rules, so these
 parts of it only apply once you trust the project:
 
-- `[mcp]` in `.kage/config.toml` (servers and `allow_sampling`)
+- `[mcp]` in `.kage/config.toml` (servers, their `oauth` tables and
+  `allow_sampling`)
 - `[permissions]` in `.kage/config.toml` (including
   `[permissions.mcp]`)
 - `[plugins.capabilities]` in `.kage/config.toml`
@@ -191,6 +203,7 @@ endpoints, and per-provider overrides (base URL, headers, key env var).
 | `~/.config/kage/templates/`         | prompt template `.md` files                                    |
 | `~/.local/share/kage/sessions/`     | append-only session JSONL files                                |
 | `~/.local/share/kage/auth.json`     | saved provider credentials (`0600`)                            |
+| `~/.local/share/kage/mcp-auth.json` | OAuth tokens for remote MCP servers (`0600`)                   |
 | `~/.local/share/kage/plugin-state/` | per-plugin `kage.store` JSON files                             |
 | `~/.local/state/kage/`              | session state (`state.json`) and input history (`history.txt`) |
 | `~/.local/state/kage/trust.json`    | trusted project configs                                        |

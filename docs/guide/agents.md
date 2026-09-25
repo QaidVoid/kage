@@ -355,9 +355,21 @@ session id, so a reader can build the tree from these events.
 
 ## editors over ACP
 
-`kage rpc` gives editor sessions the `agent` tool as well. Agents are
-not ACP sessions: the editor sees them through the top-level `agent`
-call in its own session.
+`kage rpc` gives editor sessions the `agent` tool as well. How the
+editor shows an agent depends on the editor.
+
+An editor that advertises the ACP `subagents` capability sees each
+agent as its own child session:
+
+- The parent session gets a `subagent_update` naming the child's
+  session, the agent and its task.
+- The agent's messages, tool calls and approval requests arrive on
+  its own session.
+- A final `subagent_update` marks it `completed`, `failed` or
+  `cancelled`, and the editor can cancel a running agent.
+
+Any other editor sees agents through the top-level `agent` call in
+its own session:
 
 - The `agent` call's content shows the agent's progress, one line at a
   time, such as `explore: Read src/lib.rs`, then
@@ -366,9 +378,13 @@ call in its own session.
   on the editor's session. The tool call is the top-level `agent`
   call, its title names the agent and the tool, such as
   `explore: bash`, and `rawInput` is the agent's tool input.
-- `session/cancel` stops the run and every agent under it.
+
+In both cases `session/cancel` on the editor's session stops the run
+and every agent under it. See [zed](/editors/zed#agents) for the wire
+details.
 
 ACP asks for every tool without a config entry, and `agent` is no
 exception, so the editor approves the start of each agent unless your
 config allows it (see [permissions](/guide/permissions#agents)).
-Editor sessions are not recorded, so their agents are not either.
+Editor sessions are recorded like TUI sessions, and so are their
+agents. Agent sessions stay out of the editor's session list.

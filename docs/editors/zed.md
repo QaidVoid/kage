@@ -35,45 +35,218 @@ Add kage as an agent server in Zed's `settings.json`:
 }
 ```
 
-Use an absolute `command` if `kage` is not on Zed's `PATH`; pass a
+Use an absolute `command` if `kage` is not on Zed's `PATH`. Pass a
 model with `"args": ["rpc", "-m", "anthropic:claude-sonnet-4-6"]`.
 Pick kage from Zed's agent panel and prompt as usual. Tool calls
-surface as Zed permission prompts (kage never auto-approves); the
+surface as Zed permission prompts (kage never auto-approves), and the
 agent's text and reasoning stream in as it works.
+
+## what the editor gets
+
+- **History.** Editor sessions are recorded like TUI sessions, so the
+  agent panel can list earlier kage threads for the project, newest
+  first, with their titles. Agent sessions are not listed.
+- **Loading.** Opening a thread replays the whole transcript: your
+  messages and images, the agent's text and thinking, and each tool
+  call with its result, then the title. The thread keeps its model,
+  thinking level and token totals. A client that keeps its own copy
+  can resume instead and gets no replay.
+- **Usage and title.** After each turn the editor gets the tokens in
+  context against the model's window, and the cost so far when the
+  model has pricing. The title updates when kage generates one.
+- **Selectors.** Model, Thinking and Mode drop-downs change the model,
+  the thinking level and the permission mode from the next turn on.
+- **Commands.** Typing `/` lists the prompts of your MCP servers, such
+  as `everything:complex_prompt`.
+- **Context.** Images and files attached in the editor reach the
+  model. See [prompt content](#prompt-content).
+- **Editor MCP servers.** MCP servers configured in the editor run for
+  the session. See [mcp servers from the editor](#mcp-servers-from-the-editor).
+- **Agents.** In a client that supports subagents, each agent is its
+  own child thread. Other clients show agents on the `agent` tool
+  call. See [agents](#agents).
+- **Permission prompts.** Each prompt offers "Allow for this session",
+  and a prompt kage stops waiting for is withdrawn.
 
 ## what kage implements
 
 Client to agent:
 
-| method            | params -> result                                    |
-| ----------------- | --------------------------------------------------- |
-| `initialize`      | `{protocolVersion, clientCapabilities}` -> `{protocolVersion, agentCapabilities, agentInfo, authMethods}` |
-| `session/new`     | `{cwd, mcpServers}` -> `{sessionId}`                 |
-| `session/load`    | `{sessionId, cwd, mcpServers}` -> replays history as `session/update`, then `null` |
-| `session/prompt`  | `{sessionId, prompt: ContentBlock[]}` -> `{stopReason}` |
-| `session/cancel`  | notification `{sessionId}`                           |
+| method                      | params -> result |
+| --------------------------- | ---------------- |
+| `initialize`                | `{protocolVersion, clientCapabilities}` -> `{protocolVersion, agentCapabilities, agentInfo, authMethods}` |
+| `session/new`               | `{cwd, mcpServers}` -> `{sessionId, configOptions}` |
+| `session/load`              | `{sessionId, cwd, mcpServers}` -> replays history as `session/update`, then `{configOptions}` |
+| `session/resume`            | `{sessionId, cwd, mcpServers}` -> `{configOptions}`, no replay |
+| `session/list`              | `{cwd?, cursor?}` -> `{sessions: [{sessionId, cwd, title?, updatedAt?}], nextCursor?}` |
+| `session/set_config_option` | `{sessionId, configId, value}` -> `{configOptions}` |
+| `session/prompt`            | `{sessionId, prompt: ContentBlock[]}` -> `{stopReason}` |
+| `session/cancel`            | notification `{sessionId}` |
 
 Agent to client:
 
 - `session/update` notification `{sessionId, update}` where `update`
-  is tagged by `sessionUpdate`: `agent_message_chunk`,
-  `agent_thought_chunk`, `tool_call`, `tool_call_update`.
+  is tagged by `sessionUpdate`: `user_message_chunk` (replay only),
+  `agent_message_chunk`, `agent_thought_chunk`, `tool_call`,
+  `tool_call_update`, `usage_update`, `session_info_update`,
+  `config_option_update`, `available_commands_update`, and
+  `subagent_update` for clients that support subagents.
 - `session/request_permission` request `{sessionId, toolCall,
-  options}` -> `{outcome}`; the client returns
+  options}` -> `{outcome}`. The client returns
   `{outcome: {outcome: "selected", optionId}}` or
   `{outcome: {outcome: "cancelled"}}`. kage blocks the tool until the
   client answers and never auto-approves.
+- `$/cancel_request` notification `{requestId}` when kage withdraws a
+  permission request it no longer waits for.
 
-kage advertises `agentCapabilities.loadSession: true`, empty
-`authMethods`, and `agentInfo {name: "kage", version}`. It does not
-request `fs`/`terminal` client capabilities: kage runs its own tools
-in-process and gates them through `session/request_permission`.
+kage advertises:
+
+- `loadSession: true`, and `sessionCapabilities` with `list` and
+  `resume`.
+- `promptCapabilities` with `image` and `embeddedContext`.
+- `mcpCapabilities` with `http: true` and `sse: false`.
+- empty `authMethods`, and `agentInfo {name: "kage", version}`.
+
+It does not request `fs` or `terminal` client capabilities: kage runs
+its own tools in-process and gates them through
+`session/request_permission`.
+
+## sessions
+
+`session/list` returns the sessions recorded in kage's sessions
+directory, 50 per page, newest activity first. With `cwd` it returns
+only the sessions recorded in that directory. Agent sessions are left
+out. `nextCursor` is present while more pages follow.
+
+`session/load` accepts a full session id or a unique prefix of one. It
+replays the history, sends a `session_info_update` with the stored
+title, and answers with the config options. The session opens on its
+recorded model when that model is still available (else the default
+model, with a note on stderr), with its thinking level and token
+totals. `session/resume` opens the session the same way without the
+replay.
+
+After each turn kage sends `usage_update` with `used` (tokens in
+context), `size` (the model's context window) and, when the model has
+pricing, `cost` in `USD`. Nothing is sent while the window is unknown.
+A generated title arrives as `session_info_update`.
+
+## config options
+
+Every session has three select options, returned by `session/new`,
+`session/load`, `session/resume` and `session/set_config_option`:
+
+| id         | category        | values |
+| ---------- | --------------- | ------ |
+| `model`    | `model`         | the models the TUI model picker lists, plus the current one |
+| `thinking` | `thought_level` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
+| `mode`     | `mode`          | `default` (the configured rules decide), `ask`, `allow`, `deny` |
+
+A change applies from the next turn on. `session/set_config_option`
+answers with the options as they will be once it applies. When a
+value changes by other means, such as a loaded session's model, kage
+sends `config_option_update`.
+
+The `mode` values override the permission rules for the session:
+`ask` asks before every tool call, `deny` refuses every call, and
+`allow` runs every call without asking. `allow` differs from the
+TUI's `/permission allow`, which is an alias of `default`.
+
+## prompt content
+
+Each block of a `session/prompt` reaches the model:
+
+| block | what the model gets |
+| ----- | ------------------- |
+| `text` | the text |
+| `image` | the image |
+| `resource` with text | the text in a `<resource uri="..." mime="...">` block |
+| `resource` with an image blob | the image |
+| `resource` with another blob | one line naming the URI and MIME type |
+| `resource_link` to a `file://` URI | `Referenced file: <path>` |
+| other `resource_link` | `Referenced resource: <uri> (<name>)` |
+| `audio` | `[audio omitted]` |
+
+Prompt text can mention MCP resources and run MCP prompts exactly as
+in the TUI. See [mcp](/guide/mcp#resources-and-mentions). A mention or
+prompt that fails to expand fails the `session/prompt` request with
+the reason, and nothing is sent to the model.
+
+## mcp prompts as commands
+
+When a session opens, and whenever its MCP servers change, kage sends
+`available_commands_update` with one command per prompt of a
+connected server:
+
+```json
+{"name": "everything:complex_prompt", "description": "A prompt with arguments", "input": {"hint": "<temperature> [style]"}}
+```
+
+`<name>` marks a required argument and `[name]` an optional one. A
+prompt without arguments has no `input`. The editor sends the command
+back as prompt text, such as `/everything:complex_prompt 0.7 terse`,
+and kage expands it. kage sends the list and the usage again when the
+session's first prompt starts, because an editor may drop updates that
+arrive before the `session/new` response.
+
+## mcp servers from the editor
+
+The `mcpServers` of `session/new`, `session/load` and `session/resume`
+start for that session, next to your configured and plugin servers:
+
+- stdio entries `{name, command, args, env: [{name, value}]}`.
+- HTTP entries `{type: "http", name, url, headers: [{name, value}]}`.
+- `sse` entries are refused with an invalid params error, because
+  kage has no SSE transport. Use `http` instead.
+
+An editor server replaces a configured server of the same name, and
+stderr says so. Editor servers count as your own configuration, so no
+trust prompt applies. Their tools ask before running like every MCP
+tool, unless `[permissions.mcp]` allows the server.
+
+## permission prompts
+
+Every `session/request_permission` offers three options:
+
+| optionId        | kind           | effect |
+| --------------- | -------------- | ------ |
+| `allow`         | `allow_once`   | run this call |
+| `allow_session` | `allow_always` | run this call and stop asking for this tool for the rest of the session |
+| `reject`        | `reject_once`  | refuse the call |
+
+"Allow for this session" is never saved to a config file. It covers
+the agents of the session too, and it never lifts a configured `deny`
+or the `deny` mode.
+
+When a run ends while a permission request is still open, for example
+because it was cancelled, kage sends `$/cancel_request` for that
+request so the editor can close the dialog.
 
 ## agents
 
-Editor sessions can start [agents](/guide/agents). Agents are not ACP
-sessions, so they show up on the top-level `agent` tool call of your
-session:
+Editor sessions can start [agents](/guide/agents). How the editor sees
+them depends on whether it advertises the `subagents` client
+capability (the draft ACP subagents RFD). Any value other than `false`
+counts.
+
+**With subagents.** Each agent is its own child session:
+
+- A `subagent_update` on the parent's session announces the child with
+  `subagentSessionId`, `name` (the agent definition), `task` (the
+  description) and `capabilities: {cancel: true}`. A child without a
+  state is running.
+- The child's messages, tool calls, usage and permission requests
+  arrive on its own session id, like any session.
+- When the child ends, a `subagent_update` on the parent sets `state`
+  to `completed`, `failed` or `cancelled`. It comes after every update
+  of the child, and every child ends before its parent's
+  `session/prompt` answers.
+- `session/cancel` with the child's id stops that agent and its own
+  agents. Clients cannot prompt a child.
+- The parent's `agent` tool call is still announced and completed.
+
+**Without subagents.** Agents are not ACP sessions, so they show up on
+the top-level `agent` tool call of your session:
 
 - `tool_call_update` notifications replace that call's content with
   the agent's latest step, such as `explore: Read src/lib.rs`, and end
@@ -82,12 +255,12 @@ session:
   with the `agent` call as its tool call, a title that names the agent
   and the tool, such as `explore: bash`, and the agent's tool input as
   `rawInput`.
-- `session/cancel` stops the turn and every agent under it.
 
-Every tool without a config rule asks over ACP, so Zed asks before
-each agent starts and before each of its tool calls, unless your
-`[permissions]` allow them. Limits come from the `[agents]` table of
-your config files.
+Either way, `session/cancel` on your session stops the turn and every
+agent under it. Every tool without a config rule asks over ACP, so Zed
+asks before each agent starts and before each of its tool calls,
+unless your `[permissions]` allow them. Limits come from the
+`[agents]` table of your config files.
 
 ## hand-driven smoke test
 
@@ -99,4 +272,6 @@ printf '%s\n%s\n' \
 ```
 
 Two framed JSON-RPC results come back, one per line: the agent's
-capabilities, then a fresh `sessionId`.
+capabilities, then a fresh `sessionId` with its `configOptions`.
+Session updates such as `usage_update` and `available_commands_update`
+may arrive around them.

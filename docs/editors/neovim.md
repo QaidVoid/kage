@@ -2,12 +2,13 @@
 
 `kage rpc` is a spec-conformant ACP agent: newline-delimited
 JSON-RPC 2.0 over stdio, protocol version 1. Neovim can drive it with
-a job and a one-line-per-message parser; no plugin required. See
-[zed](./zed) for the full method table.
+a job and a one-line-per-message parser, with no plugin required. See
+[zed](./zed) for the full method table, session loading, config
+options and the other features an editor can use.
 
 ## a minimal client
 
-Each message is a single JSON object terminated by `\n` - no
+Each message is a single JSON object terminated by `\n`, without
 `Content-Length` headers.
 
 ```lua
@@ -67,7 +68,7 @@ function M.start(opts)
 end
 
 -- Override to render in your UI. Notifications carry agent output;
--- `session/request_permission` is a request kage BLOCKS on - you must
+-- `session/request_permission` is a request kage BLOCKS on. You must
 -- reply. The default DENIES (never auto-approve); wire it to a real
 -- prompt.
 function M.on_message(job, msg)
@@ -102,15 +103,28 @@ return M
 local kage = require("kage").start({ model = "anthropic:claude-sonnet-4-6" })
 ```
 
-To make it usable: capture `sessionId` from the `session/new`
+To make it usable, capture `sessionId` from the `session/new`
 response, then send `session/prompt` with the user's text as a
-`ContentBlock` array; replace the `session/request_permission` branch
-with `vim.ui.select` so a human approves each tool call; and route
-`agent_message_chunk` / `agent_thought_chunk` content into a scratch
-buffer. Send `{ method = "session/cancel", params = { sessionId =
-session } }` (a notification, no `id`) to stop the in-flight turn.
+`ContentBlock` array. Replace the `session/request_permission` branch
+with `vim.ui.select` so a human approves each tool call. The options
+are `allow`, `allow_session` (allow the tool for the rest of the
+session) and `reject`. Route `agent_message_chunk` and
+`agent_thought_chunk` content into a scratch buffer. Send
+`{ method = "session/cancel", params = { sessionId = session } }` (a
+notification, no `id`) to stop the in-flight turn.
+
+A `$/cancel_request` notification withdraws a permission request that
+kage no longer waits for. Close its prompt when one arrives. Update
+kinds your client does not handle, such as `usage_update` or
+`available_commands_update`, can be skipped.
+
+To pick up an earlier conversation, call `session/list` with your
+working directory as `cwd`, then `session/load` with a `sessionId`
+from it. kage replays the transcript as `session/update`
+notifications before it answers.
 
 When kage starts [agents](/guide/agents), their permission requests
 arrive on the same session with titles such as `explore: bash`, and
-their progress replaces the content of the `agent` tool call. See
-[zed](/editors/zed#agents) for the details.
+their progress replaces the content of the `agent` tool call. A client
+that advertises the `subagents` capability sees each agent as its own
+session instead. See [zed](/editors/zed#agents) for the details.

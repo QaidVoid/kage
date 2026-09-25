@@ -41,6 +41,9 @@ The table follows the palette's order.
 | `/agents`                 | Open the agents overlay: every agent of the session, live or finished (see [agents](/guide/agents#the-agents-overlay)) |
 | `/permission [mode]` / `/perm` | Show or set the session permission mode (`allow\|ask\|deny\|default`) |
 | `/login [provider]`       | Add or update a provider credential: suspends the TUI, runs the interactive login, then refreshes the model list in place |
+| `/mcp`                    | Open the MCP servers picker: status per server, `Enter` restarts a server or logs in to one that needs it (see [mcp](/guide/mcp#the-mcp-picker)) |
+| `/mcp restart <server>`   | Restart an MCP server: now when idle, else when the next run starts |
+| `/mcp login <server>`     | Log in to a remote MCP server with OAuth: suspends the TUI, runs the browser login, then reconnects the server |
 | `/settings`               | Open the settings dialog, which lists every option (see [settings](#settings)) |
 | `/help`                   | Open the keyboard reference overlay             |
 | `/theme list`             | Show bundled and user themes                    |
@@ -77,6 +80,17 @@ option's description shows below the list.
 The dialog does not pick models or keys. Use `Ctrl+P` or `/model` for
 the model and `?` or `/keybindings` for keys. It does not write
 `default_model` either. Set that under `[provider]` in `config.toml`.
+
+## mcp prompt commands
+
+Each prompt of a connected MCP server is a command named
+`/<server>:<prompt>`, such as `/everything:complex_prompt`. The palette
+tags it `[mcp]` and shows its arguments as the hint, `<name>` for a
+required one and `[name]` for an optional one. Arguments are
+whitespace separated in declared order, and the last one takes the
+rest of the line. The prompt's messages become your prompt. A prompt
+whose name a built-in or plugin command takes is not listed. See
+[mcp](/guide/mcp#prompts-as-commands).
 
 ## plugin commands
 

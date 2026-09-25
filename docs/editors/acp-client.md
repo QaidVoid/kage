@@ -27,15 +27,15 @@ Then select it as the model:
 kage -m acp:claude-code -p "explain this file"
 ```
 
-`acp:<name>` resolves to the configured agent; kage spawns it, speaks
+`acp:<name>` resolves to the configured agent. kage spawns it, speaks
 ACP, forwards your turn as `session/prompt`, and streams its reply
-back. kage ships **no presets** - you declare the command yourself,
+back. kage ships **no presets**. You declare the command yourself,
 the same way you would an MCP server or an LSP.
 
 ## configure from a plugin
 
-Plugins can declare agents at runtime (the `nvim-lspconfig` analogy -
-plugins *configure*, core spawns):
+Plugins can declare agents at runtime. As with `nvim-lspconfig`,
+plugins *configure* and core spawns:
 
 ```lua
 kage.acp.add_agent({
@@ -70,9 +70,11 @@ handler that errors or returns a non-boolean also denies.
 - Only the upstream's assistant **text and thinking** are surfaced.
   Its own `tool_call` / `plan` / mode updates are not relayed into
   kage's loop (`supports_tool_use` is `false`).
+- A `session/update` of a kind kage does not know is ignored, so an
+  upstream that speaks a newer ACP revision keeps streaming.
 - kage advertises **no** `fs` / `terminal` client capabilities, so a
   conformant upstream will not ask kage to read/write files or open
-  terminals on its behalf - it uses its own.
+  terminals on its behalf. It uses its own.
 - `kage.on_acp_permission` is a synchronous policy callback. An
   interactive "ask the human" prompt for an upstream tool is not
-  available in v1; the handler must decide programmatically.
+  available in v1. The handler must decide programmatically.

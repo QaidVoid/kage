@@ -40,7 +40,7 @@ Tool names are literal: `bash`, `write`, `edit`, `web_fetch`,
 tool with no `[permissions.tools.<name>]` entry is always allowed.
 
 When an entry exists, the `deny` patterns are checked first, then the
-`allow` patterns, then `default`. First match wins; within a list,
+`allow` patterns, then `default`. First match wins. Within a list,
 patterns are tried in written order.
 
 Patterns match against the tool's command line: the `command` string
@@ -79,14 +79,39 @@ default = "ask"
 This matters most in print mode, which cannot ask: MCP tools there are
 refused until you allow the server or the tool.
 
+The ask default covers every configured server, whenever its tools
+appear: at startup, after `/mcp restart`, after an OAuth login, or
+when a server that failed to start comes up later. Servers an editor
+passes over ACP are covered the same way, and `[permissions.mcp]`
+applies to them by name.
+
+`mcp_resource`, the tool that lets the model list and read MCP
+resources, is not named `<server>__<tool>`. It follows the built-in
+rules: it runs without asking in the TUI and print mode, and asks over
+ACP like every tool without a rule. Restrict it like any built-in:
+
+```toml
+[permissions.tools.mcp_resource]
+default = "ask"
+```
+
+Resource mentions and MCP prompt commands you type never ask. They
+are part of your prompt, not tool calls.
+
 ## what "ask" does per mode
 
 | mode | ask behavior |
 |---|---|
 | TUI | an approval panel replaces the input box. See [approving in the TUI](#approving-in-the-tui). |
-| print (`kage -p`) | the call is denied with an error telling you to add an allow rule; there is no interactive prompt. For an MCP tool the error names both the `[permissions.mcp]` and the per-tool fix. |
-| ACP (`kage rpc`) | the editor client is asked through `session/request_permission`. Every tool without a config entry asks here, built-ins included. A config `allow` skips the round-trip; a config `deny` refuses locally. |
+| print (`kage -p`) | the call is denied with an error telling you to add an allow rule. There is no interactive prompt. For an MCP tool the error names both the `[permissions.mcp]` and the per-tool fix. |
+| ACP (`kage rpc`) | the editor client is asked through `session/request_permission`, with the options allow, allow for this session, and reject. Every tool without a config entry asks here, built-ins included. A config `allow` skips the round-trip, and a config `deny` refuses locally. |
 | MCP server (`kage mcp serve`) | the call is refused, since there is no one to ask. |
+
+Over ACP, "Allow for this session" works like the TUI's session
+scope below: the tool stops asking until the session closes, for the
+session and its agents, and nothing is written to disk. The editor's
+Mode selector sets the session's permission mode (see
+[zed](/editors/zed#config-options)).
 
 ## approving in the TUI
 
@@ -166,8 +191,8 @@ once you trust the project. See
 
 `confine_paths = true` routes the built-in file tools through
 escape-checked resolution: a read or write must stay under the working
-directory. `bash` is unaffected; a shell can always reach the whole
-filesystem, so confine it with `deny` rules instead. Agents inherit the setting.
+directory. `bash` is unaffected, because a shell can always reach the whole
+filesystem. Confine it with `deny` rules instead. Agents inherit the setting.
 
 ## runtime mode (`:permission`)
 

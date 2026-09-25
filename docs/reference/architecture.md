@@ -24,13 +24,13 @@ the only crate that wires the whole graph together.
 
 | Crate            | Responsibility                                      |
 | ---------------- | --------------------------------------------------- |
-| `kage-core`      | Message types, content blocks, errors, the cancel tree, the engine protocol (events, commands and the agent tree), agent definitions, the keymap, option and highlight registries |
-| `kage-jsonrpc`   | Shared bidirectional JSON-RPC peer over stdio       |
+| `kage-core`      | Message types, content blocks, errors, the cancel tree, the engine protocol (events, commands, the agent tree and the MCP catalog types), the resource block format, agent definitions, the keymap, option and highlight registries |
+| `kage-jsonrpc`   | Shared bidirectional JSON-RPC peer over stdio, with an optional cancel notice per connection |
 | `kage-provider`  | LLM provider clients, registry, model catalog       |
 | `kage-tools`     | Tool trait, built-in tools, tool registry           |
 | `kage-session`   | Append-only JSONL writer, replay, fork, search      |
 | `kage-loop`      | The agent loop, compaction, hooks                   |
-| `kage-mcp`       | MCP client (external tool servers) and MCP server (kage's built-in tools over stdio) |
+| `kage-mcp`       | MCP client (tools, resources, prompts, the OAuth protocol, prompt expansion) and MCP server (kage's built-in tools over stdio) |
 | `kage-acp`       | ACP agent (editors drive kage) and ACP client (kage drives another agent as a provider) |
 | `kage-plugin`    | Lua runtime, sandbox, host API surface, embedded stdlib and defaults, `init.lua` loading |
 | `kage-tui`       | The interactive TUI, modal input, block renderer    |
@@ -49,15 +49,16 @@ drives the same engine through two channels:
   client may drop (streamed text, tool output tails). `kage -p --json`
   prints these envelopes one per line.
 - **Commands in.** Prompt, cancel, answer a permission request, switch
-  model or thinking level, compact, run a shell command, and the
-  session operations (new, resume, fork, clone, delete, export).
+  model or thinking level, compact, run a shell command, restart an
+  MCP server, and the session operations (new, resume, fork, clone,
+  delete, export).
 
 A dispatcher thread owns the sessions and never blocks on a run. Each
 run executes the agent loop on its own thread and hands the session
 back when it ends. Permission questions travel over the same channels:
 the engine publishes `permission_requested` and waits for the client's
-answer. The TUI renders the stream into its buffer; the ACP adapter
-turns it into `session/update` notifications.
+answer. The TUI renders the stream into its buffer, and the ACP adapter
+turns it into ACP traffic (see [the ACP projection](#the-acp-projection)).
 
 ## agents
 
@@ -125,8 +126,82 @@ agent with its parent, state, usage, tool count, latest tool and open
 approvals. The TUI builds its cards, pinned list, drill-in views,
 breadcrumb and agents overlay from it, and routes each agent's loop
 events into that agent's own buffer. The ACP adapter uses it to find
-the client session at the root of an agent's branch, which gets the
-agent's approval requests and progress on its top-level `agent` call.
+an agent's parent session, and for editors without subagent support,
+the client session at the root of the agent's branch.
+
+## mcp in the engine
+
+Each session owns an `McpManager` with every configured server, live
+or not, and a cached catalog of their tools, resources, resource
+templates and prompts. Agents have no manager of their own.
+
+**The catalog event.** `mcp_servers` is a live event with the whole
+catalog: each server's name, status (`connected`, `failed` with its
+error, or `needs_auth`), tool count, resources, templates and prompts.
+The dispatcher publishes it when a session opens, after a restart, and
+when a reload changed the catalog. The latest snapshot wins, and it is
+never recorded. The TUI builds `@server:` completion, the prompt
+commands and the `/mcp` picker from it, and the ACP adapter builds the
+editor's command list.
+
+**The restart command.** `restart_mcp {server}` restarts one server.
+In-flight tool calls hold the old connection, so a busy session keeps
+the name until its next run starts, and an idle session restarts at
+once. The TUI sends it from `/mcp restart`, from the picker and after
+a login. `kage.mcp.restart` from Lua joins the same list at run start.
+
+**MCP work off the dispatcher.** The dispatcher never waits on an MCP
+server. At run start it lends the manager to the run thread, which
+applies the pending restarts and the list reloads that servers
+announced, then hands the manager back with the resulting tool changes
+before the loop starts. An idle restart does the same on a worker
+thread and keeps the session busy until the manager comes back.
+
+**Expansion on the run thread.** After those reloads, the run expands
+the prompt with `kage_mcp::expand` before it enters history: an MCP
+prompt command at the start is replaced by the prompt's messages, and
+each `@server:uri` mention is read and appended as a resource block.
+The expanded message is what the model receives and what the recorder
+writes, and clients shorten resource blocks for display. When
+expansion fails, the run publishes an error notice and fails with
+history untouched. Steered text is never expanded, which is why the
+TUI queues such prompts and ACP queues every prompt.
+
+**Cancel notices.** A `kage-jsonrpc` connection can build one
+notification for a request it abandons, whether through a user cancel
+or a deadline. MCP connections send `notifications/cancelled` (never
+for `initialize`), and the ACP agent sends `$/cancel_request` when it
+withdraws a permission request. A closed connection sends nothing.
+
+**OAuth.** `kage-mcp` implements the protocol (discovery, PKCE,
+registration, the loopback listener, token exchange and refresh) and
+never touches disk. The HTTP transport asks a `TokenSource` for a
+bearer token. `kage-cli` implements it over `mcp-auth.json` and owns
+refresh and storage.
+
+## the ACP projection
+
+`kage rpc` maps each ACP session to an engine session and turns the
+event stream into ACP traffic with one bus subscriber:
+
+- Loop events become `session/update` chunks and tool call updates.
+  `session/load` replays recorded history through the same mapping.
+- `usage_updated` becomes `usage_update`, `title_changed` becomes
+  `session_info_update`, a `state_changed` that moves the model,
+  thinking level or permission mode becomes `config_option_update`,
+  and `mcp_servers` becomes `available_commands_update`.
+- `permission_requested` becomes `session/request_permission`, asked
+  on its own thread. The asks still open when the run ends are
+  withdrawn before the prompt answers.
+- For a client with the subagents capability, `agent_spawned`
+  registers the agent as a child session, announced with
+  `subagent_update`, whose events then take the same path under the
+  child's id. A client session's prompt answers only after every child
+  has sent its final state. Other clients get agent progress and asks
+  on the root session's `agent` call.
+
+Config option changes and prompts become ordinary engine commands, so
+the editor, the TUI and print mode share one implementation.
 
 ## data flow per turn
 
@@ -154,7 +229,7 @@ The loop is fully synchronous. There is no async runtime in core.
 ## sessions on disk
 
 A session file is a single JSONL stream. The first line is a
-`header`; every entry carries its own `id` and `ts` so forks can
+`header`. Every entry carries its own `id` and `ts` so forks can
 branch from any point:
 
 ```jsonl

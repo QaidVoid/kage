@@ -10,17 +10,22 @@
 //! Tests render against [`ratatui::backend::TestBackend`] directly; the
 //! lifecycle wrapper is only meaningful with a real tty.
 //!
+//! [`InputReader`] reads terminal events on a thread so the run loop
+//! can wait on them next to engine events.
+//!
 //! [`forward_typed_lines`] reads lines from the terminal while the TUI
 //! is suspended and stops on request, so a host flow that waits for
 //! either typed input or something else can hand the terminal back
 //! without asking for a key press.
 
 use std::io::{self, Write};
-use std::sync::Once;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
+use std::sync::{Arc, Once, mpsc};
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use crossbeam_channel::{Receiver, Sender};
+use nix::sys::signal::{Signal, raise};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{
@@ -229,6 +234,86 @@ fn install_panic_hook() {
             prev(info);
         }));
     });
+}
+
+/// Terminal events read on a thread, handed over one at a time.
+///
+/// The thread reads an event, sends it on [`Self::events`] and reads the
+/// next one only after [`Self::resume`]. The run loop suspends the TUI
+/// only while it handles an event, so the thread never reads while an
+/// editor, a login prompt or another owner has the terminal. Dropping
+/// the reader stops the thread and waits for it.
+pub(crate) struct InputReader {
+    events: Receiver<io::Result<Event>>,
+    resume: Option<Sender<()>>,
+    stop: Arc<AtomicBool>,
+    reading: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl InputReader {
+    /// Start the reader thread. Fails when the terminal cannot be read.
+    pub(crate) fn spawn() -> io::Result<Self> {
+        // Opens crossterm's event source, and with it the SIGWINCH
+        // handler that `Drop` relies on, before the thread can block.
+        event::poll(Duration::ZERO)?;
+        let (event_tx, events) = crossbeam_channel::bounded(1);
+        let (resume, resume_rx) = crossbeam_channel::bounded::<()>(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let reading = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let (stop, reading) = (Arc::clone(&stop), Arc::clone(&reading));
+            thread::spawn(move || {
+                loop {
+                    reading.store(true, Ordering::SeqCst);
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let event = event::read();
+                    reading.store(false, Ordering::SeqCst);
+                    let failed = event.is_err();
+                    if event_tx.send(event).is_err() || failed || resume_rx.recv().is_err() {
+                        break;
+                    }
+                }
+            })
+        };
+        Ok(Self {
+            events,
+            resume: Some(resume),
+            stop,
+            reading,
+            thread: Some(thread),
+        })
+    }
+
+    /// The events read from the terminal. The thread waits for
+    /// [`Self::resume`] after each one.
+    pub(crate) fn events(&self) -> &Receiver<io::Result<Event>> {
+        &self.events
+    }
+
+    /// Let the thread read the next event. Call it once for each event
+    /// taken from [`Self::events`], after handling it.
+    pub(crate) fn resume(&self) {
+        if let Some(resume) = &self.resume {
+            let _ = resume.send(());
+        }
+    }
+}
+
+impl Drop for InputReader {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        self.resume = None;
+        // A blocked read returns on the resize this signal reports.
+        if self.reading.load(Ordering::SeqCst) {
+            let _ = raise(Signal::SIGWINCH);
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 /// Send each line typed on the terminal to `tx` until `stop` is set,

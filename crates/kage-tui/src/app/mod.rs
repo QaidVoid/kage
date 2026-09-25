@@ -15,7 +15,7 @@ pub(crate) use std::time::{Duration, Instant};
 
 pub(crate) use kage_core::options::{OptionSource, OptionValue};
 pub(crate) use kage_core::sync::lock;
-pub(crate) use ratatui::crossterm::event::{self, Event, KeyEventKind, MouseEventKind};
+pub(crate) use ratatui::crossterm::event::{Event, KeyEventKind, MouseEventKind};
 
 pub(crate) use crate::toast::{self, SharedToasts, Toast, ToastKind};
 

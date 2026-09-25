@@ -1,23 +1,32 @@
 //! The App run loop, frame draw, and run-state queries.
 
+use std::io;
+
+use crossbeam_channel::{Receiver, select_biased};
+
 #[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
+
+use crate::terminal::InputReader;
 
 impl App {
     /// Drive the event loop until the user quits. Returns the exit
     /// reason. The caller is expected to drop the [`Tui`] (which
     /// restores the terminal) before printing anything to stdout.
-    /// Dispatch terminal-suspending chords, poll events, and drive
-    /// the worker. Long by nature: it is the whole event loop.
+    /// Dispatch terminal-suspending chords, wait for input, engine
+    /// events and deadlines, and drive the worker. Long by nature: it
+    /// is the whole event loop.
     #[allow(clippy::too_many_lines)]
     pub fn run(&mut self, tui: &mut Tui) -> Result<AppExit, TuiError> {
-        // Longest a waiting engine event, such as a streamed delta,
-        // sits before the loop applies it: crossterm's poll cannot
-        // wake on the engine channel, so the wait is sliced.
-        const ENGINE_POLL: Duration = Duration::from_millis(16);
+        // Shortest gap between two paints driven by engine events, so a
+        // burst of streamed deltas repaints at most once per frame.
+        const FRAME: Duration = Duration::from_millis(16);
+        let input = InputReader::spawn()?;
+        let mut engine = self.forward_engine_events();
         // Always paint once before the steady-state loop.
         let mut last_buffer_version = self.buffer_version();
         let mut last_spinner_idx = crate::view::spinner_frame_index();
+        let mut last_draw = Instant::now();
         let mut needs_redraw = true;
         self.color_depth = tui.color_depth();
         loop {
@@ -38,8 +47,8 @@ impl App {
             // (overlay open, theme swap). Without this, the worker
             // pushes a `kage.ui.select` request from a /command, we
             // open the overlay, but `needs_redraw` is still false and
-            // the loop blocks on `event::poll` until the user
-            // happens to press a key. Force a paint on the next pass.
+            // the loop waits until the user happens to press a key.
+            // Force a paint on the next pass.
             if self.drain_plugin_dialog() {
                 needs_redraw = true;
             }
@@ -68,6 +77,7 @@ impl App {
             self.refresh_plugin_session_list_if_stale();
             if needs_redraw {
                 self.draw(tui)?;
+                last_draw = Instant::now();
                 last_buffer_version = self.buffer_version();
                 last_spinner_idx = crate::view::spinner_frame_index();
                 needs_redraw = false;
@@ -80,31 +90,29 @@ impl App {
             let animating =
                 self.is_working() || self.is_run_in_flight() || self.has_running_tool_call();
             let tick = if animating {
-                // 50ms keeps the wake latency low so streamed deltas
-                // surface promptly and shaves the worst-case lag after
-                // `working` flips false (e.g. after a cancel takes
-                // effect) so the user perceives the spinner stopping as
-                // effectively instant rather than tail-end-of-the-100ms-
-                // window. The wake is cheap; the redraw it may trigger
+                // 50ms keeps the spinner and the timers moving, and
+                // shaves the worst-case lag after `working` flips false
+                // (e.g. after a cancel takes effect) so the spinner
+                // stops effectively at once. The redraw it may trigger
                 // is gated on actual visible change below.
                 Duration::from_millis(50)
             } else {
-                // 200ms idle wake (5 Hz) keeps plugin-dialog and other
-                // worker-pushed state visible without the user having
-                // to press a key. A 1s wake felt frozen: after a
-                // /command that opened a `kage.ui.*` dialog, the
-                // overlay would not appear until the next keypress or
-                // the next tick. The CPU cost of 5 idle wakes per
-                // second is negligible; the redraw gate below still
-                // skips repaints when nothing visible changed.
+                // 200ms idle wake (5 Hz) picks up state that worker and
+                // plugin threads change without waking the loop: plugin
+                // dialogs, hot-reload snapshots, plugin output, clipboard
+                // reads and host log lines. A 1s wake felt frozen: after
+                // a /command that opened a `kage.ui.*` dialog, the
+                // overlay would not appear until the next keypress. The
+                // redraw gate below still skips repaints when nothing
+                // visible changed.
                 Duration::from_millis(200)
             };
             let mut deadline = Instant::now() + tick;
             // Toasts auto-expire on a wall-clock schedule independent
-            // of key input; cap the poll deadline at the next toast
-            // expiration and force a redraw each tick so the overlay
-            // appears immediately when pushed from a worker thread
-            // and disappears when its deadline fires, regardless of
+            // of key input; cap the wait at the next toast expiration
+            // and force a redraw each tick so the overlay appears
+            // immediately when pushed from a worker thread and
+            // disappears when its deadline fires, regardless of
             // whether the user pressed a key.
             if let Some(toast_deadline) = self.next_toast_deadline() {
                 if toast_deadline < deadline {
@@ -122,70 +130,57 @@ impl App {
             if let Some((_, until)) = self.escalation {
                 deadline = deadline.min(until);
             }
-            while Instant::now() < deadline {
-                let remaining = deadline
-                    .checked_duration_since(Instant::now())
-                    .unwrap_or_default();
-                if event::poll(remaining.min(ENGINE_POLL))? {
-                    // Only events that can change the screen set the
-                    // redraw flag. `Moved` mouse events (the terminal
-                    // reports one per pixel of travel while capture is
-                    // on) and focus flips mutate nothing visible, and
-                    // repainting per event would pin a core.
-                    match event::read()? {
-                        Event::Key(key) if key.kind == KeyEventKind::Press => {
-                            log_key_event(&key);
-                            needs_redraw = true;
-                            // `Ctrl+G` suspends the terminal for an
-                            // external editor, so it bypasses dispatch.
-                            if self.external_edit_key(key) {
-                                self.edit_in_external_editor(tui);
-                            } else if let Some(exit) = self.dispatch_key(key) {
-                                if let Some(state) = self.active_dialog.take() {
-                                    let _ = state.reply().send(None);
-                                }
-                                return Ok(exit);
+            if let Some(event) = wait(input.events(), &mut engine, deadline, last_draw + FRAME) {
+                // Only events that can change the screen set the
+                // redraw flag. `Moved` mouse events (the terminal
+                // reports one per pixel of travel while capture is
+                // on) and focus flips mutate nothing visible, and
+                // repainting per event would pin a core.
+                match event? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        log_key_event(&key);
+                        needs_redraw = true;
+                        // `Ctrl+G` suspends the terminal for an
+                        // external editor, so it bypasses dispatch.
+                        if self.external_edit_key(key) {
+                            self.edit_in_external_editor(tui);
+                        } else if let Some(exit) = self.dispatch_key(key) {
+                            if let Some(state) = self.active_dialog.take() {
+                                let _ = state.reply().send(None);
                             }
-                            // `:login` defers here: only this loop
-                            // owns the [`Tui`] it suspends.
-                            if self.consume_pending_login(tui) {
-                                needs_redraw = true;
-                            }
+                            return Ok(exit);
                         }
-                        Event::Paste(text) => {
+                        // `:login` defers here: only this loop
+                        // owns the [`Tui`] it suspends.
+                        if self.consume_pending_login(tui) {
                             needs_redraw = true;
-                            self.handle_paste(&text);
                         }
-                        Event::Mouse(mouse) => {
-                            if !matches!(mouse.kind, MouseEventKind::Moved) {
-                                needs_redraw = true;
-                            }
-                            self.handle_mouse_event(mouse);
-                        }
-                        Event::Resize(_, _) => {
-                            // Width changed; every cached height is
-                            // measured against the prior width and is
-                            // now stale.
-                            needs_redraw = true;
-                            let mut buf = lock(&self.buffer);
-                            buf.invalidate_all_heights();
-                        }
-                        _ => {}
                     }
-                    break;
+                    Event::Paste(text) => {
+                        needs_redraw = true;
+                        self.handle_paste(&text);
+                    }
+                    Event::Mouse(mouse) => {
+                        if !matches!(mouse.kind, MouseEventKind::Moved) {
+                            needs_redraw = true;
+                        }
+                        self.handle_mouse_event(mouse);
+                    }
+                    Event::Resize(_, _) => {
+                        // Width changed; every cached height is
+                        // measured against the prior width and is
+                        // now stale.
+                        needs_redraw = true;
+                        let mut buf = lock(&self.buffer);
+                        buf.invalidate_all_heights();
+                    }
+                    _ => {}
                 }
-                // No input: apply engine events that arrived
-                // meanwhile, and repaint when they or another thread
-                // changed the buffer.
-                if self.drain_engine_events() {
-                    needs_redraw = true;
-                    break;
-                }
-                let v = self.buffer_version();
-                if v != last_buffer_version {
-                    needs_redraw = true;
-                    break;
-                }
+                input.resume();
+            } else if self.buffer_version() != last_buffer_version {
+                // Another thread changed the buffer. Engine events
+                // wait for the drain at the top of the loop.
+                needs_redraw = true;
             }
             // Periodic-wake fallthrough: while the agent is mid-turn or
             // a tool is in-flight, the only thing that changes without
@@ -203,6 +198,26 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Move the engine events onto a thread that passes them back
+    /// through `engine_rx` and signals each arrival on the returned
+    /// channel, so the run loop can wait on them next to terminal
+    /// input. `None` when no engine events are wired.
+    fn forward_engine_events(&mut self) -> Option<Receiver<()>> {
+        let source = self.engine_rx.take()?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (wake_tx, wake_rx) = crossbeam_channel::bounded(1);
+        self.engine_rx = Some(rx);
+        std::thread::spawn(move || {
+            for envelope in source {
+                if tx.send(envelope).is_err() {
+                    break;
+                }
+                let _ = wake_tx.try_send(());
+            }
+        });
+        Some(wake_rx)
     }
 
     /// True when the worker has marked the [`crate::usage::SessionUsage`]
@@ -556,5 +571,78 @@ impl App {
     pub(crate) fn park_draw_snapshot(&mut self, buffer: crate::Buffer, version: u64) {
         self.draw_snapshot_version = version;
         self.draw_snapshot = Some(buffer);
+    }
+}
+
+/// Block until terminal input arrives or `deadline` passes. An engine
+/// wake-up ends the wait at `frame_at` instead, so engine events paint
+/// at once after a quiet spell and at most once per frame in a burst.
+/// A closed engine channel is dropped from later waits.
+fn wait(
+    input: &Receiver<io::Result<Event>>,
+    engine: &mut Option<Receiver<()>>,
+    mut deadline: Instant,
+    frame_at: Instant,
+) -> Option<io::Result<Event>> {
+    let idle = crossbeam_channel::never();
+    let mut woken = false;
+    loop {
+        let engine_arm = engine.as_ref().filter(|_| !woken).unwrap_or(&idle);
+        let open = select_biased! {
+            recv(input) -> event => {
+                return Some(event.unwrap_or_else(|_| {
+                    Err(io::Error::other("terminal input reader stopped"))
+                }));
+            }
+            recv(engine_arm) -> wake => wake.is_ok(),
+            default(deadline.saturating_duration_since(Instant::now())) => return None,
+        };
+        if !open {
+            *engine = None;
+        }
+        woken = true;
+        deadline = deadline.min(frame_at);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LONG: Duration = Duration::from_secs(30);
+
+    #[test]
+    fn input_wins_over_a_waiting_engine_event() {
+        let (input_tx, input) = crossbeam_channel::bounded(1);
+        let (wake_tx, wake) = crossbeam_channel::bounded(1);
+        input_tx.send(Ok(Event::FocusGained)).unwrap();
+        wake_tx.send(()).unwrap();
+        let now = Instant::now();
+        let event = wait(&input, &mut Some(wake), now + LONG, now);
+        assert!(matches!(event, Some(Ok(Event::FocusGained))));
+    }
+
+    #[test]
+    fn an_engine_event_ends_the_wait_at_the_frame() {
+        let (_input_tx, input) = crossbeam_channel::bounded(1);
+        let (wake_tx, wake) = crossbeam_channel::bounded(1);
+        wake_tx.send(()).unwrap();
+        let mut engine = Some(wake);
+        let start = Instant::now();
+        let frame_at = start + Duration::from_millis(20);
+        assert!(wait(&input, &mut engine, start + LONG, frame_at).is_none());
+        assert!(Instant::now() >= frame_at);
+        assert!(start.elapsed() < LONG);
+        assert!(engine.is_some());
+    }
+
+    #[test]
+    fn a_closed_engine_channel_is_dropped() {
+        let (_input_tx, input) = crossbeam_channel::bounded(1);
+        let (_, wake) = crossbeam_channel::bounded::<()>(1);
+        let mut engine = Some(wake);
+        let now = Instant::now();
+        assert!(wait(&input, &mut engine, now + LONG, now).is_none());
+        assert!(engine.is_none());
     }
 }

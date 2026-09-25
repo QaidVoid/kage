@@ -25,10 +25,12 @@ name = "scale"
 [dependencies]
 arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 base64.workspace = true
+crossbeam-channel.workspace = true
 ignore.workspace = true
 image = { version = "0.25.9", default-features = false, features = ["png"] }
 kage-core.workspace = true
 kage-plugin.workspace = true
+nix.workspace = true
 pulldown-cmark.workspace = true
 ratatui.workspace = true
 serde.workspace = true

@@ -7,7 +7,9 @@
 //! `session/request_permission` requests. Recorded sessions can be
 //! listed, loaded with a replay of their transcript, or resumed. Each
 //! session offers its model, thinking level and permission mode as config
-//! options.
+//! options, and the prompts of its live MCP servers as slash commands
+//! named `<server>:<prompt>`, which the engine expands when they come back
+//! as prompt text.
 //!
 //! Agent sessions started by the `agent` tool are shown as subagent
 //! sessions (draft RFD PR #1992) to a client that advertises the
@@ -26,13 +28,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use kage_acp::acp::{
-    AgentCapabilities, BlobContent, ConfigOptionUpdate, ContentBlock, Cost, Implementation,
-    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
-    LoadSessionRequest, LoadSessionResponse, MessageChunk, NewSessionRequest, NewSessionResponse,
-    PROTOCOL_VERSION, PromptCapabilities, PromptRequest, PromptResponse, ResourceLink,
-    ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionConfigCategory,
-    SessionConfigKind, SessionConfigOption, SessionConfigSelectOption, SessionInfo,
-    SessionInfoUpdate, SessionUpdate, SetSessionConfigOptionRequest,
+    AgentCapabilities, AvailableCommandsUpdate, BlobContent, ConfigOptionUpdate, ContentBlock,
+    Cost, Implementation, InitializeRequest, InitializeResponse, ListSessionsRequest,
+    ListSessionsResponse, LoadSessionRequest, LoadSessionResponse, MessageChunk, NewSessionRequest,
+    NewSessionResponse, PROTOCOL_VERSION, PromptCapabilities, PromptRequest, PromptResponse,
+    ResourceLink, ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities,
+    SessionConfigCategory, SessionConfigKind, SessionConfigOption, SessionConfigSelectOption,
+    SessionInfo, SessionInfoUpdate, SessionUpdate, SetSessionConfigOptionRequest,
     SetSessionConfigOptionResponse, StopReason, SubagentSessionCapabilities, SubagentState,
     SubagentUpdate, Supported, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
     UsageUpdate,
@@ -41,7 +43,8 @@ use kage_acp::agent::{Agent, PermissionDecision, PromptContext, send_update, ser
 use kage_core::permissions::PermissionAction;
 use kage_core::protocol::{
     AgentNode, AgentTree, Command, CommandKind, Delivery, Envelope, Event, HostEvent,
-    PermissionDecision as Decision, RequestId, RunOutcome, SessionState, Usage,
+    McpServerInfo, McpServerStatus, PermissionDecision as Decision, RequestId, RunOutcome,
+    SessionState, Usage,
 };
 use kage_core::sync::lock;
 use kage_core::{
@@ -296,6 +299,7 @@ impl CliAcpAgent {
             subagents: Arc::clone(&subagents),
             live: HashSet::new(),
             ended: HashMap::new(),
+            commands: HashMap::new(),
         };
         engine.subscribe(Box::new(move |envelope| bridge.handle(envelope)));
         Self {
@@ -620,6 +624,8 @@ struct Bridge {
     live: HashSet<SessionId>,
     /// Ended runs held back until their live subagents end.
     ended: HashMap<SessionId, PromptEnd>,
+    /// The commands last sent to each client session.
+    commands: HashMap<SessionId, Vec<serde_json::Value>>,
 }
 
 /// A permission question in flight on its own thread.
@@ -695,6 +701,20 @@ impl Bridge {
                     &client_id,
                     SessionUpdate::SessionInfoUpdate(update),
                 );
+            }
+            Event::Host(HostEvent::McpServers { servers }) if !self.live.contains(&session) => {
+                let commands = prompt_commands(servers);
+                let last = self.commands.insert(session, commands.clone());
+                if last.unwrap_or_default() != commands {
+                    let update = AvailableCommandsUpdate {
+                        available_commands: commands,
+                    };
+                    send_update(
+                        &self.peer,
+                        &client_id,
+                        SessionUpdate::AvailableCommandsUpdate(update),
+                    );
+                }
             }
             Event::Host(HostEvent::RunEnded { outcome }) => {
                 self.end_asks(session);
@@ -1158,6 +1178,41 @@ fn usage_update(usage: &Usage) -> Option<SessionUpdate> {
     }))
 }
 
+/// One `available_commands_update` entry per prompt of a live server in
+/// `servers`, named `<server>:<prompt>`. The input hint lists required
+/// arguments as `<name>` and optional ones as `[name]`, and a prompt
+/// without arguments takes no input.
+fn prompt_commands(servers: &[McpServerInfo]) -> Vec<serde_json::Value> {
+    let live = servers
+        .iter()
+        .filter(|server| server.status == McpServerStatus::Connected);
+    live.flat_map(|server| {
+        server.prompts.iter().map(move |prompt| {
+            let hint = prompt
+                .arguments
+                .iter()
+                .map(|arg| {
+                    if arg.required {
+                        format!("<{}>", arg.name)
+                    } else {
+                        format!("[{}]", arg.name)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let mut command = serde_json::json!({
+                "name": format!("{}:{}", server.name, prompt.name),
+                "description": prompt.description.clone().unwrap_or_default(),
+            });
+            if !hint.is_empty() {
+                command["input"] = serde_json::json!({ "hint": hint });
+            }
+            command
+        })
+    })
+    .collect()
+}
+
 /// The model, thinking and mode options showing `settings`. The model
 /// option offers `models`, plus the current model when they lack it.
 fn config_options(
@@ -1396,6 +1451,12 @@ mod tests {
     /// `sessions`, with one open session. Every session runs in
     /// `workdir`, asks before `ls` calls and generates a title.
     fn serve(scripts: Vec<Script>, workdir: &Path, sessions: &Path) -> Harness {
+        serve_with(scripts, workdir, sessions, false)
+    }
+
+    /// [`serve`], where every session also has the MCP server of
+    /// [`mcp_connection`] as `srv` when `mcp` is set.
+    fn serve_with(scripts: Vec<Script>, workdir: &Path, sessions: &Path, mcp: bool) -> Harness {
         let (srv_r, cli_w) = std::io::pipe().unwrap();
         let (cli_r, srv_w) = std::io::pipe().unwrap();
         let id = SessionId::new();
@@ -1417,6 +1478,8 @@ mod tests {
                             deny: Vec::new(),
                         },
                     );
+                    let mut tools = builtin_registry();
+                    let mcp = mcp.then(|| mcp_manager(&mut tools));
                     Ok(SessionSpec {
                         id,
                         model: model.to_owned(),
@@ -1424,11 +1487,11 @@ mod tests {
                             .with_workdir(&workdir)
                             .with_context_window(WINDOW),
                         recorder: None,
-                        tools: builtin_registry(),
+                        tools,
                         gate: PermissionGate::new(rules),
                         loop_cfg: LoopConfig::default(),
                         plugins: None,
-                        mcp: None,
+                        mcp,
                         interactive: true,
                         title: true,
                         agents: Some(AgentSetup {
@@ -1453,6 +1516,53 @@ mod tests {
             id,
             session: id.to_string(),
         }
+    }
+
+    /// An in-process MCP server with the prompt `p(a, b?)`, which answers
+    /// `p a=<a>`.
+    fn mcp_connection() -> Arc<kage_mcp::McpConnection> {
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_peer, cli_in, _c) = kage_jsonrpc::connect(BufReader::new(cli_r), cli_w);
+        let (srv_peer, srv_in, _s) = kage_jsonrpc::connect(BufReader::new(srv_r), srv_w);
+        std::thread::spawn(move || {
+            for msg in srv_in {
+                let Inbound::Request { id, method, params } = msg else {
+                    continue;
+                };
+                let outcome = match method.as_str() {
+                    "initialize" => Ok(serde_json::json!({
+                        "protocolVersion": kage_mcp::PROTOCOL_VERSION,
+                        "capabilities": { "tools": {}, "prompts": {} },
+                    })),
+                    "tools/list" => Ok(serde_json::json!({ "tools": [] })),
+                    "prompts/list" => Ok(serde_json::json!({ "prompts": [{
+                        "name": "p",
+                        "description": "Run p",
+                        "arguments": [{ "name": "a", "required": true }, { "name": "b" }],
+                    }] })),
+                    "prompts/get" => Ok(serde_json::json!({ "messages": [{
+                        "role": "user",
+                        "content": {
+                            "type": "text",
+                            "text": format!("p a={}", params["arguments"]["a"].as_str().unwrap()),
+                        },
+                    }] })),
+                    other => Err(RpcError::method_not_found(other)),
+                };
+                let _ = srv_peer.respond(&id, outcome);
+            }
+        });
+        let conn = kage_mcp::McpConnection::initialize("srv", cli_peer, cli_in, &[], None).unwrap();
+        Arc::new(conn)
+    }
+
+    fn mcp_manager(tools: &mut kage_tools::ToolRegistry) -> kage_mcp::McpManager {
+        let cfg = kage_core::config::McpConfig::default();
+        let (mut mcp, _errors) = kage_mcp::McpManager::spawn_all(&cfg, Vec::new(), None);
+        mcp.adopt("srv", mcp_connection());
+        assert!(mcp.register_into(tools).is_empty());
+        mcp
     }
 
     /// Collects `session/update` params until a permission request
@@ -2350,6 +2460,69 @@ mod tests {
         assert!(usage.get("cost").is_none());
         let info = &updates.last().unwrap()["update"];
         assert_eq!(info["title"], "Greeting title");
+    }
+
+    #[test]
+    fn mcp_prompts_are_commands_that_expand_when_sent_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = serve_with(vec![text_turn("ok")], dir.path(), dir.path(), true);
+
+        let updates = updates_until(&h.inbox, &h.session, "available_commands_update");
+        let update = &updates.last().unwrap()["update"];
+        assert_eq!(
+            update["availableCommands"],
+            serde_json::json!([{
+                "name": "srv:p",
+                "description": "Run p",
+                "input": { "hint": "<a> [b]" },
+            }])
+        );
+
+        assert_eq!(
+            prompt(&h.client, &h.session, "/srv:p x")["stopReason"],
+            "end_turn"
+        );
+        assert_eq!(h.mock.requests()[0].messages[0].content, [text("p a=x")]);
+    }
+
+    #[test]
+    fn a_session_without_mcp_prompts_gets_no_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = serve(vec![text_turn("ok")], dir.path(), dir.path());
+        prompt(&h.client, &h.session, "hi");
+        let updates = drain(&h.inbox);
+        assert!(!update_kinds(&updates).contains(&"available_commands_update"));
+    }
+
+    #[test]
+    fn only_live_servers_offer_commands_and_bare_prompts_take_no_input() {
+        use kage_core::protocol::McpPrompt;
+
+        let prompt = McpPrompt {
+            name: "p".into(),
+            description: None,
+            arguments: Vec::new(),
+        };
+        let server = |name: &str, status| McpServerInfo {
+            name: name.into(),
+            status,
+            tools: 0,
+            resources: Vec::new(),
+            templates: Vec::new(),
+            prompts: vec![prompt.clone()],
+        };
+        let failed = McpServerStatus::Failed {
+            error: "gone".into(),
+        };
+        let servers = [
+            server("down", failed),
+            server("auth", McpServerStatus::NeedsAuth),
+            server("up", McpServerStatus::Connected),
+        ];
+        assert_eq!(
+            prompt_commands(&servers),
+            [serde_json::json!({ "name": "up:p", "description": "" })]
+        );
     }
 
     #[test]

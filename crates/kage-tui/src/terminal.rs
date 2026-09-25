@@ -9,18 +9,27 @@
 //!
 //! Tests render against [`ratatui::backend::TestBackend`] directly; the
 //! lifecycle wrapper is only meaningful with a real tty.
+//!
+//! [`forward_typed_lines`] reads lines from the terminal while the TUI
+//! is suspended and stops on request, so a host flow that waits for
+//! either typed input or something else can hand the terminal back
+//! without asking for a key press.
 
 use std::io::{self, Write};
 use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::cursor::SetCursorStyle;
 use ratatui::crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use ratatui::crossterm::execute;
-use ratatui::crossterm::terminal::EnterAlternateScreen;
+use ratatui::crossterm::terminal::{self, EnterAlternateScreen};
 
 use crate::error::TuiError;
 
@@ -32,6 +41,9 @@ static PANIC_HOOK: Once = Once::new();
 /// `REPORT_EVENT_TYPES`) caused some terminals to ignore the entire
 /// request, dropping Shift+Enter back to plain Enter.
 const KITTY_FLAGS: KeyboardEnhancementFlags = KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
+
+/// How often [`forward_typed_lines`] checks its stop flag.
+const LINE_POLL: Duration = Duration::from_millis(50);
 
 /// Owns the terminal while the TUI is running. Restoring is automatic on
 /// drop and via a panic hook so a crashing run never strands the tty.
@@ -208,11 +220,156 @@ fn install_panic_hook() {
     });
 }
 
+/// Send each line typed on the terminal to `tx` until `stop` is set,
+/// `tx` closes or reading the terminal fails. Call it only while the
+/// TUI is suspended: the terminal is then in cooked mode, so it echoes
+/// and edits the line itself and crossterm reports the finished line
+/// as keys ending in Enter. Input typed but not submitted when it
+/// returns is discarded, so none of it reaches the TUI.
+pub fn forward_typed_lines(tx: &mpsc::Sender<String>, stop: &AtomicBool) {
+    let mut line = String::new();
+    while !stop.load(Ordering::SeqCst) {
+        match event::poll(LINE_POLL) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(_) => break,
+        }
+        let Ok(event) = event::read() else { break };
+        if let Some(done) = edit_line(&mut line, event)
+            && tx.send(done).is_err()
+        {
+            break;
+        }
+    }
+    discard_typed_input();
+}
+
+/// Apply one terminal event to the line being typed. Returns the line
+/// once Enter, or a line break inside a paste, finishes it.
+fn edit_line(line: &mut String, event: Event) -> Option<String> {
+    match event {
+        Event::Key(key) if key.kind != KeyEventKind::Release => match key.code {
+            KeyCode::Enter => Some(std::mem::take(line)),
+            KeyCode::Backspace => {
+                line.pop();
+                None
+            }
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                line.push(c);
+                None
+            }
+            _ => None,
+        },
+        Event::Paste(text) => {
+            if let Some((head, _)) = text.split_once(['\r', '\n']) {
+                line.push_str(head);
+                Some(std::mem::take(line))
+            } else {
+                line.push_str(&text);
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Drop what is left in the terminal's input. A line still being edited
+/// in cooked mode only becomes readable in raw mode, so this switches
+/// to raw mode while it drains and back afterwards.
+fn discard_typed_input() {
+    if terminal::enable_raw_mode().is_err() {
+        return;
+    }
+    while matches!(event::poll(Duration::ZERO), Ok(true)) {
+        if event::read().is_err() {
+            break;
+        }
+    }
+    let _ = terminal::disable_raw_mode();
+}
+
 #[cfg(test)]
 mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use ratatui::widgets::Paragraph;
+
+    use super::edit_line;
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::from(code))
+    }
+
+    #[test]
+    fn typed_characters_become_a_line_on_enter() {
+        let mut line = String::new();
+        for c in "http://x/cb?code=c".chars() {
+            assert_eq!(edit_line(&mut line, key(KeyCode::Char(c))), None);
+        }
+        assert_eq!(
+            edit_line(&mut line, key(KeyCode::Enter)).as_deref(),
+            Some("http://x/cb?code=c")
+        );
+        assert!(line.is_empty());
+        assert_eq!(
+            edit_line(&mut line, key(KeyCode::Enter)).as_deref(),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn backspace_removes_the_last_character() {
+        let mut line = "abc".to_owned();
+        assert_eq!(edit_line(&mut line, key(KeyCode::Backspace)), None);
+        assert_eq!(line, "ab");
+        line.clear();
+        assert_eq!(edit_line(&mut line, key(KeyCode::Backspace)), None);
+        assert!(line.is_empty());
+    }
+
+    #[test]
+    fn releases_control_keys_and_other_events_are_ignored() {
+        let mut line = "a".to_owned();
+        let release = KeyEvent::new_with_kind(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+            KeyEventKind::Release,
+        );
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        for event in [
+            Event::Key(release),
+            Event::Key(ctrl_c),
+            key(KeyCode::Tab),
+            key(KeyCode::Up),
+            key(KeyCode::Esc),
+            Event::Resize(80, 24),
+            Event::FocusGained,
+        ] {
+            assert_eq!(edit_line(&mut line, event), None);
+        }
+        assert_eq!(line, "a");
+        let release_enter =
+            KeyEvent::new_with_kind(KeyCode::Enter, KeyModifiers::NONE, KeyEventKind::Release);
+        assert_eq!(edit_line(&mut line, Event::Key(release_enter)), None);
+    }
+
+    #[test]
+    fn a_paste_joins_the_line_and_a_line_break_finishes_it() {
+        let mut line = "> ".to_owned();
+        assert_eq!(
+            edit_line(&mut line, Event::Paste("http://x".to_owned())),
+            None
+        );
+        assert_eq!(line, "> http://x");
+        let done = edit_line(&mut line, Event::Paste("/cb?code=c\nrest".to_owned()));
+        assert_eq!(done.as_deref(), Some("> http://x/cb?code=c"));
+        assert!(line.is_empty());
+    }
 
     /// Sanity check: ratatui can render a widget through `TestBackend`.
     /// Production `Tui` requires a tty, so renderer tests in this crate

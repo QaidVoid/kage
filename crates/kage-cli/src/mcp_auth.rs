@@ -35,7 +35,8 @@ use crate::oauth::REFRESH_SLACK;
 /// On-disk shape of `mcp-auth.json`.
 const FORMAT_VERSION: u32 = 1;
 
-/// How often the login checks for a pasted redirect while it waits.
+/// How often the login checks for a pasted redirect or a cancel while
+/// it waits.
 const POLL: Duration = Duration::from_millis(50);
 
 /// Serializes token refreshes in this process. Another kage process can
@@ -203,15 +204,17 @@ fn server_url<'a>(name: &str, servers: &'a BTreeMap<String, McpServer>) -> Resul
 /// Log in to MCP server `name` of `servers` and store its tokens at
 /// `path`. Prints the authorization URL and waits for the first of the
 /// browser coming back to the loopback listener or a redirect URL
-/// arriving on `pasted`. `open` tries to show the URL in a browser. The
-/// client id is the configured one, else the one stored by an earlier
-/// login at the same issuer, else a newly registered one.
+/// arriving on `pasted`, and gives up once `cancel` is set. `open`
+/// tries to show the URL in a browser. The client id is the configured
+/// one, else the one stored by an earlier login at the same issuer,
+/// else a newly registered one.
 pub(crate) fn login(
     name: &str,
     servers: &BTreeMap<String, McpServer>,
     path: &Path,
     pasted: &Receiver<String>,
     open: &dyn Fn(&str),
+    cancel: &AtomicBool,
 ) -> Result<(), String> {
     let url = server_url(name, servers)?;
     let config = servers[name].oauth.clone().unwrap_or_default();
@@ -249,7 +252,7 @@ pub(crate) fn login(
     eprintln!("kage: on another machine? paste the URL your browser was sent to and press Enter:");
     eprint!("> ");
     let _ = io::stderr().flush();
-    let code = wait_for_code(loopback, &expected, pasted).map_err(|e| e.to_string())?;
+    let code = wait_for_code(loopback, &expected, pasted, cancel).map_err(|e| e.to_string())?;
     let tokens = oauth::exchange(&discovery, &client_id, &redirect_uri, &code, &pkce)
         .map_err(|e| e.to_string())?;
     let mut store = McpAuthStore::load_from(path)?;
@@ -268,28 +271,36 @@ pub(crate) fn login(
     Ok(())
 }
 
-/// The first of the browser's redirect and a pasted one. Blank lines
-/// are ignored, and a closed input leaves only the browser. When the
-/// browser wins, the prompt line is ended.
+/// The first of the browser's redirect and a pasted one, or
+/// [`OAuthError::Cancelled`] once `cancel` is set. Blank lines are
+/// ignored, and a closed input leaves only the browser. When the
+/// browser wins or the wait is cancelled, the prompt line is ended.
 fn wait_for_code(
     loopback: Loopback,
     expected: &Expected,
     pasted: &Receiver<String>,
+    cancel: &AtomicBool,
 ) -> Result<AuthCode, OAuthError> {
-    let cancel = AtomicBool::new(false);
+    let stop = AtomicBool::new(false);
     thread::scope(|scope| {
-        let cancel = &cancel;
-        let browser = scope.spawn(move || loopback.wait(expected, oauth::LOGIN_TIMEOUT, cancel));
+        let stop = &stop;
+        let browser = scope.spawn(move || loopback.wait(expected, oauth::LOGIN_TIMEOUT, stop));
         let stopped = || OAuthError::Local("the loopback listener stopped".to_owned());
         loop {
             if browser.is_finished() {
                 eprintln!();
                 return browser.join().unwrap_or_else(|_| Err(stopped()));
             }
+            if cancel.load(Ordering::SeqCst) {
+                stop.store(true, Ordering::SeqCst);
+                let _ = browser.join();
+                eprintln!();
+                return Err(OAuthError::Cancelled);
+            }
             match pasted.recv_timeout(POLL) {
                 Ok(line) if line.trim().is_empty() => {}
                 Ok(line) => {
-                    cancel.store(true, Ordering::SeqCst);
+                    stop.store(true, Ordering::SeqCst);
                     let _ = browser.join();
                     return oauth::parse_redirect(&line, expected);
                 }
@@ -362,7 +373,14 @@ pub(crate) fn run_login(name: &str) -> ExitCode {
         let path = McpAuthStore::default_path()?;
         let (tx, rx) = mpsc::channel();
         thread::spawn(move || read_paste(&tx));
-        login(name, &servers, &path, &rx, &open_browser)
+        login(
+            name,
+            &servers,
+            &path,
+            &rx,
+            &open_browser,
+            &AtomicBool::new(false),
+        )
     });
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -396,22 +414,29 @@ pub(crate) fn run_logout(name: &str) -> ExitCode {
 }
 
 /// `/mcp login <server>` while the TUI is suspended: the login of
-/// [`run_login`] against the session's `servers`. Before returning it
-/// waits for the stdin reader, asking for Enter when the browser won,
-/// so no thread is left reading the terminal the TUI takes back.
+/// [`run_login`] against the session's `servers`. The terminal reader
+/// stops as soon as the login ends, so kage takes the terminal back
+/// without waiting for a key press. Ctrl+C cancels the login instead of
+/// ending kage.
 pub(crate) fn tui_login(name: &str, servers: &BTreeMap<String, McpServer>) -> Result<(), String> {
     let path = McpAuthStore::default_path()?;
-    let (tx, rx) = mpsc::channel();
-    let reader = thread::spawn(move || read_paste(&tx));
-    let result = login(name, servers, &path, &rx, &open_browser);
-    drop(rx);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let sigint = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&cancel)).ok();
+    let stop = AtomicBool::new(false);
+    let result = thread::scope(|scope| {
+        let (tx, rx) = mpsc::channel();
+        let stop = &stop;
+        scope.spawn(move || kage_tui::terminal::forward_typed_lines(&tx, stop));
+        let result = login(name, servers, &path, &rx, &open_browser, &cancel);
+        stop.store(true, Ordering::SeqCst);
+        result
+    });
+    if let Some(id) = sigint {
+        signal_hook::low_level::unregister(id);
+    }
     if let Err(e) = &result {
         eprintln!("kage: mcp login {name}: {e}");
     }
-    if !reader.is_finished() {
-        eprintln!("kage: press Enter to return to kage");
-    }
-    let _ = reader.join();
     result
 }
 
@@ -750,7 +775,15 @@ mod tests {
             authorize.clone_into(&mut lock(&opened));
         };
 
-        login("remote", &servers, &path, &rx, &open).unwrap();
+        login(
+            "remote",
+            &servers,
+            &path,
+            &rx,
+            &open,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
 
         let authorize = lock(&opened).clone();
         let params = url_form(authorize.split_once('?').unwrap().1);
@@ -792,8 +825,24 @@ mod tests {
             ))
             .unwrap();
         };
-        login("remote", &servers, &path, &rx, &open).unwrap();
-        login("remote", &servers, &path, &rx, &open).unwrap();
+        login(
+            "remote",
+            &servers,
+            &path,
+            &rx,
+            &open,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        login(
+            "remote",
+            &servers,
+            &path,
+            &rx,
+            &open,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
         let registered = lock(&server.seen)
             .iter()
             .filter(|s| s.path == "/register")
@@ -804,7 +853,15 @@ mod tests {
         let mut store = McpAuthStore::load_from(&path).unwrap();
         store.servers.get_mut(&url).unwrap().issuer = "https://other.example.com".to_owned();
         store.save_to(&path).unwrap();
-        login("remote", &servers, &path, &rx, &open).unwrap();
+        login(
+            "remote",
+            &servers,
+            &path,
+            &rx,
+            &open,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
         let registered = lock(&server.seen)
             .iter()
             .filter(|s| s.path == "/register")
@@ -835,7 +892,15 @@ mod tests {
             ))
             .unwrap();
         };
-        login("remote", &servers, &path, &rx, &open).unwrap();
+        login(
+            "remote",
+            &servers,
+            &path,
+            &rx,
+            &open,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
         let seen = lock(&server.seen);
         assert!(!seen.iter().any(|s| s.path == "/register"));
     }
@@ -846,10 +911,41 @@ mod tests {
         let path = dir.path().join("mcp-auth.json");
         let servers = BTreeMap::from([("local".to_owned(), server(Some("server"), None))]);
         let (_tx, rx) = mpsc::channel();
-        let err = login("local", &servers, &path, &rx, &|_| {}).unwrap_err();
+        let err = login(
+            "local",
+            &servers,
+            &path,
+            &rx,
+            &|_| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
         assert!(err.contains("stdio server"), "{err}");
-        let err = login("nope", &servers, &path, &rx, &|_| {}).unwrap_err();
+        let err = login(
+            "nope",
+            &servers,
+            &path,
+            &rx,
+            &|_| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
         assert!(err.contains("no MCP server named `nope`"), "{err}");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_cancelled_login_stores_nothing() {
+        let server = FakeServer::start();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-auth.json");
+        let url = format!("{}/mcp", server.base);
+        let servers = BTreeMap::from([("remote".to_owned(), http_server(&url))]);
+        let (_tx, rx) = mpsc::channel();
+        let cancel = AtomicBool::new(true);
+        let err = login("remote", &servers, &path, &rx, &|_| {}, &cancel).unwrap_err();
+        assert!(err.contains("cancelled"), "{err}");
+        assert!(server.tokens_issued().is_empty());
         assert!(!path.exists());
     }
 
@@ -865,7 +961,15 @@ mod tests {
             tx.send("http://127.0.0.1/callback?code=secret-code&state=forged".to_owned())
                 .unwrap();
         };
-        let err = login("remote", &servers, &path, &rx, &open).unwrap_err();
+        let err = login(
+            "remote",
+            &servers,
+            &path,
+            &rx,
+            &open,
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
         assert!(err.contains("wrong state"), "{err}");
         assert!(!err.contains("secret-code"), "{err}");
         assert!(server.tokens_issued().is_empty());

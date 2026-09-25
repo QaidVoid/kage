@@ -425,7 +425,7 @@ pub(crate) fn entry_kind(entry: &kage_session::SessionEntry) -> &'static str {
     }
 }
 
-/// Build the picker rows the App offers when the user hits `Ctrl+P`.
+/// Build the picker rows the App offers when the user hits `ctrl+p`.
 /// Iterates registered providers and pulls each one's catalog model
 /// list; when the catalog has no entry for a provider (e.g. plugin-
 /// registered providers), falls back to the live `Provider::models()`

@@ -52,7 +52,7 @@ Plugins and `init.lua` share this API but not the same privileges.
 | --- | --- | --- |
 | Capabilities (`exec`, `env`, `net`, `session_write`) | only when granted in `[plugins.capabilities]` and requested | all, without asking |
 | `require` | not available | confined to `~/.config/kage/lua/` |
-| Raw `io`, `os.execute`, `debug` | removed | removed |
+| `io.open`, `io.popen`, `os.execute`, `debug` | removed | removed |
 | Loaded by | the TUI, print mode and `kage rpc` | the TUI only |
 
 Each plugin and `init.lua` get their own copy of the `kage` tables. A
@@ -85,30 +85,65 @@ Record a structured log line. `level` is one of `"trace"`, `"debug"`,
 conversation, in order with the turn that logged it. Lines logged
 while kage starts show as `kage:log` blocks instead.
 
+### `kage.sleep_ms(ms: integer)`
+
+Sleep the Lua thread for `ms` milliseconds, at most 500 per call. Loop
+the call to wait longer.
+
+### `kage.json.encode(value)` / `kage.json.decode(raw: string)`
+
+Encode a Lua value as a JSON string, and decode a JSON string into the
+equivalent Lua value.
+
 ### `kage.config()`
 
-Return a copy of the host-supplied configuration table (the runtime
-build does not allow mutation back to the host).
+Return a copy of the host-supplied table `{ model, cwd, system_prompt }`.
+Changing the copy does not reach the host.
+
+### `kage.plugin_config()`
+
+Return this plugin's own settings from `[plugins.config.<stem>]` in
+`config.toml`, or an empty table. A plugin sees only its own table.
+
+```toml
+[plugins.config.branch]
+remote = "upstream"
+```
+
+### `kage.store`
+
+Private key-value state that survives reloads and restarts, one JSON
+file per plugin under `~/.local/share/kage/plugin-state/`.
+
+| Call | Effect |
+| --- | --- |
+| `kage.store.get(key)` | the saved value, or `nil` |
+| `kage.store.set(key, value)` | save any JSON-serializable value |
+| `kage.store.delete(key)` | remove a key |
+| `kage.store.keys()` | every saved key |
+
+### `kage.request_capabilities(names)` -> `{ name = granted }`
+
+Ask for the elevated APIs (`exec`, `env`, `net`, `session_write`) the
+user granted this plugin. See [capabilities](/plugins/capabilities).
 
 ## ui
 
 ### `kage.ui.notify(message: string, level?: string)`
 
 Show a transient toast in the TUI (stderr in print mode). `level` is
-`"info"` (default), `"warning"`, or `"error"`; non-info levels are
-also recorded through the log sink so the severity is not lost. An
+`"info"` (default), `"warning"`, or `"error"`. Other levels are also
+recorded through the log sink so the severity is not lost. An
 unrecognized level raises an error.
 
-`kage.notify(message)` is a back-compat alias for the same function;
-the optional level argument is additive, so existing single-argument
-callers are unaffected.
+`kage.notify(message, level?)` is an alias for the same function.
 
 ### blocking dialogs
 
 `kage.ui.select`, `confirm`, `input`, and `editor` look synchronous
-but do not block the host. The calling handler's coroutine *suspends*;
-the host opens the overlay, and when the user answers it resumes the
-coroutine with the result. Write them like ordinary blocking code:
+but do not block the host. The calling handler's coroutine *suspends*
+while the host opens the overlay, and the host resumes it with the
+user's answer. Write them like ordinary blocking code:
 
 ```lua
 local color = kage.ui.select("Pick a color", { "red", "green", "blue" })
@@ -122,15 +157,16 @@ Only one dialog can be open at a time per plugin runtime.
 
 ### `kage.ui.select(title: string, items)` -> value | nil
 
-Open a fuzzy picker. `items` is an array; each entry is either a
+Open a fuzzy picker. `items` is an array. Each entry is either a
 string (label and value both that string) or a table
 `{ label, value?, detail? }` (`value` defaults to `label`). Returns
 the chosen entry's `value`, or `nil` if the user cancelled.
 
 ### `kage.ui.confirm(title: string, message: string)` -> boolean
 
-Open a yes/no overlay. Returns `true` / `false`. Cancelling (Esc /
-Ctrl+C) counts as `false`, so the result is always a boolean.
+Open a yes/no overlay. `y` and `n` answer directly. Returns `true` or
+`false`. Cancelling with `esc` or `ctrl+c` counts as `false`, so the
+result is always a boolean.
 
 ### `kage.ui.input(title: string, placeholder?: string)` -> string | nil
 
@@ -140,8 +176,9 @@ result.
 
 ### `kage.ui.editor(title: string, prefill?: string)` -> string | nil
 
-Open a multi-line editor seeded with `prefill`. `Ctrl+S` submits,
-`Esc` cancels. Returns the final buffer, or `nil` if cancelled.
+Open a multi-line editor seeded with `prefill`. `ctrl+s` saves, and
+`esc` or `ctrl+c` cancels. Returns the final buffer, or `nil` if
+cancelled.
 
 ### `kage.ui.set_header(fn | nil)` / `kage.ui.set_footer(fn | nil)`
 
@@ -193,9 +230,10 @@ rule), `footer` or `start` (the start card). A row slot takes
 `notices`), a span table, or a Lua component
 `{ render = fn(ctx), events?, interval?, hl? }` whose output kage
 keeps and recomputes only when a listed event fires, the interval
-passes, the slot is set, `kage.api.redraw` is called or the width
-changes. `nil` restores the default spec. Unknown slots, components
-and events raise.
+(at least 50 ms) passes, the slot is set, `kage.api.redraw` is called
+or the width changes. An `events` entry may add a pattern after a
+space, such as `"tool_result bash"`. `nil` restores the default spec.
+Unknown slots, components and events raise.
 
 ```lua
 kage.ui.set_slot("header", {
@@ -220,19 +258,19 @@ view.
 
 ### `kage.register_block_renderer(kind, render | nil)`
 
-Own how a custom conversation block draws - the Emacs-style UI
-overhaul seam. Any `Block::Custom` whose `kind` matches (e.g. a
+Own how a custom conversation block draws. Any custom block whose
+`kind` matches (for example a
 `kage.session.append_entry("myplugin:card", ...)` entry) is painted
-by your `render` instead of the built-in header+body card. Pass
+by your `render` instead of the built-in header and body card. Pass
 `nil` to remove the renderer.
 
-`render(block)` receives `{ kind, text, width }` and returns the
-**exact same shape** as `set_header`: a string, a span table, or an
+`render(block)` receives `{ kind, text, folded, width }` and returns
+the **same shape** as `set_header`: a string, a span table, or an
 array of either (one line each). The host still adds the
-conversation's focus rule and spacing - the plugin owns the content.
-An error / non-conforming / empty return paints a visible
-`[block renderer ... produced no output]` marker, never a silent
-blank.
+conversation's focus rule and spacing, and the plugin owns the
+content. An error, a non-conforming value or an empty return paints
+a visible `[block renderer ... produced no output]` marker, never a
+silent blank.
 
 ```lua
 kage.register_block_renderer("myplugin:card", function(b)
@@ -257,19 +295,19 @@ instead of a custom one to re-skin a built-in block type:
 | `tool_result` | `{ name, output, is_error, folded, duration_ms }` (orphan) |
 | `custom`      | default `{ kind, text, folded }` fallback for any unhandled custom kind |
 
-Every payload also carries `kind` and `width`. `tool_call` /
-`tool_result` overrides only affect *unpaired* tool blocks; a merged
-call+result pair spans two blocks and is not overridable through this
-single-block path.
+Every payload also carries `kind` and `width`. `tool_call` and
+`tool_result` overrides only affect *unpaired* tool blocks. A merged
+call and result pair spans two blocks and cannot be overridden through
+this single-block path.
 
 While your output for a block is still being computed, an override of
 a built-in kind paints the built-in widget, so a streaming `assistant`
 block does not flicker. A custom kind shows a dim `...` until its
 output arrives.
 
-Same retained-output and cost rule as `set_header`. The picker a plugin needs for
-interactive UI is [`kage.ui.select`](#blocking-dialogs) - there is no
-separate `open_picker`. See `plugins/examples/block_renderer_demo.lua`.
+Same retained-output and cost rule as `set_header`. For an
+interactive picker, use [`kage.ui.select`](#blocking-dialogs). See
+`plugins/examples/block_renderer_demo.lua`.
 
 ## tools
 
@@ -284,7 +322,7 @@ built-in `read` or `bash`. Spec fields:
   description = "echo back the input",        -- string, required
   schema      = { type = "object" },          -- json schema, required
   risk        = "read",                       -- "read" | "write" | "exec" | "network"
-  execute     = function(input) ... end,      -- (table) -> string | table
+  execute     = function(input) ... end,      -- (table) -> string or table
 }
 ```
 
@@ -304,14 +342,15 @@ return {
 ### `kage.override_tool(spec)`
 
 Same shape as `register_tool` but replaces the existing entry by name.
-Useful for sandboxing `bash`, auditing `write`, etc. The host logs a
-warning if no tool with that name was previously registered.
+Useful for filtering `bash` or auditing `write`. The override replaces
+the tool, so it must do the work itself. The host logs a warning if no
+tool with that name was previously registered.
 
 ## commands
 
 ### `kage.register_command(spec)`
 
-Register a slash / colon command:
+Register a slash or colon command:
 
 ```lua
 {
@@ -329,9 +368,9 @@ Register a slash / colon command:
 
 The handler receives three arguments:
 
-- `raw` - the text typed after the command name, unparsed.
-- `ctx` - reserved for host context. It is currently `nil`.
-- `args` - a table keyed by arg name, holding the values parsed from
+- `raw`: the text typed after the command name, unparsed.
+- `ctx`: reserved for host context. It is currently `nil`.
+- `args`: a table keyed by arg name, holding the values parsed from
   `raw` using the declared `args` list. Omitted optional args are
   absent.
 
@@ -339,12 +378,13 @@ The handler may return `nil`, a string (the command output), or a
 table `{ text, is_error? }`.
 
 Argument `kind` values: `"text"`, `"choice"`, `"path"`, `"session"`,
-`"flag"`. For `"choice"`, also supply `choices = { "...", ... }`.
+`"flag"`. For `"choice"`, also supply `choices = { "...", ... }`. A
+`"text"` argument may set `hint`, the placeholder shown in the palette.
 
-`aliases` are alternate names that resolve to the same command (so
-`:br` runs `:branch`); they appear in the palette and `:help`. A
+`aliases` are alternate names that resolve to the same command, so
+`:br` runs `:branch`. They appear in the palette and `:help`. A
 command is rejected whole if its name *or* any alias collides with a
-built-in - use `kage.override_command` to shadow a built-in on
+built-in. Use `kage.override_command` to shadow a built-in on
 purpose.
 
 The handler runs through the coroutine bridge, so it may call the
@@ -395,8 +435,8 @@ conversation block, like a command.
 ### `kage.keymap.del(mode, lhs)`
 
 **Since API 2.** Remove a mapping. Raises when there is none. Keys the
-editor grammar handles (vim motions, readline edits, Enter, Esc) are
-not mappings. Shadow them with `"<Nop>"` instead.
+editor grammar handles (vim motions, readline edits, `enter`, `esc`)
+are not mappings. Shadow them with `"<Nop>"` instead.
 
 ### `kage.action`
 
@@ -436,9 +476,10 @@ Vim notation (`<C-S-x>`, `<F5>`) works too.
 A plugin mapping replaces a default mapping on the same key, and a
 mapping from `config.toml` or `init.lua` replaces the plugin one.
 Mappings never apply while a modal layer, such as a picker or the
-approval panel, is open. `Ctrl+Q` and `Ctrl+C` stay with kage's quit
-and escalation hatches, and a plugin mapping on them never fires and
-logs a warning. The handler runs through the
+approval panel, is open. `ctrl+q` and `ctrl+c` stay with kage's quit
+and interrupt keys, and a plugin mapping on them never fires and logs
+a warning. Only a mapping from `config.toml` or `init.lua` can take
+them over. The handler runs through the
 coroutine bridge, so it too may open [`kage.ui.*`](#ui) dialogs, and a
 non-empty string return is shown as a conversation block.
 
@@ -447,15 +488,15 @@ non-empty string return is shown as a conversation block.
 ### `kage.add_autocomplete_provider({ name, complete })`
 
 Add a completion provider for the prompt input. Providers form a
-stack: the host consults them in reverse registration order (the
-most recently added wins) on each input change and shows the first
+stack. On each input change the host consults them in reverse
+registration order (the most recently added wins) and shows the first
 non-empty result in a popup above the input box. Re-adding a
 provider with the same `name` replaces it in place.
 
 `complete(prefix, ctx)` is called with the run of non-whitespace
-characters before the cursor and `ctx = { text, cursor }` (the full
+characters before the cursor and `ctx = { text, cursor }`, the full
 input and the cursor byte offset, so a provider can tokenize
-differently, e.g. an `@`-trigger). It returns an array of items:
+differently. It returns an array of items:
 
 ```lua
 kage.add_autocomplete_provider({
@@ -469,21 +510,30 @@ kage.add_autocomplete_provider({
 })
 ```
 
-Item fields: `value` (required; the replacement text), `label`
-(defaults to `value`), `detail` (optional dim annotation), `range`
-(optional `{ from, to }` 0-based byte offsets to overwrite; absent
-means the host replaces the matched prefix). A `nil`/non-table
-return or an error yields no items.
+Item fields:
 
-In the popup: `Up`/`Down` (or `Ctrl-p`/`Ctrl-n`) navigate, `Tab`
-accepts, `Esc` dismisses; any other key passes through to normal
-editing and re-queries. Providers run synchronously on the Lua thread
-and return nothing while it is busy with a tool, so keep them cheap.
+- `value` (required): the replacement text.
+- `label`: the row text, `value` by default.
+- `detail`: an optional dim annotation.
+- `range`: optional `{ from, to }` 0-based byte offsets to overwrite.
+  Without it the host replaces the matched prefix.
 
-A built-in provider sits at the bottom of the stack: when the token
-under the cursor starts with `@`, it completes workdir-relative file
-paths (directories first, dotfiles only when typed). It is the
-foundation for `@file` references and needs no plugin.
+A `nil` or non-table return, or an error, yields no items.
+
+In the popup, `up` and `down` (or `ctrl+p` and `ctrl+n`) move,
+`tab` or `enter` accepts, and `esc` dismisses. Any other key passes
+through to normal editing and queries the providers again. Providers
+run synchronously on the Lua thread and return nothing while it is
+busy with a tool, so keep them cheap.
+
+Built-in completion sits at the bottom of the stack and needs no
+plugin. When the token under the cursor starts with `@`, it
+fuzzy-matches workdir-relative paths, honoring `.gitignore` and
+`.kageignore`, and directories end in `/`. Accepting one inserts the
+path as text, such as `@src/main.rs`. The file is not attached: the
+model sees the literal text and reads the file with its tools when it
+needs to. `@server:` completes the resources of an MCP server, which
+kage does expand (see [mcp](/guide/mcp#resources-and-mentions)).
 
 ## raw input
 
@@ -491,8 +541,8 @@ foundation for `@file` references and needs no plugin.
 
 Register a handler the host calls for every key *before* any modal
 layer or built-in binding sees it. Returning a truthy value consumes
-the event. The call returns an `off` function; invoking it
-unregisters that handler (idempotent).
+the event. The call returns an `off` function that unregisters the
+handler. Calling it again does nothing.
 
 ```lua
 local off = kage.on_terminal_input(function(ev)
@@ -506,17 +556,17 @@ end)
 ```
 
 `code` is `"char"` (with `char` set), `"enter"`, `"esc"`, `"tab"`,
-`"backtab"`, `"backspace"`, an arrow / nav key, `"f1"`..`"f12"`, or
-`"other"`. Handlers run synchronously on the Lua thread; a handler that
-takes longer than 20 ms lets the key through.
+`"backtab"`, `"backspace"`, an arrow or navigation key, `"f1"` to
+`"f12"`, or `"other"`. Handlers run synchronously on the Lua thread.
+A handler that takes longer than 20 ms lets the key through.
 
 This is a sharp tool. Prefer
 [`kage.register_keybinding`](#keybindings) for "run X on chord Y":
 it is declarative, appears in help, and cannot wedge the UI. A
 handler that always returns truthy makes the editor unusable, so
-the host still honors its hard `Ctrl+Q` quit hatch ahead of these
-hooks. A handler error or non-boolean return is treated as "not
-consumed".
+the host still handles its `ctrl+q` quit and `ctrl+c` interrupt keys
+ahead of these hooks. A handler error or non-boolean return is treated
+as "not consumed".
 
 ## widgets and status
 
@@ -564,8 +614,8 @@ payload alone.
 
 The call returns an `off` function that removes this subscription.
 Calling `off` more than once does nothing. A handler may call `off`
-while it runs, for itself or another subscription; the change applies
-from the next dispatch.
+while it runs, for itself or another subscription, and the change
+applies from the next dispatch.
 
 ```lua
 local off
@@ -593,19 +643,22 @@ Plain notification events (the handler's return value is ignored):
 | `tool_result`            | `{ id, name, is_error, text }`                    |
 | `model_select`           | `{ prev, next, source }`                          |
 | `thinking_level_select`  | `{ prev, next, source }`                          |
-| `user_bash`              | `{ cmd, exit_code }`                              |
+| `user_bash`              | reserved, never fired                             |
 | `permission_mode_select` | `{ prev, next, source }`                          |
 | `option_set`             | `{ name, old, new, source }`                      |
 | `color_scheme`           | `{ name }`                                        |
 | `user`                   | the `data` passed to `kage.api.autocmd_exec`      |
 
-`usage` is `{ input, output, cache_read, cache_write }`. For
-`model_select`, `source` is `"set"`. For `thinking_level_select`,
-`prev` and `next` are level names (`"default"` for the automatic
-level) and `source` is `"cycle"` or `"settings"`. `user_bash` fires after an
-inline `!cmd` from the input pane completes; `exit_code` is `nil`
-when the command was killed by a signal. `tool_update` only fires
-when at least one handler is subscribed. `option_set` fires when
+`usage` is `{ input, output, cache_read, cache_write }`.
+`model_select`, `thinking_level_select` and `permission_mode_select`
+fire in the TUI only. For `model_select`, `source` is `"set"`. For
+`thinking_level_select`, `prev` and `next` are level names
+(`"default"` for the automatic level) and `source` is `"cycle"` or
+`"settings"`. For `permission_mode_select`, `prev` and `next` are
+`"default"`, `"ask"` or `"deny"` and `source` is `"command"`. kage
+accepts the `user_bash` name but does not fire it yet, so a `!` shell
+command reaches no plugin. `tool_update` only fires when at least one
+handler is subscribed. `option_set` fires when
 `kage.opt.<name>` is assigned (`source` is `"lua"`) or a command or
 the settings dialog changes an option (`source` is `"runtime"`).
 `color_scheme` fires after the theme's base highlight groups change,
@@ -617,37 +670,37 @@ and once at the end of every load. `user` fires only through
 These chain: each handler receives the value the previous one
 produced and returns a replacement, or `nil` for "no change".
 
-- `transform_context` - argument is the message-history array; the
-  loop replaces history with whatever the last handler returns.
-  Use it to redact secrets or trim old tool output per turn.
-- `before_provider_request` - argument is the serialized provider
-  request; rewrite it to inject a system header, strip a tool, or
+- `transform_context`: the argument is the message-history array,
+  and the loop replaces history with whatever the last handler
+  returns. Use it to redact secrets or trim old tool output per turn.
+- `before_provider_request`: the argument is the serialized provider
+  request. Rewrite it to inject a system header, strip a tool, or
   swap the model.
 
   See `plugins/examples/transform_demo.lua` for a worked example
   that scrubs secret tokens via `transform_context` and stamps the
   current date into the system prompt via `before_provider_request`.
-- `compact_prepare` - fired right before history compaction calls
-  the summarizer model. Argument is
+- `compact_prepare`: fired right before history compaction calls
+  the summarizer model. The argument is
   `{ transcript, instruction, prompt, model, summarized, kept }`.
-  Return a table with `prompt` and/or `instruction` to steer the
+  Return a table with `prompt` or `instruction` (or both) to steer the
   summary, or `summary` to skip the model call entirely and use
-  that text as the summary body. `nil` passes through unchanged; an
-  error aborts compaction.
+  that text as the summary body. `nil` passes through unchanged, and
+  an error aborts compaction.
 
 ### predicate hook
 
-- `should_stop_after_turn` - argument is the turn summary; any
-  handler returning `true` halts the run after `turn_end` (a
-  plan-mode plugin can stop before execution).
+- `should_stop_after_turn`: the argument is the turn summary
+  `{ index, had_tool_calls, usage }`. Any handler returning `true`
+  halts the run after `turn_end`, so a plan-mode plugin can stop
+  before execution.
 
 ### cancellable session-op hooks
 
 `session_before_switch` and `session_before_fork` fire before the
-host runs the action. The
-argument is the target string (session id / entry id). Return
-`nil` to proceed, `{ cancel = "reason" }` to veto, or
-`{ patch = "new-target" }` to redirect.
+host runs the action. The argument is the target string (a session id
+or an entry id). Return `nil` to proceed, `{ cancel = "reason" }` to
+veto, or `{ patch = "new-target" }` to redirect.
 
 ### `resources_discover`
 
@@ -786,13 +839,13 @@ end
 ### `kage.session.fork(at?: string)`
 
 Ask the host to fork the current session at entry-id prefix `at`
-(or the latest entry when omitted). Returns `nil`; the host drains
-the request between turns and writes a new session file.
+(or the latest entry when omitted). Returns `nil`. The host takes the
+request between turns and writes a new session file.
 
 ### `kage.session.append_entry(kind: string, data?: table)`
 
 Append a custom entry to the session JSONL. `kind` is a non-empty
-namespaced string (e.g. `"my-plugin:bookmark"`); `data` is any
+namespaced string such as `"my-plugin:bookmark"`. `data` is any
 table, JSON-serialized (defaults to `{}`). The host writes it
 between turns. Pair it with a custom block renderer to display
 your own entry kind end to end.
@@ -800,8 +853,8 @@ your own entry kind end to end.
 ### `kage.session.set_label(anchor: string, label?: string)`
 
 Write a label entry pointing at the entry id `anchor`. Passing
-`label = nil` clears it. Used for bookmarking / "mark this point"
-workflows.
+`label = nil` clears it. Use it to bookmark a point in the
+conversation.
 
 ## conversation
 
@@ -822,21 +875,24 @@ doing the wrong thing.
 
 ### `kage.context_usage()`
 
-Snapshot the current per-turn token usage:
+Snapshot the session's token usage:
 
 ```lua
 local u = kage.context_usage()
-print(u.model, u.input_tokens, u.output_tokens, u.context_window)
+if u then print(u.model, u.current_context, u.context_window) end
 ```
 
-Returns `nil` until the host has run at least one turn.
+The table holds `model`, `input_tokens`, `output_tokens`,
+`cache_read_tokens`, `cache_write_tokens`, `current_context`,
+`context_window` and `working`. The TUI fills it. It is `nil` before
+that, and always in print mode and `kage rpc`.
 
 ### `kage.compact(prompt?: string)`
 
-Ask the host to run a compaction pass. The optional prompt is
-advisory; for full control over the summary subscribe to the
+Ask the TUI to compact the conversation, as `/compact` does. kage does
+not use `prompt`. To steer the summary, subscribe to the
 [`compact_prepare`](#transform-hooks) transform event, which can
-rewrite the prompt/instruction or replace the summary outright.
+rewrite the prompt and instruction or replace the summary outright.
 
 ## fs
 
@@ -851,23 +907,31 @@ Write a file under the workdir. Same path restriction as `read`.
 
 ## http
 
-`kage.http` is gated behind the `net` capability: a plugin must be
+`kage.http` is gated behind the `net` capability. A plugin must be
 granted `net` in `[plugins.capabilities]` and request it at load time
-before `kage.http` is attached to its environment. Only SSRF filtering
-applies (the scheme must be http(s) and the host must resolve to a
-routable address); there is no host allow-list.
+before `kage.http.get`, `post`, `delete` and `post_stream` are
+attached to its environment. Only SSRF filtering applies: the scheme
+must be http(s) and the host must resolve to a routable address. There
+is no host allow-list. See [capabilities](/plugins/capabilities#net)
+for the options and results.
 
-### `kage.http.get(url: string)`
+## acp and mcp
 
-HTTP GET. Returns `{ status, body, content_type, truncated }`.
+`kage.acp.add_agent(spec)` declares an upstream ACP agent and
+`kage.on_acp_permission(fn)` decides its tool requests. See
+[acp client](/editors/acp-client#configure-from-a-plugin).
+
+`kage.mcp.add_server(spec)`, `kage.mcp.list_servers()` and
+`kage.mcp.restart(name)` declare, list and restart MCP servers. See
+[mcp](/guide/mcp#declaring-servers-from-a-plugin).
 
 ## providers
 
 ### `kage.register_provider(spec)`
 
-Register a new LLM provider implementation. Advanced; a streaming
-provider makes outbound requests via `kage.http.post_stream`, so it
-also needs the `net` capability. See `plugins/types/kage.lua` for the
+Register a new LLM provider implementation. This is advanced. A
+streaming provider makes outbound requests via `kage.http.post_stream`,
+so it also needs the `net` capability. See `plugins/types/kage.lua` for the
 full spec shape.
 
 ## `kage.api` reference

@@ -4,7 +4,7 @@
 -- On `agent_end`, computes throughput against wall-clock and pushes a
 -- one-line summary through `kage.notify`.
 --
--- Drop into ~/.kage/plugins/ and load with `cargo run -p kage-cli -- ...`.
+-- Drop into ~/.config/kage/plugins/ and load with `cargo run -p kage-cli -- ...`.
 
 local started_at = nil
 local total_output = 0

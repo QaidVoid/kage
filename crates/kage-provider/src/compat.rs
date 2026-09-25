@@ -2,7 +2,7 @@
 //!
 //! Every entry here streams tool-call deltas through the same `OpenAI`
 //! Chat Completions protocol; only the id, display name, and upstream
-//! base URL differ (caching and thinking are off for all). They are
+//! base URL differ. They are
 //! described once in the [`COMPAT_PROVIDERS`] table and built on demand
 //! with [`CompatProvider::build`]; [`crate::catalog`] carries the
 //! matching model lists. [`OpenAiProvider`] detects the Z.AI and Zhipu

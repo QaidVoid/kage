@@ -127,7 +127,7 @@ pub const OPTIONS: &[OptionDef] = &[
             values: &["full", "last", "none"],
             default: "full",
         },
-        doc: "What prints after exit: the whole transcript, from the last prompt on, or only the session path.",
+        doc: "What prints after exit: the whole transcript, from the last prompt on, or only the session path and a resume hint.",
         live: true,
     },
     OptionDef {

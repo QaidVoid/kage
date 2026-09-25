@@ -449,8 +449,8 @@ pub struct CustomProviderModel {
     pub input: Inputs,
     /// Assistant message field (`reasoning_content` or
     /// `reasoning_details`) an `openai` kind model reads its reasoning
-    /// back from during a tool loop. Unset keeps reasoning out of
-    /// requests.
+    /// back from during a tool loop. Unset sends reasoning back as
+    /// `<thinking>` text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interleaved: Option<ReasoningField>,
 }
@@ -518,8 +518,8 @@ pub struct UiConfig {
     pub thinking_level: Option<String>,
     /// What prints to the terminal after exit: `full` for the whole
     /// transcript, `last` for the last prompt and what followed, or
-    /// `none` for only the session path. Validated by the option
-    /// registry, which keeps the default for any other value.
+    /// `none` for only the session path and a resume hint. Validated by
+    /// the option registry, which keeps the default for any other value.
     pub transcript_on_exit: String,
 }
 

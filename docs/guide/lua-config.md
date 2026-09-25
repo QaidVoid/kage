@@ -18,8 +18,10 @@ kage reads `$XDG_CONFIG_HOME/kage/init.lua`, which is
   `kage mcp serve` read `config.toml` only.
 - A project's `.kage/init.lua` is never loaded. Project settings go in
   `.kage/config.toml` (see [configuration](/guide/config)).
-- An error in `init.lua` is logged as an error block in the
-  conversation. kage still starts, with its defaults and your plugins
+- An error in `init.lua` shows as an error block in the
+  conversation, such as `init.lua: runtime error: init.lua:3: boom`
+  followed by `Fix init.lua, then run /reload.` The Lua traceback is
+  left out. kage still starts, with its defaults and your plugins
   loaded.
 
 `require` loads modules from the `lua/` directory next to `init.lua`.
@@ -82,7 +84,8 @@ variables before step 1.
 
 kage watches the plugins directory, `init.lua` and `lua/` (recursively)
 and reloads when a Lua file changes. A `lua/` directory created while
-kage runs is watched too. `/reload` reloads right away. A reload
+kage runs is watched too. `/reload` reloads right away and reports the
+result, such as `plugins reloaded (2 loaded, init.lua ok)`. A reload
 clears keymaps, autocmds, slots, timers and everything plugins
 registered, then runs the steps above again. It does not revert
 options or highlight overrides. If you delete
@@ -121,8 +124,8 @@ value)` is the same as assigning.
 
 `transcript_on_exit` picks what kage prints to the terminal after you
 quit: the whole conversation as plain text, only the part from your
-last prompt on, or nothing. The session file path follows when the
-session was recorded.
+last prompt on, or nothing. When the session was recorded, the session
+file path and a `kage resume <id>` hint follow.
 
 `thinking_level` and `compaction_threshold` set in `init.lua` apply to
 the first session, because kage starts it after `init.lua` has run. An
@@ -134,8 +137,8 @@ lets only the main session start agents. `agent_max_running` limits
 how many agents run at once, and further agents wait their turn. Both
 are read once when the TUI starts, after `init.lua` has run.
 
-Every set fires the [`option_set`](#configuration-events) event. `:theme set`,
-`:mouse` and the `:settings` dialog set options too, with source
+Every set fires the [`option_set`](#configuration-events) event. `/theme set`,
+`/mouse` and the `/settings` dialog set options too, with source
 `runtime`. The settings dialog marks options last set from Lua, since
 `init.lua` shadows a saved TOML value on the next start.
 
@@ -265,19 +268,20 @@ kage.keymap.del("g", "<C-s>")           -- remove the session picker key
 
 The editor grammar stays in Rust and is not in the table: vim motions,
 operators, counts, registers, `r`, undo and redo, readline edits and
-the kill ring, Enter, Shift+Enter and Alt+Enter, history Up and Down,
-Esc, insert-mode Ctrl+O, Ctrl+G (external editor), the modeless `/`,
+the kill ring, `enter`, `shift+enter` and `alt+enter`, history `up`
+and `down`, `esc`, insert-mode `ctrl+o`, `ctrl+g` (external editor), the modeless `/`,
 `!` and `?` empty-prompt prefixes, and `i` and `a` in the conversation
 pane. A mapping or `"<Nop>"` on one of these keys shadows it.
 `kage.keymap.del` cannot remove it.
 
-Ctrl+Q (quit) and Ctrl+C work above every layer, including overlays.
-Ctrl+C clears the draft, else interrupts the run, else arms quit (see
-[keybindings](/guide/keybindings#esc-and-ctrl-c)). Both yield only
+`ctrl+q` (quit) and `ctrl+c` work above every layer, including overlays.
+`ctrl+c` clears the draft, else interrupts the run, else arms quit (see
+[keybindings](/guide/keybindings#esc-and-ctrl-c)). While kage is idle,
+`ctrl+c` closes an open overlay instead. Both yield only
 to a mapping owned by `init.lua` or `config.toml`. A plugin mapping on
 them never fires and logs a warning.
 
-`:keybindings` (alias `:keys`) lists the whole table per mode with the
+`/keybindings` (alias `/keys`) lists the whole table per mode with the
 owner of each mapping: `defaults`, a plugin name, `config.toml` or
 `init.lua`.
 
@@ -535,10 +539,10 @@ An item is one of:
 | `thinking` | the thinking level the next run sends, such as `thinking high (auto)` (`auto` when you have not chosen one), hidden when off |
 | `permission` | a session permission override, such as `ask mode`, hidden when there is none |
 | `mode` | `NORMAL`, `INSERT` or `VISUAL` in vim mode, `shell` while `!` shell mode is armed, nothing otherwise |
-| `hint` | what the next keys do: the pending keys of a mapping sequence, the keys of the approval panel, the `/` palette or the `?` help, `ctrl+c again to quit` or `draft cleared, up restores it`, else a hint for the current state such as `? for shortcuts`, `tab to queue`, `ctrl+t for agents`, or `enter to steer`, `esc to go back` and `ctrl+c to stop` in an agent view |
+| `hint` | what the next keys do: the pending keys of a mapping sequence, the keys of the open picker, dialog, approval panel, palette, `:` line or search line, `ctrl+c again to quit` or `draft cleared, up restores it`, else a hint for the current state such as `? for shortcuts`, `tab to queue`, `ctrl+t for agents`, or `enter to steer`, `esc to go back` and `ctrl+c to stop` in an agent view |
 | `cwd` | the working directory |
 | `version` | the kage version |
-| `sessions` | `start` only: the three most recent sessions with their times |
+| `sessions` | `start` only: the three most recent sessions with their titles and times |
 | `notices` | `start` only: startup notices, such as a missing credential and the `/login` command that fixes it |
 
 Keys named in hints follow your mappings. Remapping
@@ -650,7 +654,7 @@ map("b", "<C-d>", act.scroll(20), { desc = "scroll down a page", group = "mine" 
 map("i", "<C-l>", function()
   kage.notify("hello from init.lua")
 end, { desc = "say hello", group = "mine" })
-kage.keymap.del("g", "<C-s>") -- give Ctrl+S back
+kage.keymap.del("g", "<C-s>") -- give ctrl+s back
 
 -- Autocmds. The group makes a reload replace them instead of adding more.
 local g = api.augroup_create("me")

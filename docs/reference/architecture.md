@@ -26,7 +26,7 @@ the only crate that wires the whole graph together.
 | ---------------- | --------------------------------------------------- |
 | `kage-core`      | Message types, content blocks, errors, the cancel tree, the engine protocol (events, commands, the agent tree and the MCP catalog types), the resource block format, agent definitions, the keymap, option and highlight registries |
 | `kage-jsonrpc`   | Shared bidirectional JSON-RPC peer over stdio, with an optional cancel notice per connection |
-| `kage-provider`  | LLM provider clients, registry, model catalog       |
+| `kage-provider`  | LLM provider clients, registry, the bundled model catalog and the optional cache that `kage models refresh` writes |
 | `kage-tools`     | Tool trait, built-in tools, tool registry           |
 | `kage-session`   | Append-only JSONL writer, replay, fork, search      |
 | `kage-loop`      | The agent loop, compaction, hooks                   |
@@ -199,6 +199,10 @@ event stream into ACP traffic with one bus subscriber:
   child's id. A client session's prompt answers only after every child
   has sent its final state. Other clients get agent progress and asks
   on the root session's `agent` call.
+
+Updates for a session are held until the response to the
+`session/new`, `session/load` or `session/resume` that names it is
+written, so a client never sees them first.
 
 Config option changes and prompts become ordinary engine commands, so
 the editor, the TUI and print mode share one implementation.

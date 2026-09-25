@@ -134,7 +134,7 @@ in to a server that needs it with `/mcp login` or `kage mcp login`.
 ## resources and `@` mentions
 
 Servers that list resources can have them attached to a prompt. Type
-`@` in the TUI: the completion popup lists files as usual, plus every
+`@` in the TUI: the completion popup lists files, plus every
 server that lists resources or resource templates as `<server>:`,
 tagged `mcp server`. Pick a server, or type `@<server>:`, and the popup
 lists that server's resources, matched against their URI and name,
@@ -148,7 +148,11 @@ for example `mcp fix: test://item/{id}: fill in {id} first`.
 > what is in @everything:test://static/resource/1
 ```
 
-On Enter, kage reads every mentioned resource with `resources/read`,
+A file picked from the popup is only a path in your text, such as
+`@src/main.rs`. The model reads the file with its tools if it needs
+to. A server mention is different.
+
+When you send the prompt, kage reads every mentioned resource with `resources/read`,
 once per distinct URI, and appends it to the same user message. The
 text you typed stays as it is. The transcript shows one line per
 resource:
@@ -192,7 +196,7 @@ never waits on the network.
 
 Mentions are expanded when a run starts. In the TUI a prompt with a
 mention therefore always waits for the current run to end, even when
-you press `Enter` to steer. Print mode and editors expand mentions the
+you press `enter` to steer. Print mode and editors expand mentions the
 same way: `kage -p "summarize @docs:file:///notes.md"` works.
 
 ### the `mcp_resource` tool
@@ -259,20 +263,24 @@ broken       failed        spawn `nope`: No such file or directory
 ```
 
 A connected row counts the server's tools, then its prompts,
-resources and resource templates when it has any. A failed row shows the first line of its
-error.
+resources and resource templates when it has any. A failed row shows
+the first line of its error.
 
-- `Enter` on a `needs login` row starts the login.
-- `Enter` on any other row restarts the server.
+- `enter` on a `needs login` row starts the login.
+- `enter` on any other row restarts the server.
+
+With no servers configured, `/mcp` says so instead:
+`no MCP servers configured. Add one under [mcp.servers.<name>] in
+config.toml, then restart kage.`
 
 `/mcp restart <server>` and `/mcp login <server>` do the same without
 the picker.
 
 A restart spawns the server again from its configuration and swaps it
 in only once the new process is up, so a restart that fails leaves a
-running server in place. A notice reports the restart or its error.
-When kage is idle the restart happens
-at once. During a run it waits for the next run to start, because
+running server in place. A notice reports the restart, such as
+``restarted `linear` ``, or its error. When kage is idle the restart
+happens at once. During a run it waits for the next run to start, because
 tool calls in flight hold the old connection.
 
 ## logging in to remote servers
@@ -322,7 +330,7 @@ The browser returns to a one-shot listener on
 such as over SSH, open the URL elsewhere, then paste the address the
 browser was sent to (the page will not load) and press Enter.
 
-In the TUI, `/mcp login linear` or `Enter` on a `needs login` row runs
+In the TUI, `/mcp login linear` or `enter` on a `needs login` row runs
 the same flow: the TUI steps aside the way `/login` does, and when the
 login succeeds it says `mcp linear: logged in, reconnecting` and
 restarts the server.
@@ -416,8 +424,7 @@ never recorded in the session file.
 
 ## declaring servers from a plugin
 
-Plugins configure; core spawns (the `nvim-lspconfig` model). From
-Lua:
+A plugin declares a server and kage spawns it. From Lua:
 
 ```lua
 kage.mcp.add_server({

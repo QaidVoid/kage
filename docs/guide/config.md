@@ -13,9 +13,9 @@ Keys are grouped into tables:
 
 ```toml
 [provider]
-# model used when -m/--model is absent. beats the last-used model
-# memory; must name a provider whose credentials are available, or
-# the saved last model / built-in order is used instead.
+# model used when -m/--model is absent. it beats the last-used model
+# but only while its provider has credentials. otherwise kage uses the
+# last model you ran, then the first provider with credentials.
 default_model = "anthropic:claude-sonnet-4-6"
 
 [ui]
@@ -33,7 +33,8 @@ input_min_lines = 1
 input_max_lines = 8
 # default thinking level for new sessions: off, minimal, low,
 # medium, high, or xhigh. left unset, kage uses high, or the nearest
-# level the model accepts. shift+tab still cycles it per session.
+# level the model accepts, and shows it as "high (auto)". shift+tab
+# still cycles it per session.
 # thinking_level = "medium"
 # what prints to the terminal after you quit the TUI: "full" (the
 # whole conversation as plain text), "last" (from your last prompt
@@ -42,7 +43,7 @@ transcript_on_exit = "full"
 
 [plugins]
 # override the plugin directory (default ~/.config/kage/plugins/).
-# `~` expands to home; relative paths resolve against ~/.config/kage.
+# `~` expands to home, and relative paths resolve against ~/.config/kage.
 # dir = "/path/to/plugins"
 # if non-empty, only these plugin file stems load.
 enabled = []
@@ -50,7 +51,7 @@ enabled = []
 [sandbox]
 # "local" is the only backend: tools run as you, without isolation.
 # any other value, such as "bubblewrap" or "sandbox-exec", is a
-# config error that names this key; remove the key to fix it.
+# config error that names this key. remove the key to fix it.
 backend = "local"
 # silence the "no isolation" warning that kage doctor gives.
 suppress_warning = false
@@ -66,8 +67,8 @@ timeoutlen = 1000
 
 [loop]
 # compact older history once the prompt fills this fraction of the
-# model context window (0.0-1.0). Applies to the next session; also
-# editable in the /settings dialog.
+# model context window (0.0 to 1.0). Applies to the next session, and
+# the /settings dialog edits it too.
 compaction_threshold = 0.8
 
 [agents]
@@ -79,7 +80,7 @@ max_running = 4
 
 [permissions]
 # tool permission rules. built-in tools are allowed unless configured
-# and MCP tools ask; see the permissions guide for the full reference.
+# and MCP tools ask. see the permissions guide for the full reference.
 # confine_paths = false
 # [permissions.tools.bash]
 # default = "ask"
@@ -116,7 +117,7 @@ Configuration is merged lowest-to-highest precedence:
 
 1. built-in defaults
 2. `~/.config/kage/config.toml` (user)
-3. `<workdir>/.kage/config.toml` (project-local; commit it to share
+3. `<workdir>/.kage/config.toml` (project-local, commit it to share
    team settings)
 4. `KAGE_*` environment variables
 
@@ -189,8 +190,12 @@ API keys are read from environment variables:
 | `KIMI_API_KEY`          | Kimi for Coding                               |
 | `XIAOMI_API_KEY`        | Xiaomi / Xiaomi Token Plan                    |
 
-If multiple keys are present, the model id you pass with `-m` or
-configure as `provider.default_model` picks the provider.
+The model id picks the provider. Without `-m`, kage uses
+`provider.default_model` when its provider has credentials, then the
+last model you ran, then the preferred model of the first provider
+with credentials. When the configured `default_model` has no
+credentials, the TUI starts on the fallback and says which model it
+used instead.
 
 See [providers](/guide/providers) for the full provider list, custom
 endpoints, and per-provider overrides (base URL, headers, key env var).
@@ -234,6 +239,7 @@ injected into the system prompt so the agent always sees it.
 
 A prompt template is a single `.md` file (frontmatter `name`,
 `description`, `argument-hint`) whose body becomes a user message
-with positional substitution: `$1`, `$2`, ... ; `$@` / `$ARGUMENTS`
-for all args joined; `${@:N:L}` for a bash-style slice. Drop files
-in the directories above; no Lua required.
+with positional substitution. `$1`, `$2` and so on are single
+arguments, `$@` or `$ARGUMENTS` is all of them joined, and `${@:N:L}`
+is a bash-style slice. Drop files in the directories above. No Lua is
+required.

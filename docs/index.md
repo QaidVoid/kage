@@ -13,8 +13,8 @@ hero:
       theme: ghost
 features:
   - tag: 01
-    title: modal TUI
-    text: vim-style modes, sticky search, a slash command palette, and a colon ex-line that share one autocomplete engine.
+    title: keyboard TUI
+    text: a modeless editor with an optional vim mode, sticky search, and a slash command palette with argument completion.
   - tag: 02
     title: lua plugins
     text: tools, commands, keybindings, blocking dialogs, status widgets, and ~25 event hooks defined in sandboxed Lua. Hot reload on file change.
@@ -23,10 +23,10 @@ features:
     text: every turn lands in a JSONL session file you can inspect with cat, search with rg, fork at any entry, and resume.
   - tag: 04
     title: multi-provider
-    text: anthropic, openai, gemini, z.ai, and openai-compatible endpoints. Switch mid-session with one keystroke.
+    text: anthropic, openai, gemini, z.ai and more from a bundled model catalog, plus your own endpoints. Switch mid-session with ctrl+p.
   - tag: 05
     title: markdown rendering
-    text: assistant responses render headings, lists, quotes, fenced code blocks, and inline styles inline.
+    text: assistant responses render headings, lists, quotes, tables, fenced code blocks, and inline styles.
   - tag: 06
     title: real diffs, no magic
     text: tool calls show their arguments, results, and timing. Compaction emits a labelled summary card you can read.

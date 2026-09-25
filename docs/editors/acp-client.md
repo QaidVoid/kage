@@ -1,9 +1,9 @@
 # acp client
 
 The other direction: drive **another** ACP agent *from* kage. kage
-becomes the ACP client and the upstream agent
-(`claude-code-acp`, `goose`, `gemini` in ACP mode, or another
-`kage rpc`) is used as a model. This is the inverse of
+becomes the ACP client and the upstream agent (any program that
+speaks ACP over stdio, including another `kage rpc`) is used as a
+model. This is the inverse of
 [zed](./zed) / [neovim](./neovim), where kage is the agent being
 driven.
 
@@ -13,18 +13,18 @@ Declare agents under `[acp.agents.<name>]` in
 `~/.config/kage/config.toml`. Each entry is the launch command:
 
 ```toml
-[acp.agents.claude-code]
-command = "npx"
-args = ["-y", "@zed-industries/claude-code-acp"]
+[acp.agents.upstream]
+command = "kage"
+args = ["rpc", "-m", "anthropic:claude-sonnet-4-6"]
 
-[acp.agents.claude-code.env]
+[acp.agents.upstream.env]
 ANTHROPIC_API_KEY = "sk-..."
 ```
 
 Then select it as the model:
 
 ```sh
-kage -m acp:claude-code -p "explain this file"
+kage -m acp:upstream -p "explain this file"
 ```
 
 `acp:<name>` resolves to the configured agent. kage spawns it, speaks
@@ -34,15 +34,15 @@ the same way you would an MCP server or an LSP.
 
 ## configure from a plugin
 
-Plugins can declare agents at runtime. As with `nvim-lspconfig`,
-plugins *configure* and core spawns:
+Plugins can declare agents at runtime. Plugins *configure* and core
+spawns:
 
 ```lua
 kage.acp.add_agent({
-  name = "goose",
-  command = "goose",
-  args = { "acp" },
-  env = { GOOSE_PROVIDER = "anthropic" },
+  name = "reviewer",
+  command = "my-agent",
+  args = { "--acp" },
+  env = { MY_AGENT_MODE = "review" },
 })
 ```
 

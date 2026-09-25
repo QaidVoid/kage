@@ -3,17 +3,19 @@
 kage ships three bundled palettes and loads any additional ones you
 drop into `~/.config/kage/themes/`.
 
-Bundled names: `default`, `tokyo-night`, `catppuccin-mocha`.
+Bundled names: `default`, `tokyo-night`, `catppuccin-mocha`. All three
+are dark. No light theme is bundled, so for a light terminal write a
+custom theme (below).
 
 ## switching themes
 
 ```text
-:theme list             list bundled + user themes (* marks active)
-:theme set tokyo-night  switch immediately for this session
-:theme current          show the active theme
+/theme list             list bundled and user themes (* marks the active one)
+/theme set tokyo-night  switch immediately for this session
+/theme current          show the active theme
 ```
 
-`:theme set` applies at once. It does **not** persist on its own. Set
+`/theme set` applies at once. It does **not** persist on its own. Set
 the default in `config.toml`
 
 ```toml
@@ -78,8 +80,11 @@ naming the offender. The theme is not partially applied.
 `[groups]` colors take the same forms except `reset`. Leave the field
 out to get the terminal default.
 
-Terminals without truecolor downsample `#rrggbb` to their nearest
-indexed color.
+kage reads `COLORTERM` and `TERM` once at startup. When the terminal
+does not advertise truecolor (`COLORTERM=truecolor` or `24bit`, or a
+`TERM` ending in `-direct`), every color is mapped to the nearest
+entry of the 256-color palette when `TERM` names `256color`, else to
+the nearest of the 16 ANSI colors.
 
 ### color roles
 

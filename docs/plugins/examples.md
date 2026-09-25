@@ -6,40 +6,50 @@ runtime. Copy whichever fits and tweak.
 
 ## tokens-per-second readout
 
-`plugins/examples/tps.lua` reports the throughput of the most recent
-assistant turn as a toast. It tracks elapsed time across the turn and
-reads token counts off the `message_end` payload:
+`plugins/examples/tps.lua` reports the throughput of each run as a
+toast. It adds up the output tokens of every `message_end` payload and
+divides by the run's wall-clock time when `agent_end` fires:
 
 ```lua
-local start_ms
+local started_at, total_output = nil, 0
 
 kage.on("agent_start", function()
-  start_ms = kage.now_ms()
+  started_at, total_output = kage.now_ms(), 0
 end)
 
 kage.on("message_end", function(ev)
-  if not start_ms then return end
-  local elapsed = (kage.now_ms() - start_ms) / 1000
-  local out = (ev.usage and ev.usage.output) or 0
-  kage.ui.notify(string.format("%d tokens, %.1f tok/s", out,
-    out / math.max(elapsed, 0.001)))
+  if ev.usage and ev.usage.output then
+    total_output = total_output + ev.usage.output
+  end
+end)
+
+kage.on("agent_end", function()
+  if started_at == nil then return end
+  local elapsed_ms = math.max(kage.now_ms() - started_at, 1)
+  kage.notify(string.format("tps: %d tokens in %.2fs (%.1f tok/s)",
+    total_output, elapsed_ms / 1000, total_output * 1000 / elapsed_ms))
+  started_at = nil
 end)
 ```
 
 ## git branch in the status bar
 
 `plugins/examples/git-status.lua` reads `.git/HEAD` directly (the
-sandbox forbids spawning `git`) and announces the branch:
+sandbox forbids spawning `git`) and announces the branch, or the short
+hash of a detached HEAD, when a run starts:
 
 ```lua
-kage.on("agent_start", function()
+local function read_head()
   local ok, head = pcall(kage.fs.read, ".git/HEAD")
-  if not ok or not head then
-    kage.notify("git: not a repo")
-    return
-  end
-  local branch = head:gsub("%s+$", ""):match("^ref: refs/heads/(.+)$")
-  kage.notify("git: " .. (branch or "detached"))
+  if not ok or head == nil or #head == 0 then return nil end
+  head = head:gsub("%s+$", "")
+  local ref = head:match("^ref: (.+)$")
+  if ref then return (ref:gsub("^refs/heads/", "")) end
+  return head:sub(1, 7) .. " (detached)"
+end
+
+kage.on("agent_start", function()
+  kage.notify("git: " .. (read_head() or "not a repo"))
 end)
 ```
 
@@ -146,16 +156,25 @@ mapping has a `desc`, so it appears in the `?` reference under
 
 ## safer bash
 
-Override the built-in `bash` tool to refuse destructive commands:
+Override the built-in `bash` tool to refuse destructive commands. The
+override replaces the tool, so it runs the command itself through
+`kage.exec`, which needs the `exec` [capability](/plugins/capabilities):
 
 ```lua
+local caps = kage.request_capabilities({ "exec" })
+if not caps.exec then return end
+
 local blocked = { "rm %-rf /", "mkfs", ":(){" }
 
 kage.override_tool({
   name = "bash",
-  description = "bash, but checked",
-  schema = { type = "object", properties = { command = { type = "string" } } },
-  risk = "write",
+  description = "Run a bash command, refusing destructive ones.",
+  schema = {
+    type = "object",
+    properties = { command = { type = "string" } },
+    required = { "command" },
+  },
+  risk = "exec",
   execute = function(input)
     local cmd = input.command or ""
     for _, pattern in ipairs(blocked) do
@@ -163,10 +182,15 @@ kage.override_tool({
         return { is_error = true, text = "blocked: " .. pattern }
       end
     end
-    return { is_error = false, text = "ok: " .. cmd }
+    local r = kage.exec({ cmd = "bash", args = { "-c", cmd } })
+    return { is_error = r.code ~= 0, text = r.stdout .. r.stderr }
   end,
 })
 ```
+
+`kage.exec` blocks until the command exits and kills it after 30
+seconds, so this override has neither the live output nor the
+cancellation of the built-in tool.
 
 ## conversation and file rewind
 
@@ -208,16 +232,17 @@ kage.session.fork_to(at)            -- host reseats next turn
 (alias `/rewind-redo`) re-applies the file changes the last `/undo` or
 `/rewind` undid.
 
-It degrades honestly: without `session_write` the plugin disables
-itself; without `exec` it still rewinds the conversation but skips
-file restore. The conversation fork is one-way - `/redo` restores
-files, not the un-forked conversation; that is the nature of branching
-an append-only session.
+It degrades honestly. Without `session_write` the plugin disables
+itself. Without `exec` it still rewinds the conversation but skips
+file restore. The conversation fork is one-way. `/redo` restores
+files, not the un-forked conversation, because a session is
+append-only and a fork is a new branch.
 
 ## testing without the TUI
 
-Drop a plugin under `crates/kage-plugin/tests/fixtures/` and drive it
-with the `PluginRuntime` harness. Bridged handlers (commands,
-keybindings) can be stepped with `bridge_call` / `bridge_resume` /
-`bridge_cancel`; see `crates/kage-plugin/tests/examples.rs` for the
-pattern, including how the dialog round-trips are asserted.
+`crates/kage-plugin/tests/examples.rs` loads every file under
+`plugins/examples/` into a fresh `PluginRuntime` and drives it without
+the TUI. Bridged handlers (commands and keybindings) are stepped with
+`bridge_call`, `bridge_resume` and `bridge_cancel`, which is how the
+dialog round-trips are asserted. Follow the same pattern for your own
+plugin.

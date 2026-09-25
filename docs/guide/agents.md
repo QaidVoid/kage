@@ -209,7 +209,7 @@ approval reads `Waiting for approval` with what it asks for.
 
 A finished card shows the head of the agent's reply and its end state
 on the right: `done`, `stopped` or `failed`. The wrapper the model
-reads is hidden. `Ctrl+O` unfolds the full reply, like any tool row.
+reads is hidden. `ctrl+o` unfolds the full reply, like any tool row.
 
 ```text
  * Agent explore: map exports under src/components                                       done . 52s
@@ -224,9 +224,10 @@ reads is hidden. `Ctrl+O` unfolds the full reply, like any tool row.
 While agents run, the working row counts them, such as
 `Waiting for 3 agents (41s, esc to interrupt)`. Below it, a pinned
 list keeps every queued, running or waiting agent in view after its
-card scrolls away. Agents started by agents sit indented under their
-parent. The list shows at most four rows, then `+N more`, and it hides
-while the approval panel is open.
+card scrolls away, in the order of their cards. Agents started by
+agents sit indented under their parent. The list shows at most four
+rows, then `+N more . ctrl+t for agents`, and it hides while the
+approval panel is open.
 
 ```text
   Waiting for 3 agents (41s, esc to interrupt)
@@ -235,8 +236,9 @@ while the approval panel is open.
   / general  check the router tests                              Running cargo test -p router . 12s
 ```
 
-While agents run and the prompt is empty, the footer names the key
-that opens the agents overlay, `ctrl+t for agents` by default.
+While agents are queued or running and the prompt is empty, the
+footer names the key that opens the agents overlay, `ctrl+t for
+agents` by default, in place of `tab to queue`.
 
 ### opening an agent
 
@@ -255,25 +257,30 @@ footer's model, context and token figures stay the main session's.
 
 | Key | In an agent view |
 | --- | --- |
-| `Enter` | While the agent runs, steer it at its next turn boundary. When it has finished, send it a new message. |
-| `Tab` | Queue the prompt until the agent's run ends |
-| `Esc` | On an empty prompt, go back one level: to the parent agent, or to the main view. It never stops the agent. |
-| `Ctrl+C` | On an empty prompt, stop the agent while it runs, else go back |
+| `enter` | While the agent runs, steer it at its next turn boundary. When it has finished, send it a new message. |
+| `tab` | Queue the prompt until the agent's run ends |
+| `esc` | On an empty prompt, go back one level: to the parent agent, or to the main view. It never stops the agent. |
+| `ctrl+c` | On an empty prompt, stop the agent while it runs, else go back |
+
+The footer shows the keys that apply, such as `enter to steer . esc to
+go back . ctrl+c to stop`. An agent restored from a resumed session
+has no run behind it, so you can read it and go back, but not message
+it.
 
 A finished agent can still take messages. Its reply to those stays in
 the agent, because the parent's `agent` call already returned. The
 placeholder says so: `Message explore (the reply stays in this agent)`.
 Going back restores the main view at the scroll position you left.
-Quitting with `Ctrl+C` twice only works from the main view.
+Quitting with `ctrl+c` twice only works from the main view.
 
 ### the agents overlay
 
-`Ctrl+T` or `/agents` opens a list of every agent of the session,
+`ctrl+t` or `/agents` opens a list of every agent of the session,
 live or finished, as a tree under the main session. The top border
 counts the agents per state and totals their tokens and cost.
 
 ```text
-+- Agents -------------------------------------- 3 running . 1 waiting . 2 done . 71k tok . $0.21 -+
++- agents -------------------------------------- 3 running . 1 waiting . 2 done . 71k tok . $0.21 -+
 |   kage        fix the router and map the exports                      running    4m 02s  14k tok |
 | > / explore   map exports under src/components   Searched "export "                 41s  22k tok |
 |   / explore   map exports under src/routes       Read src/routes/i..                18s   9k tok |
@@ -286,15 +293,17 @@ counts the agents per state and totals their tokens and cost.
 
 | Key | Effect |
 | --- | --- |
-| `Up` / `Down`, `k` / `j` | Move the selection |
-| `Home` / `End` | Jump to the first / last row |
-| `Enter` | Open the selected agent. On the `kage` row, return to the main view. |
+| `up` / `down`, `k` / `j` | Move the selection |
+| `home` / `end` | Jump to the first / last row |
+| `enter` | Open the selected agent. On the `kage` row, return to the main view. |
 | `x` | Stop the selected agent and the agents under it. Only live agents stop. |
-| `Esc` | Close the overlay |
+| `esc` | Close the overlay |
 
-As over any overlay, `Ctrl+C` interrupts the run of the session on
-screen and leaves the overlay open. With no agent in the session yet, `Ctrl+T` shows
-`no agents in this session yet`.
+As over any overlay, `ctrl+c` interrupts the run of the session on
+screen and leaves the overlay open. With no run in flight, `ctrl+c`
+closes it. With no agent in the session yet, `ctrl+t` shows `no agents
+in this session yet`. The overlay also opens over an approval panel,
+and keys it does not use still answer the panel.
 
 ### approvals from agents
 
@@ -306,16 +315,16 @@ agent, not to the main session.
 
 ### stopping agents
 
-- `Esc` or `Ctrl+C` on an empty prompt in the main view interrupts the
+- `esc` or `ctrl+c` on an empty prompt in the main view interrupts the
   main run, which stops every agent under it.
-- `Ctrl+C` in an agent view, or `x` in the agents overlay, stops that
+- `ctrl+c` in an agent view, or `x` in the agents overlay, stops that
   agent and the agents under it. Its parent keeps running and reads
   the partial reply as a cancelled result.
 - Stopping a queued agent ends it before it starts.
 
 Starting a new session, resuming another one or cloning the session
-waits until no agent runs: kage says `stop or wait for the agents
-first`. Afterwards the agents overlay starts empty.
+waits until no agent runs. Until then kage refuses with a warning
+such as `new session: stop or wait for the agents first`. Afterwards the agents overlay starts empty.
 
 ## sessions on disk
 

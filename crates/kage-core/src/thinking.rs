@@ -16,14 +16,15 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 )]
 #[serde(rename_all = "snake_case")]
 pub enum ThinkingLevel {
-    /// Thinking disabled. Providers omit any thinking-related field.
+    /// Thinking disabled, or the lowest level for a model that cannot
+    /// turn it off.
     #[default]
     Off,
     /// Smallest budget the model accepts (`OpenAI` `reasoning_effort=minimal`).
     Minimal,
     /// Light reasoning. `OpenAI` maps to `reasoning_effort=low`.
     Low,
-    /// Default reasoning level. `OpenAI` maps to `reasoning_effort=medium`.
+    /// Moderate reasoning. `OpenAI` maps to `reasoning_effort=medium`.
     Medium,
     /// Heavier reasoning. `OpenAI` maps to `reasoning_effort=high`.
     High,

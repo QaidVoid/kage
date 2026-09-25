@@ -5,12 +5,12 @@ prebuilt binaries yet.
 
 ## prerequisites
 
-You need a working Rust toolchain at version 1.86 or newer (the
-project pins 1.95 via `rust-toolchain.toml`, which rustup installs
-automatically the first time you build). On macOS that means Xcode
-command-line tools; on Linux you also need `pkg-config` and a Lua 5.4
-development package, but the bundled `mlua` feature flag vendors Lua
-so you can skip a system Lua install.
+You need a working Rust toolchain at version 1.87 or newer. The
+project pins 1.95 in `rust-toolchain.toml`, which rustup installs the
+first time you build. You also need a C compiler: the Xcode
+command-line tools on macOS, or a C compiler and `pkg-config` on
+Linux. Lua 5.4 is vendored and built with kage, so no system Lua is
+needed.
 
 If you have nix and direnv, `nix develop` (or `direnv allow`) gives
 you the exact toolchain plus `cargo-nextest` and `bacon`.
@@ -48,18 +48,20 @@ kage completions zsh > ~/.zfunc/_kage
 
 ## first-run setup
 
-`kage init` writes a starter `~/.config/kage/config.toml` and offers to
-save a provider credential interactively (`--force` overwrites an
-existing file, `--non-interactive` skips the prompts):
+`kage init` writes a starter `~/.config/kage/config.toml`, installs
+the Lua type definitions for plugin editing, and offers to save a
+provider credential interactively. `--force` overwrites an existing
+config, and `--non-interactive` skips the prompts:
 
 ```bash
 kage init
 ```
 
 `kage doctor` checks the install end to end. It prints the config,
-data, state and cache directories it resolved, parses the config,
-lists usable providers, validates discovered plugins, and reports
-the sandbox state, exiting non-zero if anything is broken:
+data, state and cache directories it resolved, then checks the config
+files, saved credentials, usable providers (custom ones included),
+plugins, the sandbox and each MCP server. It exits non-zero if any
+check fails:
 
 ```bash
 kage doctor
@@ -91,8 +93,9 @@ export XIAOMI_API_KEY=...
 Alternatively, save credentials with the built-in auth flow:
 
 ```bash
-kage auth login anthropic   # prompts silently for the key
-kage auth list              # providers with saved credentials
+kage auth login anthropic   # prompts for the key without echo
+kage auth login             # pick the provider from a list
+kage auth list              # every provider and where its key comes from
 kage auth logout anthropic  # remove a saved key
 ```
 

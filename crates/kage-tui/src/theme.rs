@@ -2,15 +2,13 @@
 //!
 //! [`Theme`] is the single source of truth for every color choice the
 //! conversation buffer, status bar, and overlay rendering paths make.
-//! Default values match what `view.rs` previously hardcoded; bundled
-//! variants ([`Theme::tokyo_night`], [`Theme::catppuccin_mocha`]) give
-//! the user a couple of recognisable palettes out of the box without
-//! needing a TOML loader yet.
+//! Bundled variants ([`Theme::tokyo_night`], [`Theme::catppuccin_mocha`])
+//! sit beside the default, and user themes load from TOML files.
 //!
 //! The renderer reads the active theme via [`current`] (returns a
 //! cheap clone of the global). The host process picks one with
-//! [`set_current`] - typically once at startup, but `:theme set <name>`
-//! also goes through this path so a swap takes effect on the next
+//! [`set_current`], typically once at startup. `/theme set <name>`
+//! also goes through this path, so a swap takes effect on the next
 //! frame without restarting the TUI.
 //!
 //! Highlight groups sit behind the palette: [`groups_for`] gives a

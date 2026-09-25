@@ -4,20 +4,21 @@ kage ships a `lua-language-server` definition stub for the whole
 `kage.*` API. Point your editor's Lua language server at it and you
 get, inside any `~/.config/kage/plugins/*.lua` file:
 
-- completion on `kage.<Ctrl-Space>` and inside spec tables
-  (`kage.register_tool({ na<Ctrl-Space>` suggests `name`,
-  `description`, `schema`, `execute`),
+- completion after `kage.` and inside spec tables (in
+  `kage.register_tool({ na`, completion suggests `name`,
+  `description`, `schema` and `execute`),
 - hover docs pulled from the same text as this site,
 - argument and field type checking, with diagnostics for typos,
-- literal-string completion for event names
-  (`kage.on("agent_st<Ctrl-Space>")` finishes `agent_start`).
+- literal-string completion for event names (`kage.on("agent_st")`
+  completes to `agent_start`).
 
 ## what `kage init` does
 
 `kage init` sets this up for you. It:
 
 1. writes the stub to `~/.local/share/kage/types/kage.lua`, and
-2. writes (or merges into) `~/.config/kage/plugins/.luarc.json`:
+2. writes (or merges into) `.luarc.json` in the plugins directory,
+   `~/.config/kage/plugins/` unless `plugins.dir` names another:
 
    ```json
    {
@@ -38,15 +39,15 @@ never duplicates the library entry, keeps any other keys you added
 valid JSON it is left untouched and the step is reported as skipped
 rather than overwriting your file.
 
-Rerun `kage init` after upgrading kage to refresh the stub; it is a
-generated artifact, so it is always overwritten in place (do not
-hand-edit `~/.local/share/kage/types/kage.lua`).
+Rerun `kage init` after upgrading kage to refresh the stub. It is a
+generated artifact and is always overwritten in place, so do not
+hand-edit `~/.local/share/kage/types/kage.lua`.
 
 ## manual setup
 
 If you skipped `kage init`, or keep plugins outside the default
 directory, add the library path yourself. The stub lives in the kage
-repo at `plugins/types/kage.lua`; copy it anywhere stable, or
+repo at `plugins/types/kage.lua`. Copy it anywhere stable, or
 reference the repo path directly. It is generated from the plugin API
 spec and CI-gated (`gen-lua-types --check` in
 `.github/workflows/ci.yml`), so hand-edits would fail CI.
@@ -54,7 +55,7 @@ spec and CI-gated (`gen-lua-types --check` in
 `.luarc.json` next to your plugins:
 
 ```json
-{ "workspace": { "library": ["/abs/path/to/kage/types"] } }
+{ "workspace": { "library": ["/abs/path/to/kage/plugins/types"] } }
 ```
 
 Per-editor notes follow. All of them assume `lua-language-server`
@@ -70,7 +71,7 @@ require("lspconfig").lua_ls.setup({})
 ```
 
 `lua-language-server` discovers `.luarc.json` automatically when you
-open a file in that directory. Nothing else is needed; the
+open a file in that directory. Nothing else is needed, because the
 `workspace.library` entry is honored from the project file.
 
 ### VS Code
@@ -82,14 +83,14 @@ folder) so the project file is picked up.
 ### Helix
 
 Helix uses `lua-language-server` out of the box for Lua. Ensure the
-binary is on `PATH`; the `.luarc.json` in the plugin directory is
+binary is on `PATH`. The `.luarc.json` in the plugin directory is
 read automatically. No `languages.toml` change is required for the
 library path.
 
 ### Zed
 
 Zed's Lua extension wraps `lua-language-server`. Install the Lua
-extension; it honors `.luarc.json` in the worktree root. Open the
+extension. It honors `.luarc.json` in the worktree root. Open the
 plugin directory as the project so the file is found.
 
 ## verifying it works

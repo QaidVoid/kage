@@ -1,8 +1,7 @@
 # permissions
 
-By default kage runs every built-in tool call without asking: the
-same yolo behavior it always had. The `[permissions]` table lets you
-opt specific tools into rules instead. MCP tools are the exception:
+By default kage runs every built-in tool call without asking. The
+`[permissions]` table lets you opt specific tools into rules instead. MCP tools are the exception:
 they ask unless you allow their server (see
 [MCP tools](#mcp-tools)).
 
@@ -119,22 +118,25 @@ The panel's title names the action, such as `Run this command?`,
 `Edit src/lib.rs?` or `Allow github.create_issue?`. Below it, a shell
 call shows its command, an edit shows its diff, a write shows the path
 and the first lines, and any other tool shows its arguments as
-`key value` rows. Five options follow, with `Yes` selected:
+`key value` rows. Five options follow, naming the tool, with `Yes`
+selected:
 
 | Option | Keys | Effect |
 |---|---|---|
 | Yes | `1`, `y` | Run this call. The next call of the tool asks again. |
-| Yes, and allow the tool for the rest of this session | `2`, `s` | Run this call and stop asking for this tool until kage exits. Nothing is written to disk. |
-| Yes, and always allow the tool (saved to config.toml) | `3`, `a` | Run this call, stop asking for this tool until kage exits, and save the rule described below. |
-| No | `4`, `n`, `Esc` | Refuse the call. The model sees `denied by user`. |
-| No, and tell kage what to do instead | `5`, `t` | Open a one-line field. `Enter` refuses the call and sends your text to the model with the denial. `Esc` goes back to the options. |
+| Yes, and allow `<tool>` for the rest of this session | `2`, `s` | Run this call and stop asking for this tool for the rest of the session. Nothing is written to disk. |
+| Yes, and always allow `<tool>` (saved to config.toml) | `3`, `a` | Run this call, stop asking for this tool for the rest of the session, and save the rule described below. |
+| No | `4`, `n`, `esc` | Refuse the call. The model sees `denied by user`. |
+| No, and tell kage what to do instead | `5`, `t` | Open a one-line field. `enter` refuses the call and sends your text to the model with the denial. `esc` goes back to the options. |
 
-`Up`, `Down` and `Enter` pick an option too. Keys pressed in the first
-400 ms after the panel opens are dropped, so typing meant for the
-prompt cannot answer it. When several calls wait, the title shows
-`1 of 3`, and the panels come one after another. `Ctrl+C` interrupts
-the run, which refuses the call. The tool's row in the conversation
-reads `waiting` until you answer, then runs or reads `denied`.
+`up`, `down` and `enter` pick an option too, and the footer lists
+`y/s/a/n/t or 1-5`, `enter` and `esc no`. Keys pressed in the first 400 ms
+after the panel opens are dropped, so typing meant for the prompt
+cannot answer it. When several calls wait, the title shows `1 of 3`,
+and the panels come one after another. `ctrl+c` interrupts the run,
+which refuses the call, and `ctrl+t` opens the agents overlay so you
+can look before you answer. The tool's row in the conversation reads
+`waiting` until you answer, then runs or reads `denied`.
 
 Both "allow" scopes cover the tool by name, every call of it, for the
 rest of the session. `/new`, a session opened from the picker and a
@@ -146,8 +148,8 @@ still apply.
 
 "Always allow" also persists `[permissions.tools.<name>] default =
 "allow"` into your user config file (`~/.config/kage/config.toml`),
-comment-preserving. Project `.kage/config.toml` layers are never
-baked in. After a restart the saved rule applies like any other, so
+editing only that key and keeping the rest of the file and its
+comments. Project `.kage/config.toml` layers are never baked in. After a restart the saved rule applies like any other, so
 the tool's `deny` patterns count again.
 
 ## agents
@@ -194,23 +196,26 @@ escape-checked resolution: a read or write must stay under the working
 directory. `bash` is unaffected, because a shell can always reach the whole
 filesystem. Confine it with `deny` rules instead. Agents inherit the setting.
 
-## runtime mode (`:permission`)
+## runtime mode (`/permission`)
 
 Switch modes without touching the config file. In the TUI:
 
-    :permission ask     # every tool call prompts this session
-    :permission deny    # every tool call is refused this session
-    :permission default # back to the configured rules (allow-all
+    /permission ask     # every tool call prompts this session
+    /permission deny    # every tool call is refused this session
+    /permission default # back to the configured rules (allow-all
                         # unless you configured [permissions])
 
-`allow` is an alias of `default`. With no argument, `:permission`
-shows the current mode. An active override shows as `ask mode` or
-`deny mode` in the footer, and on the start card while the
-conversation is empty.
+`allow` is an alias of `default`, and `/perm` is short for
+`/permission`. The `:` command line takes the same command. With no
+argument, `/permission` shows the current mode, such as
+`permission mode: ask`. An active override shows as `ask mode` or
+`deny mode` in the footer, and as `ask mode for this session` on the
+start card while the conversation is empty.
 
 The override lives for the current session only and is never written
 to the config file. `/new`, a session opened from the picker and a
-clone start with the configured rules again. It short-circuits the per-tool rules entirely.
+clone start with the configured rules again. It short-circuits the
+per-tool rules entirely.
 While `deny` is active, even allow-listed tools and tools approved in
 the panel refuse. While `ask` is active, even never-configured tools
 prompt, except the tools you approved for the session or always.

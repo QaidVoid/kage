@@ -188,9 +188,11 @@ connected server:
 `<name>` marks a required argument and `[name]` an optional one. A
 prompt without arguments has no `input`. The editor sends the command
 back as prompt text, such as `/everything:complex_prompt 0.7 terse`,
-and kage expands it. kage sends the list and the usage again when the
-session's first prompt starts, because an editor may drop updates that
-arrive before the `session/new` response.
+and kage expands it.
+
+Updates for a session never arrive before the `session/new`,
+`session/load` or `session/resume` response that names it. kage holds
+them until that response is written.
 
 ## mcp servers from the editor
 
@@ -286,5 +288,6 @@ printf '%s\n%s\n' \
 
 Two framed JSON-RPC results come back, one per line: the agent's
 capabilities, then a fresh `sessionId` with its `configOptions`.
-Session updates such as `usage_update` and `available_commands_update`
-may arrive around them.
+Session updates such as `available_commands_update` follow the
+`session/new` result. When stdin closes, kage still answers every
+request it has read except `session/prompt` before it exits.

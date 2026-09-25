@@ -1,10 +1,16 @@
 # plugins
 
 kage runs Lua plugins inside a sandboxed runtime. Drop any `.lua`
-file into `~/.config/kage/plugins/` and kage loads it at startup, in
-file-name order. When a file changes during a session, kage reloads
-every plugin. Registrations, mappings, autocmds, slots and timers do
-not carry over a reload. Option values and highlight overrides do.
+file into `~/.config/kage/plugins/` (or the directory `plugins.dir`
+names) and kage loads it at startup, in file-name order. In the TUI,
+kage reloads every plugin when a plugin file, `init.lua` or a module
+under `lua/` changes, and `/reload` does the same by hand.
+Registrations, mappings, autocmds, slots and timers do not carry over
+a reload. Option values and highlight overrides do.
+
+A plugin that fails to load logs an error and the others still load.
+A non-empty `[plugins] enabled` list in `config.toml` loads only the
+plugins it names, by file stem.
 
 For your own setup, use `~/.config/kage/init.lua` instead. It uses the
 same API, is trusted, and loads after every plugin, so it has the last
@@ -14,7 +20,7 @@ word. See [lua config](/guide/lua-config).
 
 - register new tools the agent can call
 - override built-in tools (filter `bash`, audit `write`)
-- add slash / colon commands the user invokes
+- add slash and colon commands the user invokes
 - map keys to actions, commands or Lua functions
   (`kage.keymap.set`, `kage.register_keybinding`)
 - open blocking dialogs (select, confirm, input, editor) with
@@ -26,16 +32,18 @@ word. See [lua config](/guide/lua-config).
 - read and set options (`kage.opt`) and restyle highlight groups
   (`kage.api.hl_set`)
 - run callbacks later or on an interval (`kage.defer`, `kage.timer`)
-- add prompt-input autocomplete providers, including a built-in
-  `@file` path completer (`kage.add_autocomplete_provider`)
+- add prompt-input autocomplete providers
+  (`kage.add_autocomplete_provider`)
 - intercept raw key events before the dispatcher
   (`kage.on_terminal_input`)
-- subscribe to ~25 events (lifecycle, message stream, tool calls,
-  option and theme changes) with patterns and groups, transform the
-  context or provider request, rewrite or replace the compaction
-  summary, veto session ops
-- trigger compaction, fork sessions, inject messages, write custom
-  session entries and labels
+- subscribe to about 25 events (lifecycle, message stream, tool
+  calls, option and theme changes) with patterns and groups, transform
+  the context or provider request, rewrite or replace the compaction
+  summary, and veto session ops
+- trigger compaction, fork sessions, inject messages, and write
+  custom session entries and labels
+- keep private state across restarts (`kage.store`) and read their own
+  settings from `[plugins.config.<name>]` (`kage.plugin_config`)
 
 ## what plugins cannot do by default
 
@@ -48,9 +56,10 @@ word. See [lua config](/guide/lua-config).
 - `require` other files
 - start background threads (timers run on kage's single Lua thread)
 
-The sandbox strips `os.execute`, `io.popen`, `package.loadlib`,
-`dofile`, `loadfile`, and a handful of other escape hatches before
-your code runs. Routine `string`, `math`, `table` functions stay.
+The sandbox strips `os.execute`, `io.open`, `io.popen`, `load`,
+`dofile`, `loadfile`, `require`, `package`, `debug` and a handful of
+other escape hatches before your code runs. Routine `string`, `math`
+and `table` functions stay.
 
 Subprocess access, session rewriting, environment variables and
 network access are available as opt-in, per-plugin
@@ -87,8 +96,8 @@ kage.register_command({
 })
 ```
 
-Restart kage (or wait for the watcher to pick it up). Type `:hello`
-or `/hello`. You should see a transient toast.
+A running TUI picks the new file up on its own, or run `/reload`.
+Type `:hello` or `/hello`. You should see a transient toast.
 
 ## next steps
 

@@ -11,11 +11,13 @@
 //! [`PluginRuntime::eval`] or one of the typed dispatch helpers. A
 //! plugin cannot start a thread. It can queue callbacks with
 //! `kage.schedule`, `kage.defer` and `kage.timer`, which run on the
-//! owner thread between host calls (see the `schedule` module).
-//! Before any plugin code, `build` installs the `kage.api` primitives
-//! and evaluates the embedded Lua stdlib (see the `stdlib` module). The
-//! trusted user config (`init.lua`) runs after every plugin, in its own
-//! environment (see the `user` module).
+//! owner thread between host calls (see the `schedule` module), and
+//! every coroutine it creates is covered by the instruction watchdog
+//! (see `guard_coroutines`). Before any plugin code, `build` installs
+//! the `kage.api` primitives and evaluates the embedded Lua stdlib
+//! (see the `stdlib` module). The trusted user config (`init.lua`)
+//! runs after every plugin, in its own environment (see the `user`
+//! module).
 //!
 //! See `crates/kage-plugin/src/runtime.rs` source for the exact list of
 //! removed bindings.
@@ -30,9 +32,9 @@
 //! obvious escapes back to the real globals
 //! (`_G`, `load`, `require`, `package`, `debug`, `rawset`) are removed.
 //! This is the substrate the opt-in capability tier builds on: elevated
-//! APIs attach to one plugin's environment, not the shared one. Until
-//! that tier lands the sandbox still guards against accidental, not
-//! adversarial, access - run only plugins you trust.
+//! APIs attach to one plugin's environment, not the shared one. The
+//! tier gates the documented elevated surfaces, not every way a plugin
+//! can touch your session - run only plugins you trust.
 
 pub(crate) use std::collections::{BTreeMap, HashMap};
 pub(crate) use std::path::PathBuf;
@@ -459,6 +461,46 @@ fn apply_sandbox(lua: &Lua) -> Result<(), PluginError> {
             t.set(*key, mlua::Value::Nil)?;
         }
     }
+    guard_coroutines(lua)
+}
+
+/// Replace `coroutine.create` and `coroutine.wrap` so every coroutine a
+/// plugin creates carries the watchdog hook.
+///
+/// Lua debug hooks are per-thread and are not inherited by coroutines,
+/// so with the stock functions a plugin could escape its instruction
+/// budget with `coroutine.wrap(function() while true do end end)()`,
+/// hanging the owner thread permanently. The replacements install the
+/// hook at creation time; every thread a plugin can resume reaches it
+/// through `create`/`wrap` (bridged threads are hooked by
+/// [`crate::LuaHost`]-level `bridge_call`, the main state by
+/// [`watchdog::install`]). `wrap` is rebuilt over the hooked `create`
+/// with resume semantics matching the stock function: results without
+/// the leading boolean, errors propagated.
+fn guard_coroutines(lua: &Lua) -> Result<(), PluginError> {
+    let coroutine: Table = lua.globals().get("coroutine")?;
+    let create_orig: mlua::Function = coroutine.get("create")?;
+    let hooked_create = {
+        let create_orig = create_orig.clone();
+        lua.create_function(move |_, f: mlua::Function| {
+            let thread: mlua::Thread = create_orig.call(f)?;
+            watchdog::install_on_thread(&thread).map_err(mlua::Error::external)?;
+            Ok(thread)
+        })?
+    };
+    let hooked_wrap = {
+        let hooked_create = hooked_create.clone();
+        lua.create_function(move |lua, f: mlua::Function| {
+            let thread: mlua::Thread = hooked_create.call(f)?;
+            lua.create_function(
+                move |_, args: mlua::MultiValue| -> mlua::Result<mlua::MultiValue> {
+                    thread.resume(args)
+                },
+            )
+        })?
+    };
+    coroutine.set("create", hooked_create)?;
+    coroutine.set("wrap", hooked_wrap)?;
     Ok(())
 }
 

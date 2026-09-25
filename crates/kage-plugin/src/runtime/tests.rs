@@ -151,13 +151,16 @@ fn reload_dir_clears_acp_and_mcp_registrations() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
         dir.path().join("a.lua"),
-        "kage.acp.add_agent({ name='a', command='a' }) \
+        "kage.request_capabilities({'exec'}) \
+         kage.acp.add_agent({ name='a', command='a' }) \
          kage.on_acp_permission(function() return true end) \
          kage.mcp.add_server({ name='m', command='m' }) \
          kage.mcp.restart('m')",
     )
     .unwrap();
-    let rt = PluginRuntime::new().unwrap();
+    let mut caps = BTreeMap::new();
+    caps.insert("a".to_owned(), vec!["exec".to_owned()]);
+    let rt = PluginRuntime::builder().capabilities(caps).build().unwrap();
     rt.reload_dir(dir.path()).unwrap();
     assert_eq!(rt.registered_acp_agents().len(), 1);
     assert_eq!(rt.registered_mcp_servers().len(), 1);
@@ -282,6 +285,79 @@ fn watchdog_aborts_runaway_eval() {
     // The runtime stays usable after an abort.
     let v = rt.eval("return 6 * 7").unwrap();
     assert_eq!(v.as_integer(), Some(42));
+}
+
+#[test]
+fn watchdog_aborts_runaway_wrapped_coroutine() {
+    // Lua hooks are per-thread and are not inherited by coroutines, so
+    // the stock `coroutine.wrap` used to escape the instruction budget
+    // entirely and hang the owner thread forever.
+    let rt = PluginRuntime::builder()
+        .script_budget(20_000_000)
+        .build()
+        .unwrap();
+    let start = std::time::Instant::now();
+    let err = rt
+        .eval("local co = coroutine.wrap(function() while true do end end); co()")
+        .unwrap_err();
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "watchdog took too long: {:?}",
+        start.elapsed()
+    );
+    assert!(matches!(err, PluginError::Lua(_)), "got: {err:?}");
+    let v = rt.eval("return 6 * 7").unwrap();
+    assert_eq!(v.as_integer(), Some(42));
+}
+
+#[test]
+fn watchdog_aborts_runaway_plugin_env_coroutine() {
+    // The plugin env sees a per-plugin copy of `coroutine`; the copies
+    // must carry the hooked create/wrap too.
+    let rt = PluginRuntime::builder()
+        .script_budget(20_000_000)
+        .build()
+        .unwrap();
+    let start = std::time::Instant::now();
+    let err = rt
+        .eval_plugin(
+            "runaway",
+            "local co = coroutine.create(function() while true do end end); \
+             assert(coroutine.resume(co))",
+        )
+        .unwrap_err();
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "watchdog took too long: {:?}",
+        start.elapsed()
+    );
+    assert!(matches!(err, PluginError::Lua(_)), "got: {err:?}");
+}
+
+#[test]
+fn hooked_wrap_keeps_stock_resume_semantics() {
+    let rt = PluginRuntime::new().unwrap();
+    // Yields pass through, resumes deliver their arguments, the return
+    // value arrives without the leading boolean, and errors propagate.
+    let v = rt
+        .eval(
+            "local co = coroutine.wrap(function(a) \
+                 local b = coroutine.yield(a + 1); return b * 2 \
+             end); \
+             local x = co(1); \
+             local y = co(10); \
+             return x + y",
+        )
+        .unwrap();
+    assert_eq!(v.as_integer(), Some(22));
+    assert!(
+        rt.eval("local co = coroutine.wrap(function() error('boom') end); co()")
+            .is_err()
+    );
+    let v = rt
+        .eval("return coroutine.create ~= nil and coroutine.wrap ~= nil")
+        .unwrap();
+    assert_eq!(v.as_boolean(), Some(true));
 }
 
 #[test]

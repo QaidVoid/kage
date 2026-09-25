@@ -2,11 +2,13 @@
 //! instruction budget, so a runaway loop cannot hang the host.
 //!
 //! An `every_nth_instruction` debug hook is installed on the main Lua
-//! state (and on every bridged coroutine). While a budget is armed in
-//! the Lua registry, the hook spends credits per tick; running out
-//! aborts the chunk and surfaces as [`PluginError::Lua`]. Budgets are
-//! armed per host entry through [`run`], which restores the previous
-//! arming afterwards.
+//! state, on every bridged coroutine, and on every coroutine a plugin
+//! creates through `coroutine.create`/`coroutine.wrap` (see
+//! `guard_coroutines` in the runtime module: hooks are per-thread and
+//! are not inherited). While a budget is armed in the Lua registry, the
+//! hook spends credits per tick; running out aborts the chunk and
+//! surfaces as [`PluginError::Lua`]. Budgets are armed per host entry
+//! through [`run`], which restores the previous arming afterwards.
 //!
 //! The budget counts VM instructions, not wall time: the hook only
 //! fires while Lua executes, so host-side blocking (an HTTP request,
@@ -51,9 +53,10 @@ pub fn install(lua: &Lua) -> Result<(), PluginError> {
     Ok(())
 }
 
-/// Install the watchdog hook on a bridged coroutine. Lua hooks are
-/// per-thread, so the main-state hook does not cover resumed threads;
-/// the registry credits are shared by both hooks.
+/// Install the watchdog hook on a Lua thread (a bridged coroutine or
+/// one a plugin created). Lua hooks are per-thread, so the main-state
+/// hook does not cover resumed threads; the registry credits are
+/// shared by all hooks.
 pub fn install_on_thread(thread: &Thread) -> Result<(), PluginError> {
     thread.set_hook(
         HookTriggers::new().every_nth_instruction(HOOK_INTERVAL),

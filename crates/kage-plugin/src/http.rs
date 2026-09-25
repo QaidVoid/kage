@@ -387,6 +387,22 @@ fn build_agent_bounded(global: Option<Duration>) -> ureq::Agent {
     ssrf::guarded_agent(config)
 }
 
+/// Fallback user agent, sent only when the caller did not name its own.
+/// A plugin speaking for an upstream client (a ported provider) must send
+/// that client's identity verbatim. ureq appends headers rather than
+/// replacing them, so an unconditional default would travel as a second
+/// `user-agent` line and the server would read the wrong one.
+const DEFAULT_USER_AGENT: &str = "kage-plugin/0.1";
+
+/// True when the caller already sets `user-agent`, in any casing.
+fn has_user_agent(spec: Option<&RequestSpec>) -> bool {
+    spec.is_some_and(|s| {
+        s.headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("user-agent"))
+    })
+}
+
 fn dispatch(
     method: &str,
     agent: &ureq::Agent,
@@ -405,7 +421,9 @@ fn dispatch_bodyless(
     mut req: ureq::RequestBuilder<ureq::typestate::WithoutBody>,
     spec: Option<&RequestSpec>,
 ) -> Result<ureq::http::Response<ureq::Body>, String> {
-    req = req.header("user-agent", "kage-plugin/0.1");
+    if !has_user_agent(spec) {
+        req = req.header("user-agent", DEFAULT_USER_AGENT);
+    }
     if let Some(spec) = spec {
         for (k, v) in &spec.headers {
             req = req.header(k.as_str(), v.as_str());
@@ -418,7 +436,9 @@ fn dispatch_with_body(
     mut req: ureq::RequestBuilder<ureq::typestate::WithBody>,
     spec: Option<&RequestSpec>,
 ) -> Result<ureq::http::Response<ureq::Body>, String> {
-    req = req.header("user-agent", "kage-plugin/0.1");
+    if !has_user_agent(spec) {
+        req = req.header("user-agent", DEFAULT_USER_AGENT);
+    }
     if let Some(spec) = spec {
         if let Some(ct) = &spec.content_type {
             req = req.header("content-type", ct);
@@ -550,6 +570,33 @@ mod tests {
         let frame = super::read_sse_frame(&mut reader).unwrap().unwrap();
         assert_eq!(frame.data, "trailing");
         assert!(super::read_sse_frame(&mut reader).unwrap().is_none());
+    }
+
+    #[test]
+    fn caller_user_agent_suppresses_default() {
+        let lua = Lua::new();
+        for key in ["User-Agent", "user-agent", "USER-AGENT"] {
+            let opts: Table = lua
+                .load(format!(
+                    r#"{{ headers = {{ ["{key}"] = "ZCode/3.12.3" }} }}"#
+                ))
+                .eval()
+                .unwrap();
+            let spec = super::build_request(Some(&opts)).unwrap();
+            assert!(super::has_user_agent(Some(&spec)), "key {key}");
+        }
+    }
+
+    #[test]
+    fn missing_user_agent_keeps_default() {
+        let lua = Lua::new();
+        let opts: Table = lua
+            .load(r#"{ headers = { ["X-A"] = "b" } }"#)
+            .eval()
+            .unwrap();
+        let spec = super::build_request(Some(&opts)).unwrap();
+        assert!(!super::has_user_agent(Some(&spec)));
+        assert!(!super::has_user_agent(None));
     }
 
     #[test]

@@ -335,7 +335,7 @@ fn image(data: &str, mime: &str) -> Content {
 
 /// `text` cut to [`MAX_RESOURCE_TEXT`] and to what is left of `budget`,
 /// with a line saying how much was kept.
-fn cap(text: &str, budget: &mut usize) -> String {
+pub(crate) fn cap(text: &str, budget: &mut usize) -> String {
     let limit = MAX_RESOURCE_TEXT.min(*budget);
     if text.len() <= limit {
         *budget -= text.len();
@@ -354,7 +354,7 @@ fn cap(text: &str, budget: &mut usize) -> String {
 }
 
 /// Size of the bytes a base64 string encodes.
-fn decoded_len(data: &str) -> usize {
+pub(crate) fn decoded_len(data: &str) -> usize {
     let data = data.trim_end();
     let padding = data.bytes().rev().take_while(|b| *b == b'=').count();
     (data.len() / 4 * 3).saturating_sub(padding)

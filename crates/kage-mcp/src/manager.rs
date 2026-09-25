@@ -28,6 +28,11 @@
 //! as [`McpServerStatus::NeedsAuth`], and a live server that starts
 //! refusing is taken down the same way. [`McpManager::spawn_all_with`]
 //! takes the [`TokenSource`] and keeps it for `restart`.
+//!
+//! While at least one live server advertises resources, the manager also
+//! registers the [`McpResourceTool`] over the cached lists, rebuilding it
+//! whenever it registers, refreshes or restarts, and unregisters it once
+//! no such server is left.
 
 use std::sync::Arc;
 
@@ -38,6 +43,7 @@ use kage_core::protocol::{
 use kage_tools::ToolRegistry;
 
 use crate::oauth::TokenSource;
+use crate::resource_tool::{McpResourceTool, RESOURCE_TOOL, ResourceServer};
 use crate::server::{McpConnection, McpError, McpServerHandle};
 use crate::tools::tools_from_connection;
 
@@ -182,6 +188,9 @@ pub struct McpManager {
     /// Bearer tokens for HTTP servers, retained so a `restart` (for
     /// example after a login) sends them.
     tokens: Option<Arc<dyn TokenSource>>,
+    /// Whether the manager registered [`McpResourceTool`], so it never
+    /// unregisters a tool of the same name that it did not add.
+    resource_tool: bool,
 }
 
 impl McpManager {
@@ -244,6 +253,7 @@ impl McpManager {
                 roots,
                 handler,
                 tokens,
+                resource_tool: false,
             },
             errors,
         )
@@ -338,6 +348,7 @@ impl McpManager {
             let failures = managed.settle(reg, failures);
             errors.extend(failures.into_iter().map(|e| (name.clone(), e)));
         }
+        self.sync_resource_tool(reg);
         errors
     }
 
@@ -389,6 +400,7 @@ impl McpManager {
             let failures = managed.settle(reg, failures);
             errors.extend(failures.into_iter().map(|e| (name.clone(), e)));
         }
+        self.sync_resource_tool(reg);
         errors
     }
 
@@ -436,7 +448,34 @@ impl McpManager {
         managed.clear_catalog();
         let failures = managed.load_all(reg);
         let failures = managed.settle(reg, failures);
+        self.sync_resource_tool(reg);
         failures.into_iter().next().map_or(Ok(()), Err)
+    }
+
+    /// Register [`McpResourceTool`] over the live servers that advertise
+    /// resources, or unregister it when there are none.
+    fn sync_resource_tool(&mut self, reg: &mut ToolRegistry) {
+        let servers: Vec<ResourceServer> = self
+            .servers
+            .iter()
+            .filter_map(|(name, managed)| {
+                let conn = managed.connection()?;
+                conn.has("resources").then(|| ResourceServer {
+                    name: name.clone(),
+                    conn,
+                    resources: managed.resources.clone(),
+                    templates: managed.templates.clone(),
+                })
+            })
+            .collect();
+        if servers.is_empty() {
+            if std::mem::take(&mut self.resource_tool) {
+                reg.unregister(RESOURCE_TOOL);
+            }
+        } else {
+            reg.register(Arc::new(McpResourceTool::new(servers)));
+            self.resource_tool = true;
+        }
     }
 
     /// Drop this server's previously registered tools and register
@@ -619,10 +658,14 @@ mod tests {
         );
     }
 
-    /// A server that answers `initialize` and `tools/list` (one tool
-    /// named `t`) and exits once `kill` is set, dropping the
-    /// transport so the client sees EOF.
-    fn killable_server(kill: Arc<AtomicBool>) -> Arc<McpConnection> {
+    /// A server that advertises `capabilities`, answers `initialize`,
+    /// `tools/list` (one tool named `t`) and the resource lists (one
+    /// resource), and exits once `kill` is set, dropping the transport so
+    /// the client sees EOF.
+    fn killable_server(
+        kill: Arc<AtomicBool>,
+        capabilities: serde_json::Value,
+    ) -> Arc<McpConnection> {
         let (cli_r, srv_w) = std::io::pipe().unwrap();
         let (srv_r, cli_w) = std::io::pipe().unwrap();
         let (cli_peer, cli_in, _c) = connect(BufReader::new(cli_r), cli_w);
@@ -638,11 +681,17 @@ mod tests {
                         let outcome = match method.as_str() {
                             "initialize" => Ok(serde_json::json!({
                                 "protocolVersion": PROTOCOL_VERSION,
-                                "capabilities": {},
+                                "capabilities": capabilities,
                             })),
                             "tools/list" => Ok(serde_json::json!({
                                 "tools": [{ "name": "t", "inputSchema": {} }],
                             })),
+                            "resources/list" => Ok(serde_json::json!({
+                                "resources": [{ "uri": "test://k", "name": "K" }],
+                            })),
+                            "resources/templates/list" => {
+                                Ok(serde_json::json!({ "resourceTemplates": [] }))
+                            }
                             other => Err(kage_jsonrpc::RpcError::method_not_found(other)),
                         };
                         let _ = responder.respond(&id, outcome);
@@ -659,7 +708,7 @@ mod tests {
     #[test]
     fn refresh_evicts_a_dead_server_and_restart_uses_its_spec() {
         let kill = Arc::new(AtomicBool::new(false));
-        let conn = killable_server(Arc::clone(&kill));
+        let conn = killable_server(Arc::clone(&kill), serde_json::json!({}));
         let spec = McpServer {
             command: Some("definitely-not-a-real-binary-xyz".to_owned()),
             args: vec![],
@@ -744,6 +793,16 @@ mod tests {
                 other => return Err(kage_jsonrpc::RpcError::method_not_found(other)),
             })
         })
+    }
+
+    fn wait_dead(conn: &McpConnection) {
+        for _ in 0..200 {
+            if conn.is_dead() {
+                return;
+            }
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("kill switch must close the transport");
     }
 
     fn methods(seen: &crate::catalog::tests::Seen) -> Vec<String> {
@@ -952,5 +1011,68 @@ mod tests {
             ["resources/list", "resources/templates/list"]
         );
         assert_eq!(mgr.catalog()[0].resources.len(), 1);
+    }
+
+    #[test]
+    fn the_resource_tool_exists_only_while_a_live_server_has_resources() {
+        let (plain, _srv, _seen) = crate::catalog::tests::scripted(
+            "plain",
+            serde_json::json!({ "tools": {} }),
+            |method, _| match method {
+                "tools/list" => Ok(serde_json::json!({ "tools": [] })),
+                other => Err(kage_jsonrpc::RpcError::method_not_found(other)),
+            },
+        );
+        let mut mgr = McpManager::default();
+        mgr.adopt("plain", plain);
+        let mut reg = ToolRegistry::new();
+        assert!(mgr.register_into(&mut reg).is_empty());
+        assert!(reg.get(RESOURCE_TOOL).is_none(), "no server has resources");
+
+        let kill = Arc::new(AtomicBool::new(false));
+        let conn = killable_server(
+            Arc::clone(&kill),
+            serde_json::json!({ "tools": {}, "resources": {} }),
+        );
+        mgr.adopt("x", Arc::clone(&conn));
+        assert!(mgr.register_into(&mut reg).is_empty());
+        let tool = reg.get(RESOURCE_TOOL).expect("x advertises resources");
+        assert!(
+            tool.description().contains("Servers with resources: x."),
+            "{}",
+            tool.description()
+        );
+        assert_eq!(tool.risk(), kage_core::Risk::Read);
+
+        kill.store(true, Ordering::SeqCst);
+        wait_dead(&conn);
+        let errors = mgr.refresh_into(&mut reg);
+        assert!(
+            matches!(&errors[..], [(name, McpError::Crashed { .. })] if name == "x"),
+            "{errors:?}"
+        );
+        assert!(reg.get(RESOURCE_TOOL).is_none(), "x is gone");
+        assert!(reg.get("x__t").is_none());
+    }
+
+    #[test]
+    fn the_resource_tool_lists_the_cached_catalog() {
+        let (conn, _srv, seen) = catalog_server(Arc::new(AtomicBool::new(false)));
+        let mut mgr = McpManager::default();
+        mgr.adopt("srv", conn);
+        let mut reg = ToolRegistry::new();
+        assert!(mgr.register_into(&mut reg).is_empty());
+        methods(&seen);
+
+        let tool = reg.get(RESOURCE_TOOL).expect("srv advertises resources");
+        let cancel = kage_core::CancelFlag::default();
+        let cx = kage_tools::tool::ToolContext::new(std::path::Path::new("."), &cancel);
+        let out = tool
+            .execute(serde_json::json!({ "server": "srv" }), &cx)
+            .unwrap();
+        assert!(!out.is_error, "{}", out.text);
+        assert!(out.text.contains("- test://r (R)"), "{}", out.text);
+        assert!(out.text.contains("- test://r/{id} (T)"), "{}", out.text);
+        assert!(methods(&seen).is_empty(), "listing sent a request");
     }
 }

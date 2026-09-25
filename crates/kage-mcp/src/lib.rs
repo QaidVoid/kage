@@ -7,6 +7,7 @@ pub mod expand;
 mod http;
 pub mod manager;
 pub mod oauth;
+mod resource_tool;
 pub mod serve;
 pub mod server;
 pub mod tools;
@@ -14,6 +15,7 @@ pub mod tools;
 pub use catalog::{PromptMessage, ResourceContents};
 pub use manager::McpManager;
 pub use oauth::TokenSource;
+pub use resource_tool::{McpResourceTool, RESOURCE_TOOL};
 pub use serve::{ServeGate, serve};
 pub use server::{
     McpConnection, McpError, McpServerHandle, PROTOCOL_VERSION, ServerRequestHandler,

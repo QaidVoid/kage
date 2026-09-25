@@ -437,12 +437,12 @@ fn consecutive_reads_render_as_one_explored_row() {
         lines[explored + 1].contains("Read a.rs, b.rs, c.rs"),
         "{lines:?}"
     );
-    assert!(lines[explored + 3].contains("Ran cargo test"), "{lines:?}");
+    assert!(lines[explored + 2].contains("Ran cargo test"), "{lines:?}");
     assert_eq!(lines.iter().filter(|l| l.contains("Read ")).count(), 1);
 
     assert_eq!(buffer.block_virtual_rows(0), Some((0, 2)));
     assert_eq!(buffer.block_virtual_rows(2), None, "members are hidden");
-    assert_eq!(buffer.block_virtual_rows(6), Some((3, 5)));
+    assert_eq!(buffer.block_virtual_rows(6), Some((2, 4)));
 
     assert!(buffer.toggle_fold(0), "unfolding the head splits the group");
     let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 30));
@@ -457,13 +457,13 @@ fn consecutive_reads_render_as_one_explored_row() {
         .map(|&i| buffer.block_virtual_rows(i).expect("painted"))
         .collect();
     for pair in rows.windows(2) {
-        assert_eq!(pair[1].0, pair[0].1 + 1, "heights sum: {rows:?}");
+        assert_eq!(pair[1].0, pair[0].1, "heights sum: {rows:?}");
     }
 
     assert!(buffer.toggle_fold(0), "folding the head regroups");
     snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 20));
     assert_eq!(buffer.block_virtual_rows(0), Some((0, 2)));
-    assert_eq!(buffer.block_virtual_rows(6), Some((3, 5)));
+    assert_eq!(buffer.block_virtual_rows(6), Some((2, 4)));
 }
 
 #[test]
@@ -1855,4 +1855,128 @@ fn unfolding_while_scrolled_up_is_not_new_output() {
         !rows.iter().any(|r| r.contains("new output below")),
         "{rows:#?}"
     );
+}
+
+/// A prompt, a reply, three bash calls with their results, a closing
+/// reply and a second prompt: blocks 0, 1, 2, 4, 6, 8 and 9 paint.
+fn tool_burst() -> Buffer {
+    let mut buffer = Buffer::new();
+    buffer.push_user("fix the build");
+    buffer.append_assistant_delta("Checking the tree.");
+    buffer.finish_streaming();
+    for (id, cmd) in [
+        ("b1", "cargo build"),
+        ("b2", "cargo test"),
+        ("b3", "git status"),
+    ] {
+        buffer.push_tool_call(id, "bash", json!({"command": cmd}));
+        buffer.push_tool_result(id, "exit: 0", false);
+    }
+    buffer.append_assistant_delta("All green.");
+    buffer.finish_streaming();
+    buffer.push_user("thanks");
+    buffer
+}
+
+#[test]
+fn consecutive_tool_rows_sit_flush_between_spaced_text() {
+    let mut buffer = tool_burst();
+    let input = InputState::new();
+    let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 40, 24));
+    assert_eq!(
+        lines[..14],
+        [
+            "\u{258e} > fix the build",
+            "",
+            "  Checking the tree.",
+            "",
+            "\u{258e} \u{2022} Ran cargo build",
+            "\u{258e}     exit: 0",
+            "\u{258e} \u{2022} Ran cargo test",
+            "\u{258e}     exit: 0",
+            "\u{258e} \u{2022} Ran git status",
+            "\u{258e}     exit: 0",
+            "",
+            "  All green.",
+            "",
+            "\u{258e} > thanks",
+        ],
+        "{lines:#?}"
+    );
+}
+
+#[test]
+fn tool_row_gaps_keep_heights_and_click_rows_aligned() {
+    let mut buffer = tool_burst();
+    let input = InputState::new();
+    snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 40, 24));
+    let spans: Vec<(usize, usize)> = [0, 1, 2, 4, 6, 8, 9]
+        .iter()
+        .map(|&i| buffer.block_virtual_rows(i).expect("painted"))
+        .collect();
+    assert_eq!(
+        spans,
+        [(0, 1), (2, 3), (4, 6), (6, 8), (8, 10), (11, 12), (13, 14)]
+    );
+    let y = buffer.last_area_y();
+    let hits: Vec<Option<usize>> = (0..14).map(|r| buffer.block_at_screen_row(y + r)).collect();
+    let expected = [
+        Some(0),
+        None,
+        Some(1),
+        None,
+        Some(2),
+        Some(2),
+        Some(4),
+        Some(4),
+        Some(6),
+        Some(6),
+        None,
+        Some(8),
+        None,
+        Some(9),
+    ];
+    assert_eq!(hits, expected);
+}
+
+#[test]
+fn scroll_math_follows_the_tool_row_gaps() {
+    let mut buffer = tool_burst();
+    let input = InputState::new();
+    let area = Rect::new(0, 0, 40, 10);
+    snapshot_lines(&mut buffer, &input, area);
+    buffer.set_scroll(5);
+    let lines = snapshot_lines(&mut buffer, &input, area);
+    assert_eq!(
+        lines[..6],
+        [
+            "\u{258e}     exit: 0",
+            "\u{258e} \u{2022} Ran cargo test",
+            "\u{258e}     exit: 0",
+            "\u{258e} \u{2022} Ran git status",
+            "\u{258e}     exit: 0",
+            "",
+        ],
+        "{lines:#?}"
+    );
+    let y = buffer.last_area_y();
+    let hits: Vec<Option<usize>> = (0..6).map(|r| buffer.block_at_screen_row(y + r)).collect();
+    assert_eq!(hits, [Some(2), Some(4), Some(4), Some(6), Some(6), None]);
+
+    buffer.follow();
+    let lines = snapshot_lines(&mut buffer, &input, area);
+    assert_eq!(lines[5], "\u{258e} > thanks", "{lines:#?}");
+    assert_eq!(buffer.last_virtual_top(), 8);
+
+    let area = Rect::new(0, 0, 40, 8);
+    snapshot_lines(&mut buffer, &input, area);
+    buffer.set_focus(Some(4));
+    let lines = snapshot_lines(&mut buffer, &input, area);
+    assert_eq!(
+        buffer.scroll(),
+        Some(4),
+        "the second call's bottom meets the viewport's"
+    );
+    assert!(lines[0].ends_with("Ran cargo build"), "{lines:#?}");
+    assert!(lines[3].ends_with("exit: 0"), "{lines:#?}");
 }

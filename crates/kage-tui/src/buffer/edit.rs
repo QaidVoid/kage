@@ -580,14 +580,24 @@ impl Buffer {
         k
     }
 
-    /// Sum of the virtual rows (height + separator) the `k` blocks
-    /// dropped by [`Self::compact_to`] occupied, best effort from the
-    /// renderer's height cache. Must run before the cache drain.
-    fn dropped_block_rows(&self, k: usize) -> usize {
-        self.block_heights[..k]
-            .iter()
-            .map(|slot| slot.map_or(1, |(_, h)| usize::from(h) + 1))
-            .sum()
+    /// Virtual rows the `k` blocks dropped by [`Self::compact_to`]
+    /// occupied, gaps included, best effort from the renderer's height
+    /// cache. Must run before the cache drain.
+    fn dropped_block_rows(&mut self, k: usize) -> usize {
+        let topology = self.tool_topology();
+        let mut rows = 0usize;
+        let mut above: Option<usize> = None;
+        for idx in (0..self.blocks.len()).filter(|&i| !topology.is_hidden(i)) {
+            if let Some(prev) = above {
+                rows += gap_between(&self.blocks[prev], &self.blocks[idx]);
+            }
+            if idx >= k {
+                break;
+            }
+            rows += self.block_heights[idx].map_or(1, |(_, h)| usize::from(h));
+            above = Some(idx);
+        }
+        rows
     }
 
     pub(crate) fn last_is_live_assistant(&self) -> bool {

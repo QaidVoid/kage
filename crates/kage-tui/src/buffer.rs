@@ -283,6 +283,14 @@ fn truncate_label(label: &str, label_width: usize) -> Option<String> {
     Some(format!("{cut}..."))
 }
 
+/// Blank rows the conversation leaves between two displayed blocks.
+/// Consecutive tool rows sit flush so a burst of calls stays compact;
+/// every other neighbour pair gets one row.
+pub(crate) fn gap_between(above: &Block, below: &Block) -> usize {
+    let tool_row = |b: &Block| matches!(b, Block::ToolCall { .. } | Block::ToolResult { .. });
+    usize::from(!(tool_row(above) && tool_row(below)))
+}
+
 /// Call/result pairing for [`Block::ToolCall`] and
 /// [`Block::ToolResult`] blocks plus the `Explored` groups of
 /// read-only calls, derived from the block list and cached between

@@ -2,6 +2,8 @@
 
 use kage_core::sync::read;
 
+use crate::buffer::gap_between;
+
 use super::*;
 
 #[expect(
@@ -40,12 +42,20 @@ pub(super) fn render_buffer(
     buffer.set_last_user_focus(explicit);
 
     let mut heights: Vec<usize> = Vec::with_capacity(n);
+    let mut tops: Vec<usize> = Vec::with_capacity(n);
     let mut total_rows = 0usize;
+    let mut above: Option<usize> = None;
     for idx in 0..n {
         if topology.is_hidden(idx) {
             heights.push(0);
+            tops.push(total_rows);
             continue;
         }
+        if let Some(prev) = above {
+            let blocks = buffer.blocks();
+            total_rows = total_rows.saturating_add(gap_between(&blocks[prev], &blocks[idx]));
+        }
+        above = Some(idx);
         let h = if let Some(cached) = buffer.cached_height(idx, width) {
             usize::from(cached)
         } else {
@@ -64,9 +74,9 @@ pub(super) fn render_buffer(
             measured
         };
         heights.push(h);
-        total_rows = total_rows.saturating_add(h).saturating_add(1);
+        tops.push(total_rows);
+        total_rows = total_rows.saturating_add(h);
     }
-    total_rows = total_rows.saturating_sub(1);
 
     let max_scroll_back = total_rows.saturating_sub(visible);
 
@@ -86,16 +96,10 @@ pub(super) fn render_buffer(
     // of re-firing every frame while focus rests on a block the user
     // deliberately scrolled away.
     if user_moved && let Some(di) = focus {
-        if let Some(&rendered_height) = heights.get(di) {
+        if let (Some(&rendered_height), Some(&rendered_start)) = (heights.get(di), tops.get(di)) {
             // A focus index past `heights` (host reset shrank the
             // buffer between frames) skips the follow-scroll
             // instead of panicking the render.
-            let mut rendered_start = 0usize;
-            for (i, h) in heights.iter().enumerate().take(di) {
-                if !topology.is_hidden(i) {
-                    rendered_start = rendered_start.saturating_add(*h).saturating_add(1);
-                }
-            }
             let rendered_end = rendered_start.saturating_add(rendered_height);
             // Absolute anchors: the viewport can show the block's top
             // row at the viewport top (`rendered_start`) or its bottom
@@ -143,10 +147,9 @@ pub(super) fn render_buffer(
     let visible_bot = visible_top.saturating_add(visible);
 
     let mut emitted_lines: Vec<Line<'static>> = Vec::new();
-    let mut acc = 0usize;
+    let mut next_row = visible_top;
     let mut paragraph_scroll = 0u16;
     let mut emitted_rows = 0usize;
-    let mut emitted_any = false;
     // Stop once we've covered the viewport plus a small margin for
     // wrap surprises. Skipping ahead saves the per-line clone cost
     // for huge unfolded blocks during fast scrolling.
@@ -159,12 +162,10 @@ pub(super) fn render_buffer(
         if topology.is_hidden(idx) {
             continue;
         }
-        let block_top = acc;
-        let block_bot = acc.saturating_add(h);
-        let block_advance = h.saturating_add(1);
+        let block_top = tops[idx];
+        let block_bot = block_top.saturating_add(h);
 
         if block_bot <= visible_top {
-            acc = acc.saturating_add(block_advance);
             continue;
         }
         if block_top >= visible_bot {
@@ -173,16 +174,11 @@ pub(super) fn render_buffer(
         if emitted_rows >= row_budget {
             break;
         }
-        let intra_block_skip = if emitted_any {
-            0
-        } else {
-            emitted_any = true;
-            for _ in visible_top..block_top {
-                emitted_lines.push(Line::raw(""));
-                emitted_rows = emitted_rows.saturating_add(1);
-            }
-            visible_top.saturating_sub(block_top)
-        };
+        for _ in next_row..block_top {
+            emitted_lines.push(Line::raw(""));
+            emitted_rows = emitted_rows.saturating_add(1);
+        }
+        let intra_block_skip = next_row.saturating_sub(block_top);
         let emp = emphasis_for(idx, focus, search_match_set, &topology);
         let cached_owner;
         let built_owner;
@@ -213,10 +209,8 @@ pub(super) fn render_buffer(
         let sliced_rows = sliced.len();
         emitted_lines.extend(sliced);
         emitted_rows = emitted_rows.saturating_add(sliced_rows);
-        emitted_lines.push(Line::raw(""));
-        emitted_rows = emitted_rows.saturating_add(1);
         block_layout.push((idx, block_top, block_bot));
-        acc = acc.saturating_add(block_advance);
+        next_row = block_bot;
     }
 
     if let Some(pattern) = search_pattern {

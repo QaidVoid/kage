@@ -841,3 +841,23 @@ fn the_first_fold_acts_on_the_last_foldable_block() {
     buf.set_focus(Some(0));
     assert_eq!(buf.fold_target(), Some(0));
 }
+
+#[test]
+fn compact_shift_counts_flush_tool_rows() {
+    let mut buf = Buffer::new();
+    for id in ["a", "b"] {
+        buf.push_tool_call(id, "bash", json!({"command": "true"}));
+        buf.push_tool_result(id, "exit: 0", false);
+    }
+    buf.push_user("next");
+    for idx in [0, 2] {
+        buf.set_cached_height(idx, 80, 2);
+    }
+    buf.set_cached_height(4, 80, 1);
+    // The second call sits flush under the first, so its body row is
+    // virtual row 3.
+    buf.set_scroll(3);
+
+    assert_eq!(buf.compact_to(3), 2);
+    assert_eq!(buf.scroll(), Some(1));
+}

@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use super::{Envelope, Event, HostEvent, RunOutcome, SessionId, Usage};
-use crate::{LoopEvent, ToolCallId};
+use crate::{Content, LoopEvent, Message, ToolCallId};
 
 /// What a client knows about agent sessions, built from envelopes.
 #[derive(Debug, Default)]
@@ -44,10 +44,27 @@ pub struct AgentNode {
     pub last_tool: Option<(String, serde_json::Value)>,
     /// Open permission requests.
     pub waiting: u32,
-    /// When the current or last run started.
+    /// When the run in flight started. `None` between runs.
     pub started: Option<Instant>,
-    /// How long the last run took, once it ended.
+    /// Time spent in finished runs, summed across runs. `None` until
+    /// the first run ends.
     pub took: Option<Duration>,
+    /// Rebuilt from a stored conversation by [`AgentTree::restore`]. No
+    /// engine runs it, so it cannot be messaged.
+    pub restored: bool,
+}
+
+impl AgentNode {
+    /// How long the agent has run: its finished runs plus the run in
+    /// flight. `None` before its first run starts.
+    #[must_use]
+    pub fn elapsed(&self) -> Option<Duration> {
+        let current = self.started.map(|started| started.elapsed());
+        match (self.took, current) {
+            (None, None) => None,
+            (took, current) => Some(took.unwrap_or_default() + current.unwrap_or_default()),
+        }
+    }
 }
 
 /// Where an agent is. `Running` with `waiting > 0` reads as waiting.
@@ -76,26 +93,22 @@ impl AgentTree {
             description,
         }) = &envelope.event
         {
-            // A parent inside the new session's own ancestry would close a cycle.
-            if !self.index.contains_key(&session) && self.root_of(*parent) != session {
-                self.index.insert(session, self.nodes.len());
-                self.nodes.push(AgentNode {
-                    session,
-                    parent: *parent,
-                    tool_call_id: tool_call_id.clone(),
-                    agent: agent.clone(),
-                    description: description.clone(),
-                    state: AgentState::Queued,
-                    model: String::new(),
-                    usage: Usage::default(),
-                    tool_calls: 0,
-                    last_tool: None,
-                    waiting: 0,
-                    started: None,
-                    took: None,
-                });
-            }
-            return self.index.contains_key(&session);
+            return self.insert(AgentNode {
+                session,
+                parent: *parent,
+                tool_call_id: tool_call_id.clone(),
+                agent: agent.clone(),
+                description: description.clone(),
+                state: AgentState::Queued,
+                model: String::new(),
+                usage: Usage::default(),
+                tool_calls: 0,
+                last_tool: None,
+                waiting: 0,
+                started: None,
+                took: None,
+                restored: false,
+            });
         }
         let Some(&i) = self.index.get(&session) else {
             return false;
@@ -105,7 +118,6 @@ impl AgentTree {
             Event::Host(HostEvent::RunStarted) => {
                 node.state = AgentState::Running;
                 node.started = Some(Instant::now());
-                node.took = None;
             }
             Event::Host(HostEvent::RunEnded { outcome }) => {
                 node.state = match outcome {
@@ -113,7 +125,9 @@ impl AgentTree {
                     RunOutcome::Cancelled => AgentState::Cancelled,
                     RunOutcome::Failed { .. } => AgentState::Failed,
                 };
-                node.took = node.started.map(|started| started.elapsed());
+                if let Some(started) = node.started.take() {
+                    node.took = Some(node.took.unwrap_or_default() + started.elapsed());
+                }
                 node.waiting = 0;
             }
             Event::Host(HostEvent::StateChanged { state }) => node.model.clone_from(&state.model),
@@ -133,6 +147,55 @@ impl AgentTree {
             _ => {}
         }
         true
+    }
+
+    /// Add the agents that `parent`'s stored conversation started, as
+    /// finished nodes. Each comes from an `agent` call whose result
+    /// carries the `<agent name=.. session=.. state=..>` wrapper, and
+    /// its time is the gap between the call and its result. Sessions
+    /// already known are skipped.
+    pub fn restore(&mut self, parent: SessionId, messages: &[Message]) {
+        let mut calls = HashMap::new();
+        for message in messages {
+            for block in &message.content {
+                match block {
+                    Content::ToolCall { id, name, input } if name == "agent" => {
+                        let description = input.get("description").and_then(|d| d.as_str());
+                        calls.insert(
+                            id.clone(),
+                            (description.unwrap_or("").to_owned(), message.ts),
+                        );
+                    }
+                    Content::ToolResultBlock {
+                        call_id, output, ..
+                    } => {
+                        let Some((description, called)) = calls.remove(call_id) else {
+                            continue;
+                        };
+                        let Some((agent, session, state)) = agent_wrapper(output) else {
+                            continue;
+                        };
+                        self.insert(AgentNode {
+                            session,
+                            parent,
+                            tool_call_id: call_id.clone(),
+                            agent,
+                            description,
+                            state,
+                            model: String::new(),
+                            usage: Usage::default(),
+                            tool_calls: 0,
+                            last_tool: None,
+                            waiting: 0,
+                            started: None,
+                            took: (message.ts - called).to_std().ok(),
+                            restored: true,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     /// The agent running as `session`, if it is one.
@@ -166,6 +229,18 @@ impl AgentTree {
         self.index.clear();
     }
 
+    /// Add `node` unless its session is known or its parent sits in
+    /// its own ancestry, which would close a cycle. Returns whether the
+    /// session is known afterwards.
+    fn insert(&mut self, node: AgentNode) -> bool {
+        let session = node.session;
+        if !self.index.contains_key(&session) && self.root_of(node.parent) != session {
+            self.index.insert(session, self.nodes.len());
+            self.nodes.push(node);
+        }
+        self.index.contains_key(&session)
+    }
+
     fn push_children<'a>(
         &'a self,
         parent: SessionId,
@@ -177,6 +252,24 @@ impl AgentTree {
             self.push_children(node.session, depth + 1, out);
         }
     }
+}
+
+/// The name, session and end state an `agent` result's wrapper
+/// carries.
+fn agent_wrapper(output: &str) -> Option<(String, SessionId, AgentState)> {
+    let attrs = output.strip_prefix("<agent ")?.split_once('>')?.0;
+    let attr = |key: &str| {
+        let value = attrs.split_once(&format!("{key}=\""))?.1;
+        value.split_once('"').map(|(value, _)| value)
+    };
+    let session = ulid::Ulid::from_string(attr("session")?).ok()?;
+    let state = match attr("state")? {
+        "completed" => AgentState::Done,
+        "cancelled" => AgentState::Cancelled,
+        "failed" => AgentState::Failed,
+        _ => return None,
+    };
+    Some((attr("name")?.to_owned(), SessionId(session), state))
 }
 
 #[cfg(test)]
@@ -346,6 +439,95 @@ mod tests {
         };
         assert!(!tree.apply(&envelope(root, spawned)));
         assert_eq!(tree.root_of(child), root);
+    }
+
+    #[test]
+    fn time_adds_up_across_runs_and_starts_with_the_first_run() {
+        let mut tree = AgentTree::default();
+        let child = spawn(&mut tree, SessionId::new(), "explore");
+        assert_eq!(tree.get(child).unwrap().elapsed(), None);
+        let ended = |tree: &mut AgentTree| {
+            let outcome = RunOutcome::Completed;
+            tree.apply(&envelope(child, HostEvent::RunEnded { outcome }));
+        };
+        ended(&mut tree);
+        assert_eq!(tree.get(child).unwrap().elapsed(), None, "never started");
+
+        tree.apply(&envelope(child, HostEvent::RunStarted));
+        tree.nodes[0].started = Instant::now().checked_sub(Duration::from_secs(8));
+        ended(&mut tree);
+        let first = tree.get(child).unwrap().took.unwrap();
+        assert!(first >= Duration::from_secs(8));
+
+        tree.apply(&envelope(child, HostEvent::RunStarted));
+        tree.nodes[0].started = Instant::now().checked_sub(Duration::from_secs(2));
+        assert!(tree.get(child).unwrap().elapsed().unwrap() >= first + Duration::from_secs(2));
+        ended(&mut tree);
+        let node = tree.get(child).unwrap();
+        assert!(node.took.unwrap() >= first + Duration::from_secs(2));
+        assert!(node.started.is_none());
+        assert_eq!(node.elapsed(), node.took);
+    }
+
+    #[test]
+    fn restore_reads_the_agents_of_a_stored_conversation() {
+        let parent = SessionId::new();
+        let done = SessionId::new();
+        let stopped = SessionId::new();
+        let call = |id: &str, description: &str| Content::ToolCall {
+            id: ToolCallId(id.into()),
+            name: "agent".into(),
+            input: serde_json::json!({ "agent": "explore", "description": description }),
+        };
+        let result = |id: &str, output: String| Content::ToolResultBlock {
+            call_id: ToolCallId(id.into()),
+            output,
+            is_error: false,
+        };
+        let wrapped = |session: SessionId, state: &str| {
+            format!(
+                "<agent name=\"explore\" session=\"{session}\" state=\"{state}\">\nreply\n</agent>"
+            )
+        };
+        let asked = Message::new(
+            crate::Role::Assistant,
+            vec![
+                call("a1", "map src"),
+                call("a2", "map docs"),
+                call("a3", "x"),
+            ],
+            None,
+        );
+        let mut answered = Message::new(
+            crate::Role::ToolResult,
+            vec![
+                result("a1", wrapped(done, "completed")),
+                result("a2", wrapped(stopped, "cancelled")),
+                result("a3", "unknown agent".into()),
+            ],
+            None,
+        );
+        answered.ts = asked.ts + chrono::Duration::milliseconds(8_800);
+
+        let mut tree = AgentTree::default();
+        tree.restore(parent, &[asked, answered]);
+        let rows: Vec<(SessionId, AgentState, &str)> = tree
+            .under(parent)
+            .into_iter()
+            .map(|(_, node)| (node.session, node.state, node.description.as_str()))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (done, AgentState::Done, "map src"),
+                (stopped, AgentState::Cancelled, "map docs"),
+            ]
+        );
+        let node = tree.get(done).unwrap();
+        assert!(node.restored);
+        assert_eq!(node.agent, "explore");
+        assert_eq!(node.tool_call_id, ToolCallId("a1".into()));
+        assert_eq!(node.elapsed(), Some(Duration::from_millis(8_800)));
     }
 
     #[test]

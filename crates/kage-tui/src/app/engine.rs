@@ -6,7 +6,7 @@
 use super::*;
 
 use kage_core::protocol::{AgentState, Envelope, Event, HostEvent, NoticeLevel, RequestId};
-use kage_core::{LoopEvent, Role, SessionId};
+use kage_core::{LoopEvent, Role, SessionId, ToolCallId};
 
 use crate::view::tool_view::{ToolPhase, agent_stats, describe};
 
@@ -17,8 +17,9 @@ pub(crate) struct PendingApproval {
     pub(crate) request_id: RequestId,
     /// The session that asked.
     pub(crate) session: SessionId,
-    /// The asking agent's name. `None` when the main session asked.
-    pub(crate) agent: Option<String>,
+    /// The asking agent's name and task. `None` when the main session
+    /// asked.
+    pub(crate) agent: Option<(String, String)>,
     /// The gated tool call, whose row shows the approval state.
     pub(crate) tool_call_id: Option<String>,
     /// Tool name.
@@ -69,6 +70,9 @@ impl App {
                     self.pending_delivered(None);
                 }
                 crate::events::apply_loop_event(&mut lock(&self.root_buffer), &event);
+                if let LoopEvent::ToolCallEnd { id, .. } = &event {
+                    self.card_ended(main, id);
+                }
             }
             Event::Host(event) => self.apply_host_event(event),
         }
@@ -128,9 +132,12 @@ impl App {
             HostEvent::Notice { level, text, .. } => push_notice(&self.root_buffer, level, text),
             HostEvent::SessionChanged { messages, .. } => {
                 self.set_focus(None);
+                self.drafts.clear();
                 self.pending.clear();
                 self.agents.clear();
                 self.agent_buffers.clear();
+                self.agents
+                    .restore(self.active_session.unwrap_or_default(), &messages);
                 let durations = crate::events::tool_durations(&messages);
                 {
                     let mut buf = lock(&self.root_buffer);
@@ -191,6 +198,9 @@ impl App {
                     self.pending_delivered(Some(session));
                 }
                 crate::events::apply_loop_event(&mut lock(&buffer), &event);
+                if let LoopEvent::ToolCallEnd { id, .. } = &event {
+                    self.card_ended(session, id);
+                }
                 matches!(
                     event,
                     LoopEvent::ToolCallStart { .. }
@@ -222,7 +232,10 @@ impl App {
                 input,
                 ..
             } => {
-                let agent = self.agents.get(session).map(|node| node.agent.clone());
+                let agent = self
+                    .agents
+                    .get(session)
+                    .map(|node| (node.agent.clone(), node.description.clone()));
                 self.push_approval(PendingApproval {
                     request_id,
                     session,
@@ -237,8 +250,13 @@ impl App {
                 self.drop_permission(request_id);
                 true
             }
+            HostEvent::RunStarted => {
+                self.set_card_phase(session, ToolPhase::Running);
+                true
+            }
             HostEvent::RunEnded { .. } => {
                 self.end_run(session);
+                self.set_card_time(session);
                 true
             }
             HostEvent::Notice {
@@ -266,9 +284,11 @@ impl App {
                 push_shell(buffer, &command, &output, exit_code);
                 false
             }
-            HostEvent::AgentSpawned { .. }
-            | HostEvent::RunStarted
-            | HostEvent::UsageUpdated { .. } => true,
+            HostEvent::AgentSpawned { .. } => {
+                self.set_card_phase(session, ToolPhase::Queued);
+                true
+            }
+            HostEvent::UsageUpdated { .. } => true,
             HostEvent::StateChanged { .. }
             | HostEvent::TitleChanged { .. }
             | HostEvent::SessionChanged { .. } => false,
@@ -285,7 +305,23 @@ impl App {
 
     /// Point the transcript, the working row, the header and the input
     /// at agent `session`, when it is an agent under the main session.
+    /// An agent of a resumed session first loads its stored transcript.
     pub(crate) fn focus_agent(&mut self, session: SessionId) {
+        if !self.agent_buffers.contains_key(&session)
+            && self.agents.get(session).is_some_and(|n| n.restored)
+        {
+            let Some(messages) = self.agent_loader.as_ref().and_then(|load| load(session)) else {
+                self.notify("the agent's transcript could not be read");
+                return;
+            };
+            let buffer = crate::events::shared_buffer();
+            {
+                let mut buf = lock(&buffer);
+                let durations = crate::events::tool_durations(&messages);
+                crate::events::populate_from_history(&mut buf, &messages, &durations);
+            }
+            self.agent_buffers.insert(session, buffer);
+        }
         if self.agent_buffers.contains_key(&session) {
             self.set_focus(Some(session));
         }
@@ -303,10 +339,10 @@ impl App {
     }
 
     /// Show agent `focus`, or the main session for `None` (or an unknown
-    /// agent). Each buffer keeps its own scroll, folds and block focus,
-    /// so coming back finds the view as it was left. The search, the
-    /// mouse selection, the context menu and the completion popup start
-    /// over.
+    /// agent). Each view keeps its own draft, and each buffer its own
+    /// scroll, folds and block focus, so coming back finds the view as
+    /// it was left. The search, the mouse selection, the context menu
+    /// and the completion popup start over.
     pub(crate) fn set_focus(&mut self, focus: Option<SessionId>) {
         let target = focus.and_then(|s| self.agent_buffers.get(&s).map(|b| (s, Arc::clone(b))));
         let focus = target.as_ref().map(|(s, _)| *s);
@@ -321,6 +357,9 @@ impl App {
         self.mouse_drag_anchor = None;
         self.context_menu = None;
         self.input_completion = None;
+        let draft = self.drafts.remove(&focus).unwrap_or_default();
+        let left = self.input.swap_draft(draft);
+        self.drafts.insert(self.focus, left);
         self.focus = focus;
         self.buffer = target.map_or_else(|| Arc::clone(&self.root_buffer), |(_, b)| b);
         self.draw_snapshot = None;
@@ -354,6 +393,52 @@ impl App {
         let tokens = node.usage.total.input + node.usage.total.output;
         let card = format!("{activity}\n{}", agent_stats(node.tool_calls, tokens));
         lock(&self.buffer_of(node.parent)).set_tool_progress(&node.tool_call_id.0, card);
+    }
+
+    /// Move agent `session`'s card to `phase`: queued while the running
+    /// limit holds the agent back, running from its run's start, so the
+    /// card's timer counts the agent's own run like its other views. A
+    /// card whose result is in stays as it is.
+    fn set_card_phase(&self, session: SessionId, phase: ToolPhase) {
+        if let Some(node) = self.agents.get(session) {
+            lock(&self.buffer_of(node.parent)).set_tool_phase(&node.tool_call_id.0, phase);
+        }
+    }
+
+    /// The result of `parent`'s call `id` arrived. When it started an
+    /// agent, its card takes the agent's time.
+    fn card_ended(&self, parent: SessionId, id: &ToolCallId) {
+        let agent = self
+            .agents
+            .under(parent)
+            .into_iter()
+            .rev()
+            .find(|(depth, node)| *depth == 1 && node.tool_call_id == *id)
+            .map(|(_, node)| node.session);
+        if let Some(agent) = agent {
+            self.set_card_time(agent);
+        }
+    }
+
+    /// Show agent `session`'s own run time on its finished card, the
+    /// time the overlay, the pinned list and the breadcrumb show. Only
+    /// the newest agent of its parent's call id owns the card, since
+    /// providers may reuse call ids across turns.
+    fn set_card_time(&self, session: SessionId) {
+        let Some(node) = self.agents.get(session) else {
+            return;
+        };
+        let owner = self
+            .agents
+            .under(node.parent)
+            .into_iter()
+            .rev()
+            .find(|(depth, n)| *depth == 1 && n.tool_call_id == node.tool_call_id)
+            .map(|(_, n)| n.session);
+        if let (Some(elapsed), Some(true)) = (node.elapsed(), owner.map(|o| o == session)) {
+            let ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+            lock(&self.buffer_of(node.parent)).set_tool_duration(&node.tool_call_id.0, ms);
+        }
     }
 
     fn toast(&self, level: NoticeLevel, text: String) {
@@ -402,26 +487,28 @@ impl App {
         if self.picker.is_some() || self.plugin_overlay.is_some() || self.approval_panel.is_some() {
             return false;
         }
-        self.show_next_approval(1)
+        self.show_next_approval()
     }
 
     /// Close the panel on screen and show the next waiting request, if
-    /// any, one place further in the count.
+    /// any.
     fn advance_approvals(&mut self) {
-        let position = self.approval_panel.take().map_or(1, |p| p.position() + 1);
+        self.approval_panel = None;
         self.pending_permission = None;
-        self.show_next_approval(position);
+        self.show_next_approval();
     }
 
-    fn show_next_approval(&mut self, position: usize) -> bool {
+    fn show_next_approval(&mut self) -> bool {
         let Some(approval) = self.permission_queue.pop_front() else {
             return false;
         };
         self.approval_panel = Some(crate::overlay::ApprovalPanel::new(
             &approval.tool,
             &approval.input,
-            approval.agent.as_deref(),
-            position,
+            approval
+                .agent
+                .as_ref()
+                .map(|(name, task)| (name.as_str(), task.as_str())),
             Instant::now(),
         ));
         self.pending_permission = Some(approval);
@@ -459,23 +546,41 @@ impl App {
     }
 
     /// Send the decision for the panel on screen, then show the next
-    /// request. The tool row moves to denied, or back to the queue until
-    /// the loop reports that it runs.
+    /// request. The tool row moves to denied, or to approved until the
+    /// loop reports that it runs. Allowing the tool for the session or
+    /// always also approves the waiting requests for the same tool,
+    /// which the new rule covers.
     pub(crate) fn answer_permission(&mut self, decision: PermissionDecision) {
         let Some(approval) = self.pending_permission.take() else {
             return;
         };
-        let _ = self.send_request(RunRequest::ResolvePermission {
-            request_id: approval.request_id,
+        let mut answered = vec![(approval.clone(), decision)];
+        if matches!(
             decision,
-        });
-        if let Some(id) = &approval.tool_call_id {
-            let phase = if decision == PermissionDecision::Deny {
-                ToolPhase::Denied
-            } else {
-                ToolPhase::Queued
-            };
-            lock(&self.buffer_of(approval.session)).set_tool_phase(id, phase);
+            PermissionDecision::AllowSession | PermissionDecision::AllowAlways
+        ) {
+            let (same, rest) = std::mem::take(&mut self.permission_queue)
+                .into_iter()
+                .partition(|a| a.tool == approval.tool);
+            self.permission_queue = rest;
+            answered.extend(
+                same.into_iter()
+                    .map(|a: PendingApproval| (a, PermissionDecision::AllowOnce)),
+            );
+        }
+        for (approval, decision) in answered {
+            let _ = self.send_request(RunRequest::ResolvePermission {
+                request_id: approval.request_id,
+                decision,
+            });
+            if let Some(id) = &approval.tool_call_id {
+                let phase = if decision == PermissionDecision::Deny {
+                    ToolPhase::Denied
+                } else {
+                    ToolPhase::Approved
+                };
+                lock(&self.buffer_of(approval.session)).set_tool_phase(id, phase);
+            }
         }
         self.advance_approvals();
     }

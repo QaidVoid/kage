@@ -3,7 +3,8 @@
 //! A modal list of the main session and every agent under it, live or
 //! finished, as a tree in spawn order. Enter opens the selected agent,
 //! or the main view from the main session's row. `x` stops the selected
-//! agent with the agents under it, and Esc closes. The App hands in
+//! agent with the agents under it, and Esc closes. Other keys propagate,
+//! so an approval panel under the overlay keeps its answers. The App hands in
 //! fresh rows every frame, so states and times stay live, and the
 //! selection follows its session when rows move.
 
@@ -166,7 +167,12 @@ fn name_offset(row: &AgentsRow) -> usize {
     }
 }
 
+/// The token column, empty while nothing is known, as for the agents
+/// of a resumed session.
 fn tokens_label(tokens: u64) -> String {
+    if tokens == 0 {
+        return String::new();
+    }
     format!("{} tok", crate::view::format_token_count(tokens))
 }
 
@@ -200,17 +206,17 @@ struct Columns {
 }
 
 impl Columns {
-    /// Fit the columns of `rows` into `width`. The description takes
-    /// what the activity does not need, and at least half the room.
+    /// Fit the columns of `rows` into `width`. The activity gets what
+    /// it needs up to a third of the room and the description the rest,
+    /// so agents with similar tasks stay apart on narrow screens.
     fn fit(rows: &[AgentsRow], width: usize) -> Self {
         let widest = |f: &dyn Fn(&AgentsRow) -> usize| rows.iter().map(f).max().unwrap_or(0);
         let name_end = widest(&|r| name_offset(r) + r.name.width());
         let time = widest(&|r| time_label(r).width());
         let tokens = widest(&|r| tokens_label(r.tokens).width());
         let room = width.saturating_sub(name_end + 4 * GAP + time + tokens);
-        let longest_doing = widest(&|r| doing(r).width());
-        let title =
-            widest(&|r| r.title.width()).min(room.saturating_sub(longest_doing).max(room / 2));
+        let doing_share = widest(&|r| doing(r).width()).min(room / 3);
+        let title = widest(&|r| r.title.width()).min(room.saturating_sub(doing_share));
         Self {
             name_end,
             title,
@@ -381,7 +387,8 @@ impl OverlayWidget for AgentsOverlay {
             {
                 OverlayAction::Resolve("stop".into())
             }
-            _ => OverlayAction::Stay,
+            KeyCode::Char('x') => OverlayAction::Stay,
+            _ => OverlayAction::PropagateKey,
         }
     }
 }
@@ -504,6 +511,20 @@ mod tests {
         assert!(rows[main + 3].contains("done"), "{rows:#?}");
         assert!(rows[main + 3].contains("41s  22k tok"), "{rows:#?}");
         assert!(rows.iter().any(|r| r.contains(HINT.trim())), "{rows:#?}");
+    }
+
+    #[test]
+    fn similar_tasks_stay_apart_at_80_columns() {
+        let mut rows = tree().0.rows;
+        for (row, dir) in rows[1..].iter_mut().zip(["components", "routes", "hooks"]) {
+            row.state = AgentsRowState::Running;
+            row.title = format!("map exports under src/{dir}");
+            row.activity = format!("Searched \"export \" in src/{dir}");
+        }
+        let mut overlay = AgentsOverlay::new(rows, None);
+        let painted = paint(&mut overlay, 80, 24);
+        assert!(painted.iter().any(|r| r.contains("src/co")), "{painted:#?}");
+        assert!(painted.iter().any(|r| r.contains("src/ro")), "{painted:#?}");
     }
 
     #[test]

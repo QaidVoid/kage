@@ -8,7 +8,7 @@ use serde_json::Value;
 use super::modeline::spinner_frame;
 use super::tool_view::{
     AgentEnd, BashExit, BodyLine, LineKind, ToolBody, ToolLabel, ToolPhase, agent_output, arg_rows,
-    bash_output, describe, edit_diff, format_elapsed, group_summary,
+    bash_output, describe, edit_diff, format_elapsed, format_seconds, group_summary,
 };
 
 /// Output lines a folded row shows for bash, errors and unknown tools.
@@ -111,9 +111,11 @@ pub(crate) fn tool_row_lines(
     content.extend(body.into_iter().map(|line| indent_body(line, clip)));
     let (rule, bg) = match look {
         ToolPhase::Failed => (theme.tool_error_rule, theme.tool_error_bg),
-        ToolPhase::Streaming | ToolPhase::Queued | ToolPhase::Waiting | ToolPhase::Running => {
-            (theme.tool_pending_rule, theme.tool_pending_bg)
-        }
+        ToolPhase::Streaming
+        | ToolPhase::Queued
+        | ToolPhase::Waiting
+        | ToolPhase::Approved
+        | ToolPhase::Running => (theme.tool_pending_rule, theme.tool_pending_bg),
         ToolPhase::Done | ToolPhase::Denied | ToolPhase::Interrupted => {
             (theme.tool_rule, theme.tool_bg)
         }
@@ -171,7 +173,9 @@ pub(crate) fn tool_group_lines(
 fn phase_bullet(phase: ToolPhase, theme: &crate::theme::Theme) -> (&'static str, Style) {
     let fg = |c| Style::default().fg(c);
     match phase {
-        ToolPhase::Streaming | ToolPhase::Queued => ("\u{2022}", fg(theme.tool_pending_rule)),
+        ToolPhase::Streaming | ToolPhase::Queued | ToolPhase::Approved => {
+            ("\u{2022}", fg(theme.tool_pending_rule))
+        }
         ToolPhase::Running => (spinner_frame(), fg(theme.tool_pending_rule)),
         ToolPhase::Waiting => ("\u{2022}", theme.group_style("KageApproval")),
         ToolPhase::Done => ("\u{2022}", fg(theme.success_fg)),
@@ -182,9 +186,17 @@ fn phase_bullet(phase: ToolPhase, theme: &crate::theme::Theme) -> (&'static str,
 
 /// The right-aligned part of a tool header: the duration, a failed
 /// command's exit status, or the state word. A finished agent shows
-/// how it ended before its duration.
+/// how it ended before its duration. Agents count whole seconds, like
+/// the other views of an agent, and a queued agent's card says so in
+/// its body.
 fn right_text(row: &ToolRow<'_>, exit: Option<BashExit>, end: Option<AgentEnd>) -> String {
-    let elapsed = row.elapsed_ms.map(format_elapsed);
+    let agent = row.name == "agent";
+    let format = if agent {
+        format_seconds
+    } else {
+        format_elapsed
+    };
+    let elapsed = row.elapsed_ms.map(format);
     if let Some(end) = end
         && matches!(row.phase, ToolPhase::Done | ToolPhase::Failed)
     {
@@ -196,8 +208,10 @@ fn right_text(row: &ToolRow<'_>, exit: Option<BashExit>, end: Option<AgentEnd>) 
     }
     match row.phase {
         ToolPhase::Streaming => String::new(),
+        ToolPhase::Queued if agent => String::new(),
         ToolPhase::Queued => "queued".to_owned(),
         ToolPhase::Waiting => "waiting".to_owned(),
+        ToolPhase::Approved => "approved".to_owned(),
         ToolPhase::Denied => "denied".to_owned(),
         ToolPhase::Interrupted => "interrupted".to_owned(),
         ToolPhase::Running | ToolPhase::Done => elapsed.unwrap_or_default(),
@@ -286,7 +300,9 @@ fn folded_body(row: &ToolRow<'_>, label: &ToolLabel, output: Vec<BodyLine>) -> V
 }
 
 /// The body of a folded `agent` row: the live card the App writes as
-/// progress while the agent works, else the head of its reply.
+/// progress while the agent works, else the head of its reply. An
+/// interrupted card keeps only its stat line, since the activity above
+/// it is stale.
 fn folded_agent_body(
     phase: ToolPhase,
     end: Option<AgentEnd>,
@@ -294,10 +310,14 @@ fn folded_agent_body(
 ) -> Vec<Line<'static>> {
     match (phase, end) {
         (ToolPhase::Streaming | ToolPhase::Denied, _) => Vec::new(),
-        (
-            ToolPhase::Queued | ToolPhase::Waiting | ToolPhase::Running | ToolPhase::Interrupted,
-            _,
-        ) => head(output, FOLDED_BODY_LINES, tool_result_style()),
+        (ToolPhase::Queued | ToolPhase::Waiting | ToolPhase::Approved | ToolPhase::Running, _) => {
+            head(output, FOLDED_BODY_LINES, tool_result_style())
+        }
+        (ToolPhase::Interrupted, _) => head(
+            output.into_iter().skip(1).collect(),
+            FOLDED_BODY_LINES,
+            tool_result_style(),
+        ),
         (ToolPhase::Failed, Some(AgentEnd::Failed) | None) => {
             head(output, FOLDED_AGENT_LINES, tool_error_style())
         }

@@ -25,6 +25,9 @@ pub enum ToolPhase {
     Queued,
     /// The call waits for the user's approval.
     Waiting,
+    /// The user approved the call, which waits for the other calls of
+    /// its batch to be answered or to run.
+    Approved,
     /// The tool is executing.
     Running,
     /// The tool finished successfully.

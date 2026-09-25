@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use kage_core::{Content, LoopError, LoopEvent, Message, Role, StopReason};
+use kage_core::{Content, LoopError, LoopEvent, Message, MessageId, Role, StopReason};
 
 use crate::buffer::Buffer;
 use crate::view::tool_view::ToolPhase;
@@ -147,11 +147,16 @@ fn push_user_message(buf: &mut Buffer, message: &Message) {
     }
 }
 
-/// How long each tool call took, keyed by call id, recovered from the
-/// timestamps of the assistant message that made the call and the
-/// message carrying its result.
+/// How long tool calls took in milliseconds, keyed by the message that
+/// carries each result and the call id. Providers may reuse call ids
+/// across turns, so the id alone does not name one call.
+pub type ToolDurations = HashMap<(MessageId, String), u64>;
+
+/// How long each tool call took, recovered from the timestamps of the
+/// assistant message that made the call and the message carrying its
+/// result.
 #[must_use]
-pub fn tool_durations(messages: &[Message]) -> HashMap<String, u64> {
+pub fn tool_durations(messages: &[Message]) -> ToolDurations {
     let mut started = HashMap::new();
     let mut durations = HashMap::new();
     for message in messages {
@@ -161,9 +166,12 @@ pub fn tool_durations(messages: &[Message]) -> HashMap<String, u64> {
                     started.insert(id.to_string(), message.ts);
                 }
                 Content::ToolResultBlock { call_id, .. } => {
-                    if let Some(start) = started.get(&call_id.to_string()) {
-                        let ms = (message.ts - *start).num_milliseconds();
-                        durations.insert(call_id.to_string(), u64::try_from(ms).unwrap_or(0));
+                    if let Some(start) = started.remove(&call_id.to_string()) {
+                        let ms = (message.ts - start).num_milliseconds();
+                        durations.insert(
+                            (message.id, call_id.to_string()),
+                            u64::try_from(ms).unwrap_or(0),
+                        );
                     }
                 }
                 _ => {}
@@ -183,11 +191,10 @@ pub fn tool_durations(messages: &[Message]) -> HashMap<String, u64> {
 /// `tool_durations` to recover real durations from session entry
 /// timestamps; a call missing from the map shows none. Calls left
 /// without a result read as interrupted.
-#[allow(clippy::implicit_hasher)]
 pub fn populate_from_history(
     buf: &mut Buffer,
     messages: &[Message],
-    tool_durations: &HashMap<String, u64>,
+    tool_durations: &ToolDurations,
 ) {
     for msg in messages {
         match msg.role {
@@ -233,7 +240,7 @@ pub fn populate_from_history(
                         // session's per-entry `ts` deltas via
                         // `tool_durations`. A miss yields `None`,
                         // shown without a duration.
-                        let duration = tool_durations.get(&call_id.to_string()).copied();
+                        let duration = tool_durations.get(&(msg.id, call_id.to_string())).copied();
                         buf.push_tool_result_with_duration(
                             call_id.to_string(),
                             output.clone(),
@@ -1041,6 +1048,45 @@ mod tests {
             None,
         );
         result.ts = call.ts + chrono::Duration::milliseconds(250);
-        assert_eq!(tool_durations(&[call, result])["c1"], 250);
+        let key = (result.id, "c1".to_owned());
+        assert_eq!(tool_durations(&[call, result])[&key], 250);
+    }
+
+    #[test]
+    fn a_call_id_reused_in_a_later_turn_keeps_each_duration() {
+        let turn = |ms: i64| {
+            let call = Message::new(
+                Role::Assistant,
+                vec![Content::ToolCall {
+                    id: ToolCallId::new("call_0"),
+                    name: "agent".into(),
+                    input: json!({}),
+                }],
+                None,
+            );
+            let mut result = Message::new(
+                Role::ToolResult,
+                vec![Content::ToolResultBlock {
+                    call_id: ToolCallId::new("call_0"),
+                    output: "ok".into(),
+                    is_error: false,
+                }],
+                None,
+            );
+            result.ts = call.ts + chrono::Duration::milliseconds(ms);
+            [call, result]
+        };
+        let history: Vec<Message> = turn(8_000).into_iter().chain(turn(2_000)).collect();
+        let mut buf = Buffer::new();
+        populate_from_history(&mut buf, &history, &tool_durations(&history));
+        let durations: Vec<Option<u64>> = buf
+            .blocks()
+            .iter()
+            .filter_map(|b| match b {
+                Block::ToolResult { duration_ms, .. } => Some(*duration_ms),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(durations, [Some(8_000), Some(2_000)]);
     }
 }

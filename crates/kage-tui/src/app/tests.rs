@@ -747,7 +747,7 @@ fn tool_timing_excludes_the_approval_wait() {
     assert_eq!(tool_phase(&app, "c1"), ToolPhase::Waiting);
     std::thread::sleep(std::time::Duration::from_millis(60));
     app.answer_permission(PermissionDecision::AllowOnce);
-    assert_eq!(tool_phase(&app, "c1"), ToolPhase::Queued);
+    assert_eq!(tool_phase(&app, "c1"), ToolPhase::Approved);
     feed(
         &mut app,
         &events,
@@ -923,7 +923,7 @@ fn feedback_denies_then_submits_the_text() {
 }
 
 #[test]
-fn queued_requests_count_through_the_batch() {
+fn the_count_shows_the_requests_still_waiting() {
     let (mut app, _rx, events) = app_with_events();
     feed(
         &mut app,
@@ -944,12 +944,14 @@ fn queued_requests_count_through_the_batch() {
     };
     assert!(title(&mut app).contains(" 1 of 3 "));
     app.approval_key_at(key('1'), past_guard());
-    assert!(title(&mut app).contains(" 2 of 3 "));
+    assert!(title(&mut app).contains(" 1 of 2 "));
     app.approval_key_at(key('y'), Instant::now());
     assert!(
-        title(&mut app).contains(" 2 of 3 "),
+        title(&mut app).contains(" 1 of 2 "),
         "the next panel guards too"
     );
+    app.approval_key_at(key('y'), past_guard());
+    assert!(!title(&mut app).contains(" of "));
 }
 
 #[test]
@@ -967,7 +969,7 @@ fn the_draft_survives_an_approval() {
 }
 
 #[test]
-fn answering_moves_the_row_from_waiting_to_running() {
+fn answering_moves_the_row_from_waiting_to_approved() {
     use crate::view::tool_view::ToolPhase;
     let (mut app, _rx, events) = app_with_events();
     feed(
@@ -977,7 +979,7 @@ fn answering_moves_the_row_from_waiting_to_running() {
     );
     assert_eq!(tool_phase(&app, "c1"), ToolPhase::Waiting);
     app.approval_key_at(code(KeyCode::Enter), past_guard());
-    assert_eq!(tool_phase(&app, "c1"), ToolPhase::Queued);
+    assert_eq!(tool_phase(&app, "c1"), ToolPhase::Approved);
 }
 
 #[test]
@@ -1202,7 +1204,7 @@ fn pending_rows_show_until_delivered_steers_first() {
         app.handle_key(key(c));
     }
     app.handle_key(code(KeyCode::Enter));
-    let steer = format!("  > now{}after the current tool call", " ".repeat(25));
+    let steer = format!("  > now{}after the current tools", " ".repeat(29));
     let queue = format!("  > later{}when this run ends", " ".repeat(32));
     assert_eq!(pending_rows(&mut app), [steer, queue.clone()]);
     feed(&mut app, &events, vec![user_message("now")]);
@@ -4268,7 +4270,7 @@ fn an_agent_ask_is_labeled_and_its_feedback_goes_to_the_agent() {
     let rows = snapshot_rows(&terminal);
     assert!(
         rows.iter()
-            .any(|r| r.contains("explore \u{b7} Run this command?")),
+            .any(|r| r.contains("explore: explore task \u{b7} Run this command?")),
         "{rows:#?}"
     );
     assert!(
@@ -4886,7 +4888,7 @@ fn another_agents_approval_still_opens_while_focused() {
     let rows = rendered(&mut app, 80, 24);
     assert!(
         rows.iter()
-            .any(|r| r.contains("general \u{b7} Run this command?")),
+            .any(|r| r.contains("general: general task \u{b7} Run this command?")),
         "{rows:#?}"
     );
 }
@@ -5047,7 +5049,7 @@ fn the_agents_overlay_fits_80_by_24_and_stays_live() {
     );
     assert!(
         rows.iter()
-            .any(|r| r.contains("general \u{b7} Run this command?")),
+            .any(|r| r.contains("general: general task \u{b7} Run this command?")),
         "the approval panel shows under the overlay: {rows:#?}"
     );
 }
@@ -5086,4 +5088,304 @@ fn the_more_row_and_the_working_hint_name_the_agents_key() {
     let (events, events_rx) = mpsc::channel();
     app.set_engine_events(events_rx);
     check(app, &events, "alt+a");
+}
+
+#[test]
+fn each_view_keeps_its_own_draft() {
+    let (mut app, _rx, _events, child) = focused_app();
+    app.set_focus(None);
+    type_text(&mut app, "main words");
+    app.focus_agent(child);
+    assert_eq!(app.input.text(), "", "the main draft stays behind");
+    type_text(&mut app, "agent words");
+    app.set_focus(None);
+    assert_eq!(app.input.text(), "main words");
+    app.escalate(keys::Trigger::Esc);
+    assert_eq!(app.input.text(), "");
+    app.focus_agent(child);
+    assert_eq!(
+        app.input.text(),
+        "agent words",
+        "esc cleared only the main draft"
+    );
+}
+
+/// The duration on the finished row of the tool call `id` in `buffer`.
+fn result_duration(buffer: &SharedBuffer, id: &str) -> Option<u64> {
+    let buf = buffer.lock().unwrap();
+    buf.blocks()
+        .iter()
+        .rev()
+        .find_map(|b| match b {
+            crate::buffer::Block::ToolResult {
+                call_id,
+                duration_ms,
+                ..
+            } if call_id == id => Some(*duration_ms),
+            _ => None,
+        })
+        .expect("tool result present")
+}
+
+fn agent_call_end(id: &str) -> kage_core::protocol::Event {
+    kage_core::LoopEvent::ToolCallEnd {
+        id: kage_core::ToolCallId::new(id),
+        output: kage_core::ToolOutput {
+            text: "<agent name=\"explore\" session=\"x\" state=\"completed\">\nok\n</agent>".into(),
+            ..kage_core::ToolOutput::default()
+        },
+    }
+    .into()
+}
+
+#[test]
+fn a_queued_agent_card_has_no_timer_and_times_its_run_once_started() {
+    use crate::view::tool_view::ToolPhase;
+    let (mut app, _rx, events) = app_with_events();
+    let child = spawn_agent(&mut app, &events, "a1", "explore");
+    assert_eq!(tool_phase(&app, "a1"), ToolPhase::Queued);
+    let rows = rendered(&mut app, 100, 24);
+    let card = rows.iter().find(|r| r.contains("Agent explore")).unwrap();
+    assert!(card.trim_end().ends_with("explore task"), "{rows:#?}");
+    assert!(rows.iter().any(|r| r.contains("queued")), "{rows:#?}");
+
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![kage_core::protocol::HostEvent::RunStarted.into()],
+    );
+    assert_eq!(tool_phase(&app, "a1"), ToolPhase::Running);
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![run_ended(kage_core::protocol::RunOutcome::Completed)],
+    );
+    feed(&mut app, &events, vec![agent_call_end("a1")]);
+    let took = app.agents.get(child).unwrap().took.unwrap();
+    assert_eq!(
+        result_duration(&app.buffer, "a1"),
+        Some(u64::try_from(took.as_millis()).unwrap()),
+        "the card shows the agent's own time"
+    );
+}
+
+#[test]
+fn an_agent_stopped_while_queued_shows_no_time_anywhere() {
+    let (mut app, _rx, events) = app_with_events();
+    let child = spawn_agent(&mut app, &events, "a1", "explore");
+    feed(&mut app, &events, vec![agent_call_end("a1")]);
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![run_ended(kage_core::protocol::RunOutcome::Cancelled)],
+    );
+    assert_eq!(result_duration(&app.buffer, "a1"), None);
+    let row = app
+        .agents_overlay_rows()
+        .into_iter()
+        .find(|r| r.session == Some(child))
+        .unwrap();
+    assert_eq!(row.elapsed_ms, None);
+}
+
+#[test]
+fn allowing_a_tool_for_the_session_answers_its_queued_asks() {
+    use crate::view::tool_view::ToolPhase;
+    let (mut app, rx, events) = app_with_events();
+    let read = |id: &str, request: u64| -> kage_core::protocol::Event {
+        kage_core::protocol::HostEvent::PermissionRequested {
+            request_id: kage_core::protocol::RequestId(request),
+            tool_call_id: Some(kage_core::ToolCallId::new(id)),
+            tool: "grep".into(),
+            subject: "x".into(),
+            input: serde_json::json!({ "pattern": "x" }),
+        }
+        .into()
+    };
+    feed(
+        &mut app,
+        &events,
+        vec![
+            bash_start("c1"),
+            bash_start("c2"),
+            bash_start("c3"),
+            read("c1", 1),
+            permission_request("c2", 2),
+            read("c3", 3),
+        ],
+    );
+    app.approval_key_at(key('s'), past_guard());
+    let resolve = |request: u64, decision| RunRequest::ResolvePermission {
+        request_id: kage_core::protocol::RequestId(request),
+        decision,
+    };
+    assert_eq!(
+        resolutions(&rx),
+        [
+            resolve(1, PermissionDecision::AllowSession),
+            resolve(3, PermissionDecision::AllowOnce),
+        ]
+    );
+    assert_eq!(tool_phase(&app, "c1"), ToolPhase::Approved);
+    assert_eq!(tool_phase(&app, "c3"), ToolPhase::Approved);
+    assert_eq!(tool_phase(&app, "c2"), ToolPhase::Waiting);
+    assert_eq!(
+        app.pending_permission.as_ref().map(|a| a.tool.as_str()),
+        Some("bash")
+    );
+    assert!(app.permission_queue.is_empty());
+    let rows = rendered(&mut app, 100, 30);
+    assert!(rows.iter().any(|r| r.ends_with("approved")), "{rows:#?}");
+}
+
+#[test]
+fn the_working_row_counts_only_the_agents_directly_under_the_view() {
+    let (mut app, _rx, _events, [general, _, _]) = agents_app();
+    app.run_started = Instant::now().checked_sub(Duration::from_secs(5));
+    let label = |app: &App| app.activity_label(&lock(&app.buffer), 100).unwrap();
+    assert!(
+        label(&app).starts_with("Waiting for 1 agent ("),
+        "{}",
+        label(&app)
+    );
+    app.focus_agent(general);
+    assert!(
+        label(&app).starts_with("Waiting for 1 agent ("),
+        "{}",
+        label(&app)
+    );
+}
+
+#[test]
+fn ctrl_t_opens_the_agents_overlay_over_an_approval_that_keeps_its_keys() {
+    let (mut app, rx, events, [general, _, _]) = agents_app();
+    send_to(
+        &mut app,
+        &events,
+        general,
+        vec![bash_start("c1"), permission_request("c1", 5)],
+    );
+    assert!(app.approval_panel.is_some());
+    app.handle_key(ctrl('t'));
+    assert!(app.agents_overlay.is_some());
+    app.handle_key(code(KeyCode::Down));
+    assert_eq!(
+        app.agents_overlay.as_ref().unwrap().selected(),
+        Some(general)
+    );
+    std::thread::sleep(crate::overlay::approval::TYPE_AHEAD_GUARD);
+    app.handle_key(key('y'));
+    assert_eq!(
+        resolutions(&rx),
+        [RunRequest::ResolvePermission {
+            request_id: kage_core::protocol::RequestId(5),
+            decision: PermissionDecision::AllowOnce,
+        }]
+    );
+    assert!(app.agents_overlay.is_some(), "the overlay stays open");
+}
+
+#[test]
+fn the_main_row_names_the_first_prompt_until_a_title_arrives() {
+    let (mut app, _rx, events) = app_with_events();
+    feed(
+        &mut app,
+        &events,
+        vec![user_message("fix the router\nplease")],
+    );
+    spawn_agent(&mut app, &events, "a1", "explore");
+    assert_eq!(app.agents_overlay_rows()[0].title, "fix the router");
+}
+
+/// A resumed main session whose history holds one finished `explore`
+/// agent, with a loader that serves its transcript. Returns the agent's
+/// session.
+fn resumed_app() -> (
+    App,
+    mpsc::Receiver<RunRequest>,
+    mpsc::Sender<kage_core::protocol::Envelope>,
+    kage_core::SessionId,
+) {
+    let (mut app, rx, events) = app_with_events();
+    app.set_editor_modeless(true);
+    let child = kage_core::SessionId::new();
+    let call = kage_core::Message::new(
+        kage_core::Role::Assistant,
+        vec![kage_core::Content::ToolCall {
+            id: kage_core::ToolCallId::new("a1"),
+            name: "agent".into(),
+            input: serde_json::json!({ "agent": "explore", "description": "map src" }),
+        }],
+        None,
+    );
+    let mut result = kage_core::Message::new(
+        kage_core::Role::ToolResult,
+        vec![kage_core::Content::ToolResultBlock {
+            call_id: kage_core::ToolCallId::new("a1"),
+            output: format!(
+                "<agent name=\"explore\" session=\"{child}\" state=\"completed\">\nall mapped\n</agent>"
+            ),
+            is_error: false,
+        }],
+        None,
+    );
+    result.ts = call.ts + chrono::Duration::milliseconds(8_800);
+    app.set_agent_loader(Box::new(move |session| {
+        (session == child).then(|| {
+            vec![kage_core::Message::new(
+                kage_core::Role::User,
+                vec![kage_core::Content::Text {
+                    text: "map everything under src".into(),
+                }],
+                None,
+            )]
+        })
+    }));
+    feed(
+        &mut app,
+        &events,
+        vec![
+            kage_core::protocol::HostEvent::SessionChanged {
+                path: std::path::PathBuf::from("/tmp/s.jsonl"),
+                title: None,
+                messages: vec![call, result],
+            }
+            .into(),
+        ],
+    );
+    (app, rx, events, child)
+}
+
+#[test]
+fn a_resumed_session_lists_its_agents_and_opens_them_read_only() {
+    use crate::overlay::AgentsRowState;
+    let (mut app, rx, _events, child) = resumed_app();
+    let rows = app.agents_overlay_rows();
+    assert_eq!(rows.len(), 2, "{rows:#?}");
+    assert_eq!(rows[1].session, Some(child));
+    assert_eq!(rows[1].state, AgentsRowState::Done);
+    assert_eq!(rows[1].title, "map src");
+    assert_eq!(rows[1].elapsed_ms, Some(8_800));
+    assert_eq!(result_duration(&app.buffer, "a1"), Some(8_800));
+
+    app.handle_key(ctrl('t'));
+    app.handle_key(code(KeyCode::Down));
+    app.handle_key(code(KeyCode::Enter));
+    assert_eq!(app.focus, Some(child));
+    assert!(lock(&app.buffer).blocks().iter().any(
+        |b| matches!(b, crate::buffer::Block::User { text } if text == "map everything under src")
+    ));
+    assert_eq!(
+        app.agent_placeholder().as_deref(),
+        Some("explore cannot be messaged after a resume")
+    );
+    assert_eq!(app.footer_hint(), "esc to go back");
+    assert_eq!(app.breadcrumb().unwrap().tool_calls, 0);
+    type_text(&mut app, "more please");
+    app.handle_key(code(KeyCode::Enter));
+    assert!(resolutions(&rx).is_empty(), "nothing reaches the engine");
+    assert_eq!(app.input.text(), "more please");
 }

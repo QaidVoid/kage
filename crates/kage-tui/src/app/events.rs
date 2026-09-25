@@ -6,8 +6,16 @@ use super::*;
 impl App {
     /// Resolve a submitted draft: send the prompt and its images to the
     /// session on screen, steered into the run in flight or, with
-    /// `queue`, held until it ends.
+    /// `queue`, held until it ends. An agent of a resumed session takes
+    /// no prompts, so the text goes back into the draft.
     pub(crate) fn handle_submit(&mut self, text: String, queue: bool) {
+        if self.focused_read_only() {
+            self.input.splice(0, 0, &text);
+            let agent = self.focused_agent().unwrap_or("the agent");
+            let text = format!("{agent} cannot be messaged after a resume");
+            self.notify(text);
+            return;
+        }
         let images = self.input.take_attached();
         self.send_prompt(text, images, queue, self.focus);
     }

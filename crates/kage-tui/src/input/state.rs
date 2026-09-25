@@ -92,6 +92,29 @@ impl InputState {
             .collect()
     }
 
+    /// Put `draft` in the editor and return the draft it held. A
+    /// pending command, an input selection and history browsing start
+    /// over.
+    pub(crate) fn swap_draft(&mut self, draft: Draft) -> Draft {
+        self.pending = None;
+        self.pending_op = None;
+        self.pending_count = None;
+        self.awaiting_replace = false;
+        self.visual_anchor = None;
+        self.reset_history_navigation();
+        Draft {
+            text: std::mem::replace(&mut self.text, draft.text),
+            cursor: std::mem::replace(&mut self.cursor, draft.cursor),
+            shell: std::mem::replace(&mut self.shell, draft.shell),
+            undo_stack: std::mem::replace(&mut self.undo_stack, draft.undo_stack),
+            redo_stack: std::mem::replace(&mut self.redo_stack, draft.redo_stack),
+            pastes: std::mem::replace(&mut self.pastes, draft.pastes),
+            next_paste_id: std::mem::replace(&mut self.next_paste_id, draft.next_paste_id),
+            attached: std::mem::replace(&mut self.attached, draft.attached),
+            next_image_id: std::mem::replace(&mut self.next_image_id, draft.next_image_id),
+        }
+    }
+
     /// Byte offset of the cursor in the prompt text.
     #[must_use]
     pub fn cursor(&self) -> usize {

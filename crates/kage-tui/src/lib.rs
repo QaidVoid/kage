@@ -27,8 +27,8 @@ pub mod usage;
 pub mod view;
 
 pub use app::{
-    App, AppExit, OptionSetter, PermissionDecision, PluginDialog, PluginRefresh, RunRequest,
-    SessionLister,
+    AgentLoader, App, AppExit, OptionSetter, PermissionDecision, PluginDialog, PluginRefresh,
+    RunRequest, SessionLister,
 };
 pub use buffer::{Block, Buffer};
 pub use cmdline::{CommandLine, CommandLineEvent};
@@ -40,7 +40,8 @@ pub use command::{
 };
 pub use error::TuiError;
 pub use events::{
-    SharedBuffer, apply_loop_event, populate_from_history, shared_buffer, tool_durations,
+    SharedBuffer, ToolDurations, apply_loop_event, populate_from_history, shared_buffer,
+    tool_durations,
 };
 pub use hostlog::buffer_host_log;
 pub use input::{HISTORY_MAX, InputAction, InputState, Mode, Pane};

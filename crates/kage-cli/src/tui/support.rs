@@ -3,7 +3,7 @@
 #[allow(clippy::wildcard_imports)] // tui split: shares the parent module scope
 use super::*;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, Local, Utc};
 use kage_core::protocol::NoticeLevel;
 
 use crate::auth::AuthStore;
@@ -200,7 +200,11 @@ pub(crate) fn list_session_choices(
         .into_iter()
         .map(|s| {
             let day = relative_day(s.updated_at);
-            let time = s.updated_at.format("%H:%M").to_string();
+            let time = s
+                .updated_at
+                .with_timezone(&Local)
+                .format("%H:%M")
+                .to_string();
             PickItem::simple(s.path.to_string_lossy().into_owned())
                 .with_label(format_session_label(&s))
                 .with_group(day)
@@ -255,12 +259,12 @@ pub(crate) fn format_session_label(s: &SessionSummary) -> String {
         )
 }
 
-/// A short, human day label relative to now: `Today` / `Yesterday`
-/// for the last two days, otherwise `YYYY-MM-DD`. Drives the
-/// at-a-glance grouping in the session picker.
+/// A short, human day label relative to now in local time: `Today` /
+/// `Yesterday` for the last two days, otherwise `YYYY-MM-DD`. Drives
+/// the at-a-glance grouping in the session picker.
 pub(crate) fn relative_day(ts: chrono::DateTime<chrono::Utc>) -> String {
-    let today = chrono::Utc::now().date_naive();
-    let day = ts.date_naive();
+    let today = Local::now().date_naive();
+    let day = ts.with_timezone(&Local).date_naive();
     match (today - day).num_days() {
         0 => "Today".to_owned(),
         1 => "Yesterday".to_owned(),

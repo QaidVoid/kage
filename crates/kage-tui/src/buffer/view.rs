@@ -188,6 +188,7 @@ impl Buffer {
                     phase: ToolPhase::Streaming
                         | ToolPhase::Queued
                         | ToolPhase::Waiting
+                        | ToolPhase::Approved
                         | ToolPhase::Running,
                     ..
                 }

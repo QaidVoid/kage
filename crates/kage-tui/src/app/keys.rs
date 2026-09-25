@@ -61,6 +61,20 @@ impl App {
         }
     }
 
+    /// Whether `key` alone runs the built-in action `action` in the
+    /// current editing state.
+    fn runs_action(&self, key: &ratatui::crossterm::event::KeyEvent, action: &str) -> bool {
+        let Some(key) = key_from_event(key) else {
+            return false;
+        };
+        match lock(&self.keymap).lookup(self.edit_state().modes(), &[key]) {
+            Lookup::Exact(m) | Lookup::Prefix { exact: Some(m) } => {
+                matches!(m.rhs, Rhs::Action { name, .. } if name == action)
+            }
+            _ => false,
+        }
+    }
+
     /// Whether a raw plugin terminal-input hook consumed `key`. See
     /// the call site in [`Self::dispatch_key`] for the ordering
     /// rationale.
@@ -113,10 +127,21 @@ impl App {
             return self.dispatch_plugin_overlay_key(key);
         }
 
+        // The agents overlay may open over an approval panel. It takes
+        // its own keys and hands the rest to the panel.
+        if self.agents_overlay.is_some() {
+            return self.dispatch_agents_key(key);
+        }
+
         // An approval panel is equally top-most: the worker is parked
         // inside the permission gate awaiting the decision. Ctrl+C
-        // already hit the global cancel hatch above.
+        // already hit the global cancel hatch above. The agents key
+        // still opens the overlay, so the user can look before answering.
         if self.approval_panel.is_some() {
+            if self.runs_action(&key, "OpenAgents") {
+                self.open_agents();
+                return None;
+            }
             return self.dispatch_permission_key(key);
         }
 
@@ -139,10 +164,6 @@ impl App {
         // The `:tree` session browser is also a modal sibling.
         if self.session_tree.is_some() {
             return self.dispatch_session_tree_key(key);
-        }
-
-        if self.agents_overlay.is_some() {
-            return self.dispatch_agents_key(key);
         }
 
         // The help reference is a scroll-only modal sibling: any key

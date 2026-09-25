@@ -88,6 +88,8 @@ impl App {
             active_session: None,
             agents: kage_core::protocol::AgentTree::default(),
             agent_buffers: std::collections::HashMap::new(),
+            agent_loader: None,
+            drafts: std::collections::HashMap::new(),
             approval_panel: None,
             pending_permission: None,
             permission_queue: std::collections::VecDeque::new(),
@@ -106,6 +108,13 @@ impl App {
     /// none of those.
     pub fn set_session_usage(&mut self, usage: crate::usage::SharedSessionUsage) {
         self.session_usage = Some(usage);
+    }
+
+    /// Hand the App the loader that reads a finished agent's stored
+    /// transcript, so the agents overlay can open the agents of a
+    /// resumed session.
+    pub fn set_agent_loader(&mut self, loader: AgentLoader) {
+        self.agent_loader = Some(loader);
     }
 
     /// Whether a run of the session on screen is in flight. See
@@ -132,6 +141,14 @@ impl App {
     /// count: the agent on screen, else the main session.
     pub(crate) fn view_root(&self) -> Option<kage_core::SessionId> {
         self.focus.or(self.active_session)
+    }
+
+    /// Whether the agent on screen came from a resumed session's
+    /// history, so no engine runs it and it cannot be messaged.
+    pub(crate) fn focused_read_only(&self) -> bool {
+        self.focus
+            .and_then(|session| self.agents.get(session))
+            .is_some_and(|node| node.restored)
     }
 
     /// The name of the agent on screen. `None` in the main view.
@@ -640,11 +657,15 @@ impl App {
 
     /// The footer hint of an agent view with an empty draft: how to
     /// steer or message the agent, how to go back, and how to stop it
-    /// while `working`. `None` in the main view and in visual mode.
+    /// while `working`. An agent of a resumed session only goes back.
+    /// `None` in the main view and in visual mode.
     fn agent_hint(&self, working: bool) -> Option<String> {
         self.focus?;
         let stop = "ctrl+c to stop";
+        let read_only = self.focused_read_only();
         let parts = match (self.input.is_modeless(), self.input.mode(), working) {
+            (true, _, _) | (false, Mode::Normal, _) if read_only => vec!["esc to go back"],
+            (false, Mode::Insert, _) if read_only => vec!["ctrl+c to go back"],
             (true, _, true) => vec!["enter to steer", "esc to go back", stop],
             (true, _, false) => vec!["enter to send", "esc to go back"],
             (false, Mode::Insert, true) => vec!["enter to steer", stop],
@@ -731,15 +752,17 @@ impl App {
         Some(format!("{doing}{tail}"))
     }
 
-    /// How many agents under the session on screen are queued or
-    /// running.
+    /// How many agents directly under the session on screen are queued
+    /// or running. Their own agents are theirs to wait for.
     fn live_agents(&self) -> usize {
         use kage_core::protocol::AgentState;
         self.view_root().map_or(0, |root| {
             self.agents
                 .under(root)
                 .into_iter()
-                .filter(|(_, node)| matches!(node.state, AgentState::Queued | AgentState::Running))
+                .filter(|(depth, node)| {
+                    *depth == 1 && matches!(node.state, AgentState::Queued | AgentState::Running)
+                })
                 .count()
         })
     }
@@ -776,8 +799,8 @@ impl App {
                     state,
                     activity,
                     elapsed_ms: node
-                        .started
-                        .map(|t| u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX)),
+                        .elapsed()
+                        .map(|t| u64::try_from(t.as_millis()).unwrap_or(u64::MAX)),
                 })
             })
             .collect()
@@ -798,6 +821,7 @@ impl App {
             .slots
             .as_ref()
             .and_then(|slots| lock(&slots.ui_state()).session_title.clone())
+            .or_else(|| first_prompt(&lock(&self.root_buffer)))
             .unwrap_or_else(|| "main session".to_owned());
         let mut rows = vec![AgentsRow {
             session: None,
@@ -832,10 +856,6 @@ impl App {
                 }
                 _ => String::new(),
             };
-            let elapsed = match node.state {
-                AgentState::Running => node.started.map(|t| t.elapsed()),
-                _ => node.took,
-            };
             AgentsRow {
                 session: Some(node.session),
                 depth,
@@ -843,7 +863,7 @@ impl App {
                 title: node.description.clone(),
                 state,
                 activity,
-                elapsed_ms: elapsed.map(ms),
+                elapsed_ms: node.elapsed().map(ms),
                 tokens: node.usage.total.input + node.usage.total.output,
                 cost: node.usage.cost,
             }
@@ -871,25 +891,37 @@ impl App {
             AgentState::Failed => "failed",
             AgentState::Cancelled => "stopped",
         };
-        let elapsed = match node.state {
-            AgentState::Running => node.started.map(|t| t.elapsed()),
-            _ => node.took,
-        };
         Some(view::Breadcrumb {
             trail,
             description: node.description.clone(),
             state,
-            elapsed_ms: elapsed.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+            elapsed_ms: node
+                .elapsed()
+                .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
             tokens: node.usage.total.input + node.usage.total.output,
-            tool_calls: node.tool_calls,
+            tool_calls: if node.restored {
+                self.agent_buffers.get(&node.session).map_or(0, |buffer| {
+                    let calls = lock(buffer)
+                        .blocks()
+                        .iter()
+                        .filter(|b| matches!(b, crate::Block::ToolCall { .. }))
+                        .count();
+                    u32::try_from(calls).unwrap_or(u32::MAX)
+                })
+            } else {
+                node.tool_calls
+            },
         })
     }
 
     /// The empty draft's placeholder in an agent view: steer the agent
-    /// while it runs, else message it. `None` in the main view.
+    /// while it runs, else message it, or say that an agent of a
+    /// resumed session cannot be messaged. `None` in the main view.
     pub(crate) fn agent_placeholder(&self) -> Option<String> {
         let agent = self.focused_agent()?;
-        Some(if self.is_run_in_flight() {
+        Some(if self.focused_read_only() {
+            format!("{agent} cannot be messaged after a resume")
+        } else if self.is_run_in_flight() {
             format!("Steer {agent}")
         } else {
             format!("Message {agent} (the reply stays in this agent)")
@@ -1230,6 +1262,19 @@ fn key_chord(key: &kage_core::keymap::Key) -> String {
         name => out.push_str(&name.to_lowercase()),
     }
     out
+}
+
+/// The first line of the first prompt in `buffer`, which names a
+/// session until its title arrives.
+fn first_prompt(buffer: &crate::Buffer) -> Option<String> {
+    buffer.blocks().iter().find_map(|block| match block {
+        crate::Block::User { text } => text
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(str::to_owned),
+        _ => None,
+    })
 }
 
 /// What the current run is doing, from the newest blocks back to the

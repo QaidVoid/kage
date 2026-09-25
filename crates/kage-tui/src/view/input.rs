@@ -333,7 +333,7 @@ fn paint_pending(frame: &mut Frame, area: Rect, pending: &[PendingPrompt]) {
             let when = if p.queued {
                 "when this run ends"
             } else {
-                "after the current tool call"
+                "after the current tools"
             };
             pending_line(&p.text, when, width, muted)
         })

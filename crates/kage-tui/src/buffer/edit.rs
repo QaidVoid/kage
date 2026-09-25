@@ -177,6 +177,26 @@ impl Buffer {
         self.bump_version();
     }
 
+    /// Set how long the call `call_id` took, once its result is in.
+    /// No-op while the newest call with that id has no result.
+    pub fn set_tool_duration(&mut self, call_id: &str, ms: u64) {
+        let newest = self.blocks.iter_mut().rev().find(|b| match b {
+            Block::ToolCall { call_id: cid, .. } | Block::ToolResult { call_id: cid, .. } => {
+                cid == call_id
+            }
+            _ => false,
+        });
+        let Some(Block::ToolResult { duration_ms, .. }) = newest else {
+            return;
+        };
+        if *duration_ms == Some(ms) {
+            return;
+        }
+        *duration_ms = Some(ms);
+        self.invalidate_pair_height(call_id);
+        self.bump_version();
+    }
+
     /// Mark every call that has not finished as
     /// [`ToolPhase::Interrupted`], so nothing keeps animating after a
     /// run ends.
@@ -189,6 +209,7 @@ impl Buffer {
                     ToolPhase::Streaming
                         | ToolPhase::Queued
                         | ToolPhase::Waiting
+                        | ToolPhase::Approved
                         | ToolPhase::Running
                 )
             {

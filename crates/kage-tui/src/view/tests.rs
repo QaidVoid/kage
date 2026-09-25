@@ -1377,6 +1377,27 @@ fn a_running_agent_row_shows_its_card() {
 }
 
 #[test]
+fn an_interrupted_agent_card_keeps_only_its_stats() {
+    let mut buffer = Buffer::new();
+    agent_call(&mut buffer, "a1", "map exports");
+    buffer.set_tool_phase("a1", tool_view::ToolPhase::Running);
+    buffer.set_tool_progress("a1", "Waiting for approval: $ ls\n3 tools \u{b7} 9k tok");
+    buffer.interrupt_running_tools();
+    let input = InputState::new();
+    let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 80, 10));
+    let header = lines
+        .iter()
+        .position(|l| l.contains("Agent explore: map exports"))
+        .unwrap();
+    assert!(lines[header].ends_with("interrupted"), "{lines:#?}");
+    assert!(
+        lines[header + 1].ends_with("3 tools \u{b7} 9k tok"),
+        "{lines:#?}"
+    );
+    assert!(lines.iter().all(|l| !l.contains("Waiting")), "{lines:#?}");
+}
+
+#[test]
 fn finished_agent_rows_show_their_end_and_never_the_wrapper() {
     let mut buffer = Buffer::new();
     agent_call(&mut buffer, "a1", "map exports");
@@ -1427,7 +1448,7 @@ fn finished_agent_rows_show_their_end_and_never_the_wrapper() {
 
     let failed = row("Agent explore: check the router tests");
     assert!(lines[failed].contains("\u{2717} Agent"), "{lines:#?}");
-    assert!(lines[failed].ends_with("failed \u{b7} 3.0s"), "{lines:#?}");
+    assert!(lines[failed].ends_with("failed \u{b7} 3s"), "{lines:#?}");
     assert!(
         lines[failed + 1].contains("provider error: rate limited (429)"),
         "{lines:#?}"

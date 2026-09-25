@@ -5,8 +5,8 @@
 //! the call does (a command, a diff, a file head, or its arguments),
 //! and five numbered options answer it. Option 5 turns the panel into
 //! a one-line field whose text goes to the model with the denial. A
-//! request from an agent carries the agent's name in the title and in
-//! option 5, since the text goes to that agent.
+//! request from an agent carries the agent's name and task in the title
+//! and its name in option 5, since the text goes to that agent.
 //!
 //! Keys typed in the first [`TYPE_AHEAD_GUARD`] after the panel opens
 //! are dropped, so type-ahead meant for the prompt cannot answer it.
@@ -42,6 +42,8 @@ const OPTIONS: usize = 5;
 const NO: usize = 3;
 const TELL: usize = 4;
 const SEP: &str = " \u{B7} ";
+/// Fewest cells of an agent's task the title shows before dropping it.
+const MIN_TASK_WIDTH: usize = 8;
 
 /// What a key did to the panel.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,10 +62,10 @@ pub enum ApprovalOutcome {
 pub struct ApprovalPanel {
     tool: String,
     input: Value,
-    title: String,
-    /// Who reads option 5's text: the asking agent, else `kage`.
-    asker: String,
-    position: usize,
+    question: String,
+    /// The asking agent's name and task. `None` when the main session
+    /// asks.
+    agent: Option<(String, String)>,
     selected: usize,
     feedback: Option<CommandLine>,
     /// The feedback field closed with `Esc`, restored when option 5
@@ -73,28 +75,16 @@ pub struct ApprovalPanel {
 }
 
 impl ApprovalPanel {
-    /// Build the panel for a call to `tool` with `input`, asked by
-    /// `agent` or, with `None`, by the main session. `position` is the
-    /// request's 1-based place among the requests shown since the queue
-    /// was last empty. "Yes" starts selected.
+    /// Build the panel for a call to `tool` with `input`, asked by the
+    /// agent `agent` (its name and task) or, with `None`, by the main
+    /// session. "Yes" starts selected.
     #[must_use]
-    pub fn new(
-        tool: &str,
-        input: &Value,
-        agent: Option<&str>,
-        position: usize,
-        opened_at: Instant,
-    ) -> Self {
-        let question = tool_view::question(tool, input);
+    pub fn new(tool: &str, input: &Value, agent: Option<(&str, &str)>, opened_at: Instant) -> Self {
         Self {
             tool: tool.to_owned(),
             input: input.clone(),
-            title: match agent {
-                Some(agent) => format!("{agent}{SEP}{question}"),
-                None => question,
-            },
-            asker: agent.unwrap_or("kage").to_owned(),
-            position,
+            question: tool_view::question(tool, input),
+            agent: agent.map(|(name, task)| (name.to_owned(), task.to_owned())),
             selected: 0,
             feedback: None,
             parked: None,
@@ -102,11 +92,25 @@ impl ApprovalPanel {
         }
     }
 
-    /// The request's 1-based place among the requests shown since the
-    /// queue was last empty.
-    #[must_use]
-    pub fn position(&self) -> usize {
-        self.position
+    /// Who reads option 5's text: the asking agent, else `kage`.
+    fn asker(&self) -> &str {
+        self.agent.as_ref().map_or("kage", |(name, _)| name)
+    }
+
+    /// The title in `room` cells: the question, after the asking
+    /// agent's name and its task cut to fit. The task is left out when
+    /// too little of it would show.
+    fn title(&self, room: usize) -> String {
+        let Some((name, task)) = &self.agent else {
+            return self.question.clone();
+        };
+        let short = format!("{name}{SEP}{}", self.question);
+        let task_room = room.saturating_sub(short.width() + 2);
+        if task.is_empty() || task_room < MIN_TASK_WIDTH.min(task.width()) {
+            return short;
+        }
+        let task = crate::view::truncate_to_width(task, task_room, "...");
+        format!("{name}: {task}{SEP}{}", self.question)
     }
 
     /// Whether the feedback field is open.
@@ -199,17 +203,18 @@ impl ApprovalPanel {
     }
 
     /// Paint the panel into `area`. `waiting` is the number of requests
-    /// queued behind this one. When `area` is short, summary lines are
-    /// dropped first.
+    /// queued behind this one, which the count adds to this one. When
+    /// `area` is short, summary lines are dropped first.
     pub fn render(&self, frame: &mut Frame, area: Rect, waiting: usize) {
         if area.height < 2 || area.width == 0 {
             return;
         }
         let theme = crate::theme::current();
         let rule = theme.group_style("KageApproval");
-        let total = self.position + waiting;
-        let count = (total > 1).then(|| format!("{} of {total}", self.position));
-        let mut lines = vec![rule_line(area.width, &self.title, count, rule)];
+        let count = (waiting > 0).then(|| format!("1 of {}", waiting + 1));
+        let right = count.as_ref().map_or(0, |c| c.width() + 2 + RULE_LEAD);
+        let room = usize::from(area.width).saturating_sub(right + RULE_LEAD + 2);
+        let mut lines = vec![rule_line(area.width, &self.title(room), count, rule)];
         let summary = self.summary(&theme, area.width);
         let body = self.body(&theme, area.width, !summary.is_empty());
         let room = usize::from(area.height - 2).saturating_sub(body.len());
@@ -312,7 +317,7 @@ impl ApprovalPanel {
             };
             let help = format!(
                 "Tell {} what to do instead. Enter sends it and denies the {what}, esc goes back.",
-                self.asker
+                self.asker()
             );
             let muted = theme.group_style("KageMuted");
             let wrap = width.saturating_sub(INDENT_WIDTH);
@@ -334,7 +339,7 @@ impl ApprovalPanel {
             format!("Yes, and allow {tool} for the rest of this session"),
             format!("Yes, and always allow {tool} (saved to config.toml)"),
             "No".to_owned(),
-            format!("No, and tell {} what to do instead", self.asker),
+            format!("No, and tell {} what to do instead", self.asker()),
         ];
         lines.extend(labels.into_iter().enumerate().map(|(idx, label)| {
             let label = format!("{}. {label}", idx + 1);
@@ -418,7 +423,7 @@ mod tests {
     fn opened() -> (ApprovalPanel, Instant) {
         let at = Instant::now();
         (
-            ApprovalPanel::new("bash", &json!({"command": "ls"}), None, 1, at),
+            ApprovalPanel::new("bash", &json!({"command": "ls"}), None, at),
             at + Duration::from_millis(500),
         )
     }
@@ -441,7 +446,7 @@ mod tests {
     #[test]
     fn bash_shows_the_command_and_five_options() {
         let at = Instant::now();
-        let panel = ApprovalPanel::new("bash", &json!({"command": "cargo test"}), None, 1, at);
+        let panel = ApprovalPanel::new("bash", &json!({"command": "cargo test"}), None, at);
         let rows = rows(&panel, 80, 0);
         assert!(rows[0].contains("Run this command?"), "{rows:#?}");
         assert_eq!(rows[1], "   $ cargo test");
@@ -463,8 +468,7 @@ mod tests {
     fn long_bash_commands_wrap_to_six_lines() {
         let at = Instant::now();
         let command = (0..10).map(|i| format!("step{i}")).collect::<Vec<_>>();
-        let panel =
-            ApprovalPanel::new("bash", &json!({"command": command.join("\n")}), None, 1, at);
+        let panel = ApprovalPanel::new("bash", &json!({"command": command.join("\n")}), None, at);
         let rows = rows(&panel, 40, 0);
         assert_eq!(rows[1], "   $ step0");
         assert_eq!(rows[6], "     step5");
@@ -475,7 +479,7 @@ mod tests {
     fn edit_shows_diff_lines_in_the_diff_groups() {
         let at = Instant::now();
         let input = json!({"path": "a.rs", "old_str": "old", "new_str": "new"});
-        let panel = ApprovalPanel::new("edit", &input, None, 1, at);
+        let panel = ApprovalPanel::new("edit", &input, None, at);
         assert!(rows(&panel, 60, 0)[0].contains("Edit a.rs?"));
         let groups = crate::theme::groups_for("default", None).unwrap();
         let theme = Theme::from_groups(&groups.into_highlights("default"));
@@ -500,7 +504,7 @@ mod tests {
         let at = Instant::now();
         let new: Vec<String> = (0..14).map(|i| format!("n{i}")).collect();
         let input = json!({"path": "a", "old_str": "x", "new_str": new.join("\n")});
-        let rows = rows(&ApprovalPanel::new("edit", &input, None, 1, at), 60, 0);
+        let rows = rows(&ApprovalPanel::new("edit", &input, None, at), 60, 0);
         assert_eq!(rows[10], "   + n8");
         assert_eq!(rows[11], "   ... +5 more lines");
     }
@@ -509,7 +513,7 @@ mod tests {
     fn write_shows_the_path_and_its_head() {
         let at = Instant::now();
         let input = json!({"path": "b.txt", "content": "one\ntwo"});
-        let rows = rows(&ApprovalPanel::new("write", &input, None, 1, at), 60, 0);
+        let rows = rows(&ApprovalPanel::new("write", &input, None, at), 60, 0);
         assert_eq!(&rows[1..4], ["   b.txt", "   one", "   two"]);
     }
 
@@ -517,7 +521,7 @@ mod tests {
     fn mcp_tools_show_key_value_rows() {
         let at = Instant::now();
         let input = json!({"repo": "qaidvoid/kage", "title": "Palette"});
-        let panel = ApprovalPanel::new("github__create_issue", &input, None, 1, at);
+        let panel = ApprovalPanel::new("github__create_issue", &input, None, at);
         let rows = rows(&panel, 80, 0);
         assert!(rows[0].contains("Allow github.create_issue?"), "{rows:#?}");
         assert_eq!(rows[1], "   repo    qaidvoid/kage");
@@ -527,7 +531,7 @@ mod tests {
     #[test]
     fn keys_inside_the_guard_are_dropped() {
         let at = Instant::now();
-        let mut panel = ApprovalPanel::new("bash", &json!({"command": "ls"}), None, 1, at);
+        let mut panel = ApprovalPanel::new("bash", &json!({"command": "ls"}), None, at);
         let early = at + Duration::from_millis(100);
         assert_eq!(
             panel.handle_key_at(key(KeyCode::Char('y')), early),
@@ -643,22 +647,22 @@ mod tests {
     }
 
     #[test]
-    fn the_count_shows_only_with_a_queue() {
+    fn the_count_shows_the_pending_requests_only_with_a_queue() {
         let at = Instant::now();
-        let panel = ApprovalPanel::new("bash", &json!({"command": "ls"}), None, 2, at);
-        assert!(rows(&panel, 80, 1)[0].ends_with(" 2 of 3 \u{2500}\u{2500}"));
-        let alone = ApprovalPanel::new("bash", &json!({"command": "ls"}), None, 1, at);
-        assert!(!rows(&alone, 80, 0)[0].contains(" of "));
+        let panel = ApprovalPanel::new("bash", &json!({"command": "ls"}), None, at);
+        assert!(rows(&panel, 80, 1)[0].ends_with(" 1 of 2 \u{2500}\u{2500}"));
+        assert!(!rows(&panel, 80, 0)[0].contains(" of "));
     }
 
     #[test]
     fn an_agent_request_names_the_agent() {
         let at = Instant::now();
         let input = json!({"command": "cargo test"});
-        let mut panel = ApprovalPanel::new("bash", &input, Some("explore"), 1, at);
+        let mut panel = ApprovalPanel::new("bash", &input, Some(("explore", "map src")), at);
         let options = rows(&panel, 80, 0);
         assert!(
-            options[0].starts_with("\u{2500}\u{2500} explore \u{B7} Run this command? \u{2500}"),
+            options[0]
+                .starts_with("\u{2500}\u{2500} explore: map src \u{B7} Run this command? \u{2500}"),
             "{options:#?}"
         );
         assert_eq!(options[7], "   5. No, and tell explore what to do instead");
@@ -671,11 +675,25 @@ mod tests {
     }
 
     #[test]
+    fn a_long_task_is_cut_to_fit_and_dropped_when_too_narrow() {
+        let at = Instant::now();
+        let input = json!({"path": "src/components/Button.tsx"});
+        let task = "map the named exports of every file under src/components";
+        let panel = ApprovalPanel::new("read", &input, Some(("explore", task)), at);
+        let wide = rows(&panel, 80, 1);
+        assert!(wide[0].contains("explore: map the named"), "{wide:#?}");
+        assert!(wide[0].contains("... \u{B7} Read"), "{wide:#?}");
+        assert!(wide[0].ends_with(" 1 of 2 \u{2500}\u{2500}"), "{wide:#?}");
+        assert!(wide[0].width() <= 80, "{wide:#?}");
+        let narrow = rows(&panel, 44, 0);
+        assert!(narrow[0].contains("explore \u{B7} Read"), "{narrow:#?}");
+    }
+
+    #[test]
     fn a_short_area_drops_summary_lines_first() {
         let at = Instant::now();
         let command = (0..6).map(|i| format!("s{i}")).collect::<Vec<_>>();
-        let panel =
-            ApprovalPanel::new("bash", &json!({"command": command.join("\n")}), None, 1, at);
+        let panel = ApprovalPanel::new("bash", &json!({"command": command.join("\n")}), None, at);
         let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
         terminal
             .draw(|frame| panel.render(frame, frame.area(), 0))

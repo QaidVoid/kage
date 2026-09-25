@@ -404,6 +404,12 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         }));
     }
     app.set_start_info(start);
+    let loader_mirror = Arc::clone(&mirror);
+    app.set_agent_loader(Box::new(move |session| {
+        let dir = lock(&loader_mirror).path()?.parent()?.to_path_buf();
+        let replay = kage_session::replay(&dir.join(format!("{session}.jsonl"))).ok()?;
+        Some(replay.history)
+    }));
     let result = app.run(&mut tui);
     let width = tui.terminal().size().map_or(80, |size| size.width);
     drop(tui);
@@ -424,7 +430,9 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
 
 /// Print what stays in the terminal once the alt screen is gone: the
 /// transcript `transcript_on_exit` asks for at `width`, then the
-/// session file when one was recorded.
+/// session file when one was recorded. Nothing runs any more, so live
+/// text is finished and unfinished tool calls and agent cards read as
+/// interrupted.
 fn print_exit_summary(
     buffer: &kage_tui::SharedBuffer,
     width: u16,
@@ -436,7 +444,12 @@ fn print_exit_summary(
         .and_then(OptionValue::as_str)
         .and_then(TranscriptScope::parse)
         .unwrap_or(TranscriptScope::Full);
-    let transcript = kage_tui::transcript::render(&lock(buffer), width, scope);
+    let transcript = {
+        let mut buffer = lock(buffer);
+        buffer.finish_streaming();
+        buffer.interrupt_running_tools();
+        kage_tui::transcript::render(&buffer, width, scope)
+    };
     if !transcript.is_empty() {
         println!("{transcript}\n");
     }

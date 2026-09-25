@@ -562,13 +562,19 @@ impl App {
 
     /// Drive the agents overlay. Enter closes it on the selected
     /// session's view, `x` stops the selected agent and keeps it open.
+    /// Keys it does not use reach an approval panel under it.
     pub(crate) fn dispatch_agents_key(
         &mut self,
         key: ratatui::crossterm::event::KeyEvent,
     ) -> Option<AppExit> {
         let overlay = self.agents_overlay.as_mut()?;
         match crate::overlay::OverlayWidget::handle_key(overlay, key) {
-            OverlayAction::Stay | OverlayAction::PropagateKey => {}
+            OverlayAction::Stay => {}
+            OverlayAction::PropagateKey => {
+                if self.approval_panel.is_some() {
+                    return self.dispatch_permission_key(key);
+                }
+            }
             OverlayAction::Close => self.agents_overlay = None,
             OverlayAction::Resolve(action) => {
                 let session = overlay.selected();

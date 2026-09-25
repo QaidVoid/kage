@@ -4,6 +4,8 @@
 //! stacked vertically with a one-row gap. Each toast is a three-row
 //! card: a colored vertical accent bar on the left, a top pad row,
 //! a content row with a kind-icon + message, and a bottom pad row.
+//! The right margin beside a card is blanked too, so no text under it
+//! peeks out at the edge.
 //! Widths adapt to text up to a sensible cap so long notifications
 //! do not eclipse the conversation pane.
 //!
@@ -80,6 +82,12 @@ pub fn render_toasts(frame: &mut Frame, buffer_area: Rect, toasts: &[Toast], the
             width: toast_width,
             height: TOAST_HEIGHT,
         };
+        let margin = Rect {
+            x: area.right(),
+            width: buffer_area.right().saturating_sub(area.right()),
+            ..area
+        };
+        frame.render_widget(crate::opaque::OpaqueClear, margin);
         paint_toast(frame, area, toast, theme);
         row_cursor = row_cursor
             .saturating_add(TOAST_HEIGHT)
@@ -103,6 +111,17 @@ fn paint_toast(frame: &mut Frame, area: Rect, toast: &Toast, theme: &Theme) {
     let text_fg = theme.assistant_fg;
     let chrome_style = Style::default().bg(card_bg).add_modifier(DECORATION_MARKER);
 
+    // A wide glyph starting just left of the card would paint over its
+    // first cell.
+    let buf = frame.buffer_mut();
+    if area.x > buf.area.x {
+        for y in area.y..area.bottom() {
+            let cell = &mut buf[(area.x - 1, y)];
+            if cell.symbol().width() > 1 {
+                cell.set_symbol(" ");
+            }
+        }
+    }
     // The decoration marker makes cell-based selection skip the card.
     frame.render_widget(Clear, area);
     frame.render_widget(RtBlock::default().style(chrome_style), area);
@@ -269,6 +288,41 @@ mod tests {
         let buf = terminal.backend().buffer();
         let toast_cells = (20..38).map(|x| buf[(x, 1)].symbol()).collect::<String>();
         assert!(!toast_cells.contains('x'), "{toast_cells:?}");
+    }
+
+    #[test]
+    fn no_text_under_a_toast_shows_beside_it() {
+        let wide = "\u{4f60}\u{597d}".repeat(20);
+        for (under, width) in [("x".repeat(80), 80), (wide.clone(), 80), (wide, 79)] {
+            let backend = TestBackend::new(width, 6);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let theme = Theme::default();
+            let toast = Toast::info("no agents in this session yet");
+            terminal
+                .draw(|f| {
+                    let area = Rect::new(0, 0, width, 6);
+                    for y in 0..6 {
+                        f.buffer_mut().set_string(0, y, &under, Style::default());
+                    }
+                    render_toasts(f, area, &[toast], &theme);
+                })
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            let left = (0..width)
+                .find(|&x| buf[(x, 2)].symbol() == "\u{258E}")
+                .expect("accent bar");
+            for y in 1..4 {
+                let tail: String = (left..width).map(|x| buf[(x, y)].symbol()).collect();
+                assert!(
+                    !tail.contains('x') && !tail.contains('\u{4f60}') && !tail.contains('\u{597d}'),
+                    "row {y} at width {width}: {tail:?}"
+                );
+            }
+            assert!(
+                buf[(left - 1, 2)].symbol().width() < 2,
+                "no wide glyph reaches into the card at width {width}"
+            );
+        }
     }
 
     #[test]

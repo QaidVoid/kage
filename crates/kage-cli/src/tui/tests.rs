@@ -101,7 +101,10 @@ fn relative_day_labels_today_yesterday_then_date() {
     let old = now - chrono::Duration::days(9);
     assert_eq!(
         relative_day(old),
-        old.date_naive().format("%Y-%m-%d").to_string()
+        old.with_timezone(&chrono::Local)
+            .date_naive()
+            .format("%Y-%m-%d")
+            .to_string()
     );
 }
 

@@ -443,6 +443,12 @@ impl PluginDialogState {
 /// and `:resume` completion, and by the in-picker "all dirs" toggle).
 pub type SessionLister = Box<dyn Fn(bool) -> Vec<PickItem> + Send + 'static>;
 
+/// Reads the stored transcript of an agent session, for agents listed
+/// from a resumed session's history. `None` when the file is missing
+/// or unreadable.
+pub type AgentLoader =
+    Box<dyn Fn(kage_core::SessionId) -> Option<Vec<kage_core::Message>> + Send + 'static>;
+
 /// Sets an option with source `runtime` on behalf of a command or the
 /// settings dialog. The host routes it through the plugin runtime so
 /// `option_set` fires. An `Err` carries the message to show.
@@ -840,6 +846,12 @@ pub struct App {
     /// The transcript of each agent in [`Self::agents`], fed by that
     /// agent's loop events.
     agent_buffers: std::collections::HashMap<kage_core::SessionId, SharedBuffer>,
+    /// Reads the stored transcript of an agent of a resumed session.
+    /// `None` leaves such agents listed but closed.
+    agent_loader: Option<AgentLoader>,
+    /// The drafts of the views off screen, by session (`None` for the
+    /// main view). The draft on screen lives in [`Self::input`].
+    drafts: std::collections::HashMap<Option<kage_core::SessionId>, crate::input::Draft>,
     /// The approval panel on screen in place of the input, if any. It
     /// owns the keyboard like a modal sibling of [`Self::plugin_overlay`].
     approval_panel: Option<crate::overlay::ApprovalPanel>,

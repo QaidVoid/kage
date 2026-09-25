@@ -228,6 +228,38 @@ impl PasteBlob {
     }
 }
 
+/// One view's unsent prompt: its text and cursor, undo history,
+/// collapsed pastes, attached images and shell mode. Each agent view
+/// keeps its own, swapped in with [`InputState::swap_draft`].
+#[derive(Debug)]
+pub(crate) struct Draft {
+    text: String,
+    cursor: usize,
+    shell: bool,
+    undo_stack: Vec<EditSnapshot>,
+    redo_stack: Vec<EditSnapshot>,
+    pastes: Vec<PasteBlob>,
+    next_paste_id: u32,
+    attached: Vec<(u32, crate::image::AttachedImage)>,
+    next_image_id: u32,
+}
+
+impl Default for Draft {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            cursor: 0,
+            shell: false,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            pastes: Vec::new(),
+            next_paste_id: 1,
+            attached: Vec::new(),
+            next_image_id: 1,
+        }
+    }
+}
+
 /// Vim-style operator pending after `d`, `c`, or `y`. Combines with
 /// a motion or a doubled key (`dd`, `cc`, `yy`) to act on a range.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

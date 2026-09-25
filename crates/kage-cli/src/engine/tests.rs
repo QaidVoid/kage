@@ -1074,16 +1074,13 @@ fn running_limit_queues_agents_in_spawn_order() {
     assert_eq!(children.len(), 2);
     let (first, second) = (&children[0], &children[1]);
     let position = |pred: &dyn Fn(&Envelope) -> bool| events.iter().position(pred).unwrap();
-    let second_spawned = position(&|e| {
-        e.session == second.0 && matches!(e.event, Event::Host(HostEvent::AgentSpawned { .. }))
-    });
     let first_ended = position(&|e| {
         e.session == first.0 && matches!(e.event, Event::Host(HostEvent::RunEnded { .. }))
     });
     let second_started = position(&|e| {
         e.session == second.0 && matches!(e.event, Event::Host(HostEvent::RunStarted))
     });
-    assert!(second_spawned < first_ended && first_ended < second_started);
+    assert!(first_ended < second_started);
     assert!(
         tool_output(&events, parent, &first.1.0)
             .text

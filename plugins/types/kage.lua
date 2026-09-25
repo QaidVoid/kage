@@ -331,7 +331,7 @@
 ---@field leader string The key `<leader>` expands to when a mapping is set.
 ---@field timeoutlen integer Milliseconds a mapping that is also a prefix waits for more keys.
 ---@field agent_max_depth integer How deep agents may nest. 0 turns the agent tool off, and 1 lets only the main session start agents.
----@field agent_max_running integer How many agents of one session run at once. Further agents wait until one finishes.
+---@field agent_max_running integer How many agents run at once. Further agents wait until one finishes.
 
 --- Every action `kage.action` holds.
 ---@class kage.Actions

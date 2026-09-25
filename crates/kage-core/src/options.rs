@@ -197,7 +197,7 @@ pub const OPTIONS: &[OptionDef] = &[
             max: 16,
             default: 4,
         },
-        doc: "How many agents of one session run at once. Further agents wait until one finishes.",
+        doc: "How many agents run at once. Further agents wait until one finishes.",
         since: 2,
         live: false,
     },

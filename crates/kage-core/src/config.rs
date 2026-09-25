@@ -214,7 +214,7 @@ pub struct AgentsConfig {
     /// How deep agents may nest. 0 turns the `agent` tool off, and 1
     /// lets only the main session start agents.
     pub max_depth: u8,
-    /// How many agents of one session tree run at once. Further agents
+    /// How many agents run at once across the engine. Further agents
     /// wait until one finishes.
     pub max_running: u32,
 }

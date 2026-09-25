@@ -1960,6 +1960,31 @@ fn cancel_during_backoff_aborts_cleanly() {
     assert_eq!(mock.call_count(), 1, "retry never issued after cancel");
 }
 
+#[test]
+fn provider_error_after_cancel_ends_the_run_as_cancelled() {
+    let mock = MockProvider::sequence(vec![vec![
+        Ok(ProviderEvent::MessageStart),
+        Err(kage_provider::ProviderError::Transport("cancelled".into())),
+    ]]);
+    let mut cx = AgentContext::new("mock:m", "");
+    cx.history.push(user_msg("hello"));
+    let cancel = CancelFlag::new();
+    let res = run(
+        &mock,
+        &ToolRegistry::new(),
+        &mut cx,
+        LoopConfig::default(),
+        &mut NoopHooks,
+        &cancel,
+        |e| {
+            if matches!(e, LoopEvent::MessageStart { .. }) {
+                cancel.cancel();
+            }
+        },
+    );
+    assert!(matches!(res, Err(LoopError::Cancelled)), "{res:?}");
+}
+
 /// Tool that always reports cancellation, like a host interrupt mid-run.
 #[derive(Debug)]
 struct CancelTool;

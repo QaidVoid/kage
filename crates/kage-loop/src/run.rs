@@ -125,9 +125,12 @@ where
                             emit(LoopEvent::Error { kind: kind.clone() });
                             return Err(kind);
                         }
+                        Err(TurnFailure::Provider(_)) if cancel.is_cancelled() => {
+                            return finish_cancelled(&mut emit);
+                        }
                         Err(TurnFailure::Provider(e)) => {
                             let exhausted = attempt >= config.max_provider_retries;
-                            if exhausted || !e.is_transient() || cancel.is_cancelled() {
+                            if exhausted || !e.is_transient() {
                                 let kind = match e {
                                     ProviderError::Auth(message) => LoopError::Auth { message },
                                     other => LoopError::Provider {

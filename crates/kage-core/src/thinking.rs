@@ -5,8 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Unified thinking effort the host requests for one turn.
 ///
-/// Mirrors Pi's `ThinkingLevel`: a six-step ladder the user cycles
-/// through with `Shift+Tab`. [`Reasoning::resolve`] fits a level to
+/// A six-step ladder the user cycles through with `Shift+Tab`. [`Reasoning::resolve`] fits a level to
 /// what the model accepts, and providers translate it to their shape
 /// (an effort value, a thinking token budget, or an on/off switch).
 ///

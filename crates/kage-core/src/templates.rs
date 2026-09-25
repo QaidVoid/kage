@@ -11,7 +11,7 @@
 //! * `description` (optional) - shown in the palette
 //! * `argument-hint` (optional) - free text shown next to the name
 //!
-//! Body placeholders (mirror Pi):
+//! Body placeholders:
 //! * `$1`, `$2`, ... positional, 1-indexed
 //! * `$@` and `$ARGUMENTS` - all args joined by single space
 //! * `${@:N:L}` - bash-style slice: starting at index `N`, up to `L` args

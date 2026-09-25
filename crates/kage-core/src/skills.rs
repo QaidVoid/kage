@@ -5,7 +5,7 @@
 //! slash palette as `/skill:<name>`. They give non-Lua users a way to
 //! extend kage with reusable instructions.
 //!
-//! Directory layout (per Pi convention):
+//! Directory layout:
 //!
 //! ```text
 //! ~/.config/kage/skills/<name>/SKILL.md

@@ -4,8 +4,8 @@
 //!
 //! Without this header the model has nothing to ground filesystem or
 //! shell commands on, and reliably hallucinates paths like
-//! `/home/user`. Pi's coding agent has a similar block; we keep it
-//! minimal: ASCII only, no markdown headings, no narrative.
+//! `/home/user`. The block stays minimal: ASCII only, no markdown
+//! headings, no narrative.
 
 use std::path::Path;
 

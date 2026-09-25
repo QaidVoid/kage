@@ -111,7 +111,8 @@ impl State {
                 .map_err(|err| format!("state: mkdir {}: {err}", parent.display()))?;
         }
         let raw = serde_json::to_string_pretty(self).map_err(|e| format!("state: encode: {e}"))?;
-        fs::write(path, raw).map_err(|err| format!("state: write {}: {err}", path.display()))
+        kage_core::fsutil::atomic_write(path, raw.as_bytes())
+            .map_err(|err| format!("state: write {}: {err}", path.display()))
     }
 
     /// Convenience wrapper over [`Self::save_to`] using the default path.

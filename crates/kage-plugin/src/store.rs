@@ -129,7 +129,7 @@ fn save(path: &Path, map: &StoreMap) -> mlua::Result<()> {
     }
     let body = serde_json::to_vec_pretty(map)
         .map_err(|e| mlua::Error::external(format!("kage.store: encode: {e}")))?;
-    kage_tools::atomic::atomic_write(path, &body)
+    kage_core::fsutil::atomic_write(path, &body)
         .map_err(|e| mlua::Error::external(format!("kage.store: write {}: {e}", path.display())))
 }
 

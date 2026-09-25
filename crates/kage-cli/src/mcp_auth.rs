@@ -29,7 +29,7 @@ use kage_mcp::TokenSource;
 use kage_mcp::oauth::{self, AuthCode, Expected, Loopback, OAuthError, Pkce};
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{OAuthCredential, write_private};
+use crate::auth::OAuthCredential;
 use crate::oauth::REFRESH_SLACK;
 
 /// On-disk shape of `mcp-auth.json`.
@@ -99,7 +99,7 @@ impl McpAuthStore {
         bumped.version = FORMAT_VERSION;
         let raw =
             serde_json::to_string_pretty(&bumped).map_err(|e| format!("mcp auth: encode: {e}"))?;
-        write_private(path, raw.as_bytes())
+        kage_core::fsutil::atomic_write_private(path, raw.as_bytes())
             .map_err(|err| format!("mcp auth: write {}: {err}", path.display()))
     }
 }

@@ -7,6 +7,7 @@ pub mod cancel;
 pub mod config;
 pub mod error;
 pub mod event;
+pub mod fsutil;
 pub mod highlight;
 pub mod keymap;
 pub mod message;

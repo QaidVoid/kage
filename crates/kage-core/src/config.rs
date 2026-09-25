@@ -160,9 +160,7 @@ impl Config {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, doc.to_string().as_bytes())?;
-        std::fs::rename(&tmp, path)?;
+        crate::fsutil::atomic_write(path, doc.to_string().as_bytes())?;
         Ok(())
     }
 }

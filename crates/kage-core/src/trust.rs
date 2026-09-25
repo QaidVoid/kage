@@ -293,9 +293,7 @@ fn save_store(store: &Store) -> Result<()> {
         version: STORE_VERSION,
         projects: store.projects.clone(),
     })?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, body)?;
-    std::fs::rename(&tmp, &path)?;
+    crate::fsutil::atomic_write(&path, body.as_bytes())?;
     Ok(())
 }
 

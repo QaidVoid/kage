@@ -238,7 +238,7 @@ impl AuthStore {
         bumped.version = FORMAT_VERSION;
         let raw =
             serde_json::to_string_pretty(&bumped).map_err(|e| format!("auth: encode: {e}"))?;
-        write_private(path, raw.as_bytes())
+        kage_core::fsutil::atomic_write_private(path, raw.as_bytes())
             .map_err(|err| format!("auth: write {}: {err}", path.display()))
     }
 
@@ -531,28 +531,6 @@ fn read_secret(prompt: &str) -> Result<String, String> {
     rpassword::prompt_password(prompt).map_err(|e| e.to_string())
 }
 
-/// Write `bytes` to `path`, creating it with mode `0600` on Unix so
-/// other users cannot read the secrets it holds.
-#[cfg(unix)]
-pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
-}
-
-/// Write `bytes` to `path`.
-#[cfg(not(unix))]
-pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    fs::write(path, bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -625,6 +603,30 @@ mod tests {
         store.save_to(&path).unwrap();
         let perms = fs::metadata(&path).unwrap().permissions();
         assert_eq!(perms.mode() & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resaving_tightens_mode_and_leaves_no_temp_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        let mut store = AuthStore::empty();
+        store.set_api_key("anthropic", "x");
+        store.save_to(&path).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        store.set_api_key("openai", "y");
+        store.save_to(&path).unwrap();
+
+        let perms = fs::metadata(&path).unwrap().permissions();
+        assert_eq!(perms.mode() & 0o777, 0o600);
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["auth.json"]);
+        let loaded = AuthStore::load_from(&path).unwrap();
+        assert!(loaded.credential("openai").is_some());
     }
 
     #[test]

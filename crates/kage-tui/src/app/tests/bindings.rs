@@ -314,6 +314,24 @@ fn terminal_input_hook_cannot_block_ctrl_q() {
 }
 
 #[test]
+fn terminal_input_hook_cannot_swallow_approval_panel_keys() {
+    let (mut app, _rx, events) = app_with_events();
+    let rt = kage_plugin::PluginRuntime::new().unwrap();
+    rt.eval("kage.on_terminal_input(function() return true end)")
+        .unwrap();
+    app.set_plugin_terminal_hooks(rt.shared_terminal_hooks());
+    feed(
+        &mut app,
+        &events,
+        vec![bash_start("c1"), permission_request("c1", 1)],
+    );
+    assert!(app.approval_panel.is_some());
+    std::thread::sleep(crate::overlay::approval::TYPE_AHEAD_GUARD);
+    app.handle_key(key('4'));
+    assert!(app.approval_panel.is_none(), "4 reached the panel");
+}
+
+#[test]
 fn terminal_input_off_stops_consuming() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();

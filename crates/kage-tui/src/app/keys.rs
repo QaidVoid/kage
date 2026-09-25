@@ -128,27 +128,15 @@ impl App {
         }
         self.escalation = None;
 
-        // Raw plugin terminal-input hooks see the key before any modal
-        // layer (but never before the global hatches above, so a hook
-        // cannot wedge the UI). A truthy return consumes it.
-        if self.consumed_by_terminal_hook(&key) {
-            return None;
-        }
-
-        // A blocking plugin dialog is the top-most modal layer: the
-        // worker is parked waiting for its answer.
-        if self.plugin_overlay.is_some() {
-            return self.dispatch_plugin_overlay_key(key);
-        }
-
         // The agents overlay may open over an approval panel. It takes
         // its own keys and hands the rest to the panel.
         if self.agents_overlay.is_some() {
             return self.dispatch_agents_key(key);
         }
 
-        // An approval panel is equally top-most: the worker is parked
-        // inside the permission gate awaiting the decision. Ctrl+C
+        // An approval panel outranks the plugin hooks below: the worker
+        // is parked inside the permission gate awaiting the decision,
+        // and a hook must not see or consume the approval keys. Ctrl+C
         // already hit the global cancel hatch above. The agents key
         // still opens the overlay, so the user can look before answering.
         if self.approval_panel.is_some() {
@@ -157,6 +145,20 @@ impl App {
                 return None;
             }
             return self.dispatch_permission_key(key);
+        }
+
+        // Raw plugin terminal-input hooks see the key before the
+        // remaining modal layers (but never before the global hatches
+        // above, so a hook cannot wedge the UI). A truthy return
+        // consumes it.
+        if self.consumed_by_terminal_hook(&key) {
+            return None;
+        }
+
+        // A blocking plugin dialog parks the worker waiting for its
+        // answer.
+        if self.plugin_overlay.is_some() {
+            return self.dispatch_plugin_overlay_key(key);
         }
 
         // The right-click context menu is a light modal layer above

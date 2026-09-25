@@ -1,7 +1,6 @@
 -- block_renderer_demo.lua - own how a block draws, in pure Lua.
 --
--- This is the PT.7 "Emacs-style overhaul" seam: a plugin fully
--- controls how a custom block kind renders. `kage.register_block_
+-- A plugin fully controls how a custom block kind renders. `kage.register_block_
 -- renderer(kind, fn)` takes a `{ kind, text, width }` table and
 -- returns the same shape `kage.ui.set_header` uses - a string, a
 -- span table `{ text=, fg=, bold= }`, or an array of either (one per
@@ -42,7 +41,7 @@ kage.register_command({
             title = kage.ui.select('Card title', {
                 'Hello from Lua',
                 'Fully hackable UI',
-                'PT.7 shipped',
+                'Custom renderers',
             })
             if title == nil then
                 return 'cancelled'

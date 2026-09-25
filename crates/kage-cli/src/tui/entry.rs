@@ -1,6 +1,5 @@
 //! Interactive TUI entry point: `run_tui`.
 
-#[allow(clippy::wildcard_imports)] // tui split: shares the parent module scope
 use super::*;
 
 use std::sync::OnceLock;
@@ -15,7 +14,7 @@ use kage_tui::hostlog::LogPublisher;
 /// Drop into the interactive TUI, on the recorded session at `resume`
 /// when given, the way the session picker resumes one. Returns the
 /// appropriate process exit code once the user quits.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines, reason = "one linear startup sequence")]
 pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>) -> ExitCode {
     let mut registry = crate::build_provider_registry();
     let provisional_model = model.map_or_else(|| crate::default_model(&registry), str::to_owned);
@@ -494,7 +493,10 @@ pub(crate) fn startup_options(
         .get("compaction_threshold")
         .and_then(OptionValue::as_float)
     {
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the threshold is a fraction that f32 holds"
+        )]
         {
             loop_cfg.compaction_threshold = threshold as f32;
         }

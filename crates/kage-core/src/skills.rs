@@ -209,8 +209,8 @@ pub(crate) fn split_frontmatter_pub(
 /// * `key: "quoted value"` (double-quoted, no escapes besides standard)
 /// * Lines starting with `#` are comments and are ignored.
 ///
-/// Multi-line scalars (`|`, `>`) are not supported in v0.1; skills that
-/// need long descriptions can put detail in the body.
+/// Multi-line scalars (`|`, `>`) are not supported. Skills that need
+/// long descriptions can put detail in the body.
 fn split_frontmatter(
     input: &str,
 ) -> Result<(std::collections::HashMap<String, String>, &str), String> {

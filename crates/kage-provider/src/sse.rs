@@ -1,20 +1,17 @@
 //! Shared Server-Sent-Events stream plumbing.
 //!
-//! Every HTTP provider streamed its response the same way: a blocking
+//! Every HTTP provider streams its response the same way: a blocking
 //! line reader that skips blank and comment lines and surfaces
-//! `event:` / `data:` frames, wrapped in an identical `Iterator::next`
-//! shell that drains a pending queue, honors the cancel flag, reads a
-//! frame, feeds it to a provider-specific state machine, and fuses on
-//! EOF. That shell and the framing reader lived four times over.
+//! `event:` and `data:` frames, wrapped in an `Iterator::next` shell
+//! that drains a pending queue, honors the cancel flag, reads a frame,
+//! feeds it to a provider-specific state machine, and fuses on EOF.
 //!
-//! Here they live once. A provider keeps its own state machine and
-//! pending queue and implements [`SseStreamCore`]; the framing reader
-//! and the loop are shared. The reader does full SSE framing (the
-//! Anthropic grammar), which is a behavioral superset of the
-//! `data:`-only readers the other providers used: those send one
-//! `data:` line per blank-line-terminated event, so the joined-data /
-//! `event:`-name handling never changes their observed payloads, and
-//! processors that don't care about the event name simply ignore it.
+//! A provider keeps its own state machine and pending queue and
+//! implements `SseStreamCore`. The framing reader and the loop are
+//! shared. The reader does full SSE framing (the Anthropic grammar).
+//! Providers that send one `data:` line per blank-line-terminated event
+//! see the same payloads, and processors that do not care about the
+//! event name simply ignore it.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Read};

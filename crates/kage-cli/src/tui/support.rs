@@ -1,6 +1,5 @@
 //! Session title, bridge, dialog, listing, and start notice helpers.
 
-#[allow(clippy::wildcard_imports)] // tui split: shares the parent module scope
 use super::*;
 
 use chrono::{DateTime, Duration, Local, Utc};
@@ -252,10 +251,7 @@ pub(crate) fn format_session_label(s: &SessionSummary) -> String {
         .or(s.last_user_prompt.as_deref())
         .map_or_else(
             || "(untitled session)".to_owned(),
-            |t| {
-                let one_line = t.replace('\n', " ");
-                one_line.split_whitespace().collect::<Vec<_>>().join(" ")
-            },
+            |t| t.split_whitespace().collect::<Vec<_>>().join(" "),
         )
 }
 
@@ -312,9 +308,9 @@ pub(crate) fn translate_plugin_arg(
 }
 
 /// Snapshot the plugin commands (regulars then overrides) the runtime
-/// currently holds, translated into the App's [`PluginCommand`] shape.
-/// Shared by startup seeding and the post-reload republish so both
-/// paths stay in sync.
+/// currently holds, translated into the App's
+/// [`kage_tui::command::PluginCommand`] shape. Shared by startup seeding
+/// and the post-reload republish so both paths stay in sync.
 pub(crate) fn snapshot_plugin_commands(
     rt: &PluginRuntime,
 ) -> Vec<kage_tui::command::PluginCommand> {

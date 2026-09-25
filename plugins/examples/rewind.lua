@@ -24,7 +24,7 @@
 --   /rewind-status how many checkpoints / redo entries are held
 --                  (alias: /undo-status)
 --
--- Scope/limits (v0.1): file snapshots use `git stash create`, so they
+-- Scope/limits: file snapshots use `git stash create`, so they
 -- cover tracked changes only (not untracked files) and require a git
 -- work tree. The conversation fork is one-way: /redo restores files,
 -- not the un-forked conversation (that would need a host primitive

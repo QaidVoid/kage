@@ -20,7 +20,6 @@ pub mod openai_responses;
 pub mod registry;
 pub mod request;
 pub mod sse;
-pub mod tokens;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -48,8 +47,9 @@ pub type EventStream =
 ///
 /// Implementations block synchronously inside [`Provider::stream`] until
 /// the request has been accepted, then return an iterator the caller
-/// drains for events. Cancellation is cooperative through `cancel`; the
-/// iterator polls it at safe points (between SSE events).
+/// drains for events. Built-in providers wrap their stream in
+/// [`make_cancelable`], so setting `cancel` ends the iterator even in the
+/// middle of a blocking read.
 pub trait Provider: Send + Sync + std::fmt::Debug {
     /// Static metadata describing this provider.
     fn metadata(&self) -> &ProviderMetadata;

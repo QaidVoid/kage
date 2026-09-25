@@ -55,7 +55,7 @@ const STREAM_PHASE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Install the base `kage.http` placeholder table.
 ///
 /// The request helpers themselves are gated behind the `net` capability
-/// and attached per-plugin by [`register`]. The empty base table keeps
+/// and attached per-plugin by `register`. The empty base table keeps
 /// `kage.http` resolvable so an ungranted plugin sees `kage.http.get`
 /// as `nil` rather than indexing a nil value, mirroring how
 /// `kage.session` carries gated functions on top of a base table.

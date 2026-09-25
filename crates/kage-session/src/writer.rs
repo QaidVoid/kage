@@ -31,7 +31,10 @@ pub struct SessionWriter {
     /// The lock lives on a duplicated fd, so it persists independently of
     /// the `BufWriter`'s handle.
     #[cfg(unix)]
-    #[expect(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "held only so the lock lives as long as the writer"
+    )]
     lock: Option<nix::fcntl::Flock<File>>,
 }
 

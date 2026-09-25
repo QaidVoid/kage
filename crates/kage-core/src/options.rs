@@ -63,8 +63,6 @@ pub struct OptionDef {
     pub kind: OptionKind,
     /// One-line description.
     pub doc: &'static str,
-    /// Plugin API generation that introduced the option.
-    pub since: u32,
     /// Whether a change applies while running. Other options apply at
     /// the next session start.
     pub live: bool,
@@ -81,7 +79,6 @@ pub const OPTIONS: &[OptionDef] = &[
         toml: "ui.theme",
         kind: OptionKind::Str { default: "default" },
         doc: "Color theme, bundled or from the themes directory.",
-        since: 2,
         live: true,
     },
     OptionDef {
@@ -89,7 +86,6 @@ pub const OPTIONS: &[OptionDef] = &[
         toml: "ui.mouse",
         kind: OptionKind::Bool { default: true },
         doc: "Capture mouse events.",
-        since: 2,
         live: true,
     },
     OptionDef {
@@ -100,7 +96,6 @@ pub const OPTIONS: &[OptionDef] = &[
             default: "modeless",
         },
         doc: "Prompt editing style.",
-        since: 2,
         live: true,
     },
     OptionDef {
@@ -112,7 +107,6 @@ pub const OPTIONS: &[OptionDef] = &[
             default: 1,
         },
         doc: "Minimum content rows of the input box.",
-        since: 2,
         live: true,
     },
     OptionDef {
@@ -124,7 +118,6 @@ pub const OPTIONS: &[OptionDef] = &[
             default: 8,
         },
         doc: "Content rows the input box grows to before it scrolls.",
-        since: 2,
         live: true,
     },
     OptionDef {
@@ -135,7 +128,6 @@ pub const OPTIONS: &[OptionDef] = &[
             default: "full",
         },
         doc: "What prints after exit: the whole transcript, from the last prompt on, or only the session path.",
-        since: 2,
         live: true,
     },
     OptionDef {
@@ -146,7 +138,6 @@ pub const OPTIONS: &[OptionDef] = &[
             default: "",
         },
         doc: "Thinking level for new sessions, or empty for automatic (high, or the nearest level the model accepts).",
-        since: 2,
         live: false,
     },
     OptionDef {
@@ -154,7 +145,6 @@ pub const OPTIONS: &[OptionDef] = &[
         toml: "loop.compaction_threshold",
         kind: OptionKind::Fraction { default: 0.8 },
         doc: "Fraction of the context window that triggers compaction. 0 turns compaction off.",
-        since: 2,
         live: false,
     },
     OptionDef {
@@ -162,7 +152,6 @@ pub const OPTIONS: &[OptionDef] = &[
         toml: "keybindings.leader",
         kind: OptionKind::Key { default: "\\" },
         doc: "The key `<leader>` expands to when a mapping is set.",
-        since: 2,
         live: true,
     },
     OptionDef {
@@ -174,7 +163,6 @@ pub const OPTIONS: &[OptionDef] = &[
             default: 1000,
         },
         doc: "Milliseconds a mapping that is also a prefix waits for more keys.",
-        since: 2,
         live: true,
     },
     OptionDef {
@@ -186,7 +174,6 @@ pub const OPTIONS: &[OptionDef] = &[
             default: 1,
         },
         doc: "How deep agents may nest. 0 turns the agent tool off, and 1 lets only the main session start agents.",
-        since: 2,
         live: false,
     },
     OptionDef {
@@ -198,7 +185,6 @@ pub const OPTIONS: &[OptionDef] = &[
             default: 4,
         },
         doc: "How many agents run at once. Further agents wait until one finishes.",
-        since: 2,
         live: false,
     },
 ];
@@ -535,7 +521,10 @@ pub enum OptionError {
 }
 
 #[cfg(test)]
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "figment::Jail closures must return figment::Error"
+)]
 mod tests {
     use super::*;
     use crate::test_support::process_globals;

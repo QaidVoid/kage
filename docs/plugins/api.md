@@ -814,8 +814,8 @@ kage.send_message("re-run the tests", { trigger_turn = true })
 ```
 
 `opts` fields: `trigger_turn` (bool, default `true`) and
-`deliver_as` (default `"user"`). In v0.1 only `"user"` is wired;
-`"assistant"` / `"system"` raise an error rather than silently
+`deliver_as` (default `"user"`). Only `"user"` is wired.
+`"assistant"` and `"system"` raise an error rather than silently
 doing the wrong thing.
 
 ## context inspection

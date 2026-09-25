@@ -2,7 +2,7 @@
 //!
 //! - [`run_serve`] is the `kage mcp serve` server: builds a registry of
 //!   the requested built-in tools and hands stdin/stdout to
-//!   [`kage_mcp::serve`], gated by the layered `[permissions]`.
+//!   [`kage_mcp::serve()`], gated by the layered `[permissions]`.
 //! - [`spawn_and_register`] is the client side every run path calls:
 //!   it spawns the configured `[mcp.servers.*]` (merged with any a
 //!   plugin declared via `kage.mcp.add_server`) and registers their

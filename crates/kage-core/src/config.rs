@@ -615,8 +615,7 @@ pub struct SandboxConfig {
     /// `local` backend.
     pub suppress_warning: bool,
     /// Hosts allowed for outbound network access from sandboxed tools.
-    /// Reserved for a future sandbox backend (post-0.1) and not yet
-    /// enforced: no tool consults this list today. Plugin `kage.http`
+    /// Not enforced: no tool consults this list today. Plugin `kage.http`
     /// egress is governed by the `net` capability and SSRF filtering,
     /// not by this field.
     pub network_allowlist: Vec<String>,
@@ -650,7 +649,10 @@ fn is_default_leader(leader: &str) -> bool {
     leader == DEFAULT_LEADER
 }
 
-#[allow(clippy::trivially_copy_pass_by_ref)]
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde skip_serializing_if passes the field by reference"
+)]
 fn is_default_timeoutlen(timeoutlen: &u32) -> bool {
     *timeoutlen == DEFAULT_TIMEOUTLEN
 }
@@ -759,7 +761,10 @@ pub struct McpOAuth {
 }
 
 #[cfg(test)]
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "figment::Jail closures must return figment::Error"
+)]
 mod tests {
     use super::*;
 

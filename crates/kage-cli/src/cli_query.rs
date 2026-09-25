@@ -1,12 +1,26 @@
 //! Resume, search, and fork subcommand handlers.
 
-#[allow(clippy::wildcard_imports)] // split out of main.rs; shares the crate-root scope
-use super::*;
+use std::io::{self, Write};
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::sync::Arc;
+
+use kage_core::{Content, Message, Role};
+use kage_loop::AgentContext;
+use kage_session::{SessionId, SessionWriter};
+use kage_tools::builtin_registry;
+
+use crate::cli_loop_run::execute_print_run;
+use crate::plugins::setup_runtime;
+use crate::{
+    DEFAULT_SYSTEM, NO_CREDENTIALS_MESSAGE, acp_glue, build_provider_registry, has_usable_provider,
+    mcp, plugins, plugins_dir, runtime_env, sessions_dir, state, truncate_one_line, tui,
+};
 
 /// Implement `kage resume`: open an existing session in the TUI, or with
 /// `print`, replay it and append a new user prompt before re-running the
 /// loop.
-#[allow(clippy::too_many_lines)]
+#[expect(clippy::too_many_lines, reason = "one linear resume sequence")]
 pub(crate) fn run_resume(
     id: Option<&str>,
     last: bool,

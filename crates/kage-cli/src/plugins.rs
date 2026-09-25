@@ -73,7 +73,10 @@ pub fn setup_runtime(
 /// output, so nothing is written to stderr while the TUI owns the
 /// screen. Themes resolve against the bundled set and the user themes
 /// dir, which also provide the base highlight groups.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is separately loaded startup state"
+)]
 pub(crate) fn setup_tui_runtime(
     plugins_dir: Option<&Path>,
     user_dir: Option<&Path>,
@@ -521,10 +524,10 @@ impl<H: Hooks> Hooks for PluginEventHooks<H> {
 impl<H: Hooks> PluginEventHooks<H> {
     /// Move every queued `kage.send_message` payload from the runtime
     /// into `pending_steering`. Non-user roles are filtered out and
-    /// logged because 0.1 has no synthetic-assistant or system-note
-    /// delivery path; the Lua boundary already rejects those, so
-    /// hitting this branch means a future API expansion didn't
-    /// update the host side.
+    /// logged because there is no synthetic-assistant or system-note
+    /// delivery path. The Lua boundary already rejects those, so
+    /// hitting this branch means an API expansion did not update the
+    /// host side.
     fn drain_plugin_messages(&mut self) {
         for msg in self.runtime.take_pending_messages() {
             match msg.deliver_as {

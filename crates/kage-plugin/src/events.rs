@@ -1,7 +1,7 @@
 //! Host-driven event dispatch over the autocmd registry.
 //!
 //! Plugins subscribe with `kage.on("message_end", function(payload) ... end)`,
-//! a stdlib alias over `kage.api.autocmd_create` (see [`crate::autocmd`]).
+//! a stdlib alias over `kage.api.autocmd_create` (see the `autocmd` module).
 //! The call returns an `off` function that removes the subscription;
 //! calling it again does nothing. The host then calls [`dispatch`] (or one
 //! of the typed helpers) at the appropriate boundaries to fire every

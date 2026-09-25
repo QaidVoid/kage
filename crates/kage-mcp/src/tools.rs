@@ -38,7 +38,7 @@ const MAX_TOOL_PAGES: usize = 100;
 
 impl McpConnection {
     /// List the server's tools, following `nextCursor` pagination up
-    /// to [`MAX_TOOL_PAGES`] pages so a well-behaved server's full
+    /// to `MAX_TOOL_PAGES` pages so a well-behaved server's full
     /// set is returned in one call.
     ///
     /// # Errors
@@ -46,7 +46,7 @@ impl McpConnection {
     /// Returns [`McpError::Rpc`] on a JSON-RPC error or dropped
     /// connection, and [`McpError::Protocol`] when the result is not
     /// the expected `{ tools: [...] }` shape or when pagination
-    /// exceeds [`MAX_TOOL_PAGES`] pages.
+    /// exceeds `MAX_TOOL_PAGES` pages.
     pub fn list_tools(&self) -> Result<Vec<McpToolDef>, McpError> {
         let mut out = Vec::new();
         let mut cursor: Option<String> = None;

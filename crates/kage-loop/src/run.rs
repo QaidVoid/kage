@@ -47,7 +47,10 @@ use crate::{AgentContext, Hooks, LoopConfig, SteeringMode};
 /// Returns the same [`LoopError`] variant that was emitted as the terminal
 /// [`LoopEvent::Error`], so callers can react programmatically without
 /// re-parsing events.
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the turn loop reads best as one function"
+)]
 pub fn run<F>(
     provider: &dyn Provider,
     tools: &ToolRegistry,

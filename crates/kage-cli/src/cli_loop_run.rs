@@ -1,13 +1,24 @@
 //! Print-mode run driver and the hooks wrapper.
 
-#[allow(clippy::wildcard_imports)] // split out of main.rs; shares the crate-root scope
-use super::*;
+use std::io;
+use std::process::ExitCode;
+use std::sync::Arc;
+
+use kage_core::{Content, LoopEvent, Message};
+use kage_loop::{AgentContext, LoopConfig};
+use kage_provider::ProviderRegistry;
+use kage_session::{SessionId, SessionWriter};
+
+use crate::cli_printing::{print_envelope_json, print_event};
 
 /// Drive one print-mode run on the engine. Streams events to stdout as
 /// text or JSONL, records the conversation when a writer is supplied, and
 /// maps the outcome to a process exit code. Text mode prints the opened
 /// session only, while JSON mode prints the envelopes of its agents too.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is separately built run state"
+)]
 pub(crate) fn execute_print_run(
     registry: Arc<ProviderRegistry>,
     model: &str,

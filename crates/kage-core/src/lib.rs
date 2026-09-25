@@ -35,7 +35,7 @@ pub use event::{LoopError, LoopEvent, StopReason, TokenCost, TokenUsage, ToolOut
 pub use message::{Content, ImageSource, Message, MessageId, Role, ToolCallId};
 pub use modality::{Input, Inputs};
 pub use protocol::SessionId;
-pub use risk::{Risk, classify};
+pub use risk::Risk;
 pub use skills::{Skill, SkillError, load_skill_file, load_skills_dir};
 pub use templates::{
     Template, TemplateError, load_template_file, load_templates_dir, render_template,

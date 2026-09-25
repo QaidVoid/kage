@@ -68,7 +68,10 @@ pub fn parse_color(s: &str) -> Result<Color, HighlightError> {
 /// field.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "mirrors the independent style flags of a highlight group"
+)]
 pub struct HlSpec {
     /// Foreground color.
     pub fg: Option<String>,

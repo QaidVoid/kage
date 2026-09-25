@@ -1,4 +1,4 @@
--- ui_extras.lua - the PE.C extension surface in one file.
+-- ui_extras.lua - the UI extension surface in one file.
 --
 -- Three independent demos:
 --

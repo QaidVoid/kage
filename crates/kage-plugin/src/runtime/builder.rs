@@ -1,6 +1,5 @@
 //! `PluginRuntimeBuilder`: configuration setters and `build`.
 
-#[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
 
 impl PluginRuntimeBuilder {
@@ -129,7 +128,10 @@ impl PluginRuntimeBuilder {
     /// `kage.schedule`, `kage.defer` and `kage.timer`, evaluate the embedded stdlib
     /// (which defines `kage.on`), freeze the shared tables, then hand
     /// the state to its owner thread.
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one linear install sequence over the Lua state"
+    )]
     pub fn build(self) -> Result<PluginRuntime, PluginError> {
         let lua = Lua::new();
         apply_sandbox(&lua)?;

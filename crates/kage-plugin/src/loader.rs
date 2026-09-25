@@ -6,7 +6,7 @@
 //! order, then applies the `[keybindings]` table from `config.toml`
 //! (see [`crate::PluginRuntimeBuilder::keybindings`]), and finally
 //! evaluates the trusted `init.lua` when the runtime has a user dir
-//! (see [`crate::user`]). Each later layer overrides the earlier ones.
+//! (see the `user` module). Each later layer overrides the earlier ones.
 //! The load ends by firing `color_scheme` for the current theme, so
 //! highlight setups written as autocmds apply.
 //! Each file is loaded independently: a broken plugin, a bad

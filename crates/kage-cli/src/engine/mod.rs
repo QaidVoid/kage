@@ -208,7 +208,10 @@ impl Drop for Engine {
     }
 }
 
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent per-session flags"
+)]
 struct Session {
     idle: Option<Idle>,
     state: SessionState,

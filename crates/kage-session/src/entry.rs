@@ -15,13 +15,13 @@ use ulid::Ulid;
 
 /// Current on-disk session format version.
 ///
-/// Bumped (and migrated via [`crate::migrate`]) whenever the entry schema
-/// changes in a non-additive way. v1 is the initial schema.
+/// Bumped whenever the entry schema changes in a non-additive way. Readers
+/// reject files written with any other version.
 pub const FORMAT_VERSION: u32 = 1;
 
 /// Stable identifier for a single entry within a session.
 ///
-/// Used as the cut point for [`fork`](crate::fork): a forked child copies
+/// Used as the cut point for [`fork`](crate::fork()): a forked child copies
 /// every entry up to and including the named id.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]

@@ -1,8 +1,8 @@
 //! Streaming-event stdout printers and their tests.
 
-#[allow(clippy::wildcard_imports)] // split out of main.rs; shares the crate-root scope
-use super::*;
-use kage_core::LoopError;
+use std::io::Write;
+
+use kage_core::{LoopError, LoopEvent};
 
 /// Render one streaming event to stdout. Only text-bearing events produce
 /// visible output; tool calls render a single bracketed status line.

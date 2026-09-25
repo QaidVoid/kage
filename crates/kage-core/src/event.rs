@@ -74,13 +74,8 @@ pub struct ToolOutput {
     /// When every tool in a single batch sets this to `true`, the loop
     /// returns after the turn without consulting follow-ups. Used by
     /// tools like `task_done` that signal a successful exit.
-    #[serde(default, skip_serializing_if = "is_default_false")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub terminate: bool,
-}
-
-#[allow(clippy::trivially_copy_pass_by_ref)]
-fn is_default_false(b: &bool) -> bool {
-    !*b
 }
 
 /// Dollar cost of one turn's [`TokenUsage`] given a per-million pricing
@@ -108,7 +103,10 @@ impl TokenCost {
     /// concrete cost in dollars. Each component is computed as
     /// `tokens * rate_per_million / 1_000_000`.
     #[must_use]
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "token counts stay far below 2^52, where f64 is exact"
+    )]
     pub fn from_usage(
         usage: &TokenUsage,
         input_per_m: f64,
@@ -145,9 +143,9 @@ impl TokenCost {
 
 /// Mid-execution progress update emitted by a long-running tool.
 ///
-/// Tools call [`ToolContext::update`](kage_tools::ToolContext::update)
-/// during `execute` to stream progress without buffering everything into
-/// the final [`ToolOutput::text`]. The loop wraps each call in a
+/// Tools call `ToolContext::update` from `kage-tools` during `execute`
+/// to stream progress without buffering everything into the final
+/// [`ToolOutput::text`]. The loop wraps each call in a
 /// [`LoopEvent::ToolUpdate`] event the host can render live.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolUpdate {

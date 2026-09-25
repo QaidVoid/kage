@@ -256,8 +256,8 @@ impl AuthStore {
 
     /// Look up a single bearer token for `provider`, regardless of
     /// credential kind. For API keys returns the raw key; for OAuth
-    /// returns the access token *as currently stored*. The returned
-    /// token may be expired - the refresh path lives in [`crate::oauth`].
+    /// returns the access token *as currently stored*, which may be
+    /// expired because kage does not refresh provider OAuth tokens.
     #[must_use]
     pub fn access_token(&self, provider: &str) -> Option<&str> {
         self.providers.get(provider).map(Credential::raw_token)
@@ -295,6 +295,7 @@ impl AuthStore {
 
     /// Insert or replace `provider`'s credential as an OAuth record.
     /// Convenience wrapper around [`Self::set`].
+    #[cfg(test)]
     pub fn set_oauth(&mut self, provider: &str, creds: OAuthCredential) -> Option<Credential> {
         self.set(provider, Credential::Oauth(creds))
     }

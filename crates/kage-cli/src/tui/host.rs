@@ -5,7 +5,6 @@
 //! App), provider refresh, plugin reload, and the plugin events and
 //! toasts that accompany model, thinking, and permission changes.
 
-#[allow(clippy::wildcard_imports)] // tui split: shares the parent module scope
 use super::*;
 
 use kage_core::ThinkingLevel;
@@ -150,7 +149,7 @@ impl Host {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines, reason = "one match arm per request kind")]
     fn handle(&mut self, request: RunRequest) {
         match request {
             RunRequest::Submit {

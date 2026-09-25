@@ -1,15 +1,13 @@
 //! Anthropic provider.
 //!
 //! Implements the Messages API (`POST /v1/messages`) using `ureq`. The
-//! non-streaming `request` method buffers and decodes the full response;
-//! the `Provider::stream` impl reads server-sent events line by line and
+//! `Provider::stream` impl reads server-sent events line by line and
 //! yields [`ProviderEvent`]s as they arrive.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufReader, Read};
 
 use kage_core::{CancelFlag, Content, Message, Reasoning, Role, TokenUsage, ToolCallId};
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
@@ -92,44 +90,6 @@ impl AnthropicProvider {
             headers.push((name.clone(), value.clone()));
         }
         headers
-    }
-
-    /// Issue a non-streaming Messages API request.
-    ///
-    /// Streaming is added in T2.4; this entry point is kept so callers can
-    /// validate the wire format end-to-end and is also the path used when
-    /// caller explicitly opts out of streaming.
-    pub fn request(
-        &self,
-        req: &StreamRequest,
-        cancel: &CancelFlag,
-    ) -> Result<AnthropicMessage, ProviderError> {
-        if cancel.is_cancelled() {
-            return Err(ProviderError::Cancelled);
-        }
-
-        let body = build_request_body(req, false);
-        let url = format!("{}/v1/messages", self.base_url);
-        let headers = self.request_headers();
-
-        let response = crate::http::send_blocking(&self.client, move |agent| {
-            let mut request = agent.post(&url);
-            for (name, value) in &headers {
-                request = request.header(name.as_str(), value.as_str());
-            }
-            request.send_json(&body)
-        })?;
-
-        let status = response.status().as_u16();
-        if !(200..300).contains(&status) {
-            return Err(crate::http::read_error_body(status, response));
-        }
-
-        let parsed: AnthropicMessage = response
-            .into_body()
-            .read_json()
-            .map_err(|e| ProviderError::Decode(e.to_string()))?;
-        Ok(parsed)
     }
 }
 
@@ -341,100 +301,6 @@ fn image_to_anthropic(source: &kage_core::ImageSource, mime: &str) -> Value {
             "type":"image",
             "source": {"type":"base64", "media_type": mime, "data": data},
         }),
-    }
-}
-
-/// Decoded Messages API response.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AnthropicMessage {
-    /// Model-issued message id.
-    pub id: String,
-    /// Always `"message"` in current Anthropic responses.
-    #[serde(rename = "type")]
-    pub kind: String,
-    /// Always `"assistant"`.
-    pub role: String,
-    /// Model id that generated the response.
-    pub model: String,
-    /// Content blocks (text, thinking, `tool_use`).
-    pub content: Vec<Value>,
-    /// Why the model stopped.
-    pub stop_reason: Option<String>,
-    /// Stop sequence that triggered the stop, if any.
-    pub stop_sequence: Option<String>,
-    /// Token usage for this turn.
-    pub usage: AnthropicUsage,
-}
-
-/// Token accounting block from the response.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
-pub struct AnthropicUsage {
-    /// Input tokens consumed.
-    pub input_tokens: u64,
-    /// Output tokens produced.
-    pub output_tokens: u64,
-    /// Tokens written to the prompt cache.
-    #[serde(default)]
-    pub cache_creation_input_tokens: u64,
-    /// Tokens served from the prompt cache.
-    #[serde(default)]
-    pub cache_read_input_tokens: u64,
-}
-
-impl AnthropicMessage {
-    /// Convert the API response into our internal types.
-    ///
-    /// Returns the assembled assistant message, the stop reason, and token
-    /// usage. Unknown content block types are skipped silently.
-    #[must_use]
-    pub fn into_internal(self) -> (Message, StopReason, TokenUsage) {
-        let mut content = Vec::with_capacity(self.content.len());
-        for block in self.content {
-            if let Some(c) = anthropic_block_to_content(&block) {
-                content.push(c);
-            }
-        }
-        let message = Message::new(Role::Assistant, content, None);
-        let usage = TokenUsage {
-            input: self.usage.input_tokens,
-            output: self.usage.output_tokens,
-            cache_read: self.usage.cache_read_input_tokens,
-            cache_write: self.usage.cache_creation_input_tokens,
-        };
-        let stop = match self.stop_reason.as_deref() {
-            Some("end_turn") => StopReason::EndTurn,
-            Some("max_tokens") => StopReason::MaxTokens,
-            Some("stop_sequence") => StopReason::StopSequence,
-            Some("tool_use") => StopReason::ToolUse,
-            _ => StopReason::Other,
-        };
-        (message, stop, usage)
-    }
-}
-
-fn anthropic_block_to_content(block: &Value) -> Option<Content> {
-    let kind = block.get("type")?.as_str()?;
-    match kind {
-        "text" => Some(Content::Text {
-            text: block.get("text")?.as_str()?.to_owned(),
-        }),
-        "thinking" => Some(Content::Thinking {
-            text: block.get("thinking")?.as_str()?.to_owned(),
-        }),
-        "tool_use" => {
-            let id = block.get("id")?.as_str()?.to_owned();
-            let name = block.get("name")?.as_str()?.to_owned();
-            let input = block
-                .get("input")
-                .cloned()
-                .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-            Some(Content::ToolCall {
-                id: ToolCallId::new(id),
-                name,
-                input,
-            })
-        }
-        _ => None,
     }
 }
 

@@ -824,18 +824,18 @@ fn block_renderer_demo_card_without_title_asks_via_ui_select() {
                 req.payload,
                 json!({
                     "title": "Card title",
-                    "items": ["Hello from Lua", "Fully hackable UI", "PT.7 shipped"],
+                    "items": ["Hello from Lua", "Fully hackable UI", "Custom renderers"],
                 })
             );
         }
         BridgeStep::Done(v) => panic!("expected suspend, got Done({v})"),
     }
-    let BridgeStep::Done(value) = rt.bridge_resume(&json!("PT.7 shipped")).unwrap() else {
+    let BridgeStep::Done(value) = rt.bridge_resume(&json!("Custom renderers")).unwrap() else {
         panic!("expected Done after resume");
     };
     assert_eq!(
         CommandOutput::from_json(&value).text,
-        "rendered card: PT.7 shipped"
+        "rendered card: Custom renderers"
     );
     let ops = rt.take_pending_session_ops();
     assert_eq!(ops.len(), 1);

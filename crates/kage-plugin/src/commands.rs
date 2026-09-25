@@ -33,7 +33,7 @@ use crate::host::{self, LuaHost, WeakHost};
 use crate::watchdog;
 
 /// Owned argument schema for a plugin-registered slash command. Each
-/// variant mirrors a [`kage_tui::ArgSpec`] kind so the host can
+/// variant mirrors a `kage_tui::ArgSpec` kind so the host can
 /// translate without losing information, but the strings are owned so
 /// the schema can be built at plugin-load time.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -406,7 +406,7 @@ impl CommandOutput {
     /// Build a [`CommandOutput`] from a handler's return value already
     /// converted to JSON. Used by the bridged invocation path (a
     /// coroutine's final value comes back as `serde_json::Value`, not
-    /// `mlua::Value`). Mirrors [`Self::from_value`]: a string is the
+    /// `mlua::Value`). Mirrors `Self::from_value`: a string is the
     /// text, an object reads `text` / `is_error` / `structured`, null
     /// is empty, anything else is stringified.
     #[must_use]

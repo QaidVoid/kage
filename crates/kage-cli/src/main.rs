@@ -2,10 +2,21 @@
 //!
 //! Layering: top of the workspace; depends on every library crate it uses.
 //!
-//! Print mode (`-p`) runs a single prompt through the agent loop and streams
-//! the assistant's text to stdout, then exits. The `list` subcommand prints
-//! a table of recorded sessions stored under
-//! `$XDG_DATA_HOME/kage/sessions/` (default `~/.local/share/kage/sessions/`).
+//! Without a subcommand kage opens the interactive TUI. Print mode (`-p`)
+//! runs a single prompt through the agent loop, streams the reply to
+//! stdout, and exits. Subcommands:
+//!
+//! - `list`, `resume`, `fork` and `search` work on the recorded sessions
+//!   under `$XDG_DATA_HOME/kage/sessions/`.
+//! - `auth` manages saved provider credentials, and `init` is the
+//!   first-run setup wizard.
+//! - `doctor` diagnoses the install, and `trust` trusts a project config.
+//! - `models` manages the model catalog.
+//! - `rpc` serves the Agent Client Protocol over stdio. `mcp` serves the
+//!   built-in tools over the Model Context Protocol and logs in to MCP
+//!   servers.
+//! - `completions` and the hidden `gen-manpage` generate shell and man
+//!   page files.
 
 mod acp_glue;
 mod agents;
@@ -16,7 +27,6 @@ mod history;
 mod init;
 mod mcp;
 mod mcp_auth;
-mod oauth;
 mod permissions;
 mod plugins;
 mod rpc;
@@ -26,24 +36,19 @@ mod title;
 mod trust;
 mod tui;
 
-pub(crate) use std::io::{self, Write};
-pub(crate) use std::path::PathBuf;
-pub(crate) use std::process::ExitCode;
-pub(crate) use std::sync::Arc;
+use std::io::{self, Write};
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::sync::Arc;
 
-pub(crate) use chrono::Utc;
-pub(crate) use clap::{Parser, Subcommand};
-pub(crate) use kage_core::{Content, LoopEvent, Message, Role};
-pub(crate) use kage_loop::{AgentContext, LoopConfig};
-pub(crate) use kage_provider::{
-    ProviderRegistry, anthropic, compat, gemini, openai, openai_responses,
-};
-pub(crate) use kage_session::{
-    EntryId, FORMAT_VERSION, Header, SessionId, SessionSummary, SessionWriter,
-};
-pub(crate) use kage_tools::builtin_registry;
+use chrono::Utc;
+use clap::{Parser, Subcommand};
+use kage_loop::AgentContext;
+use kage_provider::{ProviderRegistry, anthropic, compat, gemini, openai, openai_responses};
+use kage_session::{EntryId, FORMAT_VERSION, Header, SessionId, SessionSummary, SessionWriter};
+use kage_tools::builtin_registry;
 
-pub(crate) use crate::plugins::setup_runtime;
+use crate::plugins::setup_runtime;
 
 /// The system prompt role when `--system` is not given.
 pub(crate) const DEFAULT_SYSTEM: &str = "You are kage, a helpful coding agent.";
@@ -663,7 +668,6 @@ mod cli_query;
 mod sigint;
 
 pub(crate) use cli_loop_run::execute_print_run;
-pub(crate) use cli_printing::{print_envelope_json, print_event};
 pub(crate) use cli_query::{run_fork, run_resume, run_search};
 
 /// Resolve `$XDG_DATA_HOME/kage` (default `~/.local/share/kage`).
@@ -916,12 +920,7 @@ pub(crate) fn build_provider_registry() -> ProviderRegistry {
         eprintln!("kage: {e}");
         std::process::exit(1);
     }
-    let mut store = auth::AuthStore::load().unwrap_or_else(|_| auth::AuthStore::empty());
-    let mut store_dirty = false;
-    refresh_expiring_oauth(&mut store, &mut store_dirty);
-    if store_dirty && let Err(err) = store.save() {
-        eprintln!("kage: persist refreshed credentials: {err}");
-    }
+    let store = auth::AuthStore::load().unwrap_or_else(|_| auth::AuthStore::empty());
     let mut registry = ProviderRegistry::new();
     register_openai_family(&config, &store, &mut registry);
     register_compat_providers(&config, &store, &mut registry);
@@ -1111,9 +1110,7 @@ fn register_custom_providers(
 /// Look up `provider`'s bearer credential from `env_var` (when
 /// non-empty and set), falling back to the auth store. Returns the API
 /// key string for [`auth::Credential::ApiKey`] entries and the access
-/// token for [`auth::Credential::Oauth`] entries; the refresh path in
-/// [`build_provider_registry`] runs before this is called so the
-/// returned token is fresh. `env_var` defaults to
+/// token for [`auth::Credential::Oauth`] entries. `env_var` defaults to
 /// [`auth::env_var_for`]'s name for the provider; `[providers.<id>]`
 /// `api_key_env` overrides can redirect the lookup.
 pub(crate) fn lookup_key_with_env(
@@ -1129,35 +1126,6 @@ pub(crate) fn lookup_key_with_env(
         }
     }
     store.access_token(provider).map(str::to_owned)
-}
-
-/// Refresh every OAuth credential in `store` whose access token is
-/// expired or due to expire inside the configured slack window. Sets
-/// `*dirty` to `true` when at least one credential was rewritten so
-/// the caller can persist before any provider request goes out.
-pub(crate) fn refresh_expiring_oauth(store: &mut auth::AuthStore, dirty: &mut bool) {
-    let now = Utc::now();
-    let candidates: Vec<(String, auth::OAuthCredential)> = store
-        .providers
-        .iter()
-        .filter_map(|(id, cred)| match cred {
-            auth::Credential::Oauth(o) if o.expires_within(oauth::REFRESH_SLACK, now) => {
-                Some((id.clone(), o.clone()))
-            }
-            _ => None,
-        })
-        .collect();
-    for (id, prior) in candidates {
-        match oauth::refresh(&id, &prior) {
-            Ok(fresh) => {
-                store.set_oauth(&id, fresh);
-                *dirty = true;
-            }
-            Err(err) => {
-                eprintln!("kage: refresh {id} credentials: {err}");
-            }
-        }
-    }
 }
 
 /// Order in which `default_model` falls back when there is no saved

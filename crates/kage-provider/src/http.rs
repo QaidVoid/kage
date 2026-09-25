@@ -1,11 +1,8 @@
 //! Shared `ureq` plumbing used by every HTTP provider.
 //!
-//! [`HttpClient`], [`send`], [`read_error_body`], and the error
-//! mapping are provider-agnostic: they were living in `openai` and
-//! reached into sideways by the Anthropic / Gemini / Responses
-//! providers, which muddied the module layering. They belong here so
-//! each provider is a peer that depends on a shared util, not on a
-//! sibling.
+//! The pooled `HttpClient`, `send`, `read_error_body` and the
+//! status-to-error mapping are provider-agnostic, so each provider
+//! depends on this module rather than on a sibling provider.
 
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -138,9 +135,9 @@ fn is_stale_connection_error(err: &ureq::Error) -> bool {
     }
 }
 
-/// Run a provider's request-and-headers call on `client`, polling
-/// `cancel` from the foreground so a slow provider does not block the
-/// cancel flag (see [`crate::cancelable::cancellable_call`]).
+/// Run a provider's request-and-headers call on `client`, waiting on the
+/// response and a watch on `cancel` together so a slow provider does not
+/// delay cancellation (see [`crate::cancelable::cancellable_call`]).
 ///
 /// `build` receives a pooled agent snapshot and issues the POST; on a
 /// stale-connection failure the client's pool is recycled before the
@@ -161,20 +158,6 @@ where
         let agent = client.agent();
         build(&agent).map_err(|e| client.on_transport_error(e))
     })
-}
-
-/// Issue a synchronous (non-streaming) request through `client`,
-/// recycling the pool on a stale-connection failure exactly like
-/// [`send`] but without the cancel-polling worker thread.
-pub(crate) fn send_blocking<F>(
-    client: &HttpClient,
-    build: F,
-) -> Result<ureq::http::Response<ureq::Body>, ProviderError>
-where
-    F: FnOnce(&ureq::Agent) -> Result<ureq::http::Response<ureq::Body>, ureq::Error>,
-{
-    let agent = client.agent();
-    build(&agent).map_err(|e| client.on_transport_error(e))
 }
 
 /// Read the body of a non-2xx response into a [`ProviderError`].

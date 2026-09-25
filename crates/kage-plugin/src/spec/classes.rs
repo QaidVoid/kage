@@ -222,7 +222,7 @@ pub(super) const CLASSES: &[Class] = &[
             Field {
                 name: "deliver_as?",
                 ty: "\"user\"",
-                doc: "In v0.1 only user is wired.",
+                doc: "Only user is wired.",
             },
         ],
     },

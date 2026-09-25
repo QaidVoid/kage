@@ -162,7 +162,7 @@
 --- Options for `kage.send_message`.
 ---@class kage.SendOpts
 ---@field trigger_turn? boolean Default true.
----@field deliver_as? "user" In v0.1 only user is wired.
+---@field deliver_as? "user" Only user is wired.
 
 --- Snapshot returned by `kage.context_usage`. The host fills
 --- this in; the fields below are the conventional keys and

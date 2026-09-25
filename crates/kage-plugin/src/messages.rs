@@ -6,19 +6,18 @@
 //! semantics (which today is "treat each entry as a steering message
 //! the loop will consume on its next pass").
 //!
-//! # Scope in 0.1
+//! # Scope
 //!
 //! Only `deliver_as = "user"` is wired end-to-end. Passing
 //! `"assistant"` or `"system"` raises a Lua error rather than
-//! silently doing the wrong thing; the entries ride a different code
-//! path (history insertion / system note injection) that lands with
-//! the future message-delivery hooks.
+//! silently doing the wrong thing, because the host has no history
+//! insertion or system note path for them.
 //!
-//! `trigger_turn` is captured but does not change in-loop behavior in
-//! 0.1: when the loop is already running, the next steering poll
-//! consumes the queue regardless. The flag exists so a future
-//! "wake-up" path (TUI worker auto-submit while idle) can switch on
-//! it without breaking the API.
+//! `trigger_turn` is captured but does not change in-loop behavior:
+//! when the loop is already running, the next steering poll consumes
+//! the queue regardless. The flag exists so a future "wake-up" path
+//! (TUI worker auto-submit while idle) can switch on it without
+//! breaking the API.
 
 use std::sync::{Arc, Mutex};
 
@@ -34,11 +33,10 @@ pub enum PendingRole {
     /// Inject as a synthetic user message the loop picks up via the
     /// steering buffer.
     User,
-    /// Append as a synthetic assistant message. Reserved for a later
-    /// task; rejected at the Lua boundary today.
+    /// Append as a synthetic assistant message. Rejected at the Lua
+    /// boundary.
     Assistant,
-    /// Append as a system note. Reserved for a later task; rejected at
-    /// the Lua boundary today.
+    /// Append as a system note. Rejected at the Lua boundary.
     System,
 }
 

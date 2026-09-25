@@ -25,7 +25,7 @@ mod tests {
     use schemars::JsonSchema;
 
     #[derive(JsonSchema)]
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "the fields only feed the derived schema")]
     struct ReadInput {
         path: String,
         start_line: Option<u32>,

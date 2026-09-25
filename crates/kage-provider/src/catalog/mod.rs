@@ -1,6 +1,6 @@
 //! Provider/model catalog.
 //!
-//! The bundled snapshot lives in [`generated`], which is rewritten by
+//! The bundled snapshot lives in `generated.rs`, which is rewritten by
 //! `cargo xtask refresh-models`. `kage models refresh` writes a newer
 //! copy of the models.dev catalog to the model cache; [`use_cache`]
 //! lays its model entries over the snapshot. This module exposes a

@@ -1,4 +1,4 @@
-//! Conversation state carried through one [`run`](crate::run) invocation.
+//! Conversation state carried through one [`run`](crate::run()) invocation.
 
 use std::path::PathBuf;
 
@@ -61,11 +61,11 @@ impl TokenBudget {
 /// The loop appends to `history` after every turn, updates `budget` from the
 /// provider's reported usage, and reads `model` + `system_prompt` to build
 /// each provider request. Hosts may inspect or mutate the context between
-/// calls to [`run`](crate::run); during a run the loop owns it.
+/// calls to [`run`](crate::run()); during a run the loop owns it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct AgentContext {
     /// Ordered conversation history. Last entry is typically the most recent
-    /// user turn before [`run`](crate::run) is invoked.
+    /// user turn before [`run`](crate::run()) is invoked.
     pub history: Vec<Message>,
     /// Provider-qualified model id, for example `anthropic:claude-sonnet-4-6`.
     pub model: String,

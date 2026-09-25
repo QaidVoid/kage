@@ -6,13 +6,9 @@
 //! `lua-language-server` stub `plugins/types/kage.lua`; the CI drift
 //! gate re-renders and diffs, so the shipped stub cannot drift from
 //! this description, and this description cannot drift from the crate
-//! that owns it (the [`tests`] module asserts every declared function
-//! path resolves in a freshly built [`crate::PluginRuntime`]).
-//!
-//! This replaces the previously hand-maintained spec that lived in
-//! `xtask/src/luatypes.rs`: that copy could (and did) fall out of step
-//! with the Rust bindings. Keeping the description in this crate makes
-//! adding a binding a single edit instead of two.
+//! that owns it (the tests assert every declared function path resolves
+//! in a freshly built [`crate::PluginRuntime`]). Adding a binding is a
+//! single edit here.
 
 pub use kage_core::keymap::ActionDef;
 pub use kage_core::options::{OptionDef, OptionKind};
@@ -82,7 +78,7 @@ pub struct Table {
 }
 
 /// A function that is only present when the plugin has been granted
-/// `cap` (see [`crate::capabilities`]). It is rendered into the stub
+/// `cap` (see the `capabilities` module). It is rendered into the stub
 /// like any function but is not on the base surface, so it resolves
 /// only on a granted plugin's `kage` proxy, never the default one.
 #[derive(Clone, Copy, Debug)]

@@ -2,9 +2,8 @@
 --
 -- The plugin sandbox does not allow spawning processes, so this reads the
 -- working tree's `.git/HEAD` directly. Shows the symbolic ref's branch
--- name (e.g. `main`) or the short hash for a detached HEAD. Dirty state
--- is reported by Phase 9's status-bar integration; this v0.1 example only
--- handles the branch line.
+-- name (e.g. `main`) or the short hash for a detached HEAD. It does not
+-- report dirty state.
 
 local function read_head()
     local ok, head = pcall(kage.fs.read, '.git/HEAD')

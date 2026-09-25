@@ -143,7 +143,11 @@ fn should_compact(cx: &AgentContext, config: LoopConfig) -> bool {
     }
     // Apply threshold via permille arithmetic to keep the math in integers.
     let frac = config.compaction_threshold.clamp(0.0, 1.0);
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the fraction is clamped to 0..=1 first"
+    )]
     let permille = (frac * 1000.0).round() as u64;
     let threshold = cx
         .context_window

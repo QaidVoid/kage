@@ -3,7 +3,7 @@
 //! Layering: depends only on `kage-core`.
 //!
 //! Sessions are stored as line-delimited JSON: a single
-//! [`entry::Header`](entry::Header) on the first line, followed by any number
+//! [`entry::Header`] on the first line, followed by any number
 //! of [`SessionEntry`] lines appended in order. The format is intentionally
 //! plain text so it can be inspected with `cat`, searched with `rg`, and
 //! transported by ordinary file copy.
@@ -12,7 +12,6 @@ pub mod entry;
 pub mod error;
 pub mod fork;
 pub mod list;
-pub mod migrate;
 pub mod reader;
 pub mod resume;
 pub mod search;

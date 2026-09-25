@@ -12,9 +12,8 @@ use kage_provider::StreamRequest;
 ///
 /// Used by hook variants where the host must run code *before* an action and
 /// the hook needs to be able to block the action with a user-visible reason
-/// or replace the target with a different value. Plain observation-style
-/// hooks (e.g. [`Hooks::on_event`]) do not need this; transform-style hooks
-/// that mutate in place (e.g. a future `transform_context`) keep their
+/// or replace the target with a different value. Transform-style hooks
+/// that mutate in place (such as [`Hooks::transform_context`]) keep their
 /// `Result<()>` shape because they cannot meaningfully veto.
 ///
 /// The generic parameter is the target of [`HookResult::Patch`]: a session
@@ -72,8 +71,9 @@ impl<T> HookResult<T> {
 /// the hook implementation itself.
 #[derive(Clone, Copy, Debug)]
 pub struct TurnSummary {
-    /// Zero-based turn index within the current `run`, matching the value
-    /// passed to [`Hooks::on_turn_start`] / [`Hooks::on_turn_end`].
+    /// Zero-based turn index within the current `run`, matching the index
+    /// carried by [`kage_core::LoopEvent::TurnStarted`] and
+    /// [`kage_core::LoopEvent::TurnEnded`].
     pub index: u32,
     /// Whether the assistant requested at least one tool call. When
     /// `true`, returning `false` from `should_stop_after_turn` will let
@@ -111,7 +111,7 @@ pub struct CompactionPrep {
     pub summary_override: Option<String>,
 }
 
-/// Host-supplied callbacks fired during a [`run`](crate::run).
+/// Host-supplied callbacks fired during a [`run`](crate::run()).
 ///
 /// All methods take `&mut self` so hosts can accumulate state (logs,
 /// permission decisions, queued steering messages) without interior
@@ -125,7 +125,7 @@ pub trait Hooks {
     /// returned [`ToolOutput`] as if the tool produced it. Use this for
     /// permission denials, dry-run modes, or test fixtures. `id` is the
     /// provider's correlation id for the call, the same id carried by
-    /// [`LoopEvent::ToolCallStart`].
+    /// [`kage_core::LoopEvent::ToolCallStart`].
     fn before_tool_call(
         &mut self,
         id: &kage_core::ToolCallId,
@@ -198,9 +198,10 @@ pub trait Hooks {
     /// plugins that halt after the model emits its plan, before the loop
     /// can execute any tools the plan requested.
     ///
-    /// Fires after [`Self::on_turn_end`] and before any tool dispatch or
-    /// follow-up handling. The default implementation always returns
-    /// `false`, so the loop's existing behavior is unchanged.
+    /// Fires after [`kage_core::LoopEvent::TurnEnded`] is emitted and
+    /// before any tool dispatch or follow-up handling. The default
+    /// implementation always returns `false`, so the loop's existing
+    /// behavior is unchanged.
     fn should_stop_after_turn(&mut self, summary: &TurnSummary) -> bool {
         let _ = summary;
         false

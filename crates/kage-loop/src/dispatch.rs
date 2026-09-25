@@ -84,7 +84,6 @@ impl Drop for DoneOnDrop {
 /// each result to `done` with the call's index in `calls` as soon as that
 /// call completes, so `emit` and `done` stay on the loop thread. A
 /// panicking tool yields an error for its own call.
-#[allow(clippy::too_many_arguments)]
 fn execute_live<F, D>(
     calls: &[&PendingToolCall],
     tools: &ToolRegistry,
@@ -243,7 +242,10 @@ fn record_batch_error(slot: &mut Option<LoopError>, kind: &LoopError) {
 /// the loop cannot recover from, the failing call and every remaining call
 /// get synthesized `is_error` results, the completed results are kept, and
 /// the failure is carried in [`DispatchOutcome::error`].
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the loop hands over its run state unbundled"
+)]
 pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
     pending: Vec<PendingToolCall>,
     tools: &ToolRegistry,
@@ -337,7 +339,11 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
 /// `is_error` result; every call that did produce an output keeps it. The
 /// batch-level failure (cancel preferred over panic, first otherwise) is
 /// carried in [`DispatchOutcome::error`].
-#[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)] // matches dispatch_tool_calls
+#[expect(
+    clippy::too_many_arguments,
+    clippy::needless_pass_by_value,
+    reason = "matches dispatch_tool_calls"
+)]
 pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
     pending: Vec<PendingToolCall>,
     tools: &ToolRegistry,

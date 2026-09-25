@@ -1,7 +1,7 @@
 //! `kage` Lua module: small surface plugins use to ask the host for
 //! anything they cannot do safely on their own.
 //!
-//! v0.1 ships:
+//! It provides:
 //! * `kage.now_ms()` returns wall-clock milliseconds since the Unix epoch.
 //! * `kage.ui.notify(message, level?)` surfaces a one-line user-visible
 //!   notification; `level` is `"info"` (default), `"warning"`, or
@@ -36,7 +36,7 @@ use crate::error::PluginError;
 /// Generation of the `kage` plugin API surface.
 ///
 /// Bumped whenever a binding is added or removed so a plugin can guard
-/// with [`kage.requires`](requires) and fail loudly at load against an
+/// with `kage.requires` and fail loudly at load against an
 /// incompatible host instead of erroring deep inside a missing binding.
 /// Exposed to Lua as `kage.api_version()`.
 pub const API_VERSION: i64 = 2;
@@ -284,7 +284,7 @@ pub fn json_to_lua(lua: &Lua, value: &serde_json::Value) -> mlua::Result<Value> 
 /// userdata, light userdata, threads, and errors are unsupported and
 /// surface as `serde_json::Value::Null`.
 ///
-/// Tables nested deeper than [`ENCODE_DEPTH_MAX`] raise instead of
+/// Tables nested deeper than `ENCODE_DEPTH_MAX` raise instead of
 /// recursing, so a self-referential table cannot overflow the stack.
 pub fn lua_to_json(value: Value) -> mlua::Result<serde_json::Value> {
     encode_value(value, 0)

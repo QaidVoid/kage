@@ -267,32 +267,6 @@ fn tool_result_message_uses_user_role() {
     assert_eq!(blocks[0]["is_error"], false);
 }
 
-#[test]
-fn parse_response_extracts_text_and_usage() {
-    let json = serde_json::json!({
-        "id": "msg_01",
-        "type": "message",
-        "role": "assistant",
-        "model": "claude-sonnet-4-6",
-        "content": [{"type":"text","text":"hello"}],
-        "stop_reason": "end_turn",
-        "stop_sequence": null,
-        "usage": {"input_tokens": 10, "output_tokens": 5}
-    });
-    let parsed: AnthropicMessage = serde_json::from_value(json).unwrap();
-    let (msg, stop, usage) = parsed.into_internal();
-    assert_eq!(msg.role, Role::Assistant);
-    assert_eq!(msg.content.len(), 1);
-    if let Content::Text { text } = &msg.content[0] {
-        assert_eq!(text, "hello");
-    } else {
-        panic!("expected Text content");
-    }
-    assert_eq!(stop, StopReason::EndTurn);
-    assert_eq!(usage.input, 10);
-    assert_eq!(usage.output, 5);
-}
-
 /// Round-trip the real Anthropic API. Opt-in: requires `ANTHROPIC_API_KEY`
 /// in the environment. Run with:
 ///
@@ -314,40 +288,21 @@ fn anthropic_live_smoke() {
             None,
         )],
     );
-    let resp = provider
-        .request(&req, &CancelFlag::new())
+    let stream = provider
+        .stream(req, &CancelFlag::new())
         .expect("request succeeds");
-    let (msg, _stop, usage) = resp.into_internal();
-    assert!(!msg.content.is_empty(), "response has at least one block");
+    let events = collect_ok(stream);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ProviderEvent::TextDelta { .. })),
+        "response has at least one text delta"
+    );
+    let Some(ProviderEvent::MessageEnd { usage, .. }) = events.last() else {
+        panic!("stream ends with MessageEnd");
+    };
     assert!(usage.input > 0, "input tokens reported");
     assert!(usage.output > 0, "output tokens reported");
-}
-
-#[test]
-fn parse_response_extracts_tool_call_and_cache_tokens() {
-    let json = serde_json::json!({
-        "id": "msg_02",
-        "type": "message",
-        "role": "assistant",
-        "model": "m",
-        "content": [
-            {"type":"text","text":"reading"},
-            {"type":"tool_use","id":"call_1","name":"read","input":{"path":"/x"}}
-        ],
-        "stop_reason": "tool_use",
-        "usage": {
-            "input_tokens": 100,
-            "output_tokens": 20,
-            "cache_creation_input_tokens": 50,
-            "cache_read_input_tokens": 80
-        }
-    });
-    let parsed: AnthropicMessage = serde_json::from_value(json).unwrap();
-    let (msg, stop, usage) = parsed.into_internal();
-    assert_eq!(msg.content.len(), 2);
-    assert_eq!(stop, StopReason::ToolUse);
-    assert_eq!(usage.cache_read, 80);
-    assert_eq!(usage.cache_write, 50);
 }
 
 fn stream_from_bytes(bytes: &'static [u8]) -> AnthropicStream {

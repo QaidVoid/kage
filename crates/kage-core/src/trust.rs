@@ -298,7 +298,10 @@ fn save_store(store: &Store) -> Result<()> {
 }
 
 #[cfg(test)]
-#[allow(clippy::result_large_err)]
+#[expect(
+    clippy::result_large_err,
+    reason = "figment::Jail closures must return figment::Error"
+)]
 mod tests {
     use super::*;
     use crate::test_support::process_globals;

@@ -30,10 +30,13 @@ use kage_mcp::oauth::{self, AuthCode, Expected, Loopback, OAuthError, Pkce};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::OAuthCredential;
-use crate::oauth::REFRESH_SLACK;
 
 /// On-disk shape of `mcp-auth.json`.
 const FORMAT_VERSION: u32 = 1;
+
+/// A token whose deadline falls inside this window from now is treated
+/// as expired, so a request about to fire does not race the expiry.
+const REFRESH_SLACK: chrono::Duration = chrono::Duration::seconds(60);
 
 /// How often the login checks for a pasted redirect or a cancel while
 /// it waits.

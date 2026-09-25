@@ -37,7 +37,8 @@ pub struct ReplayResult {
     /// the `ToolCallId` as a string; value is milliseconds from the
     /// call's `MessageEntry.ts` to the matching result's `ts`.
     pub tool_durations: HashMap<String, u64>,
-    /// Sum of every persisted [`MessageEntry::usage`] across the
+    /// Sum of every persisted
+    /// [`MessageEntry::usage`](crate::MessageEntry::usage) across the
     /// session, post-compaction. Returned as four scalars instead of
     /// a `TokenUsage` to keep this crate's public surface free of
     /// `kage-core` types in result-only positions; the host folds it

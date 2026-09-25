@@ -3,7 +3,7 @@
 //! Models are addressed as `provider:model` strings (for example
 //! `anthropic:claude-sonnet-4-6`). The registry holds one `Provider`
 //! per id; the model portion is forwarded to that provider as the
-//! [`StreamRequest::model`] field.
+//! [`StreamRequest::model`](crate::StreamRequest::model) field.
 
 use std::collections::HashMap;
 use std::sync::Arc;

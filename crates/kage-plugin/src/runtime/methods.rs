@@ -5,7 +5,6 @@ use std::sync::atomic::AtomicBool;
 use kage_core::options::{OptionSource, OptionValue};
 use kage_core::sync::lock;
 
-#[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
 
 impl PluginRuntime {
@@ -72,15 +71,6 @@ impl PluginRuntime {
     #[must_use]
     pub fn sink(&self) -> SharedHostLog {
         Arc::clone(&self.sink)
-    }
-
-    /// Whether the loader should evaluate the plugin with file stem
-    /// `stem`. An empty allowlist (the default) enables every plugin; a
-    /// non-empty one enables only the plugins it names, so a user who
-    /// lists `[plugins] enabled = ["trusted"]` loads nothing else.
-    #[must_use]
-    pub fn is_plugin_enabled(&self, stem: &str) -> bool {
-        self.eval.is_enabled(stem)
     }
 
     /// Execute a chunk of Lua source against the shared globals.

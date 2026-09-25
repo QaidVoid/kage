@@ -40,10 +40,7 @@ pub(crate) enum TurnFailure {
 }
 
 /// One tool invocation requested by the model and not yet executed.
-///
-/// Fields are read by T4.4's tool dispatch; T4.3 only collects them.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub(crate) struct PendingToolCall {
     pub(crate) id: ToolCallId,
     pub(crate) name: String,

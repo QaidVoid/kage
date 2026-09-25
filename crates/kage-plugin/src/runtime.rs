@@ -4,18 +4,18 @@
 //! over the standard library. Every function that touches the host
 //! filesystem, spawns processes, or loads native shared libraries is
 //! removed before any plugin code runs. Plugins that need filesystem or
-//! network access must go through the `kage` table (added in later tasks),
-//! which routes through the same guards as built-in tools.
+//! network access must go through the `kage` table, which routes through
+//! the same guards as built-in tools.
 //!
 //! The runtime is host-driven: nothing runs unless the host calls
 //! [`PluginRuntime::eval`] or one of the typed dispatch helpers. A
 //! plugin cannot start a thread. It can queue callbacks with
 //! `kage.schedule`, `kage.defer` and `kage.timer`, which run on the
-//! owner thread between host calls (see [`crate::schedule`]).
+//! owner thread between host calls (see the `schedule` module).
 //! Before any plugin code, `build` installs the `kage.api` primitives
-//! and evaluates the embedded Lua stdlib (see [`crate::stdlib`]). The
+//! and evaluates the embedded Lua stdlib (see the `stdlib` module). The
 //! trusted user config (`init.lua`) runs after every plugin, in its own
-//! environment (see [`crate::user`]).
+//! environment (see the `user` module).
 //!
 //! See `crates/kage-plugin/src/runtime.rs` source for the exact list of
 //! removed bindings.
@@ -312,8 +312,8 @@ pub const SANDBOX_REMOVALS: &[(&str, &str)] = &[
     ("os", "tmpname"),
     ("os", "getenv"),
     ("os", "setlocale"),
-    // Process-spawning io helpers; `io.open` will be replaced with a
-    // safe wrapper in T6.8.
+    // Process-spawning and file io helpers. Plugins reach files through
+    // `kage.fs` instead.
     ("io", "popen"),
     ("io", "open"),
     ("io", "tmpfile"),

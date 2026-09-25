@@ -21,7 +21,7 @@ struct FindInput {
     /// Glob pattern, e.g. `**/*.rs` or `src/**/*.toml`.
     pattern: String,
     /// Optional subdirectory under workdir. Defaults to workdir.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::optional_path")]
     path: Option<String>,
     /// Filter by entry kind: `"f"` for files, `"d"` for directories. None = both.
     #[serde(default, rename = "type")]

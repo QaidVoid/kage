@@ -23,7 +23,7 @@ struct GrepInput {
     /// Regex pattern (Rust regex syntax).
     pattern: String,
     /// Optional subdirectory under workdir to search. Defaults to workdir.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::optional_path")]
     path: Option<String>,
     /// Match case-insensitively.
     #[serde(default)]

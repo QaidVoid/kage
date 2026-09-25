@@ -259,7 +259,7 @@ pub fn describe(name: &str, input: &Value) -> ToolLabel {
         }
         "ls" => {
             let dir = match field(input, "path") {
-                "" => ".",
+                "" | "null" => ".",
                 path => path,
             };
             label(["List", "Listing", "Listed"], dir.to_owned(), String::new())
@@ -812,6 +812,7 @@ mod tests {
     #[test]
     fn null_arguments_count_as_absent() {
         assert_eq!(describe("ls", &json!({"path": null})).target, ".");
+        assert_eq!(describe("ls", &json!({"path": "null"})).target, ".");
         assert_eq!(
             describe("grep", &json!({"pattern": "x", "path": null})).target,
             "\"x\""

@@ -22,6 +22,17 @@ pub use write::WriteTool;
 
 use crate::ToolRegistry;
 
+/// Deserialize an optional path argument, reading an empty string or the
+/// literal `"null"` (which some models send instead of JSON null) as
+/// absent.
+pub(crate) fn optional_path<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <Option<String> as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(value.filter(|p| !p.is_empty() && p != "null"))
+}
+
 /// Construct a [`ToolRegistry`] with all built-in tools registered.
 ///
 /// Includes: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`, `web_fetch`.

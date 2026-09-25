@@ -18,7 +18,7 @@ const MAX_ENTRIES: usize = 5_000;
 #[derive(Debug, Deserialize, JsonSchema)]
 struct LsInput {
     /// Optional subdirectory under workdir. Defaults to workdir.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::optional_path")]
     path: Option<String>,
     /// Recurse into subdirectories. Honors `.gitignore` and `.kageignore`.
     #[serde(default)]
@@ -227,5 +227,13 @@ mod tests {
         assert_eq!(structured["truncated"], true);
         assert_eq!(structured["count"], MAX_ENTRIES);
         assert_eq!(structured["entries"].as_array().unwrap().len(), MAX_ENTRIES);
+    }
+
+    #[test]
+    fn a_null_string_path_lists_the_workdir() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("marker.txt"), "x").unwrap();
+        let out = run(dir.path(), serde_json::json!({"path":"null"})).unwrap();
+        assert!(out.text.contains("marker.txt"), "{}", out.text);
     }
 }

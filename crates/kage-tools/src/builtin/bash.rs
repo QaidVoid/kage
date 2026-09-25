@@ -59,7 +59,7 @@ struct BashInput {
     /// Shell command to run, executed via `bash -c <command>`.
     command: String,
     /// Optional working directory, relative to the workdir. Defaults to the workdir.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "super::optional_path")]
     cwd: Option<String>,
     /// Hard timeout in milliseconds. Defaults to 120000 (2 minutes).
     #[serde(default)]
@@ -461,17 +461,20 @@ mod tests {
             err.to_string(),
             format!("working directory {} does not exist", gone.display())
         );
+    }
 
-        let err = run(
-            dir.path(),
-            serde_json::json!({"command":"pwd","cwd":"null"}),
-        )
-        .unwrap_err();
-        let missing = dir.path().canonicalize().unwrap().join("null");
-        assert_eq!(
-            err.to_string(),
-            format!("working directory {} does not exist", missing.display())
-        );
+    #[test]
+    fn a_null_string_cwd_runs_in_the_workdir() {
+        let dir = tempfile::tempdir().unwrap();
+        for cwd in ["null", ""] {
+            let out = run(dir.path(), serde_json::json!({"command":"pwd","cwd":cwd})).unwrap();
+            let workdir = dir.path().canonicalize().unwrap();
+            assert!(
+                out.text.contains(&*workdir.to_string_lossy()),
+                "{}",
+                out.text
+            );
+        }
     }
 
     #[test]

@@ -177,6 +177,30 @@ pub const OPTIONS: &[OptionDef] = &[
         since: 2,
         live: true,
     },
+    OptionDef {
+        name: "agent_max_depth",
+        toml: "agents.max_depth",
+        kind: OptionKind::Int {
+            min: 0,
+            max: 3,
+            default: 1,
+        },
+        doc: "How deep agents may nest. 0 turns the agent tool off, and 1 lets only the main session start agents.",
+        since: 2,
+        live: false,
+    },
+    OptionDef {
+        name: "agent_max_running",
+        toml: "agents.max_running",
+        kind: OptionKind::Int {
+            min: 1,
+            max: 16,
+            default: 4,
+        },
+        doc: "How many agents of one session run at once. Further agents wait until one finishes.",
+        since: 2,
+        live: false,
+    },
 ];
 
 /// Look up an option by name.
@@ -477,6 +501,8 @@ fn config_value(name: &str, config: &Config) -> Option<OptionValue> {
         }
         "leader" => OptionValue::Str(config.keybindings.leader.clone()),
         "timeoutlen" => OptionValue::Int(i64::from(config.keybindings.timeoutlen)),
+        "agent_max_depth" => OptionValue::Int(i64::from(config.agents.max_depth)),
+        "agent_max_running" => OptionValue::Int(i64::from(config.agents.max_running)),
         _ => return None,
     })
 }
@@ -583,6 +609,8 @@ mod tests {
             ("compaction_threshold", "0.6", OptionValue::Float(0.6)),
             ("leader", "\"<Space>\"", OptionValue::Str("<Space>".into())),
             ("timeoutlen", "300", OptionValue::Int(300)),
+            ("agent_max_depth", "0", OptionValue::Int(0)),
+            ("agent_max_running", "8", OptionValue::Int(8)),
         ] {
             let def = find(name).unwrap();
             let (table, key) = def.toml.rsplit_once('.').unwrap();
@@ -706,6 +734,35 @@ mod tests {
             .set("nope", OptionValue::Bool(true), OptionSource::Lua)
             .unwrap_err();
         assert!(err.to_string().contains("theme, mouse"), "{err}");
+    }
+
+    #[test]
+    fn agent_limits_validate_their_ranges() {
+        let mut store = OptionStore::default();
+        for (name, low, high) in [("agent_max_depth", 0, 3), ("agent_max_running", 1, 16)] {
+            for ok in [low, high] {
+                assert!(
+                    store
+                        .set(name, OptionValue::Int(ok), OptionSource::Lua)
+                        .is_ok(),
+                    "{name} = {ok}"
+                );
+            }
+            for bad in [low - 1, high + 1] {
+                let err = store
+                    .set(name, OptionValue::Int(bad), OptionSource::Lua)
+                    .unwrap_err();
+                assert!(
+                    err.to_string().contains(&format!("from {low} to {high}")),
+                    "{err}"
+                );
+            }
+        }
+        let cfg = load("[agents]\nmax_depth = 5\nmax_running = 0\n");
+        let (store, errors) = OptionStore::from_config(&cfg);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert_eq!(store.get("agent_max_depth"), Some(&OptionValue::Int(1)));
+        assert_eq!(store.get("agent_max_running"), Some(&OptionValue::Int(4)));
     }
 
     #[test]

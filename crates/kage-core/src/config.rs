@@ -33,6 +33,8 @@ pub struct Config {
     /// Agent-loop tuning (`[loop]`): compaction threshold, etc.
     #[serde(rename = "loop")]
     pub loop_settings: LoopSettings,
+    /// Subagent limits (`[agents]`).
+    pub agents: AgentsConfig,
     /// External ACP agents usable as `acp:<name>` (`[acp.agents.*]`).
     pub acp: AcpConfig,
     /// External MCP tool servers (`[mcp.servers.*]`).
@@ -200,6 +202,28 @@ impl Default for LoopSettings {
     fn default() -> Self {
         Self {
             compaction_threshold: 0.8,
+        }
+    }
+}
+
+/// Subagent limits persisted under `[agents]`. The option registry
+/// validates the ranges (`agent_max_depth`, `agent_max_running`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AgentsConfig {
+    /// How deep agents may nest. 0 turns the `agent` tool off, and 1
+    /// lets only the main session start agents.
+    pub max_depth: u8,
+    /// How many agents of one session tree run at once. Further agents
+    /// wait until one finishes.
+    pub max_running: u32,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            max_depth: 1,
+            max_running: 4,
         }
     }
 }

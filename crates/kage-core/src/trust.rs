@@ -1,12 +1,13 @@
-//! Trust for project-local config (`<workdir>/.kage/config.toml`).
+//! Trust for project-local settings under `<workdir>/.kage`.
 //!
-//! A project file can start processes and loosen tool rules, so its
-//! risky tables (`mcp`, `permissions` and `plugins.capabilities`) only
-//! apply once the user trusts the project. Trust is recorded in
-//! `$XDG_STATE_HOME/kage/trust.json` as the exact values that were
-//! approved, keyed by the canonical project directory. Any later edit
-//! to those tables makes the project untrusted again. Other project
-//! keys always apply.
+//! A project can start processes and loosen tool rules, so the risky
+//! tables of its `config.toml` (`mcp`, `permissions` and
+//! `plugins.capabilities`) and its agent definitions (`agents/*.md`,
+//! which can set tools and models) only apply once the user trusts the
+//! project. Trust is recorded in `$XDG_STATE_HOME/kage/trust.json` as
+//! the exact values that were approved, keyed by the canonical project
+//! directory. Any later edit to those tables or agent files makes the
+//! project untrusted again. Other project keys always apply.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -19,16 +20,18 @@ use crate::error::Result;
 
 const STORE_VERSION: u32 = 1;
 
-/// What an untrusted project config asks for, for prompts and warnings.
+/// What an untrusted project asks for, for prompts and warnings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrustSummary {
-    /// The project config file.
+    /// The project's `.kage` directory.
     pub path: PathBuf,
-    /// The risky tables the file sets, in the order `mcp`,
-    /// `permissions`, `plugins.capabilities`.
+    /// The risky parts the project sets, in the order `mcp`,
+    /// `permissions`, `plugins.capabilities`, `agents`.
     pub keys: Vec<&'static str>,
-    /// One human-readable line per server, grant or rule the file sets.
+    /// One human-readable line per server, grant, rule or agent.
     pub items: Vec<String>,
+    /// Names of the project agents.
+    pub agents: Vec<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -38,26 +41,33 @@ struct Store {
 }
 
 /// Summary of the project's risky settings when they are present and
-/// not trusted. `None` when there is no project file, it has no risky
-/// tables, or the current values are trusted.
+/// not trusted. `None` when the project has no risky config tables and
+/// no agents, or the current values are trusted.
 #[must_use]
 pub fn untrusted_project(workdir: &Path) -> Option<TrustSummary> {
-    let subset = risky_subset(&project_table(workdir)?)?;
+    let subset = risky_subset(workdir, project_table(workdir).as_ref())?;
     if is_trusted(workdir, &subset) {
         return None;
     }
     Some(summarize(workdir, &subset))
 }
 
-/// Trust the current risky settings of `workdir`'s project config.
-/// Returns what was trusted, or `None` when there was nothing to trust.
+/// Whether `workdir`'s project agents may load: the project has
+/// nothing that needs trust, or its current risky settings are trusted.
+#[must_use]
+pub fn project_agents_trusted(workdir: &Path) -> bool {
+    untrusted_project(workdir).is_none()
+}
+
+/// Trust the current risky settings of `workdir`'s project. Returns
+/// what was trusted, or `None` when there was nothing to trust.
 ///
 /// # Errors
 ///
 /// When the trust store cannot be read, parsed or written, or there is
 /// no home directory to hold it.
 pub fn trust_project(workdir: &Path) -> Result<Option<TrustSummary>> {
-    let Some(subset) = project_table(workdir).and_then(|t| risky_subset(&t)) else {
+    let Some(subset) = risky_subset(workdir, project_table(workdir).as_ref()) else {
         return Ok(None);
     };
     let mut store = load_store()?;
@@ -85,7 +95,10 @@ pub fn revoke_project(workdir: &Path) -> Result<bool> {
 /// tables that are not trusted. `None` means the file applies as is.
 pub(crate) fn filtered_project(workdir: &Path) -> Option<String> {
     let mut table = project_table(workdir)?;
-    let subset = risky_subset(&table)?;
+    if config_subset(&table)?.is_empty() {
+        return None;
+    }
+    let subset = risky_subset(workdir, Some(&table))?;
     if is_trusted(workdir, &subset) {
         return None;
     }
@@ -102,7 +115,21 @@ fn project_table(workdir: &Path) -> Option<toml::Table> {
     toml::from_str(&text).ok()
 }
 
-fn risky_subset(table: &toml::Table) -> Option<Value> {
+/// The risky config tables of `table` plus the project agent files, or
+/// `None` when there are neither.
+fn risky_subset(workdir: &Path, table: Option<&toml::Table>) -> Option<Value> {
+    let mut out = match table {
+        Some(table) => config_subset(table)?,
+        None => serde_json::Map::new(),
+    };
+    let agents = agent_files(workdir);
+    if !agents.is_empty() {
+        out.insert("agents".to_owned(), Value::Object(agents));
+    }
+    (!out.is_empty()).then_some(Value::Object(out))
+}
+
+fn config_subset(table: &toml::Table) -> Option<serde_json::Map<String, Value>> {
     let caps = table.get("plugins").and_then(|p| p.get("capabilities"));
     let mut out = serde_json::Map::new();
     for (key, value) in [
@@ -119,7 +146,25 @@ fn risky_subset(table: &toml::Table) -> Option<Value> {
         }
         out.insert(key.to_owned(), json);
     }
-    (!out.is_empty()).then_some(Value::Object(out))
+    Some(out)
+}
+
+/// Name to full text of each `*.md` file directly under the project
+/// agent directory.
+fn agent_files(workdir: &Path) -> serde_json::Map<String, Value> {
+    let Ok(entries) = std::fs::read_dir(crate::agents::project_dir(workdir)) else {
+        return serde_json::Map::new();
+    };
+    entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
+        .filter_map(|path| {
+            let text = std::fs::read_to_string(&path).ok()?;
+            let name = path.file_stem()?.to_string_lossy().into_owned();
+            Some((name, Value::String(text)))
+        })
+        .collect()
 }
 
 fn is_trusted(workdir: &Path, subset: &Value) -> bool {
@@ -179,10 +224,22 @@ fn summarize(workdir: &Path, subset: &Value) -> TrustSummary {
             ));
         }
     }
+    let agents: Vec<String> = subset
+        .get("agents")
+        .and_then(Value::as_object)
+        .map(|files| files.keys().cloned().collect())
+        .unwrap_or_default();
+    if !agents.is_empty() {
+        keys.push("agents");
+        for name in &agents {
+            items.push(format!("project agent {name} (.kage/agents/{name}.md)"));
+        }
+    }
     TrustSummary {
-        path: Config::project_path(workdir),
+        path: workdir.join(".kage"),
         keys,
         items,
+        agents,
     }
 }
 
@@ -367,6 +424,89 @@ mod tests {
             assert!(revoke_project(&project).map_err(io)?);
             assert!(untrusted_project(&project).is_some());
             assert_dropped(&load(&project)?);
+            Ok(())
+        });
+    }
+
+    fn write_agent(project: &Path, name: &str, body: &str) -> figment::error::Result<()> {
+        let dir = crate::agents::project_dir(project);
+        std::fs::create_dir_all(&dir).map_err(io)?;
+        std::fs::write(dir.join(format!("{name}.md")), body).map_err(io)
+    }
+
+    const REVIEWER: &str = "---\ndescription: Reviews a diff.\ntools: read\n---\nReview.\n";
+
+    #[test]
+    fn project_agents_need_trust_without_a_config_file() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, "")?;
+            std::fs::remove_file(Config::project_path(&project)).map_err(io)?;
+            assert!(untrusted_project(&project).is_none());
+            assert!(project_agents_trusted(&project));
+
+            write_agent(&project, "reviewer", REVIEWER)?;
+            write_agent(&project, "auditor", REVIEWER)?;
+            assert!(!project_agents_trusted(&project));
+            let summary = untrusted_project(&project).expect("untrusted");
+            assert_eq!(summary.path, project.join(".kage"));
+            assert_eq!(summary.keys, ["agents"]);
+            assert_eq!(summary.agents, ["auditor", "reviewer"]);
+            assert_eq!(
+                summary.items,
+                [
+                    "project agent auditor (.kage/agents/auditor.md)",
+                    "project agent reviewer (.kage/agents/reviewer.md)",
+                ]
+            );
+
+            trust_project(&project)
+                .map_err(io)?
+                .expect("agents to trust");
+            assert!(project_agents_trusted(&project));
+            assert!(untrusted_project(&project).is_none());
+
+            write_agent(
+                &project,
+                "reviewer",
+                &REVIEWER.replace("read", "read, bash"),
+            )?;
+            assert!(!project_agents_trusted(&project));
+            trust_project(&project).map_err(io)?;
+            assert!(project_agents_trusted(&project));
+
+            write_agent(&project, "extra", REVIEWER)?;
+            assert!(!project_agents_trusted(&project));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn agents_join_the_config_tables_in_one_trust() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, RISKY)?;
+            trust_project(&project).map_err(io)?;
+            assert_applied(&load(&project)?);
+
+            write_agent(&project, "reviewer", REVIEWER)?;
+            let summary = untrusted_project(&project).expect("untrusted");
+            assert_eq!(
+                summary.keys,
+                ["mcp", "permissions", "plugins.capabilities", "agents"]
+            );
+            assert_eq!(summary.agents, ["reviewer"]);
+            assert!(
+                summary
+                    .items
+                    .contains(&"project agent reviewer (.kage/agents/reviewer.md)".to_owned())
+            );
+            assert!(!project_agents_trusted(&project));
+            assert_dropped(&load(&project)?);
+
+            trust_project(&project).map_err(io)?;
+            assert!(project_agents_trusted(&project));
+            assert_applied(&load(&project)?);
             Ok(())
         });
     }

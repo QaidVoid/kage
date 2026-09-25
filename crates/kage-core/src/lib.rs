@@ -2,6 +2,7 @@
 //!
 //! Layering: workspace leaf; depends on no other `kage-*` crate.
 
+pub mod agents;
 pub mod cancel;
 pub mod config;
 pub mod error;
@@ -20,10 +21,11 @@ pub mod thinking;
 pub mod tool_spec;
 pub mod trust;
 
+pub use agents::{AgentDef, AgentDefs, AgentError, AgentSource, load_agent_file, load_agents_dir};
 pub use cancel::CancelFlag;
 pub use config::{
-    Config, KeybindingsConfig, PluginsConfig, ProviderConfig, SandboxBackend, SandboxConfig,
-    UiConfig,
+    AgentsConfig, Config, KeybindingsConfig, PluginsConfig, ProviderConfig, SandboxBackend,
+    SandboxConfig, UiConfig,
 };
 pub use error::{Error, Result};
 pub use event::{LoopError, LoopEvent, StopReason, TokenCost, TokenUsage, ToolOutput, ToolUpdate};

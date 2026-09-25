@@ -1,5 +1,5 @@
-//! Project config trust: the TUI prompt, the non-interactive warning
-//! and `kage trust`.
+//! Project trust: the TUI prompt, the non-interactive warning and
+//! `kage trust`.
 
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -8,9 +8,9 @@ use std::process::ExitCode;
 use kage_core::trust::{self, TrustSummary};
 
 /// Before the TUI starts, ask whether to trust `workdir`'s project
-/// config when it has untrusted risky settings. Yes records trust, and
-/// anything else runs with those settings ignored. Without a terminal
-/// on stdin this only prints the warning.
+/// when it has untrusted risky settings or agents. Yes records trust,
+/// and anything else runs with those settings and agents ignored.
+/// Without a terminal on stdin this only prints the warning.
 pub(crate) fn confirm_project_trust(workdir: &Path) {
     let Some(summary) = trust::untrusted_project(workdir) else {
         return;
@@ -28,7 +28,7 @@ pub(crate) fn confirm_project_trust(workdir: &Path) {
     for item in &summary.items {
         let _ = writeln!(err, "  - {item}");
     }
-    let _ = write!(err, "Trust this project config? [y/N] ");
+    let _ = write!(err, "Trust this project? [y/N] ");
     let _ = err.flush();
     drop(err);
     let mut line = String::new();
@@ -42,8 +42,8 @@ pub(crate) fn confirm_project_trust(workdir: &Path) {
     }
 }
 
-/// Print one stderr line when `workdir`'s project config has untrusted
-/// risky settings that this run ignores.
+/// Print one stderr line when `workdir`'s project has untrusted risky
+/// settings or agents that this run ignores.
 pub(crate) fn warn_if_untrusted(workdir: &Path) {
     if let Some(summary) = trust::untrusted_project(workdir) {
         eprintln!("{}", warning(workdir, &summary));
@@ -51,10 +51,26 @@ pub(crate) fn warn_if_untrusted(workdir: &Path) {
 }
 
 fn warning(workdir: &Path, summary: &TrustSummary) -> String {
+    let settings: Vec<&str> = summary
+        .keys
+        .iter()
+        .copied()
+        .filter(|key| *key != "agents")
+        .collect();
+    let mut parts = Vec::new();
+    if !settings.is_empty() {
+        parts.push(format!(
+            ".kage/config.toml settings ({})",
+            settings.join(", ")
+        ));
+    }
+    if !summary.agents.is_empty() {
+        parts.push(format!("project agents ({})", summary.agents.join(", ")));
+    }
     format!(
-        "kage: ignoring untrusted .kage/config.toml settings ({}) in {}. \
+        "kage: ignoring untrusted {} in {}. \
          Run `kage trust` in that directory to allow them.",
-        summary.keys.join(", "),
+        parts.join(" and "),
         workdir.display()
     )
 }
@@ -88,8 +104,8 @@ pub(crate) fn run(revoke: bool) -> ExitCode {
         }
         Ok(None) => {
             eprintln!(
-                "kage: {} has no mcp, permissions or plugins.capabilities settings to trust",
-                kage_core::config::Config::project_path(&workdir).display()
+                "kage: {} has no mcp, permissions or plugins.capabilities settings and no agents to trust",
+                workdir.join(".kage").display()
             );
             ExitCode::SUCCESS
         }
@@ -97,5 +113,37 @@ pub(crate) fn run(revoke: bool) -> ExitCode {
             eprintln!("kage: trust: {e}");
             ExitCode::from(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary(keys: Vec<&'static str>, agents: &[&str]) -> TrustSummary {
+        TrustSummary {
+            path: PathBuf::from("/p/.kage"),
+            keys,
+            items: Vec::new(),
+            agents: agents.iter().map(|a| (*a).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn warning_names_settings_and_agents() {
+        let dir = Path::new("/p");
+        assert_eq!(
+            warning(
+                dir,
+                &summary(vec!["mcp", "agents"], &["reviewer", "auditor"])
+            ),
+            "kage: ignoring untrusted .kage/config.toml settings (mcp) and project agents \
+             (reviewer, auditor) in /p. Run `kage trust` in that directory to allow them."
+        );
+        assert_eq!(
+            warning(dir, &summary(vec!["agents"], &["reviewer"])),
+            "kage: ignoring untrusted project agents (reviewer) in /p. \
+             Run `kage trust` in that directory to allow them."
+        );
     }
 }

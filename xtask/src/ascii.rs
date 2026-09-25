@@ -1,7 +1,7 @@
 //! `check-ascii`: enforce the ASCII-only source rule from CLAUDE.md.
 //!
-//! Scans the workspace Rust sources and the Lua files embedded in the
-//! crates for raw non-ASCII bytes. The TUI
+//! Scans the workspace Rust sources and the Lua and markdown files
+//! embedded in the crates for raw non-ASCII bytes. The TUI
 //! renders Unicode glyphs through `\u{...}` escapes, which are ASCII in
 //! source, so this gate bans only literal multibyte characters and
 //! leaves intentional escapes alone. It mirrors the `gen-lua-types
@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-/// Scan every `*.rs` and `*.lua` under the workspace crates and `xtask`
+/// Scan every `*.rs`, `*.lua` and `*.md` under the workspace crates and `xtask`
 /// and fail on raw non-ASCII bytes.
 ///
 /// # Errors
@@ -35,7 +35,7 @@ pub fn run() -> Result<(), String> {
                 dirs.push(path);
             } else if matches!(
                 path.extension().and_then(|s| s.to_str()),
-                Some("rs" | "lua")
+                Some("rs" | "lua" | "md")
             ) {
                 scan_file(&path, &mut offenders)?;
             }

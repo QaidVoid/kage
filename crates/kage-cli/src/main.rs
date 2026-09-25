@@ -8,6 +8,7 @@
 //! `$XDG_DATA_HOME/kage/sessions/` (default `~/.local/share/kage/sessions/`).
 
 mod acp_glue;
+mod agents;
 mod auth;
 mod doctor;
 mod engine;

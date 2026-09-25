@@ -289,8 +289,11 @@ impl App {
             }
             return;
         }
-        // Click inside the buffer area focuses the buffer pane.
-        self.input.set_focused_pane(Pane::Buffer);
+        // Modeless typing always goes to the input, so only vim mode
+        // moves keyboard focus to the buffer on a click.
+        if !self.input.is_modeless() {
+            self.input.set_focused_pane(Pane::Buffer);
+        }
         let vrow = buf
             .last_virtual_top()
             .saturating_add(usize::from(row - area_y));

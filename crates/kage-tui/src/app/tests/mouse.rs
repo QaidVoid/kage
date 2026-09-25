@@ -289,3 +289,16 @@ fn mouse_events_are_swallowed_while_modal_is_open() {
     let expected = 4 + MOUSE_SCROLL_LINES as usize;
     assert_eq!(buffer.lock().unwrap().scroll(), Some(expected));
 }
+
+#[test]
+fn a_click_in_the_buffer_keeps_modeless_focus_on_the_input() {
+    for (modeless, pane) in [(true, Pane::Input), (false, Pane::Buffer)] {
+        let (mut app, buffer, mut terminal) = drag_fixture();
+        app.set_editor_modeless(modeless);
+        app.input.set_focused_pane(Pane::Input);
+        let area_y = buffer.lock().unwrap().last_area_y();
+        app.mouse_down(area_y, 2);
+        app.render_into(&mut terminal).unwrap();
+        assert_eq!(app.input.focused_pane(), pane, "modeless = {modeless}");
+    }
+}

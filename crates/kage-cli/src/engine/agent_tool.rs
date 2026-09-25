@@ -6,6 +6,7 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
 
 use kage_core::agents::AgentDefs;
+use kage_core::event::AGENT_NO_REPLY_TEXT as NO_REPLY;
 use kage_core::protocol::RunOutcome;
 use kage_core::{Content, Message, Risk, Role, SessionId, ToolCallId, ToolOutput};
 use kage_tools::{ExecMode, Tool, ToolContext, ToolError};
@@ -21,8 +22,6 @@ const POLL: Duration = Duration::from_millis(100);
 
 /// Longest reply passed back to the parent, in characters.
 const RESULT_CAP: usize = 20_000;
-
-const NO_REPLY: &str = "(the agent produced no reply)";
 
 /// A request from an `agent` call to start a child session.
 pub(super) struct Spawn {

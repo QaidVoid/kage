@@ -218,6 +218,10 @@ pub enum LoopError {
 /// call as interrupted rather than failed.
 pub const TOOL_CANCELLED_TEXT: &str = "tool call cancelled before completion";
 
+/// Body of the `agent` tool result for an agent that ended without a
+/// reply. Hosts match it to say the agent was stopped before replying.
+pub const AGENT_NO_REPLY_TEXT: &str = "(the agent produced no reply)";
+
 /// One event in the loop's output stream.
 ///
 /// `MessageStart` opens a logical message; `TextDelta` and `ThinkingDelta`

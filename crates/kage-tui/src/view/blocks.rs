@@ -379,7 +379,7 @@ fn highlighted_head(
     };
     out.extend(head(plain, usize::MAX, tool_result_style()));
     if more > 0 {
-        out.push(elision(format!("... {more} more lines")));
+        out.push(elision(more_lines(more)));
     }
     out
 }
@@ -415,7 +415,7 @@ fn head(lines: Vec<BodyLine>, n: usize, text: Style) -> Vec<Line<'static>> {
         .map(|l| body_line(l, text))
         .collect();
     if more > 0 {
-        out.push(elision(format!("... {more} more lines")));
+        out.push(elision(more_lines(more)));
     }
     out
 }
@@ -531,4 +531,12 @@ pub(crate) fn tool_error_style() -> Style {
 
 pub(crate) fn custom_style() -> Style {
     Style::default().fg(crate::theme::current().custom_fg)
+}
+
+fn more_lines(more: usize) -> String {
+    if more == 1 {
+        "... 1 more line".to_owned()
+    } else {
+        format!("... {more} more lines")
+    }
 }

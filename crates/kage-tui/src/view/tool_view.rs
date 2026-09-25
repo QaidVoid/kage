@@ -10,6 +10,7 @@
 //! is never touched: [`bash_output`] and [`agent_output`] strip the
 //! model-facing labels and wrapper from a copy for painting only.
 
+use kage_core::event::AGENT_NO_REPLY_TEXT as NO_REPLY;
 use serde_json::Value;
 
 use super::modeline::format_token_count;
@@ -308,9 +309,6 @@ pub fn bash_output(text: &str) -> (Vec<BodyLine>, Option<BashExit>) {
     }
     (lines, exit)
 }
-
-/// The body the engine writes for an agent that ended without a reply.
-const NO_REPLY: &str = "(the agent produced no reply)";
 
 /// Split an `agent` call result into display lines and how the agent
 /// ended.

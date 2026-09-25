@@ -761,7 +761,7 @@ fn the_shell_look_swaps_the_glyph_and_the_placeholder() {
     let rows = snapshot_lines(&mut Buffer::new(), &input, Rect::new(0, 0, 70, 8));
     assert!(
         rows.iter()
-            .any(|r| r == " ! Run a shell command (Backspace leaves shell mode)"),
+            .any(|r| r == " ! Run a shell command (backspace leaves shell mode)"),
         "{rows:#?}"
     );
     assert!(
@@ -934,6 +934,7 @@ fn cell_bg_at(cmdline: &CommandLine, area: Rect, x: u16, y: u16) -> Color {
 fn completion(value: &str, description: Option<&str>) -> crate::cmdparse::Completion {
     crate::cmdparse::Completion {
         value: value.to_owned(),
+        hint: None,
         description: description.map(str::to_owned),
         replace_range: 0..0,
     }
@@ -1784,6 +1785,29 @@ fn wrapped_list_items_hang_under_their_text() {
     let ordered = at("1. an ordered");
     assert!(rows[ordered + 1].starts_with("     "), "{rows:#?}");
     assert!(!rows[ordered + 1].starts_with("      "), "{rows:#?}");
+}
+
+#[test]
+fn a_reply_shows_tables_as_columns_and_quotes_with_a_gutter() {
+    let mut buffer = Buffer::new();
+    buffer.append_assistant_delta(
+        "| tool | calls |\n|---|---:|\n| read | 12 |\n| bash | 3 |\n\n\
+         > a quoted line long enough to wrap onto the next row\n",
+    );
+    buffer.finish_streaming();
+    let rows = snapshot_lines(&mut buffer, &InputState::new(), Rect::new(0, 0, 40, 14));
+    let at = |text: &str| rows.iter().position(|r| r.contains(text)).expect(text);
+    let head = at("tool  calls");
+    assert!(
+        rows[head + 1].contains("\u{2500}\u{2500}\u{2500}\u{2500}  \u{2500}"),
+        "{rows:#?}"
+    );
+    assert!(rows[head + 2].contains("read     12"), "{rows:#?}");
+    assert!(rows[head + 3].contains("bash      3"), "{rows:#?}");
+    assert!(rows.iter().all(|r| !r.contains('|')), "{rows:#?}");
+    let quote = at("> a quoted line");
+    assert!(rows[quote + 1].starts_with("    "), "{rows:#?}");
+    assert!(!rows[quote + 1].contains('>'), "{rows:#?}");
 }
 
 #[test]

@@ -12,7 +12,9 @@
 //! pane. `log` (especially error level) keeps the inline path because
 //! the user wants to scroll back and review. Once the engine runs, `log`
 //! goes through a [`LogPublisher`] instead, so a line lands after the
-//! engine events already published (the prompt, the tool call).
+//! engine events already published (the prompt, the tool call). Either
+//! way an error reads the same: a `kage:error` block without the Lua
+//! traceback, and an `init.lua` failure says how to retry.
 
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -59,16 +61,39 @@ impl HostLog for BufferHostLog {
         );
     }
     fn log(&mut self, level: LogLevel, message: &str) {
+        let tidied;
+        let message = if level == LogLevel::Error {
+            tidied = tidy_error(message);
+            tidied.as_str()
+        } else {
+            message
+        };
         if let Some(publish) = self.publisher.get() {
             publish(level, message);
             return;
         }
-        let text = if level == LogLevel::Info {
-            message.to_owned()
-        } else {
-            format!("[{level:?}] {message}")
-        };
-        lock(&self.buffer).push_custom("kage:log", text, level != LogLevel::Error);
+        let mut buffer = lock(&self.buffer);
+        match level {
+            LogLevel::Error => buffer.push_custom("kage:error", message, false),
+            LogLevel::Info => buffer.push_custom("kage:log", message, true),
+            _ => buffer.push_custom("kage:log", format!("[{level:?}] {message}"), true),
+        }
+    }
+}
+
+/// An error log line as the user reads it: the Lua traceback and the
+/// `lua error: ` wrapper dropped, and for `init.lua` how to retry.
+fn tidy_error(message: &str) -> String {
+    let message = message
+        .split_once("\nstack traceback:")
+        .map_or(message, |(head, _)| head)
+        .trim_end();
+    match message.strip_prefix("init.lua: ") {
+        Some(rest) => {
+            let rest = rest.strip_prefix("lua error: ").unwrap_or(rest);
+            format!("init.lua: {rest}\nFix init.lua, then run /reload.")
+        }
+        None => message.to_owned(),
     }
 }
 
@@ -95,19 +120,44 @@ mod tests {
     }
 
     #[test]
-    fn log_error_block_is_unfolded_so_failures_are_visible() {
+    fn log_error_block_is_an_unfolded_error_like_a_published_one() {
         let buffer = shared_buffer();
         let toasts = shared_toasts();
         let sink = buffer_host_log(buffer.clone(), toasts, Arc::default());
         sink.lock().unwrap().log(LogLevel::Error, "boom");
         let buf = buffer.lock().unwrap();
         match &buf.blocks()[0] {
-            Block::Custom { kind, folded, .. } => {
-                assert_eq!(kind, "kage:log");
+            Block::Custom { kind, folded, text } => {
+                assert_eq!(kind, "kage:error");
+                assert_eq!(text, "boom");
                 assert!(!folded);
             }
             _ => panic!(),
         }
+    }
+
+    #[test]
+    fn an_init_lua_error_drops_the_traceback_and_names_the_fix() {
+        let buffer = shared_buffer();
+        let publisher: Arc<OnceLock<LogPublisher>> = Arc::default();
+        let sink = buffer_host_log(buffer.clone(), shared_toasts(), Arc::clone(&publisher));
+        let raw = "init.lua: lua error: runtime error: init.lua:3: boom\n\
+                   stack traceback:\n\t[C]: in function 'error'";
+        sink.lock().unwrap().log(LogLevel::Error, raw);
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&calls);
+        assert!(
+            publisher
+                .set(Box::new(move |_, message| {
+                    seen.lock().unwrap().push(message.to_owned());
+                }))
+                .is_ok()
+        );
+        sink.lock().unwrap().log(LogLevel::Error, raw);
+        let want = "init.lua: runtime error: init.lua:3: boom\nFix init.lua, then run /reload.";
+        let buf = buffer.lock().unwrap();
+        assert!(matches!(&buf.blocks()[0], Block::Custom { text, .. } if text == want));
+        assert_eq!(*calls.lock().unwrap(), [want]);
     }
 
     #[test]

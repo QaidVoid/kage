@@ -100,7 +100,7 @@ impl OverlayWidget for InputOverlay {
 
         Widget::render(
             Paragraph::new(Line::from(Span::styled(
-                "enter confirm  esc cancel",
+                "enter to confirm \u{b7} esc to cancel",
                 Style::default()
                     .fg(t.muted_fg)
                     .add_modifier(Modifier::ITALIC),
@@ -218,7 +218,7 @@ mod tests {
         let lines = snapshot(&mut i, Rect::new(0, 0, 80, 24));
         assert!(lines.iter().any(|l| l.contains("Name")), "title missing");
         assert!(
-            lines.iter().any(|l| l.contains("enter confirm")),
+            lines.iter().any(|l| l.contains("enter to confirm")),
             "help row missing"
         );
     }

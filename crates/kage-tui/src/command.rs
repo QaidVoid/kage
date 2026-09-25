@@ -347,7 +347,7 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "permission",
         aliases: &["perm"],
-        description: "show or set the session permission mode (allow|ask|deny|default)",
+        description: "show or set the session permission mode",
         category: CommandCategory::Both,
         args: &[ArgSpec::Choice {
             name: "mode",

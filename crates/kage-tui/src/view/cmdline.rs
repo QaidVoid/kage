@@ -243,7 +243,7 @@ pub(super) fn render_cmdline_popup(frame: &mut Frame, regions: Regions, cmdline:
         .iter()
         .skip(offset)
         .take(window)
-        .map(|c| c.value.width())
+        .map(|c| c.label().width())
         .max()
         .unwrap_or(0);
     let inner_width = usize::from(area.width);
@@ -268,7 +268,7 @@ pub(super) fn render_cmdline_popup(frame: &mut Frame, regions: Regions, cmdline:
         let value_style = if selected { sel_style } else { row_style };
         let desc_style = if selected { sel_style } else { dim_style };
         lines.push(popup_row(
-            item.value.as_str(),
+            &item.label(),
             item.description.as_deref(),
             max_value_width,
             inner_width,
@@ -292,7 +292,7 @@ fn popup_width(regions: Regions, completions: &crate::cmdparse::Completions) -> 
     let max_value = completions
         .items
         .iter()
-        .map(|c| c.value.width())
+        .map(|c| c.label().width())
         .max()
         .unwrap_or(0);
     let max_desc = completions

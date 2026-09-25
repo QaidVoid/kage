@@ -41,8 +41,7 @@ pub enum ToastKind {
     Info,
     /// Successful action: "yanked 234 chars to clipboard".
     Success,
-    /// Non-fatal heads-up: "mouse capture off - drag selects via the
-    /// terminal".
+    /// Non-fatal heads-up: "the model does not accept images".
     Warning,
     /// Error feedback that the user should see immediately but not
     /// scroll back to (errors that *do* need history go through

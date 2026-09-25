@@ -6,7 +6,7 @@
 use std::time::{Duration, Instant};
 
 use kage_core::config::EditorMode;
-use kage_core::keymap::{Key, KeyCode, Keymap, Lookup, Mode, Mods, Rhs, display_keys};
+use kage_core::keymap::{Key, KeyCode, Keymap, Lookup, Mode, Mods, Rhs};
 use ratatui::crossterm::event::{KeyCode as CtKeyCode, KeyEvent, KeyModifiers};
 
 use crate::input::InputAction;
@@ -301,6 +301,47 @@ pub struct HelpRow {
     pub desc: String,
 }
 
+/// One key as user-facing text shows it: `<C-p>` reads `ctrl+p`,
+/// `<S-Tab>` reads `shift+tab`, and a plain character stays itself.
+#[must_use]
+pub fn key_label(key: &Key) -> String {
+    let vim = key.to_string();
+    let Some(mut inner) = vim.strip_prefix('<').and_then(|v| v.strip_suffix('>')) else {
+        return vim;
+    };
+    let mut out = String::new();
+    loop {
+        let (prefix, rest) = match inner.split_at_checked(2) {
+            Some(("C-", rest)) => ("ctrl+", rest),
+            Some(("M-", rest)) => ("alt+", rest),
+            Some(("S-", rest)) => ("shift+", rest),
+            Some(("D-", rest)) => ("super+", rest),
+            _ => break,
+        };
+        out.push_str(prefix);
+        inner = rest;
+    }
+    match inner {
+        "CR" => out.push_str("enter"),
+        "BS" => out.push_str("backspace"),
+        name => out.push_str(&name.to_lowercase()),
+    }
+    out
+}
+
+/// A key sequence as user-facing text shows it: plain characters run
+/// together (`gg`), and a sequence with a named key or chord is spaced
+/// (`ctrl+w j`).
+#[must_use]
+pub fn key_labels(keys: &[Key]) -> String {
+    let labels: Vec<String> = keys.iter().map(key_label).collect();
+    if labels.iter().all(|l| l.chars().count() == 1) {
+        labels.concat()
+    } else {
+        labels.join(" ")
+    }
+}
+
 /// Build help rows from `keymap`: mappings with a `desc`, in the modes
 /// that apply to `editor`, grouped by `group` in first-seen order.
 /// Rows repeated across modes with the same keys and text show once.
@@ -327,7 +368,7 @@ pub fn help_groups(keymap: &Keymap, editor: EditorMode) -> Vec<HelpGroup> {
                 groups.len() - 1
             });
         let row = HelpRow {
-            lhs: display_keys(entry.lhs),
+            lhs: key_labels(entry.lhs),
             desc: desc.clone(),
         };
         if !groups[index].rows.contains(&row) {
@@ -752,11 +793,14 @@ mod tests {
             [
                 group(
                     "pickers",
-                    vec![row("<C-p>", "model picker"), row("<C-s>", "session picker")]
+                    vec![
+                        row("ctrl+p", "model picker"),
+                        row("ctrl+s", "session picker")
+                    ]
                 ),
                 group(
                     "buffer",
-                    vec![row("gg", "scroll to top"), row("<PageUp>", "scroll up")]
+                    vec![row("gg", "scroll to top"), row("pageup", "scroll up")]
                 ),
                 group("other", vec![row("y", "yank")]),
             ]
@@ -766,10 +810,28 @@ mod tests {
             [
                 group(
                     "pickers",
-                    vec![row("<C-p>", "model picker"), row("<C-s>", "session picker")]
+                    vec![
+                        row("ctrl+p", "model picker"),
+                        row("ctrl+s", "session picker")
+                    ]
                 ),
-                group("buffer", vec![row("<PageUp>", "scroll up")]),
+                group("buffer", vec![row("pageup", "scroll up")]),
             ]
         );
+    }
+
+    #[test]
+    fn key_labels_use_the_footer_notation() {
+        for (vim, label) in [
+            ("<C-p>", "ctrl+p"),
+            ("<S-Tab>", "shift+tab"),
+            ("<M-CR>", "alt+enter"),
+            ("<C-S-l>", "ctrl+shift+l"),
+            ("<BS>", "backspace"),
+            ("gg", "gg"),
+            ("<C-w>j", "ctrl+w j"),
+        ] {
+            assert_eq!(key_labels(&keys(vim)), label, "{vim}");
+        }
     }
 }

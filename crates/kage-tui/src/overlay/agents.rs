@@ -314,7 +314,7 @@ impl OverlayWidget for AgentsOverlay {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.overlay_border))
             .title(Line::styled(
-                " Agents ",
+                " agents ",
                 Style::default()
                     .fg(theme.overlay_fg)
                     .add_modifier(Modifier::BOLD),
@@ -349,6 +349,10 @@ impl OverlayWidget for AgentsOverlay {
             .map(|(i, row)| row_line(row, i == self.selected, &cols, width, ctx))
             .collect();
         Widget::render(Paragraph::new(lines), body, buf);
+    }
+
+    fn footer_hint(&self) -> &'static str {
+        "enter to open \u{b7} x to stop \u{b7} esc to close"
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> OverlayAction {
@@ -495,7 +499,7 @@ mod tests {
     fn rows_paint_as_a_tree_with_a_summary() {
         let (mut overlay, _) = tree();
         let rows = paint(&mut overlay, 120, 10);
-        let top = rows.iter().find(|r| r.contains("Agents")).unwrap();
+        let top = rows.iter().find(|r| r.contains(" agents ")).unwrap();
         assert!(
             top.contains(" 1 running \u{b7} 1 waiting \u{b7} 1 done \u{b7} 88k tok \u{b7} $0.20 "),
             "{rows:#?}"

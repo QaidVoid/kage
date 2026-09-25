@@ -336,7 +336,7 @@ impl ApprovalPanel {
                 "call"
             };
             let help = format!(
-                "Tell {} what to do instead. Enter sends it and denies the {what}, esc goes back.",
+                "Tell {} what to do instead. Press enter to send it and deny the {what}, or esc to go back.",
                 self.asker()
             );
             let muted = theme.group_style("KageMuted");
@@ -645,7 +645,7 @@ mod tests {
         let rows = rows(&panel, 100, 0);
         assert_eq!(
             rows[3],
-            "   Tell kage what to do instead. Enter sends it and denies the command, esc goes back."
+            "   Tell kage what to do instead. Press enter to send it and deny the command, or esc to go back."
         );
         assert_eq!(rows[4], " > use ls -a");
         assert_eq!(

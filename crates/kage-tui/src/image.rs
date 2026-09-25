@@ -104,7 +104,8 @@ pub fn from_bytes(bytes: &[u8], label: impl Into<String>) -> Result<AttachedImag
 /// # Errors
 ///
 /// Returns a user-facing message when the file cannot be read or
-/// [`from_bytes`] rejects its contents.
+/// [`from_bytes`] rejects its contents. A file that is not an image
+/// is pointed at `@` mentions, which include text files.
 pub fn load_path(path: &Path) -> Result<AttachedImage, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let label = path
@@ -112,6 +113,14 @@ pub fn load_path(path: &Path) -> Result<AttachedImage, String> {
         .and_then(|n| n.to_str())
         .unwrap_or("image")
         .to_owned();
+    if !bytes.is_empty() && sniff_mime(&bytes).is_none() {
+        return Err(format!(
+            "{} is not a png, jpeg, gif or webp image. To include a text file, \
+             mention it as @{} in the prompt.",
+            path.display(),
+            path.display()
+        ));
+    }
     from_bytes(&bytes, label)
 }
 
@@ -224,6 +233,19 @@ mod tests {
         }
         assert!(att.placeholder().contains("image/png"));
         assert!(att.placeholder().contains("shot.png"));
+    }
+
+    #[test]
+    fn a_text_file_points_at_an_at_mention() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("README.md");
+        std::fs::write(&path, "# readme").unwrap();
+        let err = load_path(&path).unwrap_err();
+        assert!(
+            err.contains("is not a png, jpeg, gif or webp image"),
+            "{err}"
+        );
+        assert!(err.contains("README.md in the prompt"), "{err}");
     }
 
     #[test]

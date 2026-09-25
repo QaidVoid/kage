@@ -14,7 +14,7 @@ impl App {
         match sub {
             "" | "current" => {
                 let cur = crate::theme::current().name.clone();
-                self.notify(format!("theme: {cur} (try `/theme list`)"));
+                self.push_info(format!("theme: {cur} (`/theme list` shows the others)"));
             }
             "list" => {
                 let cur = crate::theme::current().name.clone();
@@ -250,6 +250,13 @@ impl App {
         }
     }
 
+    /// Show the answer to a command the user ran, such as the current
+    /// theme or an empty list, as a notice in the conversation. A toast
+    /// confirms a change instead.
+    pub(crate) fn push_info(&mut self, msg: impl Into<String>) {
+        lock(&self.buffer).push_custom("kage:help", msg, false);
+    }
+
     pub(crate) fn notify(&mut self, msg: impl Into<String>) {
         let Some(toasts) = &self.toasts else {
             return;
@@ -264,11 +271,11 @@ impl App {
         match rest {
             "off" | "disable" => {
                 self.set_option("mouse", OptionValue::Bool(false));
-                self.notify("mouse capture off - drag selects via the terminal's native clipboard");
+                self.notify("mouse capture off \u{b7} the terminal selects and copies text");
             }
             "on" | "enable" => {
                 self.set_option("mouse", OptionValue::Bool(true));
-                self.notify("mouse capture on - drag selects blocks inside kage");
+                self.notify("mouse capture on \u{b7} drag selects text inside kage");
             }
             "toggle" | "" => {
                 let now_enabled =
@@ -284,25 +291,39 @@ impl App {
     }
 
     /// Title for the session picker, encoding the active scope and
-    /// the `Ctrl+A` toggle so the binding is discoverable in-place.
+    /// the `ctrl+a` toggle so the binding is discoverable in-place.
     pub(crate) fn session_picker_title(all: bool) -> &'static str {
         if all {
-            "Resume session - all dirs (Ctrl+A: this dir)"
+            "resume session \u{b7} all dirs \u{b7} ctrl+a for this dir"
         } else {
-            "Resume session - this dir (Ctrl+A: all dirs)"
+            "resume session \u{b7} this dir \u{b7} ctrl+a for all dirs"
         }
     }
 
     /// (Re)build the session picker for the current
-    /// [`Self::session_scope_all`] scope. `allow_empty` keeps the
-    /// modal open with no rows (used by the toggle so the user can
-    /// flip back); the initial open passes `false` so `Ctrl+S` with
-    /// nothing to resume is a no-op rather than an empty dialog.
+    /// [`Self::session_scope_all`] scope, with the session on screen
+    /// marked `*`. `allow_empty` keeps the modal open with no rows
+    /// (used by the toggle so the user can flip back); the initial
+    /// open passes `false` so `Ctrl+S` with nothing to resume is a
+    /// no-op rather than an empty dialog.
     pub(crate) fn open_session_picker(&mut self, allow_empty: bool) {
         let Some(lister) = self.session_lister.as_ref() else {
             return;
         };
-        let items = lister(self.session_scope_all);
+        let current = self.active_session.map(|id| id.to_string());
+        let items: Vec<_> = lister(self.session_scope_all)
+            .into_iter()
+            .map(|item| {
+                let stem = std::path::Path::new(&item.value)
+                    .file_stem()
+                    .and_then(|s| s.to_str());
+                if stem.is_some() && stem == current.as_deref() {
+                    item.with_badge('*')
+                } else {
+                    item
+                }
+            })
+            .collect();
         if items.is_empty() && !allow_empty {
             return;
         }
@@ -330,7 +351,7 @@ impl App {
         if items.is_empty() {
             return;
         }
-        self.picker = Some(OverlayPicker::new_ordered("Jump to message", items));
+        self.picker = Some(OverlayPicker::new_ordered("jump to message", items));
         self.picker_kind = Some(PickerKind::Jump);
     }
 
@@ -340,7 +361,10 @@ impl App {
     pub(crate) fn open_mcp_picker(&mut self) {
         use kage_core::protocol::McpServerStatus;
         if self.mcp_servers.is_empty() {
-            self.notify("no MCP servers configured");
+            self.push_info(
+                "no MCP servers configured. Add one under [mcp.servers.<name>] in \
+                 config.toml, then restart kage.",
+            );
             return;
         }
         let width = self
@@ -366,7 +390,7 @@ impl App {
             })
             .collect();
         self.picker = Some(
-            OverlayPicker::new_ordered("MCP servers", items)
+            OverlayPicker::new_ordered("mcp servers", items)
                 .with_note("enter restarts the server, or logs in when it needs a login"),
         );
         self.picker_kind = Some(PickerKind::Mcp);
@@ -560,15 +584,20 @@ impl App {
         }
     }
 
-    /// Open the `:tree` session browser, querying the wired source.
+    /// Open the `:tree` session browser, querying the wired source,
+    /// with the session on screen marked.
     pub(crate) fn open_session_tree(&mut self) {
         let Some(source) = self.session_tree_source.as_ref() else {
             self.push_error("tree: session browser unavailable");
             return;
         };
-        let nodes = source();
+        let current = self.active_session.map(|id| id.to_string());
+        let mut nodes = source();
+        for node in &mut nodes {
+            node.is_current |= current.as_deref() == Some(node.id.as_str());
+        }
         if nodes.is_empty() {
-            self.notify("no sessions to browse yet");
+            self.push_info("no sessions to browse yet");
             return;
         }
         self.session_tree = Some(SessionTreeOverlay::new(nodes));
@@ -605,7 +634,7 @@ impl App {
                         // overlay resolves Yes.
                         self.pending_tree_delete = Some(path);
                         self.plugin_overlay = Some(Box::new(crate::overlay::ConfirmOverlay::new(
-                            "Delete session",
+                            "delete session",
                             "Delete this session? This cannot be undone.",
                         )));
                     }
@@ -621,7 +650,7 @@ impl App {
     pub(crate) fn open_agents(&mut self) {
         let rows = self.agents_overlay_rows();
         if rows.len() < 2 {
-            self.notify("no agents in this session yet");
+            self.push_info("no agents in this session yet");
             return;
         }
         self.agents_overlay = Some(crate::overlay::AgentsOverlay::new(rows, self.focus));

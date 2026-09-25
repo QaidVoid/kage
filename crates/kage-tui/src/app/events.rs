@@ -113,7 +113,7 @@ impl App {
                     self.notify("no models available. Run /login to connect a provider");
                 } else {
                     self.picker = Some(
-                        OverlayPicker::new("Switch model", self.model_choices.clone())
+                        OverlayPicker::new("switch model", self.model_choices.clone())
                             .with_note("/login to add a provider"),
                     );
                     self.picker_kind = Some(PickerKind::Model);

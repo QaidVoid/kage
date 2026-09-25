@@ -11,17 +11,20 @@
 //! and flushes a [`Line`] whenever the parser emits a paragraph break,
 //! a heading, a list item, or an explicit `SoftBreak` / `HardBreak`.
 //! Adjacent inline styles (bold, italic, inline code) stack via a
-//! small style state.
+//! small style state. Block quotes keep a dim `>` gutter on every
+//! line, and tables render as plain columns padded to line up, with a
+//! bold header over a dim rule.
 //!
-//! Not supported by design (yet): images, tables, footnotes, HTML
+//! Not supported by design (yet): images, footnotes, HTML
 //! passthrough, task lists, autolinks. They render as the raw text the
 //! parser yields so users still see content rather than a silent drop.
 
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
 use crate::syntax::{highlight_with_lang, plain_lines_styled};
+use crate::view::UnicodeWidthStr as _;
 
 /// Convert `text` into a vector of styled [`Line`]s by walking the
 /// `CommonMark` event stream. `fallback` is the base text style for
@@ -46,10 +49,16 @@ pub fn render_streaming(text: &str, fallback: Style) -> Vec<Line<'static>> {
 /// Indent of fenced code under its language label.
 const CODE_INDENT: &str = "  ";
 
+/// Gutter painted before every line of a block quote, once per level.
+pub(crate) const QUOTE_GUTTER: &str = "> ";
+
+/// Cells between two table columns.
+const TABLE_GAP: &str = "  ";
+
 fn render_with(text: &str, fallback: Style, highlight_code: bool) -> Vec<Line<'static>> {
     let mut state = RenderState::new(fallback);
     state.highlight_code = highlight_code;
-    for event in Parser::new(text) {
+    for event in Parser::new_ext(text, Options::ENABLE_TABLES) {
         state.handle(event);
     }
     state.finish()
@@ -68,6 +77,19 @@ struct RenderState {
     pending_blank: bool,
     has_block_content: bool,
     highlight_code: bool,
+    quote_depth: usize,
+    table: Option<Table>,
+}
+
+/// A table being collected: every cell's spans, rendered once the
+/// table ends and every column width is known.
+#[derive(Default)]
+struct Table {
+    alignments: Vec<Alignment>,
+    rows: Vec<Vec<Vec<Span<'static>>>>,
+    row: Vec<Vec<Span<'static>>>,
+    cell: Vec<Span<'static>>,
+    header_rows: usize,
 }
 
 struct ListFrame {
@@ -90,10 +112,18 @@ impl RenderState {
             pending_blank: false,
             has_block_content: false,
             highlight_code: true,
+            quote_depth: 0,
+            table: None,
         }
     }
 
-    fn emit_line(&mut self, line: Line<'static>) {
+    fn emit_line(&mut self, mut line: Line<'static>) {
+        if self.quote_depth > 0 {
+            line.spans.insert(
+                0,
+                Span::styled(QUOTE_GUTTER.repeat(self.quote_depth), dim_style()),
+            );
+        }
         self.lines.push(line);
     }
 
@@ -105,7 +135,10 @@ impl RenderState {
         if text.is_empty() {
             return;
         }
-        self.current.push(Span::styled(text, style));
+        match &mut self.table {
+            Some(table) => table.cell.push(Span::styled(text, style)),
+            None => self.current.push(Span::styled(text, style)),
+        }
     }
 
     fn flush_line(&mut self) {
@@ -175,7 +208,7 @@ impl RenderState {
                 self.style_stack.push(heading_style(level, self.fallback));
                 self.push_text(heading_prefix(level), dim_style());
             }
-            Tag::Strong => {
+            Tag::Strong | Tag::TableHead => {
                 let s = self.current_style().add_modifier(Modifier::BOLD);
                 self.style_stack.push(s);
             }
@@ -188,9 +221,18 @@ impl RenderState {
                 self.style_stack.push(s);
             }
             Tag::BlockQuote(_) => {
+                self.flush_line();
                 self.maybe_emit_pending_blank();
+                self.quote_depth += 1;
                 let s = self.fallback.add_modifier(Modifier::DIM | Modifier::ITALIC);
                 self.style_stack.push(s);
+            }
+            Tag::Table(alignments) => {
+                self.maybe_emit_pending_blank();
+                self.table = Some(Table {
+                    alignments,
+                    ..Table::default()
+                });
             }
             Tag::List(start) => {
                 self.maybe_emit_pending_blank();
@@ -239,9 +281,43 @@ impl RenderState {
                 self.has_block_content = true;
                 self.emit_paragraph_break();
             }
-            TagEnd::Heading(_) | TagEnd::BlockQuote(_) => {
+            TagEnd::Heading(_) => {
                 self.flush_line();
                 self.style_stack.pop();
+                self.has_block_content = true;
+                self.emit_paragraph_break();
+            }
+            TagEnd::BlockQuote(_) => {
+                self.flush_line();
+                self.style_stack.pop();
+                self.quote_depth = self.quote_depth.saturating_sub(1);
+                self.has_block_content = true;
+                self.emit_paragraph_break();
+            }
+            TagEnd::TableCell => {
+                if let Some(table) = &mut self.table {
+                    let cell = std::mem::take(&mut table.cell);
+                    table.row.push(cell);
+                }
+            }
+            TagEnd::TableHead | TagEnd::TableRow => {
+                if end == TagEnd::TableHead {
+                    self.style_stack.pop();
+                }
+                if let Some(table) = &mut self.table {
+                    let row = std::mem::take(&mut table.row);
+                    table.rows.push(row);
+                    if end == TagEnd::TableHead {
+                        table.header_rows = table.rows.len();
+                    }
+                }
+            }
+            TagEnd::Table => {
+                if let Some(table) = self.table.take() {
+                    for line in table_lines(table) {
+                        self.emit_line(line);
+                    }
+                }
                 self.has_block_content = true;
                 self.emit_paragraph_break();
             }
@@ -306,6 +382,8 @@ impl RenderState {
     fn handle_break(&mut self) {
         if self.in_code_block.is_some() {
             self.code_body.push('\n');
+        } else if self.table.is_some() {
+            self.push_text(" ".to_owned(), self.current_style());
         } else {
             self.flush_line();
         }
@@ -325,6 +403,53 @@ impl RenderState {
         }
         self.lines
     }
+}
+
+/// Lay `table` out as plain lines: every column padded to its widest
+/// cell and aligned as the delimiter row asks, the header rows over a
+/// dim rule.
+fn table_lines(table: Table) -> Vec<Line<'static>> {
+    let columns = table.rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut widths = vec![0; columns];
+    for row in &table.rows {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(spans_width(cell));
+        }
+    }
+    let mut lines = Vec::with_capacity(table.rows.len() + 1);
+    for (i, row) in table.rows.into_iter().enumerate() {
+        if i == table.header_rows && i > 0 {
+            let rule: Vec<String> = widths.iter().map(|w| "\u{2500}".repeat(*w)).collect();
+            lines.push(Line::from(Span::styled(rule.join(TABLE_GAP), dim_style())));
+        }
+        let mut spans = Vec::new();
+        let mut cells = row.into_iter();
+        for (col, width) in widths.iter().enumerate() {
+            let cell = cells.next().unwrap_or_default();
+            let room = width.saturating_sub(spans_width(&cell));
+            let (left, right) = match table.alignments.get(col) {
+                Some(Alignment::Right) => (room, 0),
+                Some(Alignment::Center) => (room / 2, room - room / 2),
+                _ => (0, room),
+            };
+            if col > 0 {
+                spans.push(Span::raw(TABLE_GAP));
+            }
+            if left > 0 {
+                spans.push(Span::raw(" ".repeat(left)));
+            }
+            spans.extend(cell);
+            if right > 0 && col + 1 < columns {
+                spans.push(Span::raw(" ".repeat(right)));
+            }
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
+fn spans_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|s| s.content.width()).sum()
 }
 
 fn heading_style(level: HeadingLevel, fallback: Style) -> Style {
@@ -462,6 +587,68 @@ mod tests {
             .iter()
             .any(|s| s.style.add_modifier.contains(Modifier::DIM));
         assert!(dim);
+    }
+
+    #[test]
+    fn block_quote_keeps_a_gutter_on_every_line() {
+        let lines = render("> one\n>\n> two\n\nafter", Style::default());
+        let texts: Vec<String> = lines.iter().map(spans_text).collect();
+        assert_eq!(texts, ["> one", "> ", "> two", "", "after"]);
+        let nested = render("> outer\n>> inner", Style::default());
+        assert_eq!(spans_text(&nested[0]), "> outer");
+        assert!(
+            nested.iter().any(|l| spans_text(l) == "> > inner"),
+            "{nested:?}"
+        );
+    }
+
+    #[test]
+    fn table_renders_as_aligned_columns_under_a_rule() {
+        let md = "| name | size |\n|:-----|-----:|\n| a.rs | 12 |\n| lib.rs | 3 |";
+        let texts: Vec<String> = render(md, Style::default())
+            .iter()
+            .map(spans_text)
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "name    size",
+                "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}  \u{2500}\u{2500}\u{2500}\u{2500}",
+                "a.rs      12",
+                "lib.rs     3",
+            ]
+        );
+        assert!(texts.iter().all(|t| !t.contains('|')));
+    }
+
+    #[test]
+    fn table_header_is_bold_and_cells_keep_inline_styles() {
+        let _guard = crate::theme::theme_test_lock();
+        let md = "| key | what |\n|---|---|\n| `x` | **bold** |";
+        let lines = render(md, Style::default());
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .filter(|s| !s.content.trim().is_empty())
+                .all(|s| s.style.add_modifier.contains(Modifier::BOLD))
+        );
+        assert!(lines[2].spans.iter().any(|s| s.content == "x"
+            && s.style.fg == Some(crate::theme::current().md_code_fg)));
+    }
+
+    #[test]
+    fn table_after_a_paragraph_is_separated_by_a_blank_line() {
+        let md = "intro\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\nafter";
+        let texts: Vec<String> = render(md, Style::default())
+            .iter()
+            .map(spans_text)
+            .collect();
+        assert_eq!(texts[0], "intro");
+        assert_eq!(texts[1], "");
+        assert_eq!(texts[2], "a  b");
+        assert_eq!(texts[5], "");
+        assert_eq!(texts[6], "after");
     }
 
     #[test]

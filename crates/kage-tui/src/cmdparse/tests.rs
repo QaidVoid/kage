@@ -628,12 +628,14 @@ fn complete_descends_into_subcommand_args() {
 }
 
 #[test]
-fn complete_subcommand_arg_hints_in_description() {
+fn complete_subcommand_arg_hints_in_their_own_column() {
     let r = TestResolver;
     let c = complete(&subcommand_registry(), "tree ", 5, &r);
     let set_item = c.items.iter().find(|i| i.value == "set").expect("set item");
+    assert_eq!(set_item.hint.as_deref(), Some("<id>"));
+    assert_eq!(set_item.label(), "set <id>");
     assert!(
-        set_item
+        !set_item
             .description
             .as_deref()
             .unwrap_or("")

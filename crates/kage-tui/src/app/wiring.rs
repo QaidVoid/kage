@@ -654,7 +654,7 @@ impl App {
     pub(crate) fn footer_hint(&mut self) -> String {
         let keys = self.sequencer.pending();
         if !keys.is_empty() {
-            return format!("{} ...", kage_core::keymap::display_keys(keys));
+            return format!("{} ...", crate::keymap::key_labels(keys));
         }
         if let Some(hint) = self.layer_hint() {
             return hint;
@@ -688,9 +688,15 @@ impl App {
         let queue = label(self, "QueuePrompt", "to queue").filter(|_| working);
         let queues = label(self, "QueuePrompt", "queues").filter(|_| working);
         let has_agents = working
-            && self
-                .active_session
-                .is_some_and(|main| !self.agents.under(main).is_empty());
+            && self.active_session.is_some_and(|main| {
+                self.agents.under(main).iter().any(|(_, node)| {
+                    matches!(
+                        node.state,
+                        kage_core::protocol::AgentState::Queued
+                            | kage_core::protocol::AgentState::Running
+                    )
+                })
+            });
         let agents = label(self, "OpenAgents", "for agents").filter(|_| has_agents);
         let (queue, queues, agents) = (queue.as_deref(), queues.as_deref(), agents.as_deref());
         let mut parts: Vec<&str> = Vec::new();
@@ -745,18 +751,43 @@ impl App {
     }
 
     /// The footer hint of the layer above the editor that takes the
-    /// keys: the approval panel, the palette, the help overlay, the
-    /// completion popup, or an empty hint under any other overlay.
+    /// keys, in the order [`Self::dispatch_key`] offers them: a plugin
+    /// dialog, the agents overlay, the approval panel, the context
+    /// menu, a picker or dialog, the palette, the `:` and search lines,
+    /// then the completion popup.
     fn layer_hint(&self) -> Option<String> {
+        use crate::overlay::OverlayWidget;
+        if let Some(overlay) = self.plugin_overlay.as_deref() {
+            return Some(overlay.footer_hint().to_owned());
+        }
+        if let Some(overlay) = &self.agents_overlay {
+            return Some(overlay.footer_hint().to_owned());
+        }
         if let Some(panel) = &self.approval_panel {
             return Some(panel.hint());
         }
-        let parts: &[&str] = if self.slash_palette.is_some() {
+        let overlay: Option<&dyn OverlayWidget> = if let Some(p) = &self.picker {
+            Some(p)
+        } else if let Some(s) = &self.settings_overlay {
+            Some(s)
+        } else if let Some(t) = &self.session_tree {
+            Some(t)
+        } else if let Some(h) = &self.help_overlay {
+            Some(h)
+        } else if let Some(p) = &self.slash_palette {
+            Some(p)
+        } else {
+            None
+        };
+        if let Some(overlay) = overlay.filter(|_| self.context_menu.is_none()) {
+            return Some(overlay.footer_hint().to_owned());
+        }
+        let parts: &[&str] = if self.context_menu.is_some() {
+            &["enter to run", "esc to close"]
+        } else if self.cmdline.is_some() {
             &["tab to complete", "enter to run", "esc to close"]
-        } else if self.help_overlay.is_some() {
-            &["up/down to scroll", "esc to close"]
-        } else if self.modal_open() {
-            &[]
+        } else if self.search_line.is_some() {
+            &["up/down for matches", "enter to keep", "esc to cancel"]
         } else if self.input_completion.is_some() {
             &["enter to complete", "esc to close"]
         } else {
@@ -814,7 +845,7 @@ impl App {
             .filter(runs)
             .find(|e| e.mapping.user_owned())
             .or_else(|| entries.iter().find(runs))
-            .map(|e| e.lhs.iter().map(key_chord).collect::<String>());
+            .map(|e| crate::keymap::key_labels(e.lhs));
         self.key_labels.labels.push((action, label.clone()));
         label
     }
@@ -879,16 +910,44 @@ impl App {
 
     /// The pinned list: the queued, running and waiting agents under
     /// the session on screen in tree order, with what each does now.
+    /// Direct agents follow the order of their cards in the
+    /// conversation, which can differ from the order they started in.
     /// Empty while the approval panel is open.
     pub(crate) fn agent_rows(&self) -> Vec<view::AgentRow> {
         use kage_core::protocol::AgentState;
         let Some(root) = self.view_root().filter(|_| self.approval_panel.is_none()) else {
             return Vec::new();
         };
-        self.agents
+        let cards: std::collections::HashMap<String, usize> = lock(&self.buffer)
+            .blocks()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, block)| match block {
+                crate::Block::ToolCall { call_id, name, .. } if name == "agent" => {
+                    Some((call_id.clone(), i))
+                }
+                _ => None,
+            })
+            .collect();
+        let mut card = usize::MAX;
+        let mut nodes: Vec<_> = self
+            .agents
             .under(root)
             .into_iter()
-            .filter_map(|(depth, node)| {
+            .map(|(depth, node)| {
+                if depth == 1 {
+                    card = cards
+                        .get(&node.tool_call_id.0)
+                        .copied()
+                        .unwrap_or(usize::MAX);
+                }
+                (card, depth, node)
+            })
+            .collect();
+        nodes.sort_by_key(|(card, _, _)| *card);
+        nodes
+            .into_iter()
+            .filter_map(|(_, depth, node)| {
                 let state = match node.state {
                     AgentState::Queued => view::AgentRowState::Queued,
                     AgentState::Running if node.waiting > 0 => view::AgentRowState::Waiting,
@@ -1352,33 +1411,6 @@ const ACTIVITY_INDENT: usize = 2;
 pub(crate) struct KeyLabels {
     key: Option<(u64, EditState)>,
     labels: Vec<(&'static str, Option<String>)>,
-}
-
-/// One key in hint form: `<C-p>` reads `ctrl+p`, `<S-Tab>` reads
-/// `shift+tab`, and a plain character stays itself.
-fn key_chord(key: &kage_core::keymap::Key) -> String {
-    let vim = key.to_string();
-    let Some(mut inner) = vim.strip_prefix('<').and_then(|v| v.strip_suffix('>')) else {
-        return vim;
-    };
-    let mut out = String::new();
-    loop {
-        let (prefix, rest) = match inner.split_at_checked(2) {
-            Some(("C-", rest)) => ("ctrl+", rest),
-            Some(("M-", rest)) => ("alt+", rest),
-            Some(("S-", rest)) => ("shift+", rest),
-            Some(("D-", rest)) => ("super+", rest),
-            _ => break,
-        };
-        out.push_str(prefix);
-        inner = rest;
-    }
-    match inner {
-        "CR" => out.push_str("enter"),
-        "BS" => out.push_str("backspace"),
-        name => out.push_str(&name.to_lowercase()),
-    }
-    out
 }
 
 /// The first line of the first prompt in `buffer`, which names a

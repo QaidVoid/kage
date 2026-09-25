@@ -88,6 +88,11 @@ pub trait OverlayWidget: Send + Sync {
     /// fall through to the host's hidden input underneath. Text-entry
     /// overlays override this to insert at their cursor.
     fn handle_paste(&mut self, _text: &str) {}
+
+    /// What the footer says the keys do while the overlay has them.
+    fn footer_hint(&self) -> &'static str {
+        "enter to confirm \u{b7} esc to cancel"
+    }
 }
 
 /// No-op overlay used to lock the trait shape and as a safe default

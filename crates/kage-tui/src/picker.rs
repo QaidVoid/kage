@@ -88,15 +88,15 @@ impl PickItem {
 }
 
 /// Show `items` in a search-as-you-type picker with `prompt` as the
-/// header. Items are sorted alphabetically by label so unfamiliar
-/// lists feel predictable. Returns the chosen item's value, or
+/// header. Items are sorted alphabetically by label, ignoring case,
+/// so unfamiliar lists feel predictable. Returns the chosen item's value, or
 /// `None` for cancel.
 pub fn pick(prompt: &str, items: &[PickItem]) -> Result<Option<String>, TuiError> {
     if items.is_empty() {
         return Ok(None);
     }
     let mut sorted = items.to_vec();
-    sorted.sort_by(|a, b| a.label.cmp(&b.label));
+    sorted.sort_by_cached_key(|item| item.label.to_lowercase());
     let mut stdout = io::stdout();
     terminal::enable_raw_mode()?;
     let _restore = RawModeGuard;
@@ -175,6 +175,15 @@ fn run(out: &mut io::Stdout, prompt: &str, items: &[PickItem]) -> Result<Option<
                 selected = 0;
                 scroll_offset = 0;
             }
+            KeyCode::Char(c)
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                edit_search(&mut search, c);
+                selected = 0;
+                scroll_offset = 0;
+            }
             KeyCode::Char(c) => {
                 search.push(c);
                 selected = 0;
@@ -182,6 +191,20 @@ fn run(out: &mut io::Stdout, prompt: &str, items: &[PickItem]) -> Result<Option<
             }
             _ => {}
         }
+    }
+}
+
+/// Apply a readline chord to a picker's filter text: `ctrl+u` clears
+/// it and `ctrl+w` deletes the word before the end. Other chords
+/// change nothing, so they never type their letter.
+pub(crate) fn edit_search(search: &mut String, c: char) {
+    match c {
+        'u' => search.clear(),
+        'w' => {
+            let start = crate::input::unix_word_rubout_start(search, search.len());
+            search.truncate(start);
+        }
+        _ => {}
     }
 }
 
@@ -379,7 +402,9 @@ fn render(
     queue!(
         out,
         SetForegroundColor(Color::DarkGrey),
-        Print("  up/down select, page up/down jump, enter confirm, esc cancel\r\n"),
+        Print(
+            "  up/down to select \u{b7} pageup/pagedown to jump \u{b7} enter to confirm \u{b7} esc to cancel\r\n"
+        ),
         ResetColor,
     )?;
     lines += 1;

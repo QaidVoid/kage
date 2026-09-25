@@ -465,7 +465,11 @@ fn tail(lines: Vec<BodyLine>, n: usize) -> Vec<Line<'static>> {
     let skip = lines.len().saturating_sub(n);
     let mut out = Vec::with_capacity(n + 1);
     if skip > 0 {
-        out.push(elision(format!("... {skip} earlier lines")));
+        out.push(elision(if skip == 1 {
+            "... 1 earlier line".to_owned()
+        } else {
+            format!("... {skip} earlier lines")
+        }));
     }
     let text = tool_result_style();
     out.extend(lines.into_iter().skip(skip).map(|l| body_line(l, text)));

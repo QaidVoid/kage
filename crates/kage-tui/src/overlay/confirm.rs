@@ -113,6 +113,10 @@ impl OverlayWidget for ConfirmOverlay {
         Widget::render(Paragraph::new(line), chunks[1], buf);
     }
 
+    fn footer_hint(&self) -> &'static str {
+        "y or n to answer \u{b7} esc to cancel"
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> OverlayAction {
         if key.kind != KeyEventKind::Press {
             return OverlayAction::Stay;

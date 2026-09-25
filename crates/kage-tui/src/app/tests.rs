@@ -278,7 +278,7 @@ fn keybindings_command_lists_the_table_per_mode_with_owners() {
     let rendered = last_block_text(&buffer);
     for wanted in [
         "g: any editing state",
-        "<C-t>",
+        "ctrl+t",
         ":theme set tokyo-night",
         "action:BeginCommand",
         "config.toml",
@@ -288,7 +288,7 @@ fn keybindings_command_lists_the_table_per_mode_with_owners() {
         "action:OpenModelPicker",
         "defaults",
         "built in (editor grammar",
-        "<C-q>        quit",
+        "ctrl+q         quit",
     ] {
         assert!(rendered.contains(wanted), "missing {wanted}: {rendered}");
     }
@@ -1204,7 +1204,7 @@ fn pending_rows_show_until_delivered_steers_first() {
         app.handle_key(key(c));
     }
     app.handle_key(code(KeyCode::Enter));
-    let steer = format!("  > now{}after the current tools", " ".repeat(29));
+    let steer = format!("  > now{}after the current tool call", " ".repeat(25));
     let queue = format!("  > later{}when this run ends", " ".repeat(32));
     assert_eq!(pending_rows(&mut app), [steer, queue.clone()]);
     feed(&mut app, &events, vec![user_message("now")]);
@@ -1248,18 +1248,21 @@ fn pending_rows_fold_past_three_and_clear_on_session_change() {
 
 #[test]
 fn ctrl_c_interrupts_over_an_open_cmdline() {
-    let buffer = shared_buffer();
-    let (tx, rx) = mpsc::channel();
-    let mut app = app_with_defaults(buffer, tx);
+    let (mut app, rx, _events) = app_with_events();
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
     app.handle_key(key(':'));
     assert!(app.cmdline.is_some(), "cmdline should be open");
+    lock(app.session_usage.as_ref().unwrap()).working = true;
     app.handle_key(ctrl('c'));
     assert_eq!(rx.try_recv(), Ok(RunRequest::Cancel { session: None }));
     assert!(
         app.cmdline.is_some(),
         "interrupt must not close the cmdline"
     );
+    lock(app.session_usage.as_ref().unwrap()).working = false;
+    app.handle_key(ctrl('c'));
+    assert!(app.cmdline.is_none(), "idle, ctrl+c closes the cmdline");
+    assert!(rx.try_recv().is_err());
 }
 
 #[test]
@@ -2316,6 +2319,19 @@ fn validated_unknown_command_returns_error_with_suggestion() {
 }
 
 #[test]
+fn the_colon_line_suggests_with_its_own_prefix() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer, tx);
+    app.handle_key(code(KeyCode::Esc));
+    app.handle_key(key(':'));
+    type_str(&mut app, "quut");
+    app.handle_key(code(KeyCode::Enter));
+    let error = app.cmdline.as_ref().and_then(|c| c.error()).unwrap_or("");
+    assert_eq!(error, "unknown command: quut (did you mean :quit?)");
+}
+
+#[test]
 fn validated_invalid_choice_returns_error() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
@@ -3066,7 +3082,7 @@ fn search_fixture() -> (App, SharedBuffer) {
 }
 
 #[test]
-fn search_jump_walks_matches_without_wrapping() {
+fn search_jump_walks_matches_and_wraps_at_either_end() {
     let (mut app, buffer) = search_fixture();
     app.search_pattern = Some("needle".into());
 
@@ -3074,17 +3090,25 @@ fn search_jump_walks_matches_without_wrapping() {
     assert_eq!(buffer.lock().unwrap().focus(), Some(1));
     app.jump_to_search_match(true);
     assert_eq!(buffer.lock().unwrap().focus(), Some(3));
-
-    // Forward past the last match is a no-op, not a wrap.
     app.jump_to_search_match(true);
+    assert_eq!(buffer.lock().unwrap().focus(), Some(1));
+    app.jump_to_search_match(false);
     assert_eq!(buffer.lock().unwrap().focus(), Some(3));
+}
 
-    app.jump_to_search_match(false);
+#[test]
+fn a_reopened_search_line_walks_only_what_it_shows() {
+    let (mut app, buffer) = search_fixture();
+    app.handle_key(ctrl('f'));
+    type_str(&mut app, "needle");
+    app.handle_key(code(KeyCode::Enter));
     assert_eq!(buffer.lock().unwrap().focus(), Some(1));
-
-    // Backward past the first match is a no-op too.
-    app.jump_to_search_match(false);
+    app.handle_key(ctrl('f'));
+    assert_eq!(app.search_line.as_ref().unwrap().text(), "");
+    app.handle_key(code(KeyCode::Down));
     assert_eq!(buffer.lock().unwrap().focus(), Some(1));
+    app.handle_key(code(KeyCode::Esc));
+    assert_eq!(app.search_pattern.as_deref(), Some("needle"));
 }
 
 #[test]
@@ -3985,8 +4009,8 @@ fn help_rows_come_from_the_live_keymap() {
     );
     app.open_help();
     let rows = app.help_overlay.as_ref().unwrap().mapped_rows();
-    assert!(rows.contains(&("<C-t>", "dark theme")), "{rows:?}");
-    assert!(!rows.iter().any(|(lhs, _)| *lhs == "<C-s>"), "{rows:?}");
+    assert!(rows.contains(&("ctrl+t", "dark theme")), "{rows:?}");
+    assert!(!rows.iter().any(|(lhs, _)| *lhs == "ctrl+s"), "{rows:?}");
 }
 
 #[test]
@@ -5108,6 +5132,179 @@ fn x_in_the_agents_overlay_stops_the_selected_agent_and_esc_closes() {
     assert!(rx.try_recv().is_err());
 }
 
+/// Opens one overlay on an App.
+type OpenOverlay = fn(&mut App);
+
+#[test]
+fn idle_ctrl_c_closes_each_overlay_and_the_footer_names_its_keys() {
+    let (mut app, rx, _events) = app_with_events();
+    app.set_editor_modeless(true);
+    app.set_model_choices(vec![PickItem::simple("fake:m").with_label("Fake")]);
+    app.set_session_lister(Box::new(|_| vec![PickItem::simple("/tmp/s.jsonl")]));
+    app.set_session_tree_source(Box::new(|| {
+        vec![crate::overlay::SessionNode {
+            id: "s".into(),
+            path: "/tmp/s.jsonl".into(),
+            label: "work".into(),
+            ..Default::default()
+        }]
+    }));
+    let open: [(OpenOverlay, &str); 6] = [
+        (
+            |app| {
+                app.handle_key(ctrl('p'));
+            },
+            "enter to pick \u{b7} esc to close",
+        ),
+        (
+            |app| {
+                app.handle_key(ctrl('s'));
+            },
+            "enter to pick \u{b7} esc to close",
+        ),
+        (App::open_settings, "enter to save \u{b7} esc to cancel"),
+        (
+            App::open_session_tree,
+            "enter to resume \u{b7} f to fork \u{b7} esc to close",
+        ),
+        (App::open_help, "up/down to scroll \u{b7} esc to close"),
+        (
+            |app| {
+                app.handle_key(key('/'));
+            },
+            "tab to complete \u{b7} enter to run \u{b7} esc to close",
+        ),
+    ];
+    for (open, hint) in open {
+        open(&mut app);
+        assert!(app.keyboard_modal_open(), "{hint}");
+        assert_eq!(app.footer_hint(), hint);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        app.render_into(&mut terminal).unwrap();
+        let footer = snapshot_rows(&terminal).pop().unwrap();
+        assert!(footer.starts_with(&format!("  {hint}")), "{footer:?}");
+        app.handle_key(ctrl('c'));
+        assert!(!app.keyboard_modal_open(), "ctrl+c closes: {hint}");
+    }
+    assert!(app.escalation.is_none(), "closing never arms quit");
+    assert!(rx.try_recv().is_err(), "idle, nothing is cancelled");
+}
+
+#[test]
+fn the_session_picker_and_tree_mark_the_session_on_screen() {
+    let (mut app, _rx, events) = app_with_events();
+    let current = kage_core::SessionId::new();
+    let other = kage_core::SessionId::new();
+    send_to(
+        &mut app,
+        &events,
+        current,
+        vec![
+            kage_core::protocol::HostEvent::SessionChanged {
+                path: format!("/tmp/{current}.jsonl").into(),
+                title: None,
+                messages: Vec::new(),
+            }
+            .into(),
+        ],
+    );
+    let paths = [current, other].map(|id| format!("/tmp/{id}.jsonl"));
+    let listed = paths.clone();
+    app.set_session_lister(Box::new(move |_| {
+        listed.iter().map(|p| PickItem::simple(p.clone())).collect()
+    }));
+    app.set_session_tree_source(Box::new(move || {
+        [current, other]
+            .map(|id| crate::overlay::SessionNode {
+                id: id.to_string(),
+                path: format!("/tmp/{id}.jsonl"),
+                label: id.to_string(),
+                ..Default::default()
+            })
+            .to_vec()
+    }));
+    app.open_session_picker(false);
+    let rows = rendered(&mut app, 120, 24);
+    let marked: Vec<&String> = rows.iter().filter(|r| r.contains(" * ")).collect();
+    assert_eq!(marked.len(), 1, "{rows:#?}");
+    assert!(marked[0].contains(&paths[0]), "{rows:#?}");
+    app.picker = None;
+    app.open_session_tree();
+    let rows = rendered(&mut app, 120, 24);
+    let marked: Vec<&String> = rows.iter().filter(|r| r.contains("* ")).collect();
+    assert_eq!(marked.len(), 1, "{rows:#?}");
+    assert!(marked[0].contains(&current.to_string()), "{rows:#?}");
+}
+
+#[test]
+fn enter_on_a_command_missing_its_argument_names_it() {
+    let mut app = defaults_app();
+    app.set_editor_modeless(true);
+    app.handle_key(key('/'));
+    type_str(&mut app, "theme set");
+    app.handle_key(code(KeyCode::Enter));
+    let palette = app.slash_palette.as_ref().expect("the palette stays open");
+    assert_eq!(palette.cmdline().text(), "theme set ");
+    assert_eq!(
+        palette.cmdline().error(),
+        Some("missing required argument `name`")
+    );
+    let rows = rendered(&mut app, 80, 24);
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("! missing required argument `name`")),
+        "{rows:#?}"
+    );
+    type_str(&mut app, "d");
+    assert!(
+        app.slash_palette
+            .as_ref()
+            .unwrap()
+            .cmdline()
+            .error()
+            .is_none()
+    );
+}
+
+#[test]
+fn palette_descriptions_line_up_after_the_argument_hints() {
+    let mut app = defaults_app();
+    app.set_editor_modeless(true);
+    app.handle_key(key('/'));
+    type_str(&mut app, "m");
+    let rows = rendered(&mut app, 100, 30);
+    let row = |name: &str| {
+        rows.iter()
+            .find(|r| r.trim_start().starts_with(name))
+            .unwrap_or_else(|| panic!("{name}: {rows:#?}"))
+            .clone()
+    };
+    let model = row("model [id]");
+    let mouse = row("mouse [on|off|toggle]");
+    let mcp = row("mcp [restart|login]");
+    let column = |r: &str, desc: &str| r.find(desc).unwrap_or_else(|| panic!("{r}"));
+    let at = column(&model, "switch to provider:model");
+    assert_eq!(column(&mouse, "toggle mouse capture"), at, "{rows:#?}");
+    assert_eq!(column(&mcp, "list MCP servers"), at, "{rows:#?}");
+}
+
+#[test]
+fn answers_to_commands_land_in_the_conversation() {
+    let (mut app, _rx, _events) = app_with_events();
+    let registry = builtin_registry();
+    for (line, want) in [
+        ("theme current", "theme: "),
+        ("mcp", "Add one under [mcp.servers.<name>] in config.toml"),
+        ("agents", "no agents in this session yet"),
+        ("permission", "permission mode: default"),
+    ] {
+        let result = app.run_command_validated(line, &registry);
+        assert!(matches!(result, CommandResult::Done(None)), "{line}");
+        let text = last_block_text(&app.buffer);
+        assert!(text.contains(want), "{line}: {text}");
+    }
+}
+
 #[test]
 fn slash_agents_opens_the_overlay_and_help_lists_its_key() {
     let (mut app, _rx, _events, _) = agents_app();
@@ -5119,7 +5316,7 @@ fn slash_agents_opens_the_overlay_and_help_lists_its_key() {
 
     app.open_help();
     let rows = app.help_overlay.as_ref().unwrap().mapped_rows();
-    assert!(rows.contains(&("<C-t>", "agents")), "{rows:?}");
+    assert!(rows.contains(&("ctrl+t", "agents")), "{rows:?}");
 }
 
 #[test]
@@ -5135,7 +5332,7 @@ fn the_agents_overlay_fits_80_by_24_and_stays_live() {
     let (mut app, _rx, events, [general, _, _]) = agents_app();
     app.handle_key(ctrl('t'));
     let rows = rendered(&mut app, 80, 24);
-    let top = rows.iter().position(|r| r.contains("Agents")).unwrap();
+    let top = rows.iter().position(|r| r.contains(" agents ")).unwrap();
     assert!(rows[top].contains("2 running \u{b7} 1 done"), "{rows:#?}");
     assert!(rows[top + 1].contains("> kage"), "{rows:#?}");
     assert!(rows[top + 1].contains("idle"), "{rows:#?}");
@@ -5197,6 +5394,57 @@ fn the_more_row_and_the_working_hint_name_the_agents_key() {
     let (events, events_rx) = mpsc::channel();
     app.set_engine_events(events_rx);
     check(app, &events, "alt+a");
+}
+
+#[test]
+fn pinned_agents_follow_their_cards_and_finished_ones_leave_the_queue_hint() {
+    let (mut app, _rx, events) = app_with_events();
+    app.set_editor_modeless(true);
+    lock(app.session_usage.as_ref().unwrap()).working = true;
+    let input = |agent: &str| serde_json::json!({ "agent": agent, "description": format!("{agent} task"), "prompt": "go" });
+    feed(
+        &mut app,
+        &events,
+        ["c1", "c2"]
+            .into_iter()
+            .zip(["first", "second"])
+            .map(|(id, agent)| {
+                kage_core::LoopEvent::ToolCallStart {
+                    id: kage_core::ToolCallId::new(id),
+                    name: "agent".into(),
+                    input_partial: input(agent),
+                }
+                .into()
+            })
+            .collect(),
+    );
+    let mut children = Vec::new();
+    for (id, agent) in [("c2", "second"), ("c1", "first")] {
+        let child = kage_core::SessionId::new();
+        let spawned = kage_core::protocol::HostEvent::AgentSpawned {
+            parent: app.active_session.unwrap(),
+            tool_call_id: kage_core::ToolCallId::new(id),
+            agent: agent.into(),
+            description: format!("{agent} task"),
+        };
+        send_to(&mut app, &events, child, vec![spawned.into()]);
+        children.push(child);
+    }
+    let names: Vec<String> = app.agent_rows().into_iter().map(|r| r.agent).collect();
+    assert_eq!(names, ["first", "second"]);
+    assert!(app.footer_hint().starts_with("ctrl+t for agents"));
+    for child in children {
+        send_to(
+            &mut app,
+            &events,
+            child,
+            vec![
+                kage_core::protocol::HostEvent::RunStarted.into(),
+                run_ended(kage_core::protocol::RunOutcome::Completed),
+            ],
+        );
+    }
+    assert_eq!(app.footer_hint(), "tab to queue \u{b7} esc to interrupt");
 }
 
 #[test]
@@ -5634,7 +5882,7 @@ fn the_palette_lists_mcp_prompts_with_their_hint_and_tag() {
         .completions()
         .items
         .iter()
-        .map(|c| (c.value.clone(), c.description.clone().unwrap_or_default()))
+        .map(|c| (c.label(), c.description.clone().unwrap_or_default()))
         .collect();
     assert_eq!(
         rows,
@@ -5644,8 +5892,8 @@ fn the_palette_lists_mcp_prompts_with_their_hint_and_tag() {
                 "A prompt without arguments  [mcp]".to_owned()
             ),
             (
-                "everything:complex_prompt".to_owned(),
-                "<temperature> [style]  A prompt with arguments  [mcp]".to_owned()
+                "everything:complex_prompt <temperature> [style]".to_owned(),
+                "A prompt with arguments  [mcp]".to_owned()
             ),
         ]
     );
@@ -5920,13 +6168,13 @@ fn the_palette_lists_mcp() {
         .map(|c| c.value.as_str())
         .collect();
     assert_eq!(values, ["mcp"]);
-    let description = palette.cmdline().completions().items[0]
-        .description
-        .clone()
-        .unwrap_or_default();
+    let item = &palette.cmdline().completions().items[0];
+    assert_eq!(item.label(), "mcp [restart|login]");
     assert!(
-        description.starts_with("[restart|login]  list MCP servers"),
-        "{description}"
+        item.description
+            .as_deref()
+            .is_some_and(|d| d.starts_with("list MCP servers")),
+        "{item:?}"
     );
 }
 

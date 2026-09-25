@@ -26,7 +26,10 @@ use crate::view::UnicodeWidthStr as _;
 use crate::view::truncate_to_width;
 
 /// Key hint painted on the picker's bottom row.
-const HELP_HINT: &str = "up/down select  enter confirm  type to filter  esc cancel";
+const HELP_HINT: &str = "up/down to select \u{b7} enter to confirm \u{b7} esc to cancel";
+
+/// Separator between the parts of [`HELP_HINT`].
+const HINT_SEP: &str = " \u{b7} ";
 
 /// Widest a picker may grow on a narrow terminal, where 80% of the
 /// width would cut long rows: a 100-column row less a one-cell margin
@@ -187,6 +190,10 @@ impl OverlayWidget for OverlayPicker {
         Self::render_help(buf, chunks[3]);
     }
 
+    fn footer_hint(&self) -> &'static str {
+        "enter to pick \u{b7} esc to close"
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> OverlayAction {
         if key.kind != KeyEventKind::Press {
             return OverlayAction::Stay;
@@ -230,6 +237,16 @@ impl OverlayWidget for OverlayPicker {
             },
             KeyCode::Backspace => {
                 self.search.pop();
+                self.selected = 0;
+                self.scroll_offset = 0;
+                OverlayAction::Stay
+            }
+            KeyCode::Char(c)
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                crate::picker::edit_search(&mut self.search, c);
                 self.selected = 0;
                 self.scroll_offset = 0;
                 OverlayAction::Stay
@@ -357,11 +374,11 @@ impl OverlayPicker {
     /// whole instead of cutting one.
     fn render_help(buf: &mut Buffer, area: Rect) {
         let mut hint = String::new();
-        for part in HELP_HINT.split("  ") {
+        for part in HELP_HINT.split(HINT_SEP) {
             let next = if hint.is_empty() {
                 part.to_owned()
             } else {
-                format!("{hint}  {part}")
+                format!("{hint}{HINT_SEP}{part}")
             };
             if next.width() > usize::from(area.width) {
                 break;
@@ -582,7 +599,7 @@ mod tests {
 
     #[test]
     fn measure_fits_the_title_and_key_hint() {
-        let title = "Resume session - this dir (Tab toggles all dirs)";
+        let title = "resume session \u{b7} this dir \u{b7} ctrl+a for all dirs";
         let p = OverlayPicker::new(title, vec![PickItem::simple("a")]);
         let m = p.measure(Rect::new(0, 0, 200, 40));
         assert!(usize::from(m.width) >= title.width() + 4);
@@ -604,9 +621,23 @@ mod tests {
             .map(|x| buf[(x, area.height - 2)].symbol())
             .collect();
         assert!(
-            hint_row.contains("type to filter") && !hint_row.contains("esc"),
+            hint_row.contains("enter to confirm") && !hint_row.contains("esc"),
             "{hint_row:?}"
         );
+    }
+
+    #[test]
+    fn ctrl_chords_edit_the_filter_instead_of_typing_letters() {
+        let mut p = pick(&["alpha", "beta"]);
+        for c in "be ta".chars() {
+            p.handle_key(key(KeyCode::Char(c)));
+        }
+        p.handle_key(ctrl('w'));
+        assert_eq!(p.search, "be ");
+        p.handle_key(ctrl('u'));
+        assert_eq!(p.search, "");
+        p.handle_key(ctrl('x'));
+        assert_eq!(p.search, "");
     }
 
     #[test]

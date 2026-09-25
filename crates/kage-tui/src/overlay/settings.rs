@@ -29,13 +29,13 @@ const LUA_MARK: &str = "set in init.lua";
 const DOC_ROWS: u16 = 3;
 
 /// Help line of a number row.
-const NUMBER_HINT: &str = "type or left/right to change  enter save  esc cancel";
+const NUMBER_HINT: &str = "type or left/right to change \u{b7} enter to save \u{b7} esc to cancel";
 
 /// Help line of a key row.
-const KEY_HINT: &str = "press a key to set it  enter save  esc cancel";
+const KEY_HINT: &str = "press a key to set it \u{b7} enter to save \u{b7} esc to cancel";
 
 /// Help line of every other row.
-const CYCLE_HINT: &str = "left/right to change  enter save  esc cancel";
+const CYCLE_HINT: &str = "left/right to change \u{b7} enter to save \u{b7} esc to cancel";
 
 #[derive(Debug)]
 struct Row {
@@ -352,6 +352,10 @@ impl OverlayWidget for SettingsOverlay {
         );
     }
 
+    fn footer_hint(&self) -> &'static str {
+        "enter to save \u{b7} esc to cancel"
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> OverlayAction {
         if key.kind != KeyEventKind::Press {
             return OverlayAction::Stay;
@@ -489,7 +493,7 @@ mod tests {
         assert!(modal.width <= 80 && modal.height <= 24, "{modal:?}");
         let rows = rendered(&mut s, 80, 24).join("\n");
         assert!(rows.contains("timeoutlen"), "{rows}");
-        assert!(rows.contains("enter save"), "{rows}");
+        assert!(rows.contains("enter to save"), "{rows}");
         assert!(rows.contains("Color theme"), "{rows}");
     }
 

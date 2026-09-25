@@ -14,12 +14,12 @@ kage.ui.set_slot("footer", {
 })
 
 local tips = {
-  "Tab queues a message while kage works. Enter steers the running turn.",
-  "Ctrl+F searches the conversation. Up and Down walk the matches.",
-  "Shift+Enter inserts a newline. Ctrl+G edits the prompt in $EDITOR.",
-  "Ctrl+O folds or unfolds the focused block. Alt+P and Alt+N move the focus.",
+  "Press tab to queue a message while kage works, or enter to steer the running turn.",
+  "Press ctrl+f to search the conversation, then up and down to walk the matches.",
+  "Press shift+enter for a newline, or ctrl+g to edit the prompt in $EDITOR.",
+  "Press ctrl+o to fold the focused block, and alt+p or alt+n to move the focus.",
   "Start a prompt with ! to run a shell command. Type @ to complete a file path.",
-  "Ctrl+V attaches an image from the clipboard.",
+  "Press ctrl+v to attach an image from the clipboard.",
   "/settings changes the theme, the editor style and more.",
 }
 local blank = { text = "" }

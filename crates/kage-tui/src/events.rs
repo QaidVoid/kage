@@ -86,7 +86,9 @@ pub fn apply_loop_event(buf: &mut Buffer, event: &LoopEvent) {
         } => {
             buf.push_custom(
                 "kage:compaction",
-                format!("Compacted history (kept {kept}, summarized {summarized})\n{summary}"),
+                format!(
+                    "Compacted history ({summarized} messages summarized, {kept} kept)\n{summary}"
+                ),
                 true,
             );
         }
@@ -885,7 +887,7 @@ mod tests {
         match &buf.blocks()[0] {
             Block::Custom { kind, text, .. } => {
                 assert_eq!(kind, "kage:compaction");
-                assert!(text.contains("kept 4"));
+                assert!(text.starts_with("Compacted history (12 messages summarized, 4 kept)"));
                 assert!(text.contains("everyone agrees"));
             }
             other => panic!("expected Custom, got {other:?}"),

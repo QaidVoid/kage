@@ -22,6 +22,20 @@ fn editor_command() -> Option<String> {
     None
 }
 
+/// Why the editor run failed and how to fix it, from the shell's exit
+/// `code`: 127 means the shell found no such command.
+fn editor_failure(editor: &str, code: Option<i32>) -> String {
+    match code {
+        Some(127) => {
+            format!("editor `{editor}` not found. Set $VISUAL or $EDITOR to an installed editor.")
+        }
+        Some(code) => {
+            format!("editor `{editor}` exited with status {code}. The prompt is unchanged.")
+        }
+        None => format!("editor `{editor}` was stopped by a signal. The prompt is unchanged."),
+    }
+}
+
 /// Normalize editor output before it lands in the prompt: strip one
 /// trailing newline (editors always append one) and any carriage
 /// returns a Windows-ish editor left behind.
@@ -98,7 +112,7 @@ impl super::App {
             return;
         };
         if !status.success() {
-            self.notify("editor exited abnormally; prompt unchanged");
+            self.notify(editor_failure(editor.trim(), status.code()));
             let _ = std::fs::remove_file(&path);
             return;
         }
@@ -132,6 +146,14 @@ mod tests {
         assert_eq!(normalize_edited_text("a\r\nb\r\n"), "a\nb");
         assert_eq!(normalize_edited_text(""), "");
         assert_eq!(normalize_edited_text("\n"), "");
+    }
+
+    #[test]
+    fn a_missing_editor_says_how_to_fix_it() {
+        let msg = editor_failure("nosuchedit", Some(127));
+        assert!(msg.contains("`nosuchedit` not found"), "{msg}");
+        assert!(msg.contains("$EDITOR"), "{msg}");
+        assert!(editor_failure("vi", Some(1)).contains("status 1"));
     }
 
     #[test]

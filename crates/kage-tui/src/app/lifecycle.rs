@@ -82,6 +82,12 @@ impl App {
                 last_spinner_idx = crate::view::spinner_frame_index();
                 needs_redraw = false;
             }
+            // A frame drawn inside the reparse throttle shows the stale
+            // render of the streaming block. Wake when the reparse is
+            // due so the new text paints within a frame of it.
+            let reparse_at = lock(&self.buffer)
+                .stream_reparse_at()
+                .filter(|at| *at > last_draw);
             // Timers and the spinner tick with no input or deltas, so a
             // run in flight wakes about once per spinner frame.
             // Computed once and reused for the redraw gate below;
@@ -130,6 +136,9 @@ impl App {
             if let Some((_, until)) = self.escalation {
                 deadline = deadline.min(until);
             }
+            if let Some(at) = reparse_at {
+                deadline = deadline.min(at);
+            }
             if let Some(event) = wait(input.events(), &mut engine, deadline, last_draw + FRAME) {
                 // Only events that can change the screen set the
                 // redraw flag. `Moved` mouse events (the terminal
@@ -177,9 +186,12 @@ impl App {
                     _ => {}
                 }
                 input.resume();
-            } else if self.buffer_version() != last_buffer_version {
-                // Another thread changed the buffer. Engine events
-                // wait for the drain at the top of the loop.
+            } else if self.buffer_version() != last_buffer_version
+                || reparse_at.is_some_and(|at| at <= Instant::now())
+            {
+                // Another thread changed the buffer, or a streaming
+                // reparse came due. Engine events wait for the drain
+                // at the top of the loop.
                 needs_redraw = true;
             }
             // Periodic-wake fallthrough: while the agent is mid-turn or

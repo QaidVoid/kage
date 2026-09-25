@@ -17,6 +17,17 @@ impl App {
         line: &str,
         registry: &[&CommandSpec],
     ) -> CommandResult {
+        self.run_command_line(line, registry, '/')
+    }
+
+    /// [`Self::run_command_validated`] for a line typed after `prefix`,
+    /// which a suggestion for an unknown command repeats.
+    pub(crate) fn run_command_line(
+        &mut self,
+        line: &str,
+        registry: &[&CommandSpec],
+        prefix: char,
+    ) -> CommandResult {
         let mut parts = line.splitn(2, char::is_whitespace);
         let head = parts.next().unwrap_or("");
         let rest = parts.next().unwrap_or("").trim();
@@ -78,7 +89,7 @@ impl App {
 
         let mut msg = format!("unknown command: {head}");
         if let Some(suggestion) = crate::cmdparse::suggest_command(registry, head) {
-            msg = format!("{msg} (did you mean /{suggestion}?)");
+            msg = format!("{msg} (did you mean {prefix}{suggestion}?)");
         }
         CommandResult::ValidationError(msg)
     }
@@ -314,7 +325,7 @@ impl App {
             "deny" => Some(Some(kage_core::permissions::PermissionAction::Deny)),
             other => {
                 self.push_error(format!(
-                    "permission: unknown mode `{other}` (allow|ask|deny|default)"
+                    "permission: unknown mode `{other}` (try allow, ask, deny or default)"
                 ));
                 return;
             }
@@ -329,8 +340,7 @@ impl App {
                 Some(kage_core::permissions::PermissionAction::Deny) => "deny".to_owned(),
                 _ => "default (configured rules)".to_owned(),
             };
-            let mut buf = lock(&self.buffer);
-            buf.push_custom("kage:help", format!("permission mode: {label}"), false);
+            self.push_info(format!("permission mode: {label}"));
             return;
         };
         let _ = self.send_request(RunRequest::SetPermissionMode(mode));
@@ -628,7 +638,7 @@ impl App {
     /// Render the live keymap per mode with the owner of each mapping,
     /// then the keys the editor grammar handles and the two hatches.
     pub(crate) fn push_keybindings(&mut self) {
-        use kage_core::keymap::{Mode as KeymapMode, display_keys};
+        use kage_core::keymap::Mode as KeymapMode;
         let mut lines = vec!["key mappings (last set wins):".to_owned()];
         {
             let keymap = lock(&self.keymap);
@@ -654,8 +664,8 @@ impl App {
                             Rhs::Lua(_) => "lua function".to_owned(),
                             Rhs::Nop => "<Nop>".to_owned(),
                         };
-                        let lhs = display_keys(e.lhs);
-                        format!("  {lhs:<12} {rhs:<32} {}", e.mapping.owner)
+                        let lhs = crate::keymap::key_labels(e.lhs);
+                        format!("  {lhs:<14} {rhs:<32} {}", e.mapping.owner)
                     })
                     .collect();
                 if rows.is_empty() {
@@ -673,10 +683,10 @@ impl App {
         );
         for row in [
             "vim motions, operators, counts, registers, r, undo, redo",
-            "readline edits and the kill ring (<C-a/e/w/u/k/y>, <C-/>, <M-b/f/d>, <M-BS>)",
-            "<CR> submit (steers a running turn), <S-CR> and <M-CR> newline, <Up> and <Down> history",
-            "modeless <Esc> clears the draft (<Up> restores it), else interrupts the turn",
-            "vim <Esc>, insert <C-o> (expand a paste or fold), <C-g> external editor",
+            "readline edits and the kill ring (ctrl+a/e/w/u/k/y, ctrl+/, alt+b/f/d, alt+backspace)",
+            "enter submits (steers a running turn), shift+enter and alt+enter insert a newline, up and down walk history",
+            "modeless esc clears the draft (up restores it), else interrupts the turn",
+            "vim esc, insert ctrl+o (expand a paste or fold), ctrl+g external editor",
             "modeless empty-prompt /, ! and ?, conversation pane i and a",
         ] {
             lines.push(format!("  {row}"));
@@ -685,9 +695,9 @@ impl App {
         lines.push(
             "hatches (above every layer; they yield only to init.lua or config.toml):".to_owned(),
         );
-        lines.push("  <C-q>        quit".to_owned());
+        lines.push("  ctrl+q         quit".to_owned());
         lines.push(
-            "  <C-c>        clear the draft, else interrupt the turn, else twice to quit"
+            "  ctrl+c         clear the draft, else interrupt the turn, else twice to quit"
                 .to_owned(),
         );
 

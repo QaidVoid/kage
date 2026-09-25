@@ -15,7 +15,7 @@ impl InputState {
             return;
         }
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
-        let lines = text.split('\n').count();
+        let lines = text.lines().count();
         let chars = text.chars().count();
         let size = if lines >= PASTE_COLLAPSE_LINES {
             format!("{lines} lines")

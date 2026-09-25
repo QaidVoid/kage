@@ -165,27 +165,34 @@ pub(crate) fn split_line_into_rows(line: Line<'static>, max: usize) -> Vec<Vec<S
     split_line_hanging(line, max, 0)
 }
 
-/// Columns a list item's continuation rows indent by: its leading
-/// spaces plus a `\u{2022} ` or `N. ` marker. Zero for other lines.
+/// Columns a list item's continuation rows indent by: any quote
+/// gutter, its leading spaces and a `\u{2022} ` or `N. ` marker. A
+/// quoted line without a marker hangs under its gutter. Zero for
+/// other lines.
 fn list_hang(line: &Line<'_>) -> usize {
     let text: String = line
         .spans
         .iter()
         .flat_map(|span| span.content.chars())
-        .take(16)
+        .take(24)
         .collect();
-    let body = text.trim_start_matches(' ');
-    let indent = text.len() - body.len();
+    let mut quoted = text.as_str();
+    while let Some(rest) = quoted.strip_prefix(crate::markdown::QUOTE_GUTTER) {
+        quoted = rest;
+    }
+    let gutter = text.len() - quoted.len();
+    let body = quoted.trim_start_matches(' ');
+    let indent = quoted.len() - body.len();
     let marker = if body.starts_with("\u{2022} ") {
         2
     } else {
         let digits = body.bytes().take_while(u8::is_ascii_digit).count();
         match body.get(digits..digits + 2) {
             Some(". ") if digits > 0 => digits + 2,
-            _ => return 0,
+            _ => return gutter,
         }
     };
-    indent + marker
+    gutter + indent + marker
 }
 
 /// [`split_line_into_rows`] with every row after the first indented

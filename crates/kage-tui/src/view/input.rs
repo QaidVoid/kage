@@ -19,7 +19,7 @@ const INPUT_PLACEHOLDER_INSERT: &str = "Ask kage anything";
 /// Placeholder of the empty draft in vim normal mode.
 const INPUT_PLACEHOLDER_NORMAL: &str = "Press i to type";
 /// Placeholder of the empty draft while shell-escape mode is armed.
-const INPUT_PLACEHOLDER_SHELL: &str = "Run a shell command (Backspace leaves shell mode)";
+const INPUT_PLACEHOLDER_SHELL: &str = "Run a shell command (backspace leaves shell mode)";
 
 /// The rule glyph of the input's top and bottom rules.
 const RULE: &str = "\u{2500}";
@@ -333,7 +333,7 @@ fn paint_pending(frame: &mut Frame, area: Rect, pending: &[PendingPrompt]) {
             let when = if p.queued {
                 "when this run ends"
             } else {
-                "after the current tools"
+                "after the current tool call"
             };
             pending_line(&p.text, when, width, muted)
         })

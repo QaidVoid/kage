@@ -543,6 +543,25 @@ fn streaming_reparse_forces_rebuild_after_window_expires() {
 }
 
 #[test]
+fn a_pending_stream_edit_reports_when_its_reparse_is_due() {
+    let mut buf = throttled_stream_fixture();
+    assert_eq!(buf.stream_reparse_at(), None);
+    let before = Instant::now();
+    buf.append_assistant_delta(" and more");
+    let due = buf.stream_reparse_at().expect("a reparse is pending");
+    assert!(due >= before + STREAM_REPARSE_THROTTLE);
+    assert!(due <= Instant::now() + STREAM_REPARSE_THROTTLE);
+    buf.append_assistant_delta(" still more");
+    assert_eq!(
+        buf.stream_reparse_at(),
+        Some(due),
+        "later deltas keep the deadline"
+    );
+    buf.set_cached_render_lines(0, 80, Arc::new(vec![Line::from("rebuilt")]));
+    assert_eq!(buf.stream_reparse_at(), None);
+}
+
+#[test]
 fn a_height_rebuild_after_the_window_drops_the_stale_lines() {
     let mut buf = throttled_stream_fixture();
     buf.append_assistant_delta(" and more");

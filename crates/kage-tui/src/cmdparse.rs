@@ -289,6 +289,9 @@ pub fn parse_input(spec: &CommandSpec, args: &str) -> Result<ParsedArgs, ParseEr
 pub struct Completion {
     /// Replacement text inserted when this completion is accepted.
     pub value: String,
+    /// Argument hint shown after a command or subcommand name, such
+    /// as `<name>` or `[on|off|toggle]`.
+    pub hint: Option<String>,
     /// Optional one-line description shown beside the value (used for
     /// command-name completions to display the command description).
     pub description: Option<String>,
@@ -309,6 +312,18 @@ pub struct Completions {
     /// Byte offset in the raw input at which a literal completion
     /// would begin. For all items this equals `replace_range.start`.
     pub anchor: usize,
+}
+
+impl Completion {
+    /// The value followed by its argument hint: the column a popup
+    /// lines the descriptions up after.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match &self.hint {
+            Some(hint) => format!("{} {hint}", self.value),
+            None => self.value.clone(),
+        }
+    }
 }
 
 impl Completions {
@@ -411,7 +426,8 @@ pub fn complete(
                 if name.starts_with(&prefix) {
                     items.push(Completion {
                         value: name.to_owned(),
-                        description: Some(described(spec)),
+                        hint: spec_hint(spec),
+                        description: Some(spec.description.to_owned()),
                         replace_range: replace_range.clone(),
                     });
                 }
@@ -461,7 +477,8 @@ pub fn complete(
                 }
                 items.push(Completion {
                     value: name.to_owned(),
-                    description: Some(described(sub)),
+                    hint: spec_hint(sub),
+                    description: Some(sub.description.to_owned()),
                     replace_range: replace_range.clone(),
                 });
             }
@@ -486,6 +503,7 @@ pub fn complete(
             }
             items.push(Completion {
                 value: c,
+                hint: None,
                 description: None,
                 replace_range: replace_range.clone(),
             });
@@ -495,15 +513,10 @@ pub fn complete(
     Completions { items, anchor }
 }
 
-/// The description a completion row shows for `spec`: its hint, then
-/// its description, which ends in any `[plugin]` or `[mcp]` tag.
-fn described(spec: &CommandSpec) -> String {
-    let hint = crate::command::spec_hint(spec);
-    if hint.is_empty() {
-        spec.description.to_owned()
-    } else {
-        format!("{hint}  {}", spec.description)
-    }
+/// The argument hint a completion row shows after `spec`'s name, if
+/// it takes any.
+fn spec_hint(spec: &CommandSpec) -> Option<String> {
+    Some(crate::command::spec_hint(spec)).filter(|hint| !hint.is_empty())
 }
 
 /// Find the closest command name to `input` from the registry using a

@@ -125,6 +125,14 @@ impl Buffer {
         self.stream_dirty_since.is_some()
     }
 
+    /// When the pending streaming edits are due to be re-parsed, so a
+    /// frame drawn from the stale render can be followed by one that
+    /// shows them. `None` with nothing pending.
+    pub(crate) fn stream_reparse_at(&self) -> Option<Instant> {
+        self.stream_dirty_since
+            .map(|since| since + STREAM_REPARSE_THROTTLE)
+    }
+
     /// Cached call/result block pairing and `Explored` grouping for
     /// the current block list, rebuilt here when the block count, the
     /// structural epoch or the fold generation changed since it was

@@ -229,9 +229,10 @@ impl SlashPalette {
             .iter()
             .skip(offset)
             .take(window)
-            .map(|c| c.value.width())
+            .map(|c| c.label().width())
             .max()
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .min(inner_width / 2);
 
         let mut lines: Vec<Line<'static>> = Vec::with_capacity(usize::from(area.height));
         lines.push(Line::from(Span::styled(
@@ -322,6 +323,10 @@ impl OverlayWidget for SlashPalette {
         self.paint_popup(area, buf);
     }
 
+    fn footer_hint(&self) -> &'static str {
+        "tab to complete \u{b7} enter to run \u{b7} esc to close"
+    }
+
     fn handle_key(&mut self, key: KeyEvent) -> OverlayAction {
         let resolver = SnapshotResolver { ctx: &self.ctx };
         match self.cmdline.handle_key(key, &self.registry, &resolver) {
@@ -401,12 +406,13 @@ fn render_row(
     desc_style: Style,
 ) -> Line<'static> {
     let leading = "  ";
-    let value_width = item.value.width();
+    let label = truncate_to_width(&item.label(), value_col_width.max(1), "\u{2026}");
+    let value_width = label.width();
     let pad = value_col_width.saturating_sub(value_width);
     let after_value = leading.width() + value_width + pad;
     let mut spans: Vec<Span<'static>> = Vec::with_capacity(4);
     spans.push(Span::styled(leading.to_owned(), value_style));
-    spans.push(Span::styled(item.value.clone(), value_style));
+    spans.push(Span::styled(label, value_style));
     if pad > 0 {
         spans.push(Span::styled(" ".repeat(pad), value_style));
     }
@@ -634,11 +640,13 @@ mod tests {
         let style = Style::default();
         let wide = Completion {
             value: "\u{4e2d}\u{6587}".to_owned(),
+            hint: None,
             description: Some("d".to_owned()),
             replace_range: 0..0,
         };
         let plain = Completion {
             value: "ab".to_owned(),
+            hint: None,
             description: Some("d".to_owned()),
             replace_range: 0..0,
         };

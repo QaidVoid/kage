@@ -99,14 +99,19 @@ impl App {
     ) -> Option<AppExit> {
         // Global escape hatches before any modal layer: ctrl+q quits,
         // ctrl+c escalates from every mode (insert, modeless, any open
-        // overlay). Both yield to a mapping from `init.lua` or
-        // `config.toml` on the chord, so `quit` and `:cancel` stay
-        // reachable through whatever the user mapped instead.
+        // overlay while a run is in flight). Idle, ctrl+c reaches an
+        // open overlay, which closes. Both yield to a mapping from
+        // `init.lua` or `config.toml` on the chord, so `quit` and
+        // `:cancel` stay reachable through whatever the user mapped
+        // instead.
         use ratatui::crossterm::event::{KeyCode, KeyModifiers};
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
                 KeyCode::Char('q') if !self.user_mapped(&key) => return Some(AppExit::Quit),
-                KeyCode::Char('c') if !self.user_mapped(&key) => {
+                KeyCode::Char('c')
+                    if !self.user_mapped(&key)
+                        && (self.is_run_in_flight() || !self.keyboard_modal_open()) =>
+                {
                     return self.escalate(Trigger::CtrlC);
                 }
                 _ => {}
@@ -408,7 +413,7 @@ impl App {
     /// `:` cmdline, so `quit`, plugin commands, everything works.
     fn run_mapped_command(&mut self, command: &str) -> Option<AppExit> {
         let registry = self.command_registry();
-        match self.run_command_validated(command, &registry) {
+        match self.run_command_line(command, &registry, ':') {
             CommandResult::Done(exit) => exit,
             CommandResult::ValidationError(msg) => {
                 self.push_error(format!("mapping `:{command}`: {msg}"));
@@ -506,12 +511,14 @@ impl App {
         value.find('{')
     }
 
-    /// Open the search line on the footer row, remembering the pattern
-    /// and the view that `Esc` restores.
+    /// Open an empty search line on the footer row, remembering the
+    /// pattern and the view that `Esc` restores. The old pattern stops
+    /// matching until the line does, so Up and Down only walk what the
+    /// line shows.
     pub(crate) fn begin_search(&mut self) {
         let buf = lock(&self.buffer);
         self.search_origin = Some(SearchOrigin {
-            pattern: self.search_pattern.clone(),
+            pattern: self.search_pattern.take(),
             focus: buf.focus(),
             scroll: buf.scroll(),
         });
@@ -588,7 +595,8 @@ impl App {
     }
 
     /// Jump focus to the next or previous block whose content matches
-    /// the active search pattern. No-op when no pattern is set.
+    /// the active search pattern, wrapping around at either end. No-op
+    /// when no pattern is set.
     pub(crate) fn jump_to_search_match(&mut self, forward: bool) {
         self.refresh_search_matches();
         if self.search_pattern.is_none() {
@@ -606,9 +614,11 @@ impl App {
             matches.partition_point(|&i| i < from)
         };
         let next = if forward {
-            matches.get(pos)
+            matches.get(pos).or_else(|| matches.first())
         } else {
-            pos.checked_sub(1).and_then(|p| matches.get(p))
+            pos.checked_sub(1)
+                .and_then(|p| matches.get(p))
+                .or_else(|| matches.last())
         };
         if let Some(&n) = next {
             buf.set_focus(Some(n));
@@ -638,7 +648,7 @@ impl App {
                 None
             }
             CommandLineEvent::Submit(text) => {
-                let result = self.run_command_validated(&text, &registry);
+                let result = self.run_command_line(&text, &registry, ':');
                 match result {
                     CommandResult::Done(exit) => {
                         self.cmdline = None;

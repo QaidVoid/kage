@@ -332,8 +332,8 @@ impl CommandLine {
     }
 
     /// Take the highlighted row and submit the line. A bare command
-    /// whose first argument is required is not run: it gets a trailing
-    /// space and waits for that argument.
+    /// whose first argument is required is not run: it names the
+    /// missing argument and gets a trailing space for it.
     fn submit(&mut self, registry: &[&CommandSpec], resolver: &dyn Resolver) -> CommandLineEvent {
         if let Some(value) = self
             .selected
@@ -346,10 +346,11 @@ impl CommandLine {
         if trimmed.is_empty() {
             return CommandLineEvent::Cancelled;
         }
-        if needs_argument(registry, &trimmed) {
+        if let Some(name) = missing_argument(registry, &trimmed) {
             self.text = format!("{trimmed} ");
             self.cursor = self.text.len();
             self.refresh(registry, resolver);
+            self.error = Some(crate::cmdparse::ParseError::MissingArg(name).to_string());
             return CommandLineEvent::Pending;
         }
         CommandLineEvent::Submit(trimmed)
@@ -509,24 +510,21 @@ impl CommandLine {
     }
 }
 
-/// Whether `text` is only a command name, followed by any of its
-/// subcommand names, whose first argument is required.
-fn needs_argument(registry: &[&CommandSpec], text: &str) -> bool {
+/// The name of the required first argument `text` leaves out, when
+/// `text` is only a command name followed by any of its subcommand
+/// names.
+fn missing_argument(registry: &[&CommandSpec], text: &str) -> Option<&'static str> {
     let mut words = text.split_whitespace();
-    let Some(mut spec) = words
+    let mut spec: &CommandSpec = words
         .next()
-        .and_then(|head| registry.iter().find(|s| s.names().any(|n| n == head)))
-        .map(|s| &**s)
-    else {
-        return false;
-    };
+        .and_then(|head| registry.iter().find(|s| s.names().any(|n| n == head)))?;
     for word in words {
-        match spec.subcommand(word) {
-            Some(sub) => spec = sub,
-            None => return false,
-        }
+        spec = spec.subcommand(word)?;
     }
-    spec.args.first().is_some_and(|arg| !arg.optional())
+    spec.args
+        .first()
+        .filter(|arg| !arg.optional())
+        .map(crate::command::ArgSpec::name)
 }
 
 fn longest_common_prefix<'a, I: IntoIterator<Item = &'a str>>(values: I) -> String {

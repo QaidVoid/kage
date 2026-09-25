@@ -508,7 +508,8 @@ const OAUTH_EXPIRY_WARNING: Duration = Duration::days(3);
 
 /// Notices for the start screen: the version-updated line, a configured
 /// default model that does not resolve, OAuth credentials close to
-/// expiry, and auth failures recorded on earlier runs. `model` is the
+/// expiry, auth failures recorded on earlier runs, and the project
+/// settings ignored because the project is not trusted. `model` is the
 /// model kage picked on its own, `None` when `--model` chose it, which
 /// skips the default-model notice. Records the running version as
 /// seen.
@@ -539,7 +540,30 @@ pub(crate) fn start_notices(
             .into_iter()
             .map(|text| (NoticeLevel::Warning, text)),
     );
+    let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if let Some(summary) = kage_core::trust::untrusted_project(&workdir) {
+        notices.push((NoticeLevel::Warning, untrusted_notice(&summary)));
+    }
     notices
+}
+
+/// Notice naming the project settings and agents this run ignores
+/// because the project is not trusted, and how to allow them.
+fn untrusted_notice(summary: &kage_core::trust::TrustSummary) -> String {
+    let mut ignored: Vec<String> = summary
+        .keys
+        .iter()
+        .filter(|key| **key != "agents")
+        .map(|key| (*key).to_owned())
+        .collect();
+    if !summary.agents.is_empty() {
+        ignored.push(format!("agents ({})", summary.agents.join(", ")));
+    }
+    format!(
+        "project settings ignored because the project is not trusted: {}. \
+         Run `kage trust` here and restart to use them.",
+        ignored.join(", ")
+    )
 }
 
 /// Notice for a `configured` default model that does not resolve,
@@ -727,6 +751,21 @@ mod tests {
                 ("agent: map exports".to_owned(), Some(main.to_string())),
                 ("main work".to_owned(), None),
             ]
+        );
+    }
+
+    #[test]
+    fn untrusted_notice_names_what_is_ignored_and_the_fix() {
+        let summary = kage_core::trust::TrustSummary {
+            path: PathBuf::from("/p/.kage"),
+            keys: vec!["mcp", "permissions", "agents"],
+            items: Vec::new(),
+            agents: vec!["reviewer".to_owned()],
+        };
+        assert_eq!(
+            untrusted_notice(&summary),
+            "project settings ignored because the project is not trusted: mcp, permissions, \
+             agents (reviewer). Run `kage trust` here and restart to use them."
         );
     }
 

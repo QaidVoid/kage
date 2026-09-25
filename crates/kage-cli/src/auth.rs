@@ -563,11 +563,15 @@ fn select_provider(
             } else {
                 '-'
             };
-            let label = match kage_provider::catalog::provider(p) {
-                Some(info) => format!("{} ({}, {} models)", info.name, p, info.models.len()),
-                // `zai-coding` and any future kage-only ids without a
-                // models.dev entry just render their id.
-                None => (*p).to_owned(),
+            let compat = kage_provider::compat::COMPAT_PROVIDERS
+                .iter()
+                .find(|c| c.id == *p);
+            let label = match (kage_provider::catalog::provider(p), compat) {
+                (Some(info), _) => format!("{} ({}, {} models)", info.name, p, info.models.len()),
+                // Providers the bundled catalog does not list have no
+                // model count to show.
+                (None, Some(c)) => format!("{} ({p})", c.display_name),
+                (None, None) => (*p).to_owned(),
             };
             kage_tui::PickItem::simple(*p)
                 .with_label(label)
@@ -888,5 +892,16 @@ mod tests {
             assert_ne!(line.as_bytes()[column], b' ', "{line}");
         }
         assert!(out.contains("a-very-long-custom-provider  ready   no key needed"));
+    }
+
+    #[test]
+    fn the_no_credentials_message_names_every_provider_env_var() {
+        for id in KNOWN_PROVIDERS {
+            let env = env_var_for(id);
+            assert!(
+                crate::NO_CREDENTIALS_MESSAGE.contains(env),
+                "{id}: {env} missing"
+            );
+        }
     }
 }

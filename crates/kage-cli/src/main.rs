@@ -1150,8 +1150,10 @@ const DEFAULT_MODEL_PRIORITY: &[&str] = &[
 /// Printed when no provider other than `acp` is registered and the
 /// requested model does not resolve.
 pub(crate) const NO_CREDENTIALS_MESSAGE: &str = "kage: no provider credentials found. \
-    Run `kage auth login` to save one, or export an env var (ANTHROPIC_API_KEY, \
-    OPENAI_API_KEY, GEMINI_API_KEY, ZAI_API_KEY, ZAI_CODING_API_KEY).";
+    Run `kage auth login` to save one, or export one of ANTHROPIC_API_KEY, \
+    OPENAI_API_KEY, GEMINI_API_KEY, ZAI_API_KEY, ZAI_CODING_API_KEY, DEEPSEEK_API_KEY, \
+    GROQ_API_KEY, MISTRAL_API_KEY, CEREBRAS_API_KEY, XAI_API_KEY, OPENROUTER_API_KEY, \
+    FIREWORKS_API_KEY, MOONSHOT_API_KEY, KIMI_API_KEY or XIAOMI_API_KEY.";
 
 /// Printed when no model was requested and none could be picked.
 pub(crate) const NO_MODEL_MESSAGE: &str =

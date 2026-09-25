@@ -1006,8 +1006,7 @@ fn large_paste_collapses_to_placeholder() {
     let blob = "row\n".repeat(12);
     state.paste(&blob);
     assert_eq!(state.collapsed_paste_count(), 1);
-    assert!(state.text().starts_with("[paste #1: "));
-    assert!(state.text().ends_with(" lines]"));
+    assert_eq!(state.text(), "[paste #1: 12 lines]");
     assert!(!state.text().contains("row"));
 }
 
@@ -1019,7 +1018,7 @@ fn a_cr_paste_keeps_its_lines() {
     let blob = "row\r".repeat(12);
     state.paste(&blob);
     assert!(
-        state.text().ends_with("[paste #1: 13 lines]"),
+        state.text().ends_with("[paste #1: 12 lines]"),
         "{}",
         state.text()
     );

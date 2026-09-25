@@ -17,9 +17,16 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget, Wrap};
 
 use crate::keymap::HelpGroup;
 use crate::overlay::widget::{OverlayAction, OverlayCtx, OverlayWidget};
+use crate::view::UnicodeWidthStr as _;
 
 /// Title of the static section listing the editor grammar keys.
 pub const BUILTIN_SECTION: &str = "editing (built in)";
+
+/// Widest the key column grows before long keys push their text.
+const KEY_COLUMN_MAX: usize = 24;
+
+/// Scroll hint painted over the bottom border while rows are hidden.
+const MORE_HINT: &str = " more: up/down ";
 
 /// One rendered row of the reference: a group header or a key/desc
 /// pair.
@@ -35,28 +42,28 @@ enum Row {
 /// clearing the draft or interrupting the turn and `/`, `!`, `?` as
 /// empty-prompt prefixes.
 const MODELESS_BUILTIN: &[(&str, &str)] = &[
-    ("Enter", "send the prompt, or steer the running turn"),
-    ("Shift+Enter", "insert a newline (Alt+Enter also works)"),
-    ("Up / Down", "previous / next prompt from history"),
-    ("Ctrl+A / Ctrl+E", "line start / end"),
-    ("Ctrl+K / Ctrl+U", "kill to end / start of line"),
-    ("Ctrl+W / Alt+BS", "kill previous word"),
-    ("Ctrl+Y", "yank last kill"),
-    ("Ctrl+/", "undo last edit"),
+    ("enter", "send the prompt, or steer the running turn"),
+    ("shift+enter", "insert a newline (alt+enter also works)"),
+    ("up / down", "previous / next prompt from history"),
+    ("ctrl+a / ctrl+e", "line start / end"),
+    ("ctrl+k / ctrl+u", "kill to end / start of line"),
+    ("ctrl+w / alt+backspace", "kill previous word"),
+    ("ctrl+y", "yank last kill"),
+    ("ctrl+/", "undo last edit"),
     (
-        "Ctrl+O",
+        "ctrl+o",
         "expand a collapsed paste, or fold the focused block",
     ),
-    ("Ctrl+G", "edit the prompt in $VISUAL or $EDITOR"),
+    ("ctrl+g", "edit the prompt in $VISUAL or $EDITOR"),
     ("/ (empty prompt)", "command palette"),
     ("! (empty prompt)", "run a shell command"),
     ("? (empty prompt)", "this reference"),
-    ("Esc", "clear the draft (Up restores it), else interrupt"),
+    ("esc", "clear the draft (up restores it), else interrupt"),
     (
-        "Ctrl+C",
+        "ctrl+c",
         "clear the draft, else interrupt, else twice to quit",
     ),
-    ("Ctrl+Q", "quit kage (cancels a running turn)"),
+    ("ctrl+q", "quit kage (cancels a running turn)"),
 ];
 
 /// Grammar keys of the vim-style modal editor.
@@ -65,7 +72,7 @@ const VIM_BUILTIN: &[(&str, &str)] = &[
         "i / a / I / A",
         "insert mode (from the conversation: focus input)",
     ),
-    ("Esc", "normal mode, clear the selection"),
+    ("esc", "normal mode, clear the selection"),
     ("h j k l w b e", "move in the prompt (normal mode)"),
     ("0 $ ^ gg G", "line start / end, prompt start / end"),
     (
@@ -73,32 +80,32 @@ const VIM_BUILTIN: &[(&str, &str)] = &[
         "operators, doubled for lines (dd), counts (3dw)",
     ),
     ("x X r D C o O", "single-character and line edits"),
-    ("p P u Ctrl+R", "paste, undo, redo"),
+    ("p P u ctrl+r", "paste, undo, redo"),
     ("v", "visual select in the prompt"),
-    ("Enter", "send the prompt, or steer the running turn"),
-    ("Shift+Enter", "insert a newline (Alt+Enter also works)"),
-    ("Up / Down", "prompt history (insert mode)"),
-    ("Ctrl+A / Ctrl+E", "line start / end (insert mode)"),
+    ("enter", "send the prompt, or steer the running turn"),
+    ("shift+enter", "insert a newline (alt+enter also works)"),
+    ("up / down", "prompt history (insert mode)"),
+    ("ctrl+a / ctrl+e", "line start / end (insert mode)"),
     (
-        "Ctrl+K / Ctrl+U",
+        "ctrl+k / ctrl+u",
         "kill to end / start of line (insert mode)",
     ),
     (
-        "Ctrl+W / Ctrl+Y",
+        "ctrl+w / ctrl+y",
         "kill previous word / yank it back (insert mode)",
     ),
     (
-        "Ctrl+O (insert)",
+        "ctrl+o (insert)",
         "expand a collapsed paste, or fold the focused block",
     ),
-    ("Ctrl+G", "edit the prompt in $VISUAL or $EDITOR"),
+    ("ctrl+g", "edit the prompt in $VISUAL or $EDITOR"),
     ("/ (empty prompt)", "command palette (insert mode)"),
     ("! (empty prompt)", "run a shell command (insert mode)"),
     (
-        "Ctrl+C",
+        "ctrl+c",
         "clear the draft, else interrupt, else twice to quit",
     ),
-    ("Ctrl+Q", "quit kage"),
+    ("ctrl+q", "quit kage"),
 ];
 
 /// The `?` keyboard reference modal.
@@ -204,6 +211,16 @@ impl OverlayWidget for HelpOverlay {
             .fg(theme.focus_color)
             .add_modifier(Modifier::BOLD);
         let muted_style = Style::default().fg(theme.muted_fg);
+        let key_width = self
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Key(keys, _) => Some(keys.width()),
+                Row::Header(_) => None,
+            })
+            .max()
+            .unwrap_or(0)
+            .min(KEY_COLUMN_MAX);
 
         let lines: Vec<Line> = self
             .rows
@@ -211,7 +228,7 @@ impl OverlayWidget for HelpOverlay {
             .map(|row| match row {
                 Row::Header(title) => Line::from(Span::styled(title.clone(), header_style)),
                 Row::Key(keys, desc) => Line::from(vec![
-                    Span::styled(format!("  {keys:<18}"), key_style),
+                    Span::styled(format!("  {keys:<key_width$}  "), key_style),
                     Span::styled(desc.clone(), desc_style),
                 ]),
             })
@@ -226,17 +243,20 @@ impl OverlayWidget for HelpOverlay {
         // border row, so the affordance is visible without a footer.
         let more_below = self.scroll + usize::from(inner.height) < self.rows.len();
         if more_below && area.width > 12 {
-            let hint_width =
-                u16::try_from(crate::view::UnicodeWidthStr::width(" more: j/k ")).unwrap_or(11);
+            let hint_width = u16::try_from(MORE_HINT.width()).unwrap_or(u16::MAX);
             let x = area.x + area.width.saturating_sub(hint_width + 1);
             let y = area.y + area.height.saturating_sub(1);
             let hint_area = Rect::new(x, y, hint_width, 1);
             Widget::render(
-                Paragraph::new(Line::from(Span::styled(" more: j/k ", muted_style))),
+                Paragraph::new(Line::from(Span::styled(MORE_HINT, muted_style))),
                 hint_area,
                 buf,
             );
         }
+    }
+
+    fn footer_hint(&self) -> &'static str {
+        "up/down to scroll \u{b7} esc to close"
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> OverlayAction {
@@ -361,14 +381,14 @@ mod tests {
         let groups = [HelpGroup {
             name: "general".to_owned(),
             rows: vec![HelpRow {
-                lhs: "<C-p>".to_owned(),
+                lhs: "ctrl+p".to_owned(),
                 desc: "model picker".to_owned(),
             }],
         }];
         let h = HelpOverlay::new(&groups, true);
         assert!(matches!(&h.rows[0], Row::Header(name) if name == "general"));
         assert!(
-            matches!(&h.rows[1], Row::Key(keys, desc) if keys == "<C-p>" && desc == "model picker")
+            matches!(&h.rows[1], Row::Key(keys, desc) if keys == "ctrl+p" && desc == "model picker")
         );
         assert!(matches!(&h.rows[2], Row::Header(name) if name == BUILTIN_SECTION));
         assert_eq!(h.rows.len(), 3 + MODELESS_BUILTIN.len());
@@ -378,7 +398,7 @@ mod tests {
     fn builtin_sections_cover_each_style() {
         let modeless = HelpOverlay::new(&[], true);
         let labels = key_labels(&modeless.rows);
-        for wanted in ["Shift+Enter", "! (empty prompt)", "Ctrl+G", "Ctrl+Q"] {
+        for wanted in ["shift+enter", "! (empty prompt)", "ctrl+g", "ctrl+q"] {
             assert!(labels.contains(&wanted), "missing {wanted}");
         }
         assert!(!labels.iter().any(|l| l.contains("gg")));
@@ -396,12 +416,12 @@ mod tests {
                     _ => None,
                 })
             };
-            assert!(desc("Ctrl+C").unwrap().contains("twice to quit"));
-            assert!(desc("Enter").unwrap().contains("steer"));
+            assert!(desc("ctrl+c").unwrap().contains("twice to quit"));
+            assert!(desc("enter").unwrap().contains("steer"));
         }
         let modeless = HelpOverlay::new(&[], true).rows;
         assert!(modeless.iter().any(
-            |row| matches!(row, Row::Key(keys, desc) if keys == "Esc" && desc.contains("clear the draft"))
+            |row| matches!(row, Row::Key(keys, desc) if keys == "esc" && desc.contains("clear the draft"))
         ));
     }
 
@@ -413,6 +433,17 @@ mod tests {
             labels.sort_unstable();
             labels.dedup();
             assert_eq!(labels.len(), count, "duplicate key label in {rows:?}");
+        }
+    }
+
+    #[test]
+    fn builtin_rows_use_the_footer_key_notation() {
+        for (keys, desc) in MODELESS_BUILTIN.iter().chain(VIM_BUILTIN) {
+            for text in [keys, desc] {
+                for capitalized in ["Ctrl", "Shift", "Alt", "Esc", "Enter", "Up", "BS", "<"] {
+                    assert!(!text.contains(capitalized), "{text:?} has {capitalized:?}");
+                }
+            }
         }
     }
 }

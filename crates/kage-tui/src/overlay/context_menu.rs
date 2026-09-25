@@ -121,6 +121,7 @@ impl ContextMenu {
                 ContextMenuOutcome::Activated(self.items[self.selected].action)
             }
             KeyCode::Esc => ContextMenuOutcome::Dismissed,
+            KeyCode::Char('c') if ctrl => ContextMenuOutcome::Dismissed,
             _ => ContextMenuOutcome::Navigated,
         }
     }

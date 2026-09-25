@@ -246,11 +246,15 @@ impl OverlayWidget for SessionTreeOverlay {
             rows[1].x,
             rows[1].y,
             &Line::from(Span::styled(
-                "Up/Down move - Enter resume - f fork - d delete - Esc close",
+                "up/down to move \u{b7} enter to resume \u{b7} f to fork \u{b7} d to delete \u{b7} esc to close",
                 Style::default().fg(ctx.theme.status_dim_fg),
             )),
             rows[1].width,
         );
+    }
+
+    fn footer_hint(&self) -> &'static str {
+        "enter to resume \u{b7} f to fork \u{b7} esc to close"
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> OverlayAction {

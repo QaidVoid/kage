@@ -1,7 +1,7 @@
 //! Custom widget for `kage:compaction` blocks.
 //!
 //! Compaction events from the agent loop arrive as a custom block whose
-//! payload is `"Compacted history (kept N, summarized M)\n<body>"`; a
+//! payload is `"Compacted history (M messages summarized, N kept)\n<body>"`; a
 //! replayed session carries only the framed body. The widget shows one
 //! `Compacted history` line and, when unfolded, the summary rendered
 //! through the markdown renderer assistant text uses.
@@ -131,16 +131,17 @@ mod tests {
 
     #[test]
     fn folded_compaction_is_one_header_line() {
-        let text = "Compacted history (kept 3, summarized 7)\n<summary>\nbody\n</summary>";
+        let text = "Compacted history (7 messages summarized, 3 kept)\n<summary>\nbody\n</summary>";
         assert_eq!(
             rows(text, true),
-            ["Compacted history (kept 3, summarized 7)"]
+            ["Compacted history (7 messages summarized, 3 kept)"]
         );
     }
 
     #[test]
     fn unfolded_compaction_shows_the_summary_without_framing() {
-        let text = "Compacted history (kept 1, summarized 2)\n<summary>\nthe summary\n</summary>";
+        let text =
+            "Compacted history (2 messages summarized, 1 kept)\n<summary>\nthe summary\n</summary>";
         let rows = rows(text, false);
         assert!(rows.iter().any(|r| r == "the summary"), "{rows:?}");
         assert!(rows.iter().all(|r| !r.contains("<summary>")), "{rows:?}");

@@ -189,7 +189,7 @@ impl OverlayWidget for EditorOverlay {
 
         Widget::render(
             Paragraph::new(Line::from(Span::styled(
-                "ctrl-s save  esc cancel",
+                "ctrl+s to save \u{b7} esc to cancel",
                 Style::default()
                     .fg(t.muted_fg)
                     .add_modifier(Modifier::ITALIC),
@@ -197,6 +197,10 @@ impl OverlayWidget for EditorOverlay {
             chunks[1],
             buf,
         );
+    }
+
+    fn footer_hint(&self) -> &'static str {
+        "ctrl+s to save \u{b7} esc to cancel"
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> OverlayAction {
@@ -413,7 +417,7 @@ mod tests {
         let mut e = EditorOverlay::new("Compose");
         let lines = snapshot(&mut e, Rect::new(0, 0, 80, 24));
         assert!(lines.iter().any(|l| l.contains("Compose")));
-        assert!(lines.iter().any(|l| l.contains("ctrl-s save")));
+        assert!(lines.iter().any(|l| l.contains("ctrl+s to save")));
     }
 
     #[test]

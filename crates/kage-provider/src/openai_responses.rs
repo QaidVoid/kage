@@ -126,8 +126,8 @@ impl Provider for OpenAiResponsesProvider {
         let body = build_request_body(&req, true);
         let url = format!("{}/responses", self.base_url);
         let headers = self.request_headers();
-        let response = crate::http::send(&self.client, cancel, move |agent| {
-            let mut request = agent.post(&url);
+        let response = crate::http::send(&self.client, cancel, url, move |agent, url| {
+            let mut request = agent.post(url);
             for (name, value) in &headers {
                 request = request.header(name.as_str(), value.as_str());
             }

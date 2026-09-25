@@ -813,25 +813,32 @@ pub(crate) fn run_list() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// Print one row per session: short id, local creation time, model and
+/// the title, or the last prompt for a session without one.
 pub(crate) fn print_session_table<W: Write>(out: &mut W, summaries: &[SessionSummary]) {
     let id_h = "ID";
     let created_h = "CREATED";
     let model_h = "MODEL";
-    let prompt_h = "PROMPT";
-    let _ = writeln!(
-        out,
-        "{id_h:<10}  {created_h:<19}  {model_h:<32}  {prompt_h}"
-    );
+    let title_h = "TITLE";
+    let _ = writeln!(out, "{id_h:<10}  {created_h:<16}  {model_h:<32}  {title_h}");
     for s in summaries {
         let id = s.id.to_string();
         let id_short: String = id.chars().take(10).collect();
-        let created = s.created_at.format("%Y-%m-%d %H:%M:%S").to_string();
+        let created = s
+            .created_at
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M")
+            .to_string();
         let model = &s.model;
-        let prompt = match &s.last_user_prompt {
-            Some(text) => truncate_one_line(text, 60),
-            None => "(no user prompt)".to_owned(),
-        };
-        let _ = writeln!(out, "{id_short:<10}  {created:<19}  {model:<32}  {prompt}");
+        let title = s
+            .title
+            .as_deref()
+            .or(s.last_user_prompt.as_deref())
+            .map_or_else(
+                || "(untitled session)".to_owned(),
+                |text| truncate_one_line(text, 60),
+            );
+        let _ = writeln!(out, "{id_short:<10}  {created:<16}  {model:<32}  {title}");
     }
 }
 
@@ -1237,6 +1244,46 @@ fn config_sets_default_model(path: &std::path::Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn summary(title: Option<&str>, prompt: Option<&str>) -> SessionSummary {
+        let created_at = Utc::now();
+        SessionSummary {
+            id: SessionId::new(),
+            path: PathBuf::from("/s.jsonl"),
+            created_at,
+            updated_at: created_at,
+            cwd: PathBuf::from("/p"),
+            model: "mock:m".to_owned(),
+            parent_session: None,
+            last_user_prompt: prompt.map(str::to_owned),
+            title: title.map(str::to_owned),
+            entry_count: 1,
+            agent: None,
+        }
+    }
+
+    #[test]
+    fn session_table_shows_local_time_and_prefers_the_title() {
+        let rows = [
+            summary(Some("Fix the parser"), Some("last prompt")),
+            summary(None, Some("only a prompt\nsecond line")),
+            summary(None, None),
+        ];
+        let mut out = Vec::new();
+        print_session_table(&mut out, &rows);
+        let text = String::from_utf8(out).expect("utf-8");
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines[0].ends_with("TITLE"), "{text}");
+        let local = rows[0]
+            .created_at
+            .with_timezone(&chrono::Local)
+            .format("%Y-%m-%d %H:%M")
+            .to_string();
+        assert!(lines[1].contains(&local), "{text}");
+        assert!(lines[1].ends_with("Fix the parser"), "{text}");
+        assert!(lines[2].ends_with("only a prompt"), "{text}");
+        assert!(lines[3].ends_with("(untitled session)"), "{text}");
+    }
 
     #[test]
     fn plugin_dir_override_absolute_asis() {

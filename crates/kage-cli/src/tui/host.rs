@@ -13,6 +13,7 @@ use kage_core::protocol::{
     Command, CommandKind, Delivery, Envelope, Event, HostEvent, NoticeLevel, RunOutcome,
     SessionState,
 };
+use kage_provider::ProviderError;
 
 use crate::engine::{AUTO_THINKING, Commander};
 
@@ -289,7 +290,7 @@ impl Host {
 
     fn switch_model(&self, model: &str) {
         if let Err(err) = self.registry.resolve(model) {
-            self.error(format!("cannot switch to {model}: {err}"));
+            self.error(switch_error(model, &err));
             return;
         }
         let prev = lock(&self.mirror).state.model.clone();
@@ -471,6 +472,17 @@ impl Host {
     }
 }
 
+/// Why switching to `model` failed, with the next step for an unknown
+/// model.
+fn switch_error(model: &str, err: &ProviderError) -> String {
+    match err {
+        ProviderError::UnknownModel(_) => {
+            format!("unknown model {model}. Press ctrl+p to pick one, or check the provider id.")
+        }
+        other => format!("cannot switch to {model}: {other}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use kage_core::SessionId;
@@ -506,5 +518,13 @@ mod tests {
         apply(&envelope(child, 1, spawned));
         apply(&envelope(child, 2, state("agent:m")));
         assert_eq!(lock(&shared).state.model, "main:m");
+    }
+
+    #[test]
+    fn unknown_model_error_names_the_model_once_and_the_fix() {
+        let err = ProviderError::UnknownModel("bogus:thing".into());
+        let text = switch_error("bogus:thing", &err);
+        assert_eq!(text.matches("bogus:thing").count(), 1, "{text}");
+        assert!(text.contains("ctrl+p"), "{text}");
     }
 }

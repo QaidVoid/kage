@@ -21,6 +21,17 @@ fn find_last_entry(path: &std::path::Path) -> Result<Option<EntryId>, kage_sessi
     Ok(last)
 }
 
+/// The latest title recorded in the session at `path`, if any.
+fn stored_title(path: &Path) -> Option<String> {
+    SessionReader::iter(path)
+        .ok()?
+        .filter_map(|item| match item {
+            Ok(kage_session::SessionEntry::Title(title)) => Some(title.title),
+            _ => None,
+        })
+        .last()
+}
+
 /// Copy `src` up through entry `at` (an id prefix, or the latest entry)
 /// into a new session file next to it. Returns the new path and id.
 pub(super) fn fork_session(src: &Path, at: Option<&str>) -> Result<(PathBuf, SessionId), String> {
@@ -221,13 +232,13 @@ impl super::Dispatcher {
         let mut cx = idle.cx.clone();
         cx.history.clear();
         cx.budget = kage_loop::TokenBudget::default();
-        let recorder = super::Recorder::planned(path.clone(), header, session.plugins.clone());
+        let recorder = super::Recorder::planned(path, header, session.plugins.clone());
         self.reseat(
             id,
             new_id,
             cx,
             recorder,
-            path,
+            None,
             format!("new session: {}", short_id(new_id)),
         );
     }
@@ -287,7 +298,7 @@ impl super::Dispatcher {
             session.state.model
         );
         let recorder = super::Recorder::new(writer, session.plugins.clone());
-        self.reseat(id, new_id, cx, recorder, path.to_path_buf(), message);
+        self.reseat(id, new_id, cx, recorder, replay.title, message);
         if let Some(note) = fallback {
             self.info(new_id, note);
         }
@@ -321,12 +332,13 @@ impl super::Dispatcher {
         };
         let cx = idle.cx.clone();
         let recorder = super::Recorder::new(writer, session.plugins.clone());
+        let title = stored_title(&dst);
         self.reseat(
             id,
             new_id,
             cx,
             recorder,
-            dst,
+            title,
             format!("cloned session: {}", short_id(new_id)),
         );
     }
@@ -389,19 +401,21 @@ impl super::Dispatcher {
         }
     }
 
-    /// Replace session `old` with a session `new` recorded at `path`,
-    /// keeping its tools, plugins, MCP servers and settings but not its
-    /// permission mode or approvals, drop the agents of `old`, and tell
-    /// clients, including the MCP catalog for `new`.
+    /// Replace session `old` with a session `new` recorded by
+    /// `recorder` under `title`, keeping its tools, plugins, MCP servers and
+    /// settings but not its permission mode or approvals, drop the
+    /// agents of `old`, and tell clients, including the MCP catalog for
+    /// `new`.
     fn reseat(
         &mut self,
         old: SessionId,
         new: SessionId,
         cx: kage_loop::AgentContext,
         recorder: super::Recorder,
-        path: PathBuf,
+        title: Option<String>,
         message: String,
     ) {
+        let path = recorder.path().to_path_buf();
         let mut session = self.sessions.remove(&old).expect("session checked");
         let messages = cx.history.clone();
         session.usage = super::usage_of(&cx);
@@ -443,7 +457,7 @@ impl super::Dispatcher {
             new,
             HostEvent::SessionChanged {
                 path,
-                title: None,
+                title,
                 messages,
             },
         );

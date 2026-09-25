@@ -103,11 +103,11 @@ impl HttpClient {
     /// Map a transport-time [`ureq::Error`] onto a [`ProviderError`],
     /// first recycling the pool when the failure implicates a dead or
     /// stale connection so the next attempt dials fresh.
-    fn on_transport_error(&self, err: ureq::Error) -> ProviderError {
+    fn on_transport_error(&self, err: ureq::Error, url: &str) -> ProviderError {
         if is_stale_connection_error(&err) {
             self.recycle();
         }
-        map_ureq_error(err)
+        map_ureq_error(err, url)
     }
 }
 
@@ -139,24 +139,26 @@ fn is_stale_connection_error(err: &ureq::Error) -> bool {
 /// response and a watch on `cancel` together so a slow provider does not
 /// delay cancellation (see [`crate::cancelable::cancellable_call`]).
 ///
-/// `build` receives a pooled agent snapshot and issues the POST; on a
-/// stale-connection failure the client's pool is recycled before the
-/// error is returned, so the *next* call dials a fresh connection
-/// rather than reusing the wedged socket.
+/// `build` receives a pooled agent snapshot and `url`, and issues the
+/// POST; on a stale-connection failure the client's pool is recycled
+/// before the error is returned, so the *next* call dials a fresh
+/// connection rather than reusing the wedged socket. A transport error
+/// names the host and port of `url`, never its path or query.
 pub(crate) fn send<F>(
     client: &HttpClient,
     cancel: &CancelFlag,
+    url: String,
     build: F,
 ) -> Result<ureq::http::Response<ureq::Body>, ProviderError>
 where
-    F: FnOnce(&ureq::Agent) -> Result<ureq::http::Response<ureq::Body>, ureq::Error>
+    F: FnOnce(&ureq::Agent, &str) -> Result<ureq::http::Response<ureq::Body>, ureq::Error>
         + Send
         + 'static,
 {
     let client = client.clone();
     crate::cancelable::cancellable_call(cancel, move || {
         let agent = client.agent();
-        build(&agent).map_err(|e| client.on_transport_error(e))
+        build(&agent, &url).map_err(|e| client.on_transport_error(e, &url))
     })
 }
 
@@ -248,16 +250,33 @@ fn parse_retry_after(value: Option<&str>, now: chrono::DateTime<chrono::Utc>) ->
 /// Map a transport-time [`ureq::Error`] (from sending the request or
 /// reading headers) onto a [`ProviderError`]. A bare status code keeps
 /// an empty body; the caller reads the real body separately via
-/// [`read_error_body`].
-fn map_ureq_error(err: ureq::Error) -> ProviderError {
-    match err {
-        ureq::Error::StatusCode(code) => ProviderError::Http {
-            status: code,
-            body: String::new(),
-        },
-        ureq::Error::Io(e) => ProviderError::Transport(e.to_string()),
-        other => ProviderError::Transport(other.to_string()),
+/// [`read_error_body`]. A transport error names the host of `url`.
+fn map_ureq_error(err: ureq::Error, url: &str) -> ProviderError {
+    let detail = match err {
+        ureq::Error::StatusCode(code) => {
+            return ProviderError::Http {
+                status: code,
+                body: String::new(),
+            };
+        }
+        ureq::Error::Io(e) => e.to_string(),
+        other => other.to_string(),
+    };
+    match url_host(url) {
+        Some(host) => ProviderError::Transport(format!("{detail} (host {host})")),
+        None => ProviderError::Transport(detail),
     }
+}
+
+/// The host of `url`, with its port when one is given. The scheme,
+/// credentials, path and query are left out.
+fn url_host(url: &str) -> Option<String> {
+    let uri = url.parse::<ureq::http::Uri>().ok()?;
+    let host = uri.host()?;
+    Some(match uri.port_u16() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    })
 }
 
 #[cfg(test)]
@@ -292,11 +311,14 @@ mod tests {
         // A send-phase timeout is a stale-connection error: this drives
         // the recycle path (must not panic) and still maps to a
         // transport error so the caller surfaces it unchanged.
-        let mapped = client.on_transport_error(ureq::Error::Timeout(ureq::Timeout::SendRequest));
+        let mapped = client.on_transport_error(
+            ureq::Error::Timeout(ureq::Timeout::SendRequest),
+            "http://localhost/v1",
+        );
         assert!(matches!(mapped, ProviderError::Transport(_)));
         // A bare status code is not a connection problem; it must map
         // to an HTTP error with an empty body for the caller to fill.
-        let mapped = client.on_transport_error(ureq::Error::StatusCode(503));
+        let mapped = client.on_transport_error(ureq::Error::StatusCode(503), "http://localhost/v1");
         assert!(matches!(
             mapped,
             ProviderError::Http {
@@ -306,6 +328,21 @@ mod tests {
         ));
         // The client is still usable after a recycle.
         let _ = client.agent();
+    }
+
+    #[test]
+    fn transport_error_names_the_host_but_not_the_path_or_credentials() {
+        let url = "http://user:secret@localhost:11434/v1/chat?key=abc";
+        let err = map_ureq_error(ureq::Error::ConnectionFailed, url).to_string();
+        assert!(err.contains("(host localhost:11434)"), "got {err}");
+        for hidden in ["user", "secret", "/v1", "chat", "key=abc"] {
+            assert!(!err.contains(hidden), "{hidden} leaked into {err}");
+        }
+        assert_eq!(
+            url_host("https://api.anthropic.com/v1/messages").as_deref(),
+            Some("api.anthropic.com")
+        );
+        assert_eq!(url_host("not a url"), None);
     }
 
     #[test]

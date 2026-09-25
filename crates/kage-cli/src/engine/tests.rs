@@ -594,6 +594,46 @@ fn clone_continues_on_a_copy() {
     assert_eq!(messages.len(), 2);
 }
 
+#[test]
+fn clone_and_resume_keep_the_title() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::replaying(text_turn("hello")));
+    let id = SessionId::new();
+    let (recorder, path) = recorder_in(dir.path(), id);
+    h.engine.open(SessionSpec {
+        recorder: Some(recorder),
+        title: true,
+        ..h.spec(id)
+    });
+    prompt(&h.engine, id, "hi", Delivery::Steer);
+    wait_for(&h.events, |e| {
+        matches!(e.event, Event::Host(HostEvent::TitleChanged { .. }))
+    });
+
+    h.engine.send(Command::to(id, CommandKind::Clone));
+    let seen = wait_for(&h.events, is_session_changed);
+    let last = seen.last().unwrap();
+    let Event::Host(HostEvent::SessionChanged {
+        path: copy, title, ..
+    }) = &last.event
+    else {
+        unreachable!()
+    };
+    assert_eq!(title.as_deref(), Some("hello"));
+    assert_eq!(
+        kage_session::replay(copy).unwrap().title.as_deref(),
+        Some("hello")
+    );
+
+    h.engine
+        .send(Command::to(last.session, CommandKind::LoadSession { path }));
+    let seen = wait_for(&h.events, is_session_changed);
+    let Event::Host(HostEvent::SessionChanged { title, .. }) = &seen.last().unwrap().event else {
+        unreachable!()
+    };
+    assert_eq!(title.as_deref(), Some("hello"));
+}
+
 fn state_of(envelope: &Envelope) -> Option<&SessionState> {
     match &envelope.event {
         Event::Host(HostEvent::StateChanged { state }) => Some(state),

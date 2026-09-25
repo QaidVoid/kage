@@ -1189,7 +1189,8 @@ fn modeline_hides_permission_pill_without_override() {
 
 // --- Start card ---
 
-const TIP: &str = "   Tip: Tab queues a message while kage works. Enter steers the running turn.";
+const TIP: &str =
+    "   Tip: Press tab to queue a message while kage works, or enter to steer the running turn.";
 
 fn start_info(sessions: usize) -> StartInfo {
     let titles = [
@@ -1303,7 +1304,7 @@ fn the_card_ends_directly_above_the_input_rule() {
 #[test]
 fn a_short_card_drops_the_tip_then_the_sessions() {
     let info = start_info(3);
-    let area = Rect::new(0, 0, 80, 24);
+    let area = Rect::new(0, 0, 100, 24);
     let filler = |lines: usize| {
         let mut buffer = Buffer::new();
         let text = vec!["config: bad value"; lines].join("\n");

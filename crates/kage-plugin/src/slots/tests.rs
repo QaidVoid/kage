@@ -54,6 +54,20 @@ fn assert_default_start(spec: &SlotSpec) {
 }
 
 #[test]
+fn the_fallback_tip_is_the_first_tip_in_defaults_lua() {
+    let default = default_spec(SlotName::Start);
+    let Some(SlotItem::Text(tip)) = default.lines.last() else {
+        panic!("expected a tip span");
+    };
+    let first = crate::stdlib::DEFAULTS
+        .split("local tips = {")
+        .nth(1)
+        .and_then(|rest| rest.split('"').nth(1))
+        .expect("_defaults.lua lists tips");
+    assert_eq!(tip.text, format!("Tip: {first}"));
+}
+
+#[test]
 fn a_user_start_spec_replaces_the_card_and_nil_restores_it() {
     let rt = PluginRuntime::new().unwrap();
     crate::load_all(None, &rt).unwrap();

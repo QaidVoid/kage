@@ -73,7 +73,8 @@ pub fn max_output_tokens_for(registry: &ProviderRegistry, qualified_model: &str)
 }
 
 /// Build the full system prompt for an agent run: `role` (the user's
-/// `--system` text or a default), an `<environment>` block, and a
+/// `--system` text or a default), an `<environment>` block, the
+/// [`AGENTS.md` instruction files](#instruction-files), and a
 /// `<skills>` block listing every discovered skill (when `skills` is
 /// non-empty).
 ///
@@ -91,7 +92,55 @@ pub fn build_system_prompt(role: &str, workdir: &Path, model: &str, skills: &[Sk
         model,
     };
     let base = compose_system_prompt(role, &env);
-    with_skills(base, skills)
+    let with_instructions = format!("{base}{}", instructions_block(&instruction_files(workdir)));
+    with_skills(with_instructions, skills)
+}
+
+/// Instruction files that apply to `workdir`, user level first.
+///
+/// `<config dir>/AGENTS.md` always applies. `<workdir>/.kage/AGENTS.md`
+/// applies only once the project is trusted: a cloned repo's
+/// instructions are third-party input, so they wait for `kage trust`
+/// exactly like the project's agent files. Both files are optional.
+fn instruction_files(workdir: &Path) -> Vec<(std::path::PathBuf, &'static str)> {
+    let mut files = Vec::new();
+    if let Ok(dir) = crate::config_dir() {
+        files.push((dir.join("AGENTS.md"), "user_instructions"));
+    }
+    if kage_core::trust::project_agents_trusted(workdir) {
+        files.push((
+            workdir.join(".kage").join("AGENTS.md"),
+            "project_instructions",
+        ));
+    }
+    files
+}
+
+/// The instructions block for `files`: one labeled element per file
+/// that exists and holds non-blank text, user level before project so
+/// both apply and the project has the last word on conflicts.
+/// Missing, unreadable, and blank files contribute nothing.
+fn instructions_block(files: &[(std::path::PathBuf, &'static str)]) -> String {
+    let mut out = String::new();
+    for (path, tag) in files {
+        let Ok(body) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let body = body.trim();
+        if body.is_empty() {
+            continue;
+        }
+        out.push_str("\n\n<");
+        out.push_str(tag);
+        out.push_str(" path=\"");
+        out.push_str(&path.display().to_string());
+        out.push_str("\">\n");
+        out.push_str(body);
+        out.push_str("\n</");
+        out.push_str(tag);
+        out.push('>');
+    }
+    out
 }
 
 #[cfg(test)]
@@ -106,6 +155,41 @@ mod tests {
         assert!(out.contains("cwd: /tmp/work"));
         assert!(out.contains("model: x:y"));
         assert!(!out.contains("<skills>"));
+    }
+
+    #[test]
+    fn instructions_block_combines_user_then_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("user.md");
+        let project = dir.path().join("project.md");
+        let missing = dir.path().join("missing.md");
+        let blank = dir.path().join("blank.md");
+        std::fs::write(&user, "Be terse.\n").unwrap();
+        std::fs::write(&project, "Never use em-dashes.").unwrap();
+        std::fs::write(&blank, "  \n").unwrap();
+        let out = instructions_block(&[
+            (user.clone(), "user_instructions"),
+            (missing, "user_instructions"),
+            (blank, "user_instructions"),
+            (project.clone(), "project_instructions"),
+        ]);
+        let user_pos = out.find("Be terse.").expect("user text");
+        let project_pos = out.find("Never use em-dashes.").expect("project text");
+        assert!(user_pos < project_pos, "{out}");
+        assert!(out.contains(&format!("<user_instructions path=\"{}\">", user.display())));
+        assert!(out.contains(&format!(
+            "<project_instructions path=\"{}\">",
+            project.display()
+        )));
+        assert!(!out.contains("missing.md"));
+        assert!(!out.contains("blank.md"));
+    }
+
+    #[test]
+    fn instructions_block_is_empty_when_nothing_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = instructions_block(&[(dir.path().join("nope.md"), "user_instructions")]);
+        assert!(out.is_empty());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! `UserBlockWidget`: per-block renderer for user prompts.
 //!
 //! The widget delegates row construction to the existing
-//! [`super::user_block_lines`] helper, which produces the tinted band
+//! `super::user_block_lines` helper, which produces the tinted band
 //! rows (left-edge rule, `>` glyph, inline emphasis).
 
 use ratatui::text::Line;

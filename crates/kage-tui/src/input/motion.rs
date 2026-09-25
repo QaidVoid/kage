@@ -1,6 +1,5 @@
 //! Counts, operators, and motion-operator ranges.
 
-#[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
 
 impl InputState {

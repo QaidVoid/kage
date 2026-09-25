@@ -1,6 +1,5 @@
 //! Modeline, chrome, spinner, and input geometry.
 
-#[allow(clippy::wildcard_imports)] // free-fn split: shares the parent view module scope
 use super::*;
 
 use crate::theme::Slot;
@@ -75,7 +74,7 @@ pub(crate) fn format_token_count(n: u64) -> String {
     if n < 1_000 {
         return n.to_string();
     }
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(clippy::cast_precision_loss, reason = "a count shown to one decimal")]
     let (value, suffix) = if n < 1_000_000 {
         (n as f64 / 1_000.0, 'k')
     } else if n < 1_000_000_000 {
@@ -117,10 +116,7 @@ pub(crate) fn spinner_frame_index() -> usize {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis());
-    #[allow(clippy::cast_possible_truncation)]
-    {
-        ((now / 100) as usize) % SPINNER_FRAMES.len()
-    }
+    ((now / 100) as usize) % SPINNER_FRAMES.len()
 }
 
 pub(crate) fn spinner_frame() -> &'static str {
@@ -144,11 +140,6 @@ pub(crate) fn mode_pill_style(theme: &crate::theme::Theme, mode: Mode) -> Style 
     Style::default().fg(fg).add_modifier(Modifier::BOLD)
 }
 
-/// How many rows to scroll the input Paragraph so that the cursor row
-/// always stays inside the visible content area. Once the prompt has
-/// more rows than the input area can fit ([`INPUT_CONTENT_MAX_LINES`]
-/// from `layout.rs`), scrolling is the only way to keep typing
-/// visible.
 /// Total visual rows the input text occupies inside `body_width`,
 /// counting wrapped continuation rows. Empty logical lines still
 /// count for one row each (so a trailing newline grows the input).

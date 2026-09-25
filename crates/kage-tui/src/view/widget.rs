@@ -72,8 +72,8 @@ pub struct SelectionState {
 pub trait BlockWidget: Send + Sync {
     /// Produce the styled `Line`s this block paints at `width`
     /// columns, including any chrome (focus rule column, padding) it
-    /// owns. The default returns an empty vector for
-    /// [`EmptyBlockWidget`]; every real widget overrides this.
+    /// owns. The default returns no lines; every real widget overrides
+    /// this.
     fn lines(&self, width: u16, ctx: &RenderCtx<'_>) -> Vec<Line<'static>> {
         let _ = (width, ctx);
         Vec::new()
@@ -82,38 +82,12 @@ pub trait BlockWidget: Send + Sync {
 
 /// Uniform layout convention for every block widget.
 ///
-/// The spacing every block reserves around its content keeps the
-/// buffer reading as a series of evenly-spaced blocks rather than a
-/// mix of "tinted bubbles padded inside" and "naked assistant text
-/// crammed against its neighbours".
-///
-/// Blocks carry no vertical padding: the one blank row the renderer
-/// puts between blocks is the only separation, so every block reads
-/// with the same rhythm. The 2-col left padding aligns content with
-/// the bubble interior (1 col rule + 1 col internal pad).
-pub struct BlockPadding;
-
-impl BlockPadding {
-    /// Rows of blank space above the block's content. Currently `0`
-    /// for both bubbles and non-bubbles; bumped only if a future
-    /// design wants more headroom.
-    pub const TOP: usize = 0;
-    /// Rows of blank space below the block's content. Currently `0`
-    /// for both bubbles and non-bubbles.
-    pub const BOTTOM: usize = 0;
-    /// Left chrome cells reserved before content. `2` to match the
-    /// focus-rule (1 col) plus its trailing space (1 col).
-    pub const LEFT: usize = 2;
-    /// Right chrome cells reserved after content. `0` - blocks fill
-    /// to the right edge.
-    pub const RIGHT: usize = 0;
-}
-
-/// No-op widget used as the safe fallback from registry lookups for
-/// kinds without a real widget. Yields no lines.
+/// No-op widget for tests. Yields no lines.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EmptyBlockWidget;
 
+#[cfg(test)]
 impl BlockWidget for EmptyBlockWidget {}
 
 #[cfg(test)]

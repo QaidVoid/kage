@@ -288,7 +288,11 @@ fn clear_lines(out: &mut io::Stdout, count: usize) -> io::Result<()> {
     out.flush()
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "the picker state and one frame of it"
+)]
 fn render(
     out: &mut io::Stdout,
     prompt: &str,

@@ -1,6 +1,5 @@
 //! Normal-mode key dispatch.
 
-#[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
 
 impl InputState {
@@ -168,7 +167,7 @@ impl InputState {
     /// entry variants (`i`/`a`/`I`/`A`/`o`/`O`). Cursor movement and
     /// edits mutate state in place; mode transitions return an
     /// [`InputAction`] for the host to react to.
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines, reason = "one match over the normal-mode keys")]
     pub(crate) fn handle_normal_input(&mut self, key: KeyEvent) -> Vec<InputAction> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && matches!(key.code, KeyCode::Char('r')) {

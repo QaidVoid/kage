@@ -2,7 +2,6 @@
 //! permission prompts, and the agent sessions started under the main
 //! session.
 
-#[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
 
 use kage_core::protocol::{AgentState, Envelope, Event, HostEvent, NoticeLevel, RequestId};

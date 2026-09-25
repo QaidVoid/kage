@@ -1,6 +1,5 @@
 //! Paste collapsing, image chips, and cursor movement.
 
-#[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
 
 impl InputState {

@@ -33,7 +33,7 @@ pub use tool_call_alone::ToolCallAloneBlockWidget;
 pub use tool_pair::ToolPairBlockWidget;
 pub use tool_result_alone::ToolResultAloneBlockWidget;
 pub use user::UserBlockWidget;
-pub use widget::{BlockWidget, EmptyBlockWidget, RenderCtx, SelectionState};
+pub use widget::{BlockWidget, RenderCtx, SelectionState};
 
 pub(crate) use ratatui::Frame;
 pub(crate) use ratatui::layout::{Alignment, Rect};
@@ -221,7 +221,10 @@ impl Emphasis {
 /// has no visible effect until the inflated count drains down to the
 /// renderer-clamped value. Persisting the clamp here keeps user input
 /// in sync with what's on screen.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "every part of one frame, passed once"
+)]
 pub fn render(
     frame: &mut Frame,
     regions: Regions,

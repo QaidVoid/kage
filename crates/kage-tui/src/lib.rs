@@ -63,7 +63,7 @@ pub use toast::{
 pub use transcript::TranscriptScope;
 pub use usage::{SessionUsage, SharedSessionUsage, shared_session_usage};
 pub use view::{
-    AssistantBlockWidget, BlockFactory, BlockRenderer, BlockWidget, BuiltinKind, EmptyBlockWidget,
-    RenderCtx, SelectionState, StartInfo, StartKeys, StatusCtx, ThinkingBlockWidget,
-    ToolPairBlockWidget, UserBlockWidget,
+    AssistantBlockWidget, BlockFactory, BlockRenderer, BlockWidget, BuiltinKind, RenderCtx,
+    SelectionState, StartInfo, StartKeys, StatusCtx, ThinkingBlockWidget, ToolPairBlockWidget,
+    UserBlockWidget,
 };

@@ -360,7 +360,7 @@ impl Provider for AnthropicProvider {
     }
 
     /// Thinking this model signed goes back as native blocks, and other
-    /// thinking as `<thinking>` text, see [`build_request_body`].
+    /// thinking as `<thinking>` text, see `build_request_body`.
     fn preserves_thinking(&self) -> bool {
         true
     }

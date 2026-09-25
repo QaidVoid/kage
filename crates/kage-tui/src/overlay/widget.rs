@@ -3,16 +3,12 @@
 //! Every overlay surface (model picker, slash palette, settings
 //! dialog, session tree, login, confirmation, single-line input,
 //! multi-line editor, custom plugin overlay) is a type that
-//! implements [`OverlayWidget`] and is dispatched through an
-//! [`crate::overlay::OverlayRegistry`] instead of a stack of
-//! hand-rolled `Option<X>` fields on [`crate::App`].
+//! implements [`OverlayWidget`].
 //!
 //! The trait is deliberately `dyn`-compatible: no generic methods, no
-//! `Self` in return positions, no associated types. That lets plugin
-//! dialog factories hand back `Box<dyn OverlayWidget>` from Lua and
-//! the registry hold `Arc<dyn OverlayWidget>` per key. Every overlay
-//! in the app implements this trait; the dispatch layers in the App
-//! route keys to whichever modal is on top.
+//! `Self` in return positions, no associated types. That lets the App
+//! hold a plugin dialog as a `Box<dyn OverlayWidget>`. The dispatch
+//! layers in the App route keys to whichever modal is on top.
 
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::KeyEvent;
@@ -74,7 +70,7 @@ pub trait OverlayWidget: Send + Sync {
     /// chrome. The host blanks `area` with [`ratatui::widgets::Clear`]
     /// before the call, so overlays can assume a clean surface.
     ///
-    /// `&mut self` (unlike [`crate::view::widget::BlockWidget::render`])
+    /// `&mut self` (unlike [`crate::view::widget::BlockWidget::lines`])
     /// because interactive overlays persist layout state across
     /// frames (scroll offset, last viewport size, animation cursor).
     /// Blocks paint a content snapshot and have no such state.
@@ -95,12 +91,13 @@ pub trait OverlayWidget: Send + Sync {
     }
 }
 
-/// No-op overlay used to lock the trait shape and as a safe default
-/// from registry lookups before every overlay is migrated. Reports a
-/// zero-size area, paints nothing, and propagates every key.
+/// No-op overlay for tests. Reports a zero-size area, paints nothing,
+/// and propagates every key.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EmptyOverlayWidget;
 
+#[cfg(test)]
 impl OverlayWidget for EmptyOverlayWidget {
     fn measure(&self, _available: Rect) -> Rect {
         Rect::new(0, 0, 0, 0)

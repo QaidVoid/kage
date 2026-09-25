@@ -2,10 +2,12 @@
 
 use kage_core::sync::read;
 
-#[allow(clippy::wildcard_imports)] // free-fn split: shares the parent view module scope
 use super::*;
 
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "measure, scroll and paint the visible blocks in one pass"
+)]
 pub(super) fn render_buffer(
     frame: &mut Frame,
     regions: Regions,
@@ -303,7 +305,7 @@ pub struct CapturedCell {
     /// exact display width doesn't matter.
     pub ch: char,
     /// `true` if the renderer tagged this cell as chrome via
-    /// [`DECORATION_MARKER`].
+    /// `DECORATION_MARKER`.
     pub decoration: bool,
 }
 

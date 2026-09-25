@@ -157,7 +157,7 @@ impl Provider for OpenAiProvider {
 
     /// Interleaved models get the current turn's thinking in their
     /// reasoning field; other models get it as `<thinking>` text, see
-    /// [`build_request_body`].
+    /// `build_request_body`.
     fn preserves_thinking(&self) -> bool {
         true
     }

@@ -1,6 +1,5 @@
 //! Tool row and block line builders and styles.
 
-#[allow(clippy::wildcard_imports)] // free-fn split: shares the parent view module scope
 use super::*;
 
 use serde_json::Value;

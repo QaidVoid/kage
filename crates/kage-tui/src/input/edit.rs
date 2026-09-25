@@ -1,6 +1,5 @@
 //! Insert-mode editing, deletion, and the kill ring.
 
-#[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
 
 impl InputState {
@@ -28,7 +27,7 @@ impl InputState {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines, reason = "one match over the insert-mode keys")]
     pub(crate) fn handle_insert(&mut self, key: KeyEvent) -> Vec<InputAction> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);

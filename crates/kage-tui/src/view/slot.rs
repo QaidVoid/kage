@@ -7,7 +7,6 @@
 //! between two adjacent items that both produced output, except after
 //! `working`, which is a lead-in indicator followed by one space.
 
-#[allow(clippy::wildcard_imports)] // free-fn split: shares the parent view module scope
 use super::*;
 
 use kage_plugin::{ChromeLine, SlotItem, SlotName, SlotSpec};
@@ -742,7 +741,7 @@ fn push_usage(name: &str, u: &SessionUsage, styles: &Styles, out: &mut Vec<Span<
         }
         "context" => {
             if u.context_window > 0 {
-                #[allow(clippy::cast_precision_loss)]
+                #[expect(clippy::cast_precision_loss, reason = "a rounded percentage")]
                 let pct =
                     (u.current_context as f64 / u.context_window as f64 * 100.0).clamp(0.0, 999.9);
                 out.push(Span::styled(format!("{pct:.0}% ctx"), styles.text));

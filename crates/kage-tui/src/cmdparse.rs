@@ -383,7 +383,10 @@ impl Resolver for EmptyResolver {}
 /// the line) returns [`Completions::empty`]: completion is best-effort
 /// and we never return partial / misleading suggestions for
 /// malformed input.
-#[allow(clippy::too_many_lines)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass over the head and every argument kind"
+)]
 pub fn complete(
     registry: &[&CommandSpec],
     raw: &str,
@@ -524,7 +527,7 @@ fn spec_hint(spec: &CommandSpec) -> Option<String> {
 /// (primary or alias) if the distance is below a reasonable
 /// threshold, or `None` when nothing looks close enough.
 ///
-/// Used by the error UX (PN.9) to suggest "did you mean X?" when the
+/// Used by the error UX to suggest "did you mean X?" when the
 /// user types an unknown command name.
 #[must_use]
 pub fn suggest_command(registry: &[&CommandSpec], input: &str) -> Option<&'static str> {

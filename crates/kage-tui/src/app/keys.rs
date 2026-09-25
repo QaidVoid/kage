@@ -1,6 +1,5 @@
 //! Key-event dispatch across the App modes and overlays.
 
-#[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
 
 /// How long an armed quit, or the note that the draft was cleared,

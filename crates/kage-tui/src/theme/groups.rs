@@ -104,7 +104,7 @@ pub struct ThemeGroups {
 
 impl ThemeGroups {
     /// The groups that compile back to exactly `theme`, plus the
-    /// [`EXTRA_GROUPS`] links.
+    /// `EXTRA_GROUPS` links.
     #[must_use]
     pub fn from_theme(theme: &Theme) -> Self {
         let mut groups = BTreeMap::<String, HlSpec>::new();

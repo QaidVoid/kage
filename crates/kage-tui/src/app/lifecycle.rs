@@ -4,7 +4,6 @@ use std::io;
 
 use crossbeam_channel::{Receiver, select_biased};
 
-#[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
 
 use crate::terminal::InputReader;
@@ -14,9 +13,8 @@ impl App {
     /// reason. The caller is expected to drop the [`Tui`] (which
     /// restores the terminal) before printing anything to stdout.
     /// Dispatch terminal-suspending chords, wait for input, engine
-    /// events and deadlines, and drive the worker. Long by nature: it
-    /// is the whole event loop.
-    #[allow(clippy::too_many_lines)]
+    /// events and deadlines, and drive the worker.
+    #[expect(clippy::too_many_lines, reason = "the whole event loop")]
     pub fn run(&mut self, tui: &mut Tui) -> Result<AppExit, TuiError> {
         // Shortest gap between two paints driven by engine events, so a
         // burst of streamed deltas repaints at most once per frame.
@@ -337,7 +335,7 @@ impl App {
 
     /// Paint one frame into `terminal`: the chrome, the buffer and
     /// every open overlay.
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines, reason = "one frame, drawn in order")]
     pub(crate) fn paint<B>(&mut self, terminal: &mut ratatui::Terminal<B>) -> Result<(), TuiError>
     where
         B: ratatui::backend::Backend,

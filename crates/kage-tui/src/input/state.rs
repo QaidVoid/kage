@@ -1,6 +1,5 @@
 //! State accessors, undo/redo, and prompt history.
 
-#[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
 
 impl InputState {

@@ -2,21 +2,17 @@
 //! of their own below the conversation, auto-expire after a duration,
 //! and never occupy buffer scroll space.
 //!
-//! Replaces the previous `kage:notify` Custom-block path so the
-//! conversation pane stays focused on actual conversation content.
-//! `kage:log` and `kage:error` blocks remain inline because the user
+//! Toasts keep the conversation pane focused on conversation content.
+//! `kage:log` and `kage:error` blocks stay inline because the user
 //! wants to scroll back to them; toasts are for "thing happened, ack
 //! it, move on" feedback.
 //!
-//! Plugins customize toasts in three places:
+//! Plugins customize toasts in two places:
 //!
 //! 1. **Source** - `kage.notify(text)` pushes a toast via the
 //!    plugin host log sink.
 //! 2. **Style** - the per-kind theme colors live in the `Theme` and
 //!    can be overridden by a plugin's theme TOML.
-//! 3. **Renderer** - swap the implementation behind
-//!    [`ToastRenderer`] via [`crate::App::set_toast_renderer`] for
-//!    full layout control. The default renderer is bundled.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};

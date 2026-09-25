@@ -1,6 +1,5 @@
 //! Submit, mouse, scroll/fold, and render entry points.
 
-#[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
 
 impl App {

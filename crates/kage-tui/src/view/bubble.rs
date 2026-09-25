@@ -1,6 +1,5 @@
 //! Chat-bubble and block line builders.
 
-#[allow(clippy::wildcard_imports)] // free-fn split: shares the parent view module scope
 use super::*;
 
 /// Render a user prompt as a tinted full-width band with a thin themed

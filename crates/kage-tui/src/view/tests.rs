@@ -1070,7 +1070,7 @@ fn popup_truncates_description_in_narrow_viewport() {
     );
 }
 
-// --- Inline error rendering tests (PN.9) ---
+// --- Inline error rendering tests ---
 
 #[test]
 fn error_line_shows_marker_and_message() {

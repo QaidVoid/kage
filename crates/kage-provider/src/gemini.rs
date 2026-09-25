@@ -108,7 +108,7 @@ impl Provider for GeminiProvider {
     }
 
     /// Thought signatures go back on their function calls, and thinking
-    /// text as `<thinking>` text, see [`build_request_body`].
+    /// text as `<thinking>` text, see `build_request_body`.
     fn preserves_thinking(&self) -> bool {
         true
     }

@@ -10,7 +10,7 @@
 //! Tests render against [`ratatui::backend::TestBackend`] directly; the
 //! lifecycle wrapper is only meaningful with a real tty.
 //!
-//! [`InputReader`] reads terminal events on a thread so the run loop
+//! `InputReader` reads terminal events on a thread so the run loop
 //! can wait on them next to engine events.
 //!
 //! [`forward_typed_lines`] reads lines from the terminal while the TUI
@@ -53,10 +53,10 @@ const LINE_POLL: Duration = Duration::from_millis(50);
 
 /// Owns the terminal while the TUI is running. Restoring is automatic on
 /// drop and via a panic hook so a crashing run never strands the tty.
-// The three `*_active` flags model independent terminal features
-// (paste, kitty keyboard, mouse); folding them into a bitmask or
-// options buys nothing.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent terminal features: paste, kitty keyboard, mouse"
+)]
 pub struct Tui {
     terminal: DefaultTerminal,
     bracketed_paste_active: bool,
@@ -118,7 +118,7 @@ impl Tui {
     }
 
     /// Toggle mouse capture at runtime. With capture off the host
-    /// receives no [`crossterm`] mouse events, but the terminal's
+    /// receives no [`ratatui::crossterm`] mouse events, but the terminal's
     /// native selection (drag to highlight, double-click word, etc.)
     /// becomes available again - the user can copy any visible text
     /// via the terminal's own clipboard binding without the TUI

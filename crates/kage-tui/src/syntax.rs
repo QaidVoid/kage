@@ -134,7 +134,7 @@ fn theme() -> &'static Theme {
 ///
 /// Results are cached per-thread on `(code, extension, paired theme)`;
 /// identical inputs reuse a previous render rather than re-running
-/// syntect each frame. Cache caps at [`CACHE_CAP`] entries with FIFO
+/// syntect each frame. Cache caps at `CACHE_CAP` entries with FIFO
 /// eviction.
 #[must_use]
 pub fn highlight_extension(code: &str, extension: &str, fallback: Style) -> Vec<Line<'static>> {
@@ -155,7 +155,7 @@ pub fn highlight_extension(code: &str, extension: &str, fallback: Style) -> Vec<
 /// Highlight `code` using the syntect grammar matching `lang`
 /// (by token, then by name; e.g. `"rust"` or `"Rust"`). Falls back to
 /// `plain_lines_styled` when the language is unknown or the input
-/// exceeds [`HIGHLIGHT_BYTE_LIMIT`]. Used by [`crate::markdown::render`]
+/// exceeds `HIGHLIGHT_BYTE_LIMIT`. Used by [`crate::markdown::render`]
 /// for fenced code blocks.
 #[must_use]
 pub fn highlight_with_lang(code: &str, lang: &str, fallback: Style) -> Vec<Line<'static>> {

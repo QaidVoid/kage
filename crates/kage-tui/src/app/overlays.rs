@@ -1,6 +1,5 @@
 //! Theme, clipboard/paste, and overlay (picker/settings/tree) handling.
 
-#[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
 use kage_core::options::OptionDef;
 

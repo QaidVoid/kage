@@ -1,6 +1,5 @@
 //! Input area rendering.
 
-#[allow(clippy::wildcard_imports)] // free-fn split: shares the parent view module scope
 use super::*;
 
 /// Width in cells of the prompt column: a space, the glyph and a

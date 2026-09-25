@@ -2,7 +2,6 @@
 
 use base64::Engine as _;
 
-#[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
 use crate::command::{ArgValue, ParsedArgs};
 
@@ -118,9 +117,10 @@ impl App {
     /// remaining unparsed argument string and the arguments parsed
     /// against the matched spec. The match is on the primary name;
     /// aliases were already resolved by [`Self::run_command`].
-    // A flat dispatch table over every builtin command; the line
-    // count is the command list, not complexity.
-    #[allow(clippy::too_many_lines)]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "a flat dispatch table over every builtin command"
+    )]
     pub(crate) fn dispatch_builtin(
         &mut self,
         name: &str,

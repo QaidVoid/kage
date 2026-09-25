@@ -38,10 +38,8 @@ pub enum Mode {
 /// conversation buffer above it. `Ctrl-w` toggles between them, and
 /// mouse clicks inside a region focus that pane.
 ///
-/// The pane is purely a routing flag in Stage B (PR-2): keystrokes
-/// behave the same regardless. Stage C (vim ops on the input pane)
-/// uses it to decide whether `j`/`k` scrolls the buffer or moves the
-/// input cursor.
+/// Normal-mode keys use it to decide whether `j`/`k` scroll the
+/// buffer or move the input cursor.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Pane {
     /// The bordered input card. Default focus: text and cursor live
@@ -54,7 +52,7 @@ pub enum Pane {
 }
 
 impl Pane {
-    /// Return the other pane. Stage B's `Ctrl-w` toggles using this.
+    /// Return the other pane, the one `Ctrl-w` toggles to.
     #[must_use]
     pub fn opposite(self) -> Self {
         match self {
@@ -293,10 +291,10 @@ impl Operator {
 
 /// Tracking the editing mode, the prompt text, the prompt history, and
 /// any pending leader key (e.g. `g` waiting for the second `g` of `gg`).
-// The independent state flags (modeless, awaiting_replace,
-// register_linewise, shell) are the natural encoding here; a bitmask
-// would obscure the doc comments that explain each one.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent state flags, each documented"
+)]
 #[derive(Debug)]
 pub struct InputState {
     mode: Mode,
@@ -322,7 +320,7 @@ pub struct InputState {
     /// `true` after `r` was pressed; the next character literally
     /// replaces the char at the cursor.
     awaiting_replace: bool,
-    /// Last yanked / cut text. Inserted by `p` / `P` (Stage C.4).
+    /// Last yanked / cut text. Inserted by `p` / `P`.
     register: String,
     /// `true` when `register` was filled by a linewise op (`dd`, `yy`,
     /// etc.), so `p` pastes on a new line below the cursor instead of
@@ -331,9 +329,8 @@ pub struct InputState {
     /// Anchor byte offset of an active input-pane char-visual
     /// selection. `None` outside Visual mode and during buffer-cell
     /// visual; `Some(n)` while the user is dragging a vim-style range
-    /// across the input text. Stage C.5 uses this to disambiguate
-    /// "v in input pane" (inline selection) from "v in buffer pane"
-    /// (today's cell-overlay selection).
+    /// across the input text. It tells "v in input pane" (inline
+    /// selection) from "v in buffer pane" (the cell-overlay selection).
     visual_anchor: Option<usize>,
     /// Undo stack: snapshots taken before each mutating op. Vim
     /// groups one Insert session as a single undo unit, so the

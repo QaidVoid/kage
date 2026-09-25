@@ -1,6 +1,5 @@
 //! Buffer read-side: scroll, focus, cache geometry, search, folding queries.
 
-#[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
 
 impl Buffer {
@@ -337,7 +336,7 @@ impl Buffer {
 
     /// Renderer hook: stash each painted block's unclamped
     /// `(idx, virtual_top, virtual_bottom)` for this frame. See
-    /// [`Self::last_block_virtual_rows`].
+    /// `Self::last_block_virtual_rows`.
     pub fn set_last_block_virtual_rows(&mut self, rows: Vec<(usize, usize, usize)>) {
         self.last_block_virtual_rows = rows;
     }

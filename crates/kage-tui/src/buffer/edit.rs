@@ -1,6 +1,5 @@
 //! Buffer write-side: block construction, streaming, and fold ops.
 
-#[allow(clippy::wildcard_imports)] // impl-split submodule shares the parent module scope
 use super::*;
 
 use kage_core::event::TOOL_CANCELLED_TEXT;

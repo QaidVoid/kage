@@ -2,7 +2,6 @@
 //! footer row like vim, with their error row and completion popup
 //! stacked above it.
 
-#[allow(clippy::wildcard_imports)] // free-fn split: shares the parent view module scope
 use super::*;
 
 /// Paint the open `:` command line over `row`.

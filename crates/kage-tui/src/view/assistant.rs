@@ -14,7 +14,7 @@ use ratatui::text::Line;
 use super::widget::{BlockWidget, RenderCtx};
 use super::{Emphasis, assistant_style, mark_emphasis};
 
-/// Renders a [`Block::Assistant`] as live markdown (structure now,
+/// Renders a [`crate::buffer::Block::Assistant`] as live markdown (structure now,
 /// code highlighted once the turn finishes), with the usual
 /// `mark_emphasis` left rule when focused or matching a search.
 #[derive(Clone, Debug)]

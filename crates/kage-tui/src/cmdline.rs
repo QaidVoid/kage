@@ -879,7 +879,7 @@ mod tests {
         assert_eq!(longest_common_prefix(empty), "");
     }
 
-    // --- Inline error tests (PN.9) ---
+    // --- Inline error tests ---
 
     #[test]
     fn set_error_stores_message_accessible_via_error() {

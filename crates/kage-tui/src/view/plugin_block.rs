@@ -2,10 +2,10 @@
 //! [`BlockWidget`] registry.
 //!
 //! A [`PluginBlockFactory`] holds one plugin renderer and produces a
-//! [`PluginBlockWidget`] for every `Block::Custom` of the matching
+//! `PluginBlockWidget` for every `Block::Custom` of the matching
 //! kind. The widget calls into Lua to get the block's styled lines
 //! (the same `ChromeLine` shape `kage.ui.set_header` uses), then runs
-//! them through [`mark_emphasis`] so a plugin-drawn block still gets
+//! them through `mark_emphasis` so a plugin-drawn block still gets
 //! the conversation's focus rule and spacing - the plugin owns the
 //! *content*; the host keeps *block chrome* uniform.
 //!

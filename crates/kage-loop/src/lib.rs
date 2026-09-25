@@ -16,6 +16,8 @@ pub mod hooks;
 pub mod run;
 mod stream;
 pub mod system_prompt;
+#[cfg(test)]
+mod test_support;
 
 pub use compact::{COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX, force_compact};
 pub use config::{LoopConfig, SteeringMode};

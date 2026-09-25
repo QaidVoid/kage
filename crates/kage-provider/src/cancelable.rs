@@ -129,7 +129,7 @@ impl Iterator for CancelableStream {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use super::*;
 
@@ -155,68 +155,75 @@ mod tests {
         assert!(s.next().is_none());
     }
 
-    #[test]
-    fn returns_cancelled_quickly_when_inner_is_blocked() {
-        struct Slow;
-        impl Iterator for Slow {
-            type Item = Result<ProviderEvent, ProviderError>;
-            fn next(&mut self) -> Option<Self::Item> {
-                std::thread::sleep(Duration::from_secs(60));
-                Some(Ok(ProviderEvent::MessageStart))
-            }
-        }
+    /// A read that never finishes on its own: `next` reports on
+    /// `entered`, then blocks until the test drops the release sender
+    /// (or five seconds pass) and yields `MessageStart`.
+    struct Stalled {
+        entered: crossbeam_channel::Sender<()>,
+        release: crossbeam_channel::Receiver<()>,
+    }
 
+    impl Iterator for Stalled {
+        type Item = Result<ProviderEvent, ProviderError>;
+        fn next(&mut self) -> Option<Self::Item> {
+            let _ = self.entered.send(());
+            let _ = self.release.recv_timeout(Duration::from_secs(5));
+            Some(Ok(ProviderEvent::MessageStart))
+        }
+    }
+
+    fn stalled() -> (
+        Stalled,
+        crossbeam_channel::Receiver<()>,
+        crossbeam_channel::Sender<()>,
+    ) {
+        let (entered_tx, entered) = crossbeam_channel::unbounded();
+        let (release, release_rx) = crossbeam_channel::bounded(0);
+        let inner = Stalled {
+            entered: entered_tx,
+            release: release_rx,
+        };
+        (inner, entered, release)
+    }
+
+    #[test]
+    fn returns_cancelled_while_inner_is_blocked() {
+        let (inner, entered, _release) = stalled();
         let cancel = CancelFlag::new();
-        let mut s = make_cancelable(Box::new(Slow), cancel.clone());
-        let watcher = cancel.clone();
+        let mut s = make_cancelable(Box::new(inner), cancel.clone());
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(50));
-            watcher.cancel();
+            let _ = entered.recv();
+            cancel.cancel();
         });
-        let start = Instant::now();
         let item = s.next().expect("an item should arrive");
-        let elapsed = start.elapsed();
         assert!(
             matches!(item, Err(ProviderError::Cancelled)),
             "expected Cancelled, got {item:?}"
-        );
-        assert!(
-            elapsed < Duration::from_millis(500),
-            "cancel observation took {elapsed:?}, expected < 500ms"
         );
     }
 
     #[test]
     fn cancellable_call_returns_cancelled_while_the_closure_blocks() {
+        let (mut inner, entered, _release) = stalled();
         let cancel = CancelFlag::new();
         let flag = cancel.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(50));
+            let _ = entered.recv();
             flag.cancel();
         });
-        let start = Instant::now();
-        let result = cancellable_call(&cancel, || {
-            std::thread::sleep(Duration::from_secs(60));
+        let result = cancellable_call(&cancel, move || {
+            inner.next();
             Ok(())
         });
         assert!(matches!(result, Err(ProviderError::Cancelled)));
-        assert!(start.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
     fn fuses_after_cancelled_so_next_returns_none() {
-        struct Slow;
-        impl Iterator for Slow {
-            type Item = Result<ProviderEvent, ProviderError>;
-            fn next(&mut self) -> Option<Self::Item> {
-                std::thread::sleep(Duration::from_secs(60));
-                None
-            }
-        }
-
+        let (inner, _entered, _release) = stalled();
         let cancel = CancelFlag::new();
         cancel.cancel();
-        let mut s = make_cancelable(Box::new(Slow), cancel);
+        let mut s = make_cancelable(Box::new(inner), cancel);
         assert!(matches!(s.next(), Some(Err(ProviderError::Cancelled))));
         assert!(s.next().is_none());
     }

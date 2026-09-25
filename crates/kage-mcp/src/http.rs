@@ -530,7 +530,6 @@ fn spawn_get_pump(endpoint: Endpoint, shared: SharedState, out: OutSlot) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::fmt;
     use std::os::unix::net::UnixStream;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -538,8 +537,8 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
-    use crate::oauth::tests::StaticTokens;
     use crate::server::{McpConnection, McpError};
+    use crate::test_support::{HttpRequest, StaticTokens, read_request, wait_until};
     use ureq::config::Config;
     use ureq::http::Uri;
     use ureq::unversioned::resolver::{ResolvedSocketAddrs, Resolver};
@@ -578,61 +577,15 @@ mod tests {
         assert_eq!(pipe_rx.read(&mut eof).unwrap(), 0);
     }
 
-    /// One request seen by the test server.
-    #[derive(Clone)]
-    struct Recorded {
-        method: String,
-        headers: HashMap<String, String>,
-        body: String,
-    }
-
     /// The handler each test server call goes through: one recorded
     /// request in, the HTTP response written to the connection.
-    type Handler = Arc<dyn Fn(&Recorded, &mut UnixStream) + Send + Sync>;
+    type Handler = Arc<dyn Fn(&HttpRequest, &mut UnixStream) + Send + Sync>;
 
     /// A [`Handler`] answering every request with the full response
     /// `respond` builds.
-    fn fixed(respond: impl Fn(&Recorded) -> Vec<u8> + Send + Sync + 'static) -> Handler {
+    fn fixed(respond: impl Fn(&HttpRequest) -> Vec<u8> + Send + Sync + 'static) -> Handler {
         Arc::new(move |request, stream| {
             let _ = stream.write_all(&respond(request));
-        })
-    }
-
-    /// Parse one HTTP/1.1 request off `stream`: request line, headers
-    /// (keys lowercased), and a content-length-delimited body.
-    fn read_request(stream: &mut UnixStream) -> io::Result<Recorded> {
-        let mut reader = BufReader::new(stream);
-        let mut request_line = String::new();
-        reader.read_line(&mut request_line)?;
-        let method = request_line
-            .split_whitespace()
-            .next()
-            .unwrap_or_default()
-            .to_owned();
-        let mut headers = HashMap::new();
-        loop {
-            let mut line = String::new();
-            if reader.read_line(&mut line)? == 0 {
-                break;
-            }
-            let line = line.trim_end_matches(['\r', '\n']);
-            if line.is_empty() {
-                break;
-            }
-            if let Some((name, value)) = line.split_once(':') {
-                headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
-            }
-        }
-        let length: usize = headers
-            .get("content-length")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
-        let mut body = vec![0u8; length];
-        reader.read_exact(&mut body)?;
-        Ok(Recorded {
-            method,
-            headers,
-            body: String::from_utf8_lossy(&body).into_owned(),
         })
     }
 
@@ -785,7 +738,7 @@ mod tests {
             let served = Arc::clone(&self.served);
             let quota = self.quota;
             std::thread::spawn(move || {
-                let Ok(request) = read_request(&mut remote) else {
+                let Some(request) = read_request(&mut remote) else {
                     return;
                 };
                 if request.method != "GET" && served.fetch_add(1, Ordering::SeqCst) >= quota {
@@ -842,17 +795,6 @@ mod tests {
         )
     }
 
-    /// Poll `cond` for up to 5 s; the caller's assert reports the
-    /// failure with the real values when it never becomes true.
-    fn wait_for(cond: impl Fn() -> bool) {
-        for _ in 0..500 {
-            if cond() {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
     /// Run `f` on its own thread and return its result, or `None` when
     /// it has not finished within 5 s.
     fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
@@ -887,9 +829,9 @@ mod tests {
 
     #[test]
     fn http_round_trip_json_with_session_echo() {
-        let log: Arc<Mutex<Vec<Recorded>>> = Arc::new(Mutex::new(Vec::new()));
+        let log: Arc<Mutex<Vec<HttpRequest>>> = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&log);
-        let handler = fixed(move |request: &Recorded| -> Vec<u8> {
+        let handler = fixed(move |request: &HttpRequest| -> Vec<u8> {
             recorded.lock().unwrap().push(request.clone());
             if request.method == "GET" {
                 return response_bytes("HTTP/1.1 405 Method Not Allowed", None, &[], "");
@@ -942,7 +884,11 @@ mod tests {
             tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
             ["t"]
         );
-        wait_for(|| log.lock().unwrap().iter().any(|r| r.method == "GET"));
+        assert!(wait_until(|| log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.method == "GET")));
         let log = log.lock().unwrap();
         assert_eq!(log.iter().filter(|r| r.method == "GET").count(), 1);
         let init = log
@@ -963,7 +909,7 @@ mod tests {
 
     #[test]
     fn http_round_trip_sse_response() {
-        let handler = fixed(|request: &Recorded| -> Vec<u8> {
+        let handler = fixed(|request: &HttpRequest| -> Vec<u8> {
             if request.method == "GET" {
                 return response_bytes("HTTP/1.1 405 Method Not Allowed", None, &[], "");
             }
@@ -1006,9 +952,9 @@ mod tests {
     #[test]
     fn later_requests_carry_the_negotiated_version() {
         for sse in [false, true] {
-            let log: Arc<Mutex<Vec<Recorded>>> = Arc::new(Mutex::new(Vec::new()));
+            let log: Arc<Mutex<Vec<HttpRequest>>> = Arc::new(Mutex::new(Vec::new()));
             let recorded = Arc::clone(&log);
-            let handler = fixed(move |request: &Recorded| -> Vec<u8> {
+            let handler = fixed(move |request: &HttpRequest| -> Vec<u8> {
                 recorded.lock().unwrap().push(request.clone());
                 if request.method == "GET" {
                     return response_bytes("HTTP/1.1 405 Method Not Allowed", None, &[], "");
@@ -1038,9 +984,13 @@ mod tests {
             .unwrap();
             let conn = McpConnection::initialize("srv", peer, inbound, &[], None).unwrap();
             assert_eq!(conn.protocol_version(), "2025-03-26");
-            wait_for(|| log.lock().unwrap().iter().any(|r| r.method == "GET"));
+            assert!(wait_until(|| log
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.method == "GET")));
             let log = log.lock().unwrap();
-            let version = |r: &Recorded| r.headers.get("mcp-protocol-version").cloned();
+            let version = |r: &HttpRequest| r.headers.get("mcp-protocol-version").cloned();
             assert_eq!(version(&log[0]), None, "sse: {sse}");
             let initialized = log
                 .iter()
@@ -1058,7 +1008,7 @@ mod tests {
 
     #[test]
     fn transport_failure_fails_the_request_and_marks_connection_dead() {
-        let handler = fixed(|request: &Recorded| -> Vec<u8> {
+        let handler = fixed(|request: &HttpRequest| -> Vec<u8> {
             if request.method == "GET" {
                 return response_bytes("HTTP/1.1 405 Method Not Allowed", None, &[], "");
             }
@@ -1088,16 +1038,15 @@ mod tests {
             }
             other => panic!("expected an rpc error, got {other:?}"),
         }
-        wait_for(|| conn.is_dead());
-        assert!(conn.is_dead());
+        assert!(wait_until(|| conn.is_dead()));
     }
 
     /// A handler answering `initialize` and 202 to everything else when
     /// `accept` passes the request, and 401 otherwise. GETs get 405.
-    fn guarded(accept: impl Fn(&Recorded) -> bool + Send + Sync + 'static) -> (Handler, Log) {
+    fn guarded(accept: impl Fn(&HttpRequest) -> bool + Send + Sync + 'static) -> (Handler, Log) {
         let log: Log = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&log);
-        let handler = fixed(move |request: &Recorded| -> Vec<u8> {
+        let handler = fixed(move |request: &HttpRequest| -> Vec<u8> {
             recorded.lock().unwrap().push(request.clone());
             if request.method == "GET" {
                 return response_bytes("HTTP/1.1 405 Method Not Allowed", None, &[], "");
@@ -1114,9 +1063,9 @@ mod tests {
         (handler, log)
     }
 
-    type Log = Arc<Mutex<Vec<Recorded>>>;
+    type Log = Arc<Mutex<Vec<HttpRequest>>>;
 
-    fn authorization(request: &Recorded) -> Option<&str> {
+    fn authorization(request: &HttpRequest) -> Option<&str> {
         request.headers.get("authorization").map(String::as_str)
     }
 
@@ -1132,7 +1081,11 @@ mod tests {
         )
         .unwrap();
         McpConnection::initialize("srv", peer, inbound, &[], None).unwrap();
-        wait_for(|| log.lock().unwrap().iter().any(|r| r.method == "GET"));
+        assert!(wait_until(|| log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.method == "GET")));
         let log = log.lock().unwrap();
         assert!(log.len() >= 3, "initialize, initialized and the stream");
         for request in log.iter() {
@@ -1250,7 +1203,7 @@ mod tests {
     fn authorization_is_not_forwarded_across_a_redirect() {
         let log: Log = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&log);
-        let handler = fixed(move |request: &Recorded| -> Vec<u8> {
+        let handler = fixed(move |request: &HttpRequest| -> Vec<u8> {
             recorded.lock().unwrap().push(request.clone());
             if request.headers.get("host").map(String::as_str) == Some("other.test") {
                 return initialize_response();

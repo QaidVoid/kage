@@ -5,7 +5,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use kage_core::{CancelFlag, sync::lock};
+use kage_core::{CancelFlag, Content, Message, Role, sync::lock};
 
 use crate::{EventStream, Provider, ProviderError, ProviderEvent, ProviderMetadata, StreamRequest};
 
@@ -107,6 +107,25 @@ impl Provider for MockProvider {
         };
         Ok(Box::new(events.into_iter()))
     }
+}
+
+/// A user message holding `text`.
+#[must_use]
+pub fn user_msg(text: &str) -> Message {
+    Message::new(
+        Role::User,
+        vec![Content::Text {
+            text: text.to_owned(),
+        }],
+        None,
+    )
+}
+
+/// Collect every event of `stream`, panicking on the first error.
+pub fn collect_ok(
+    stream: impl Iterator<Item = Result<ProviderEvent, ProviderError>>,
+) -> Vec<ProviderEvent> {
+    stream.map(|r| r.expect("stream item is Ok")).collect()
 }
 
 #[cfg(test)]

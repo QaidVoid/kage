@@ -1,9 +1,9 @@
 //! Tests for the Lua owner thread: render paths never block on it,
 //! input hooks are bounded, dispatch stays ordered, reload runs there.
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::sync::atomic::Ordering;
+use std::thread;
+use std::time::Duration;
 
 use kage_core::CancelFlag;
 use kage_tools::{ToolContext, ToolError};
@@ -11,16 +11,8 @@ use serde_json::json;
 
 use super::*;
 use crate::api::LogLevel;
+use crate::test_support::{Gate, occupy, wait_until};
 use crate::testing::runtime_with_recording;
-
-const SLOW_TOOL: &str = r"
-    kage.register_tool({
-        name = 'slow',
-        description = '',
-        schema = {},
-        execute = function() kage.sleep_ms(300) return 'done' end,
-    })
-";
 
 fn tool_named(rt: &PluginRuntime, name: &str) -> Arc<dyn kage_tools::Tool> {
     rt.registered_tools()
@@ -35,29 +27,9 @@ fn run_tool(tool: &Arc<dyn kage_tools::Tool>, cancel: &CancelFlag) -> Result<Str
         .map(|out| out.text)
 }
 
-/// Start the slow tool on another thread and return once the owner
-/// thread has it queued or running.
-fn occupy_owner(rt: &PluginRuntime) -> JoinHandle<String> {
-    let tool = tool_named(rt, "slow");
-    let running = thread::spawn(move || run_tool(&tool, &CancelFlag::new()).unwrap());
-    while rt.host.is_idle() {
-        thread::sleep(Duration::from_millis(1));
-    }
-    running
-}
-
-fn wait_for(flag: &AtomicBool) {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while !flag.swap(false, Ordering::SeqCst) {
-        assert!(Instant::now() < deadline, "flag never set");
-        thread::sleep(Duration::from_millis(1));
-    }
-}
-
 #[test]
-fn widget_render_returns_retained_text_while_a_lua_tool_runs() {
+fn widget_render_returns_retained_text_while_the_owner_is_busy() {
     let rt = PluginRuntime::new().unwrap();
-    rt.eval(SLOW_TOOL).unwrap();
     rt.eval(
         "kage.register_widget({ key = 'w', render = function(width) return 'w' .. width end })",
     )
@@ -67,24 +39,18 @@ fn widget_render_returns_retained_text_while_a_lua_tool_runs() {
     let redraw = rt.redraw_flag();
     redraw.store(false, Ordering::SeqCst);
 
-    let running = occupy_owner(&rt);
-    let start = Instant::now();
+    let busy = occupy(&rt.host);
     assert_eq!(widget.render(20), "w10");
-    assert!(
-        start.elapsed() < Duration::from_millis(50),
-        "render blocked for {:?}",
-        start.elapsed()
-    );
-    assert_eq!(running.join().unwrap(), "done");
+    busy.assert_held();
+    busy.open();
 
-    wait_for(&redraw);
+    wait_until(|| redraw.swap(false, Ordering::SeqCst));
     assert_eq!(widget.render(20), "w20");
 }
 
 #[test]
 fn block_render_never_waits_on_a_busy_owner() {
     let rt = PluginRuntime::new().unwrap();
-    rt.eval(SLOW_TOOL).unwrap();
     rt.eval("kage.register_block_renderer('k', function(b) return b.text end)")
         .unwrap();
     let renderer = rt.registered_block_renderers().pop().unwrap();
@@ -93,24 +59,35 @@ fn block_render_never_waits_on_a_busy_owner() {
     let redraw = rt.redraw_flag();
     redraw.store(false, Ordering::SeqCst);
 
-    let running = occupy_owner(&rt);
-    let start = Instant::now();
+    let busy = occupy(&rt.host);
     assert_eq!(renderer.render(&block("a")).unwrap()[0].spans[0].text, "a");
     assert!(renderer.render(&block("b")).is_none());
-    assert!(start.elapsed() < Duration::from_millis(50));
-    running.join().unwrap();
+    busy.assert_held();
+    busy.open();
 
-    wait_for(&redraw);
+    wait_until(|| redraw.swap(false, Ordering::SeqCst));
     assert_eq!(renderer.render(&block("b")).unwrap()[0].spans[0].text, "b");
 }
 
 #[test]
 fn slow_terminal_hook_lets_the_key_through_and_warns_once() {
     let (rec, rt) = runtime_with_recording(PathBuf::from("."));
+    let gate = Arc::new(Gate::default());
+    let lua_gate = Arc::clone(&gate);
+    rt.with_lua(move |lua| {
+        let hold = lua
+            .create_function(move |_, ()| {
+                lua_gate.hold();
+                Ok(())
+            })
+            .unwrap();
+        lua.globals().set("hold", hold).unwrap();
+    })
+    .unwrap();
     rt.eval(
         r"
         kage.on_terminal_input(function(ev)
-            if ev.code == 'slow' then kage.sleep_ms(100) end
+            if ev.code == 'slow' then hold() end
             return true
         end)
         ",
@@ -120,10 +97,9 @@ fn slow_terminal_hook_lets_the_key_through_and_warns_once() {
     assert!(hook.handle(&json!({ "code": "enter" })));
 
     for _ in 0..2 {
-        let start = Instant::now();
         assert!(!hook.handle(&json!({ "code": "slow" })));
-        assert!(start.elapsed() < Duration::from_millis(80));
     }
+    gate.assert_held();
     let warnings: Vec<_> = rec
         .snapshot()
         .logs
@@ -132,16 +108,14 @@ fn slow_terminal_hook_lets_the_key_through_and_warns_once() {
         .collect();
     assert_eq!(warnings.len(), 1, "{warnings:?}");
 
-    while !rt.host.is_idle() {
-        thread::sleep(Duration::from_millis(1));
-    }
+    gate.open();
+    wait_until(|| rt.host.is_idle());
     assert!(hook.handle(&json!({ "code": "enter" })));
 }
 
 #[test]
 fn lua_tool_honors_cancel_while_waiting_for_a_busy_owner() {
     let rt = PluginRuntime::new().unwrap();
-    rt.eval(SLOW_TOOL).unwrap();
     rt.eval(
         r"
         kage.register_tool({
@@ -153,18 +127,17 @@ fn lua_tool_honors_cancel_while_waiting_for_a_busy_owner() {
         ",
     )
     .unwrap();
-    let running = occupy_owner(&rt);
+    let busy = occupy(&rt.host);
     let cancel = CancelFlag::new();
     let flag = cancel.clone();
     thread::spawn(move || {
         thread::sleep(Duration::from_millis(20));
         flag.cancel();
     });
-    let start = Instant::now();
     let result = run_tool(&tool_named(&rt, "fast"), &cancel);
     assert!(matches!(result, Err(ToolError::Cancelled)), "{result:?}");
-    assert!(start.elapsed() < Duration::from_millis(150));
-    running.join().unwrap();
+    busy.assert_held();
+    busy.open();
     assert!(
         rt.eval("return fast_ran").unwrap().is_nil(),
         "a cancelled tool call must not run later"
@@ -239,22 +212,18 @@ fn render_surfaces_outlive_the_runtime_handle() {
 #[test]
 fn handler_count_answers_while_the_owner_is_busy() {
     let rt = PluginRuntime::new().unwrap();
-    rt.eval(SLOW_TOOL).unwrap();
     rt.eval("kage.on('turn_start', function() end)").unwrap();
-    let running = occupy_owner(&rt);
-    let start = Instant::now();
+    let busy = occupy(&rt.host);
     assert_eq!(rt.handler_count("turn_start"), 1);
     assert_eq!(rt.handler_count("turn_end"), 0);
-    assert!(start.elapsed() < Duration::from_millis(100));
-    assert_eq!(running.join().unwrap(), "done");
+    busy.assert_held();
+    busy.open();
 }
 
 #[test]
 fn dispatch_without_subscribers_skips_the_owner() {
     let rt = PluginRuntime::new().unwrap();
-    rt.eval(SLOW_TOOL).unwrap();
-    let running = occupy_owner(&rt);
-    let start = Instant::now();
+    let busy = occupy(&rt.host);
     rt.dispatch_event("turn_end", &json!({})).unwrap();
     let payload = rt
         .dispatch_transform("transform_context", json!({ "keep": 1 }))
@@ -264,21 +233,19 @@ fn dispatch_without_subscribers_skips_the_owner() {
             .unwrap()
     );
     rt.notify_event("turn_end", &json!({})).unwrap();
-    assert!(start.elapsed() < Duration::from_millis(100));
+    busy.assert_held();
+    busy.open();
     assert_eq!(payload, json!({ "keep": 1 }));
-    assert_eq!(running.join().unwrap(), "done");
 }
 
 #[test]
 fn notify_event_returns_before_its_handler_runs() {
     let rt = PluginRuntime::new().unwrap();
-    rt.eval(SLOW_TOOL).unwrap();
     rt.eval("hits = 0; kage.on('user_bash', function(p) hits = hits + p.n end)")
         .unwrap();
-    let running = occupy_owner(&rt);
-    let start = Instant::now();
+    let busy = occupy(&rt.host);
     rt.notify_event("user_bash", &json!({ "n": 2 })).unwrap();
-    assert!(start.elapsed() < Duration::from_millis(100));
-    assert_eq!(running.join().unwrap(), "done");
+    busy.assert_held();
+    busy.open();
     assert_eq!(rt.eval("return hits").unwrap().as_integer(), Some(2));
 }

@@ -45,6 +45,8 @@ pub mod status;
 pub(crate) mod stdlib;
 pub(crate) mod store;
 pub mod terminal_input;
+#[cfg(test)]
+mod test_support;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 pub(crate) mod theme;

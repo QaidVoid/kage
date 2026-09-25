@@ -563,48 +563,31 @@ fn reload_connection(
 
 #[cfg(test)]
 mod tests {
-    use std::io::BufReader;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread;
 
     use super::*;
     use crate::server::PROTOCOL_VERSION;
+    use crate::test_support::{FakeServer, Reply, Seen, StaticTokens, scripted, serve, wait_until};
     use kage_core::config::McpServer;
-    use kage_jsonrpc::{Inbound, connect};
+    use kage_jsonrpc::Inbound;
 
     /// A server whose `tools/list` returns `old` on the first call
     /// and `new` on every call after, so a reload must swap them.
     fn flipping_server() -> Arc<McpConnection> {
-        let (cli_r, srv_w) = std::io::pipe().unwrap();
-        let (srv_r, cli_w) = std::io::pipe().unwrap();
-        let (cli_peer, cli_in, _c) = connect(BufReader::new(cli_r), cli_w);
-        let (srv_peer, srv_in, _s) = connect(BufReader::new(srv_r), srv_w);
-        let responder = srv_peer.clone();
-        let calls = Arc::new(AtomicUsize::new(0));
-        thread::spawn(move || {
-            for msg in srv_in {
-                let Inbound::Request { id, method, .. } = msg else {
-                    continue;
-                };
-                let outcome = match method.as_str() {
-                    "initialize" => Ok(serde_json::json!({
-                        "protocolVersion": PROTOCOL_VERSION,
-                        "capabilities": {},
-                        "serverInfo": { "name": "x", "version": "0" },
-                    })),
-                    "tools/list" => {
-                        let n = calls.fetch_add(1, Ordering::SeqCst);
-                        let tool = if n == 0 { "old" } else { "new" };
-                        Ok(serde_json::json!({
-                            "tools": [{ "name": tool, "inputSchema": {} }]
-                        }))
-                    }
-                    other => Err(kage_jsonrpc::RpcError::method_not_found(other)),
-                };
-                let _ = responder.respond(&id, outcome);
-            }
-        });
-        Arc::new(McpConnection::initialize("x", cli_peer, cli_in, &[], None).unwrap())
+        let calls = AtomicUsize::new(0);
+        let (conn, _srv, _seen) =
+            scripted("x", serde_json::json!({}), move |method, _| match method {
+                "tools/list" => {
+                    let n = calls.fetch_add(1, Ordering::SeqCst);
+                    let tool = if n == 0 { "old" } else { "new" };
+                    Ok(serde_json::json!({
+                        "tools": [{ "name": tool, "inputSchema": {} }]
+                    }))
+                }
+                other => Err(kage_jsonrpc::RpcError::method_not_found(other)),
+            });
+        conn
     }
 
     #[test]
@@ -714,11 +697,7 @@ mod tests {
         kill: Arc<AtomicBool>,
         capabilities: serde_json::Value,
     ) -> Arc<McpConnection> {
-        let (cli_r, srv_w) = std::io::pipe().unwrap();
-        let (srv_r, cli_w) = std::io::pipe().unwrap();
-        let (cli_peer, cli_in, _c) = connect(BufReader::new(cli_r), cli_w);
-        let (srv_peer, srv_in, _s) = connect(BufReader::new(srv_r), srv_w);
-        let responder = srv_peer.clone();
+        let ((cli_peer, cli_in), (responder, srv_in)) = kage_jsonrpc::testing::pair();
         thread::spawn(move || {
             loop {
                 if kill.load(Ordering::SeqCst) {
@@ -778,15 +757,10 @@ mod tests {
         assert_eq!(mgr.len(), 1);
 
         kill.store(true, Ordering::SeqCst);
-        let mut dead = false;
-        for _ in 0..200 {
-            if conn.is_dead() {
-                dead = true;
-                break;
-            }
-            thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(dead, "kill switch must close the transport");
+        assert!(
+            wait_until(|| conn.is_dead()),
+            "kill switch must close the transport"
+        );
 
         let errors = mgr.refresh_into(&mut reg);
         assert_eq!(errors.len(), 1, "{errors:?}");
@@ -817,13 +791,9 @@ mod tests {
     /// fails while `fail_resources` is set.
     fn catalog_server(
         fail_resources: Arc<AtomicBool>,
-    ) -> (
-        Arc<McpConnection>,
-        kage_jsonrpc::Peer,
-        crate::catalog::tests::Seen,
-    ) {
+    ) -> (Arc<McpConnection>, kage_jsonrpc::Peer, Seen) {
         let caps = serde_json::json!({ "tools": {}, "resources": {}, "prompts": {} });
-        crate::catalog::tests::scripted("srv", caps, move |method, _| {
+        scripted("srv", caps, move |method, _| {
             Ok(match method {
                 "tools/list" => {
                     serde_json::json!({ "tools": [{ "name": "t", "inputSchema": {} }] })
@@ -843,17 +813,7 @@ mod tests {
         })
     }
 
-    fn wait_dead(conn: &McpConnection) {
-        for _ in 0..200 {
-            if conn.is_dead() {
-                return;
-            }
-            thread::sleep(std::time::Duration::from_millis(10));
-        }
-        panic!("kill switch must close the transport");
-    }
-
-    fn methods(seen: &crate::catalog::tests::Seen) -> Vec<String> {
+    fn methods(seen: &Seen) -> Vec<String> {
         seen.lock().unwrap().drain(..).map(|(m, _)| m).collect()
     }
 
@@ -926,11 +886,7 @@ mod tests {
     /// An HTTP MCP server on 127.0.0.1 that answers `initialize` (and
     /// `tools/list` with one tool) to `Bearer good` while `ready` is set,
     /// and 401 otherwise and to the `refused` method.
-    fn guarded_server(
-        ready: Arc<AtomicBool>,
-        refused: Option<&'static str>,
-    ) -> crate::oauth::tests::FakeServer {
-        use crate::oauth::tests::{Reply, serve};
+    fn guarded_server(ready: Arc<AtomicBool>, refused: Option<&'static str>) -> FakeServer {
         serve(move |request, _| {
             if request.method == "GET" {
                 return Reply::status(405);
@@ -985,7 +941,7 @@ mod tests {
     fn a_refused_token_needs_auth_and_restart_sends_the_token() {
         let ready = Arc::new(AtomicBool::new(false));
         let server = guarded_server(Arc::clone(&ready), None);
-        let tokens = crate::oauth::tests::StaticTokens::new("good", None);
+        let tokens = StaticTokens::new("good", None);
         let (mut mgr, errors) = McpManager::spawn_all_with(
             &remote_config(format!("{}/mcp", server.base)),
             vec![],
@@ -1017,7 +973,7 @@ mod tests {
     #[test]
     fn a_live_server_that_refuses_its_token_needs_auth() {
         let server = guarded_server(Arc::new(AtomicBool::new(true)), Some("tools/list"));
-        let tokens = crate::oauth::tests::StaticTokens::new("good", None);
+        let tokens = StaticTokens::new("good", None);
         let (mut mgr, errors) = McpManager::spawn_all_with(
             &remote_config(format!("{}/mcp", server.base)),
             vec![],
@@ -1039,10 +995,7 @@ mod tests {
 
     /// A manager with the guarded `remote` server spawned and its tools
     /// registered.
-    fn signed_in(
-        server: &crate::oauth::tests::FakeServer,
-        tokens: &Arc<crate::oauth::tests::StaticTokens>,
-    ) -> (McpManager, ToolRegistry) {
+    fn signed_in(server: &FakeServer, tokens: &Arc<StaticTokens>) -> (McpManager, ToolRegistry) {
         let (mut mgr, errors) = McpManager::spawn_all_with(
             &remote_config(format!("{}/mcp", server.base)),
             vec![],
@@ -1069,7 +1022,7 @@ mod tests {
     #[test]
     fn a_refused_tool_call_needs_auth_at_the_next_refresh() {
         let server = guarded_server(Arc::new(AtomicBool::new(true)), Some("tools/call"));
-        let tokens = crate::oauth::tests::StaticTokens::new("good", None);
+        let tokens = StaticTokens::new("good", None);
         let (mut mgr, mut reg) = signed_in(&server, &tokens);
 
         let cancel = kage_core::CancelFlag::default();
@@ -1087,7 +1040,7 @@ mod tests {
     fn a_refused_restart_takes_the_live_server_down() {
         let ready = Arc::new(AtomicBool::new(true));
         let server = guarded_server(Arc::clone(&ready), None);
-        let tokens = crate::oauth::tests::StaticTokens::new("good", None);
+        let tokens = StaticTokens::new("good", None);
         let (mut mgr, mut reg) = signed_in(&server, &tokens);
 
         ready.store(false, Ordering::SeqCst);
@@ -1098,7 +1051,7 @@ mod tests {
     #[test]
     fn a_logout_needs_auth_at_the_next_refresh() {
         let server = guarded_server(Arc::new(AtomicBool::new(true)), None);
-        let tokens = crate::oauth::tests::StaticTokens::new("good", None);
+        let tokens = StaticTokens::new("good", None);
         let (mut mgr, mut reg) = signed_in(&server, &tokens);
         assert!(mgr.refresh_into(&mut reg).is_empty());
 
@@ -1136,7 +1089,7 @@ mod tests {
 
     #[test]
     fn the_resource_tool_exists_only_while_a_live_server_has_resources() {
-        let (plain, _srv, _seen) = crate::catalog::tests::scripted(
+        let (plain, _srv, _seen) = scripted(
             "plain",
             serde_json::json!({ "tools": {} }),
             |method, _| match method {
@@ -1166,7 +1119,10 @@ mod tests {
         assert_eq!(tool.risk(), kage_core::Risk::Read);
 
         kill.store(true, Ordering::SeqCst);
-        wait_dead(&conn);
+        assert!(
+            wait_until(|| conn.is_dead()),
+            "kill switch must close the transport"
+        );
         let errors = mgr.refresh_into(&mut reg);
         assert!(
             matches!(&errors[..], [(name, McpError::Crashed { .. })] if name == "x"),

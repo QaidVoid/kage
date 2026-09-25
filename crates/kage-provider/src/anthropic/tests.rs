@@ -1,17 +1,8 @@
 //! Tests for the Anthropic provider and SSE stream.
 
 use super::*;
+use crate::testing::{collect_ok, user_msg};
 use kage_core::{Content, Message, Role};
-
-fn user_msg(text: &str) -> Message {
-    Message::new(
-        Role::User,
-        vec![Content::Text {
-            text: text.to_owned(),
-        }],
-        None,
-    )
-}
 
 fn assistant_tool_call(id: &str, name: &str) -> Message {
     Message::new(
@@ -361,10 +352,6 @@ fn parse_response_extracts_tool_call_and_cache_tokens() {
 
 fn stream_from_bytes(bytes: &'static [u8]) -> AnthropicStream {
     AnthropicStream::new(Box::new(std::io::Cursor::new(bytes)), CancelFlag::new())
-}
-
-fn collect_ok(stream: AnthropicStream) -> Vec<ProviderEvent> {
-    stream.map(|r| r.expect("stream item is Ok")).collect()
 }
 
 #[test]

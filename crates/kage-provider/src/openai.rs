@@ -540,16 +540,7 @@ fn parse_finish_reason(value: &str) -> StopReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn user_msg(text: &str) -> Message {
-        Message::new(
-            Role::User,
-            vec![Content::Text {
-                text: text.to_owned(),
-            }],
-            None,
-        )
-    }
+    use crate::testing::{collect_ok, user_msg};
 
     #[test]
     fn body_includes_model_and_messages() {
@@ -670,10 +661,6 @@ mod tests {
 
     fn stream_from_bytes(bytes: &'static [u8]) -> OpenAiStream {
         OpenAiStream::new(Box::new(std::io::Cursor::new(bytes)), CancelFlag::new())
-    }
-
-    fn collect_ok(stream: OpenAiStream) -> Vec<ProviderEvent> {
-        stream.map(|r| r.expect("stream item is Ok")).collect()
     }
 
     #[test]

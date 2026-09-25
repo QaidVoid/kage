@@ -489,16 +489,7 @@ fn parse_finish_reason(value: &str) -> StopReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn user_msg(text: &str) -> Message {
-        Message::new(
-            Role::User,
-            vec![Content::Text {
-                text: text.to_owned(),
-            }],
-            None,
-        )
-    }
+    use crate::testing::{collect_ok, user_msg};
 
     #[test]
     fn body_has_contents_and_generation_config() {
@@ -599,10 +590,6 @@ mod tests {
 
     fn stream_from_bytes(bytes: &'static [u8]) -> GeminiStream {
         GeminiStream::new(Box::new(std::io::Cursor::new(bytes)), CancelFlag::new())
-    }
-
-    fn collect_ok(stream: GeminiStream) -> Vec<ProviderEvent> {
-        stream.map(|r| r.expect("stream item is Ok")).collect()
     }
 
     #[test]

@@ -1,21 +1,13 @@
 //! Tests for the agent loop.
 
 use kage_core::{CancelFlag, Content, Message, Role, TokenUsage};
-use kage_provider::{ProviderEvent, StopReason, testing::MockProvider};
+use kage_provider::testing::{MockProvider, user_msg};
+use kage_provider::{ProviderEvent, StopReason};
 use kage_tools::ToolRegistry;
 
 use super::*;
 use crate::NoopHooks;
-
-fn user_msg(text: &str) -> Message {
-    Message::new(
-        Role::User,
-        vec![Content::Text {
-            text: text.to_owned(),
-        }],
-        None,
-    )
-}
+use crate::test_support::{Meet, MeetTool};
 
 #[test]
 fn build_request_forwards_max_output_tokens_from_context() {
@@ -638,77 +630,6 @@ fn transform_provider_request_observes_and_can_rewrite() {
     assert_eq!(req.system.as_deref(), Some("rewritten"));
 }
 
-#[derive(Debug)]
-struct SleepTool {
-    millis: u64,
-}
-
-impl kage_tools::Tool for SleepTool {
-    fn name(&self) -> &'static str {
-        "sleep"
-    }
-    fn description(&self) -> &'static str {
-        "sleeps"
-    }
-    fn schema(&self) -> serde_json::Value {
-        serde_json::json!({"type": "object"})
-    }
-    fn risk(&self) -> kage_core::Risk {
-        kage_core::Risk::Read
-    }
-    fn execute(
-        &self,
-        _input: serde_json::Value,
-        _cx: &kage_tools::ToolContext<'_>,
-    ) -> Result<kage_core::ToolOutput, kage_tools::ToolError> {
-        std::thread::sleep(std::time::Duration::from_millis(self.millis));
-        Ok(kage_core::ToolOutput {
-            is_error: false,
-            text: "ok".into(),
-            structured: None,
-            terminate: false,
-        })
-    }
-}
-
-#[derive(Debug)]
-struct SeqSleepTool;
-
-impl kage_tools::Tool for SeqSleepTool {
-    fn name(&self) -> &'static str {
-        "seq_sleep"
-    }
-    fn description(&self) -> &'static str {
-        "sleeps and requires sequential dispatch"
-    }
-    fn schema(&self) -> serde_json::Value {
-        serde_json::json!({"type": "object"})
-    }
-    fn risk(&self) -> kage_core::Risk {
-        kage_core::Risk::Exec
-    }
-    fn execution_mode(&self) -> Option<kage_tools::ExecMode> {
-        Some(kage_tools::ExecMode::Sequential)
-    }
-    fn execute(
-        &self,
-        _input: serde_json::Value,
-        _cx: &kage_tools::ToolContext<'_>,
-    ) -> Result<kage_core::ToolOutput, kage_tools::ToolError> {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        Ok(kage_core::ToolOutput {
-            is_error: false,
-            text: "ok".into(),
-            structured: None,
-            terminate: false,
-        })
-    }
-}
-
-fn three_tool_call_turn() -> Vec<Result<ProviderEvent, kage_provider::ProviderError>> {
-    tool_call_turn(&["seq_sleep", "sleep", "sleep"])
-}
-
 fn tool_call_turn(names: &[&str]) -> Vec<Result<ProviderEvent, kage_provider::ProviderError>> {
     let mut events = vec![Ok(ProviderEvent::MessageStart)];
     for (i, name) in names.iter().enumerate() {
@@ -731,112 +652,6 @@ fn tool_call_turn(names: &[&str]) -> Vec<Result<ProviderEvent, kage_provider::Pr
         usage: TokenUsage::default(),
     }));
     events
-}
-
-#[test]
-fn sequential_tool_in_batch_downgrades_parallel_dispatch() {
-    let mock = MockProvider::sequence(vec![
-        three_tool_call_turn(),
-        vec![Ok(ProviderEvent::MessageEnd {
-            stop_reason: StopReason::EndTurn,
-            usage: TokenUsage::default(),
-        })],
-    ]);
-    let mut cx = AgentContext::new("mock:m", "");
-    cx.history.push(user_msg("go"));
-    let cfg = LoopConfig {
-        parallel_tools: true,
-        ..LoopConfig::default()
-    };
-    let mut hooks = NoopHooks;
-    let cancel = CancelFlag::new();
-    let mut registry = ToolRegistry::new();
-    registry.register(std::sync::Arc::new(SeqSleepTool));
-    registry.register(std::sync::Arc::new(SleepTool { millis: 100 }));
-
-    let start = std::time::Instant::now();
-    run(&mock, &registry, &mut cx, cfg, &mut hooks, &cancel, |_| {}).unwrap();
-    let elapsed = start.elapsed();
-    // Three 100ms tools serialized take ~300ms+; parallel would take ~100ms.
-    assert!(
-        elapsed.as_millis() >= 250,
-        "expected sequential fallback, elapsed {}ms",
-        elapsed.as_millis(),
-    );
-}
-
-/// A barrier with a timeout: each arrival waits until `parties` calls
-/// have arrived, or gives up after `timeout`.
-#[derive(Debug)]
-struct Meet {
-    parties: usize,
-    timeout: std::time::Duration,
-    arrived: std::sync::Mutex<usize>,
-    all_here: std::sync::Condvar,
-}
-
-impl Meet {
-    fn new(parties: usize, timeout: std::time::Duration) -> std::sync::Arc<Self> {
-        std::sync::Arc::new(Self {
-            parties,
-            timeout,
-            arrived: std::sync::Mutex::new(0),
-            all_here: std::sync::Condvar::new(),
-        })
-    }
-
-    /// Arrive and wait. Returns whether every party arrived in time.
-    fn arrive(&self) -> bool {
-        let mut arrived = self.arrived.lock().unwrap();
-        *arrived += 1;
-        self.all_here.notify_all();
-        let (arrived, _) = self
-            .all_here
-            .wait_timeout_while(arrived, self.timeout, |n| *n < self.parties)
-            .unwrap();
-        *arrived >= self.parties
-    }
-}
-
-/// Meets the other calls of its batch at a shared [`Meet`]. Its result is
-/// an error when the others never arrived, which is what sequential
-/// dispatch produces.
-#[derive(Debug)]
-struct MeetTool {
-    name: &'static str,
-    mode: Option<kage_tools::ExecMode>,
-    meet: std::sync::Arc<Meet>,
-}
-
-impl kage_tools::Tool for MeetTool {
-    fn name(&self) -> &str {
-        self.name
-    }
-    fn description(&self) -> &'static str {
-        "waits for the other calls of its batch"
-    }
-    fn schema(&self) -> serde_json::Value {
-        serde_json::json!({"type": "object"})
-    }
-    fn risk(&self) -> kage_core::Risk {
-        kage_core::Risk::Read
-    }
-    fn execution_mode(&self) -> Option<kage_tools::ExecMode> {
-        self.mode
-    }
-    fn execute(
-        &self,
-        _input: serde_json::Value,
-        _cx: &kage_tools::ToolContext<'_>,
-    ) -> Result<kage_core::ToolOutput, kage_tools::ToolError> {
-        let met = self.meet.arrive();
-        Ok(kage_core::ToolOutput {
-            is_error: !met,
-            text: if met { "met" } else { "alone" }.into(),
-            structured: None,
-            terminate: false,
-        })
-    }
 }
 
 /// Run one turn calling `tools` in order, then an empty final turn,
@@ -879,6 +694,29 @@ fn run_meet_batch(tools: Vec<MeetTool>, parallel_tools: bool) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+#[test]
+fn sequential_tool_in_batch_downgrades_parallel_dispatch() {
+    let meet = Meet::new(2, std::time::Duration::from_millis(100));
+    let tools = vec![
+        MeetTool {
+            name: "seq",
+            mode: Some(kage_tools::ExecMode::Sequential),
+            meet: meet.clone(),
+        },
+        MeetTool {
+            name: "a",
+            mode: None,
+            meet: meet.clone(),
+        },
+        MeetTool {
+            name: "b",
+            mode: None,
+            meet,
+        },
+    ];
+    assert_eq!(run_meet_batch(tools, true), ["alone", "met", "met"]);
 }
 
 #[test]
@@ -1700,7 +1538,9 @@ impl EventLog {
 }
 
 fn transient_turn() -> Vec<Result<ProviderEvent, kage_provider::ProviderError>> {
-    vec![Err(kage_provider::ProviderError::Transport("boom".into()))]
+    vec![Err(kage_provider::ProviderError::RateLimited {
+        retry_after: Some(Duration::from_millis(1)),
+    })]
 }
 
 fn good_turn() -> Vec<Result<ProviderEvent, kage_provider::ProviderError>> {

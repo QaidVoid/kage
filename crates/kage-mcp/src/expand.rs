@@ -432,7 +432,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::catalog::tests::{Seen, scripted};
+    use crate::test_support::{Seen, scripted};
 
     fn text(text: &str) -> Content {
         Content::Text { text: text.into() }

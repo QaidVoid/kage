@@ -275,76 +275,54 @@ pub fn tools_from_connection(conn: &Arc<McpConnection>) -> Result<Vec<Arc<dyn To
 
 #[cfg(test)]
 mod tests {
-    use std::io::BufReader;
-    use std::thread;
-
     use kage_core::CancelFlag;
 
     use super::*;
-    use crate::server::PROTOCOL_VERSION;
-    use kage_jsonrpc::{Inbound, Peer, connect};
+    use crate::test_support::{answer_requests, scripted, wait_until};
 
-    /// A scripted MCP server: answers `initialize`, serves a two-page
-    /// `tools/list`, and echoes `tools/call` arguments back as text.
-    fn scripted() -> (Arc<McpConnection>, thread::JoinHandle<()>) {
-        let (cli_r, srv_w) = std::io::pipe().unwrap();
-        let (srv_r, cli_w) = std::io::pipe().unwrap();
-        let (cli_peer, cli_in, _c) = connect(BufReader::new(cli_r), cli_w);
-        let (srv_peer, srv_in, _s) = connect(BufReader::new(srv_r), srv_w);
-        let responder: Peer = srv_peer.clone();
-        let handle = thread::spawn(move || {
-            for msg in srv_in {
-                let Inbound::Request { id, method, params } = msg else {
-                    continue;
-                };
-                let outcome = match method.as_str() {
-                    "initialize" => Ok(serde_json::json!({
-                        "protocolVersion": PROTOCOL_VERSION,
-                        "capabilities": { "tools": {} },
-                        "serverInfo": { "name": "fs", "version": "0" },
-                    })),
-                    "tools/list" => {
-                        if params.get("cursor").and_then(|c| c.as_str()) == Some("p2") {
-                            Ok(serde_json::json!({
-                                "tools": [{
-                                    "name": "write_file",
-                                    "description": "write a file",
-                                    "inputSchema": { "type": "object" },
-                                }]
-                            }))
-                        } else {
-                            Ok(serde_json::json!({
-                                "tools": [{
-                                    "name": "read_file",
-                                    "description": "read a file",
-                                    "inputSchema": {
-                                        "type": "object",
-                                        "properties": { "path": { "type": "string" } },
-                                    },
-                                }],
-                                "nextCursor": "p2",
-                            }))
-                        }
-                    }
-                    "tools/call" => {
-                        let args = params.get("arguments").cloned().unwrap_or_default();
-                        Ok(serde_json::json!({
-                            "content": [{ "type": "text", "text": args.to_string() }],
-                            "isError": false,
-                        }))
-                    }
-                    other => Err(kage_jsonrpc::RpcError::method_not_found(other)),
-                };
-                let _ = responder.respond(&id, outcome);
+    /// A scripted MCP server: serves a two-page `tools/list` and echoes
+    /// `tools/call` arguments back as text.
+    fn fs_server() -> Arc<McpConnection> {
+        let caps = serde_json::json!({ "tools": {} });
+        let (conn, _srv, _seen) = scripted("fs", caps, |method, params| match method {
+            "tools/list" => {
+                if params.get("cursor").and_then(|c| c.as_str()) == Some("p2") {
+                    Ok(serde_json::json!({
+                        "tools": [{
+                            "name": "write_file",
+                            "description": "write a file",
+                            "inputSchema": { "type": "object" },
+                        }]
+                    }))
+                } else {
+                    Ok(serde_json::json!({
+                        "tools": [{
+                            "name": "read_file",
+                            "description": "read a file",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": { "path": { "type": "string" } },
+                            },
+                        }],
+                        "nextCursor": "p2",
+                    }))
+                }
             }
+            "tools/call" => {
+                let args = params.get("arguments").cloned().unwrap_or_default();
+                Ok(serde_json::json!({
+                    "content": [{ "type": "text", "text": args.to_string() }],
+                    "isError": false,
+                }))
+            }
+            other => Err(kage_jsonrpc::RpcError::method_not_found(other)),
         });
-        let conn = Arc::new(McpConnection::initialize("fs", cli_peer, cli_in, &[], None).unwrap());
-        (conn, handle)
+        conn
     }
 
     #[test]
     fn list_tools_follows_pagination() {
-        let (conn, _h) = scripted();
+        let conn = fs_server();
         let defs = conn.list_tools().unwrap();
         let names: Vec<_> = defs.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, ["read_file", "write_file"]);
@@ -352,7 +330,7 @@ mod tests {
 
     #[test]
     fn adapter_namespaces_and_passes_schema() {
-        let (conn, _h) = scripted();
+        let conn = fs_server();
         let tools = tools_from_connection(&conn).unwrap();
         let read = tools.iter().find(|t| t.name() == "fs__read_file").unwrap();
         assert_eq!(read.description(), "read a file");
@@ -362,7 +340,7 @@ mod tests {
 
     #[test]
     fn execute_round_trips_arguments_as_text() {
-        let (conn, _h) = scripted();
+        let conn = fs_server();
         let tools = tools_from_connection(&conn).unwrap();
         let read = tools.iter().find(|t| t.name() == "fs__read_file").unwrap();
         let cancel = CancelFlag::default();
@@ -377,7 +355,7 @@ mod tests {
 
     #[test]
     fn cancelled_call_reports_cancelled() {
-        let (conn, _h) = scripted();
+        let conn = fs_server();
         let tool = McpTool::new(
             Arc::clone(&conn),
             McpToolDef {
@@ -407,48 +385,28 @@ mod tests {
     /// and then twice for the call's own token, and answers only once
     /// both updates reached `seen`, so the test does not race the drain.
     fn progressing(seen: Arc<Updates>) -> Arc<McpConnection> {
-        let (cli_r, srv_w) = std::io::pipe().unwrap();
-        let (srv_r, cli_w) = std::io::pipe().unwrap();
-        let (cli_peer, cli_in, _c) = connect(BufReader::new(cli_r), cli_w);
-        let (srv_peer, srv_in, _s) = connect(BufReader::new(srv_r), srv_w);
-        thread::spawn(move || {
-            for msg in srv_in {
-                let Inbound::Request { id, method, params } = msg else {
-                    continue;
-                };
-                let outcome = match method.as_str() {
-                    "initialize" => Ok(serde_json::json!({
-                        "protocolVersion": PROTOCOL_VERSION,
-                        "capabilities": { "tools": {} },
-                    })),
-                    "tools/call" => {
-                        let token = params["_meta"]["progressToken"].clone();
-                        let notify = |params| {
-                            srv_peer.notify("notifications/progress", params).unwrap();
-                        };
-                        notify(serde_json::json!({ "progressToken": "other", "progress": 9 }));
-                        notify(
-                            serde_json::json!({ "progressToken": token, "progress": 1, "total": 4 }),
-                        );
-                        notify(serde_json::json!({
-                            "progressToken": token,
-                            "progress": 2,
-                            "message": "halfway",
-                        }));
-                        for _ in 0..500 {
-                            if seen.0.lock().unwrap().len() >= 2 {
-                                break;
-                            }
-                            thread::sleep(std::time::Duration::from_millis(10));
-                        }
-                        Ok(serde_json::json!({
-                            "content": [{ "type": "text", "text": token }],
-                        }))
-                    }
-                    other => Err(kage_jsonrpc::RpcError::method_not_found(other)),
-                };
-                let _ = srv_peer.respond(&id, outcome);
+        let ((cli_peer, cli_in), (srv_peer, srv_in)) = kage_jsonrpc::testing::pair();
+        let notifier = srv_peer.clone();
+        let caps = serde_json::json!({ "tools": {} });
+        answer_requests(srv_peer, srv_in, caps, move |method, params| {
+            if method != "tools/call" {
+                return Err(kage_jsonrpc::RpcError::method_not_found(method));
             }
+            let token = params["_meta"]["progressToken"].clone();
+            let notify = |params| {
+                notifier.notify("notifications/progress", params).unwrap();
+            };
+            notify(serde_json::json!({ "progressToken": "other", "progress": 9 }));
+            notify(serde_json::json!({ "progressToken": token, "progress": 1, "total": 4 }));
+            notify(serde_json::json!({
+                "progressToken": token,
+                "progress": 2,
+                "message": "halfway",
+            }));
+            wait_until(|| seen.0.lock().unwrap().len() >= 2);
+            Ok(serde_json::json!({
+                "content": [{ "type": "text", "text": token }],
+            }))
         });
         Arc::new(McpConnection::initialize("fs", cli_peer, cli_in, &[], None).unwrap())
     }
@@ -528,39 +486,21 @@ mod tests {
 
     /// A server whose `tools/list` always advertises one more page:
     /// every response carries a tool plus a fresh `nextCursor`.
-    fn endless() -> (Arc<McpConnection>, thread::JoinHandle<()>) {
-        let (cli_r, srv_w) = std::io::pipe().unwrap();
-        let (srv_r, cli_w) = std::io::pipe().unwrap();
-        let (cli_peer, cli_in, _c) = connect(BufReader::new(cli_r), cli_w);
-        let (srv_peer, srv_in, _s) = connect(BufReader::new(srv_r), srv_w);
-        let responder: Peer = srv_peer.clone();
-        let handle = thread::spawn(move || {
-            for msg in srv_in {
-                let Inbound::Request { id, method, .. } = msg else {
-                    continue;
-                };
-                let outcome = match method.as_str() {
-                    "initialize" => Ok(serde_json::json!({
-                        "protocolVersion": PROTOCOL_VERSION,
-                        "capabilities": { "tools": {} },
-                    })),
-                    "tools/list" => Ok(serde_json::json!({
-                        "tools": [{ "name": "more", "inputSchema": {} }],
-                        "nextCursor": "more",
-                    })),
-                    other => Err(kage_jsonrpc::RpcError::method_not_found(other)),
-                };
-                let _ = responder.respond(&id, outcome);
-            }
+    fn endless() -> Arc<McpConnection> {
+        let caps = serde_json::json!({ "tools": {} });
+        let (conn, _srv, _seen) = scripted("endless", caps, |method, _| match method {
+            "tools/list" => Ok(serde_json::json!({
+                "tools": [{ "name": "more", "inputSchema": {} }],
+                "nextCursor": "more",
+            })),
+            other => Err(kage_jsonrpc::RpcError::method_not_found(other)),
         });
-        let conn =
-            Arc::new(McpConnection::initialize("endless", cli_peer, cli_in, &[], None).unwrap());
-        (conn, handle)
+        conn
     }
 
     #[test]
     fn list_tools_refuses_endless_pagination() {
-        let (conn, _h) = endless();
+        let conn = endless();
         let err = conn.list_tools().unwrap_err();
         assert!(matches!(err, McpError::Protocol { .. }), "got {err:?}");
         assert!(err.to_string().contains("pagination"), "got {err}");

@@ -274,56 +274,12 @@ fn optional(entry: &Value, key: &str) -> Option<String> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    use std::io::BufReader;
-    use std::sync::{Arc, Mutex};
-    use std::thread;
-
-    use kage_jsonrpc::{Inbound, Peer, RpcError, connect};
+mod tests {
+    use kage_jsonrpc::RpcError;
     use serde_json::json;
 
     use super::*;
-    use crate::server::PROTOCOL_VERSION;
-
-    /// Requests a scripted server received, as `(method, params)`.
-    pub(crate) type Seen = Arc<Mutex<Vec<(String, Value)>>>;
-
-    /// An in-process server named `name` that advertises `capabilities`
-    /// and answers every other request with `answer`. Returns the
-    /// client connection, the server's peer (for notifications) and the
-    /// requests it saw after `initialize`.
-    pub(crate) fn scripted(
-        name: &str,
-        capabilities: Value,
-        answer: impl Fn(&str, &Value) -> Result<Value, RpcError> + Send + 'static,
-    ) -> (Arc<McpConnection>, Peer, Seen) {
-        let (cli_r, srv_w) = std::io::pipe().unwrap();
-        let (srv_r, cli_w) = std::io::pipe().unwrap();
-        let (cli_peer, cli_in, _c) = connect(BufReader::new(cli_r), cli_w);
-        let (srv_peer, srv_in, _s) = connect(BufReader::new(srv_r), srv_w);
-        let responder = srv_peer.clone();
-        let seen = Seen::default();
-        let log = Arc::clone(&seen);
-        thread::spawn(move || {
-            for msg in srv_in {
-                let Inbound::Request { id, method, params } = msg else {
-                    continue;
-                };
-                let outcome = if method == "initialize" {
-                    Ok(json!({
-                        "protocolVersion": PROTOCOL_VERSION,
-                        "capabilities": capabilities,
-                    }))
-                } else {
-                    log.lock().unwrap().push((method.clone(), params.clone()));
-                    answer(&method, &params)
-                };
-                let _ = responder.respond(&id, outcome);
-            }
-        });
-        let conn = McpConnection::initialize(name, cli_peer, cli_in, &[], None).unwrap();
-        (Arc::new(conn), srv_peer, seen)
-    }
+    use crate::test_support::{Seen, scripted};
 
     /// Answer a list call with page `cursor` (absent means 0) holding
     /// `per_page` entries built by `entry`, and a `nextCursor` until

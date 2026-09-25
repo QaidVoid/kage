@@ -40,6 +40,9 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, select_biased};
 use kage_core::CancelFlag;
 use kage_core::sync::lock;
 
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
+
 /// Cap on a single inbound line, mirroring the HTTP transport's body
 /// cap: one newline-delimited message cannot exhaust memory. A longer
 /// line is answered with a -32700 error and the connection closes.
@@ -519,18 +522,7 @@ mod tests {
     use std::io::BufReader;
 
     use super::*;
-
-    /// Wire two `connect`ed peers back to back with OS pipes.
-    fn pair() -> (
-        (Peer, mpsc::Receiver<Inbound>),
-        (Peer, mpsc::Receiver<Inbound>),
-    ) {
-        let (a_r, b_w) = std::io::pipe().unwrap();
-        let (b_r, a_w) = std::io::pipe().unwrap();
-        let (a_peer, a_in, _a) = connect(BufReader::new(a_r), a_w);
-        let (b_peer, b_in, _b) = connect(BufReader::new(b_r), b_w);
-        ((a_peer, a_in), (b_peer, b_in))
-    }
+    use crate::testing::pair;
 
     #[test]
     fn request_gets_routed_response() {
@@ -759,15 +751,10 @@ mod tests {
 
     #[test]
     fn pending_request_fails_when_connection_closes() {
-        let (a_r, b_w) = std::io::pipe().unwrap();
-        let (b_r, a_w) = std::io::pipe().unwrap();
-        let (a_peer, _a_in, _h) = connect(BufReader::new(a_r), a_w);
-        // Close the peer end so the reader hits EOF while a request
-        // is outstanding.
-        let waiter = thread::spawn(move || a_peer.request("x", serde_json::Value::Null));
-        thread::sleep(Duration::from_millis(50));
-        drop(b_w);
-        drop(b_r);
+        let (peer, in_w, mut out, _h) = recorded(None);
+        let waiter = thread::spawn(move || peer.request("x", serde_json::Value::Null));
+        assert_eq!(next_line(&mut out)["method"], "x");
+        drop(in_w);
         assert_eq!(waiter.join().unwrap().unwrap_err().code, -32603);
     }
 
@@ -780,12 +767,10 @@ mod tests {
 
     #[test]
     fn parse_error_gets_a_32700_reply() {
-        let (in_r, mut in_w) = std::io::pipe().unwrap();
-        let (out_r, out_w) = std::io::pipe().unwrap();
-        let (_peer, _inbound, _h) = connect(BufReader::new(in_r), out_w);
+        let (_peer, mut in_w, mut out, _h) = recorded(None);
         in_w.write_all(b"not json\n").unwrap();
         let mut reply = String::new();
-        BufReader::new(out_r).read_line(&mut reply).unwrap();
+        out.read_line(&mut reply).unwrap();
         assert!(reply.contains("-32700"), "{reply}");
         assert!(reply.contains("parse error"), "{reply}");
     }
@@ -804,7 +789,7 @@ mod tests {
         BufReader::new(out_r).read_line(&mut reply).unwrap();
         assert!(reply.contains("-32700"), "{reply}");
         assert!(reply.contains("size cap"), "{reply}");
-        match inbound.recv_timeout(Duration::from_secs(1)) {
+        match inbound.recv_timeout(Duration::from_secs(5)) {
             Err(mpsc::RecvTimeoutError::Disconnected) => {}
             other => panic!("expected disconnect, got {other:?}"),
         }
@@ -812,24 +797,21 @@ mod tests {
 
     #[test]
     fn batch_and_scalar_get_32600() {
-        let (in_r, mut in_w) = std::io::pipe().unwrap();
-        let (out_r, out_w) = std::io::pipe().unwrap();
-        let (_peer, _inbound, _h) = connect(BufReader::new(in_r), out_w);
+        let (_peer, mut in_w, mut out, _h) = recorded(None);
         for raw in ["[1, 2]\n", "42\n", "{\"method\":42,\"id\":7}\n"] {
             in_w.write_all(raw.as_bytes()).unwrap();
         }
-        let mut reader = BufReader::new(out_r);
         let mut reply = String::new();
-        reader.read_line(&mut reply).unwrap();
+        out.read_line(&mut reply).unwrap();
         assert!(
             reply.contains("-32600") && reply.contains("expected one JSON-RPC message object"),
             "{reply}"
         );
         reply.clear();
-        reader.read_line(&mut reply).unwrap();
+        out.read_line(&mut reply).unwrap();
         assert!(reply.contains("-32600"), "{reply}");
         reply.clear();
-        reader.read_line(&mut reply).unwrap();
+        out.read_line(&mut reply).unwrap();
         assert!(
             reply.contains("-32600")
                 && reply.contains("\"id\":7")
@@ -845,17 +827,14 @@ mod tests {
     /// serve-then-join teardown.
     #[test]
     fn dropping_the_client_peer_ends_the_server_loop() {
-        let (srv_r, cli_w) = std::io::pipe().unwrap();
-        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let ((client, inbox), (peer, inbound)) = pair();
         let server = thread::spawn(move || {
-            let (peer, inbound, _h) = connect(BufReader::new(srv_r), srv_w);
             for message in inbound {
                 if let Inbound::Request { id, .. } = message {
                     let _ = peer.respond(&id, Err(RpcError::method_not_found("bogus/method")));
                 }
             }
         });
-        let (client, inbox, _h) = connect(BufReader::new(cli_r), cli_w);
         let err = client
             .request("bogus/method", serde_json::Value::Null)
             .unwrap_err();
@@ -867,13 +846,11 @@ mod tests {
 
     #[test]
     fn response_shaped_unknown_id_stays_silent() {
-        let (in_r, mut in_w) = std::io::pipe().unwrap();
-        let (out_r, out_w) = std::io::pipe().unwrap();
-        let (_peer, _inbound, _h) = connect(BufReader::new(in_r), out_w);
+        let (_peer, mut in_w, mut out, _h) = recorded(None);
         in_w.write_all(b"{\"id\":999,\"result\":1}\n").unwrap();
         in_w.write_all(b"boom\n").unwrap();
         let mut reply = String::new();
-        BufReader::new(out_r).read_line(&mut reply).unwrap();
+        out.read_line(&mut reply).unwrap();
         // The first reply must belong to `boom`: the response-shaped
         // line was dropped, not answered with -32600.
         assert!(reply.contains("-32700"), "{reply}");

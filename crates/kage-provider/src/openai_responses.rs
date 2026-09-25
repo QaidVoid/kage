@@ -603,16 +603,7 @@ impl Iterator for ResponsesStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn user_msg(text: &str) -> Message {
-        Message::new(
-            Role::User,
-            vec![Content::Text {
-                text: text.to_owned(),
-            }],
-            None,
-        )
-    }
+    use crate::testing::{collect_ok, user_msg};
 
     #[test]
     fn body_uses_input_array_and_instructions_field() {
@@ -812,10 +803,6 @@ mod tests {
 
     fn stream_from_bytes(bytes: &'static [u8]) -> ResponsesStream {
         ResponsesStream::new(Box::new(std::io::Cursor::new(bytes)), CancelFlag::new())
-    }
-
-    fn collect_ok(stream: ResponsesStream) -> Vec<ProviderEvent> {
-        stream.map(|r| r.expect("stream item is Ok")).collect()
     }
 
     #[test]

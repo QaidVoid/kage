@@ -229,7 +229,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::catalog::tests::{Seen, scripted};
+    use crate::test_support::{Seen, scripted};
 
     fn resource(uri: &str, name: &str) -> McpResource {
         McpResource {

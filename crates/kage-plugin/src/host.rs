@@ -286,9 +286,8 @@ impl Owner {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
     use super::*;
+    use crate::test_support::{TIMEOUT, occupy};
 
     fn started() -> LuaHost {
         let (host, owner) = LuaHost::new();
@@ -318,14 +317,13 @@ mod tests {
     #[test]
     fn call_within_times_out_and_skips_the_stale_job() {
         let host = started();
-        host.submit(|_| thread::sleep(Duration::from_millis(100)))
-            .unwrap();
-        let start = Instant::now();
+        let busy = occupy(&host);
         let reply = host.call_within(Duration::from_millis(20), |lua| {
             lua.globals().set("ran", true).unwrap();
         });
         assert!(reply.is_none());
-        assert!(start.elapsed() < Duration::from_millis(90));
+        busy.assert_held();
+        busy.open();
         let ran: bool = host
             .call(|lua| {
                 lua.globals()
@@ -340,17 +338,12 @@ mod tests {
     #[test]
     fn call_cancellable_returns_when_cancelled() {
         let host = started();
-        host.submit(|_| thread::sleep(Duration::from_millis(200)))
-            .unwrap();
+        let busy = occupy(&host);
         let cancel = CancelFlag::new();
-        let flag = cancel.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(20));
-            flag.cancel();
-        });
-        let start = Instant::now();
+        cancel.cancel();
         assert!(host.call_cancellable(&cancel, |_| ()).unwrap().is_none());
-        assert!(start.elapsed() < Duration::from_millis(150));
+        busy.assert_held();
+        busy.open();
     }
 
     #[test]
@@ -385,14 +378,11 @@ mod tests {
                 .unwrap();
         })
         .unwrap();
-        assert_eq!(
-            rx.recv_timeout(Duration::from_millis(20)),
-            Err(RecvTimeoutError::Timeout)
-        );
+        assert_eq!(rx.try_recv(), Err(mpsc::TryRecvError::Empty));
         let weak = host.downgrade();
         drop(host);
         assert_eq!(
-            rx.recv_timeout(Duration::from_secs(2)),
+            rx.recv_timeout(TIMEOUT),
             Err(RecvTimeoutError::Disconnected)
         );
         assert!(weak.upgrade().is_err());

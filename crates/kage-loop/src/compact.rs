@@ -259,20 +259,11 @@ fn summarize(
 #[cfg(test)]
 mod tests {
     use kage_core::{Content, Role, TokenUsage};
-    use kage_provider::{ProviderEvent, StopReason, testing::MockProvider};
+    use kage_provider::testing::{MockProvider, user_msg};
+    use kage_provider::{ProviderEvent, StopReason};
 
     use super::*;
     use crate::NoopHooks;
-
-    fn user_msg(text: &str) -> Message {
-        Message::new(
-            Role::User,
-            vec![Content::Text {
-                text: text.to_owned(),
-            }],
-            None,
-        )
-    }
 
     fn assistant_msg(text: &str) -> Message {
         Message::new(

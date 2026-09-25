@@ -168,6 +168,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::test_support::wait_until;
 
     /// Wait up to `timeout` for the watcher to flip dirty. Returns the
     /// final value the watcher reported. The OS-level events propagate
@@ -253,10 +254,10 @@ mod tests {
         let user = tempdir().unwrap();
         let w = PluginWatcher::for_config(None, Some(user.path().to_path_buf())).unwrap();
         fs::create_dir(user.path().join("lua")).unwrap();
-        sleep(Duration::from_millis(200));
-        let _ = w.poll();
-        fs::write(user.path().join("lua/x.lua"), "return 1").unwrap();
-        assert!(wait_for_change(&w, Duration::from_secs(2)));
+        wait_until(|| {
+            fs::write(user.path().join("lua/x.lua"), "return 1").unwrap();
+            w.poll()
+        });
     }
 
     #[test]

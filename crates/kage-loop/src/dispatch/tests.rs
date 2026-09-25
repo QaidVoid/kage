@@ -7,6 +7,7 @@ use kage_tools::Tool;
 
 use super::*;
 use crate::NoopHooks;
+use crate::test_support::{Meet, MeetTool};
 
 #[derive(Debug)]
 struct EchoTool;
@@ -604,7 +605,11 @@ fn parallel_dispatch_preserves_input_order() {
 
 #[test]
 fn parallel_dispatch_actually_runs_concurrently() {
-    let tools = ToolRegistry::new().with(Arc::new(SleepTool { millis: 100 }));
+    let tools = ToolRegistry::new().with(Arc::new(MeetTool {
+        name: "meet",
+        mode: None,
+        meet: Meet::new(3, std::time::Duration::from_secs(5)),
+    }));
     let cancel = CancelFlag::new();
     let parent = MessageId::new();
     let mut hooks = NoopHooks;
@@ -612,12 +617,11 @@ fn parallel_dispatch_actually_runs_concurrently() {
     let pendings: Vec<_> = (0..3)
         .map(|i| pending(&format!("call_{i}"), serde_json::json!({})))
         .map(|mut c| {
-            c.name = "sleep".to_owned();
+            c.name = "meet".to_owned();
             c
         })
         .collect();
 
-    let start = std::time::Instant::now();
     let results = dispatch_tool_calls_parallel(
         pendings,
         &tools,
@@ -629,15 +633,14 @@ fn parallel_dispatch_actually_runs_concurrently() {
         &mut |_| {},
     )
     .results;
-    let elapsed = start.elapsed();
 
     assert_eq!(results.len(), 3);
-    // 3 tools sleeping 100ms each: parallel <= ~150ms; serial >= 300ms.
-    assert!(
-        elapsed.as_millis() < 250,
-        "expected parallel execution under 250ms, took {}ms",
-        elapsed.as_millis(),
-    );
+    for result in &results {
+        assert!(matches!(
+            &result.content[0],
+            Content::ToolResultBlock { output, .. } if output == "met"
+        ));
+    }
 }
 
 #[test]

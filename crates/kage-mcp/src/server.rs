@@ -695,44 +695,28 @@ impl Drop for McpServerHandle {
 
 #[cfg(test)]
 mod tests {
-    use std::io::BufReader;
     use std::sync::Mutex;
     use std::thread;
 
-    use kage_jsonrpc::connect;
+    use kage_jsonrpc::testing::{pair, pair_with};
 
     use super::*;
+    use crate::test_support::{answer_requests, wait_until};
 
-    /// Wire two transport peers back to back and run a minimal MCP
-    /// server on one side: a thread drains the server inbound for the
-    /// whole test, answering `initialize` and rejecting anything else,
-    /// while ignoring notifications (the `initialized` one).
+    /// A minimal MCP server that answers `initialize` and rejects every
+    /// other request.
     fn stub_server() -> (McpConnection, Peer) {
         stub_server_with_roots(&[])
     }
 
     fn stub_server_with_roots(roots: &[std::path::PathBuf]) -> (McpConnection, Peer) {
-        let (cli_r, srv_w) = std::io::pipe().unwrap();
-        let (srv_r, cli_w) = std::io::pipe().unwrap();
-        let (cli_peer, cli_in, _c) = connect(BufReader::new(cli_r), cli_w);
-        let (srv_peer, srv_in, _s) = connect(BufReader::new(srv_r), srv_w);
-        let responder = srv_peer.clone();
-        thread::spawn(move || {
-            for msg in srv_in {
-                if let Inbound::Request { id, method, .. } = msg {
-                    let outcome = if method == "initialize" {
-                        Ok(serde_json::json!({
-                            "protocolVersion": PROTOCOL_VERSION,
-                            "capabilities": { "tools": {} },
-                            "serverInfo": { "name": "stub", "version": "0" },
-                        }))
-                    } else {
-                        Err(RpcError::method_not_found(&method))
-                    };
-                    let _ = responder.respond(&id, outcome);
-                }
-            }
-        });
+        let ((cli_peer, cli_in), (srv_peer, srv_in)) = pair();
+        answer_requests(
+            srv_peer.clone(),
+            srv_in,
+            serde_json::json!({ "tools": {} }),
+            |method, _| Err(RpcError::method_not_found(method)),
+        );
         let conn = McpConnection::initialize("stub", cli_peer, cli_in, roots, None).unwrap();
         (conn, srv_peer)
     }
@@ -746,12 +730,8 @@ mod tests {
 
     #[test]
     fn initialize_gives_up_on_a_silent_server() {
-        let (cli_r, srv_w) = std::io::pipe().unwrap();
-        let (srv_r, cli_w) = std::io::pipe().unwrap();
-        let (cli_peer, cli_in, _c) = connect(BufReader::new(cli_r), cli_w);
-        // Nobody ever drains `srv_in` or answers: the server side of
-        // the pipe stays mute.
-        let (_srv_peer, _srv_in, _s) = connect(BufReader::new(srv_r), srv_w);
+        // Nobody ever drains or answers the server end: it stays mute.
+        let ((cli_peer, cli_in), _srv) = pair();
         let start = std::time::Instant::now();
         let err = McpConnection::initialize_with_timeout(
             "silent",
@@ -791,10 +771,7 @@ mod tests {
     fn stub_server_with_handler(
         handler: Option<Arc<dyn ServerRequestHandler>>,
     ) -> (McpConnection, Peer, Arc<Mutex<Option<serde_json::Value>>>) {
-        let (cli_r, srv_w) = std::io::pipe().unwrap();
-        let (srv_r, cli_w) = std::io::pipe().unwrap();
-        let (cli_peer, cli_in, _c) = connect(BufReader::new(cli_r), cli_w);
-        let (srv_peer, srv_in, _s) = connect(BufReader::new(srv_r), srv_w);
+        let ((cli_peer, cli_in), (srv_peer, srv_in)) = pair();
         let responder = srv_peer.clone();
         let init_params = Arc::new(Mutex::new(None));
         let captured = Arc::clone(&init_params);
@@ -880,15 +857,9 @@ mod tests {
         let (conn, srv) = stub_server();
         srv.notify("notifications/tools/list_changed", serde_json::Value::Null)
             .unwrap();
-        let mut seen = false;
-        for _ in 0..50 {
-            if conn.take_tools_changed() {
-                seen = true;
-                break;
-            }
-            thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(seen, "tools_changed flag should latch");
+        srv.request("ping", serde_json::json!({}))
+            .expect("the drain thread handled the notice before the ping");
+        assert!(conn.take_tools_changed(), "tools_changed flag should latch");
         assert!(!conn.take_tools_changed(), "flag clears after take");
     }
 
@@ -951,10 +922,7 @@ mod tests {
     fn server_answering(
         result: serde_json::Value,
     ) -> (Result<McpConnection, McpError>, std::sync::mpsc::Sender<()>) {
-        let (cli_r, srv_w) = std::io::pipe().unwrap();
-        let (srv_r, cli_w) = std::io::pipe().unwrap();
-        let (cli_peer, cli_in, _c) = connect(BufReader::new(cli_r), cli_w);
-        let (srv_peer, srv_in, _s) = connect(BufReader::new(srv_r), srv_w);
+        let ((cli_peer, cli_in), (srv_peer, srv_in)) = pair();
         let responder = srv_peer.clone();
         let (hold_tx, hold_rx) = std::sync::mpsc::channel::<()>();
         thread::spawn(move || {
@@ -981,15 +949,10 @@ mod tests {
         let conn = conn.unwrap();
         assert!(!conn.is_dead(), "the server holds the transport open");
         drop(hold);
-        let mut dead = false;
-        for _ in 0..100 {
-            if conn.is_dead() {
-                dead = true;
-                break;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        assert!(dead, "connection must report dead once the server exits");
+        assert!(
+            wait_until(|| conn.is_dead()),
+            "connection must report dead once the server exits"
+        );
     }
 
     #[test]
@@ -1034,11 +997,7 @@ mod tests {
 
     #[test]
     fn cancelled_call_notifies_the_server() {
-        let (cli_r, srv_w) = std::io::pipe().unwrap();
-        let (srv_r, cli_w) = std::io::pipe().unwrap();
-        let (cli_peer, cli_in, _c) =
-            connect_with(BufReader::new(cli_r), cli_w, Some(cancel_notice()));
-        let (srv_peer, srv_in, _s) = connect(BufReader::new(srv_r), srv_w);
+        let ((cli_peer, cli_in), (srv_peer, srv_in)) = pair_with(Some(cancel_notice()));
         let (seen_tx, seen) = std::sync::mpsc::channel();
         thread::spawn(move || {
             for msg in srv_in {
@@ -1085,11 +1044,7 @@ mod tests {
 
     #[test]
     fn abandoned_initialize_sends_no_notice() {
-        let (cli_r, srv_w) = std::io::pipe().unwrap();
-        let (srv_r, cli_w) = std::io::pipe().unwrap();
-        let (cli_peer, cli_in, _c) =
-            connect_with(BufReader::new(cli_r), cli_w, Some(cancel_notice()));
-        let (_srv_peer, srv_in, _s) = connect(BufReader::new(srv_r), srv_w);
+        let ((cli_peer, cli_in), (_srv_peer, srv_in)) = pair_with(Some(cancel_notice()));
         let err = McpConnection::initialize_with_timeout(
             "silent",
             cli_peer,

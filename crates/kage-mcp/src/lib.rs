@@ -12,6 +12,9 @@ pub mod serve;
 pub mod server;
 pub mod tools;
 
+#[cfg(test)]
+mod test_support;
+
 pub use catalog::{PromptMessage, ResourceContents};
 pub use manager::McpManager;
 pub use oauth::TokenSource;

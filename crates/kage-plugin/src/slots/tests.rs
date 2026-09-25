@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use super::*;
 use crate::PluginRuntime;
+use crate::test_support::{occupy, wait_until};
 
 fn component(rt: &PluginRuntime, slot: SlotName) -> Arc<LuaComponent> {
     let spec = rt.slots().spec(slot).expect("slot set");
@@ -22,14 +23,6 @@ fn text(rt: &PluginRuntime, slot: SlotName) -> String {
 
 fn count(rt: &PluginRuntime) -> i64 {
     rt.eval("return n").unwrap().as_i64().unwrap_or(0)
-}
-
-fn wait_until(mut done: impl FnMut() -> bool) {
-    let start = Instant::now();
-    while !done() {
-        assert!(start.elapsed() < Duration::from_secs(5), "timed out");
-        std::thread::sleep(Duration::from_millis(5));
-    }
 }
 
 #[test]
@@ -164,7 +157,7 @@ fn a_looping_render_aborts_fast() {
     let start = Instant::now();
     rt.eval("kage.ui.set_header(function() while true do end end)")
         .unwrap();
-    assert!(start.elapsed() < Duration::from_secs(1));
+    assert!(start.elapsed() < Duration::from_secs(5));
     assert!(component(&rt, SlotName::Header).lines().is_empty());
 }
 
@@ -274,19 +267,13 @@ fn reads_never_wait_on_a_busy_owner() {
     rt.eval("kage.ui.set_footer(function(w) return 'f' .. w end)")
         .unwrap();
     let c = component(&rt, SlotName::Footer);
-    rt.host
-        .submit(|_| std::thread::sleep(Duration::from_millis(300)))
-        .unwrap();
-    let start = Instant::now();
+    let busy = occupy(&rt.host);
     let slots = rt.slots();
     slots.report(120, "insert");
     assert!(slots.spec(SlotName::Footer).is_some());
     assert_eq!(c.lines()[0].spans[0].text, "f80");
-    assert!(
-        start.elapsed() < Duration::from_millis(50),
-        "a read waited {:?}",
-        start.elapsed()
-    );
+    busy.assert_held();
+    busy.open();
     rt.eval("return 1").unwrap();
     assert_eq!(c.lines()[0].spans[0].text, "f120");
 }

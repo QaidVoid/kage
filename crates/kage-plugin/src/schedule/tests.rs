@@ -4,10 +4,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::PluginRuntime;
 use crate::api::LogLevel;
+use crate::test_support::wait_until;
 use crate::testing::{RecordingSink, recording_sink, runtime_with_recording};
 
 fn int(rt: &PluginRuntime, expr: &str) -> i64 {
@@ -15,15 +16,6 @@ fn int(rt: &PluginRuntime, expr: &str) -> i64 {
         .unwrap()
         .as_integer()
         .unwrap()
-}
-
-/// Poll `expr` until it reaches `at_least`, failing after five seconds.
-fn wait_until(rt: &PluginRuntime, expr: &str, at_least: i64) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while int(rt, expr) < at_least {
-        assert!(Instant::now() < deadline, "{expr} never reached {at_least}");
-        thread::sleep(Duration::from_millis(10));
-    }
 }
 
 fn errors(rec: &RecordingSink) -> Vec<String> {
@@ -69,13 +61,13 @@ fn defer_fires_once_near_its_deadline_and_stop_cancels_it() {
          kage.defer(function() fired = fired + 1 at = kage.now_ms() end, 100)
          local stop = kage.defer(function() cancelled = cancelled + 1 end, 50)
          stop()
-         stop()",
+         stop()
+         kage.defer(function() after = true end, 250)",
     )
     .unwrap();
-    wait_until(&rt, "fired", 1);
+    wait_until(|| rt.eval("return after").unwrap().as_boolean() == Some(true));
     let waited = int(&rt, "at - start");
     assert!((95..1000).contains(&waited), "fired after {waited} ms");
-    thread::sleep(Duration::from_millis(200));
     assert_eq!(int(&rt, "fired"), 1);
     assert_eq!(int(&rt, "cancelled"), 0);
 }
@@ -94,10 +86,12 @@ fn timer_repeats_at_the_floor_interval_until_stopped() {
          end, 1)",
     )
     .unwrap();
-    wait_until(&rt, "ticks", 3);
+    wait_until(|| int(&rt, "ticks") >= 3);
     let elapsed = int(&rt, "last - start");
     assert!(elapsed >= 145, "three ticks took only {elapsed} ms");
-    thread::sleep(Duration::from_millis(200));
+    rt.eval("kage.defer(function() after = true end, 120)")
+        .unwrap();
+    wait_until(|| rt.eval("return after").unwrap().as_boolean() == Some(true));
     assert_eq!(int(&rt, "ticks"), 3);
 }
 
@@ -109,8 +103,11 @@ fn a_raising_timer_stops_and_logs_once() {
         "kage.timer(function() kage.notify('tick') error('tick failed') end, 50)",
     )
     .unwrap();
-    thread::sleep(Duration::from_millis(400));
-    assert_eq!(rec.snapshot().notifications, ["tick"]);
+    wait_until(|| !errors(&rec).is_empty());
+    rt.eval("kage.defer(function() kage.notify('after') end, 150)")
+        .unwrap();
+    wait_until(|| rec.snapshot().notifications.len() >= 2);
+    assert_eq!(rec.snapshot().notifications, ["tick", "after"]);
     let errors = errors(&rec);
     assert_eq!(errors.len(), 1, "{errors:?}");
     assert!(
@@ -160,11 +157,7 @@ fn a_timer_never_runs_while_a_job_runs() {
         flag.store(false, Ordering::SeqCst);
     })
     .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while calls.load(Ordering::SeqCst) == 0 {
-        assert!(Instant::now() < deadline, "the timer never ran");
-        thread::sleep(Duration::from_millis(10));
-    }
+    wait_until(|| calls.load(Ordering::SeqCst) > 0);
     assert_eq!(overlaps.load(Ordering::SeqCst), 0);
 }
 
@@ -183,6 +176,13 @@ fn reload_cancels_old_timers_and_keeps_new_ones() {
     )
     .unwrap();
     rt.reload_all(None).unwrap();
-    thread::sleep(Duration::from_millis(400));
-    assert_eq!(rec.snapshot().notifications, ["scheduled", "fresh"]);
+    rt.eval("kage.defer(function() kage.notify('end') end, 150)")
+        .unwrap();
+    wait_until(|| {
+        rec.snapshot()
+            .notifications
+            .last()
+            .is_some_and(|n| n == "end")
+    });
+    assert_eq!(rec.snapshot().notifications, ["scheduled", "fresh", "end"]);
 }

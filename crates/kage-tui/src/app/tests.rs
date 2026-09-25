@@ -5692,20 +5692,51 @@ fn the_mcp_picker_lists_every_status_and_enter_restarts() {
 }
 
 #[test]
-fn logging_in_to_an_mcp_server_points_at_the_cli() {
+fn logging_in_to_an_mcp_server_queues_the_flow() {
     let (mut app, rx, _events) = mcp_app();
     let registry = app.command_registry();
+    let _ = app.run_command_validated("mcp login broken", &registry);
+    assert_eq!(app.pending_login, None, "no flow queued without a runner");
+    assert!(last_block_text(&app.buffer).contains("mcp login: unavailable"));
+
+    app.set_mcp_login_runner(std::sync::Arc::new(|_| Ok(())));
     let _ = app.run_command_validated("mcp", &registry);
     app.handle_key(code(KeyCode::Down));
     app.handle_key(code(KeyCode::Enter));
-    assert!(rx.try_recv().is_err(), "a login row restarts nothing");
-    assert!(
-        last_block_text(&app.buffer).contains("run `kage mcp login linear`"),
-        "{}",
-        last_block_text(&app.buffer)
+    assert!(rx.try_recv().is_err(), "a login row restarts nothing yet");
+    assert_eq!(
+        app.pending_login,
+        Some(crate::app::PendingLogin::Mcp("linear".to_owned()))
     );
-    let _ = app.run_command_validated("mcp login broken", &registry);
-    assert!(last_block_text(&app.buffer).contains("run `kage mcp login broken`"));
+    app.pending_login = None;
+    let _ = app.run_command_validated("mcp login x", &registry);
+    assert_eq!(
+        app.pending_login,
+        Some(crate::app::PendingLogin::Mcp("x".to_owned()))
+    );
+}
+
+#[test]
+fn a_finished_mcp_login_restarts_the_server() {
+    let (mut app, rx, _events) = mcp_app();
+    let asked = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let log = std::sync::Arc::clone(&asked);
+    app.set_mcp_login_runner(std::sync::Arc::new(move |server| {
+        log.lock().unwrap().push(server.to_owned());
+        if server == "linear" {
+            Ok(())
+        } else {
+            Err("authorization discovery: no metadata".to_owned())
+        }
+    }));
+
+    app.run_login_flow(crate::app::PendingLogin::Mcp("linear".to_owned()));
+    assert_eq!(rx.try_recv(), Ok(RunRequest::RestartMcp("linear".into())));
+
+    app.run_login_flow(crate::app::PendingLogin::Mcp("broken".to_owned()));
+    assert!(rx.try_recv().is_err(), "a failed login restarts nothing");
+    assert!(last_block_text(&app.buffer).contains("mcp login broken: authorization discovery"));
+    assert_eq!(*asked.lock().unwrap(), ["linear", "broken"]);
 }
 
 #[test]

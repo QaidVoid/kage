@@ -16,6 +16,7 @@
 //! one of the two yielded a key.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -39,8 +40,9 @@ const FORMAT_VERSION: u32 = 2;
 /// * an object `{ "type": "oauth", "access_token": "...", ... }`.
 ///
 /// The serializer always emits the tagged-object form so files
-/// rewritten by the current binary advance to the v2 layout.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+/// rewritten by the current binary advance to the v2 layout. `Debug`
+/// prints `***` in place of every secret.
+#[derive(Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Credential {
     /// Long-lived API key the provider exchanges for one request at a time.
@@ -80,7 +82,8 @@ impl Credential {
 
 /// OAuth token bundle persisted alongside the access token. Mirrors
 /// the canonical RFC 6749 fields the providers we support all return.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// `Debug` prints `***` in place of both tokens.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthCredential {
     /// Bearer token presented in the `Authorization` header.
     pub access_token: String,
@@ -105,6 +108,32 @@ impl OAuthCredential {
     #[must_use]
     pub fn expires_within(&self, slack: Duration, now: DateTime<Utc>) -> bool {
         self.expires_at.is_some_and(|t| now + slack >= t)
+    }
+}
+
+/// What `Debug` prints in place of a secret.
+const REDACTED: &str = "***";
+
+impl fmt::Debug for Credential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ApiKey { .. } => f.debug_struct("ApiKey").field("key", &REDACTED).finish(),
+            Self::Oauth(oauth) => f.debug_tuple("Oauth").field(oauth).finish(),
+        }
+    }
+}
+
+impl fmt::Debug for OAuthCredential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthCredential")
+            .field("access_token", &REDACTED)
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| REDACTED),
+            )
+            .field("expires_at", &self.expires_at)
+            .field("scope", &self.scope)
+            .finish()
     }
 }
 
@@ -502,8 +531,10 @@ fn read_secret(prompt: &str) -> Result<String, String> {
     rpassword::prompt_password(prompt).map_err(|e| e.to_string())
 }
 
+/// Write `bytes` to `path`, creating it with mode `0600` on Unix so
+/// other users cannot read the secrets it holds.
 #[cfg(unix)]
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
     let mut file = fs::OpenOptions::new()
@@ -516,8 +547,9 @@ fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     file.sync_all()
 }
 
+/// Write `bytes` to `path`.
 #[cfg(not(unix))]
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     fs::write(path, bytes)
 }
 
@@ -677,6 +709,31 @@ mod tests {
             ..OAuthCredential::default()
         };
         assert!(!oauth.expires_within(Duration::days(365), fixed_now()));
+    }
+
+    #[test]
+    fn debug_output_redacts_every_secret() {
+        let oauth = OAuthCredential {
+            access_token: "access-secret".into(),
+            refresh_token: Some("refresh-secret".into()),
+            expires_at: Some(fixed_now()),
+            scope: Some("read".into()),
+        };
+        let mut store = AuthStore::empty();
+        store.set_api_key("anthropic", "sk-ant-secret");
+        store.set_oauth("zai", oauth.clone());
+        for debug in [
+            format!("{oauth:?}"),
+            format!("{:?}", Credential::Oauth(oauth.clone())),
+            format!("{store:?}"),
+            format!("{store:#?}"),
+        ] {
+            assert!(debug.contains("***"), "{debug}");
+            for secret in ["access-secret", "refresh-secret", "sk-ant-secret"] {
+                assert!(!debug.contains(secret), "{debug}");
+            }
+        }
+        assert!(format!("{oauth:?}").contains("read"));
     }
 
     #[test]

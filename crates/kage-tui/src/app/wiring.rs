@@ -80,6 +80,7 @@ impl App {
             dialog_rx: None,
             plugin_refresh_rx: None,
             login_runner: None,
+            mcp_login_runner: None,
             pending_login: None,
             attach_tx,
             attach_rx,
@@ -579,31 +580,51 @@ impl App {
         self.login_runner = Some(runner);
     }
 
-    /// Consume a pending `:login` (if any) and run its flow. Returns
-    /// whether anything ran so the caller repaints.
+    /// Wire the host hook [`App::run_login_flow`] uses to log in to an
+    /// MCP server in the real terminal. `/mcp login` is an error
+    /// without it.
+    pub fn set_mcp_login_runner(&mut self, runner: McpLoginRunner) {
+        self.mcp_login_runner = Some(runner);
+    }
+
+    /// Consume a pending login (if any) and run its flow with the
+    /// terminal suspended. Returns whether anything ran so the caller
+    /// repaints.
     pub(crate) fn consume_pending_login(&mut self, tui: &mut Tui) -> bool {
         let Some(request) = self.pending_login.take() else {
             return false;
         };
-        self.run_login_flow(tui, request);
+        tui.suspend();
+        self.run_login_flow(request);
+        tui.resume();
         true
     }
 
-    /// Suspend the TUI, run the host login hook for the request (a
-    /// picker or a named provider), resume, and ask the worker to
-    /// rebuild the provider registry on success.
-    pub(crate) fn run_login_flow(&mut self, tui: &mut Tui, request: PendingLogin) {
-        let Some(runner) = self.login_runner.clone() else {
-            return;
-        };
+    /// Run the host login hook for the request while the terminal is
+    /// suspended. A saved provider credential rebuilds the provider
+    /// registry, and an MCP login restarts its server.
+    pub(crate) fn run_login_flow(&mut self, request: PendingLogin) {
         let provider = match request {
             PendingLogin::Picker => None,
             PendingLogin::Provider(name) => Some(name),
+            PendingLogin::Mcp(server) => {
+                let Some(runner) = self.mcp_login_runner.clone() else {
+                    return;
+                };
+                match runner(&server) {
+                    Ok(()) => {
+                        self.notify(format!("mcp {server}: logged in, reconnecting"));
+                        let _ = self.send_request(RunRequest::RestartMcp(server));
+                    }
+                    Err(e) => self.push_error(format!("mcp login {server}: {e}")),
+                }
+                return;
+            }
         };
-        tui.suspend();
-        let saved = runner(provider.as_deref());
-        tui.resume();
-        if saved {
+        let Some(runner) = self.login_runner.clone() else {
+            return;
+        };
+        if runner(provider.as_deref()) {
             self.notify("credentials updated");
             let _ = self.send_request(RunRequest::RefreshProviders);
         } else {

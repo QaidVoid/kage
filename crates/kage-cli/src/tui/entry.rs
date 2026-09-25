@@ -335,6 +335,17 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
             ok
         }));
     }
+    // `/mcp login` runs the flow of `kage mcp login` the same way, and
+    // the App restarts the server once it succeeds.
+    {
+        let mut servers = app_config.mcp.servers.clone();
+        if let Some(rt) = plugin_runtime.as_ref() {
+            servers.extend(rt.registered_mcp_servers());
+        }
+        app.set_mcp_login_runner(std::sync::Arc::new(move |server| {
+            crate::mcp_auth::tui_login(server, &servers)
+        }));
+    }
     app.set_workdir(workdir.clone());
     if let Ok(dir) = crate::themes_dir() {
         app.set_themes_dir(dir);

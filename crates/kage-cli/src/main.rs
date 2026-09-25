@@ -15,6 +15,7 @@ mod engine;
 mod history;
 mod init;
 mod mcp;
+mod mcp_auth;
 mod oauth;
 mod permissions;
 mod plugins;
@@ -193,9 +194,9 @@ pub(crate) enum Command {
         #[arg(long)]
         revoke: bool,
     },
-    /// Model Context Protocol server: expose kage's built-in tools to
-    /// another agent over stdio (newline-delimited JSON-RPC). Point an
-    /// MCP client's server command at `kage mcp serve`.
+    /// Model Context Protocol: expose kage's built-in tools to another
+    /// agent over stdio (newline-delimited JSON-RPC) with `kage mcp
+    /// serve`, or log in to remote MCP servers that need OAuth.
     Mcp {
         /// MCP sub-action.
         #[command(subcommand)]
@@ -213,6 +214,20 @@ pub(crate) enum McpAction {
         /// an error.
         #[arg(long, value_delimiter = ',', default_value = "read,grep,find,ls")]
         tools: Vec<String>,
+    },
+    /// Log in to a remote MCP server with OAuth. Prints the
+    /// authorization URL, opens it in a browser when one is available,
+    /// and waits for the browser to return, or for the redirected URL to
+    /// be pasted on a machine without one. The token is stored in
+    /// `$XDG_DATA_HOME/kage/mcp-auth.json` (mode 0600).
+    Login {
+        /// Server name from `[mcp.servers.<name>]`.
+        server: String,
+    },
+    /// Forget the stored OAuth token of a remote MCP server.
+    Logout {
+        /// Server name from `[mcp.servers.<name>]`.
+        server: String,
     },
 }
 
@@ -279,6 +294,8 @@ pub(crate) fn run_subcommand(command: Command) -> ExitCode {
         Command::Trust { revoke } => trust::run(revoke),
         Command::Mcp { action } => match action {
             McpAction::Serve { tools } => mcp::run_serve(&tools),
+            McpAction::Login { server } => mcp_auth::run_login(&server),
+            McpAction::Logout { server } => mcp_auth::run_logout(&server),
         },
     }
 }

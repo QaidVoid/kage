@@ -264,12 +264,15 @@ impl App {
         }
     }
 
-    /// Log in to MCP server `server`, from `/mcp login` or the picker.
-    /// Until the TUI runs the flow itself, point at the CLI command.
+    /// Log in to MCP server `server`, from `/mcp login` or the picker:
+    /// queue the flow for the run loop, which owns the terminal the
+    /// flow suspends.
     pub(crate) fn mcp_login(&mut self, server: &str) {
-        let text =
-            format!("mcp {server}: run `kage mcp login {server}`, then restart it with /mcp");
-        lock(&self.buffer).push_custom("kage:notify", text, false);
+        if self.mcp_login_runner.is_none() {
+            self.push_error("mcp login: unavailable in this host");
+            return;
+        }
+        self.pending_login = Some(PendingLogin::Mcp(server.to_owned()));
     }
 
     /// Whether the engine expands `text` through MCP: it starts with the

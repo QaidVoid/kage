@@ -8,6 +8,7 @@
 //!   plugin declared via `kage.mcp.add_server`) and registers their
 //!   tools into the loop's [`ToolRegistry`], keeping the returned
 //!   [`McpManager`] alive for the session.
+//! - `kage mcp login` and `logout` live in [`crate::mcp_auth`].
 //!
 //! Diagnostics for `serve` go to stderr so they do not corrupt the
 //! JSON-RPC stream on stdout.
@@ -132,7 +133,8 @@ fn merged_config(workdir: &Path, runtime: Option<&PluginRuntime>) -> McpConfig {
 }
 
 /// Spawn every enabled MCP server and register its tools into
-/// `tools`. The caller must keep the returned [`McpManager`] alive
+/// `tools`. HTTP servers get their stored OAuth tokens from
+/// `mcp-auth.json`. The caller must keep the returned [`McpManager`] alive
 /// for the session: dropping it kills the child processes. Spawn and
 /// discovery failures are returned as `(server, error)` for the
 /// caller to surface (never swallowed).
@@ -143,8 +145,12 @@ pub(crate) fn spawn_and_register(
 ) -> (McpManager, Vec<(String, McpError)>) {
     let cfg = merged_config(workdir, runtime);
     let handler = sampling_handler(&cfg);
-    let (mut manager, mut errors) =
-        McpManager::spawn_all(&cfg, vec![workdir.to_path_buf()], handler);
+    let (mut manager, mut errors) = McpManager::spawn_all_with(
+        &cfg,
+        vec![workdir.to_path_buf()],
+        handler,
+        crate::mcp_auth::token_source(),
+    );
     errors.extend(manager.register_into(tools));
     (manager, errors)
 }

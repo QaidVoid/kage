@@ -359,18 +359,23 @@ pub struct PluginRefresh {
     pub models: Vec<crate::picker::PickItem>,
 }
 
-/// A `:login` invocation waiting for the run loop to suspend the
-/// terminal. The enum distinguishes "open the provider picker"
-/// ([`PendingLogin::Picker`]) from "log in to this provider".
+/// A login waiting for the run loop to suspend the terminal: `:login`
+/// with the provider picker ([`PendingLogin::Picker`]) or a named
+/// provider, or `/mcp login` for an MCP server.
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum PendingLogin {
     Picker,
     Provider(String),
+    Mcp(String),
 }
 
 /// Host hook that runs an interactive credential login in the real
 /// terminal. Returns whether a credential was saved.
 pub(crate) type LoginRunner = std::sync::Arc<dyn Fn(Option<&str>) -> bool + Send + Sync>;
+
+/// Host hook that logs in to the named MCP server in the real terminal.
+/// The error says why the login failed and never carries a secret.
+pub(crate) type McpLoginRunner = std::sync::Arc<dyn Fn(&str) -> Result<(), String> + Send + Sync>;
 
 pub use kage_core::protocol::PermissionDecision;
 
@@ -621,8 +626,11 @@ pub struct App {
     /// in the real terminal. Wired by kage-cli; `None` makes
     /// `:login` a no-op. Returns whether a credential was saved.
     login_runner: Option<LoginRunner>,
-    /// A `:login` invocation waiting for the run loop to suspend the
-    /// terminal. Set by the command handler (which has no terminal
+    /// Host hook that logs in to an MCP server in the real terminal.
+    /// Wired by kage-cli; `None` makes `/mcp login` an error.
+    mcp_login_runner: Option<McpLoginRunner>,
+    /// A `:login` or `/mcp login` waiting for the run loop to suspend
+    /// the terminal. Set by the command handler (which has no terminal
     /// access); consumed by the loop like the external-editor chord.
     pending_login: Option<PendingLogin>,
     /// The active search pattern: the open search line's text, else

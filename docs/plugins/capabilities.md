@@ -75,6 +75,14 @@ process.
 The grant is coarse: a granted plugin may run any program with any
 arguments.
 
+The grant also covers the declarative surfaces that make the *host*
+spawn a process: `kage.mcp.add_server(spec)` and
+`kage.mcp.restart(name)` (see [mcp](/guide/mcp#declaring-servers-from-a-plugin))
+and `kage.acp.add_agent(spec)` (see
+[acp](/editors/acp-client#configure-from-a-plugin)). Declaring a
+server or agent is naming a command for kage to run, so it needs the
+same grant as running one.
+
 ### `env`
 
 ```lua

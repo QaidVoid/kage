@@ -35,9 +35,13 @@ the same way you would an MCP server or an LSP.
 ## configure from a plugin
 
 Plugins can declare agents at runtime. Plugins *configure* and core
-spawns:
+spawns. Naming a command for the host to spawn is process execution,
+so `kage.acp.add_agent` requires the `exec` capability
+(`[plugins.capabilities] your-plugin = ["exec"]`, then request it at
+load):
 
 ```lua
+kage.request_capabilities({ "exec" })
 kage.acp.add_agent({
   name = "reviewer",
   command = "my-agent",

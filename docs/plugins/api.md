@@ -52,7 +52,7 @@ Plugins and `init.lua` share this API but not the same privileges.
 | --- | --- | --- |
 | Capabilities (`exec`, `env`, `net`, `session_write`) | only when granted in `[plugins.capabilities]` and requested | all, without asking |
 | `require` | not available | confined to `~/.config/kage/lua/` |
-| `io.open`, `io.popen`, `os.execute`, `debug` | removed | removed |
+| the `io` library, `os.execute`, `debug` | removed | removed |
 | Loaded by | the TUI, print mode and `kage rpc` | the TUI only |
 
 Each plugin and `init.lua` get their own copy of the `kage` tables. A
@@ -931,10 +931,14 @@ conversion, all over byte strings. Since API 3. See
 `kage.acp.add_agent(spec)` declares an upstream ACP agent and
 `kage.on_acp_permission(fn)` decides its tool requests. See
 [acp client](/editors/acp-client#configure-from-a-plugin).
+Declaring an agent names a command the host will spawn, so
+`kage.acp.add_agent` requires the `exec` capability.
 
 `kage.mcp.add_server(spec)`, `kage.mcp.list_servers()` and
 `kage.mcp.restart(name)` declare, list and restart MCP servers. See
-[mcp](/guide/mcp#declaring-servers-from-a-plugin).
+[mcp](/guide/mcp#declaring-servers-from-a-plugin). Declaring and
+restarting name commands the host spawns, so both require the `exec`
+capability; `list_servers` needs no grant.
 
 ## providers
 

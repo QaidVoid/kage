@@ -424,9 +424,14 @@ never recorded in the session file.
 
 ## declaring servers from a plugin
 
-A plugin declares a server and kage spawns it. From Lua:
+A plugin declares a server and kage spawns it. Naming a command for
+the host to spawn is process execution, so `add_server` and `restart`
+require the `exec` capability (`[plugins.capabilities]
+your-plugin = ["exec"]`, requested at load); `list_servers` needs no
+grant. From Lua:
 
 ```lua
+kage.request_capabilities({ "exec" })
 kage.mcp.add_server({
   name = "filesystem",
   command = "npx",

@@ -56,7 +56,7 @@ word. See [lua config](/guide/lua-config).
 - `require` other files
 - start background threads (timers run on kage's single Lua thread)
 
-The sandbox strips `os.execute`, `io.open`, `io.popen`, `load`,
+The sandbox strips `os.execute`, the whole `io` library, `load`,
 `dofile`, `loadfile`, `require`, `package`, `debug` and a handful of
 other escape hatches before your code runs. Routine `string`, `math`
 and `table` functions stay.

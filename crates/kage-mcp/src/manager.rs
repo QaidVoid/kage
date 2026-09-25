@@ -13,8 +13,10 @@
 //!
 //! A server that fails to spawn or list tools does not abort the
 //! agent: the failure is collected and returned to the caller to
-//! surface, while the rest of the servers continue. The manager owns
-//! the [`McpServerHandle`]s, so dropping it kills every child.
+//! surface, while the rest of the servers continue. A server that
+//! failed to spawn is kept like an evicted one, so `restart` can bring
+//! it up later and permission gates still know its name. The manager
+//! owns the [`McpServerHandle`]s, so dropping it kills every child.
 
 use std::sync::Arc;
 
@@ -24,13 +26,15 @@ use kage_tools::ToolRegistry;
 use crate::server::{McpConnection, McpError, McpServerHandle};
 use crate::tools::tools_from_connection;
 
-/// One spawned server: its launch spec (kept so it can be
+/// One configured server: its launch spec (kept so it can be
 /// respawned by `restart`, including after an eviction), the live
-/// handle (`None` once the server has been evicted as dead), and the
-/// tool names it currently contributes.
+/// handle (`None` when it failed to spawn or was evicted as dead), the
+/// last error of a server that is not live, and the tool names it
+/// currently contributes.
 struct Managed {
     spec: McpServer,
     handle: Option<McpServerHandle>,
+    error: Option<String>,
     registered: Vec<String>,
 }
 
@@ -53,9 +57,11 @@ impl McpManager {
     /// skipped. Spawn/handshake failures are collected as
     /// `(server_name, error)` and returned alongside the manager so
     /// the caller can surface them without losing the servers that
-    /// did come up. `roots` are the filesystem roots advertised to
-    /// every server (typically the host workdir); `handler` answers
-    /// server-initiated requests such as sampling.
+    /// did come up. A failed server stays in the manager without a
+    /// handle, so [`Self::restart`] can retry it. `roots` are the
+    /// filesystem roots advertised to every server (typically the host
+    /// workdir); `handler` answers server-initiated requests such as
+    /// sampling.
     #[must_use]
     pub fn spawn_all(
         cfg: &McpConfig,
@@ -68,17 +74,24 @@ impl McpManager {
             if spec.disabled {
                 continue;
             }
-            match McpServerHandle::spawn(name.clone(), spec, &roots, handler.clone()) {
-                Ok(handle) => servers.push((
-                    name.clone(),
-                    Managed {
-                        spec: spec.clone(),
-                        handle: Some(handle),
-                        registered: Vec::new(),
-                    },
-                )),
-                Err(e) => errors.push((name.clone(), e)),
-            }
+            let (handle, error) =
+                match McpServerHandle::spawn(name.clone(), spec, &roots, handler.clone()) {
+                    Ok(handle) => (Some(handle), None),
+                    Err(e) => {
+                        let detail = e.to_string();
+                        errors.push((name.clone(), e));
+                        (None, Some(detail))
+                    }
+                };
+            servers.push((
+                name.clone(),
+                Managed {
+                    spec: spec.clone(),
+                    handle,
+                    error,
+                    registered: Vec::new(),
+                },
+            ));
         }
         (
             Self {
@@ -90,13 +103,13 @@ impl McpManager {
         )
     }
 
-    /// Whether no server is live (evicted ones do not count).
+    /// Whether no server is live (failed and evicted ones do not count).
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    /// Number of live servers (evicted ones do not count).
+    /// Number of live servers (failed and evicted ones do not count).
     #[must_use]
     pub fn len(&self) -> usize {
         self.servers
@@ -105,12 +118,23 @@ impl McpManager {
             .count()
     }
 
-    /// Names of the live servers, in registration order.
+    /// Names of the servers whose tools must be gated: every
+    /// configured, enabled server, live, failed or evicted, in
+    /// registration order. A server that comes up later through
+    /// [`Self::restart`] is therefore already known to a gate built
+    /// from this list.
     pub fn server_names(&self) -> impl Iterator<Item = &str> {
+        self.servers.iter().map(|(n, _)| n.as_str())
+    }
+
+    /// The spawn or crash error of a server that is not live, or `None`
+    /// for a live or unknown server.
+    #[must_use]
+    pub fn error(&self, name: &str) -> Option<&str> {
         self.servers
             .iter()
-            .filter(|(_, m)| m.handle.is_some())
-            .map(|(n, _)| n.as_str())
+            .find(|(n, _)| n == name)
+            .and_then(|(_, m)| m.error.as_deref())
     }
 
     /// Discover and register every live server's tools. Returns the
@@ -152,13 +176,12 @@ impl McpManager {
                     reg.unregister(&stale);
                 }
                 managed.handle = None;
-                errors.push((
-                    name.clone(),
-                    McpError::Crashed {
-                        server: name.clone(),
-                        detail,
-                    },
-                ));
+                let crash = McpError::Crashed {
+                    server: name.clone(),
+                    detail,
+                };
+                managed.error = Some(crash.to_string());
+                errors.push((name.clone(), crash));
             } else if conn.take_tools_changed() {
                 if let Err(e) = Self::reload(managed, reg) {
                     errors.push((name.clone(), e));
@@ -171,10 +194,11 @@ impl McpManager {
     /// Restart one server by name: spawn a fresh process from its
     /// original spec, and only on success swap it in (killing the old
     /// child, if any) and re-register its tools. The name is looked
-    /// up across every entry, including servers evicted as dead, so
-    /// `restart` can respawn a crashed server from its retained spec.
-    /// A failed respawn leaves the current state untouched, so
-    /// `restart` never causes downtime on its own failure.
+    /// up across every entry, including servers that failed to spawn or
+    /// were evicted as dead, so `restart` can bring them up from the
+    /// retained spec. A failed respawn leaves a live server untouched,
+    /// so `restart` never causes downtime on its own failure, and
+    /// records the new error for a server that is not live.
     ///
     /// # Errors
     ///
@@ -189,11 +213,20 @@ impl McpManager {
             .find(|(n, _)| n == name)
             .map(|(_, m)| m)
             .ok_or_else(|| McpError::Unknown(name.to_owned()))?;
-        let fresh = McpServerHandle::spawn(name.to_owned(), &managed.spec, &roots, handler)?;
+        let fresh = match McpServerHandle::spawn(name.to_owned(), &managed.spec, &roots, handler) {
+            Ok(fresh) => fresh,
+            Err(e) => {
+                if managed.handle.is_none() {
+                    managed.error = Some(e.to_string());
+                }
+                return Err(e);
+            }
+        };
         for stale in managed.registered.drain(..) {
             reg.unregister(&stale);
         }
         managed.handle = Some(fresh);
+        managed.error = None;
         Self::reload(managed, reg)
     }
 
@@ -328,6 +361,42 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_spawn_is_kept_for_gates_and_restart() {
+        let mut cfg = McpConfig::default();
+        let spec = McpServer {
+            command: Some("definitely-not-a-real-binary-xyz".to_owned()),
+            args: vec![],
+            env: std::collections::BTreeMap::new(),
+            url: None,
+            headers: std::collections::BTreeMap::new(),
+            disabled: false,
+        };
+        cfg.servers.insert("broken".to_owned(), spec.clone());
+        cfg.servers.insert(
+            "off".to_owned(),
+            McpServer {
+                disabled: true,
+                ..spec
+            },
+        );
+        let (mut mgr, errors) = McpManager::spawn_all(&cfg, vec![], None);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(mgr.server_names().collect::<Vec<_>>(), ["broken"]);
+        assert_eq!(mgr.len(), 0);
+        assert!(mgr.is_empty());
+        let spawn_error = mgr.error("broken").expect("the spawn error is kept");
+        assert!(spawn_error.contains("definitely-not-a-real-binary-xyz"));
+
+        let mut reg = ToolRegistry::new();
+        let err = mgr.restart("broken", &mut reg).unwrap_err();
+        assert!(
+            matches!(&err, McpError::Spawn { command, .. } if command == "definitely-not-a-real-binary-xyz"),
+            "restart must retry the kept spec: {err}"
+        );
+        assert!(mgr.error("off").is_none());
+    }
+
+    #[test]
     fn restart_unknown_server_errors() {
         let (mut mgr, _e) = McpManager::spawn_all(&McpConfig::default(), vec![], None);
         let mut reg = ToolRegistry::new();
@@ -348,6 +417,7 @@ mod tests {
                 Managed {
                     spec,
                     handle: Some(McpServerHandle::from_connection(conn)),
+                    error: None,
                     registered: Vec::new(),
                 },
             ));
@@ -433,6 +503,8 @@ mod tests {
             errors[0].1
         );
         assert!(reg.get("x__t").is_none(), "dead server's tools evicted");
+        assert!(mgr.error("x").is_some_and(|e| e.contains("crashed")));
+        assert_eq!(mgr.server_names().collect::<Vec<_>>(), ["x"]);
         assert!(mgr.is_empty(), "evicted server no longer counts as live");
         assert!(
             mgr.refresh_into(&mut reg).is_empty(),

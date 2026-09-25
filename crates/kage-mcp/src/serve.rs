@@ -26,6 +26,10 @@ use kage_tools::tool::ToolContext;
 
 use crate::server::PROTOCOL_VERSION;
 
+/// Protocol revisions `kage mcp serve` can speak. A client asking for
+/// one of them gets it back; any other request gets [`PROTOCOL_VERSION`].
+const SUPPORTED_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
+
 /// Decides whether one `tools/call` may run: `None` runs it, `Some(reason)`
 /// refuses it with `reason` as the error text. Receives the tool name and
 /// its arguments.
@@ -60,7 +64,7 @@ where
         };
         let outcome = match method.as_str() {
             "initialize" => Ok(serde_json::json!({
-                "protocolVersion": PROTOCOL_VERSION,
+                "protocolVersion": negotiate(&params),
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": {
                     "name": "kage",
@@ -79,6 +83,16 @@ where
     handle
         .join()
         .map_err(|_| std::io::Error::other("mcp serve: reader thread panicked"))
+}
+
+/// The version to answer `initialize` with: the client's requested
+/// `protocolVersion` when kage knows it, else its own.
+fn negotiate(params: &serde_json::Value) -> &'static str {
+    let requested = params.get("protocolVersion").and_then(|v| v.as_str());
+    SUPPORTED_VERSIONS
+        .into_iter()
+        .find(|v| Some(*v) == requested)
+        .unwrap_or(PROTOCOL_VERSION)
 }
 
 /// The registry as MCP tool descriptors.
@@ -213,6 +227,30 @@ mod tests {
         let peer = client();
         let res = peer.request("initialize", serde_json::json!({})).unwrap();
         assert_eq!(res["serverInfo"]["name"], "kage");
+        assert_eq!(res["protocolVersion"], PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn initialize_echoes_a_known_requested_version() {
+        let peer = client();
+        let res = peer
+            .request(
+                "initialize",
+                serde_json::json!({ "protocolVersion": "2025-03-26" }),
+            )
+            .unwrap();
+        assert_eq!(res["protocolVersion"], "2025-03-26");
+    }
+
+    #[test]
+    fn initialize_answers_its_own_version_for_an_unknown_one() {
+        let peer = client();
+        let res = peer
+            .request(
+                "initialize",
+                serde_json::json!({ "protocolVersion": "2099-01-01" }),
+            )
+            .unwrap();
         assert_eq!(res["protocolVersion"], PROTOCOL_VERSION);
     }
 

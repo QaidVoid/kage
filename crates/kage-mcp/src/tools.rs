@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use kage_core::{Risk, ToolOutput};
+use kage_core::{Risk, ToolOutput, ToolUpdate};
 use kage_tools::error::ToolError;
 use kage_tools::tool::{Tool, ToolContext};
 
@@ -136,19 +136,12 @@ impl McpTool {
             .unwrap_or(false);
         let mut parts: Vec<String> = Vec::new();
         if let Some(items) = value.get("content").and_then(|c| c.as_array()) {
-            for item in items {
-                match item.get("type").and_then(|t| t.as_str()) {
-                    Some("text") => {
-                        if let Some(t) = item.get("text").and_then(|t| t.as_str()) {
-                            parts.push(t.to_owned());
-                        }
-                    }
-                    Some(other) => {
-                        parts.push(format!("[mcp {other} content omitted]"));
-                    }
-                    None => parts.push("[mcp content of unknown type]".to_owned()),
-                }
-            }
+            parts.extend(items.iter().filter_map(render_content));
+        }
+        if parts.is_empty()
+            && let Some(structured) = value.get("structuredContent")
+        {
+            parts.push(serde_json::to_string_pretty(structured).unwrap_or_default());
         }
         ToolOutput {
             is_error,
@@ -186,14 +179,23 @@ impl Tool for McpTool {
         } else {
             input
         };
+        let progress = self.conn.track_progress(&self.exposed_name);
         let params = serde_json::json!({
             "name": self.original_name,
             "arguments": arguments,
+            "_meta": { "progressToken": progress.token },
         });
-        match self
-            .conn
-            .request_cancellable("tools/call", params, &|| cx.is_cancelled())
-        {
+        let relay = || {
+            for update in progress.updates.try_iter() {
+                cx.update(progress_update(&update));
+            }
+        };
+        let outcome = self.conn.request_cancellable("tools/call", params, &|| {
+            relay();
+            cx.is_cancelled()
+        });
+        relay();
+        match outcome {
             Ok(result) => Ok(Self::render_result(&result)),
             Err(McpError::Rpc { source, .. }) if source.code == -32800 => Err(ToolError::Cancelled),
             Err(e) => Ok(ToolOutput {
@@ -203,6 +205,57 @@ impl Tool for McpTool {
                 terminate: false,
             }),
         }
+    }
+}
+
+/// Render one `content` item of a `tools/call` result as text. Text
+/// resources carry their text, while binary content keeps a marker that
+/// names its URI or MIME type.
+fn render_content(item: &serde_json::Value) -> Option<String> {
+    let str_field = |value: &serde_json::Value, key: &str| {
+        value.get(key).and_then(|v| v.as_str()).map(str::to_owned)
+    };
+    let kind = item.get("type").and_then(|t| t.as_str());
+    Some(match kind {
+        Some("text") => str_field(item, "text")?,
+        Some("resource") => {
+            let resource = item.get("resource")?;
+            let uri = str_field(resource, "uri").unwrap_or_default();
+            match str_field(resource, "text") {
+                Some(text) => format!("resource: {uri}\n{text}"),
+                None => format!("[mcp resource {uri} omitted]"),
+            }
+        }
+        Some("resource_link") => {
+            let uri = str_field(item, "uri").unwrap_or_default();
+            match str_field(item, "name") {
+                Some(name) => format!("resource: {uri} ({name})"),
+                None => format!("resource: {uri}"),
+            }
+        }
+        Some(other) => match str_field(item, "mimeType") {
+            Some(mime) => format!("[mcp {other} content ({mime}) omitted]"),
+            None => format!("[mcp {other} content omitted]"),
+        },
+        None => "[mcp content of unknown type]".to_owned(),
+    })
+}
+
+/// A `notifications/progress` payload as a tool update: the server's
+/// `message` when it sent one, else `progress/total` (or `progress`).
+fn progress_update(params: &serde_json::Value) -> ToolUpdate {
+    let content = if let Some(message) = params.get("message").and_then(|m| m.as_str()) {
+        message.to_owned()
+    } else {
+        let progress = params.get("progress").cloned().unwrap_or_default();
+        match params.get("total") {
+            Some(total) => format!("{progress}/{total}"),
+            None => progress.to_string(),
+        }
+    };
+    ToolUpdate {
+        content,
+        structured: None,
     }
 }
 
@@ -339,6 +392,139 @@ mod tests {
         let cx = ToolContext::new(std::path::Path::new("."), &cancel);
         let err = tool.execute(serde_json::Value::Null, &cx).unwrap_err();
         assert!(matches!(err, ToolError::Cancelled));
+    }
+
+    /// Collects the updates a tool reports.
+    #[derive(Default)]
+    struct Updates(std::sync::Mutex<Vec<String>>);
+
+    impl kage_tools::tool::ProgressSink for Updates {
+        fn emit(&self, update: ToolUpdate) {
+            self.0.lock().unwrap().push(update.content);
+        }
+    }
+
+    /// A server whose `tools/call` reports progress for an unknown token
+    /// and then twice for the call's own token, and answers only once
+    /// both updates reached `seen`, so the test does not race the drain.
+    fn progressing(seen: Arc<Updates>) -> Arc<McpConnection> {
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_peer, cli_in, _c) = connect(BufReader::new(cli_r), cli_w);
+        let (srv_peer, srv_in, _s) = connect(BufReader::new(srv_r), srv_w);
+        thread::spawn(move || {
+            for msg in srv_in {
+                let Inbound::Request { id, method, params } = msg else {
+                    continue;
+                };
+                let outcome = match method.as_str() {
+                    "initialize" => Ok(serde_json::json!({
+                        "protocolVersion": PROTOCOL_VERSION,
+                        "capabilities": { "tools": {} },
+                    })),
+                    "tools/call" => {
+                        let token = params["_meta"]["progressToken"].clone();
+                        let notify = |params| {
+                            srv_peer.notify("notifications/progress", params).unwrap();
+                        };
+                        notify(serde_json::json!({ "progressToken": "other", "progress": 9 }));
+                        notify(
+                            serde_json::json!({ "progressToken": token, "progress": 1, "total": 4 }),
+                        );
+                        notify(serde_json::json!({
+                            "progressToken": token,
+                            "progress": 2,
+                            "message": "halfway",
+                        }));
+                        for _ in 0..500 {
+                            if seen.0.lock().unwrap().len() >= 2 {
+                                break;
+                            }
+                            thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        Ok(serde_json::json!({
+                            "content": [{ "type": "text", "text": token }],
+                        }))
+                    }
+                    other => Err(kage_jsonrpc::RpcError::method_not_found(other)),
+                };
+                let _ = srv_peer.respond(&id, outcome);
+            }
+        });
+        Arc::new(McpConnection::initialize("fs", cli_peer, cli_in, &[], None).unwrap())
+    }
+
+    #[test]
+    fn progress_notifications_reach_the_context_in_order() {
+        let updates = Arc::new(Updates::default());
+        let conn = progressing(Arc::clone(&updates));
+        let tool = McpTool::new(
+            conn,
+            McpToolDef {
+                name: "slow".to_owned(),
+                description: String::new(),
+                input_schema: serde_json::json!({}),
+            },
+        );
+        let cancel = CancelFlag::default();
+        let cx = ToolContext::new(std::path::Path::new("."), &cancel)
+            .with_progress(Arc::clone(&updates) as Arc<dyn kage_tools::tool::ProgressSink>);
+        let out = tool.execute(serde_json::Value::Null, &cx).unwrap();
+        assert!(out.text.starts_with("fs__slow#"), "token: {}", out.text);
+        assert_eq!(*updates.0.lock().unwrap(), ["1/4", "halfway"]);
+    }
+
+    fn rendered(result: &serde_json::Value) -> String {
+        McpTool::render_result(result).text
+    }
+
+    #[test]
+    fn embedded_resources_render_text_and_mark_blobs() {
+        let text = rendered(&serde_json::json!({
+            "content": [
+                { "type": "resource", "resource": {
+                    "uri": "file:///notes.md", "mimeType": "text/markdown", "text": "# notes" } },
+                { "type": "resource", "resource": {
+                    "uri": "file:///logo.png", "mimeType": "image/png", "blob": "AAAA" } },
+            ],
+        }));
+        assert_eq!(
+            text,
+            "resource: file:///notes.md\n# notes\n[mcp resource file:///logo.png omitted]"
+        );
+    }
+
+    #[test]
+    fn resource_links_render_uri_and_name() {
+        let text = rendered(&serde_json::json!({
+            "content": [
+                { "type": "resource_link", "uri": "test://a", "name": "Alpha" },
+                { "type": "resource_link", "uri": "test://b" },
+            ],
+        }));
+        assert_eq!(text, "resource: test://a (Alpha)\nresource: test://b");
+    }
+
+    #[test]
+    fn images_keep_a_marker_with_their_mime_type() {
+        let text = rendered(&serde_json::json!({
+            "content": [{ "type": "image", "data": "AAAA", "mimeType": "image/png" }],
+        }));
+        assert_eq!(text, "[mcp image content (image/png) omitted]");
+    }
+
+    #[test]
+    fn structured_only_results_render_as_pretty_json() {
+        let result = serde_json::json!({
+            "content": [],
+            "structuredContent": { "temperature": 21 },
+        });
+        assert_eq!(rendered(&result), "{\n  \"temperature\": 21\n}");
+        let with_text = serde_json::json!({
+            "content": [{ "type": "text", "text": "21 degrees" }],
+            "structuredContent": { "temperature": 21 },
+        });
+        assert_eq!(rendered(&with_text), "21 degrees");
     }
 
     /// A server whose `tools/list` always advertises one more page:

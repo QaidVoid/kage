@@ -12,10 +12,12 @@
 //! can be tested with in-process pipes, and the process plumbing in
 //! [`McpServerHandle::spawn`] stays a thin shell on top.
 
+use std::collections::HashMap;
 use std::io::BufReader;
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -136,25 +138,47 @@ pub trait ServerRequestHandler: Send + Sync {
     }
 }
 
+/// Open progress tokens, each routed to the call waiting on it.
+type ProgressRoutes = Arc<Mutex<HashMap<String, Sender<serde_json::Value>>>>;
+
+/// One registered progress token. `notifications/progress` params for
+/// the token arrive on `updates` until the ticket is dropped.
+pub(crate) struct ProgressTicket {
+    pub(crate) token: String,
+    pub(crate) updates: Receiver<serde_json::Value>,
+    routes: ProgressRoutes,
+}
+
+impl Drop for ProgressTicket {
+    fn drop(&mut self) {
+        kage_core::sync::lock(&self.routes).remove(&self.token);
+    }
+}
+
 /// A live, initialized MCP connection (transport + drained
 /// notifications), independent of how the peer was created.
 pub struct McpConnection {
     server: String,
     peer: Peer,
     tools_changed: Arc<AtomicBool>,
+    progress: ProgressRoutes,
+    next_progress: AtomicU64,
     drain: JoinHandle<()>,
     protocol_version: String,
+    capabilities: serde_json::Value,
 }
 
 impl McpConnection {
     /// Drive the MCP `initialize` / `notifications/initialized`
     /// handshake on an already-connected `peer`, then spawn a thread
     /// that drains server-initiated traffic: `tools/list_changed`
-    /// notifications flip an internal flag, `roots/list` requests are
-    /// answered from `roots` (advertised as a client capability), `ping`
-    /// gets an empty result, and any other server request is answered with `method not found` so
-    /// a server that asks for an unsupported feature (sampling,
-    /// elicitation) is not left hanging.
+    /// notifications flip an internal flag, `notifications/progress`
+    /// goes to the call that registered its token, `roots/list`
+    /// requests are answered from `roots` (advertised as a client
+    /// capability), `ping` gets an empty result, and any other server
+    /// request is answered with `method not found` so a server that
+    /// asks for an unsupported feature (sampling, elicitation) is not
+    /// left hanging. The server's `capabilities` are recorded.
     ///
     /// `roots` are the filesystem roots exposed to the server (the host
     /// workdir); each is sent as a `file://` URI.
@@ -222,6 +246,11 @@ impl McpConnection {
                 });
             }
         };
+        let capabilities = result
+            .get("capabilities")
+            .filter(|c| c.is_object())
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
         peer.notify("notifications/initialized", serde_json::json!({}))
             .map_err(|source| McpError::Rpc {
                 server: server.clone(),
@@ -229,8 +258,10 @@ impl McpConnection {
             })?;
 
         let tools_changed = Arc::new(AtomicBool::new(false));
+        let progress = ProgressRoutes::default();
         let drain = {
             let flag = Arc::clone(&tools_changed);
+            let progress = Arc::clone(&progress);
             let peer = peer.clone();
             std::thread::spawn(move || {
                 for msg in inbound {
@@ -239,6 +270,11 @@ impl McpConnection {
                             if method == "notifications/tools/list_changed" =>
                         {
                             flag.store(true, Ordering::SeqCst);
+                        }
+                        Inbound::Notification { method, params }
+                            if method == "notifications/progress" =>
+                        {
+                            route_progress(&progress, params);
                         }
                         Inbound::Notification { .. } => {}
                         Inbound::Request { id, method, .. } if method == "roots/list" => {
@@ -268,8 +304,11 @@ impl McpConnection {
             server,
             peer,
             tools_changed,
+            progress,
+            next_progress: AtomicU64::new(0),
             drain,
             protocol_version,
+            capabilities,
         })
     }
 
@@ -283,6 +322,36 @@ impl McpConnection {
     #[must_use]
     pub fn protocol_version(&self) -> &str {
         &self.protocol_version
+    }
+
+    /// The `capabilities` object the server answered `initialize` with
+    /// (an empty object when it sent none).
+    #[must_use]
+    pub fn server_capabilities(&self) -> &serde_json::Value {
+        &self.capabilities
+    }
+
+    /// Whether the server advertised the capability `name` (for example
+    /// `tools`, `resources` or `prompts`).
+    #[must_use]
+    pub fn has(&self, name: &str) -> bool {
+        self.capabilities
+            .get(name)
+            .is_some_and(|value| !value.is_null())
+    }
+
+    /// Register a fresh progress token, `<label>#<n>`, for one call.
+    /// Progress for it is delivered until the ticket is dropped.
+    pub(crate) fn track_progress(&self, label: &str) -> ProgressTicket {
+        let n = self.next_progress.fetch_add(1, Ordering::Relaxed);
+        let token = format!("{label}#{n}");
+        let (tx, updates) = std::sync::mpsc::channel();
+        kage_core::sync::lock(&self.progress).insert(token.clone(), tx);
+        ProgressTicket {
+            token,
+            updates,
+            routes: Arc::clone(&self.progress),
+        }
     }
 
     /// Whether the server's side of the transport has closed. The
@@ -370,6 +439,17 @@ impl McpConnection {
                 server: self.server.clone(),
                 source,
             })
+    }
+}
+
+/// Hand `notifications/progress` params to the call that owns their
+/// token. Unknown and finished tokens are dropped.
+fn route_progress(routes: &ProgressRoutes, params: serde_json::Value) {
+    let Some(token) = params.get("progressToken").and_then(|t| t.as_str()) else {
+        return;
+    };
+    if let Some(tx) = kage_core::sync::lock(routes).get(token) {
+        let _ = tx.send(params);
     }
 }
 
@@ -794,6 +874,29 @@ mod tests {
             "capabilities": {},
         }));
         assert_eq!(conn.unwrap().protocol_version(), "2024-11-05");
+    }
+
+    #[test]
+    fn initialize_records_server_capabilities() {
+        let (conn, _hold) = server_answering(serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "capabilities": { "tools": { "listChanged": true }, "prompts": {} },
+        }));
+        let conn = conn.unwrap();
+        assert_eq!(conn.server_capabilities()["tools"]["listChanged"], true);
+        assert!(conn.has("tools"));
+        assert!(conn.has("prompts"));
+        assert!(!conn.has("resources"));
+    }
+
+    #[test]
+    fn missing_capabilities_record_an_empty_object() {
+        let (conn, _hold) = server_answering(serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+        }));
+        let conn = conn.unwrap();
+        assert_eq!(conn.server_capabilities(), &serde_json::json!({}));
+        assert!(!conn.has("tools"));
     }
 
     #[test]

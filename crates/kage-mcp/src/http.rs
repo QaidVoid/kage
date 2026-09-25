@@ -4,21 +4,25 @@
 //! message and the reply rides on that POST's response: a JSON body,
 //! a `text/event-stream` of frames, or a bare `202 Accepted` when the
 //! server answers later. A GET on the same endpoint opens the optional
-//! server-initiated stream; kage opens it once, after the first
-//! successful POST, and forwards any JSON frames it produces into the
-//! same pipe the POST responses feed. The session id the server hands
+//! server-initiated stream; kage opens it once, after the
+//! `initialize` reply, and forwards any JSON frames it produces into
+//! the same pipe the POST responses feed. The session id the server hands
 //! back is echoed as `mcp-session-id` on later requests.
 //!
 //! This maps onto the byte stream [`kage_jsonrpc::connect`] expects, so
 //! the HTTP transport reuses the exact same [`Peer`], request routing,
 //! and cancellation as the stdio transport.
 //!
-//! Two simplifications over the spec: `MCP-Protocol-Version` carries
-//! the version kage advertises rather than the negotiated one, and a
-//! POST failure closes the transport only when the server could not
-//! have routed the request at all (404, which the spec defines as an
-//! expired session, or an unreachable host); any other HTTP status
-//! fails that one request and leaves the transport open.
+//! The transport learns the negotiated protocol version from the first
+//! response whose `result` carries a string `protocolVersion` (the
+//! `initialize` reply) and sends it as `MCP-Protocol-Version` on every
+//! later POST and on the GET.
+//!
+//! One simplification over the spec: a POST failure closes the
+//! transport only when the server could not have routed the request at
+//! all (404, which the spec defines as an expired session, or an
+//! unreachable host); any other HTTP status fails that one request and
+//! leaves the transport open.
 //!
 //! Each outgoing request is sent as a POST on its own detached
 //! thread, so the peer's writer lock is released as soon as the
@@ -46,9 +50,9 @@ use std::time::Duration;
 
 use kage_jsonrpc::{Inbound, Peer, connect_with};
 
-use crate::server::{PROTOCOL_VERSION, cancel_notice};
+use crate::server::cancel_notice;
 
-/// How long the GET pump waits for the first successful POST before
+/// How long the GET pump waits for the negotiated version before
 /// giving up on the server-initiated stream. Generous: this only
 /// trips on a server that never answers.
 const STREAM_READY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -61,11 +65,11 @@ const MAX_SSE_LINE: u64 = 8 * 1024 * 1024;
 const MAX_JSON_BODY: u64 = 8 * 1024 * 1024;
 
 /// Session state shared between the POST writer and the GET pump:
-/// the server-assigned session id and whether any POST has succeeded.
+/// the server-assigned session id and the negotiated protocol version.
 #[derive(Default)]
 struct Shared {
     session_id: Option<String>,
-    ready: bool,
+    protocol_version: Option<String>,
 }
 
 /// Session state behind the condvar the GET pump waits on.
@@ -178,15 +182,34 @@ fn read_sse_frame<R: BufRead>(reader: &mut R, limit: u64) -> io::Result<Option<S
 /// Pull SSE frames from `body` and forward every JSON payload into
 /// the pipe. Keep-alive comments, empty frames, and non-JSON data
 /// (legacy `endpoint` events, bare strings) are dropped.
-fn pump_sse<R: Read>(body: R, out: &OutSlot) -> io::Result<()> {
+fn pump_sse<R: Read>(body: R, shared: &SharedState, out: &OutSlot) -> io::Result<()> {
     let mut reader = BufReader::new(body);
     while let Some(data) = read_sse_frame(&mut reader, MAX_SSE_LINE)? {
-        if data.is_empty() || serde_json::from_str::<serde_json::Value>(&data).is_err() {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(&data) else {
             continue;
-        }
+        };
+        record_version(shared, &message);
         forward(out, data.as_bytes())?;
     }
     Ok(())
+}
+
+/// Remember the version from the first `result` that names one, and
+/// wake the GET pump that waits for it. It is recorded before the
+/// message is forwarded, so the next POST already carries it.
+fn record_version(shared: &SharedState, message: &serde_json::Value) {
+    let Some(version) = message
+        .get("result")
+        .and_then(|r| r.get("protocolVersion"))
+        .and_then(|v| v.as_str())
+    else {
+        return;
+    };
+    let mut guard = kage_core::sync::lock(&shared.0);
+    if guard.protocol_version.is_none() {
+        guard.protocol_version = Some(version.to_owned());
+        shared.1.notify_all();
+    }
 }
 
 /// Take away the pipe writer: the reader side sees EOF, the jsonrpc
@@ -216,10 +239,10 @@ impl PostFailure {
 }
 
 /// POST one JSON-RPC message and absorb the response. A successful
-/// response records the session id (first one wins) and unblocks the
-/// GET pump before any body is forwarded, so the next POST already
-/// carries the session; an SSE response or a JSON body is forwarded
-/// into the pipe, a 202 or empty body is a bare success.
+/// response records the session id (first one wins) before any body is
+/// forwarded, so the next POST already carries the session; an SSE
+/// response or a JSON body is forwarded into the pipe, a 202 or empty
+/// body is a bare success.
 fn post_and_forward(
     agent: &ureq::Agent,
     url: &str,
@@ -237,8 +260,8 @@ fn post_and_forward(
         if let Some(session) = &guard.session_id {
             req = req.header("mcp-session-id", session.as_str());
         }
-        if guard.ready {
-            req = req.header("MCP-Protocol-Version", PROTOCOL_VERSION);
+        if let Some(version) = &guard.protocol_version {
+            req = req.header("MCP-Protocol-Version", version.as_str());
         }
     }
     // Configured headers go last so they can override the defaults.
@@ -275,9 +298,7 @@ fn post_and_forward(
         {
             guard.session_id = Some(session.to_owned());
         }
-        guard.ready = true;
     }
-    shared.1.notify_all();
     let status = response.status().as_u16();
     let content_type = response
         .headers()
@@ -288,7 +309,8 @@ fn post_and_forward(
     // A failure past this point may leave the response part-consumed,
     // so the transport can no longer be trusted.
     if content_type.starts_with("text/event-stream") {
-        return pump_sse(response.into_body().into_reader(), out).map_err(PostFailure::fatal);
+        return pump_sse(response.into_body().into_reader(), shared, out)
+            .map_err(PostFailure::fatal);
     }
     let mut payload = Vec::new();
     response
@@ -305,6 +327,11 @@ fn post_and_forward(
     }
     if status == 202 || payload.iter().all(u8::is_ascii_whitespace) {
         return Ok(());
+    }
+    if kage_core::sync::lock(&shared.0).protocol_version.is_none()
+        && let Ok(message) = serde_json::from_slice::<serde_json::Value>(&payload)
+    {
+        record_version(shared, &message);
     }
     forward(out, &payload).map_err(PostFailure::fatal)
 }
@@ -379,8 +406,8 @@ impl Write for HttpPoster {
     }
 }
 
-/// Spawn the detached GET pump: wait for the first successful POST,
-/// then open the optional server-initiated stream and forward its
+/// Spawn the detached GET pump: wait for the negotiated version (the
+/// `initialize` reply), then open the optional server-initiated stream and forward its
 /// JSON frames into the pipe. A refused or non-SSE answer (the spec
 /// allows a plain 405) ends the pump silently.
 fn spawn_get_pump(
@@ -394,18 +421,21 @@ fn spawn_get_pump(
         let (lock, cv) = &*shared;
         let guard = kage_core::sync::lock(lock);
         let (guard, waited) = cv
-            .wait_timeout_while(guard, STREAM_READY_TIMEOUT, |s| !s.ready)
+            .wait_timeout_while(guard, STREAM_READY_TIMEOUT, |s| {
+                s.protocol_version.is_none()
+            })
             .expect("mcp http state mutex poisoned");
         if waited.timed_out() {
             return;
         }
         let session = guard.session_id.clone();
+        let version = guard.protocol_version.clone().unwrap_or_default();
         drop(guard);
         let mut req = agent.get(&url).header("accept", "text/event-stream");
         if let Some(session) = &session {
             req = req.header("mcp-session-id", session.as_str());
         }
-        req = req.header("MCP-Protocol-Version", PROTOCOL_VERSION);
+        req = req.header("MCP-Protocol-Version", version.as_str());
         for (key, value) in &headers {
             req = req.header(key.as_str(), value.as_str());
         }
@@ -420,7 +450,7 @@ fn spawn_get_pump(
         if !content_type.starts_with("text/event-stream") {
             return;
         }
-        let _ = pump_sse(response.into_body().into_reader(), &out);
+        let _ = pump_sse(response.into_body().into_reader(), &shared, &out);
     });
 }
 
@@ -460,10 +490,11 @@ mod tests {
     fn pump_sse_forwards_json_and_drops_noise() {
         let (mut pipe_rx, pipe_tx) = io::pipe().unwrap();
         let out: OutSlot = Arc::new(Mutex::new(Some(pipe_tx)));
+        let shared = SharedState::default();
         let stream: &[u8] = b": keep-alive\nevent: endpoint\ndata: /mcp\n\n\
             event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":7}\n\n\
             data: not json\n\n";
-        pump_sse(stream, &out).unwrap();
+        pump_sse(stream, &shared, &out).unwrap();
         *kage_core::sync::lock(&out) = None;
         let mut got = String::new();
         BufReader::new(&mut pipe_rx).read_line(&mut got).unwrap();
@@ -885,6 +916,54 @@ mod tests {
             open_http(fake_agent(handler, usize::MAX), TEST_URL, &BTreeMap::new()).unwrap();
         let conn = McpConnection::initialize("srv", peer, inbound, &[], None).unwrap();
         assert_eq!(conn.protocol_version(), "2025-06-18");
+    }
+
+    #[test]
+    fn later_requests_carry_the_negotiated_version() {
+        for sse in [false, true] {
+            let log: Arc<Mutex<Vec<Recorded>>> = Arc::new(Mutex::new(Vec::new()));
+            let recorded = Arc::clone(&log);
+            let handler = fixed(move |request: &Recorded| -> Vec<u8> {
+                recorded.lock().unwrap().push(request.clone());
+                if request.method == "GET" {
+                    return response_bytes("HTTP/1.1 405 Method Not Allowed", None, &[], "");
+                }
+                if !request.body.contains("\"initialize\"") {
+                    return response_bytes("HTTP/1.1 202 Accepted", None, &[], "");
+                }
+                let reply = serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": { "protocolVersion": "2025-03-26", "capabilities": {} }
+                });
+                if sse {
+                    let body = format!("data: {reply}\n\n");
+                    response_bytes("HTTP/1.1 200 OK", Some("text/event-stream"), &[], &body)
+                } else {
+                    let body = reply.to_string();
+                    response_bytes("HTTP/1.1 200 OK", Some("application/json"), &[], &body)
+                }
+            });
+            let (peer, inbound, _reader) =
+                open_http(fake_agent(handler, usize::MAX), TEST_URL, &BTreeMap::new()).unwrap();
+            let conn = McpConnection::initialize("srv", peer, inbound, &[], None).unwrap();
+            assert_eq!(conn.protocol_version(), "2025-03-26");
+            wait_for(|| log.lock().unwrap().iter().any(|r| r.method == "GET"));
+            let log = log.lock().unwrap();
+            let version = |r: &Recorded| r.headers.get("mcp-protocol-version").cloned();
+            assert_eq!(version(&log[0]), None, "sse: {sse}");
+            let initialized = log
+                .iter()
+                .find(|r| r.body.contains("notifications/initialized"))
+                .expect("the second post");
+            assert_eq!(
+                version(initialized).as_deref(),
+                Some("2025-03-26"),
+                "sse: {sse}"
+            );
+            let get = log.iter().find(|r| r.method == "GET").expect("the stream");
+            assert_eq!(version(get).as_deref(), Some("2025-03-26"), "sse: {sse}");
+        }
     }
 
     #[test]

@@ -49,6 +49,9 @@ pub struct ReplayResult {
     /// `ThinkingLevel` and seeds `AgentContext::thinking_level` so a
     /// resumed session keeps the level the user last selected.
     pub thinking_level: Option<String>,
+    /// Text of the most recent [`SessionEntry::Title`], or `None` if the
+    /// session never recorded one.
+    pub title: Option<String>,
 }
 
 /// Cumulative token totals replayed from a session file, plus the
@@ -91,6 +94,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
 
     let mut model = header.model.clone();
     let mut thinking_level: Option<String> = None;
+    let mut title: Option<String> = None;
     let mut history: Vec<Message> = Vec::new();
     // `call_starts` tracks the wall-clock time each ToolCall was
     // appended; on a matching ToolResult we compute the elapsed
@@ -163,7 +167,8 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
             }
             SessionEntry::ModelChange(mc) => model = mc.model,
             SessionEntry::ThinkingLevelChange(t) => thinking_level = Some(t.level),
-            SessionEntry::Label(_) | SessionEntry::Title(_) | SessionEntry::Custom(_) => {}
+            SessionEntry::Title(t) => title = Some(t.title),
+            SessionEntry::Label(_) | SessionEntry::Custom(_) => {}
         }
     }
     Ok(ReplayResult {
@@ -173,6 +178,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
         tool_durations,
         usage_total,
         thinking_level,
+        title,
     })
 }
 
@@ -386,6 +392,29 @@ mod tests {
         let result = replay(&path).unwrap();
         assert_eq!(result.model, "openai:gpt-4o");
         assert_eq!(result.history.len(), 2);
+    }
+
+    #[test]
+    fn replay_keeps_the_latest_title() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("a.jsonl");
+        let title = |text: &str| {
+            SessionEntry::Title(crate::entry::SessionTitle {
+                id: EntryId::new(),
+                ts: Utc::now(),
+                title: text.into(),
+            })
+        };
+        write(
+            &path,
+            fresh_header(),
+            &[
+                message_entry(Role::User, "go"),
+                title("first"),
+                title("second"),
+            ],
+        );
+        assert_eq!(replay(&path).unwrap().title.as_deref(), Some("second"));
     }
 
     #[test]

@@ -1,6 +1,7 @@
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
+use kage_core::agents::AgentDefs;
 use kage_core::permissions::{PermissionAction, PermissionsConfig};
 use kage_core::protocol::{Envelope, Event, RunOutcome};
 use kage_core::{LoopEvent, StopReason, TokenUsage, ToolCallId, ToolOutput};
@@ -124,18 +125,27 @@ impl Harness {
 
     fn open_with(&self, id: SessionId, recorder: Option<Recorder>, gate: PermissionGate) {
         self.engine.open(SessionSpec {
+            recorder,
+            gate,
+            ..self.spec(id)
+        });
+    }
+
+    fn spec(&self, id: SessionId) -> SessionSpec {
+        SessionSpec {
             id,
             model: "mock:m".into(),
             cx: AgentContext::new("m", "").with_workdir("/tmp"),
-            recorder,
+            recorder: None,
             tools: self.tools.clone(),
             plugins: None,
-            gate,
+            gate: PermissionGate::new(PermissionsConfig::default()),
             loop_cfg: LoopConfig::default(),
             mcp: None,
             interactive: true,
             title: false,
-        });
+            agents: None,
+        }
     }
 }
 
@@ -723,6 +733,7 @@ fn first_exchange_records_a_title() {
         mcp: None,
         interactive: true,
         title: true,
+        agents: None,
     });
     prompt(&h.engine, id, "hi", Delivery::Steer);
     let seen = wait_for(&h.events, |e| {
@@ -764,10 +775,588 @@ fn plugin_turn_end_entries_land_in_the_session_file() {
         mcp: None,
         interactive: true,
         title: false,
+        agents: None,
     });
     prompt(&h.engine, id, "hi", Delivery::Steer);
     until_runs_end(&h.events, 1);
     h.engine.shutdown();
     let file = std::fs::read_to_string(&path).unwrap();
     assert!(file.contains("plugin:mark"), "{file}");
+}
+
+fn agent_setup(max_depth: u8, max_running: usize) -> AgentSetup {
+    AgentSetup {
+        defs: Arc::new(AgentDefs::builtin()),
+        max_depth,
+        max_running,
+    }
+}
+
+fn task(prompt: &str) -> serde_json::Value {
+    serde_json::json!({"description": "a task", "prompt": prompt})
+}
+
+/// One assistant turn that calls `agent` once per `(call id, input)`.
+fn agent_turn(calls: &[(&str, serde_json::Value)]) -> Vec<Result<ProviderEvent, ProviderError>> {
+    let mut turn = vec![Ok(ProviderEvent::MessageStart)];
+    for (id, input) in calls {
+        let id = ToolCallId::new(*id);
+        turn.push(Ok(ProviderEvent::ToolCallStart {
+            id: id.clone(),
+            name: "agent".into(),
+        }));
+        turn.push(Ok(ProviderEvent::ToolCallEnd {
+            id,
+            input: input.clone(),
+        }));
+    }
+    turn.push(Ok(ProviderEvent::MessageEnd {
+        stop_reason: StopReason::ToolUse,
+        usage: TokenUsage::default(),
+    }));
+    turn
+}
+
+impl Harness {
+    fn open_parent(
+        &self,
+        recorder: Option<Recorder>,
+        gate: PermissionGate,
+        agents: Option<AgentSetup>,
+    ) -> SessionId {
+        let id = SessionId::new();
+        self.engine.open(SessionSpec {
+            recorder,
+            gate,
+            agents,
+            ..self.spec(id)
+        });
+        id
+    }
+}
+
+/// Children in spawn order, with the call that started each.
+fn spawned(events: &[Envelope]) -> Vec<(SessionId, ToolCallId)> {
+    events
+        .iter()
+        .filter_map(|e| match &e.event {
+            Event::Host(HostEvent::AgentSpawned { tool_call_id, .. }) => {
+                Some((e.session, tool_call_id.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn tool_output(events: &[Envelope], session: SessionId, call: &str) -> ToolOutput {
+    events
+        .iter()
+        .find_map(|e| match &e.event {
+            Event::Loop(LoopEvent::ToolCallEnd { id, output })
+                if e.session == session && id.0 == call =>
+            {
+                Some(output.clone())
+            }
+            _ => None,
+        })
+        .expect("tool call ended")
+}
+
+fn outcome_of(events: &[Envelope], session: SessionId) -> Vec<RunOutcome> {
+    let mine: Vec<Envelope> = events
+        .iter()
+        .filter(|e| e.session == session)
+        .cloned()
+        .collect();
+    outcomes(&mine)
+}
+
+fn is_tool_start_outside(parent: SessionId) -> impl Fn(&Envelope) -> bool {
+    move |e| e.session != parent && is_tool_start(e)
+}
+
+#[test]
+fn agent_call_returns_the_child_reply_and_records_the_child() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("find it"))]),
+        text_turn("child reply"),
+        text_turn("parent done"),
+    ]));
+    let parent_id = SessionId::new();
+    let (recorder, parent_path) = recorder_in(dir.path(), parent_id);
+    h.engine.open(SessionSpec {
+        recorder: Some(recorder),
+        agents: Some(agent_setup(1, 1)),
+        ..h.spec(parent_id)
+    });
+    prompt(&h.engine, parent_id, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 2);
+    h.engine.shutdown();
+
+    let [(child, call)] = &spawned(&events)[..] else {
+        panic!("one child expected");
+    };
+    let child = *child;
+    assert_eq!(call.0, "call_a");
+    let first = events.iter().find(|e| e.session == child).unwrap();
+    assert_eq!(first.seq, 1);
+    assert!(matches!(
+        &first.event,
+        Event::Host(HostEvent::AgentSpawned { parent, agent, .. })
+            if *parent == parent_id && agent == "general"
+    ));
+    let output = tool_output(&events, parent_id, "call_a");
+    assert_eq!(
+        output.text,
+        format!(
+            "<agent name=\"general\" session=\"{child}\" state=\"completed\">\nchild reply\n</agent>"
+        )
+    );
+    assert!(!output.is_error);
+    assert_eq!(outcome_of(&events, parent_id), [RunOutcome::Completed]);
+
+    let child_path = dir.path().join(format!("{child}.jsonl"));
+    let entries: Vec<kage_session::SessionEntry> = kage_session::SessionReader::iter(&child_path)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    match &entries[..3] {
+        [
+            kage_session::SessionEntry::Header(header),
+            kage_session::SessionEntry::Custom(marker),
+            kage_session::SessionEntry::Title(title),
+        ] => {
+            assert_eq!(header.parent_session, Some(parent_id));
+            assert_eq!(marker.kind, kage_session::list::AGENT_ENTRY_KIND);
+            assert_eq!(marker.data["agent"], "general");
+            assert_eq!(marker.data["tool_call_id"], "call_a");
+            assert_eq!(marker.data["parent"], parent_id.to_string());
+            assert_eq!(title.title, "a task");
+        }
+        other => panic!("unexpected entries {other:?}"),
+    }
+    let summaries = kage_session::list(dir.path()).unwrap();
+    let child_summary = summaries.iter().find(|s| s.id == child).unwrap();
+    assert_eq!(child_summary.agent.as_deref(), Some("general"));
+    let parent_file = std::fs::read_to_string(&parent_path).unwrap();
+    assert!(
+        parent_file.contains(&format!("session=\\\"{child}\\\"")),
+        "{parent_file}"
+    );
+}
+
+#[test]
+fn agent_tool_follows_the_depth_limit() {
+    let tool_names = |request: &kage_provider::StreamRequest| -> Vec<String> {
+        request.tools.iter().map(|t| t.name.clone()).collect()
+    };
+    let mock = MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("look"))]),
+        text_turn("child reply"),
+        text_turn("parent done"),
+    ]);
+    let h = harness(mock.clone());
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(1, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    until_runs_end(&h.events, 2);
+    let requests = mock.requests();
+    assert!(tool_names(&requests[0]).contains(&"agent".to_owned()));
+    assert_eq!(tool_names(&requests[1]), ["gate"]);
+
+    let mock = MockProvider::replaying(text_turn("ok"));
+    let h = harness(mock.clone());
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(0, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+    assert_eq!(tool_names(&mock.requests()[0]), ["gate"]);
+}
+
+#[test]
+fn unknown_agent_names_the_valid_ones() {
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[(
+            "call_a",
+            serde_json::json!({"agent": "nope", "description": "d", "prompt": "p"}),
+        )]),
+        text_turn("parent done"),
+    ]));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(1, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 1);
+    let output = tool_output(&events, parent, "call_a");
+    assert!(output.is_error);
+    assert!(output.text.contains("explore, general"), "{}", output.text);
+    assert!(spawned(&events).is_empty());
+}
+
+#[test]
+fn cancelling_the_parent_stops_the_child() {
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("wait"))]),
+        tool_turn("gate"),
+    ]));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(1, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    wait_for(&h.events, is_tool_start_outside(parent));
+    h.engine.send(Command::to(parent, CommandKind::Cancel));
+    let events = until_runs_end(&h.events, 2);
+    assert_eq!(
+        outcomes(&events),
+        [RunOutcome::Cancelled, RunOutcome::Cancelled]
+    );
+}
+
+#[test]
+fn cancelling_only_the_child_lets_the_parent_continue() {
+    let mock = MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("wait"))]),
+        tool_turn("gate"),
+        text_turn("parent done"),
+    ]);
+    let h = harness(mock.clone());
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(1, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let seen = wait_for(&h.events, is_tool_start_outside(parent));
+    let child = seen.last().unwrap().session;
+    h.engine.send(Command::to(child, CommandKind::Cancel));
+    let events = until_runs_end(&h.events, 2);
+
+    assert_eq!(outcome_of(&events, child), [RunOutcome::Cancelled]);
+    assert_eq!(outcome_of(&events, parent), [RunOutcome::Completed]);
+    let output = tool_output(&events, parent, "call_a");
+    assert!(output.is_error);
+    assert!(
+        output.text.contains("state=\"cancelled\""),
+        "{}",
+        output.text
+    );
+    assert_eq!(mock.call_count(), 3);
+}
+
+#[test]
+fn running_limit_queues_agents_in_spawn_order() {
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("one")), ("call_b", task("two"))]),
+        text_turn("first reply"),
+        text_turn("second reply"),
+        text_turn("parent done"),
+    ]));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(1, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 3);
+
+    let children = spawned(&events);
+    assert_eq!(children.len(), 2);
+    let (first, second) = (&children[0], &children[1]);
+    let position = |pred: &dyn Fn(&Envelope) -> bool| events.iter().position(pred).unwrap();
+    let second_spawned = position(&|e| {
+        e.session == second.0 && matches!(e.event, Event::Host(HostEvent::AgentSpawned { .. }))
+    });
+    let first_ended = position(&|e| {
+        e.session == first.0 && matches!(e.event, Event::Host(HostEvent::RunEnded { .. }))
+    });
+    let second_started = position(&|e| {
+        e.session == second.0 && matches!(e.event, Event::Host(HostEvent::RunStarted))
+    });
+    assert!(second_spawned < first_ended && first_ended < second_started);
+    assert!(
+        tool_output(&events, parent, &first.1.0)
+            .text
+            .contains("first reply")
+    );
+    assert!(
+        tool_output(&events, parent, &second.1.0)
+            .text
+            .contains("second reply")
+    );
+    let results: Vec<String> = events
+        .iter()
+        .filter(|e| e.session == parent)
+        .filter_map(|e| match &e.event {
+            Event::Loop(LoopEvent::MessageAppended { message }) => Some(message.content.clone()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|c| match c {
+            Content::ToolResultBlock { call_id, .. } => Some(call_id.0),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results, ["call_a", "call_b"]);
+}
+
+#[test]
+fn child_asks_and_resolutions_use_the_child_session() {
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("ask"))]),
+        tool_turn("gate"),
+        text_turn("child done"),
+        text_turn("parent done"),
+    ]));
+    let parent = h.open_parent(None, ask_for_gate(), Some(agent_setup(1, 1)));
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let seen = wait_for(&h.events, |e| {
+        matches!(e.event, Event::Host(HostEvent::PermissionRequested { .. }))
+    });
+    let asked = seen.last().unwrap();
+    let child = asked.session;
+    assert_ne!(child, parent);
+    let Event::Host(HostEvent::PermissionRequested { request_id, .. }) = asked.event else {
+        unreachable!()
+    };
+    h.engine
+        .send(Command::active(CommandKind::ResolvePermission {
+            request_id,
+            decision: PermissionDecision::AllowOnce,
+        }));
+    let resolved = wait_for(&h.events, |e| {
+        matches!(e.event, Event::Host(HostEvent::PermissionResolved { .. }))
+    });
+    assert_eq!(resolved.last().unwrap().session, child);
+    h.release.send(()).unwrap();
+    let events = until_runs_end(&h.events, 2);
+    assert_eq!(outcome_of(&events, parent), [RunOutcome::Completed]);
+}
+
+#[test]
+fn steering_a_running_child_reaches_it() {
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("work"))]),
+        tool_turn("gate"),
+        text_turn("child done"),
+        text_turn("parent done"),
+    ]));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(1, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let child = wait_for(&h.events, is_tool_start_outside(parent))
+        .last()
+        .unwrap()
+        .session;
+    prompt(&h.engine, child, "also this", Delivery::Steer);
+    std::thread::sleep(Duration::from_millis(50));
+    h.release.send(()).unwrap();
+    let events = until_runs_end(&h.events, 2);
+    let child_events: Vec<Envelope> = events
+        .iter()
+        .filter(|e| e.session == child)
+        .cloned()
+        .collect();
+    assert!(appended_texts(&child_events).contains(&"also this".to_owned()));
+}
+
+#[test]
+fn prompting_an_idle_child_leaves_the_parent_alone() {
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("work"))]),
+        text_turn("child reply"),
+        text_turn("parent done"),
+        text_turn("second child reply"),
+    ]));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(1, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 2);
+    let (child, _) = spawned(&events)[0].clone();
+    prompt(&h.engine, child, "more", Delivery::Steer);
+    let events = until_runs_end(&h.events, 1);
+    assert!(
+        events
+            .iter()
+            .filter(|e| e.session == parent)
+            .all(|e| state_of(e).is_some()),
+        "only the parent's trailing state change: {events:?}"
+    );
+    assert_eq!(outcomes(&events), [RunOutcome::Completed]);
+}
+
+#[test]
+fn an_idle_child_of_a_cancelled_parent_can_run_again() {
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("wait"))]),
+        tool_turn("gate"),
+        text_turn("child again"),
+    ]));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(1, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let child = wait_for(&h.events, is_tool_start_outside(parent))
+        .last()
+        .unwrap()
+        .session;
+    h.engine.send(Command::to(parent, CommandKind::Cancel));
+    until_runs_end(&h.events, 2);
+    prompt(&h.engine, child, "again", Delivery::Steer);
+    let events = until_runs_end(&h.events, 1);
+    assert_eq!(outcome_of(&events, child), [RunOutcome::Completed]);
+}
+
+#[test]
+fn new_session_waits_for_agents_then_drops_them() {
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("work"))]),
+        text_turn("child reply"),
+        text_turn("parent done"),
+        tool_turn("gate"),
+        text_turn("child again"),
+    ]));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(1, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 2);
+    let (child, _) = spawned(&events)[0].clone();
+    prompt(&h.engine, child, "more", Delivery::Steer);
+    wait_for(&h.events, is_tool_start);
+
+    h.engine.send(Command::to(parent, CommandKind::NewSession));
+    let refused = wait_for(&h.events, is_notice);
+    assert_eq!(
+        notices(&refused),
+        ["new session: stop or wait for the agents first"]
+    );
+    h.engine.send(Command::to(child, CommandKind::NewSession));
+    let refused = wait_for(&h.events, is_notice);
+    assert_eq!(
+        notices(&refused),
+        ["new session: not available in an agent session"]
+    );
+
+    h.release.send(()).unwrap();
+    until_runs_end(&h.events, 1);
+    h.engine.send(Command::to(parent, CommandKind::NewSession));
+    wait_for(&h.events, is_session_changed);
+    prompt(&h.engine, child, "gone?", Delivery::Steer);
+    let unknown = wait_for(&h.events, |e| {
+        is_notice(e) && notices(std::slice::from_ref(e))[0].starts_with("unknown session")
+    });
+    assert_eq!(unknown.last().unwrap().session, child);
+}
+
+#[test]
+fn agent_runs_skip_plugin_events_and_session_ops() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = Arc::new(PluginRuntime::new().unwrap());
+    runtime
+        .eval(
+            "kage.session.append_entry('plugin:queued', {}) \
+             kage.on('turn_start', function() \
+                kage.session.append_entry('plugin:turn', {}) \
+             end)",
+        )
+        .unwrap();
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("work"))]),
+        text_turn("child reply"),
+        text_turn("parent done"),
+    ]));
+    let parent = SessionId::new();
+    let (_, path) = recorder_in(dir.path(), parent);
+    let writer = SessionWriter::open(&path).unwrap();
+    h.engine.open(SessionSpec {
+        recorder: Some(Recorder::new(writer, Some(Arc::clone(&runtime)))),
+        plugins: Some(runtime),
+        agents: Some(agent_setup(1, 1)),
+        ..h.spec(parent)
+    });
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 2);
+    h.engine.shutdown();
+
+    let (child, _) = spawned(&events)[0].clone();
+    let parent_file = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        parent_file.matches("plugin:turn").count(),
+        2,
+        "{parent_file}"
+    );
+    assert!(parent_file.contains("plugin:queued"), "{parent_file}");
+    let child_file = std::fs::read_to_string(dir.path().join(format!("{child}.jsonl"))).unwrap();
+    assert!(!child_file.contains("plugin:"), "{child_file}");
+}
+
+#[test]
+fn shutdown_with_running_and_waiting_agents_returns() {
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("one")), ("call_b", task("two"))]),
+        tool_turn("gate"),
+    ]));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(1, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    wait_for(&h.events, is_tool_start_outside(parent));
+    let (done_tx, done_rx) = channel();
+    std::thread::spawn(move || {
+        h.engine.shutdown();
+        let _ = done_tx.send(());
+    });
+    done_rx.recv_timeout(WAIT).expect("shutdown hung");
+}
+
+#[test]
+fn print_mode_text_shows_only_the_main_session() {
+    let h = harness(MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("work"))]),
+        text_turn("child reply"),
+        text_turn("parent done"),
+    ]));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(1, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 2);
+
+    let mut text = Vec::new();
+    let mut json = Vec::new();
+    for envelope in &events {
+        crate::cli_loop_run::print_envelope(&mut text, envelope, parent, false);
+        crate::cli_loop_run::print_envelope(&mut json, envelope, parent, true);
+    }
+    let text = String::from_utf8(text).unwrap();
+    assert!(text.contains("parent done"), "{text}");
+    assert!(!text.contains("child reply"), "{text}");
+    let json = String::from_utf8(json).unwrap();
+    assert!(json.contains("\"agent_spawned\""), "{json}");
+    assert!(json.contains("child reply"), "{json}");
 }

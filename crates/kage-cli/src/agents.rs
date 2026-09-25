@@ -10,7 +10,6 @@ use kage_core::agents::{self, AgentDefs, AgentSource};
 /// project is trusted. A later definition replaces an earlier one of
 /// the same name. Returns the definitions and one message per file
 /// that failed to load.
-#[expect(dead_code, reason = "the agent tool is not wired yet")]
 pub(crate) fn load(workdir: &Path) -> (AgentDefs, Vec<String>) {
     let mut dirs = Vec::new();
     if let Ok(dir) = crate::config_dir() {

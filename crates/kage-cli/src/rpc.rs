@@ -202,6 +202,7 @@ impl CliAcpAgent {
             mcp: Some(mcp),
             interactive: true,
             title: true,
+            agents: None,
         })
     }
 }

@@ -247,6 +247,7 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         mcp: Some(mcp_manager),
         interactive: true,
         title: true,
+        agents: None,
     });
     let log_commander = engine.commander();
     let _ = log_publisher.set(Box::new(move |level, message| {

@@ -7,6 +7,7 @@
 //! channels: the engine publishes `PermissionRequested` and a client
 //! answers with `ResolvePermission`.
 
+mod agent_tool;
 mod bus;
 mod plugin_tools;
 mod recorder;
@@ -14,18 +15,21 @@ mod runner;
 mod sessions;
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 
+use kage_core::agents::{AgentDef, AgentDefs};
+use kage_core::config::Config;
+use kage_core::options::{OptionStore, OptionValue};
 use kage_core::protocol::{
     Command, CommandKind, Delivery, HostEvent, NoticeLevel, PermissionDecision, RequestId,
     RunOutcome, SessionState, Usage,
 };
 use kage_core::sync::lock;
 use kage_core::{
-    CancelFlag, Content, LoopError, Message, Role, SessionId, ThinkingLevel, TokenUsage,
+    CancelFlag, Content, LoopError, Message, Role, SessionId, ThinkingLevel, TokenUsage, ToolOutput,
 };
 use kage_loop::{AgentContext, LoopConfig};
 use kage_mcp::McpManager;
@@ -38,6 +42,7 @@ pub(crate) use recorder::Recorder;
 #[cfg(test)]
 pub(crate) use sessions::render_session_markdown;
 
+use agent_tool::{AGENT_TOOL, AgentTool, Spawn};
 use bus::Bus;
 use plugin_tools::PluginTools;
 use runner::{Finished, Run, Steering, Work};
@@ -63,6 +68,32 @@ pub(crate) struct SessionSpec {
     pub interactive: bool,
     /// Generate and record a title after the first completed exchange.
     pub title: bool,
+    /// Agent definitions and limits. `None` means no `agent` tool.
+    pub agents: Option<AgentSetup>,
+}
+
+/// What the `agent` tool may start, shared by a whole session tree.
+#[derive(Clone)]
+pub(crate) struct AgentSetup {
+    pub defs: Arc<AgentDefs>,
+    /// How deep agents may nest. 0 turns the `agent` tool off.
+    pub max_depth: u8,
+    /// How many agents run at once. Further agents wait their turn.
+    pub max_running: usize,
+}
+
+impl AgentSetup {
+    /// `defs` with the limits of `config`'s `[agents]` table, where an
+    /// out-of-range value falls back to its default.
+    pub(crate) fn from_config(defs: AgentDefs, config: &Config) -> Self {
+        let (options, _) = OptionStore::from_config(config);
+        let int = |name: &str| options.get(name).and_then(OptionValue::as_int).unwrap_or(0);
+        Self {
+            defs: Arc::new(defs),
+            max_depth: u8::try_from(int("agent_max_depth")).unwrap_or(0),
+            max_running: usize::try_from(int("agent_max_running")).unwrap_or(1),
+        }
+    }
 }
 
 /// Handle to a running engine. Dropping it shuts the engine down.
@@ -101,6 +132,7 @@ impl Commander {
 enum Input {
     Command(Command),
     Open(Box<SessionSpec>),
+    Spawn(Box<Spawn>),
     Finished(Box<Finished>),
     ShellDone {
         session: SessionId,
@@ -129,6 +161,7 @@ impl Engine {
             tx: tx.clone(),
             asks: Arc::default(),
             next_request: Arc::default(),
+            waiting: VecDeque::new(),
             shutting_down: false,
         };
         let thread = thread::spawn(move || dispatcher.run(&rx));
@@ -177,6 +210,7 @@ impl Drop for Engine {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct Session {
     idle: Option<Idle>,
     state: SessionState,
@@ -200,6 +234,23 @@ struct Session {
     title: bool,
     title_pending: bool,
     plugin_tools: PluginTools,
+    agents: Option<AgentSetup>,
+    /// Present on sessions an `agent` call started.
+    link: Option<AgentLink>,
+    /// Read at spawn, while the context is out with a run.
+    confine_paths: bool,
+}
+
+/// How an agent session hangs off the session that started it.
+struct AgentLink {
+    parent: SessionId,
+    agent: String,
+    /// 1 for agents of the main session, 2 for theirs, and so on.
+    depth: u8,
+    /// Delivers the result to the waiting `agent` call. Taken by the
+    /// first run that finishes, so later runs a user starts in the
+    /// agent never answer the parent twice.
+    reply: Option<mpsc::Sender<ToolOutput>>,
 }
 
 /// What a session holds while no run owns it.
@@ -208,7 +259,8 @@ struct Idle {
     recorder: Option<Recorder>,
 }
 
-type Asks = Arc<Mutex<HashMap<RequestId, mpsc::Sender<PermissionDecision>>>>;
+/// Open permission requests with the session that asked.
+type Asks = Arc<Mutex<HashMap<RequestId, (SessionId, mpsc::Sender<PermissionDecision>)>>>;
 
 struct Dispatcher {
     bus: Arc<Bus>,
@@ -218,6 +270,8 @@ struct Dispatcher {
     tx: mpsc::Sender<Input>,
     asks: Asks,
     next_request: Arc<AtomicU64>,
+    /// Agents over the running limit, in spawn order.
+    waiting: VecDeque<SessionId>,
     shutting_down: bool,
 }
 
@@ -226,7 +280,8 @@ impl Dispatcher {
         while let Ok(input) = rx.recv() {
             match input {
                 Input::Command(command) => self.command(command),
-                Input::Open(spec) => self.open(*spec),
+                Input::Open(spec) => self.open(*spec, CancelFlag::new(), None),
+                Input::Spawn(spawn) => self.spawn(*spawn),
                 Input::Finished(finished) => self.finish(*finished),
                 Input::ShellDone {
                     session,
@@ -254,7 +309,7 @@ impl Dispatcher {
         }
     }
 
-    fn open(&mut self, spec: SessionSpec) {
+    fn open(&mut self, spec: SessionSpec, cancel: CancelFlag, link: Option<AgentLink>) {
         let SessionSpec {
             id,
             model,
@@ -267,6 +322,7 @@ impl Dispatcher {
             mcp,
             interactive,
             title,
+            agents,
         } = spec;
         let usage = usage_of(&cx);
         let state = SessionState {
@@ -284,6 +340,7 @@ impl Dispatcher {
         self.bus.publish(id, HostEvent::UsageUpdated { usage });
         let path = recorder.as_ref().map(|r| r.path().to_path_buf());
         let workdir = cx.workdir.clone();
+        let confine_paths = cx.confine_paths;
         let title_pending = title && !has_reply(&cx);
         self.sessions.insert(
             id,
@@ -292,7 +349,7 @@ impl Dispatcher {
                 state,
                 thinking: None,
                 usage,
-                cancel: CancelFlag::new(),
+                cancel,
                 steering: Arc::default(),
                 queued: VecDeque::new(),
                 tools,
@@ -307,6 +364,9 @@ impl Dispatcher {
                 title,
                 title_pending,
                 plugin_tools: PluginTools::default(),
+                agents,
+                link,
+                confine_paths,
             },
         );
         self.active.get_or_insert(id);
@@ -340,6 +400,9 @@ impl Dispatcher {
                 for session in self.sessions.values() {
                     session.cancel.cancel();
                 }
+                while let Some(&id) = self.waiting.front() {
+                    self.end_waiting(id);
+                }
                 return;
             }
             CommandKind::ResolvePermission {
@@ -365,6 +428,7 @@ impl Dispatcher {
         }
         match command.kind {
             CommandKind::Prompt { content, delivery } => self.prompt(id, content, delivery),
+            CommandKind::Cancel if self.waiting.contains(&id) => self.end_waiting(id),
             CommandKind::Cancel => self.sessions[&id].cancel.cancel(),
             CommandKind::Compact => {
                 if self.ensure_idle(id, "compact") {
@@ -491,10 +555,11 @@ impl Dispatcher {
         request_id: RequestId,
         decision: PermissionDecision,
     ) {
-        if let Some(reply) = lock(&self.asks).remove(&request_id) {
+        let asker = lock(&self.asks).remove(&request_id).map(|(asker, reply)| {
             let _ = reply.send(decision);
-        }
-        if let Some(id) = session.or(self.active) {
+            asker
+        });
+        if let Some(id) = asker.or(session).or(self.active) {
             self.bus
                 .publish(id, HostEvent::PermissionResolved { request_id });
         }
@@ -509,7 +574,7 @@ impl Dispatcher {
 
     fn prompt(&mut self, id: SessionId, content: Vec<Content>, delivery: Delivery) {
         let session = self.sessions.get_mut(&id).expect("session checked");
-        if session.idle.is_some() {
+        if session.idle.is_some() && !self.waiting.contains(&id) {
             let prompt = Message::new(Role::User, content, None);
             self.start_run(id, Work::Prompt(prompt));
             return;
@@ -528,14 +593,11 @@ impl Dispatcher {
             Err(err) => {
                 let message = format!("model {model} unavailable: {err}");
                 notice(&self.bus, id, NoticeLevel::Error, message.clone());
-                self.bus.publish(
-                    id,
-                    HostEvent::RunEnded {
-                        outcome: RunOutcome::Failed {
-                            error: LoopError::Provider { message },
-                        },
-                    },
-                );
+                let outcome = RunOutcome::Failed {
+                    error: LoopError::Provider { message },
+                };
+                self.deliver(id, &outcome, &[]);
+                self.bus.publish(id, HostEvent::RunEnded { outcome });
                 return;
             }
         };
@@ -581,12 +643,18 @@ impl Dispatcher {
             }),
             Work::Compact => Work::Compact,
         };
+        let mut tools = session.tools.clone();
+        if let Some(setup) = &session.agents
+            && depth_of(session) < setup.max_depth
+        {
+            tools.register(Arc::new(AgentTool::new(id, self.tx.clone(), &setup.defs)));
+        }
         let run = Run {
             session: id,
             work,
             provider,
             model,
-            tools: session.tools.clone(),
+            tools,
             cx,
             recorder,
             usage: session.usage,
@@ -619,12 +687,25 @@ impl Dispatcher {
             let model = session.state.model.clone();
             self.generate_title(id, &cx, &model);
         }
+        self.deliver(id, &outcome, &cx.history);
+        // Children may not have seen the cancel yet, and this session's
+        // own flag resets below, so they get their own.
+        if outcome == RunOutcome::Cancelled {
+            for child in self.sessions.values() {
+                if child.link.as_ref().is_some_and(|l| l.parent == id) && child.idle.is_none() {
+                    child.cancel.cancel();
+                }
+            }
+        }
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
         session.idle = Some(Idle { cx, recorder });
         session.usage = usage;
         session.state.working = false;
+        // A set flag on an idle session would cancel any run its agents
+        // start, through the tree.
+        session.cancel.reset();
         let leftover: Vec<String> = lock(&session.steering).drain(..).collect();
         for text in leftover.into_iter().rev() {
             session.queued.push_front(vec![Content::Text { text }]);
@@ -640,6 +721,216 @@ impl Dispatcher {
         if let Some(content) = next {
             self.start_run(id, Work::Prompt(Message::new(Role::User, content, None)));
         }
+        let orphans: Vec<SessionId> = self
+            .waiting
+            .iter()
+            .copied()
+            .filter(|w| self.parent_of(*w) == Some(id))
+            .collect();
+        for orphan in orphans {
+            self.end_waiting(orphan);
+        }
+        self.start_waiting();
+    }
+
+    /// Open a child session for an `agent` call and start it, or queue it
+    /// when the running limit is reached. Errors reply at once.
+    fn spawn(&mut self, spawn: Spawn) {
+        let Spawn {
+            parent,
+            tool_call_id,
+            agent,
+            description,
+            prompt,
+            reply,
+        } = spawn;
+        let fail = |text: String| {
+            let _ = reply.send(agent_tool::error_output(text));
+        };
+        let Some(from) = self.sessions.get(&parent) else {
+            return fail(format!("session {parent} is gone"));
+        };
+        let Some(setup) = from.agents.clone() else {
+            return fail("agents are turned off".to_owned());
+        };
+        let depth = depth_of(from) + 1;
+        if depth > setup.max_depth {
+            return fail(format!(
+                "agents may nest {} level(s) deep (agent_max_depth)",
+                setup.max_depth
+            ));
+        }
+        let Some(def) = setup.defs.get(&agent) else {
+            let names: Vec<&str> = setup.defs.iter().map(|d| d.name.as_str()).collect();
+            return fail(format!(
+                "unknown agent `{agent}`. Available agents: {}",
+                names.join(", ")
+            ));
+        };
+
+        let id = SessionId::new();
+        let (spec, missing) = agent_spec(from, parent, id, def, &setup);
+        let cancel = from.cancel.child();
+        let link = AgentLink {
+            parent,
+            agent: agent.clone(),
+            depth,
+            reply: Some(reply),
+        };
+        let marker = serde_json::json!({
+            "parent": parent,
+            "tool_call_id": tool_call_id,
+            "agent": agent,
+            "description": description,
+        });
+
+        self.bus.publish(
+            id,
+            HostEvent::AgentSpawned {
+                parent,
+                tool_call_id,
+                agent,
+                description: description.clone(),
+            },
+        );
+        self.open(spec, cancel, Some(link));
+        self.record_agent_entries(id, marker, description);
+        for name in missing {
+            notice(
+                &self.bus,
+                id,
+                NoticeLevel::Warning,
+                format!("agent tools: no tool named `{name}`"),
+            );
+        }
+        let content = vec![Content::Text { text: prompt }];
+        if self.running_agents() < setup.max_running {
+            self.start_run(id, Work::Prompt(Message::new(Role::User, content, None)));
+        } else {
+            let session = self.sessions.get_mut(&id).expect("session opened");
+            session.queued.push_back(content);
+            self.waiting.push_back(id);
+        }
+    }
+
+    /// Write the `kage:agent` marker and the title right after the header.
+    fn record_agent_entries(&mut self, id: SessionId, marker: serde_json::Value, title: String) {
+        let Some(recorder) = self
+            .sessions
+            .get_mut(&id)
+            .and_then(|s| s.idle.as_mut())
+            .and_then(|i| i.recorder.as_mut())
+        else {
+            return;
+        };
+        let ts = chrono::Utc::now();
+        let entries = [
+            kage_session::SessionEntry::Custom(kage_session::Custom {
+                id: kage_session::EntryId::new(),
+                ts,
+                kind: kage_session::list::AGENT_ENTRY_KIND.to_owned(),
+                data: marker,
+            }),
+            kage_session::SessionEntry::Title(kage_session::SessionTitle {
+                id: kage_session::EntryId::new(),
+                ts,
+                title,
+            }),
+        ];
+        for entry in &entries {
+            if let Err(err) = recorder.append(entry) {
+                notice(
+                    &self.bus,
+                    id,
+                    NoticeLevel::Error,
+                    format!("session write failed: {err}"),
+                );
+                return;
+            }
+        }
+    }
+
+    /// Send an agent's result to its `agent` call, once.
+    fn deliver(&mut self, id: SessionId, outcome: &RunOutcome, history: &[Message]) {
+        let Some(link) = self.sessions.get_mut(&id).and_then(|s| s.link.as_mut()) else {
+            return;
+        };
+        if let Some(reply) = link.reply.take() {
+            let _ = reply.send(agent_tool::agent_result(id, &link.agent, outcome, history));
+        }
+    }
+
+    /// Agent runs in flight that hold a slot of the running limit. An
+    /// agent waiting on its own agents holds none, so nesting cannot
+    /// deadlock the limit.
+    fn running_agents(&self) -> usize {
+        let waits_on_agents = |id: &SessionId| {
+            self.sessions.values().any(|s| {
+                s.link
+                    .as_ref()
+                    .is_some_and(|l| l.parent == *id && l.reply.is_some())
+            })
+        };
+        self.sessions
+            .iter()
+            .filter(|(id, s)| s.link.is_some() && s.idle.is_none() && !waits_on_agents(id))
+            .count()
+    }
+
+    /// Start waiting agents while the running limit allows.
+    fn start_waiting(&mut self) {
+        while !self.shutting_down
+            && let Some(&id) = self.waiting.front()
+        {
+            let max = self
+                .sessions
+                .get(&id)
+                .and_then(|s| s.agents.as_ref())
+                .map_or(usize::MAX, |a| a.max_running);
+            if self.running_agents() >= max {
+                return;
+            }
+            self.waiting.pop_front();
+            let next = self
+                .sessions
+                .get_mut(&id)
+                .and_then(|s| s.queued.pop_front());
+            if let Some(content) = next {
+                self.start_run(id, Work::Prompt(Message::new(Role::User, content, None)));
+            }
+        }
+    }
+
+    /// End a waiting agent that never started as cancelled.
+    fn end_waiting(&mut self, id: SessionId) {
+        self.waiting.retain(|w| *w != id);
+        if let Some(session) = self.sessions.get_mut(&id) {
+            session.queued.clear();
+            lock(&session.steering).clear();
+        }
+        self.deliver(id, &RunOutcome::Cancelled, &[]);
+        self.bus.publish(
+            id,
+            HostEvent::RunEnded {
+                outcome: RunOutcome::Cancelled,
+            },
+        );
+    }
+
+    fn parent_of(&self, id: SessionId) -> Option<SessionId> {
+        self.sessions.get(&id)?.link.as_ref().map(|l| l.parent)
+    }
+
+    /// Whether `id` is an agent somewhere below `ancestor`.
+    fn descends_from(&self, id: SessionId, ancestor: SessionId) -> bool {
+        let mut current = self.parent_of(id);
+        while let Some(parent) = current {
+            if parent == ancestor {
+                return true;
+            }
+            current = self.parent_of(parent);
+        }
+        false
     }
 
     /// Ask the model for a short title for the session's first exchange,
@@ -681,7 +972,7 @@ fn asker(bus: &Arc<Bus>, asks: &Asks, next: &Arc<AtomicU64>, session: SessionId)
     Arc::new(move |prompt: PermissionPrompt| {
         let request_id = RequestId(next.fetch_add(1, Ordering::Relaxed));
         let (reply, answer) = mpsc::channel();
-        lock(&asks).insert(request_id, reply);
+        lock(&asks).insert(request_id, (session, reply));
         bus.publish(
             session,
             HostEvent::PermissionRequested {
@@ -737,6 +1028,81 @@ fn notice(bus: &Bus, id: SessionId, level: NoticeLevel, text: String) {
             transient: false,
         },
     );
+}
+
+/// The session an agent of `from` runs in: the definition's model,
+/// thinking, role and tools over `from`'s, `from`'s gate and loop
+/// settings, no plugins or MCP of its own, and a file next to `from`'s
+/// when `from` records. Also returns listed tools that match nothing.
+fn agent_spec(
+    from: &Session,
+    parent: SessionId,
+    id: SessionId,
+    def: &AgentDef,
+    setup: &AgentSetup,
+) -> (SessionSpec, Vec<String>) {
+    let model = def
+        .model
+        .clone()
+        .unwrap_or_else(|| from.state.model.clone());
+    let system_prompt =
+        crate::runtime_env::build_system_prompt(&def.body, &from.workdir, &model, &[]);
+    let mut cx = AgentContext::new(model.clone(), &system_prompt).with_workdir(&from.workdir);
+    cx.confine_paths = from.confine_paths;
+    cx.thinking_level = Some(def.thinking.unwrap_or(from.state.thinking));
+    let (tools, missing) = agent_tools(&from.tools, def.tools.as_deref());
+    let recorder = from.path.as_deref().and_then(Path::parent).map(|dir| {
+        let header = kage_session::Header {
+            version: kage_session::FORMAT_VERSION,
+            session: id,
+            id: kage_session::EntryId::new(),
+            ts: chrono::Utc::now(),
+            cwd: from.workdir.clone(),
+            model: model.clone(),
+            system_prompt,
+            parent_session: Some(parent),
+            parent_entry: None,
+        };
+        Recorder::planned(crate::build_session_path(dir, id), header, None)
+    });
+    let spec = SessionSpec {
+        id,
+        model,
+        cx,
+        recorder,
+        tools,
+        plugins: None,
+        gate: from.gate.clone(),
+        loop_cfg: from.loop_cfg,
+        mcp: None,
+        interactive: from.interactive,
+        title: false,
+        agents: Some(setup.clone()),
+    };
+    (spec, missing)
+}
+
+/// 0 for a main session, 1 for its agents, and so on.
+fn depth_of(session: &Session) -> u8 {
+    session.link.as_ref().map_or(0, |l| l.depth)
+}
+
+/// The tools an agent gets: `parent`'s, narrowed to `only` when the
+/// definition lists tools. Also returns listed names that match nothing.
+fn agent_tools(parent: &ToolRegistry, only: Option<&[String]>) -> (ToolRegistry, Vec<String>) {
+    let Some(only) = only else {
+        return (parent.clone(), Vec::new());
+    };
+    let mut tools = ToolRegistry::new();
+    let mut missing = Vec::new();
+    for name in only {
+        match parent.get(name) {
+            Some(tool) => tools.register(Arc::clone(tool)),
+            None if name == AGENT_TOOL => {}
+            None => missing.push(name.clone()),
+        }
+    }
+    (tools, missing)
 }
 
 /// Usage totals carried by a context's token budget.

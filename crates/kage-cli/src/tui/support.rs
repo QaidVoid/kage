@@ -179,7 +179,8 @@ pub(crate) fn error_output(label: &str, msg: &str) -> CommandOutput {
 /// happens at picker-open time so newly recorded sessions appear
 /// without needing to restart the TUI. Unless `all` is set, only
 /// sessions whose recorded `cwd` is `workdir` are shown (the picker
-/// default); the in-picker `Ctrl+A` toggle re-lists with `all`.
+/// default); the in-picker `Ctrl+A` toggle re-lists with `all`. Agent
+/// sessions are never shown.
 pub(crate) fn list_session_choices(
     dir: &std::path::Path,
     workdir: &std::path::Path,
@@ -188,9 +189,7 @@ pub(crate) fn list_session_choices(
     let Ok(mut summaries) = kage_session::list(dir) else {
         return Vec::new();
     };
-    if !all {
-        summaries.retain(|s| s.cwd == workdir);
-    }
+    summaries.retain(|s| s.agent.is_none() && (all || s.cwd == workdir));
     // Order by last activity, newest first, so the date sections are
     // contiguous (the rows are grouped by `updated_at`'s day) and the
     // time column reads top-to-bottom within each day. `list` sorts
@@ -212,6 +211,7 @@ pub(crate) fn list_session_choices(
 
 /// Build the `:tree` forest rows from the sessions directory, marking
 /// whichever file the runtime is currently writing as the active one.
+/// Agent sessions sit under their parent with an `agent: ` label.
 pub(crate) fn list_session_nodes(
     dir: &std::path::Path,
     current: Option<&std::path::Path>,
@@ -227,7 +227,10 @@ pub(crate) fn list_session_nodes(
                 id: s.id.to_string(),
                 path: s.path.to_string_lossy().into_owned(),
                 parent: s.parent_session.map(|p| p.to_string()),
-                label: format_session_label(&s),
+                label: match s.agent {
+                    Some(_) => format!("agent: {}", format_session_label(&s)),
+                    None => format_session_label(&s),
+                },
                 is_current,
             }
         })
@@ -568,8 +571,10 @@ fn credential_notices(state: &State, auth: &AuthStore, now: DateTime<Utc>) -> Ve
 
 #[cfg(test)]
 mod tests {
-    use kage_core::LoopError;
+    use std::path::Path;
+
     use kage_core::protocol::RunOutcome;
+    use kage_core::{LoopError, SessionId};
     use kage_provider::testing::MockProvider;
 
     use super::*;
@@ -643,6 +648,72 @@ mod tests {
         assert_eq!(
             notices,
             ["the anthropic login has expired. Run /login anthropic."]
+        );
+    }
+
+    /// Write a session in `dir` titled `title`, spawned by `parent` as an
+    /// agent when given.
+    fn write_session(dir: &Path, title: &str, parent: Option<SessionId>) -> SessionId {
+        use kage_session::{Custom, EntryId, FORMAT_VERSION, Header, SessionEntry, SessionTitle};
+
+        let id = SessionId::new();
+        let header = Header {
+            version: FORMAT_VERSION,
+            session: id,
+            id: EntryId::new(),
+            ts: Utc::now(),
+            cwd: dir.to_path_buf(),
+            model: "mock:m".into(),
+            system_prompt: String::new(),
+            parent_session: parent,
+            parent_entry: None,
+        };
+        let mut writer =
+            kage_session::SessionWriter::create(dir.join(format!("{id}.jsonl")), header).unwrap();
+        if parent.is_some() {
+            writer
+                .append(&SessionEntry::Custom(Custom {
+                    id: EntryId::new(),
+                    ts: Utc::now(),
+                    kind: kage_session::list::AGENT_ENTRY_KIND.into(),
+                    data: serde_json::json!({ "agent": "explore" }),
+                }))
+                .unwrap();
+        }
+        writer
+            .append(&SessionEntry::Title(SessionTitle {
+                id: EntryId::new(),
+                ts: Utc::now(),
+                title: title.into(),
+            }))
+            .unwrap();
+        id
+    }
+
+    #[test]
+    fn picker_hides_agent_sessions_and_the_tree_labels_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = write_session(dir.path(), "main work", None);
+        write_session(dir.path(), "map exports", Some(main));
+
+        for all in [false, true] {
+            let labels: Vec<String> = list_session_choices(dir.path(), dir.path(), all)
+                .into_iter()
+                .map(|item| item.label)
+                .collect();
+            assert_eq!(labels, ["main work"]);
+        }
+        let mut nodes: Vec<(String, Option<String>)> = list_session_nodes(dir.path(), None)
+            .into_iter()
+            .map(|node| (node.label, node.parent))
+            .collect();
+        nodes.sort();
+        assert_eq!(
+            nodes,
+            [
+                ("agent: map exports".to_owned(), Some(main.to_string())),
+                ("main work".to_owned(), None),
+            ]
         );
     }
 

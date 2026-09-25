@@ -160,8 +160,43 @@ impl super::Dispatcher {
         false
     }
 
+    /// `true` when `id` is an agent session, which cannot be replaced or
+    /// copied; tells the user.
+    fn refuse_for_agent(&self, id: SessionId, what: &str) -> bool {
+        if self.sessions.get(&id).is_none_or(|s| s.link.is_none()) {
+            return false;
+        }
+        super::notice(
+            &self.bus,
+            id,
+            NoticeLevel::Warning,
+            format!("{what}: not available in an agent session"),
+        );
+        true
+    }
+
+    /// `true` when `id` and its agents are all idle; otherwise tells the
+    /// user.
+    fn ensure_tree_idle(&self, id: SessionId, what: &str) -> bool {
+        if !self.ensure_idle(id, what) {
+            return false;
+        }
+        let busy = self.sessions.iter().any(|(agent, s)| {
+            (s.idle.is_none() || self.waiting.contains(agent)) && self.descends_from(*agent, id)
+        });
+        if busy {
+            super::notice(
+                &self.bus,
+                id,
+                NoticeLevel::Warning,
+                format!("{what}: stop or wait for the agents first"),
+            );
+        }
+        !busy
+    }
+
     pub(super) fn new_session(&mut self, id: SessionId) {
-        if !self.ensure_idle(id, "new session") {
+        if self.refuse_for_agent(id, "new session") || !self.ensure_tree_idle(id, "new session") {
             return;
         }
         let session = &self.sessions[&id];
@@ -193,7 +228,7 @@ impl super::Dispatcher {
     }
 
     pub(super) fn load_session(&mut self, id: SessionId, path: &Path) {
-        if !self.ensure_idle(id, "resume") {
+        if self.refuse_for_agent(id, "resume") || !self.ensure_tree_idle(id, "resume") {
             return;
         }
         if self.sessions[&id].path.as_deref() == Some(path) {
@@ -254,7 +289,7 @@ impl super::Dispatcher {
     }
 
     pub(super) fn clone_session(&mut self, id: SessionId) {
-        if !self.ensure_idle(id, "clone") {
+        if self.refuse_for_agent(id, "clone") || !self.ensure_tree_idle(id, "clone") {
             return;
         }
         let Some(src) = self.sessions[&id].path.clone() else {
@@ -292,6 +327,9 @@ impl super::Dispatcher {
     }
 
     pub(super) fn fork(&mut self, id: SessionId, at: Option<&str>, switch: bool) {
+        if self.refuse_for_agent(id, "fork") {
+            return;
+        }
         let Some(src) = self.sessions[&id].path.clone() else {
             self.error(id, "fork: the session is not recorded".to_owned());
             return;
@@ -304,6 +342,9 @@ impl super::Dispatcher {
     }
 
     pub(super) fn fork_file(&self, id: SessionId, path: &Path) {
+        if self.refuse_for_agent(id, "fork") {
+            return;
+        }
         match fork_session(path, None) {
             Ok((_, new_id)) => self.info(id, format!("forked session: {}", short_id(new_id))),
             Err(err) => self.error(id, format!("fork: {err}")),
@@ -345,7 +386,7 @@ impl super::Dispatcher {
 
     /// Replace session `old` with a session `new` recorded at `path`,
     /// keeping its tools, plugins and settings but not its permission
-    /// mode or approvals, and tell clients.
+    /// mode or approvals, drop the agents of `old`, and tell clients.
     fn reseat(
         &mut self,
         old: SessionId,
@@ -372,6 +413,15 @@ impl super::Dispatcher {
         });
         let state = session.state.clone();
         let usage = session.usage;
+        let agents: Vec<SessionId> = self
+            .sessions
+            .keys()
+            .copied()
+            .filter(|agent| self.descends_from(*agent, old))
+            .collect();
+        for agent in agents {
+            self.sessions.remove(&agent);
+        }
         self.sessions.insert(new, session);
         if self.active == Some(old) {
             self.active = Some(new);

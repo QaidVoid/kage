@@ -5,7 +5,8 @@ use super::*;
 
 /// Drive one print-mode run on the engine. Streams events to stdout as
 /// text or JSONL, records the conversation when a writer is supplied, and
-/// maps the outcome to a process exit code.
+/// maps the outcome to a process exit code. Text mode prints the opened
+/// session only, while JSON mode prints the envelopes of its agents too.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_print_run(
     registry: Arc<ProviderRegistry>,
@@ -40,26 +41,26 @@ pub(crate) fn execute_print_run(
         eprintln!("kage: {err}; Ctrl-C will kill the process");
     }
 
-    let (ended_tx, ended_rx) = std::sync::mpsc::channel();
-    let printer: crate::engine::Subscriber = Box::new(move |envelope| {
-        let mut stdout = io::stdout().lock();
-        if json_mode {
-            print_envelope_json(&mut stdout, envelope);
-        }
-        match &envelope.event {
-            Event::Loop(event) if !json_mode => print_event(&mut stdout, event),
-            Event::Host(HostEvent::Notice { text, .. }) if !json_mode => eprintln!("kage: {text}"),
-            Event::Host(HostEvent::RunEnded { outcome }) => {
-                let _ = ended_tx.send(outcome.clone());
-            }
-            _ => {}
-        }
-    });
+    let (defs, agent_errors) = crate::agents::load(&workdir);
+    for err in agent_errors {
+        eprintln!("kage: {err}");
+    }
+    let agents = crate::engine::AgentSetup::from_config(defs, &layered);
 
     let session = writer
         .as_ref()
         .and_then(|w| crate::engine::session_id_of(w.path()))
         .unwrap_or_default();
+    let (ended_tx, ended_rx) = std::sync::mpsc::channel();
+    let printer: crate::engine::Subscriber = Box::new(move |envelope| {
+        print_envelope(&mut io::stdout().lock(), envelope, session, json_mode);
+        if envelope.session == session
+            && let Event::Host(HostEvent::RunEnded { outcome }) = &envelope.event
+        {
+            let _ = ended_tx.send(outcome.clone());
+        }
+    });
+
     let mcp_servers = mcp
         .as_ref()
         .map(|m| m.server_names().map(str::to_owned).collect())
@@ -82,6 +83,7 @@ pub(crate) fn execute_print_run(
         mcp,
         interactive: false,
         title: false,
+        agents: Some(agents),
     });
     engine.send(Command::active(CommandKind::Prompt {
         content: vec![Content::Text { text: prompt }],
@@ -109,6 +111,27 @@ pub(crate) fn execute_print_run(
     match outcome {
         Some(RunOutcome::Completed) => ExitCode::SUCCESS,
         _ => ExitCode::from(1),
+    }
+}
+
+/// Print one envelope: every envelope as a JSON line in JSON mode, else
+/// the loop events of `session` as text and notices on stderr.
+pub(crate) fn print_envelope<W: io::Write>(
+    out: &mut W,
+    envelope: &kage_core::protocol::Envelope,
+    session: SessionId,
+    json_mode: bool,
+) {
+    use kage_core::protocol::{Event, HostEvent};
+
+    if json_mode {
+        print_envelope_json(out, envelope);
+        return;
+    }
+    match &envelope.event {
+        Event::Loop(event) if envelope.session == session => print_event(out, event),
+        Event::Host(HostEvent::Notice { text, .. }) => eprintln!("kage: {text}"),
+        _ => {}
     }
 }
 

@@ -139,8 +139,9 @@ server that lists resources or resource templates as `<server>:`,
 tagged `mcp server`. Pick a server, or type `@<server>:`, and the popup
 lists that server's resources, matched against their URI and name,
 followed by its resource templates tagged `template: <name>`. A
-template is inserted as written, so replace its `{...}` parts
-yourself. A mention that still has one is refused before any request,
+template is inserted as written with the cursor on its first `{...}`
+part, so type over it. A mention that still has one is refused before
+any request,
 for example `mcp fix: test://item/{id}: fill in {id} first`.
 
 ```text
@@ -179,7 +180,9 @@ The rules:
   `mcp <server>: read <uri>: <reason>`. The notice shows in the
   transcript and nothing is sent to the model.
 - Image resources are attached as images. Other binary resources
-  become one line naming the URI, the MIME type and the size.
+  become an empty resource block with their URI, MIME type and size.
+  The transcript shows every attachment as `attached <server>:<uri>`
+  with its size, or its MIME type for an image.
 - Text is capped at 64 KiB per resource and 256 KiB per prompt. A
   truncated resource ends with a line saying how many bytes were kept.
 
@@ -250,13 +253,13 @@ command in the TUI waits for the current run to end.
 its status and a detail.
 
 ```text
-everything   connected     11 tools, 3 prompts, 100 resources
+everything   connected     11 tools, 3 prompts, 100 resources, 2 templates
 linear       needs login   enter to log in
 broken       failed        spawn `nope`: No such file or directory
 ```
 
-A connected row counts the server's tools, then its prompts and
-resources when it has any. A failed row shows the first line of its
+A connected row counts the server's tools, then its prompts,
+resources and resource templates when it has any. A failed row shows the first line of its
 error.
 
 - `Enter` on a `needs login` row starts the login.

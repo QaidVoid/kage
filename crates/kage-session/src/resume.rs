@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use kage_core::{Content, Message, MessageId, Role};
 
-use crate::entry::{FORMAT_VERSION, Header, SessionEntry};
+use crate::entry::{Compaction, FORMAT_VERSION, Header, SessionEntry};
 use crate::error::SessionError;
 use crate::list::list;
 use crate::reader::SessionReader;
@@ -151,20 +151,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
                 }
                 history.push(m.message);
             }
-            SessionEntry::Compaction(c) => {
-                let split = c.summarized.min(history.len());
-                history.drain(..split);
-                history.insert(
-                    0,
-                    Message {
-                        role: Role::User,
-                        content: vec![Content::Text { text: c.summary }],
-                        id: MessageId::new(),
-                        parent: None,
-                        ts: c.ts,
-                    },
-                );
-            }
+            SessionEntry::Compaction(c) => apply_compaction(&mut history, c),
             SessionEntry::ModelChange(mc) => model = mc.model,
             SessionEntry::ThinkingLevelChange(t) => thinking_level = Some(t.level),
             SessionEntry::Title(t) => title = Some(t.title),
@@ -180,6 +167,33 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
         thinking_level,
         title,
     })
+}
+
+/// Replace the messages `compaction` summarized at the front of
+/// `history` with its summary, as the loop did.
+fn apply_compaction(history: &mut Vec<Message>, compaction: Compaction) {
+    // Files from before shell output was recorded can count more
+    // summarized messages than they hold, which would leave a result
+    // without its call at the front.
+    let mut split = compaction.summarized.min(history.len());
+    while history
+        .get(split)
+        .is_some_and(|m| m.role == Role::ToolResult)
+    {
+        split += 1;
+    }
+    history.splice(
+        ..split,
+        std::iter::once(Message {
+            role: Role::User,
+            content: vec![Content::Text {
+                text: compaction.summary,
+            }],
+            id: MessageId::new(),
+            parent: None,
+            ts: compaction.ts,
+        }),
+    );
 }
 
 /// Reject a header whose schema version this build cannot interpret.
@@ -370,6 +384,51 @@ mod tests {
             Content::Text { text } => assert_eq!(text, "kept 1"),
             other => panic!("expected text, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn replay_drops_results_a_compaction_cut_from_their_calls() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("a.jsonl");
+        let result = SessionEntry::Message(MessageEntry {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            message: Message::new(
+                Role::ToolResult,
+                vec![Content::ToolResultBlock {
+                    call_id: ToolCallId::new("c1"),
+                    output: "done".into(),
+                    is_error: false,
+                }],
+                None,
+            ),
+            usage: None,
+        });
+        write(
+            &path,
+            fresh_header(),
+            &[
+                message_entry(Role::User, "old"),
+                message_entry(Role::Assistant, "call"),
+                result,
+                message_entry(Role::Assistant, "kept"),
+                SessionEntry::Compaction(Compaction {
+                    id: EntryId::new(),
+                    ts: Utc::now(),
+                    kept: 2,
+                    summarized: 2,
+                    summary: "summary".into(),
+                }),
+            ],
+        );
+
+        let roles: Vec<Role> = replay(&path)
+            .unwrap()
+            .history
+            .iter()
+            .map(|m| m.role)
+            .collect();
+        assert_eq!(roles, [Role::User, Role::Assistant]);
     }
 
     #[test]

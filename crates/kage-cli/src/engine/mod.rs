@@ -21,9 +21,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+use std::time::Duration;
 
 use kage_core::agents::{AgentDef, AgentDefs};
 use kage_core::config::Config;
+use kage_core::message::ShellRun;
 use kage_core::options::{OptionStore, OptionValue};
 use kage_core::protocol::{
     Command, CommandKind, Delivery, HostEvent, McpServerInfo, NoticeLevel, PermissionDecision,
@@ -31,13 +33,14 @@ use kage_core::protocol::{
 };
 use kage_core::sync::lock;
 use kage_core::{
-    CancelFlag, Content, LoopError, Message, Role, SessionId, ThinkingLevel, TokenUsage, ToolOutput,
+    CancelFlag, Content, LoopError, Message, Role, SessionId, ThinkingLevel, TokenUsage,
+    ToolOutput, ToolUpdate,
 };
 use kage_loop::{AgentContext, LoopConfig};
 use kage_mcp::{McpError, McpManager};
 use kage_plugin::PluginRuntime;
 use kage_provider::ProviderRegistry;
-use kage_tools::{Tool, ToolRegistry};
+use kage_tools::{ProgressSink, Tool, ToolContext, ToolError, ToolRegistry};
 
 pub(crate) use bus::Subscriber;
 pub(crate) use recorder::Recorder;
@@ -137,16 +140,8 @@ enum Input {
     Spawn(Box<Spawn>),
     Finished(Box<Finished>),
     McpDone(Box<McpDone>),
-    ShellDone {
-        session: SessionId,
-        command: String,
-        output: String,
-        exit_code: Option<i32>,
-    },
-    Title {
-        session: SessionId,
-        title: String,
-    },
+    ShellDone(Box<ShellDone>),
+    Title { session: SessionId, title: String },
     Publish(HostEvent),
     SetRegistry(Arc<ProviderRegistry>),
     ReloadPluginTools,
@@ -236,9 +231,11 @@ struct Session {
     /// Session file, when the session is recorded.
     path: Option<PathBuf>,
     workdir: PathBuf,
-    /// Messages to add to history before the next run, such as shell
-    /// output that arrived while a run was in flight.
+    /// Messages to add to history once the session is idle, such as
+    /// shell output that arrived while a run was in flight.
     pending_history: Vec<Message>,
+    /// User shell commands still running.
+    shells: usize,
     title: bool,
     title_pending: bool,
     /// A generated title that arrived while a run or an idle restart held
@@ -279,6 +276,40 @@ struct McpDone {
     /// What an idle restart took from the session, so no run started
     /// while the manager was away.
     idle: Option<Idle>,
+}
+
+/// A user shell command that ended, with what it took from the session.
+struct ShellDone {
+    session: SessionId,
+    command: String,
+    output: String,
+    exit_code: Option<i32>,
+    /// The idle state a command started on an idle session held, so no
+    /// run started while it ran.
+    idle: Option<Idle>,
+}
+
+/// Publishes the tail of a running user shell command and keeps the
+/// latest one, which stands in for the output when the command is
+/// cancelled.
+struct ShellProgress {
+    bus: Arc<Bus>,
+    session: SessionId,
+    command: String,
+    tail: Mutex<String>,
+}
+
+impl ProgressSink for ShellProgress {
+    fn emit(&self, update: ToolUpdate) {
+        lock(&self.tail).clone_from(&update.content);
+        self.bus.publish(
+            self.session,
+            HostEvent::ShellOutput {
+                command: self.command.clone(),
+                tail: update.content,
+            },
+        );
+    }
 }
 
 /// The tools an MCP refresh added, replaced or removed.
@@ -341,12 +372,7 @@ impl Dispatcher {
                 Input::Spawn(spawn) => self.spawn(*spawn),
                 Input::Finished(finished) => self.finish(*finished),
                 Input::McpDone(done) => self.mcp_done(*done),
-                Input::ShellDone {
-                    session,
-                    command,
-                    output,
-                    exit_code,
-                } => self.shell_done(session, command, output, exit_code),
+                Input::ShellDone(done) => self.shell_done(*done),
                 Input::Title { session, title } => self.record_title(session, title),
                 Input::Publish(event) => {
                     if let Some(id) = self.active {
@@ -361,7 +387,12 @@ impl Dispatcher {
                     }
                 }
             }
-            if self.shutting_down && self.sessions.values().all(|s| s.idle.is_some()) {
+            if self.shutting_down
+                && self
+                    .sessions
+                    .values()
+                    .all(|s| s.idle.is_some() && s.shells == 0)
+            {
                 return;
             }
         }
@@ -425,6 +456,7 @@ impl Dispatcher {
                 path,
                 workdir,
                 pending_history: Vec::new(),
+                shells: 0,
                 title,
                 title_pending,
                 late_title: None,
@@ -556,45 +588,85 @@ impl Dispatcher {
         self.bus.publish(id, HostEvent::StateChanged { state });
     }
 
-    fn shell(&self, id: SessionId, command: String) {
-        let workdir = self.sessions[&id].workdir.clone();
+    /// Run a user shell command on a worker thread. On an idle session it
+    /// holds the session like a run, so prompts wait for it and a cancel
+    /// stops it. During a run it runs alongside, and the run's cancel
+    /// stops it too.
+    fn shell(&mut self, id: SessionId, command: String) {
+        let session = self.sessions.get_mut(&id).expect("session checked");
+        let idle = session.idle.take();
+        if idle.is_some() {
+            session.cancel.reset();
+        }
+        session.shells += 1;
+        session.state.working = true;
+        let state = session.state.clone();
+        self.bus.publish(id, HostEvent::StateChanged { state });
+        let cancel = session.cancel.child();
+        let workdir = session.workdir.clone();
+        let progress = Arc::new(ShellProgress {
+            bus: Arc::clone(&self.bus),
+            session: id,
+            command,
+            tail: Mutex::default(),
+        });
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let (exit_code, output) = run_shell(&command, &workdir);
-            let _ = tx.send(Input::ShellDone {
+            progress.emit(ToolUpdate {
+                content: String::new(),
+                structured: None,
+            });
+            let cx = ToolContext::new(&workdir, &cancel).with_progress(progress.clone());
+            let (exit_code, output) = run_shell(&progress.command, &cx).unwrap_or_else(|_| {
+                let tail = lock(&progress.tail);
+                let output = if tail.trim().is_empty() {
+                    "cancelled".to_owned()
+                } else {
+                    format!("{}\ncancelled", tail.trim_end())
+                };
+                (None, output)
+            });
+            let _ = tx.send(Input::ShellDone(Box::new(ShellDone {
                 session: id,
-                command,
+                command: progress.command.clone(),
                 output,
                 exit_code,
-            });
+                idle,
+            })));
         });
     }
 
-    /// Show a finished shell command and share its output with the model
-    /// on the next turn. The output is not recorded to the session file.
-    fn shell_done(
-        &mut self,
-        id: SessionId,
-        command: String,
-        output: String,
-        exit_code: Option<i32>,
-    ) {
+    /// Show a finished shell command and add its output to the history,
+    /// recorded, for the model's next turn. A command that held the
+    /// session gives it back and starts what was submitted meanwhile.
+    fn shell_done(&mut self, done: ShellDone) {
+        let ShellDone {
+            session: id,
+            command,
+            output,
+            exit_code,
+            idle,
+        } = done;
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
-        let exit = exit_code.map_or_else(|| "signal".to_owned(), |c| c.to_string());
-        let text = format!(
-            "[shell] ran `{command}` in the session working directory; exit code {exit}:\n{}",
-            output.trim_end()
-        );
-        let message = Message::new(Role::User, vec![Content::Text { text }], None);
-        match session.idle.as_mut() {
-            Some(idle) => {
-                let parent = idle.cx.history.last().map(|m| m.id);
-                idle.cx.history.push(Message { parent, ..message });
-            }
-            None => session.pending_history.push(message),
+        session.shells -= 1;
+        let text = ShellRun {
+            command: command.clone(),
+            exit_code,
+            output: output.clone(),
         }
+        .to_text();
+        session
+            .pending_history
+            .push(Message::new(Role::User, vec![Content::Text { text }], None));
+        let held = idle.is_some();
+        if let Some(idle) = idle {
+            session.idle = Some(idle);
+            session.cancel.reset();
+            record_late_title(&self.bus, id, session);
+        }
+        flush_pending(&self.bus, id, session);
         self.bus.publish(
             id,
             HostEvent::ShellFinished {
@@ -603,6 +675,17 @@ impl Dispatcher {
                 exit_code,
             },
         );
+        settle_working(&self.bus, id, session);
+        if !held || self.shutting_down {
+            return;
+        }
+        let steered: Vec<String> = lock(&session.steering).drain(..).collect();
+        for text in steered.into_iter().rev() {
+            session.queued.push_front(vec![Content::Text { text }]);
+        }
+        if let Some(content) = session.queued.pop_front() {
+            self.start_run(id, Work::Prompt(Message::new(Role::User, content, None)));
+        }
     }
 
     fn record_title(&mut self, id: SessionId, title: String) {
@@ -677,6 +760,7 @@ impl Dispatcher {
                 return;
             }
         };
+        flush_pending(&self.bus, id, session);
         let Some(Idle {
             mut cx,
             mut recorder,
@@ -689,7 +773,6 @@ impl Dispatcher {
             cx.context_window = window;
         }
         cx.max_output_tokens = crate::runtime_env::max_output_tokens_for(&self.registry, &model);
-        cx.history.append(&mut session.pending_history);
         if let Some(level) = session.thinking.take() {
             cx.thinking_level = Some(level);
             if let Some(recorder) = recorder.as_mut() {
@@ -762,14 +845,20 @@ impl Dispatcher {
         let Finished {
             session: id,
             mut cx,
-            recorder,
+            mut recorder,
             usage,
             outcome,
         } = finished;
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
-        cx.history.append(&mut session.pending_history);
+        append_history(
+            &self.bus,
+            id,
+            &mut cx,
+            recorder.as_mut(),
+            session.pending_history.drain(..),
+        );
         if outcome == RunOutcome::Completed && session.title_pending {
             session.title_pending = false;
             let model = session.state.model.clone();
@@ -791,7 +880,7 @@ impl Dispatcher {
         session.idle = Some(Idle { cx, recorder });
         record_late_title(&self.bus, id, session);
         session.usage = usage;
-        session.state.working = false;
+        session.state.working = session.shells > 0;
         // A set flag on an idle session would cancel any run its agents
         // start, through the tree.
         session.cancel.reset();
@@ -884,6 +973,7 @@ impl Dispatcher {
         };
         session.idle = Some(idle);
         record_late_title(&self.bus, id, session);
+        settle_working(&self.bus, id, session);
         let steered: Vec<String> = lock(&session.steering).drain(..).collect();
         for text in steered.into_iter().rev() {
             session.queued.push_front(vec![Content::Text { text }]);
@@ -1350,6 +1440,52 @@ fn record_late_title(bus: &Bus, id: SessionId, session: &mut Session) {
     }
 }
 
+/// Append `messages` to `cx`'s history, each after the one before, and
+/// record them.
+fn append_history(
+    bus: &Bus,
+    id: SessionId,
+    cx: &mut AgentContext,
+    mut recorder: Option<&mut Recorder>,
+    messages: impl IntoIterator<Item = Message>,
+) {
+    for message in messages {
+        let message = Message {
+            parent: cx.history.last().map(|m| m.id),
+            ..message
+        };
+        if let Some(recorder) = recorder.as_deref_mut() {
+            report_write(bus, id, recorder.message(&message));
+        }
+        cx.history.push(message);
+    }
+}
+
+/// Move the messages that arrived while `session` was busy into its
+/// history, once it is idle.
+fn flush_pending(bus: &Bus, id: SessionId, session: &mut Session) {
+    if let Some(Idle { cx, recorder }) = session.idle.as_mut() {
+        append_history(
+            bus,
+            id,
+            cx,
+            recorder.as_mut(),
+            session.pending_history.drain(..),
+        );
+    }
+}
+
+/// Clear the working flag of an idle session once no shell command runs
+/// any more, and publish the change.
+fn settle_working(bus: &Bus, id: SessionId, session: &mut Session) {
+    let working = session.idle.is_none() || session.shells > 0;
+    if session.state.working != working {
+        session.state.working = working;
+        let state = session.state.clone();
+        bus.publish(id, HostEvent::StateChanged { state });
+    }
+}
+
 fn thinking_entry(level: ThinkingLevel) -> kage_session::SessionEntry {
     kage_session::SessionEntry::ThinkingLevelChange(kage_session::ThinkingLevelChange {
         id: kage_session::EntryId::new(),
@@ -1358,20 +1494,25 @@ fn thinking_entry(level: ThinkingLevel) -> kage_session::SessionEntry {
     })
 }
 
-/// Run `command` with `sh -c` in `workdir` and capture stdout and stderr
-/// together, truncated so a chatty command cannot flood the context.
-/// Returns the exit code (`None` when a signal ended the command or it
-/// failed to spawn) and the output.
-pub(crate) fn run_shell(command: &str, workdir: &std::path::Path) -> (Option<i32>, String) {
+/// Run a user shell command with the bash tool's runner in `cx`'s
+/// workdir, streaming its tail to `cx`'s progress sink, and capture stdout
+/// and stderr together, truncated so a chatty command cannot flood the
+/// context. Returns the exit code (`None` when a signal ended the command
+/// or it failed to spawn) and the output.
+///
+/// # Errors
+///
+/// [`ToolError::Cancelled`] when `cx` was cancelled and the command
+/// killed.
+pub(crate) fn run_shell(
+    command: &str,
+    cx: &ToolContext<'_>,
+) -> Result<(Option<i32>, String), ToolError> {
     const OUTPUT_CAP: usize = 8 * 1024;
-    let output = match std::process::Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(workdir)
-        .output()
-    {
+    let output = match kage_tools::builtin::bash::run(command, cx.workdir(), Duration::MAX, cx) {
         Ok(output) => output,
-        Err(err) => return (None, format!("failed to run: {err}")),
+        Err(ToolError::Cancelled) => return Err(ToolError::Cancelled),
+        Err(err) => return Ok((None, format!("failed to run: {err}"))),
     };
     let mut combined = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1385,7 +1526,7 @@ pub(crate) fn run_shell(command: &str, workdir: &std::path::Path) -> (Option<i32
         let cut: String = combined.chars().take(OUTPUT_CAP).collect();
         combined = format!("{cut}\n... (output truncated)");
     }
-    (output.status.code(), combined)
+    Ok((output.exit_code, combined))
 }
 
 /// The session id encoded in a session file name, `<id>.jsonl`.

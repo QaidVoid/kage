@@ -107,12 +107,36 @@ impl Tool for BashTool {
     }
 }
 
-fn run_command(
+/// What a finished command left: both streams, each capped at 100KB, and
+/// how it exited.
+#[derive(Debug)]
+pub struct CommandOutput {
+    /// Captured stdout.
+    pub stdout: Vec<u8>,
+    /// Whether stdout went past the cap.
+    pub stdout_truncated: bool,
+    /// Captured stderr.
+    pub stderr: Vec<u8>,
+    /// Whether stderr went past the cap.
+    pub stderr_truncated: bool,
+    /// Exit code, or `None` when a signal ended the command.
+    pub exit_code: Option<i32>,
+}
+
+/// Run `command` with `bash -c` in `cwd`, in its own process group, and
+/// report the last lines of its output through `cx`'s progress sink while
+/// it runs. A cancel of `cx` or passing `timeout` kills the whole group.
+///
+/// # Errors
+///
+/// [`ToolError::Cancelled`] or [`ToolError::Timeout`] after a kill, or an
+/// I/O error when the shell cannot start.
+pub fn run(
     command: &str,
     cwd: &Path,
     timeout: Duration,
     cx: &ToolContext<'_>,
-) -> Result<ToolOutput, ToolError> {
+) -> Result<CommandOutput, ToolError> {
     let mut cmd = Command::new("bash");
     cmd.arg("-c")
         .arg(command)
@@ -138,14 +162,10 @@ fn run_command(
     let stdout_handle = thread::spawn(move || read_capped(&mut stdout, &stdout_tail));
     let stderr_handle = thread::spawn(move || read_capped(&mut stderr, &stderr_tail));
 
+    let watch = cx.cancel_flag().watch();
     let start = Instant::now();
     let mut last_progress = start;
     let status = loop {
-        if cx.is_cancelled() {
-            kill_process_group(&mut child);
-            let _ = child.wait();
-            return Err(ToolError::Cancelled);
-        }
         if let Some(s) = child.try_wait()? {
             break s;
         }
@@ -166,7 +186,11 @@ fn run_command(
                 });
             }
         }
-        thread::sleep(POLL_INTERVAL);
+        if watch.receiver().recv_timeout(POLL_INTERVAL).is_ok() {
+            kill_process_group(&mut child);
+            let _ = child.wait();
+            return Err(ToolError::Cancelled);
+        }
     };
 
     // Bash is done, but backgrounded grandchildren may still hold our
@@ -175,12 +199,32 @@ fn run_command(
     // straggler: release the group before reading.
     kill_process_group(&mut child);
     let _ = child.wait();
-    let (stdout_bytes, stdout_truncated) = stdout_handle.join().unwrap_or_default();
-    let (stderr_bytes, stderr_truncated) = stderr_handle.join().unwrap_or_default();
+    let (stdout, stdout_truncated) = stdout_handle.join().unwrap_or_default();
+    let (stderr, stderr_truncated) = stderr_handle.join().unwrap_or_default();
+    Ok(CommandOutput {
+        stdout,
+        stdout_truncated,
+        stderr,
+        stderr_truncated,
+        exit_code: status.code(),
+    })
+}
 
-    let stdout_text = String::from_utf8_lossy(&stdout_bytes).into_owned();
-    let stderr_text = String::from_utf8_lossy(&stderr_bytes).into_owned();
-    let exit_code = status.code();
+fn run_command(
+    command: &str,
+    cwd: &Path,
+    timeout: Duration,
+    cx: &ToolContext<'_>,
+) -> Result<ToolOutput, ToolError> {
+    let CommandOutput {
+        stdout,
+        stdout_truncated,
+        stderr,
+        stderr_truncated,
+        exit_code,
+    } = run(command, cwd, timeout, cx)?;
+    let stdout_text = String::from_utf8_lossy(&stdout).into_owned();
+    let stderr_text = String::from_utf8_lossy(&stderr).into_owned();
 
     let mut text = String::new();
     if !stdout_text.is_empty() {
@@ -210,7 +254,7 @@ fn run_command(
     );
 
     Ok(ToolOutput {
-        is_error: !status.success(),
+        is_error: exit_code != Some(0),
         text,
         structured: Some(serde_json::json!({
             "exit_code": exit_code,
@@ -362,6 +406,23 @@ mod tests {
             elapsed < Duration::from_secs(3),
             "kill took {elapsed:?}; process group was not killed"
         );
+    }
+
+    #[test]
+    fn cancel_kills_the_process_group() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = CancelFlag::new();
+        let trip = cancel.clone();
+        let canceller = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            trip.cancel();
+        });
+        let started = Instant::now();
+        let cx = ToolContext::new(dir.path(), &cancel);
+        let err = super::run("sleep 5; echo done", dir.path(), Duration::MAX, &cx).unwrap_err();
+        canceller.join().unwrap();
+        assert!(matches!(err, ToolError::Cancelled));
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[test]

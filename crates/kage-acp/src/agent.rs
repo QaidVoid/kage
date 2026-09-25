@@ -13,6 +13,8 @@
 //! Every request except `initialize` runs on its own thread, so the
 //! dispatch loop keeps draining inbound messages: a `session/cancel`
 //! always lands, and a slow `session/new` never blocks a running prompt.
+//! When the input ends, every request but a prompt that is still in
+//! flight is answered before [`serve_agent`] returns.
 
 use std::io::{BufRead, Write};
 use std::sync::Arc;
@@ -214,6 +216,12 @@ pub trait Agent: Send + Sync + 'static {
 
     /// The client asked to cancel the running prompt of `session_id`.
     fn cancel(&self, session_id: &str);
+
+    /// The response naming `session_id` to a `session/new`,
+    /// `session/load` or `session/resume` was written, so updates for
+    /// the session sent from now on cannot overtake it. The default does
+    /// nothing.
+    fn session_announced(&self, _session_id: &str) {}
 }
 
 /// The `$/cancel_request` notice ACP expects for an abandoned request.
@@ -249,6 +257,7 @@ where
     let (peer, inbound, _reader) = connect_with(reader, writer, Some(cancel_notice()));
     let agent = Arc::new(make_agent(peer.clone()));
 
+    let mut ops = Vec::new();
     for message in inbound {
         match message {
             Inbound::Notification { method, params } => {
@@ -259,9 +268,15 @@ where
                 }
             }
             Inbound::Request { id, method, params } => {
-                handle_request(&peer, &agent, id, &method, params);
+                if let Some(op) = handle_request(&peer, &agent, id, &method, params) {
+                    ops.retain(|op: &thread::JoinHandle<()>| !op.is_finished());
+                    ops.push(op);
+                }
             }
         }
+    }
+    for op in ops {
+        let _ = op.join();
     }
     Ok(())
 }
@@ -271,7 +286,12 @@ fn jval<T: serde::Serialize>(value: T) -> serde_json::Value {
 }
 
 /// Answer request `id` with `op`, run on its own thread.
-fn spawn_op<A, F>(peer: &Peer, agent: &Arc<A>, id: serde_json::Value, op: F)
+fn spawn_op<A, F>(
+    peer: &Peer,
+    agent: &Arc<A>,
+    id: serde_json::Value,
+    op: F,
+) -> thread::JoinHandle<()>
 where
     A: Agent,
     F: FnOnce(&A) -> Result<serde_json::Value, RpcError> + Send + 'static,
@@ -281,30 +301,65 @@ where
     thread::spawn(move || {
         let outcome = op(&agent);
         let _ = peer.respond(&id, outcome);
-    });
+    })
 }
 
+/// Answer request `id` with `op`, which opens the session it returns
+/// the id of, on its own thread, then tell the agent the client has the
+/// response.
+fn spawn_open<A, F>(
+    peer: &Peer,
+    agent: &Arc<A>,
+    id: serde_json::Value,
+    op: F,
+) -> thread::JoinHandle<()>
+where
+    A: Agent,
+    F: FnOnce(&A) -> Result<(String, serde_json::Value), RpcError> + Send + 'static,
+{
+    let agent = Arc::clone(agent);
+    let peer = peer.clone();
+    thread::spawn(move || match op(&agent) {
+        Ok((session, response)) => {
+            let _ = peer.respond(&id, Ok(response));
+            agent.session_announced(&session);
+        }
+        Err(e) => {
+            let _ = peer.respond(&id, Err(e));
+        }
+    })
+}
+
+/// Answer one request, on its own thread for all but `initialize`.
+/// Returns the thread to wait for at the end of the input, which is
+/// every one but a prompt's.
 fn handle_request<A: Agent>(
     peer: &Peer,
     agent: &Arc<A>,
     id: serde_json::Value,
     method: &str,
     params: serde_json::Value,
-) {
-    match method {
+) -> Option<thread::JoinHandle<()>> {
+    let op = match method {
         "initialize" => {
             let outcome = parse::<InitializeRequest>(params).map(|req| jval(agent.initialize(req)));
             let _ = peer.respond(&id, outcome);
+            return None;
         }
         "session/new" => match parse::<NewSessionRequest>(params) {
             Err(e) => {
                 let _ = peer.respond(&id, Err(e));
+                return None;
             }
-            Ok(req) => spawn_op(peer, agent, id, move |a| a.new_session(req).map(jval)),
+            Ok(req) => spawn_open(peer, agent, id, move |a| {
+                a.new_session(req)
+                    .map(|resp| (resp.session_id.clone(), jval(resp)))
+            }),
         },
         "session/prompt" => match parse::<PromptRequest>(params) {
             Err(e) => {
                 let _ = peer.respond(&id, Err(e));
+                return None;
             }
             Ok(req) => {
                 let ctx = PromptContext {
@@ -312,44 +367,55 @@ fn handle_request<A: Agent>(
                     session_id: req.session_id.clone(),
                 };
                 spawn_op(peer, agent, id, move |a| a.prompt(req, &ctx).map(jval));
+                return None;
             }
         },
         "session/load" => match parse::<LoadSessionRequest>(params) {
             Err(e) => {
                 let _ = peer.respond(&id, Err(e));
+                return None;
             }
             Ok(req) => {
                 let ctx = PromptContext {
                     peer: peer.clone(),
                     session_id: req.session_id.clone(),
                 };
-                spawn_op(peer, agent, id, move |a| {
-                    a.load_session(req, &ctx).map(jval)
-                });
+                spawn_open(peer, agent, id, move |a| {
+                    let session = req.session_id.clone();
+                    a.load_session(req, &ctx).map(|resp| (session, jval(resp)))
+                })
             }
         },
         "session/list" => match parse::<ListSessionsRequest>(params) {
             Err(e) => {
                 let _ = peer.respond(&id, Err(e));
+                return None;
             }
             Ok(req) => spawn_op(peer, agent, id, move |a| a.list_sessions(req).map(jval)),
         },
         "session/resume" => match parse::<ResumeSessionRequest>(params) {
             Err(e) => {
                 let _ = peer.respond(&id, Err(e));
+                return None;
             }
-            Ok(req) => spawn_op(peer, agent, id, move |a| a.resume_session(req).map(jval)),
+            Ok(req) => spawn_open(peer, agent, id, move |a| {
+                let session = req.session_id.clone();
+                a.resume_session(req).map(|resp| (session, jval(resp)))
+            }),
         },
         "session/set_config_option" => match parse::<SetSessionConfigOptionRequest>(params) {
             Err(e) => {
                 let _ = peer.respond(&id, Err(e));
+                return None;
             }
             Ok(req) => spawn_op(peer, agent, id, move |a| a.set_config_option(req).map(jval)),
         },
         other => {
             let _ = peer.respond(&id, Err(RpcError::method_not_found(other)));
+            return None;
         }
-    }
+    };
+    Some(op)
 }
 
 #[cfg(test)]
@@ -463,6 +529,56 @@ mod tests {
         drop(client);
         drop(inbox);
         server.join().unwrap().unwrap();
+    }
+
+    /// Opens sessions slowly and notes which ones it announced.
+    struct SlowAgent(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl Agent for SlowAgent {
+        fn initialize(&self, req: InitializeRequest) -> InitializeResponse {
+            MockAgent.initialize(req)
+        }
+
+        fn new_session(&self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+            thread::sleep(std::time::Duration::from_millis(100));
+            MockAgent.new_session(req)
+        }
+
+        fn prompt(
+            &self,
+            _req: PromptRequest,
+            _ctx: &PromptContext,
+        ) -> Result<PromptResponse, RpcError> {
+            unreachable!("no prompt is sent")
+        }
+
+        fn cancel(&self, _session_id: &str) {}
+
+        fn session_announced(&self, session_id: &str) {
+            kage_core::sync::lock(&self.0).push(session_id.to_owned());
+        }
+    }
+
+    #[test]
+    fn a_new_session_is_answered_after_the_input_ends() {
+        use std::io::Read as _;
+
+        let (srv_r, mut cli_w) = std::io::pipe().unwrap();
+        let (mut cli_r, srv_w) = std::io::pipe().unwrap();
+        writeln!(
+            cli_w,
+            r#"{{"jsonrpc":"2.0","id":1,"method":"session/new","params":{{"cwd":"/tmp"}}}}"#
+        )
+        .unwrap();
+        drop(cli_w);
+        let announced = Arc::default();
+        let agent = SlowAgent(Arc::clone(&announced));
+        serve_agent(BufReader::new(srv_r), srv_w, |_| agent).unwrap();
+        assert_eq!(*kage_core::sync::lock(&announced), ["sess-1"]);
+
+        let mut out = String::new();
+        cli_r.read_to_string(&mut out).unwrap();
+        assert!(out.contains(r#""sessionId":"sess-1""#), "{out}");
     }
 
     struct LoadAgent;

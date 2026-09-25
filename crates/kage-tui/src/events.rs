@@ -207,6 +207,12 @@ pub fn populate_from_history(
                 if let Some(text) = user_text(msg) {
                     if is_compaction_summary(&text) {
                         buf.push_custom("kage:compaction", text, true);
+                    } else if let Some(run) = kage_core::message::ShellRun::parse(&text) {
+                        let exit = run
+                            .exit_code
+                            .map_or_else(|| "signal".to_owned(), |c| c.to_string());
+                        let body = format!("$ {}\n{}\n(exit code {exit})", run.command, run.output);
+                        buf.push_custom("kage:shell", body, false);
                     } else {
                         buf.push_user(text);
                     }

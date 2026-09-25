@@ -167,8 +167,18 @@ pub enum HostEvent {
         /// New title.
         title: String,
     },
-    /// A user shell command finished. Its output is shared with the model
-    /// on the next turn but is not part of the recorded conversation.
+    /// A user shell command started or printed more. Carries the last
+    /// lines of its output so far, empty at the start. Never recorded.
+    /// Live.
+    ShellOutput {
+        /// Command line that runs.
+        command: String,
+        /// The last lines of stdout and stderr together.
+        tail: String,
+    },
+    /// A user shell command finished or was cancelled. Its output joins
+    /// the conversation as a user message the model sees on the next
+    /// turn.
     ShellFinished {
         /// Command line that ran.
         command: String,
@@ -551,6 +561,16 @@ mod tests {
         assert_eq!(value["type"], "agent_spawned");
         assert_eq!(value["parent"], parent.to_string());
         assert_eq!(value["tool_call_id"], "call_1");
+    }
+
+    #[test]
+    fn shell_output_has_its_own_tag() {
+        let value = roundtrip(&envelope(HostEvent::ShellOutput {
+            command: "ls".into(),
+            tail: "a".into(),
+        }));
+        assert_eq!(value["type"], "shell_output");
+        assert!(serde_json::from_value::<LoopEvent>(value).is_err());
     }
 
     #[test]

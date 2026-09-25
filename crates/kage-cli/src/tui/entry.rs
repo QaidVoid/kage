@@ -7,15 +7,16 @@ use std::sync::OnceLock;
 
 use kage_core::ThinkingLevel;
 use kage_core::options::{OptionStore, OptionValue};
-use kage_core::protocol::{HostEvent, NoticeLevel};
+use kage_core::protocol::{Command, CommandKind, HostEvent, NoticeLevel};
 use kage_plugin::LogLevel;
 use kage_tui::TranscriptScope;
 use kage_tui::hostlog::LogPublisher;
 
-/// Drop into the interactive TUI. Returns the appropriate process exit
-/// code once the user quits.
+/// Drop into the interactive TUI, on the recorded session at `resume`
+/// when given, the way the session picker resumes one. Returns the
+/// appropriate process exit code once the user quits.
 #[allow(clippy::too_many_lines)]
-pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
+pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>) -> ExitCode {
     let mut registry = crate::build_provider_registry();
     let provisional_model = model.map_or_else(|| crate::default_model(&registry), str::to_owned);
 
@@ -260,6 +261,14 @@ pub fn run_tui(model: Option<&str>, system: &str) -> ExitCode {
         title: true,
         agents: Some(agents),
     });
+    if let Some(path) = resume {
+        engine.send(Command::active(CommandKind::LoadSession { path }));
+        if let Some(model) = model {
+            engine.send(Command::active(CommandKind::SetModel {
+                model: model.to_owned(),
+            }));
+        }
+    }
     let log_commander = engine.commander();
     let _ = log_publisher.set(Box::new(move |level, message| {
         let level = match level {
@@ -466,6 +475,9 @@ fn print_exit_summary(
     }
     if let Some(path) = session.filter(|path| path.exists()) {
         println!("session saved to {}", path.display());
+        if let Some(id) = crate::engine::session_id_of(path) {
+            println!("resume it with `kage resume {id}`");
+        }
     }
 }
 

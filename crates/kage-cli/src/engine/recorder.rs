@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
-use kage_core::{LoopEvent, Role, TokenUsage};
+use kage_core::{LoopEvent, Message, Role, TokenUsage};
 use kage_plugin::{PendingSessionOp, PluginRuntime};
 use kage_session::{
     Compaction, Custom, EntryId, Header, Label, MessageEntry, ModelChange, SessionEntry,
@@ -67,6 +67,17 @@ impl Recorder {
     /// Append an entry the loop does not produce, such as a title.
     pub(crate) fn append(&mut self, entry: &SessionEntry) -> Result<(), SessionError> {
         self.writer()?.append(entry)
+    }
+
+    /// Record a message added to history outside the loop, such as the
+    /// output of a user shell command.
+    pub(crate) fn message(&mut self, message: &Message) -> Result<(), SessionError> {
+        self.writer()?.append(&SessionEntry::Message(MessageEntry {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            message: message.clone(),
+            usage: None,
+        }))
     }
 
     /// Record a switch to `model`. A file not created yet gets it in its
@@ -173,7 +184,7 @@ pub(crate) fn plugin_op_entry(op: PendingSessionOp) -> Option<SessionEntry> {
 
 #[cfg(test)]
 mod tests {
-    use kage_core::{Content, Message, MessageId, StopReason};
+    use kage_core::{Content, MessageId, StopReason};
     use kage_session::{FORMAT_VERSION, SessionReader};
 
     use super::*;

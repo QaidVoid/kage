@@ -173,6 +173,54 @@ pub const COMPACTION_SUMMARY_PREFIX: &str = "The conversation history before thi
 /// [`COMPACTION_SUMMARY_PREFIX`].
 pub const COMPACTION_SUMMARY_SUFFIX: &str = "\n</summary>";
 
+const SHELL_PREFIX: &str = "[shell] ran `";
+const SHELL_MIDDLE: &str = "` in the session working directory; exit code ";
+
+/// A user `!` command and its output, shared with the model as the text
+/// of a user message. Exposed so a replayed history can show the message
+/// as the shell block it was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShellRun {
+    /// Command line that ran.
+    pub command: String,
+    /// Exit code, or `None` when a signal ended the command.
+    pub exit_code: Option<i32>,
+    /// Combined stdout and stderr.
+    pub output: String,
+}
+
+impl ShellRun {
+    /// The text of the user message that carries the run.
+    #[must_use]
+    pub fn to_text(&self) -> String {
+        let exit = self
+            .exit_code
+            .map_or_else(|| "signal".to_owned(), |c| c.to_string());
+        format!(
+            "{SHELL_PREFIX}{}{SHELL_MIDDLE}{exit}:\n{}",
+            self.command,
+            self.output.trim_end()
+        )
+    }
+
+    /// Read a run back from text [`Self::to_text`] wrote.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let rest = text.strip_prefix(SHELL_PREFIX)?;
+        let (command, rest) = rest.split_once(SHELL_MIDDLE)?;
+        let (exit, output) = rest.split_once(":\n")?;
+        let exit_code = match exit {
+            "signal" => None,
+            code => Some(code.parse().ok()?),
+        };
+        Some(Self {
+            command: command.to_owned(),
+            exit_code,
+            output: output.to_owned(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -202,6 +250,19 @@ mod tests {
         let encoded = serde_json::to_string(&original).expect("serialize");
         let decoded: Message = serde_json::from_str(&encoded).expect("deserialize");
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn shell_runs_read_back_from_their_text() {
+        for exit_code in [Some(0), Some(2), None] {
+            let run = ShellRun {
+                command: "echo `a`; ls".into(),
+                exit_code,
+                output: "a\nb".into(),
+            };
+            assert_eq!(ShellRun::parse(&run.to_text()), Some(run));
+        }
+        assert_eq!(ShellRun::parse("plain prompt"), None);
     }
 
     #[test]

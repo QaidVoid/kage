@@ -314,6 +314,27 @@ impl Buffer {
         }
     }
 
+    /// Replace the text of the newest custom block of `kind` that `pick`
+    /// accepts, otherwise push a new one. Keeps a block that is still
+    /// live, such as a running shell command, in one place.
+    pub fn replace_custom_where(
+        &mut self,
+        kind: &str,
+        pick: impl Fn(&str) -> bool,
+        text: impl Into<String>,
+    ) {
+        let found = self.blocks.iter().rposition(
+            |b| matches!(b, Block::Custom { kind: k, text: t, .. } if k == kind && pick(t)),
+        );
+        match found.map(|idx| (idx, &mut self.blocks[idx])) {
+            Some((idx, Block::Custom { text: t, .. })) => {
+                *t = text.into();
+                self.invalidate_height(idx);
+            }
+            _ => self.push_custom(kind, text, false),
+        }
+    }
+
     /// Mark the most recent live (assistant or thinking) block as
     /// finished. No-op if there is no streaming block.
     pub fn finish_streaming(&mut self) {

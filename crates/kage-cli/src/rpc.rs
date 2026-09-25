@@ -135,6 +135,11 @@ type Waiters = Arc<Mutex<HashMap<SessionId, mpsc::Sender<PromptEnd>>>>;
 
 type ShownBySession = Arc<Mutex<HashMap<SessionId, Shown>>>;
 
+/// Updates for client sessions whose opening response is not written
+/// yet. Sending them earlier would reach the client before it knows the
+/// session.
+type Held = Arc<Mutex<HashMap<SessionId, Vec<SessionUpdate>>>>;
+
 /// What a client session's config options last showed.
 struct Shown {
     settings: Settings,
@@ -273,6 +278,8 @@ struct CliAcpAgent {
     models: Arc<[SessionConfigSelectOption]>,
     shown: ShownBySession,
     subagents: Arc<AtomicBool>,
+    peer: Peer,
+    held: Held,
 }
 
 impl CliAcpAgent {
@@ -293,8 +300,9 @@ impl CliAcpAgent {
                 .collect();
         let shown = ShownBySession::default();
         let subagents = Arc::new(AtomicBool::new(false));
+        let held = Held::default();
         let mut bridge = Bridge {
-            peer,
+            peer: peer.clone(),
             commander: engine.commander(),
             ids: Arc::clone(&ids),
             waiters: Arc::clone(&waiters),
@@ -308,8 +316,7 @@ impl CliAcpAgent {
             live: HashSet::new(),
             ended: HashMap::new(),
             commands: HashMap::new(),
-            usage: HashMap::new(),
-            prompted: HashSet::new(),
+            held: Arc::clone(&held),
             approving: HashMap::new(),
         };
         engine.subscribe(Box::new(move |envelope| bridge.handle(envelope)));
@@ -324,11 +331,14 @@ impl CliAcpAgent {
             models,
             shown,
             subagents,
+            peer,
+            held,
         }
     }
 
     /// Opens `spec` as the client session `client_id` and returns its
-    /// config options.
+    /// config options. Updates for it wait for
+    /// [`Agent::session_announced`].
     fn open(&self, client_id: String, spec: SessionSpec) -> Vec<SessionConfigOption> {
         let settings = Settings::of(&spec);
         let options = config_options(&self.models, &settings);
@@ -337,6 +347,7 @@ impl CliAcpAgent {
             catching_up: false,
         };
         lock(&self.shown).insert(spec.id, shown);
+        lock(&self.held).insert(spec.id, Vec::new());
         lock(&self.ids).insert(client_id, spec.id);
         self.engine.open(spec);
         options
@@ -629,6 +640,16 @@ impl Agent for CliAcpAgent {
             self.engine.send(Command::to(id, CommandKind::Cancel));
         }
     }
+
+    fn session_announced(&self, session_id: &str) {
+        let Some(id) = lock(&self.ids).by_client.get(session_id).copied() else {
+            return;
+        };
+        let mut held = lock(&self.held);
+        for update in held.remove(&id).unwrap_or_default() {
+            send_update(&self.peer, session_id, update);
+        }
+    }
 }
 
 /// Turns engine events into ACP traffic for the sessions a client opened
@@ -652,10 +673,7 @@ struct Bridge {
     ended: HashMap<SessionId, PromptEnd>,
     /// The commands last sent to each client session.
     commands: HashMap<SessionId, Vec<serde_json::Value>>,
-    /// The usage last sent to each session.
-    usage: HashMap<SessionId, SessionUpdate>,
-    /// Client sessions whose first run has started.
-    prompted: HashSet<SessionId>,
+    held: Held,
     /// Agent calls waiting for approval, by session and call id, with the
     /// line their card shows again once they run.
     approving: HashMap<(SessionId, String), String>,
@@ -690,7 +708,7 @@ impl Bridge {
                 }
                 let seen = self.seen.entry(session).or_default();
                 if let Some(update) = to_update(seen, event) {
-                    send_update(&self.peer, &client_id, update);
+                    self.send(session, &client_id, update);
                 }
             }
             Event::Host(HostEvent::PermissionRequested {
@@ -705,14 +723,8 @@ impl Bridge {
             }
             Event::Host(HostEvent::UsageUpdated { usage }) => {
                 if let Some(update) = usage_update(usage) {
-                    self.usage.insert(session, update.clone());
-                    send_update(&self.peer, &client_id, update);
+                    self.send(session, &client_id, update);
                 }
-            }
-            Event::Host(HostEvent::RunStarted)
-                if !self.live.contains(&session) && self.prompted.insert(session) =>
-            {
-                self.resend(session, &client_id);
             }
             Event::Host(HostEvent::StateChanged { state }) => {
                 let settings = Settings::from(state);
@@ -723,8 +735,8 @@ impl Bridge {
                     let update = ConfigOptionUpdate {
                         config_options: config_options(&self.models, &settings),
                     };
-                    send_update(
-                        &self.peer,
+                    self.send(
+                        session,
                         &client_id,
                         SessionUpdate::ConfigOptionUpdate(update),
                     );
@@ -735,8 +747,8 @@ impl Bridge {
                     title: Some(title.clone()),
                     updated_at: None,
                 };
-                send_update(
-                    &self.peer,
+                self.send(
+                    session,
                     &client_id,
                     SessionUpdate::SessionInfoUpdate(update),
                 );
@@ -748,8 +760,8 @@ impl Bridge {
                     let update = AvailableCommandsUpdate {
                         available_commands: commands,
                     };
-                    send_update(
-                        &self.peer,
+                    self.send(
+                        session,
                         &client_id,
                         SessionUpdate::AvailableCommandsUpdate(update),
                     );
@@ -770,23 +782,16 @@ impl Bridge {
         }
     }
 
-    /// Sends the command list and usage of `session` again. They are first
-    /// sent while the session opens, which can be before the client has
-    /// the response naming the session, so a client may have dropped them.
-    fn resend(&self, session: SessionId, client_id: &str) {
-        if let Some(commands) = self.commands.get(&session).filter(|c| !c.is_empty()) {
-            let update = AvailableCommandsUpdate {
-                available_commands: commands.clone(),
-            };
-            send_update(
-                &self.peer,
-                client_id,
-                SessionUpdate::AvailableCommandsUpdate(update),
-            );
+    /// Sends `update` to the client, or holds it while the response that
+    /// names the session is still on its way.
+    fn send(&self, session: SessionId, client_id: &str, update: SessionUpdate) {
+        let mut held = lock(&self.held);
+        if let Some(updates) = held.get_mut(&session) {
+            updates.push(update);
+            return;
         }
-        if let Some(update) = self.usage.get(&session) {
-            send_update(&self.peer, client_id, update.clone());
-        }
+        drop(held);
+        send_update(&self.peer, client_id, update);
     }
 
     /// Announces an agent as a subagent of its parent's client session,
@@ -1612,46 +1617,10 @@ mod tests {
         let (commander_tx, commander) = mpsc::channel();
         std::thread::spawn(move || {
             serve_agent(BufReader::new(srv_r), srv_w, |peer| {
-                let registry = Arc::new(ProviderRegistry::new().with(Arc::new(provider)));
-                let spec = Box::new(move |id, _cwd: &str, model: &str, servers| {
-                    let mut rules = PermissionsConfig::default();
-                    rules.tools.insert(
-                        "ls".into(),
-                        ToolPermissionRules {
-                            default: PermissionAction::Ask,
-                            allow: Vec::new(),
-                            deny: Vec::new(),
-                        },
-                    );
-                    let mut tools = builtin_registry();
-                    let mcp = mcp_manager(&mut tools, servers, mcp);
-                    let names = mcp.iter().flat_map(kage_mcp::McpManager::server_names);
-                    let gate = PermissionGate::new(rules)
-                        .with_mcp_servers(names.map(str::to_owned).collect());
-                    Ok(SessionSpec {
-                        id,
-                        model: model.to_owned(),
-                        cx: AgentContext::new(model, "")
-                            .with_workdir(&workdir)
-                            .with_context_window(WINDOW),
-                        recorder: None,
-                        tools,
-                        gate,
-                        loop_cfg: LoopConfig::default(),
-                        plugins: None,
-                        mcp,
-                        interactive: true,
-                        title: true,
-                        agents: Some(AgentSetup {
-                            defs: Arc::new(AgentDefs::builtin()),
-                            max_depth: 1,
-                            max_running: 4,
-                        }),
-                    })
-                });
-                let agent = CliAcpAgent::new(registry, "mock:m".into(), sessions, spec, peer);
+                let agent = test_agent(peer, provider, workdir, sessions, mcp);
                 let spec = (agent.spec)(id, "", "mock:m", BTreeMap::new()).unwrap();
                 agent.open(id.to_string(), spec);
+                agent.session_announced(&id.to_string());
                 let _ = commander_tx.send(agent.engine.commander());
                 agent
             })
@@ -1665,6 +1634,54 @@ mod tests {
             id,
             session: id.to_string(),
         }
+    }
+
+    /// The agent [`serve_with`] serves, on `provider`.
+    fn test_agent(
+        peer: Peer,
+        provider: Listed,
+        workdir: PathBuf,
+        sessions: PathBuf,
+        mcp: bool,
+    ) -> CliAcpAgent {
+        let registry = Arc::new(ProviderRegistry::new().with(Arc::new(provider)));
+        let spec = Box::new(move |id, _cwd: &str, model: &str, servers| {
+            let mut rules = PermissionsConfig::default();
+            rules.tools.insert(
+                "ls".into(),
+                ToolPermissionRules {
+                    default: PermissionAction::Ask,
+                    allow: Vec::new(),
+                    deny: Vec::new(),
+                },
+            );
+            let mut tools = builtin_registry();
+            let mcp = mcp_manager(&mut tools, servers, mcp);
+            let names = mcp.iter().flat_map(kage_mcp::McpManager::server_names);
+            let gate =
+                PermissionGate::new(rules).with_mcp_servers(names.map(str::to_owned).collect());
+            Ok(SessionSpec {
+                id,
+                model: model.to_owned(),
+                cx: AgentContext::new(model, "")
+                    .with_workdir(&workdir)
+                    .with_context_window(WINDOW),
+                recorder: None,
+                tools,
+                gate,
+                loop_cfg: LoopConfig::default(),
+                plugins: None,
+                mcp,
+                interactive: true,
+                title: true,
+                agents: Some(AgentSetup {
+                    defs: Arc::new(AgentDefs::builtin()),
+                    max_depth: 1,
+                    max_running: 4,
+                }),
+            })
+        });
+        CliAcpAgent::new(registry, "mock:m".into(), sessions, spec, peer)
     }
 
     /// An in-process MCP server with the prompt `p(a, b?)`, which answers
@@ -2837,33 +2854,34 @@ done
     }
 
     #[test]
-    fn the_first_prompt_resends_commands_and_usage() {
+    fn a_new_session_is_answered_before_its_updates_as_the_input_ends() {
+        use std::io::{BufRead as _, Write as _};
+
         let dir = tempfile::tempdir().unwrap();
-        let h = serve_with(
-            vec![text_turn("one"), text_turn("title"), text_turn("two")],
-            dir.path(),
-            dir.path(),
-            true,
-        );
-        let opened = updates_until(&h.inbox, &h.session, "available_commands_update");
-        if !update_kinds(&opened).contains(&"usage_update") {
-            updates_until(&h.inbox, &h.session, "usage_update");
-        }
+        let (srv_r, mut cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let params = serde_json::json!({"cwd": dir.path(), "mcpServers": []});
+        let request = serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "session/new", "params": params});
+        writeln!(cli_w, "{request}").unwrap();
+        drop(cli_w);
+        let provider = Listed(MockProvider::sequence(Vec::new()));
+        let (workdir, sessions) = (dir.path().to_path_buf(), dir.path().to_path_buf());
+        serve_agent(BufReader::new(srv_r), srv_w, |peer| {
+            test_agent(peer, provider, workdir, sessions, true)
+        })
+        .unwrap();
 
-        prompt(&h.client, &h.session, "hi");
-        let updates = drain(&h.inbox);
-        let kinds = update_kinds(&updates);
-        let first = |kind: &str| kinds.iter().position(|k| *k == kind).expect(kind);
-        let commands = first("available_commands_update");
-        let chunk = first("agent_message_chunk");
-        assert!(commands < chunk, "{kinds:?}");
-        assert!(first("usage_update") < chunk, "{kinds:?}");
-        let resent = &updates[commands]["update"]["availableCommands"];
-        assert_eq!(resent[0]["name"], "srv:p");
-
-        prompt(&h.client, &h.session, "again");
-        let kinds = update_kinds(&drain(&h.inbox)).join(" ");
-        assert!(!kinds.contains("available_commands_update"), "{kinds}");
+        let lines: Vec<serde_json::Value> = BufReader::new(cli_r)
+            .lines()
+            .map(|line| serde_json::from_str(&line.unwrap()).unwrap())
+            .collect();
+        let answered = lines.iter().position(|l| l["id"] == 1).expect("answered");
+        let session = &lines[answered]["result"]["sessionId"];
+        let updates: Vec<usize> = (0..lines.len())
+            .filter(|&i| lines[i]["params"]["sessionId"] == *session)
+            .collect();
+        assert!(!updates.is_empty(), "{lines:?}");
+        assert!(updates.iter().all(|&i| i > answered), "{lines:?}");
     }
 
     #[test]

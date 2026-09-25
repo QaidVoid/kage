@@ -146,6 +146,9 @@ impl App {
                 }
                 self.on_session_changed();
             }
+            HostEvent::ShellOutput { command, tail } => {
+                show_running_shell(&self.root_buffer, &command, &tail);
+            }
             HostEvent::ShellFinished {
                 command,
                 output,
@@ -275,6 +278,10 @@ impl App {
             }
             HostEvent::Notice { level, text, .. } => {
                 push_notice(buffer, level, text);
+                false
+            }
+            HostEvent::ShellOutput { command, tail } => {
+                show_running_shell(buffer, &command, &tail);
                 false
             }
             HostEvent::ShellFinished {
@@ -612,13 +619,35 @@ fn push_notice(buffer: &SharedBuffer, level: NoticeLevel, text: String) {
 }
 
 /// Show a finished shell escape as a block in `buffer`.
+/// Show a finished shell command in place of its running block.
 fn push_shell(buffer: &SharedBuffer, command: &str, output: &str, exit_code: Option<i32>) {
     let exit = exit_code.map_or_else(|| "signal".to_owned(), |c| c.to_string());
-    lock(buffer).push_custom(
+    lock(buffer).replace_custom_where(
         "kage:shell",
+        |text| is_running_shell(text, command),
         format!("$ {command}\n{}\n(exit code {exit})", output.trim_end()),
-        false,
     );
+}
+
+/// Show `command` running with the last lines of its output so far.
+fn show_running_shell(buffer: &SharedBuffer, command: &str, tail: &str) {
+    lock(buffer).replace_custom_where(
+        "kage:shell",
+        |text| is_running_shell(text, command),
+        format!("$ {command}\n{tail}"),
+    );
+}
+
+/// Whether a `kage:shell` block shows `command` still running: its
+/// header without an exit line.
+fn is_running_shell(text: &str, command: &str) -> bool {
+    text.strip_prefix("$ ")
+        .and_then(|rest| rest.strip_prefix(command))
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with('\n'))
+        && !text
+            .lines()
+            .last()
+            .is_some_and(|line| line.starts_with("(exit code "))
 }
 
 /// What an agent's card says it does: its running tool, else its latest

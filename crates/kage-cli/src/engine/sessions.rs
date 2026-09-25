@@ -146,9 +146,14 @@ pub(crate) fn render_session_markdown(replay: &kage_session::ReplayResult) -> St
 }
 
 impl super::Dispatcher {
-    /// `true` when `id` has no run in flight; otherwise tells the user.
+    /// `true` when `id` has no run or shell command in flight; otherwise
+    /// tells the user.
     pub(super) fn ensure_idle(&self, id: SessionId, what: &str) -> bool {
-        if self.sessions.get(&id).is_some_and(|s| s.idle.is_some()) {
+        if self
+            .sessions
+            .get(&id)
+            .is_some_and(|s| s.idle.is_some() && s.shells == 0)
+        {
             return true;
         }
         super::notice(

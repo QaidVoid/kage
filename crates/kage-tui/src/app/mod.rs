@@ -204,11 +204,11 @@ pub enum RunRequest {
     /// firing the plugin event with `"source": "settings"`. Unknown
     /// strings surface an inline error instead of changing anything.
     SetThinkingLevel(String),
-    /// Run a `!`-prefixed shell-escape line. The worker executes the
-    /// command in the session working directory, paints the output as
-    /// a `kage:shell` block, and appends a `[shell]` user message to
-    /// the live context so the model sees the result on the next
-    /// turn. Not recorded to the session file.
+    /// Run a `!`-prefixed shell-escape line. The engine executes the
+    /// command in the session working directory, streams its output
+    /// into a `kage:shell` block, stops it on a cancel, and adds a
+    /// recorded `[shell]` user message to the history so the model
+    /// sees the result on the next turn.
     RunShell(String),
     /// Rebuild the provider registry from the auth store, env vars,
     /// and plugin contributions after a `:login` changed credentials.

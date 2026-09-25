@@ -479,10 +479,14 @@ fn denied_permission_refuses_the_tool() {
     assert!(output.unwrap().is_error);
 }
 
+fn capture(command: &str, dir: &std::path::Path) -> (Option<i32>, String) {
+    run_shell(command, &ToolContext::new(dir, &CancelFlag::new())).unwrap()
+}
+
 #[test]
 fn run_shell_capture_combines_streams_and_exit_code() {
     let dir = std::env::temp_dir();
-    let (code, out) = run_shell("echo out; echo err >&2", &dir);
+    let (code, out) = capture("echo out; echo err >&2", &dir);
     assert_eq!(code, Some(0));
     assert!(out.contains("out"), "{out}");
     assert!(out.contains("err"), "{out}");
@@ -491,17 +495,17 @@ fn run_shell_capture_combines_streams_and_exit_code() {
 #[test]
 fn run_shell_capture_reports_failure_and_signal() {
     let dir = std::env::temp_dir();
-    let (code, out) = run_shell("exit 3", &dir);
+    let (code, out) = capture("exit 3", &dir);
     assert_eq!(code, Some(3));
     assert_eq!(out, "");
-    let (code, _) = run_shell("kill -9 $$", &dir);
+    let (code, _) = capture("kill -9 $$", &dir);
     assert_eq!(code, None);
 }
 
 #[test]
 fn run_shell_capture_truncates_large_output() {
     let dir = std::env::temp_dir();
-    let (_, out) = run_shell("yes | head -c 100000", &dir);
+    let (_, out) = capture("yes | head -c 100000", &dir);
     assert!(
         out.chars().count() <= 8 * 1024 + 64,
         "truncated, len {}",
@@ -517,7 +521,7 @@ fn run_shell_capture_truncates_large_output() {
 #[test]
 fn run_shell_capture_runs_in_the_given_workdir() {
     let dir = std::env::temp_dir();
-    let (_, out) = run_shell("pwd", &dir);
+    let (_, out) = capture("pwd", &dir);
     assert!(out.trim().starts_with(dir.to_str().unwrap()), "{out}");
 }
 
@@ -759,6 +763,130 @@ fn shell_output_reaches_the_next_request() {
             .iter()
             .any(|t| t.contains("[shell] ran `echo from-shell`"))
     );
+}
+
+#[test]
+fn a_shell_command_streams_its_output_and_a_cancel_kills_it() {
+    let h = harness(MockProvider::replaying(text_turn("ok")));
+    let id = SessionId::new();
+    h.open(id, None);
+    let started = std::time::Instant::now();
+    h.engine.send(Command::to(
+        id,
+        CommandKind::Shell {
+            command: "echo first; sleep 5; echo done".into(),
+        },
+    ));
+    let seen = wait_for(
+        &h.events,
+        |e| matches!(&e.event, Event::Host(HostEvent::ShellOutput { tail, .. }) if tail == "first"),
+    );
+    assert!(host_events(&seen).iter().any(|e| matches!(
+        e,
+        HostEvent::StateChanged { state } if state.working
+    )));
+    h.engine.send(Command::to(id, CommandKind::Cancel));
+    let seen = wait_for(
+        &h.events,
+        |e| matches!(&e.event, Event::Host(HostEvent::StateChanged { state }) if !state.working),
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let finished = host_events(&seen).into_iter().find_map(|e| match e {
+        HostEvent::ShellFinished {
+            output, exit_code, ..
+        } => Some((output.clone(), *exit_code)),
+        _ => None,
+    });
+    assert_eq!(finished, Some(("first\ncancelled".to_owned(), None)));
+}
+
+#[test]
+fn a_prompt_waits_for_the_shell_command_before_it() {
+    let mock = MockProvider::replaying(text_turn("ok"));
+    let h = harness(mock.clone());
+    let id = SessionId::new();
+    h.open(id, None);
+    h.engine.send(Command::to(
+        id,
+        CommandKind::Shell {
+            command: "sleep 0.2; echo late".into(),
+        },
+    ));
+    prompt(&h.engine, id, "go", Delivery::Steer);
+    let seen = until_runs_end(&h.events, 1);
+    let order: Vec<&str> = host_events(&seen)
+        .into_iter()
+        .filter_map(|e| match e {
+            HostEvent::ShellFinished { .. } => Some("shell"),
+            HostEvent::RunStarted => Some("run"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(order, ["shell", "run"]);
+    let texts: Vec<String> = mock.requests()[0]
+        .messages
+        .iter()
+        .map(crate::cli_loop_run::first_user_text)
+        .collect();
+    assert!(texts[0].starts_with("[shell] ran `sleep 0.2; echo late`"));
+    assert_eq!(texts[1], "go");
+}
+
+#[test]
+fn a_compacted_session_replays_the_live_history() {
+    let dir = tempfile::tempdir().unwrap();
+    let mock = MockProvider::sequence(vec![
+        text_turn("first"),
+        tool_turn("gate"),
+        tool_turn("gate"),
+        text_turn("done"),
+        text_turn("summary"),
+        text_turn("ok"),
+    ]);
+    let h = harness(mock.clone());
+    let id = SessionId::new();
+    let (recorder, path) = recorder_in(dir.path(), id);
+    h.open(id, Some(recorder));
+    prompt(&h.engine, id, "one", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+    h.engine.send(Command::to(
+        id,
+        CommandKind::Shell {
+            command: "echo from-shell".into(),
+        },
+    ));
+    wait_for(&h.events, |e| {
+        matches!(e.event, Event::Host(HostEvent::ShellFinished { .. }))
+    });
+    h.release.send(()).unwrap();
+    h.release.send(()).unwrap();
+    prompt(&h.engine, id, "two", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+    h.engine.send(Command::to(id, CommandKind::Compact));
+    until_runs_end(&h.events, 1);
+    prompt(&h.engine, id, "three", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+    h.engine.shutdown();
+
+    let live = mock.requests().pop().unwrap().messages;
+    let replayed = kage_session::replay(&path).unwrap().history;
+    let shape = |m: &Message| (m.role, m.content.clone());
+    assert_eq!(
+        replayed[..live.len()].iter().map(shape).collect::<Vec<_>>(),
+        live.iter().map(shape).collect::<Vec<_>>()
+    );
+    let mut calls = std::collections::HashSet::new();
+    for block in replayed.iter().flat_map(|m| &m.content) {
+        match block {
+            Content::ToolCall { id, .. } => {
+                calls.insert(id.clone());
+            }
+            Content::ToolResultBlock { call_id, .. } => {
+                assert!(calls.contains(call_id), "orphan result {call_id}");
+            }
+            _ => {}
+        }
+    }
 }
 
 #[test]

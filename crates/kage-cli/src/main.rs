@@ -45,6 +45,9 @@ pub(crate) use kage_tools::builtin_registry;
 
 pub(crate) use crate::plugins::setup_runtime;
 
+/// The system prompt role when `--system` is not given.
+pub(crate) const DEFAULT_SYSTEM: &str = "You are kage, a helpful coding agent.";
+
 /// kage: a minimal, extensible coding agent.
 #[derive(Parser, Debug)]
 #[command(
@@ -72,10 +75,7 @@ struct Cli {
     model: Option<String>,
 
     /// System prompt to prepend.
-    #[arg(
-        long = "system",
-        default_value = "You are kage, a helpful coding agent."
-    )]
+    #[arg(long = "system", default_value = DEFAULT_SYSTEM)]
     system: String,
 
     /// Disable session recording. By default every run writes a JSONL
@@ -104,8 +104,8 @@ pub(crate) enum Command {
         /// Resume the most recently created session.
         #[arg(long = "last", conflicts_with = "id")]
         last: bool,
-        /// New user prompt to append. Required: print mode is the only
-        /// runtime in this build.
+        /// New user prompt to append in print mode. Without it the
+        /// session opens in the interactive TUI.
         #[arg(short = 'p', long = "print")]
         print: Option<String>,
         /// Override the recorded model. Defaults to the model the session
@@ -497,14 +497,14 @@ fn main() -> ExitCode {
     }
 
     // No subcommand and no `-p`: drop into the interactive TUI.
-    tui::run_tui(cli.model.as_deref(), &cli.system)
+    tui::run_tui(cli.model.as_deref(), &cli.system, None)
 }
 
 /// One `-p` print-mode run: provider and tool setup, permission gate,
 /// session recording, and the exit code.
 fn run_print_mode(cli: Cli) -> ExitCode {
     let Some(prompt) = cli.print else {
-        return tui::run_tui(cli.model.as_deref(), &cli.system);
+        return tui::run_tui(cli.model.as_deref(), &cli.system, None);
     };
     let mut registry = build_provider_registry();
 

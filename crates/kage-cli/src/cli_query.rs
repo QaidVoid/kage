@@ -3,8 +3,9 @@
 #[allow(clippy::wildcard_imports)] // split out of main.rs; shares the crate-root scope
 use super::*;
 
-/// Implement `kage resume`: replay an existing session and append a new
-/// user prompt before re-running the loop.
+/// Implement `kage resume`: open an existing session in the TUI, or with
+/// `print`, replay it and append a new user prompt before re-running the
+/// loop.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn run_resume(
     id: Option<&str>,
@@ -13,10 +14,6 @@ pub(crate) fn run_resume(
     model_override: Option<&str>,
     json: bool,
 ) -> ExitCode {
-    let Some(prompt) = print else {
-        eprintln!("kage: resume requires -p/--print in this build");
-        return ExitCode::from(2);
-    };
     let dir = match sessions_dir() {
         Ok(d) => d,
         Err(e) => {
@@ -30,6 +27,9 @@ pub(crate) fn run_resume(
             eprintln!("kage: {e}");
             return ExitCode::from(1);
         }
+    };
+    let Some(prompt) = print else {
+        return tui::run_tui(model_override, DEFAULT_SYSTEM, Some(path));
     };
 
     let replay = match kage_session::replay(&path) {
@@ -268,7 +268,9 @@ pub(crate) fn resolve_resume_target(
             .map_err(|e| format!("failed to scan sessions: {e}"))?
             .ok_or_else(|| format!("no sessions in {}", dir.display()));
     }
-    let prefix = id.ok_or_else(|| "resume requires either --last or a session id".to_owned())?;
+    let prefix = id.ok_or_else(|| {
+        "resume needs a session id or --last; to pick one, run `kage` and press ctrl+s".to_owned()
+    })?;
     kage_session::find_by_prefix(dir, prefix)
         .map_err(|e| format!("failed to resolve session id: {e}"))?
         .ok_or_else(|| format!("no session matches prefix '{prefix}'"))

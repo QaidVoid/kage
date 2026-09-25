@@ -916,6 +916,16 @@ must be http(s) and the host must resolve to a routable address. There
 is no host allow-list. See [capabilities](/plugins/capabilities#net)
 for the options and results.
 
+## crypto
+
+`kage.crypto` is gated behind the `crypto` capability. A plugin must be
+granted `crypto` in `[plugins.capabilities]` and request it at load time
+before the primitives are attached to its environment. The calls are
+stateless and synchronous: random bytes, SHA-256, SHA-512, HMAC-SHA256,
+HKDF-SHA256, AES-256-GCM decrypt, Ed25519 sign, and base64 and hex
+conversion, all over byte strings. Since API 3. See
+[capabilities](/plugins/capabilities#crypto) for the table.
+
 ## acp and mcp
 
 `kage.acp.add_agent(spec)` declares an upstream ACP agent and

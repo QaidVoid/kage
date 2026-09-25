@@ -19,6 +19,7 @@ pub mod bridge;
 pub(crate) mod capabilities;
 pub mod chrome;
 pub mod commands;
+pub(crate) mod crypto;
 pub(crate) mod env;
 pub mod error;
 pub mod events;

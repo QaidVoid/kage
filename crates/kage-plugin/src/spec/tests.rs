@@ -91,6 +91,7 @@ fn gated_funcs_resolve_only_when_capability_granted() {
             "exec".to_owned(),
             "env".to_owned(),
             "net".to_owned(),
+            "crypto".to_owned(),
         ],
     );
     let rt = PluginRuntime::builder()

@@ -35,6 +35,15 @@ impl PluginRuntimeBuilder {
         self
     }
 
+    /// Set the live lookup of stored provider credentials behind
+    /// `kage.credential`. Read on every call, so a credential saved
+    /// mid-session applies at once. Empty by default.
+    #[must_use]
+    pub fn credential_lookup(mut self, credential_lookup: env::CredentialLookup) -> Self {
+        self.credential_lookup = credential_lookup;
+        self
+    }
+
     /// Set the load allowlist (from `[plugins] enabled`), keyed by
     /// plugin file stem. Empty (the default) loads every discovered
     /// plugin; non-empty loads only the named plugins.
@@ -139,6 +148,7 @@ impl PluginRuntimeBuilder {
         api::install(&lua, self.sink.clone(), self.config)?;
         plugin_fs::install_fs(&lua, self.workdir.clone())?;
         http::install_http(&lua)?;
+        crypto::install_crypto(&lua)?;
         store::install_base(&lua)?;
         let (host, owner) = LuaHost::new();
         let weak_host = host.downgrade();
@@ -197,8 +207,9 @@ impl PluginRuntimeBuilder {
             Arc::clone(&switch_request),
         );
         exec::register(&cap_registry, self.workdir.clone());
-        env::register(&cap_registry);
+        env::register(&cap_registry, self.credential_lookup.clone());
         http::register(&cap_registry);
+        crypto::register(&cap_registry);
         bridge::install_suspend(&lua)?;
         capabilities::install_request_capabilities(
             &lua,

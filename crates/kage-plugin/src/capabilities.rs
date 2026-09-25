@@ -45,6 +45,9 @@ pub(crate) enum Capability {
     Env,
     /// Make outbound HTTP requests via `kage.http`.
     Net,
+    /// Call synchronous cryptographic primitives via `kage.crypto`.
+    /// Stateless pure functions over byte strings.
+    Crypto,
 }
 
 impl Capability {
@@ -57,8 +60,9 @@ impl Capability {
             "exec" => Ok(Self::Exec),
             "env" => Ok(Self::Env),
             "net" => Ok(Self::Net),
+            "crypto" => Ok(Self::Crypto),
             other => Err(format!(
-                "unknown capability {other:?} (known: session_write, exec, env, net)"
+                "unknown capability {other:?} (known: session_write, exec, env, net, crypto)"
             )),
         }
     }

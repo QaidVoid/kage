@@ -126,6 +126,11 @@ fn runtime_builder(
         .capabilities(plugins_cfg.capabilities)
         .enabled(plugins_cfg.enabled)
         .plugin_config(plugins_cfg.config)
+        .credential_lookup(std::sync::Arc::new(|provider: &str| {
+            crate::auth::AuthStore::load()
+                .ok()
+                .and_then(|store| store.access_token(provider).map(str::to_owned))
+        }))
         .config(json!({
             "model": model,
             "cwd": workdir.display().to_string(),

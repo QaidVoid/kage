@@ -55,6 +55,7 @@ pub(crate) use crate::block_renderers::{
 pub(crate) use crate::bridge::{self, BridgeStep, SharedBridge, shared_bridge};
 pub(crate) use crate::capabilities::{self, CapabilityRegistry, CurrentPlugin};
 pub(crate) use crate::commands::{self, LuaCommand, RegisteredCommands, registered_commands};
+pub(crate) use crate::crypto;
 pub(crate) use crate::env;
 pub(crate) use crate::error::PluginError;
 pub(crate) use crate::events;
@@ -275,6 +276,7 @@ pub struct PluginRuntimeBuilder {
     config: serde_json::Value,
     workdir: PathBuf,
     capabilities: BTreeMap<String, Vec<String>>,
+    credential_lookup: env::CredentialLookup,
     enabled: Vec<String>,
     plugin_config: BTreeMap<String, serde_json::Value>,
     state_dir: Option<PathBuf>,

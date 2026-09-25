@@ -23,6 +23,7 @@ impl PluginRuntime {
             config: serde_json::Value::Object(serde_json::Map::new()),
             workdir: PathBuf::from("."),
             capabilities: BTreeMap::new(),
+            credential_lookup: std::sync::Arc::new(|_: &str| -> Option<String> { None }),
             enabled: Vec::new(),
             plugin_config: BTreeMap::new(),
             state_dir: None,

@@ -47,4 +47,8 @@ pub(super) const TABLES: &[Table] = &[
         path: "kage.api",
         class_doc: "Low-level primitives the stdlib builds on.",
     },
+    Table {
+        path: "kage.crypto",
+        class_doc: "Synchronous cryptographic primitives, gated behind the `crypto` capability.",
+    },
 ];

@@ -986,6 +986,14 @@ function kage.exec(spec) end
 ---@return string?
 function kage.env(name) end
 
+--- Token the host holds for a provider id, or `nil`
+--- when nothing is stored. Same store the login flow
+--- writes. Requires the `env` capability.
+--- Since API 2.
+---@param provider string
+---@return string?
+function kage.credential(provider) end
+
 --- Outbound HTTP, gated behind the `net` capability.
 ---@class kage.http
 kage.http = {}
@@ -1030,3 +1038,96 @@ function kage.http.delete(url, opts) end
 ---@param on_event fun(ev: { event: string, data: string })
 ---@return { status: integer, content_type: string }
 function kage.http.post_stream(url, opts, on_event) end
+
+--- Synchronous cryptographic primitives, gated behind the `crypto` capability.
+---@class kage.crypto
+kage.crypto = {}
+
+--- N cryptographically random bytes as a raw string.
+--- Requires the `crypto` capability.
+--- Since API 2.
+---@param count integer
+---@return string
+function kage.crypto.random_bytes(count) end
+
+--- SHA-256 of a byte string, as 32 raw bytes.
+--- Requires the `crypto` capability.
+--- Since API 2.
+---@param data string
+---@return string
+function kage.crypto.sha256(data) end
+
+--- SHA-512 of a byte string, as 64 raw bytes.
+--- Requires the `crypto` capability.
+--- Since API 2.
+---@param data string
+---@return string
+function kage.crypto.sha512(data) end
+
+--- HMAC-SHA256 of data under key, as 32 raw bytes.
+--- Requires the `crypto` capability.
+--- Since API 2.
+---@param key string
+---@param data string
+---@return string
+function kage.crypto.hmac_sha256(key, data) end
+
+--- HKDF-SHA256 over the input keying material, as length
+--- raw bytes. An empty salt behaves as a zero salt.
+--- Requires the `crypto` capability.
+--- Since API 2.
+---@param ikm string
+---@param salt string
+---@param info string
+---@param length integer
+---@return string
+function kage.crypto.hkdf_sha256(ikm, salt, info, length) end
+
+--- AES-256-GCM decrypt. The key is 32 bytes, the iv 12
+--- bytes. Fails when authentication fails, without saying
+--- why. Requires the `crypto` capability.
+--- Since API 2.
+---@param key string
+---@param iv string
+---@param aad string
+---@param ciphertext string
+---@param tag string
+---@return string
+function kage.crypto.aes256gcm_decrypt(key, iv, aad, ciphertext, tag) end
+
+--- Ed25519 signature of a message, as 64 raw bytes. The
+--- key is a PKCS#8 DER private key. Requires the `crypto`
+--- capability.
+--- Since API 2.
+---@param private_key_pkcs8 string
+---@param message string
+---@return string
+function kage.crypto.ed25519_sign(private_key_pkcs8, message) end
+
+--- Standard base64 of a byte string. Requires the `crypto`
+--- capability.
+--- Since API 2.
+---@param data string
+---@return string
+function kage.crypto.to_base64(data) end
+
+--- Bytes of standard base64. Requires the `crypto`
+--- capability.
+--- Since API 2.
+---@param text string
+---@return string
+function kage.crypto.from_base64(text) end
+
+--- Lower-case hex of a byte string. Requires the `crypto`
+--- capability.
+--- Since API 2.
+---@param data string
+---@return string
+function kage.crypto.to_hex(data) end
+
+--- Bytes of lower-case hex. Requires the `crypto`
+--- capability.
+--- Since API 2.
+---@param text string
+---@return string
+function kage.crypto.from_hex(text) end

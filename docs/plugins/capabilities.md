@@ -88,6 +88,11 @@ per-variable allowlist, so a granted plugin can read every variable,
 including secrets such as provider API keys. Grant it only to plugins
 you trust.
 
+`kage.credential(provider)` returns the token the host holds for a
+provider id, the same store the login flow writes, or `nil` when
+nothing is stored. It is attached by the same `env` grant: stored
+tokens are secrets of the same class as environment secrets.
+
 ### `net`
 
 ```lua
@@ -116,6 +121,35 @@ and sending, so a long stream is never cut off.
 Every request passes the same SSRF check as the built-in `web_fetch`
 tool: the scheme must be `http` or `https` and the host must resolve to
 a routable address. There is no host allowlist beyond that.
+
+### `crypto`
+
+```lua
+local digest = kage.crypto.sha256("abc")
+-- digest is 32 raw bytes; kage.crypto.to_hex(digest) is ba7816...
+```
+
+Attaches synchronous primitives to `kage.crypto`. Without the grant,
+`kage.crypto` is an empty table and `kage.crypto.sha256` is `nil`.
+
+| call | effect |
+| --- | --- |
+| `kage.crypto.random_bytes(n)` | `n` cryptographically random bytes. `n` is 1 to 1048576. |
+| `kage.crypto.sha256(data)` | SHA-256 digest, 32 raw bytes. |
+| `kage.crypto.sha512(data)` | SHA-512 digest, 64 raw bytes. |
+| `kage.crypto.hmac_sha256(key, data)` | HMAC-SHA256, 32 raw bytes. |
+| `kage.crypto.hkdf_sha256(ikm, salt, info, length)` | HKDF-SHA256, `length` raw bytes (1 to 8160). An empty salt behaves as a zero salt. |
+| `kage.crypto.aes256gcm_decrypt(key, iv, aad, ciphertext, tag)` | AES-256-GCM plaintext. The key is 32 bytes, the iv 12 bytes. Fails when authentication fails, without saying why. |
+| `kage.crypto.ed25519_sign(private_key_pkcs8, message)` | Ed25519 signature, 64 raw bytes. The key is a PKCS#8 DER private key. |
+| `kage.crypto.to_base64(data)` / `from_base64(text)` | standard base64 encode and decode. |
+| `kage.crypto.to_hex(data)` / `from_hex(text)` | lower-case hex encode and decode. |
+
+All inputs and outputs are byte strings. Lengths are validated and
+failures are generic: an error never echoes the input that caused it.
+The grant is coarse: a granted plugin may call any primitive with any
+inputs. The work runs on the host, so long loops over these calls
+never consume the Lua instruction budget the way a pure Lua loop
+would.
 
 ## why this is safe enough
 

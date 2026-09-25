@@ -99,6 +99,24 @@ pub(super) const GATED: &[GatedFunc] = &[
         },
     },
     GatedFunc {
+        cap: "env",
+        func: Func {
+            doc: &[
+                "Token the host holds for a provider id, or `nil`",
+                "when nothing is stored. Same store the login flow",
+                "writes. Requires the `env` capability.",
+            ],
+            path: "kage.credential",
+            since: 2,
+            params: &[Field {
+                name: "provider",
+                ty: "string",
+                doc: "",
+            }],
+            ret: Some("string?"),
+        },
+    },
+    GatedFunc {
         cap: "net",
         func: Func {
             doc: &[
@@ -211,6 +229,249 @@ pub(super) const GATED: &[GatedFunc] = &[
                 },
             ],
             ret: Some("{ status: integer, content_type: string }"),
+        },
+    },
+    GatedFunc {
+        cap: "crypto",
+        func: Func {
+            doc: &[
+                "N cryptographically random bytes as a raw string.",
+                "Requires the `crypto` capability.",
+            ],
+            path: "kage.crypto.random_bytes",
+            since: 2,
+            params: &[Field {
+                name: "count",
+                ty: "integer",
+                doc: "",
+            }],
+            ret: Some("string"),
+        },
+    },
+    GatedFunc {
+        cap: "crypto",
+        func: Func {
+            doc: &[
+                "SHA-256 of a byte string, as 32 raw bytes.",
+                "Requires the `crypto` capability.",
+            ],
+            path: "kage.crypto.sha256",
+            since: 2,
+            params: &[Field {
+                name: "data",
+                ty: "string",
+                doc: "",
+            }],
+            ret: Some("string"),
+        },
+    },
+    GatedFunc {
+        cap: "crypto",
+        func: Func {
+            doc: &[
+                "SHA-512 of a byte string, as 64 raw bytes.",
+                "Requires the `crypto` capability.",
+            ],
+            path: "kage.crypto.sha512",
+            since: 2,
+            params: &[Field {
+                name: "data",
+                ty: "string",
+                doc: "",
+            }],
+            ret: Some("string"),
+        },
+    },
+    GatedFunc {
+        cap: "crypto",
+        func: Func {
+            doc: &[
+                "HMAC-SHA256 of data under key, as 32 raw bytes.",
+                "Requires the `crypto` capability.",
+            ],
+            path: "kage.crypto.hmac_sha256",
+            since: 2,
+            params: &[
+                Field {
+                    name: "key",
+                    ty: "string",
+                    doc: "",
+                },
+                Field {
+                    name: "data",
+                    ty: "string",
+                    doc: "",
+                },
+            ],
+            ret: Some("string"),
+        },
+    },
+    GatedFunc {
+        cap: "crypto",
+        func: Func {
+            doc: &[
+                "HKDF-SHA256 over the input keying material, as length",
+                "raw bytes. An empty salt behaves as a zero salt.",
+                "Requires the `crypto` capability.",
+            ],
+            path: "kage.crypto.hkdf_sha256",
+            since: 2,
+            params: &[
+                Field {
+                    name: "ikm",
+                    ty: "string",
+                    doc: "",
+                },
+                Field {
+                    name: "salt",
+                    ty: "string",
+                    doc: "",
+                },
+                Field {
+                    name: "info",
+                    ty: "string",
+                    doc: "",
+                },
+                Field {
+                    name: "length",
+                    ty: "integer",
+                    doc: "",
+                },
+            ],
+            ret: Some("string"),
+        },
+    },
+    GatedFunc {
+        cap: "crypto",
+        func: Func {
+            doc: &[
+                "AES-256-GCM decrypt. The key is 32 bytes, the iv 12",
+                "bytes. Fails when authentication fails, without saying",
+                "why. Requires the `crypto` capability.",
+            ],
+            path: "kage.crypto.aes256gcm_decrypt",
+            since: 2,
+            params: &[
+                Field {
+                    name: "key",
+                    ty: "string",
+                    doc: "",
+                },
+                Field {
+                    name: "iv",
+                    ty: "string",
+                    doc: "",
+                },
+                Field {
+                    name: "aad",
+                    ty: "string",
+                    doc: "",
+                },
+                Field {
+                    name: "ciphertext",
+                    ty: "string",
+                    doc: "",
+                },
+                Field {
+                    name: "tag",
+                    ty: "string",
+                    doc: "",
+                },
+            ],
+            ret: Some("string"),
+        },
+    },
+    GatedFunc {
+        cap: "crypto",
+        func: Func {
+            doc: &[
+                "Ed25519 signature of a message, as 64 raw bytes. The",
+                "key is a PKCS#8 DER private key. Requires the `crypto`",
+                "capability.",
+            ],
+            path: "kage.crypto.ed25519_sign",
+            since: 2,
+            params: &[
+                Field {
+                    name: "private_key_pkcs8",
+                    ty: "string",
+                    doc: "",
+                },
+                Field {
+                    name: "message",
+                    ty: "string",
+                    doc: "",
+                },
+            ],
+            ret: Some("string"),
+        },
+    },
+    GatedFunc {
+        cap: "crypto",
+        func: Func {
+            doc: &[
+                "Standard base64 of a byte string. Requires the `crypto`",
+                "capability.",
+            ],
+            path: "kage.crypto.to_base64",
+            since: 2,
+            params: &[Field {
+                name: "data",
+                ty: "string",
+                doc: "",
+            }],
+            ret: Some("string"),
+        },
+    },
+    GatedFunc {
+        cap: "crypto",
+        func: Func {
+            doc: &[
+                "Bytes of standard base64. Requires the `crypto`",
+                "capability.",
+            ],
+            path: "kage.crypto.from_base64",
+            since: 2,
+            params: &[Field {
+                name: "text",
+                ty: "string",
+                doc: "",
+            }],
+            ret: Some("string"),
+        },
+    },
+    GatedFunc {
+        cap: "crypto",
+        func: Func {
+            doc: &[
+                "Lower-case hex of a byte string. Requires the `crypto`",
+                "capability.",
+            ],
+            path: "kage.crypto.to_hex",
+            since: 2,
+            params: &[Field {
+                name: "data",
+                ty: "string",
+                doc: "",
+            }],
+            ret: Some("string"),
+        },
+    },
+    GatedFunc {
+        cap: "crypto",
+        func: Func {
+            doc: &[
+                "Bytes of lower-case hex. Requires the `crypto`",
+                "capability.",
+            ],
+            path: "kage.crypto.from_hex",
+            since: 2,
+            params: &[Field {
+                name: "text",
+                ty: "string",
+                doc: "",
+            }],
+            ret: Some("string"),
         },
     },
 ];

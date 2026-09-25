@@ -145,31 +145,9 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>) -> Ex
 
     let mut tools = kage_tools::builtin_registry();
     let mut plugin_command_listing: Vec<kage_tui::command::PluginCommand> = Vec::new();
-    let mut plugin_widgets: Vec<Arc<kage_plugin::LuaWidget>> = Vec::new();
-    let mut plugin_autocomplete: Vec<Arc<kage_plugin::LuaAutocompleteProvider>> = Vec::new();
-    let mut plugin_status: Option<kage_plugin::SharedStatus> = None;
-    let mut plugin_usage: Option<kage_plugin::SharedUsage> = None;
-    let mut plugin_compact_request: Option<kage_plugin::SharedCompactRequest> = None;
-    let mut plugin_session_list: Option<kage_plugin::SharedSessionList> = None;
-    let mut plugin_fork_request: Option<kage_plugin::SharedForkRequest> = None;
-    let mut plugin_switch_request: Option<kage_plugin::SharedSwitchRequest> = None;
-    let mut plugin_highlights: Option<kage_plugin::SharedHighlights> = None;
-    let mut plugin_slots: Option<kage_plugin::Slots> = None;
-    let mut plugin_terminal_hooks: Option<kage_plugin::RegisteredTerminalHooks> = None;
     if let Some(rt) = plugin_runtime.as_ref() {
         plugin_command_listing = support::snapshot_plugin_commands(rt);
         support::register_block_renderers(rt);
-        plugin_widgets = rt.registered_widgets();
-        plugin_autocomplete = rt.registered_autocomplete_providers();
-        plugin_status = Some(rt.shared_status());
-        plugin_usage = Some(rt.shared_usage());
-        plugin_compact_request = Some(rt.shared_compact_request());
-        plugin_session_list = Some(rt.shared_session_list());
-        plugin_fork_request = Some(rt.shared_fork_request());
-        plugin_switch_request = Some(rt.shared_switch_request());
-        plugin_highlights = Some(rt.highlights());
-        plugin_slots = Some(rt.slots());
-        plugin_terminal_hooks = Some(rt.shared_terminal_hooks());
     }
     let (mcp_manager, mcp_errors) =
         crate::mcp::spawn_and_register(&mut tools, &workdir, plugin_runtime.as_deref());
@@ -328,8 +306,6 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>) -> Ex
     app.set_status_model(Arc::new(Mutex::new(qualified_model.clone())));
     app.set_engine_events(events_rx);
     app.set_plugin_commands(plugin_command_listing);
-    app.set_plugin_widgets(plugin_widgets);
-    app.set_plugin_autocomplete(plugin_autocomplete);
     // `:login` runs the interactive credential flow in the real
     // terminal (the App suspends itself around the call) and then
     // refreshes providers through the worker.
@@ -364,36 +340,8 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>) -> Ex
         }) as kage_tui::OptionSetter
     });
     app.set_options(Arc::clone(&options), setter);
-    if let Some(status) = plugin_status {
-        app.set_plugin_status(status);
-    }
-    if let Some(usage) = plugin_usage {
-        app.set_plugin_usage(usage);
-    }
-    if let Some(req) = plugin_compact_request {
-        app.set_plugin_compact_request(req);
-    }
-    if let Some(list) = plugin_session_list {
-        app.set_plugin_session_list(list);
-    }
-    if let Some(req) = plugin_fork_request {
-        app.set_plugin_fork_request(req);
-    }
-    if let Some(req) = plugin_switch_request {
-        app.set_plugin_switch_request(req);
-    }
-    if let Some(highlights) = plugin_highlights {
-        app.set_highlights(highlights);
-    }
-    if let Some(slots) = plugin_slots {
-        app.set_slots(slots);
-    }
-    if let Some(hooks) = plugin_terminal_hooks {
-        app.set_plugin_terminal_hooks(hooks);
-    }
     if let Some(rt) = plugin_runtime.as_ref() {
-        app.set_plugin_redraw(rt.redraw_flag(), rt.blocks_flag());
-        app.set_keymap(rt.keymap());
+        app.attach_plugins(rt);
     }
     app.set_plugin_dialog(dialog_rx);
     app.set_plugin_refresh(plugin_refresh_rx);

@@ -82,7 +82,6 @@ impl Resolver for SnapshotResolver<'_> {
                 .map(|(n, _)| n.clone())
                 .collect(),
             ArgSource::Sessions => self.ctx.sessions.iter().map(|p| p.value.clone()).collect(),
-            ArgSource::Custom(f) => f(),
         }
     }
 

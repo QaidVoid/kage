@@ -6,10 +6,10 @@
 //! [`ParsedArgs`] holds the result of parsing a raw input string
 //! against a spec's [`ArgSpec`] list.
 //!
-//! The registry is consumed by the completion engine (PN.3) and the
-//! tokenizer/parser (PN.3), which in turn feed the `CommandLine`
-//! widget (PN.4) and the slash palette (PN.6). This module defines
-//! only the types; wiring into the TUI happens in later PN tasks.
+//! The registry is consumed by the completion engine and the
+//! tokenizer/parser in [`crate::cmdparse`], which in turn feed the
+//! `CommandLine` widget and the slash palette. This module defines
+//! only the types.
 
 use std::collections::HashMap;
 
@@ -31,10 +31,6 @@ pub enum ArgSource {
     Sessions,
     /// Names registered by Lua plugins via `kage.register_command`.
     PluginCommands,
-    /// Custom closure returning the candidate values. The closure
-    /// receives no context in this initial version; PN.3 may widen
-    /// the signature to accept a `&CommandCtx`.
-    Custom(fn() -> Vec<String>),
 }
 
 /// Schema for a single command argument.
@@ -258,8 +254,8 @@ pub type ParsedArgs = HashMap<&'static str, ArgValue>;
 /// Full specification of one command.
 ///
 /// Fields use `&'static str` and `&'static [&'static str]` so the
-/// entire registry can live as a `const` slice in the binary. Plugin
-/// commands will use a separate heap-allocated variant (PN.8).
+/// entire registry can live as a `const` slice in the binary. A
+/// [`PluginCommand`] is leaked into this shape when it registers.
 #[derive(Debug)]
 pub struct CommandSpec {
     /// Primary command name (e.g. `"model"`).

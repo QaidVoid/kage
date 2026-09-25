@@ -276,10 +276,9 @@ pub enum AppExit {
     Quit,
 }
 
-/// Which overlay picker is currently open. Determines how
-/// [`PickerEvent::Picked`] is dispatched: a model id triggers a switch,
-/// a session path triggers a resume. (Command picking moved off
-/// `OverlayPicker` onto [`SlashPalette`] in PN.6.)
+/// Which overlay picker is currently open. Determines how a pick is
+/// dispatched: a model id triggers a switch, a session path triggers
+/// a resume.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PickerKind {
     Model,
@@ -294,7 +293,7 @@ enum PickerKind {
 ///
 /// A `kage.ui.*` call suspends the plugin coroutine on the worker
 /// thread; the worker forwards this over a channel and parks on the
-/// carried `reply`. The App hosts the matching [`OverlayWidget`],
+/// carried `reply`. The App hosts the matching [`crate::overlay::OverlayWidget`],
 /// then sends the answer back, and the worker resumes the coroutine
 /// with it. `reply` carries `Some(value)` to resume with that JSON
 /// value or `None` to resume with `nil`.
@@ -524,7 +523,7 @@ fn leak_str(s: &str) -> &'static str {
 /// [`Resolver`] backed by the live App state: model choices and
 /// plugin-registered commands the user has imported, plus the bundled
 /// theme list and any session lister the host provided. Paths return
-/// empty until PU.4 wires file-system completion.
+/// empty.
 struct AppResolver<'a> {
     models: &'a [PickItem],
     plugin_commands: &'a [(String, String)],
@@ -549,7 +548,6 @@ impl Resolver for AppResolver<'_> {
                 .into_iter()
                 .map(|item| item.value)
                 .collect(),
-            ArgSource::Custom(f) => f(),
         }
     }
 
@@ -895,7 +893,7 @@ pub struct App {
     /// transition. `None` while idle.
     run_started: Option<Instant>,
     /// Cached hint labels for [`Self::key_label`].
-    key_labels: wiring::KeyLabels,
+    key_labels: chrome::KeyLabels,
     /// What the start card lists. `None` until the host sets it.
     start_info: Option<view::StartInfo>,
     /// Prompts sent during a run that the engine has not delivered
@@ -912,12 +910,14 @@ pub struct App {
 }
 
 mod actions;
+mod chrome;
 mod editor;
 mod engine;
 mod events;
 mod keys;
 mod lifecycle;
 mod overlays;
+mod plugin_sync;
 mod wiring;
 
 /// Translate an absolute terminal `(row, col)` mouse position to a

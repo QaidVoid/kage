@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 
 use crossbeam_channel::{Receiver, select_biased};
 use kage_core::config::Config;
+use kage_core::options::OptionValue;
 use kage_core::permissions::{PermissionAction, PermissionsConfig};
 use kage_core::protocol::PermissionDecision;
 use kage_core::sync::lock;
@@ -241,22 +242,22 @@ impl PermissionGate {
     }
 }
 
-/// Load the user config at `path`, set `[permissions.tools.<tool>]
-/// default = "allow"`, and save it back comment-preserving. Missing
-/// files are created from defaults by [`Config::save`].
+/// Set `[permissions.tools.<tool>] default = "allow"` in the user
+/// config at `path`, leaving every other line of the file as written.
+/// A missing file is created with just that key.
 ///
 /// # Errors
 ///
-/// A string describing the load or save failure, for the caller's
-/// eprintln.
+/// A string describing the save failure, for the caller's eprintln.
 fn save_allow_always(path: &Path, tool: &str) -> Result<(), String> {
-    let mut cfg = Config::load(path).map_err(|e| format!("config load: {e}"))?;
-    cfg.permissions
-        .tools
-        .entry(tool.to_owned())
-        .or_default()
-        .default = PermissionAction::Allow;
-    cfg.save(path).map_err(|e| format!("save: {e}"))
+    Config::save_keys(
+        path,
+        &[(
+            vec!["permissions", "tools", tool, "default"],
+            OptionValue::Str("allow".to_owned()),
+        )],
+    )
+    .map_err(|e| format!("save: {e}"))
 }
 
 impl Hooks for PermissionGate {
@@ -655,6 +656,25 @@ mod tests {
         assert_eq!(
             saved.permissions.check("edit", "anything"),
             PermissionAction::Allow
+        );
+    }
+
+    #[test]
+    fn allow_always_adds_only_its_rule_to_a_hand_written_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = "# mine\n\n[ui]\ntheme = \"default\"  # by hand\n\n\
+                        [providers.custom.fake]\nbase_url = \"http://127.0.0.1:1/v1\"\n\
+                        api_key_env = \"\"\n\n[[providers.custom.fake.models]]\n\
+                        id = \"small\"\nname = \"Small\"\n\n\
+                        [mcp.servers.files]\ncommand = \"mcp-files\"\n";
+        std::fs::write(&path, original).unwrap();
+        let gate =
+            PermissionGate::new(PermissionsConfig::default()).with_persist_path(path.clone());
+        gate.persist_allow_always("write");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            format!("{original}\n[permissions.tools.write]\ndefault = \"allow\"\n")
         );
     }
 

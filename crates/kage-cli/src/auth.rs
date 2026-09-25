@@ -416,9 +416,74 @@ pub fn run_logout(provider: &str) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `kage auth list`: show one row per known provider, indicating
-/// whether a credential is available from the env, the auth store
-/// (and what kind), both, or neither.
+/// Where one provider's credential can come from.
+pub(crate) struct ProviderKey {
+    /// Provider id.
+    pub id: String,
+    /// Environment variable checked before the auth store; empty for
+    /// none.
+    pub env: String,
+    /// A custom provider whose endpoint needs no key.
+    pub keyless: bool,
+}
+
+impl ProviderKey {
+    /// Where the credential comes from right now, or `None` when the
+    /// provider has none.
+    pub(crate) fn source(&self, store: &AuthStore) -> Option<String> {
+        if self.keyless {
+            return Some("no key needed".to_owned());
+        }
+        let env = (!self.env.is_empty() && std::env::var(&self.env).is_ok_and(|v| !v.is_empty()))
+            .then_some(self.env.as_str());
+        let stored = store.credential(&self.id).map(|c| {
+            if c.is_oauth() {
+                "auth.json (oauth)"
+            } else {
+                "auth.json"
+            }
+        });
+        match (env, stored) {
+            (Some(env), Some(label)) => Some(format!("{env} + {label}")),
+            (Some(env), None) => Some(env.to_owned()),
+            (None, Some(label)) => Some(label.to_owned()),
+            (None, None) => None,
+        }
+    }
+}
+
+/// Every provider `config` can use, sorted by id: the known providers,
+/// with any `[providers.<id>] api_key_env` override applied, and the
+/// custom providers under `[providers.custom.*]`.
+pub(crate) fn provider_keys(config: &kage_core::config::Config) -> Vec<ProviderKey> {
+    let mut keys: Vec<ProviderKey> = KNOWN_PROVIDERS
+        .iter()
+        .map(|id| ProviderKey {
+            id: (*id).to_owned(),
+            env: config
+                .providers
+                .overrides
+                .get(*id)
+                .and_then(|o| o.api_key_env.clone())
+                .unwrap_or_else(|| env_var_for(id).to_owned()),
+            keyless: false,
+        })
+        .collect();
+    keys.extend(config.providers.custom.iter().map(|(id, cfg)| {
+        let env = cfg.key_env(id);
+        ProviderKey {
+            id: id.clone(),
+            keyless: env.is_empty(),
+            env,
+        }
+    }));
+    keys.sort_by(|a, b| a.id.cmp(&b.id));
+    keys
+}
+
+/// `kage auth list`: show one row per known or custom provider,
+/// indicating whether a credential is available from the env, the
+/// auth store (and what kind), both, or neither.
 pub fn run_list() -> ExitCode {
     let store = match AuthStore::load() {
         Ok(s) => s,
@@ -427,35 +492,39 @@ pub fn run_list() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let mut stdout = io::stdout().lock();
-    let _ = writeln!(stdout, "{:<18}  {:<8}  source", "PROVIDER", "STATUS");
-    let mut providers: Vec<&str> = KNOWN_PROVIDERS.to_vec();
-    providers.sort_unstable();
-    for provider in providers {
-        let env = env_var_for(provider);
-        let from_env = !env.is_empty() && std::env::var(env).is_ok_and(|v| !v.is_empty());
-        let stored = store.credential(provider);
-        let status = if from_env || stored.is_some() {
-            "ready"
-        } else {
-            "-"
-        };
-        let stored_label = stored.map(|c| {
-            if c.is_oauth() {
-                "auth.json (oauth)"
-            } else {
-                "auth.json"
-            }
-        });
-        let source = match (from_env, stored_label) {
-            (true, Some(label)) => format!("{env} + {label}"),
-            (true, None) => env.to_owned(),
-            (false, Some(label)) => label.to_owned(),
-            (false, None) => "(unset)".to_owned(),
-        };
-        let _ = writeln!(stdout, "{provider:<18}  {status:<8}  {source}");
-    }
+    let config = kage_core::config::Config::load_default().unwrap_or_else(|e| {
+        eprintln!("kage: config: {e}; custom providers are not listed");
+        kage_core::config::Config::default()
+    });
+    let _ = write_list(&mut io::stdout().lock(), &provider_keys(&config), &store);
     ExitCode::SUCCESS
+}
+
+/// Render the `kage auth list` table, sizing the id column to the
+/// longest id.
+fn write_list<W: Write>(
+    out: &mut W,
+    providers: &[ProviderKey],
+    store: &AuthStore,
+) -> io::Result<()> {
+    let width = providers
+        .iter()
+        .map(|p| p.id.len())
+        .chain(["PROVIDER".len()])
+        .max()
+        .unwrap_or_default();
+    writeln!(out, "{:<width$}  {:<6}  SOURCE", "PROVIDER", "STATUS")?;
+    for provider in providers {
+        let source = provider.source(store);
+        let status = if source.is_some() { "ready" } else { "-" };
+        writeln!(
+            out,
+            "{:<width$}  {status:<6}  {}",
+            provider.id,
+            source.as_deref().unwrap_or("(unset)")
+        )?;
+    }
+    Ok(())
 }
 
 /// `true` when `target` names a provider `kage auth login` can store a
@@ -782,5 +851,42 @@ mod tests {
             &config.providers.custom
         ));
         assert!(!login_target_is_known("llama", &config.providers.custom));
+    }
+
+    fn keyless_config(id: &str) -> kage_core::config::Config {
+        let body = format!(
+            "[providers.custom.{id}]\nbase_url = \"http://127.0.0.1:1/v1\"\napi_key_env = \"\"\n\
+             [[providers.custom.{id}.models]]\nid = \"small\"\nname = \"Small\"\n"
+        );
+        toml::from_str(&body).unwrap()
+    }
+
+    #[test]
+    fn provider_keys_include_custom_providers() {
+        let keys = provider_keys(&keyless_config("fake"));
+        let fake = keys.iter().find(|k| k.id == "fake").unwrap();
+        assert!(fake.keyless);
+        assert_eq!(
+            fake.source(&AuthStore::empty()).as_deref(),
+            Some("no key needed")
+        );
+        assert!(keys.windows(2).all(|w| w[0].id <= w[1].id));
+    }
+
+    #[test]
+    fn list_aligns_columns_to_the_longest_id() {
+        let keys = provider_keys(&keyless_config("a-very-long-custom-provider"));
+        let mut out = Vec::new();
+        write_list(&mut out, &keys, &AuthStore::empty()).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        let mut lines = out.lines();
+        let header = lines.next().unwrap();
+        assert!(header.ends_with("SOURCE"), "{header}");
+        let column = header.find("STATUS").unwrap();
+        for line in lines {
+            assert_eq!(line[..column].chars().last(), Some(' '), "{line}");
+            assert_ne!(line.as_bytes()[column], b' ', "{line}");
+        }
+        assert!(out.contains("a-very-long-custom-provider  ready   no key needed"));
     }
 }

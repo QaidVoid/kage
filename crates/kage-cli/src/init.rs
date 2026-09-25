@@ -34,19 +34,19 @@ const STARTER_CONFIG: &str = r#"# kage configuration. See `kage doctor` for diag
 [provider]
 # Default `provider:model` to start each session with. Override per
 # session with `kage -m <provider:model> ...` or with the in-TUI
-# model picker (Ctrl-P).
+# model picker (ctrl+p).
 default_model = "anthropic:claude-sonnet-4-6"
 
 [ui]
-# Bundled themes: "default", "tokyo-night", "catppuccin-mocha", ...
+# Bundled themes: "default", "tokyo-night", "catppuccin-mocha".
 theme = "default"
 # Capture mouse events (drag-to-select, click-to-focus). Set to false
 # if you prefer your terminal's native selection.
 mouse = true
-# Prompt-input editing model: "vim" (modal: Normal/Insert/Visual) or
-# "modeless" (always-editable, Emacs/readline keys, Esc cancels the
-# turn). Takes effect on next launch; also in the :settings dialog.
-editor = "vim"
+# Prompt editing style: "modeless" (always editable, readline keys)
+# or "vim" (modal: normal, insert and visual modes). Also in the
+# /settings dialog, which applies it at once.
+editor = "modeless"
 
 [plugins]
 # Defaults: `~/.config/kage/plugins/`. Set `dir` to an absolute path
@@ -55,14 +55,14 @@ editor = "vim"
 enabled = []
 
 [sandbox]
-# 0.1 ships only the "local" backend. "bubblewrap" and "sandbox-exec"
-# are placeholders for post-0.1.
+# "local" is the only backend: tools run as you, without isolation.
+# `kage doctor` warns about that until suppress_warning is true.
 backend = "local"
 suppress_warning = false
 
 [keybindings]
-# `bindings` maps chord -> command name. Chords use vim-style
-# notation; commands match the slash-command and `:`-command palette.
+# `bindings` maps a key to a command line, or to `action:<Name>` for a
+# built-in action. See the keybindings guide.
 bindings = {}
 "#;
 
@@ -326,6 +326,7 @@ mod tests {
         assert_eq!(cfg.provider.default_model, "anthropic:claude-sonnet-4-6");
         assert_eq!(cfg.ui.theme, "default");
         assert!(cfg.ui.mouse);
+        assert_eq!(cfg.ui.editor, kage_core::config::EditorMode::Modeless);
         assert!(cfg.plugins.enabled.is_empty());
         assert!(matches!(
             cfg.sandbox.backend,

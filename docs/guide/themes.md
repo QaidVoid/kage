@@ -21,7 +21,8 @@ the default in `config.toml`
 theme = "my-theme"
 ```
 
-or use the `:settings` dialog, which writes the choice back for you.
+or use the `/settings` dialog, which writes only that key back to
+`config.toml`.
 The configured theme is resolved at startup. An unknown name leaves
 the default palette in place and reports the error inline rather than
 failing silently.

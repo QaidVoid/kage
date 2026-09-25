@@ -284,22 +284,29 @@ fn check_auth() -> Check {
 }
 
 fn check_providers() -> Check {
+    let config = Config::load_default().unwrap_or_default();
     let store = AuthStore::load().unwrap_or_else(|_| AuthStore::empty());
-    let available: Vec<&str> = KNOWN_PROVIDERS
-        .iter()
-        .copied()
-        .filter(|p| {
-            let env = auth::env_var_for(p);
-            let from_env = !env.is_empty() && std::env::var(env).is_ok_and(|v| !v.is_empty());
-            from_env || store.access_token(p).is_some()
-        })
+    providers_check(&config, &store)
+}
+
+/// The `providers` row: every known or custom provider with a
+/// credential, or with an endpoint that needs none.
+fn providers_check(config: &Config, store: &AuthStore) -> Check {
+    let available: Vec<String> = auth::provider_keys(config)
+        .into_iter()
+        .filter(|p| p.source(store).is_some())
+        .map(|p| p.id)
         .collect();
     if available.is_empty() {
         Check {
             name: "providers",
             status: Status::Fail,
             body: "no provider credentials available".into(),
-            hint: Some("run `kage auth login <provider>` or export an *_API_KEY env var".into()),
+            hint: Some(
+                "run `kage auth login <provider>`, export an *_API_KEY env var, \
+                 or add a [providers.custom.<id>] endpoint"
+                    .into(),
+            ),
         }
     } else {
         Check {
@@ -405,34 +412,22 @@ fn check_plugins(workdir: &Path) -> Check {
 }
 
 fn check_sandbox(workdir: &Path) -> Check {
-    use kage_core::config::SandboxBackend;
     let cfg = match Config::load_layered(workdir) {
         Ok(c) => c,
         Err(err) => {
             return Check {
                 name: "sandbox",
-                status: Status::Warn,
-                body: format!("config unreadable: {err}; checked against defaults"),
+                status: Status::Fail,
+                body: format!("config unreadable: {err}"),
                 hint: None,
             };
         }
     };
-    let backend = match cfg.sandbox.backend {
-        SandboxBackend::Local => "local",
-        SandboxBackend::Bubblewrap => "bubblewrap",
-        SandboxBackend::SandboxExec => "sandbox-exec",
-    };
-    let body = if matches!(cfg.sandbox.backend, SandboxBackend::Local) {
-        format!("backend={backend} (0.1 default: no isolation)")
+    let status = if cfg.sandbox.suppress_warning {
+        Status::Ok
     } else {
-        format!("backend={backend}")
+        Status::Warn
     };
-    let status =
-        if matches!(cfg.sandbox.backend, SandboxBackend::Local) && !cfg.sandbox.suppress_warning {
-            Status::Warn
-        } else {
-            Status::Ok
-        };
     let hint = (status == Status::Warn).then_some(
         "set `sandbox.suppress_warning = true` in config.toml to silence this once acknowledged"
             .to_owned(),
@@ -440,7 +435,7 @@ fn check_sandbox(workdir: &Path) -> Check {
     Check {
         name: "sandbox",
         status,
-        body,
+        body: "backend=local (no isolation: tools run as you)".to_owned(),
         hint,
     }
 }
@@ -538,6 +533,32 @@ mod tests {
         let check = run_check_sandbox(dir.path());
         assert_eq!(check.status, Status::Warn);
         assert!(check.body.contains("local"));
+    }
+
+    #[test]
+    fn providers_check_counts_a_keyless_custom_provider() {
+        let config: Config = toml::from_str(
+            "[providers.custom.fake]\nbase_url = \"http://127.0.0.1:1/v1\"\napi_key_env = \"\"\n\
+             [[providers.custom.fake.models]]\nid = \"small\"\nname = \"Small\"\n",
+        )
+        .unwrap();
+        let check = providers_check(&config, &AuthStore::empty());
+        assert_eq!(check.status, Status::Ok, "{}", check.body);
+        assert!(check.body.contains("fake"), "{}", check.body);
+    }
+
+    #[test]
+    fn sandbox_check_fails_on_an_unbuilt_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join(".kage")).unwrap();
+        fs::write(
+            dir.path().join(".kage").join("config.toml"),
+            "[sandbox]\nbackend = \"bubblewrap\"\n",
+        )
+        .unwrap();
+        let check = run_check_sandbox(dir.path());
+        assert_eq!(check.status, Status::Fail);
+        assert!(check.body.contains("sandbox.backend"), "{}", check.body);
     }
 
     #[test]

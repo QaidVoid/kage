@@ -47,7 +47,12 @@ pub(crate) use crate::plugins::setup_runtime;
 
 /// kage: a minimal, extensible coding agent.
 #[derive(Parser, Debug)]
-#[command(name = "kage", version, about, long_about = None)]
+#[command(
+    name = "kage",
+    version,
+    about = "A minimal, extensible coding agent in your terminal",
+    long_about = None
+)]
 struct Cli {
     /// Subcommand. With no subcommand, `-p/--print` runs print mode;
     /// with neither, the interactive TUI opens.
@@ -60,8 +65,9 @@ struct Cli {
     print: Option<String>,
 
     /// Provider-qualified model id (`provider:model`). Defaults to
-    /// `zai:glm-4.6` when `ZAI_API_KEY` is set, otherwise the first
-    /// provider with an API key in the environment.
+    /// `[provider] default_model` when its provider has credentials,
+    /// then the last model you used, then the first available
+    /// provider's preferred model.
     #[arg(short = 'm', long = "model")]
     model: Option<String>,
 
@@ -160,9 +166,11 @@ pub(crate) enum Command {
         #[arg(long = "out", default_value = "man/kage.1")]
         out: PathBuf,
     },
-    /// Print a shell completion script for `kage` to stdout. Pipe to
-    /// `source` (bash / zsh) or redirect into your shell's completion
-    /// directory (fish / elvish). For example:
+    /// Print a shell completion script for `kage` to stdout.
+    ///
+    /// Pipe it to `source` (bash, zsh) or redirect it into your
+    /// shell's completion directory (fish, elvish), as in these
+    /// examples:
     ///
     ///   `source <(kage completions bash)`
     ///
@@ -178,7 +186,7 @@ pub(crate) enum Command {
     /// progress is streamed back as ACP `session/update` notifications.
     Rpc {
         /// Provider-qualified model id (`provider:model`). Defaults
-        /// to the first authed provider's default model.
+        /// the same way as the top-level `-m`.
         #[arg(short = 'm', long = "model")]
         model: Option<String>,
         /// System-prompt role override forwarded to the agent loop.
@@ -243,7 +251,7 @@ pub(crate) enum AuthAction {
         /// Provider id.
         provider: String,
     },
-    /// Show which providers have saved credentials available.
+    /// Show which known and custom providers have credentials available.
     List,
 }
 
@@ -318,12 +326,13 @@ pub(crate) fn run_completions(shell: clap_complete::Shell) -> ExitCode {
 /// run `kage gen-manpage --out man/kage.1` without a prior `mkdir`.
 pub(crate) fn run_gen_manpage(out: &std::path::Path) -> ExitCode {
     use clap::CommandFactory as _;
-    let cmd = Cli::command();
-    let mut buffer: Vec<u8> = Vec::new();
-    if let Err(err) = clap_mangen::Man::new(cmd).render(&mut buffer) {
-        eprintln!("kage: render manpage: {err}");
-        return ExitCode::from(1);
-    }
+    let buffer = match render_manpage(&Cli::command()) {
+        Ok(buffer) => buffer,
+        Err(err) => {
+            eprintln!("kage: render manpage: {err}");
+            return ExitCode::from(1);
+        }
+    };
     if let Some(parent) = out.parent()
         && !parent.as_os_str().is_empty()
         && let Err(err) = std::fs::create_dir_all(parent)
@@ -337,6 +346,127 @@ pub(crate) fn run_gen_manpage(out: &std::path::Path) -> ExitCode {
     }
     eprintln!("kage: wrote {}", out.display());
     ExitCode::SUCCESS
+}
+
+/// Paths listed in the manpage's FILES section, with what each holds.
+const MANPAGE_FILES: &[(&str, &str)] = &[
+    (
+        "~/.config/kage/config.toml",
+        "User config, written by kage init.",
+    ),
+    (
+        "~/.config/kage/init.lua",
+        "Lua config the TUI runs after config.toml.",
+    ),
+    (
+        "<workdir>/.kage/config.toml",
+        "Project config, merged over the user config. Its mcp, permissions and plugins.capabilities tables apply only after kage trust.",
+    ),
+    (
+        "~/.config/kage/{plugins,themes,agents,skills,templates}/",
+        "Lua plugins, user themes, agent definitions, skills and prompt templates.",
+    ),
+    (
+        "~/.local/share/kage/sessions/",
+        "Recorded sessions, one JSONL file each.",
+    ),
+    (
+        "~/.local/share/kage/auth.json",
+        "Saved provider credentials (mode 0600).",
+    ),
+    (
+        "~/.local/state/kage/",
+        "Session state, input history and trusted projects (trust.json).",
+    ),
+];
+
+/// Render the manpage for `cmd`. The NAME, SYNOPSIS, OPTIONS and
+/// VERSION sections come from `clap_mangen`; DESCRIPTION, COMMANDS and
+/// FILES are written here so the page describes the TUI, lists the
+/// subcommands as `kage <command>` rather than as separate pages that
+/// are not installed, and names the files kage reads and writes.
+fn render_manpage(cmd: &clap::Command) -> io::Result<String> {
+    use clap_mangen::Man;
+    use clap_mangen::roff::{Roff, bold, italic, roman};
+
+    type Section = fn(&Man, &mut dyn Write) -> io::Result<()>;
+    let man = Man::new(cmd.clone());
+    let preamble = Roff::new().render();
+    let mut page = preamble.clone();
+    let mut push = |section: String| {
+        page.push_str(section.strip_prefix(&preamble).unwrap_or(&section));
+    };
+    let render = |section: Section| -> io::Result<String> {
+        let mut buffer = Vec::new();
+        section(&man, &mut buffer)?;
+        Ok(String::from_utf8_lossy(&buffer).into_owned())
+    };
+    push(render(Man::render_title)?);
+    push(render(Man::render_name_section)?);
+    push(render(Man::render_synopsis_section)?);
+
+    let mut roff = Roff::new();
+    roff.control("SH", ["DESCRIPTION"]);
+    roff.text([
+        roman("With no command and no "),
+        bold("-p"),
+        roman(", kage opens its interactive TUI in the current directory. Type a prompt and press enter to send it. On an empty prompt, "),
+        bold("?"),
+        roman(" shows the keys and "),
+        bold("/"),
+        roman(" opens the command palette. "),
+        bold("ctrl+q"),
+        roman(" quits."),
+    ]);
+    roff.control("PP", []);
+    roff.text([
+        roman("With "),
+        bold("-p"),
+        roman(
+            ", kage runs one prompt through the agent loop, streams the reply to stdout and exits.",
+        ),
+    ]);
+    push(roff.render());
+    push(render(Man::render_options_section)?);
+
+    let mut roff = Roff::new();
+    roff.control("SH", ["COMMANDS"]);
+    let listed = |c: &&clap::Command| !c.is_hide_set() && c.get_name() != "help";
+    for sub in cmd.get_subcommands().filter(listed) {
+        let nested = sub
+            .get_subcommands()
+            .filter(listed)
+            .map(|n| (format!("{} {}", sub.get_name(), n.get_name()), n));
+        for (name, page) in std::iter::once((sub.get_name().to_owned(), sub)).chain(nested) {
+            roff.control("TP", []);
+            roff.text([bold(format!("kage {name}"))]);
+            if let Some(about) = page.get_about() {
+                roff.text([roman(about.to_string())]);
+            }
+        }
+    }
+    roff.control("PP", []);
+    roff.text([
+        roman("Run "),
+        bold("kage "),
+        italic("command"),
+        bold(" --help"),
+        roman(" for the options of a command."),
+    ]);
+
+    roff.control("SH", ["FILES"]);
+    for (path, what) in MANPAGE_FILES {
+        roff.control("TP", []);
+        roff.text([italic(*path)]);
+        roff.text([roman(*what)]);
+    }
+    roff.control("PP", []);
+    roff.text([roman(
+        "XDG_CONFIG_HOME, XDG_DATA_HOME and XDG_STATE_HOME replace the ~/.config, ~/.local/share and ~/.local/state roots.",
+    )]);
+    push(roff.render());
+    push(render(Man::render_version_section)?);
+    Ok(page)
 }
 
 /// `-p/--print` belongs to print mode, which only runs without a
@@ -1174,5 +1304,17 @@ mod tests {
         std::fs::write(&path, "[ui]\ntheme = \"dark\"\n[provider]\n").unwrap();
         assert!(!config_sets_default_model(&path));
         assert!(!config_sets_default_model(&dir.path().join("missing.toml")));
+    }
+
+    #[test]
+    fn manpage_lists_commands_inline_and_has_files() {
+        use clap::CommandFactory as _;
+        let page = render_manpage(&Cli::command()).unwrap();
+        assert_eq!(page.matches(".ds Aq").count(), 2, "one preamble");
+        assert!(!page.contains("kage \\- kage"), "NAME repeats the name");
+        assert!(!page.contains("(1)"), "no references to missing pages");
+        assert!(!page.contains("For example:"));
+        assert!(page.contains("\\fBkage auth list\\fR"));
+        assert!(page.contains(".SH FILES"));
     }
 }

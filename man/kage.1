@@ -2,18 +2,20 @@
 .el .ds Aq '
 .TH kage 1  "kage 0.1.0" 
 .SH NAME
-kage \- kage: a minimal, extensible coding agent in your terminal.
+kage \- A minimal, extensible coding agent in your terminal
 .SH SYNOPSIS
 \fBkage\fR [\fB\-p\fR|\fB\-\-print\fR] [\fB\-m\fR|\fB\-\-model\fR] [\fB\-\-system\fR] [\fB\-\-no\-session\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] [\fIsubcommands\fR]
 .SH DESCRIPTION
-kage: a minimal, extensible coding agent in your terminal.
+With no command and no \fB\-p\fR, kage opens its interactive TUI in the current directory. Type a prompt and press enter to send it. On an empty prompt, \fB?\fR shows the keys and \fB/\fR opens the command palette. \fBctrl+q\fR quits.
+.PP
+With \fB\-p\fR, kage runs one prompt through the agent loop, streams the reply to stdout and exits.
 .SH OPTIONS
 .TP
 \fB\-p\fR, \fB\-\-print\fR \fI<PRINT>\fR
 Run a single prompt through the agent loop and stream the response to stdout
 .TP
 \fB\-m\fR, \fB\-\-model\fR \fI<MODEL>\fR
-Provider\-qualified model id (`provider:model`). Defaults to `zai:glm\-4.6` when `ZAI_API_KEY` is set, otherwise the first provider with an API key in the environment
+Provider\-qualified model id (`provider:model`). Defaults to `[provider] default_model` when its provider has credentials, then the last model you used, then the first available provider\*(Aqs preferred model
 .TP
 \fB\-\-system\fR \fI<SYSTEM>\fR [default: You are kage, a helpful coding agent.]
 System prompt to prepend
@@ -29,42 +31,83 @@ Print help
 .TP
 \fB\-V\fR, \fB\-\-version\fR
 Print version
-.SH SUBCOMMANDS
+.SH COMMANDS
 .TP
-kage\-list(1)
+\fBkage list\fR
 List recorded sessions in `$XDG_DATA_HOME/kage/sessions/`
 .TP
-kage\-resume(1)
+\fBkage resume\fR
 Resume a recorded session, appending new entries to the same file
 .TP
-kage\-fork(1)
+\fBkage fork\fR
 Fork a recorded session at a specific entry into a new session file
 .TP
-kage\-search(1)
+\fBkage search\fR
 Regex\-search recorded sessions
 .TP
-kage\-auth(1)
+\fBkage auth\fR
 Manage saved provider API credentials
 .TP
-kage\-init(1)
+\fBkage auth login\fR
+Save an API key for a provider, prompting for it without echo
+.TP
+\fBkage auth logout\fR
+Remove a saved API key
+.TP
+\fBkage auth list\fR
+Show which known and custom providers have credentials available
+.TP
+\fBkage init\fR
 First\-run setup wizard. Creates `~/.config/kage/config.toml`, scaffolds the data directories, and offers to save a provider API key. Idempotent: rerunning without `\-\-force` keeps any existing config in place
 .TP
-kage\-doctor(1)
+\fBkage doctor\fR
 Diagnose the kage install: parses config, lists available providers, validates plugins, reports the active sandbox. Exit code is `0` when no check fails, `1` otherwise
 .TP
-kage\-completions(1)
-Print a shell completion script for `kage` to stdout. Pipe to `source` (bash / zsh) or redirect into your shell\*(Aqs completion directory (fish / elvish). For example:
+\fBkage completions\fR
+Print a shell completion script for `kage` to stdout
 .TP
-kage\-rpc(1)
+\fBkage rpc\fR
 Agent Client Protocol server: speak JSON\-RPC over stdio so an editor (Zed, Neovim, ...) can drive kage. Messages are newline\-delimited JSON. Each request is answered, and loop progress is streamed back as ACP `session/update` notifications
 .TP
-kage\-trust(1)
+\fBkage trust\fR
 Trust the current directory\*(Aqs `.kage/config.toml`. Until a project is trusted, its `mcp`, `permissions` and `plugins.capabilities` settings are ignored. Trust covers the values as they are now, so editing any of them asks again
 .TP
-kage\-mcp(1)
+\fBkage mcp\fR
 Model Context Protocol: expose kage\*(Aqs built\-in tools to another agent over stdio (newline\-delimited JSON\-RPC) with `kage mcp serve`, or log in to remote MCP servers that need OAuth
 .TP
-kage\-help(1)
-Print this message or the help of the given subcommand(s)
+\fBkage mcp serve\fR
+Serve kage\*(Aqs built\-in tools as an MCP server over stdio. Calls are checked against `[permissions]`, and a tool whose verdict is `ask` is refused because there is no one to ask
+.TP
+\fBkage mcp login\fR
+Log in to a remote MCP server with OAuth. Prints the authorization URL, opens it in a browser when one is available, and waits for the browser to return, or for the redirected URL to be pasted on a machine without one. The token is stored in `$XDG_DATA_HOME/kage/mcp\-auth.json` (mode 0600)
+.TP
+\fBkage mcp logout\fR
+Forget the stored OAuth token of a remote MCP server
+.PP
+Run \fBkage \fR\fIcommand\fR\fB \-\-help\fR for the options of a command.
+.SH FILES
+.TP
+\fI~/.config/kage/config.toml\fR
+User config, written by kage init.
+.TP
+\fI~/.config/kage/init.lua\fR
+Lua config the TUI runs after config.toml.
+.TP
+\fI<workdir>/.kage/config.toml\fR
+Project config, merged over the user config. Its mcp, permissions and plugins.capabilities tables apply only after kage trust.
+.TP
+\fI~/.config/kage/{plugins,themes,agents,skills,templates}/\fR
+Lua plugins, user themes, agent definitions, skills and prompt templates.
+.TP
+\fI~/.local/share/kage/sessions/\fR
+Recorded sessions, one JSONL file each.
+.TP
+\fI~/.local/share/kage/auth.json\fR
+Saved provider credentials (mode 0600).
+.TP
+\fI~/.local/state/kage/\fR
+Session state, input history and trusted projects (trust.json).
+.PP
+XDG_CONFIG_HOME, XDG_DATA_HOME and XDG_STATE_HOME replace the ~/.config, ~/.local/share and ~/.local/state roots.
 .SH VERSION
 v0.1.0

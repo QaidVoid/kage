@@ -21,7 +21,7 @@ default_model = "anthropic:claude-sonnet-4-6"
 [ui]
 # bundled theme name, or a user theme under ~/.config/kage/themes/<name>.toml.
 theme = "default"
-# capture terminal mouse events. Toggle at runtime with :mouse.
+# capture terminal mouse events. Toggle at runtime with /mouse.
 mouse = true
 # prompt editing style: "modeless" or "vim".
 editor = "modeless"
@@ -47,9 +47,11 @@ transcript_on_exit = "full"
 enabled = []
 
 [sandbox]
-# "local" (default in 0.1), "bubblewrap", or "sandbox-exec".
+# "local" is the only backend: tools run as you, without isolation.
+# any other value, such as "bubblewrap" or "sandbox-exec", is a
+# config error that names this key; remove the key to fix it.
 backend = "local"
-# silence the "running unsandboxed" startup warning.
+# silence the "no isolation" warning that kage doctor gives.
 suppress_warning = false
 
 [keybindings]
@@ -63,8 +65,8 @@ timeoutlen = 1000
 
 [loop]
 # compact older history once the prompt fills this fraction of the
-# model context window (0.0-1.0). Applies on next launch; also
-# editable in the :settings dialog.
+# model context window (0.0-1.0). Applies to the next session; also
+# editable in the /settings dialog.
 compaction_threshold = 0.8
 
 [agents]
@@ -98,7 +100,12 @@ allow_sampling = false
 ```
 
 Every table and key is optional. Omitted values fall back to the
-defaults shown above. See [permissions](/guide/permissions) for the
+defaults shown above.
+
+When kage writes this file itself (saving `/settings`, or answering
+"always allow" to a permission prompt), it changes only the keys
+involved. Your comments, key order and every other line stay as you
+wrote them. See [permissions](/guide/permissions) for the
 rules reference, [agents](/guide/agents#limits) for the `[agents]`
 limits, and [mcp](/guide/mcp) for MCP servers and OAuth logins.
 

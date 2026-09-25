@@ -12,6 +12,7 @@ use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
 use serde::{Deserialize, Serialize};
 
+use crate::options::OptionValue;
 use crate::permissions::PermissionsConfig;
 
 use crate::error::Result;
@@ -129,16 +130,24 @@ impl Config {
         Ok(figment.extract()?)
     }
 
-    /// Write this config back to `path`, preserving the existing
-    /// file's comments, formatting, key order, and any keys this
-    /// version does not model. Modeled values are merged in over the
-    /// existing document via `toml_edit`; a missing file is created
-    /// from scratch and the parent directory is made as needed.
+    /// Set each `(key path, value)` pair in the TOML file at `path`,
+    /// in place. A key path is the list of table names ending in the
+    /// key, such as `["ui", "theme"]`.
+    ///
+    /// Only the named keys change: comments, formatting, key order and
+    /// every other key and table stay as written. Missing tables are
+    /// created, and a missing file (and its parent directory) is
+    /// created holding just these keys.
     ///
     /// The write is atomic: the TOML is rendered to a sibling temp
     /// file and renamed over `path`, so an interrupted save never
     /// truncates an existing config.
-    pub fn save(&self, path: &Path) -> Result<()> {
+    ///
+    /// # Errors
+    ///
+    /// The file cannot be read, parsed or written, or a table on a key
+    /// path is already set to a value that is not a table.
+    pub fn save_keys(path: &Path, edits: &[(Vec<&str>, OptionValue)]) -> Result<()> {
         use toml_edit::DocumentMut;
 
         let mut doc = match std::fs::read_to_string(path) {
@@ -148,15 +157,9 @@ impl Config {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => DocumentMut::new(),
             Err(e) => return Err(e.into()),
         };
-        // Serialize via the `toml` crate so nested structs render as
-        // block tables (`[ui]`), not inline (`ui = { .. }`); merging
-        // block-into-block is what keeps the user's section comments.
-        let fresh = toml::to_string(self)
-            .map_err(|e| crate::error::Error::ConfigWrite(e.to_string()))?
-            .parse::<DocumentMut>()
-            .map_err(|e| crate::error::Error::ConfigWrite(e.to_string()))?;
-        merge_table(doc.as_table_mut(), fresh.as_table());
-
+        for (keys, value) in edits {
+            set_key(doc.as_table_mut(), keys, value)?;
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -165,22 +168,53 @@ impl Config {
     }
 }
 
-/// Recursively copy every value from `src` into `dst`: overwrite
-/// leaves and arrays, recurse into sub-tables. Keys present only in
-/// `dst` (comments, blank lines, and any keys this version does not
-/// model) are left untouched, so a hand-edited config keeps its
-/// annotations across a settings-dialog save.
-fn merge_table(dst: &mut toml_edit::Table, src: &toml_edit::Table) {
-    for (key, src_item) in src {
-        match (dst.get_mut(key), src_item) {
-            (Some(toml_edit::Item::Table(dst_sub)), toml_edit::Item::Table(src_sub)) => {
-                merge_table(dst_sub, src_sub);
+/// Set `keys` to `value` under `root`, creating missing tables. An
+/// existing value keeps its surrounding whitespace and trailing
+/// comment.
+fn set_key(root: &mut toml_edit::Table, keys: &[&str], value: &OptionValue) -> Result<()> {
+    use toml_edit::{InlineTable, Item, Table, TableLike, Value};
+
+    let Some((last, parents)) = keys.split_last() else {
+        return Ok(());
+    };
+    let mut table: &mut dyn TableLike = root;
+    let mut inline = false;
+    for (depth, key) in parents.iter().enumerate() {
+        let dotted = table.is_dotted();
+        let item = table.entry(key).or_insert_with(|| {
+            if inline {
+                Item::Value(Value::InlineTable(InlineTable::new()))
+            } else {
+                let mut new = Table::new();
+                new.set_implicit(true);
+                new.set_dotted(dotted);
+                Item::Table(new)
             }
-            _ => {
-                dst.insert(key, src_item.clone());
-            }
+        });
+        inline = item.is_inline_table();
+        table = item.as_table_like_mut().ok_or_else(|| {
+            crate::error::Error::ConfigWrite(format!(
+                "`{}` is not a table",
+                parents[..=depth].join(".")
+            ))
+        })?;
+    }
+    let mut new = match value {
+        OptionValue::Bool(b) => Value::from(*b),
+        OptionValue::Int(n) => Value::from(*n),
+        OptionValue::Float(x) => Value::from(*x),
+        OptionValue::Str(s) => Value::from(s.as_str()),
+    };
+    match table.get_mut(last) {
+        Some(Item::Value(old)) => {
+            *new.decor_mut() = old.decor().clone();
+            *old = new;
+        }
+        _ => {
+            table.insert(last, Item::Value(new));
         }
     }
+    Ok(())
 }
 
 /// Agent-loop tuning persisted under `[loop]`. Mirrors the subset of
@@ -266,7 +300,7 @@ pub struct ProvidersConfig {
 }
 
 impl ProvidersConfig {
-    /// True when nothing is configured, so `save` skips the section.
+    /// True when nothing is configured, so serializing skips the section.
     #[must_use]
     pub fn is_default(&self) -> bool {
         self.custom.is_empty() && self.overrides.is_empty()
@@ -363,6 +397,18 @@ pub struct CustomProviderConfig {
     /// Whether the endpoint supports prompt caching. Defaults to false.
     #[serde(default)]
     pub caching: bool,
+}
+
+impl CustomProviderConfig {
+    /// The environment variable holding this provider's API key:
+    /// `api_key_env` when set, else `<ID>_API_KEY` uppercased. Empty
+    /// means the endpoint needs no key.
+    #[must_use]
+    pub fn key_env(&self, id: &str) -> String {
+        self.api_key_env
+            .clone()
+            .unwrap_or_else(|| format!("{}_API_KEY", id.to_uppercase()))
+    }
 }
 
 fn default_true() -> bool {
@@ -494,17 +540,33 @@ pub struct PluginsConfig {
     pub config: BTreeMap<String, serde_json::Value>,
 }
 
-/// Sandbox backend selection.
+/// Sandbox backend selection. Only `local` exists today; the
+/// `bubblewrap` and `sandbox-exec` names are refused at load because
+/// nothing implements them, so accepting them would promise isolation
+/// that does not happen.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", try_from = "String")]
 pub enum SandboxBackend {
-    /// No isolation (default in 0.1).
+    /// No isolation: tools run as the current user.
     #[default]
     Local,
-    /// Linux bubblewrap (post-0.1).
-    Bubblewrap,
-    /// macOS sandbox-exec (post-0.1).
-    SandboxExec,
+}
+
+impl TryFrom<String> for SandboxBackend {
+    type Error = String;
+
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        match value.as_str() {
+            "local" => Ok(Self::Local),
+            "bubblewrap" | "sandbox-exec" => Err(format!(
+                "sandbox.backend = \"{value}\" is not implemented and would give no isolation; \
+                 remove the sandbox.backend key (only \"local\" is supported)"
+            )),
+            _ => Err(format!(
+                "unknown sandbox.backend \"{value}\"; remove the key (only \"local\" is supported)"
+            )),
+        }
+    }
 }
 
 /// Sandbox configuration.
@@ -513,7 +575,8 @@ pub enum SandboxBackend {
 pub struct SandboxConfig {
     /// Which sandbox implementation to use.
     pub backend: SandboxBackend,
-    /// Suppress the "running unsandboxed" startup warning.
+    /// Silence the "no isolation" warning `kage doctor` gives for the
+    /// `local` backend.
     pub suppress_warning: bool,
     /// Hosts allowed for outbound network access from sandboxed tools.
     /// Reserved for a future sandbox backend (post-0.1) and not yet
@@ -931,85 +994,188 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_backend_serializes_kebab_case() {
-        let json = serde_json::to_string(&SandboxBackend::SandboxExec).unwrap();
-        assert_eq!(json, "\"sandbox-exec\"");
-    }
-
-    #[test]
-    fn save_then_load_roundtrips() {
+    fn sandbox_backend_accepts_local() {
         let _globals = process_globals();
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nested").join("config.toml");
-        let mut cfg = Config::default();
-        cfg.ui.theme = "tokyo-night".to_owned();
-        cfg.ui.mouse = false;
-        cfg.provider.default_model = "anthropic:claude-opus-4-7".to_owned();
-        cfg.save(&path).unwrap();
-        // Parent directory was created and the file is valid TOML that
-        // parses back to an equal config.
-        assert!(path.exists());
-        let loaded = Config::load(&path).unwrap();
-        assert_eq!(loaded, cfg);
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("config.toml", "[sandbox]\nbackend = \"local\"\n")?;
+            let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
+            assert_eq!(cfg.sandbox.backend, SandboxBackend::Local);
+            Ok(())
+        });
     }
 
     #[test]
-    fn save_is_atomic_and_leaves_no_temp_file() {
+    fn sandbox_backend_refuses_unbuilt_backends() {
+        let _globals = process_globals();
+        for backend in ["bubblewrap", "sandbox-exec"] {
+            figment::Jail::expect_with(|jail| {
+                jail.create_file(
+                    "config.toml",
+                    &format!("[sandbox]\nbackend = \"{backend}\"\n"),
+                )?;
+                let err = Config::load(jail.directory().join("config.toml").as_path())
+                    .expect_err("unbuilt backend must be refused")
+                    .to_string();
+                assert!(err.contains("sandbox.backend"), "{err}");
+                assert!(err.contains("remove"), "{err}");
+                assert!(err.contains(backend), "{err}");
+                Ok(())
+            });
+        }
+    }
+
+    const HAND_WRITTEN: &str = r#"# my kage config
+
+[provider]
+default_model = "fake:small"  # keyless local model
+
+[ui]
+# picked by hand
+theme = "default"
+
+[providers.custom.fake]
+base_url = "http://127.0.0.1:8080/v1"
+api_key_env = ""
+
+[[providers.custom.fake.models]]
+id = "small"
+name = "Small"
+
+[[providers.custom.fake.models]]
+id = "large"
+name = "Large"
+context = 32768
+
+[mcp.servers.files]
+command = "mcp-files"
+args = ["--root", "."]
+
+[permissions.tools.write]
+default = "ask"   # keep asking
+"#;
+
+    fn str_value(s: &str) -> OptionValue {
+        OptionValue::Str(s.to_owned())
+    }
+
+    #[test]
+    fn save_keys_changes_only_the_named_keys() {
+        let _globals = process_globals();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save(&path).unwrap();
-        let tmp = path.with_extension("toml.tmp");
-        assert!(!tmp.exists(), "temp file should be renamed away");
-        assert!(path.exists());
+        std::fs::write(&path, HAND_WRITTEN).unwrap();
+        Config::save_keys(
+            &path,
+            &[
+                (vec!["ui", "theme"], str_value("tokyo-night")),
+                (
+                    vec!["permissions", "tools", "write", "default"],
+                    str_value("allow"),
+                ),
+            ],
+        )
+        .unwrap();
+        let expected = HAND_WRITTEN
+            .replace("theme = \"default\"", "theme = \"tokyo-night\"")
+            .replace("default = \"ask\"", "default = \"allow\"");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
     }
 
     #[test]
-    fn save_preserves_comments_and_unknown_keys() {
+    fn save_keys_appends_missing_tables_after_the_hand_written_ones() {
         let _globals = process_globals();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, HAND_WRITTEN).unwrap();
+        Config::save_keys(
+            &path,
+            &[
+                (
+                    vec!["permissions", "tools", "bash", "default"],
+                    str_value("allow"),
+                ),
+                (
+                    vec!["loop", "compaction_threshold"],
+                    OptionValue::Float(0.6),
+                ),
+            ],
+        )
+        .unwrap();
+        let expected = format!(
+            "{HAND_WRITTEN}\n[permissions.tools.bash]\ndefault = \"allow\"\n\n[loop]\ncompaction_threshold = 0.6\n"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.providers.custom["fake"].models.len(), 2);
+        assert!((cfg.loop_settings.compaction_threshold - 0.6).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn save_keys_creates_a_missing_file_with_only_those_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("config.toml");
+        Config::save_keys(
+            &path,
+            &[
+                (vec!["ui", "mouse"], OptionValue::Bool(false)),
+                (vec!["agents", "max_running"], OptionValue::Int(2)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[ui]\nmouse = false\n\n[agents]\nmax_running = 2\n"
+        );
+        assert!(!path.with_extension("toml.tmp").exists());
+    }
+
+    #[test]
+    fn save_keys_edits_inline_and_dotted_tables_in_place() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            "# kage config header\n\
-             \n\
-             [ui]\n\
-             # theme chosen by hand\n\
-             theme = \"old\"\n\
-             \n\
-             [custom.plugin]\n\
-             # a section this version does not model\n\
-             retries = 5\n",
+            "ui.theme = \"default\"\n\n[permissions]\ntools = { bash = { default = \"ask\" } }\n",
         )
         .unwrap();
-        let mut cfg = Config::load(&path).unwrap();
-        assert_eq!(cfg.ui.theme, "old");
-        cfg.ui.theme = "tokyo-night".to_owned();
-        cfg.save(&path).unwrap();
-
+        Config::save_keys(
+            &path,
+            &[
+                (vec!["ui", "theme"], str_value("ayu")),
+                (
+                    vec!["permissions", "tools", "bash", "default"],
+                    str_value("allow"),
+                ),
+                (
+                    vec!["permissions", "tools", "edit", "default"],
+                    str_value("allow"),
+                ),
+            ],
+        )
+        .unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
-        assert!(body.contains("# kage config header"), "header comment kept");
-        assert!(body.contains("[custom.plugin]"), "unknown section kept");
-        assert!(body.contains("retries = 5"), "unknown key kept");
         assert!(
-            body.contains("# a section this version does not model"),
-            "comment on unknown section kept"
+            body.starts_with(
+                "ui.theme = \"ayu\"\n\n[permissions]\ntools = { bash = { default = \"allow\" }"
+            ),
+            "{body}"
         );
-        assert!(body.contains("tokyo-night"), "modeled value updated");
-        let reloaded = Config::load(&path).unwrap();
-        assert_eq!(reloaded.ui.theme, "tokyo-night");
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(
+            cfg.permissions.check("edit", ""),
+            crate::permissions::PermissionAction::Allow
+        );
     }
 
     #[test]
-    fn save_overwrites_existing_file() {
-        let _globals = process_globals();
+    fn save_keys_refuses_to_replace_a_value_with_a_table() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save(&path).unwrap();
-        let mut cfg = Config::default();
-        cfg.ui.theme = "ayu".to_owned();
-        cfg.save(&path).unwrap();
-        let loaded = Config::load(&path).unwrap();
-        assert_eq!(loaded.ui.theme, "ayu");
+        std::fs::write(&path, "ui = 3\n").unwrap();
+        let err = Config::save_keys(&path, &[(vec!["ui", "theme"], str_value("ayu"))])
+            .expect_err("ui is not a table");
+        assert!(err.to_string().contains("`ui` is not a table"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "ui = 3\n");
     }
 
     fn sample_custom_provider() -> CustomProviderConfig {
@@ -1366,7 +1532,7 @@ mod tests {
     }
 
     #[test]
-    fn providers_save_then_load_roundtrips() {
+    fn providers_serialize_then_load_roundtrips() {
         let _globals = process_globals();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -1382,14 +1548,14 @@ mod tests {
                 headers: BTreeMap::from([("X-Team".to_owned(), "infra".to_owned())]),
             },
         );
-        cfg.save(&path).unwrap();
-        let body = std::fs::read_to_string(&path).unwrap();
+        let body = toml::to_string(&cfg).unwrap();
         assert!(body.contains("[providers.custom.together]"), "{body}");
         assert!(
             body.contains("[[providers.custom.together.models]]"),
             "{body}"
         );
         assert!(body.contains("[providers.deepseek]"), "{body}");
+        std::fs::write(&path, body).unwrap();
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded, cfg);
     }

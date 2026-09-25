@@ -726,31 +726,13 @@ fn option_from_json(value: &serde_json::Value) -> Option<OptionValue> {
 }
 
 /// Write `edits` into the user config at `path`, each at its option's
-/// TOML path.
+/// TOML path, leaving the rest of the file as written.
 fn save_options(path: &std::path::Path, edits: &[(&OptionDef, OptionValue)]) -> Result<(), String> {
-    use kage_core::config::Config;
-    let cfg = Config::load(path).map_err(|e| format!("config load failed: {e}"))?;
-    let mut doc = toml::Value::try_from(&cfg).map_err(|e| e.to_string())?;
-    for (def, value) in edits {
-        let Some((table, key)) = def.toml.rsplit_once('.') else {
-            continue;
-        };
-        let Some(toml::Value::Table(table)) = table
-            .split('.')
-            .try_fold(&mut doc, |node, part| node.get_mut(part))
-        else {
-            continue;
-        };
-        let value = match value {
-            OptionValue::Bool(b) => toml::Value::Boolean(*b),
-            OptionValue::Int(n) => toml::Value::Integer(*n),
-            OptionValue::Float(x) => toml::Value::Float(*x),
-            OptionValue::Str(s) => toml::Value::String(s.clone()),
-        };
-        table.insert(key.to_owned(), value);
-    }
-    let cfg: Config = doc.try_into().map_err(|e| e.to_string())?;
-    cfg.save(path).map_err(|e| format!("save failed: {e}"))
+    let edits: Vec<(Vec<&str>, OptionValue)> = edits
+        .iter()
+        .map(|(def, value)| (def.toml.split('.').collect(), value.clone()))
+        .collect();
+    kage_core::config::Config::save_keys(path, &edits).map_err(|e| format!("save failed: {e}"))
 }
 
 /// What a live MCP server offers, as the `/mcp` picker lists it: its
@@ -837,10 +819,9 @@ mod tests {
         let cfg = kage_core::config::Config::load(&path).unwrap();
         assert_eq!(cfg.ui.thinking_level.as_deref(), Some("xhigh"));
         assert!((cfg.loop_settings.compaction_threshold - 0.5).abs() < f32::EPSILON);
-        assert!(
-            std::fs::read_to_string(&path)
-                .unwrap()
-                .starts_with("# mine")
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "# mine\n[ui]\nmouse = true\nthinking_level = \"xhigh\"\n\n[loop]\ncompaction_threshold = 0.5\n"
         );
         assert_eq!(
             lock(&app.options).get("compaction_threshold"),

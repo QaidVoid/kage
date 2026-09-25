@@ -142,14 +142,8 @@ fn all_loop_errors_roundtrip() {
 }
 
 #[test]
-fn all_sandbox_backends_roundtrip() {
-    for b in [
-        SandboxBackend::Local,
-        SandboxBackend::Bubblewrap,
-        SandboxBackend::SandboxExec,
-    ] {
-        roundtrip(&b);
-    }
+fn sandbox_backend_roundtrips() {
+    roundtrip(&SandboxBackend::Local);
 }
 
 #[test]

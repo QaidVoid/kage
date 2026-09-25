@@ -4,6 +4,8 @@
 use super::*;
 use kage_core::options::OptionDef;
 
+use crate::view::{UnicodeWidthStr as _, pad_to_width};
+
 impl App {
     pub(crate) fn run_theme_command(&mut self, rest: &str) {
         let mut parts = rest.splitn(2, char::is_whitespace);
@@ -190,8 +192,8 @@ impl App {
             palette.paste(text);
             return;
         }
+        let registry = self.command_registry();
         if let Some(cl) = self.cmdline.as_mut() {
-            let registry = cmdline_registry(&self.plugin_command_specs);
             let resolver = AppResolver {
                 models: &self.model_choices,
                 plugin_commands: &self.plugin_commands,
@@ -316,6 +318,44 @@ impl App {
         self.picker_kind = Some(PickerKind::Jump);
     }
 
+    /// Open the `/mcp` picker: one row per configured server of the
+    /// main session with its status, and what it offers, why it failed
+    /// or that it needs a login.
+    pub(crate) fn open_mcp_picker(&mut self) {
+        use kage_core::protocol::McpServerStatus;
+        if self.mcp_servers.is_empty() {
+            self.notify("no MCP servers configured");
+            return;
+        }
+        let width = self
+            .mcp_servers
+            .iter()
+            .map(|s| s.name.width())
+            .max()
+            .unwrap_or(0);
+        let items = self
+            .mcp_servers
+            .iter()
+            .map(|server| {
+                let (status, detail) = match &server.status {
+                    McpServerStatus::Connected => ("connected", mcp_offer(server)),
+                    McpServerStatus::NeedsAuth => ("needs login", "enter to log in".to_owned()),
+                    McpServerStatus::Failed { error } => {
+                        ("failed", error.lines().next().unwrap_or("").to_owned())
+                    }
+                };
+                let name = pad_to_width(&server.name, width);
+                crate::picker::PickItem::simple(server.name.clone())
+                    .with_label(format!("{name}  {status:<11}  {detail}"))
+            })
+            .collect();
+        self.picker = Some(
+            OverlayPicker::new_ordered("MCP servers", items)
+                .with_note("enter restarts the server, or logs in when it needs a login"),
+        );
+        self.picker_kind = Some(PickerKind::Mcp);
+    }
+
     pub(crate) fn dispatch_picker_key(
         &mut self,
         key: ratatui::crossterm::event::KeyEvent,
@@ -355,6 +395,17 @@ impl App {
                         let _ = self.send_request(RunRequest::ResumeSession(
                             std::path::PathBuf::from(value),
                         ));
+                    }
+                    Some(PickerKind::Mcp) => {
+                        let needs_login = self.mcp_servers.iter().any(|s| {
+                            s.name == value
+                                && s.status == kage_core::protocol::McpServerStatus::NeedsAuth
+                        });
+                        if needs_login {
+                            self.mcp_login(&value);
+                        } else {
+                            let _ = self.send_request(RunRequest::RestartMcp(value));
+                        }
                     }
                     Some(PickerKind::Jump) => {
                         // Focus drives the renderer's scroll-into-view
@@ -700,6 +751,27 @@ fn save_options(path: &std::path::Path, edits: &[(&OptionDef, OptionValue)]) -> 
     }
     let cfg: Config = doc.try_into().map_err(|e| e.to_string())?;
     cfg.save(path).map_err(|e| format!("save failed: {e}"))
+}
+
+/// What a live MCP server offers, as the `/mcp` picker lists it: its
+/// tools, then its prompts and resources when it has any.
+fn mcp_offer(server: &kage_core::protocol::McpServerInfo) -> String {
+    let count = |n: usize, what: &str| {
+        let s = if n == 1 { "" } else { "s" };
+        format!("{n} {what}{s}")
+    };
+    let mut parts = vec![count(
+        usize::try_from(server.tools).unwrap_or(usize::MAX),
+        "tool",
+    )];
+    if !server.prompts.is_empty() {
+        parts.push(count(server.prompts.len(), "prompt"));
+    }
+    let resources = server.resources.len() + server.templates.len();
+    if resources > 0 {
+        parts.push(count(resources, "resource"));
+    }
+    parts.join(" \u{b7} ")
 }
 
 #[cfg(test)]

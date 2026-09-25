@@ -5,9 +5,11 @@
 //! from a stored conversation. The renderer reads the same buffer each
 //! frame, so painting is decoupled from event arrival.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use kage_core::resource_block::{self, ResourceRef};
 use kage_core::{Content, LoopError, LoopEvent, Message, MessageId, Role, StopReason};
 
 use crate::buffer::Buffer;
@@ -129,16 +131,8 @@ pub fn apply_loop_event(buf: &mut Buffer, event: &LoopEvent) {
 /// Paint a user prompt: its text as a user bubble, then one placeholder
 /// per attached image.
 fn push_user_message(buf: &mut Buffer, message: &Message) {
-    let text: Vec<&str> = message
-        .content
-        .iter()
-        .filter_map(|c| match c {
-            Content::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect();
-    if !text.is_empty() {
-        buf.push_user(text.join("\n"));
+    if let Some(text) = user_text(message) {
+        buf.push_user(text);
     }
     for block in &message.content {
         if let Content::Image { mime, .. } = block {
@@ -199,7 +193,7 @@ pub fn populate_from_history(
     for msg in messages {
         match msg.role {
             Role::User => {
-                if let Some(text) = first_text(msg) {
+                if let Some(text) = user_text(msg) {
                     if is_compaction_summary(&text) {
                         buf.push_custom("kage:compaction", text, true);
                     } else {
@@ -266,11 +260,30 @@ fn is_compaction_summary(text: &str) -> bool {
         || text.contains("<summary>") && text.contains("</summary>")
 }
 
-fn first_text(msg: &Message) -> Option<String> {
-    msg.content.iter().find_map(|c| match c {
-        Content::Text { text } => Some(text.clone()),
-        _ => None,
-    })
+/// The text of a user message as its bubble shows it: every text
+/// block, with each attached resource shortened to one `attached` line.
+/// The contents stay in the message the model receives.
+fn user_text(message: &Message) -> Option<String> {
+    let text: Vec<Cow<'_, str>> = message
+        .content
+        .iter()
+        .filter_map(|c| match c {
+            Content::Text { text } => Some(match resource_block::parse(text) {
+                Some(resource) => Cow::Owned(attached_line(&resource)),
+                None => Cow::Borrowed(text.as_str()),
+            }),
+            _ => None,
+        })
+        .collect();
+    (!text.is_empty()).then(|| text.join("\n"))
+}
+
+fn attached_line(resource: &ResourceRef) -> String {
+    let size = crate::image::human_bytes(resource.bytes);
+    match &resource.server {
+        Some(server) => format!("attached {server}:{} ({size})", resource.uri),
+        None => format!("attached {} ({size})", resource.uri),
+    }
 }
 
 /// One-line summary of a tool's input: the
@@ -999,6 +1012,36 @@ mod tests {
         let blocks = buf.blocks();
         assert_eq!(blocks.len(), 1);
         assert!(matches!(blocks[0], Block::User { .. }));
+    }
+
+    #[test]
+    fn resource_blocks_show_as_attached_lines_live_and_on_replay() {
+        let message = Message::new(
+            Role::User,
+            vec![
+                Content::Text {
+                    text: "compare @docs:file:///a and the context".into(),
+                },
+                Content::Text {
+                    text: resource_block::render("file:///a", Some("docs"), None, "secret body"),
+                },
+                Content::Text {
+                    text: resource_block::render("file:///b.rs", None, Some("text/x-rust"), ""),
+                },
+            ],
+            None,
+        );
+        let want = "compare @docs:file:///a and the context\n\
+                    attached docs:file:///a (11 B)\n\
+                    attached file:///b.rs (0 B)";
+        let (buf, mut hooks) = fresh();
+        hooks.on_event(&LoopEvent::MessageAppended {
+            message: message.clone(),
+        });
+        assert!(matches!(&lock(&buf).blocks()[0], Block::User { text } if text == want));
+        let mut replayed = Buffer::new();
+        populate_from_history(&mut replayed, &[message], &HashMap::new());
+        assert!(matches!(&replayed.blocks()[0], Block::User { text } if text == want));
     }
 
     #[test]

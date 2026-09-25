@@ -264,6 +264,9 @@ pub enum RunRequest {
     /// so does the keymap. Commands arrive through a fresh
     /// [`PluginRefresh`].
     ReloadPlugins,
+    /// Restart the named MCP server of the main session, from `/mcp
+    /// restart` or the `/mcp` picker.
+    RestartMcp(String),
 }
 
 /// Outcome of [`App::run`].
@@ -283,6 +286,8 @@ enum PickerKind {
     Session,
     /// F3 history jump: value is the target block index.
     Jump,
+    /// `/mcp`: value is the server name.
+    Mcp,
 }
 
 /// A blocking plugin dialog the worker handed to the App to run.
@@ -454,13 +459,16 @@ pub type AgentLoader =
 /// `option_set` fires. An `Err` carries the message to show.
 pub type OptionSetter = Box<dyn Fn(&str, OptionValue) -> Result<(), String> + Send + 'static>;
 
-/// Unified command registry the completion engine consumes: builtin
-/// commands first, then any plugin-registered commands (built once at
-/// `set_plugin_commands` time and stored as `&'static` refs).
-fn cmdline_registry(plugin_specs: &[&'static CommandSpec]) -> Vec<&'static CommandSpec> {
-    let mut out: Vec<&'static CommandSpec> = BUILTIN_COMMANDS.iter().collect();
-    out.extend(plugin_specs.iter().copied());
-    out
+impl App {
+    /// Unified command registry the completion engine consumes: builtin
+    /// commands first, then plugin commands, then MCP prompt commands
+    /// (built at registration time and stored as `&'static` refs).
+    fn command_registry(&self) -> Vec<&'static CommandSpec> {
+        let mut out: Vec<&'static CommandSpec> = BUILTIN_COMMANDS.iter().collect();
+        out.extend(self.plugin_command_specs.iter().copied());
+        out.extend(self.mcp_command_specs.iter().copied());
+        out
+    }
 }
 
 /// Translate an [`OwnedArgSpec`] entry (declared at runtime by a
@@ -653,12 +661,21 @@ pub struct App {
     /// the completion engine can mix them with the static builtin
     /// registry. Cleared and re-built on every `set_plugin_commands`.
     plugin_command_specs: Vec<&'static CommandSpec>,
-    /// Every `&'static CommandSpec` ever leaked for plugin commands,
-    /// paired with the owned [`PluginCommand`] it was built from.
-    /// `set_plugin_commands` reuses a pair's spec when the incoming
-    /// command is equal, so repeated hot reloads of an unchanged
-    /// plugin set do not grow the leak.
+    /// Every `&'static CommandSpec` ever leaked for plugin and MCP
+    /// prompt commands, paired with the owned [`PluginCommand`] it was
+    /// built from (its description already tagged). A registration
+    /// reuses a pair's spec when the incoming command is equal, so
+    /// repeated hot reloads and catalog snapshots of an unchanged set
+    /// do not grow the leak.
     plugin_commands_leaked: Vec<(PluginCommand, &'static CommandSpec)>,
+    /// The main session's MCP servers from its latest `McpServers`
+    /// snapshot. Drives `@server:` completion, prompt commands and the
+    /// `/mcp` picker.
+    mcp_servers: Vec<kage_core::protocol::McpServerInfo>,
+    /// One `server:prompt` spec per prompt of a live server whose name
+    /// no builtin or plugin command takes, rebuilt with
+    /// [`Self::mcp_servers`] and on every `set_plugin_commands`.
+    mcp_command_specs: Vec<&'static CommandSpec>,
     /// Keymap table shared with the plugin runtime, which fills it
     /// from `_defaults.lua`, plugins, `config.toml` and `init.lua`.
     /// Keys resolve against it after the modal layers and before the

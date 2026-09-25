@@ -10,6 +10,7 @@
 //! popup. The host computes the splice range when a candidate is
 //! accepted; this widget only owns selection and painting.
 
+use kage_core::protocol::McpServerInfo;
 use kage_plugin::AutocompleteItem;
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -64,6 +65,13 @@ impl InputCompletion {
     #[must_use]
     pub fn selected_index(&self) -> usize {
         self.selected
+    }
+
+    /// The candidates, in display order.
+    #[cfg(test)]
+    #[must_use]
+    pub fn items(&self) -> &[AutocompleteItem] {
+        &self.items
     }
 
     /// Number of candidates.
@@ -265,7 +273,7 @@ pub fn prefix_before_cursor(text: &str, cursor: usize) -> &str {
 /// up, so a huge tree cannot stall a keystroke.
 const FILE_WALK_CAP: usize = 20_000;
 
-/// Most `@file` candidates handed to the popup.
+/// Most `@file` or `@server:` candidates handed to the popup.
 const FILE_RESULT_CAP: usize = 50;
 
 /// Built-in `@file` completion: the bottom of the provider stack.
@@ -339,6 +347,78 @@ pub fn file_completions(
                 range: Some((token_start, cursor)),
             }
         })
+        .collect()
+}
+
+/// Built-in `@server:` completion for MCP resources.
+///
+/// A fragment `server:` or `server:part` lists that server's resources,
+/// fuzzy matched over URI and name, then its resource templates, which
+/// are inserted as written. A fragment without `:` lists the matching
+/// server names as `@name:` items, which the host appends after the
+/// file items. Only servers that list resources or templates are
+/// offered. Candidates replace the whole `@...` token.
+#[must_use]
+pub fn mcp_completions(
+    servers: &[McpServerInfo],
+    prefix: &str,
+    cursor: usize,
+) -> Vec<AutocompleteItem> {
+    let Some(frag) = prefix.strip_prefix('@') else {
+        return Vec::new();
+    };
+    let range = Some((cursor.saturating_sub(prefix.len()), cursor));
+    let mut offered = servers
+        .iter()
+        .filter(|s| !s.resources.is_empty() || !s.templates.is_empty());
+    let Some((name, part)) = frag.split_once(':') else {
+        let query = frag.to_lowercase();
+        return offered
+            .filter(|s| match_rank(&query, &s.name).is_some())
+            .map(|s| AutocompleteItem {
+                label: format!("{}:", s.name),
+                detail: Some("mcp server".to_owned()),
+                value: format!("@{}:", s.name),
+                range,
+            })
+            .collect();
+    };
+    let Some(server) = offered.find(|s| s.name == name) else {
+        return Vec::new();
+    };
+    let query = part.to_lowercase();
+    let rank = |uri: &str, title: &str| {
+        match_rank(&query, uri)
+            .into_iter()
+            .chain(match_rank(&query, title))
+            .min()
+    };
+    let item = |uri: &str, detail: String| AutocompleteItem {
+        label: format!("{name}:{uri}"),
+        detail: Some(detail),
+        value: format!("@{name}:{uri}"),
+        range,
+    };
+    let resources = server.resources.iter().filter_map(|r| {
+        let detail = match &r.mime_type {
+            Some(mime) => format!("{}  {mime}", r.name),
+            None => r.name.clone(),
+        };
+        Some((rank(&r.uri, &r.name)?, item(&r.uri, detail)))
+    });
+    let templates = server.templates.iter().filter_map(|t| {
+        let detail = format!("template: {}", t.name);
+        Some((
+            rank(&t.uri_template, &t.name)?,
+            item(&t.uri_template, detail),
+        ))
+    });
+    let mut scored: Vec<(u8, AutocompleteItem)> = resources.chain(templates).collect();
+    scored.sort_by_key(|(rank, _)| *rank);
+    scored
+        .into_iter()
+        .take(FILE_RESULT_CAP)
+        .map(|(_, item)| item)
         .collect()
 }
 
@@ -549,6 +629,88 @@ mod tests {
         let values: Vec<&str> = items.iter().map(|i| i.value.as_str()).collect();
         assert!(values.contains(&"@visible.txt"));
         assert!(!values.iter().any(|v| v.contains(".secret")));
+    }
+
+    fn servers() -> Vec<McpServerInfo> {
+        use kage_core::protocol::{McpResource, McpResourceTemplate, McpServerStatus};
+        let resource = |uri: &str, name: &str| McpResource {
+            uri: uri.to_owned(),
+            name: name.to_owned(),
+            description: None,
+            mime_type: Some("text/plain".to_owned()),
+        };
+        let server = |name: &str| McpServerInfo {
+            name: name.to_owned(),
+            status: McpServerStatus::Connected,
+            tools: 0,
+            resources: Vec::new(),
+            templates: Vec::new(),
+            prompts: Vec::new(),
+        };
+        vec![
+            McpServerInfo {
+                resources: vec![
+                    resource("test://static/resource/1", "Resource 1"),
+                    resource("test://static/notes", "Meeting notes"),
+                ],
+                templates: vec![McpResourceTemplate {
+                    uri_template: "test://static/resource/{id}".to_owned(),
+                    name: "Static resource".to_owned(),
+                    description: None,
+                }],
+                ..server("everything")
+            },
+            server("toolsonly"),
+        ]
+    }
+
+    #[test]
+    fn mcp_completions_offer_servers_with_resources_by_name() {
+        let items = mcp_completions(&servers(), "@every", 6);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].label, "everything:");
+        assert_eq!(items[0].value, "@everything:");
+        assert_eq!(items[0].detail.as_deref(), Some("mcp server"));
+        assert_eq!(items[0].range, Some((0, 6)));
+        assert!(mcp_completions(&servers(), "@tools", 6).is_empty());
+        assert!(mcp_completions(&servers(), "every", 5).is_empty());
+    }
+
+    #[test]
+    fn mcp_completions_list_resources_then_templates_of_a_server() {
+        let items = mcp_completions(&servers(), "@everything:", 16);
+        let values: Vec<&str> = items.iter().map(|i| i.value.as_str()).collect();
+        assert_eq!(
+            values,
+            [
+                "@everything:test://static/resource/1",
+                "@everything:test://static/notes",
+                "@everything:test://static/resource/{id}",
+            ]
+        );
+        assert_eq!(items[0].detail.as_deref(), Some("Resource 1  text/plain"));
+        assert_eq!(
+            items[2].detail.as_deref(),
+            Some("template: Static resource")
+        );
+        assert_eq!(items[0].range, Some((4, 16)));
+    }
+
+    #[test]
+    fn mcp_completions_match_the_uri_or_the_name() {
+        let by_name = mcp_completions(&servers(), "@everything:meet", 16);
+        assert_eq!(by_name.len(), 1);
+        assert_eq!(by_name[0].value, "@everything:test://static/notes");
+        let by_uri = mcp_completions(&servers(), "@everything:resource/", 21);
+        let values: Vec<&str> = by_uri.iter().map(|i| i.value.as_str()).collect();
+        assert_eq!(
+            values,
+            [
+                "@everything:test://static/resource/1",
+                "@everything:test://static/resource/{id}",
+            ]
+        );
+        assert!(mcp_completions(&servers(), "@nope:x", 7).is_empty());
     }
 
     #[test]

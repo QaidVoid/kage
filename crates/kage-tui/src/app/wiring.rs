@@ -34,6 +34,8 @@ impl App {
             plugin_command_overrides: Vec::new(),
             plugin_command_specs: Vec::new(),
             plugin_commands_leaked: Vec::new(),
+            mcp_servers: Vec::new(),
+            mcp_command_specs: Vec::new(),
             keymap: kage_plugin::SharedKeymap::default(),
             sequencer: Sequencer::new(Duration::from_secs(1)),
             plugin_widgets: Vec::new(),
@@ -213,6 +215,7 @@ impl App {
     /// in a previous call reuses that call's leaked spec, so repeated
     /// hot reloads of an unchanged plugin set do not grow the leak;
     /// it grows only when a reload actually changes the command set.
+    /// MCP prompt commands are rebuilt so plugin names win over them.
     pub fn set_plugin_commands(&mut self, mut commands: Vec<PluginCommand>) {
         // A regular plugin command (or any of its aliases) may not
         // shadow a builtin; an `override_command` is allowed to and
@@ -228,7 +231,10 @@ impl App {
         self.plugin_command_aliases.clear();
         self.plugin_command_overrides.clear();
         for cmd in &commands {
-            let spec = self.leaked_plugin_spec(cmd);
+            let spec = self.leaked_spec(PluginCommand {
+                description: format!("{}  [plugin]", cmd.description),
+                ..cmd.clone()
+            });
             self.plugin_command_specs.push(spec);
             for alias in &cmd.aliases {
                 self.plugin_command_aliases
@@ -242,24 +248,25 @@ impl App {
             .into_iter()
             .map(|c| (c.name, c.description))
             .collect();
+        self.set_mcp_prompts();
     }
 
     /// Return the previously-leaked spec for `cmd` when an equal
     /// command was registered in an earlier call, so a hot reload of
     /// unchanged plugins reuses the old `&'static` storage. Otherwise
-    /// leak a fresh spec and remember it.
-    fn leaked_plugin_spec(&mut self, cmd: &PluginCommand) -> &'static CommandSpec {
+    /// leak a fresh spec and remember it. The description is used as
+    /// given, tag included.
+    fn leaked_spec(&mut self, cmd: PluginCommand) -> &'static CommandSpec {
         let reused = self
             .plugin_commands_leaked
             .iter()
-            .find(|(known, _)| known == cmd)
+            .find(|(known, _)| *known == cmd)
             .map(|(_, spec)| *spec);
         if let Some(spec) = reused {
             return spec;
         }
         let name_static: &'static str = Box::leak(cmd.name.clone().into_boxed_str());
-        let desc_static: &'static str =
-            Box::leak(format!("{}  [plugin]", cmd.description).into_boxed_str());
+        let desc_static: &'static str = Box::leak(cmd.description.clone().into_boxed_str());
         let args_owned: Vec<ArgSpec> = cmd.args.iter().map(leak_argspec).collect();
         let args_static: &'static [ArgSpec] = Box::leak(args_owned.into_boxed_slice());
         let aliases_static: &'static [&'static str] = Box::leak(
@@ -277,8 +284,75 @@ impl App {
             args: args_static,
             subcommands: &[],
         }));
-        self.plugin_commands_leaked.push((cmd.clone(), spec));
+        self.plugin_commands_leaked.push((cmd, spec));
         spec
+    }
+
+    /// Take the main session's MCP catalog from an `McpServers`
+    /// snapshot and rebuild the prompt commands from it.
+    pub(crate) fn set_mcp_servers(&mut self, servers: Vec<kage_core::protocol::McpServerInfo>) {
+        self.mcp_servers = servers;
+        self.set_mcp_prompts();
+    }
+
+    /// Rebuild [`Self::mcp_command_specs`]: one `server:prompt` command
+    /// per prompt of a live server, whose optional argument hint lists
+    /// the prompt's arguments and whose description ends in `[mcp]`.
+    /// Names a builtin or plugin command takes are skipped, so the
+    /// palette shows only the command that runs.
+    fn set_mcp_prompts(&mut self) {
+        let mut commands = Vec::new();
+        for server in &self.mcp_servers {
+            if server.status != kage_core::protocol::McpServerStatus::Connected {
+                continue;
+            }
+            for prompt in &server.prompts {
+                let name = format!("{}:{}", server.name, prompt.name);
+                let taken = crate::command::find_builtin_command(&name).is_some()
+                    || self.plugin_commands.iter().any(|(n, _)| *n == name)
+                    || self.plugin_command_aliases.iter().any(|(a, _)| *a == name);
+                if taken {
+                    continue;
+                }
+                let hint = prompt
+                    .arguments
+                    .iter()
+                    .map(|a| {
+                        if a.required {
+                            format!("<{}>", a.name)
+                        } else {
+                            format!("[{}]", a.name)
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let args = if hint.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![OwnedArgSpec::Text {
+                        name: "arguments".to_owned(),
+                        optional: true,
+                        hint,
+                    }]
+                };
+                let description = match prompt.description.as_deref().and_then(|d| d.lines().next())
+                {
+                    Some(text) => format!("{text}  [mcp]"),
+                    None => "[mcp]".to_owned(),
+                };
+                commands.push(PluginCommand {
+                    name,
+                    aliases: Vec::new(),
+                    is_override: false,
+                    description,
+                    args,
+                });
+            }
+        }
+        self.mcp_command_specs = commands
+            .into_iter()
+            .map(|cmd| self.leaked_spec(cmd))
+            .collect();
     }
 
     /// Hand the App a shared handle on the active `provider:model`

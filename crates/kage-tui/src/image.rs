@@ -177,7 +177,8 @@ pub fn clipboard_image() -> Result<Vec<u8>, String> {
     Ok(png)
 }
 
-fn human_bytes(n: usize) -> String {
+/// `n` bytes for display: `512 B`, `12 KB`, `1.5 MB`.
+pub(crate) fn human_bytes(n: usize) -> String {
     if n >= 1024 * 1024 {
         #[allow(clippy::cast_precision_loss)]
         let mb = n as f64 / (1024.0 * 1024.0);

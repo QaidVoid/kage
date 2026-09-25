@@ -405,7 +405,7 @@ impl App {
     /// Run a mapping's command line through the same executor as the
     /// `:` cmdline, so `quit`, plugin commands, everything works.
     fn run_mapped_command(&mut self, command: &str) -> Option<AppExit> {
-        let registry = cmdline_registry(&self.plugin_command_specs);
+        let registry = self.command_registry();
         match self.run_command_validated(command, &registry) {
             CommandResult::Done(exit) => exit,
             CommandResult::ValidationError(msg) => {
@@ -420,8 +420,9 @@ impl App {
     /// popup) unless plugins registered providers and the user is
     /// actively typing in the input pane.
     pub(crate) fn refresh_input_completion(&mut self) {
-        let has_sources =
-            !self.autocomplete_providers.is_empty() || self.completion_workdir.is_some();
+        let has_sources = !self.autocomplete_providers.is_empty()
+            || self.completion_workdir.is_some()
+            || !self.mcp_servers.is_empty();
         if !has_sources
             || self.input.focused_pane() != Pane::Input
             || self.input.mode() != Mode::Insert
@@ -440,10 +441,14 @@ impl App {
                 break;
             }
         }
-        if items.is_empty()
-            && let Some(workdir) = self.completion_workdir.as_deref()
-        {
-            items = file_completions(workdir, prefix, cursor);
+        if items.is_empty() {
+            let mcp =
+                crate::overlay::completion::mcp_completions(&self.mcp_servers, prefix, cursor);
+            let resources = prefix.contains(':') && !mcp.is_empty();
+            if !resources && let Some(workdir) = self.completion_workdir.as_deref() {
+                items = file_completions(workdir, prefix, cursor);
+            }
+            items.extend(mcp);
         }
         self.input_completion = InputCompletion::new(items);
     }
@@ -578,7 +583,7 @@ impl App {
         &mut self,
         key: ratatui::crossterm::event::KeyEvent,
     ) -> Option<AppExit> {
-        let registry = cmdline_registry(&self.plugin_command_specs);
+        let registry = self.command_registry();
         let resolver = AppResolver {
             models: &self.model_choices,
             plugin_commands: &self.plugin_commands,
@@ -633,7 +638,7 @@ impl App {
                     self.slash_palette = None;
                     return None;
                 };
-                let registry = cmdline_registry(&self.plugin_command_specs);
+                let registry = self.command_registry();
                 let result = self.run_command_validated(&text, &registry);
                 match result {
                     CommandResult::Done(exit) => {

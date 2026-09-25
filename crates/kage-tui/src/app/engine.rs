@@ -174,9 +174,8 @@ impl App {
                 self.run_started = None;
                 self.end_run(self.active_session.unwrap_or_default());
             }
-            HostEvent::TitleChanged { .. }
-            | HostEvent::AgentSpawned { .. }
-            | HostEvent::McpServers { .. } => {}
+            HostEvent::McpServers { servers } => self.set_mcp_servers(servers),
+            HostEvent::TitleChanged { .. } | HostEvent::AgentSpawned { .. } => {}
         }
     }
 

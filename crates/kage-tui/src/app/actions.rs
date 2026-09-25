@@ -66,6 +66,16 @@ impl App {
             return CommandResult::Done(None);
         }
 
+        if self.mcp_command_specs.iter().any(|spec| spec.name == head) {
+            let text = if rest.is_empty() {
+                format!("/{head}")
+            } else {
+                format!("/{head} {rest}")
+            };
+            self.send_prompt(text, Vec::new(), true, None);
+            return CommandResult::Done(None);
+        }
+
         let mut msg = format!("unknown command: {head}");
         if let Some(suggestion) = crate::cmdparse::suggest_command(registry, head) {
             msg = format!("{msg} (did you mean /{suggestion}?)");
@@ -176,6 +186,10 @@ impl App {
                 self.run_login_command(rest);
                 None
             }
+            "mcp" => {
+                self.run_mcp_command(rest);
+                None
+            }
             "tree" => {
                 self.open_session_tree();
                 None
@@ -230,6 +244,60 @@ impl App {
         } else {
             PendingLogin::Provider(arg.to_owned())
         });
+    }
+
+    /// Handle `/mcp`, `/mcp restart <server>` and `/mcp login <server>`.
+    /// The argument schema already checked that a subcommand names its
+    /// server.
+    pub(crate) fn run_mcp_command(&mut self, rest: &str) {
+        let (sub, server) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
+        let server = server.trim();
+        match sub {
+            "" => self.open_mcp_picker(),
+            "restart" => {
+                let _ = self.send_request(RunRequest::RestartMcp(server.to_owned()));
+            }
+            "login" => self.mcp_login(server),
+            other => self.push_error(format!(
+                "mcp: unknown subcommand `{other}` (try restart, login)"
+            )),
+        }
+    }
+
+    /// Log in to MCP server `server`, from `/mcp login` or the picker.
+    /// Until the TUI runs the flow itself, point at the CLI command.
+    pub(crate) fn mcp_login(&mut self, server: &str) {
+        let text =
+            format!("mcp {server}: run `kage mcp login {server}`, then restart it with /mcp");
+        lock(&self.buffer).push_custom("kage:notify", text, false);
+    }
+
+    /// Whether the engine expands `text` through MCP: it starts with the
+    /// prompt command of a live server, or mentions a resource of a
+    /// configured server. Such a prompt is queued, never steered,
+    /// because the engine expands only prompts it starts a run with.
+    pub(crate) fn mcp_expands(&self, text: &str) -> bool {
+        let command = text
+            .trim_start()
+            .strip_prefix('/')
+            .and_then(|c| c.split_whitespace().next())
+            .and_then(|token| token.split_once(':'));
+        if let Some((server, prompt)) = command
+            && self.mcp_servers.iter().any(|s| {
+                s.name == server
+                    && s.status == kage_core::protocol::McpServerStatus::Connected
+                    && s.prompts.iter().any(|p| p.name == prompt)
+            })
+        {
+            return true;
+        }
+        text.split_whitespace().any(|word| {
+            word.strip_prefix('@')
+                .and_then(|w| w.split_once(':'))
+                .is_some_and(|(server, uri)| {
+                    !uri.is_empty() && self.mcp_servers.iter().any(|s| s.name == server)
+                })
+        })
     }
 
     /// Handle `:permission [mode]`: dispatch the override request,

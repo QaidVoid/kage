@@ -6,8 +6,9 @@ use super::*;
 impl App {
     /// Resolve a submitted draft: send the prompt and its images to the
     /// session on screen, steered into the run in flight or, with
-    /// `queue`, held until it ends. An agent of a resumed session takes
-    /// no prompts, so the text goes back into the draft.
+    /// `queue`, held until it ends. A prompt the engine expands through
+    /// MCP is always queued. An agent of a resumed session takes no
+    /// prompts, so the text goes back into the draft.
     pub(crate) fn handle_submit(&mut self, text: String, queue: bool) {
         if self.focused_read_only() {
             self.input.splice(0, 0, &text);
@@ -17,6 +18,7 @@ impl App {
             return;
         }
         let images = self.input.take_attached();
+        let queue = queue || self.mcp_expands(&text);
         self.send_prompt(text, images, queue, self.focus);
     }
 
@@ -118,7 +120,7 @@ impl App {
                 }
             }
             InputAction::OpenCommandPalette => {
-                let registry = cmdline_registry(&self.plugin_command_specs);
+                let registry = self.command_registry();
                 let ctx = SlashContext {
                     models: self.model_choices.iter().map(|p| p.value.clone()).collect(),
                     plugin_commands: self.plugin_commands.clone(),

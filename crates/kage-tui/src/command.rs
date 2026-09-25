@@ -160,7 +160,9 @@ pub struct PluginCommand {
 /// Format the argument schema as a compact hint string for inline
 /// help, e.g. `"<id>"` for a required dynamic choice, `"[name]"` for
 /// an optional one, `"<on|off|toggle>"` for a required fixed choice.
-/// Multi-arg commands join hints with spaces. Returns an empty string
+/// Multi-arg commands join hints with spaces. A `Rest` hint already
+/// in bracket form, such as the `<temperature> [style]` of an MCP
+/// prompt, is shown as written. Returns an empty string
 /// when `args` is empty so callers can render argless commands
 /// without trailing whitespace.
 #[must_use]
@@ -170,6 +172,7 @@ pub fn arg_hints_text(args: &[ArgSpec]) -> String {
 
 fn arg_hint_one(arg: &ArgSpec) -> String {
     match arg {
+        ArgSpec::Rest { hint, .. } if hint.starts_with(['<', '[']) => (*hint).to_owned(),
         ArgSpec::Rest { name, optional, .. }
         | ArgSpec::DynamicChoice { name, optional, .. }
         | ArgSpec::Path { name, optional }
@@ -352,6 +355,39 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
             hint: "[provider]",
         }],
         subcommands: &[],
+    },
+    CommandSpec {
+        name: "mcp",
+        aliases: &[],
+        description: "list MCP servers, restart one or log in to one",
+        category: CommandCategory::Both,
+        args: &[],
+        subcommands: &[
+            CommandSpec {
+                name: "restart",
+                aliases: &[],
+                description: "restart an MCP server",
+                category: CommandCategory::Both,
+                args: &[ArgSpec::Rest {
+                    name: "server",
+                    optional: false,
+                    hint: "<server>",
+                }],
+                subcommands: &[],
+            },
+            CommandSpec {
+                name: "login",
+                aliases: &[],
+                description: "log in to an MCP server that needs it",
+                category: CommandCategory::Both,
+                args: &[ArgSpec::Rest {
+                    name: "server",
+                    optional: false,
+                    hint: "<server>",
+                }],
+                subcommands: &[],
+            },
+        ],
     },
     CommandSpec {
         name: "settings",
@@ -652,7 +688,7 @@ mod tests {
 
     #[test]
     fn builtin_registry_has_expected_command_count() {
-        assert_eq!(BUILTIN_COMMANDS.len(), 23);
+        assert_eq!(BUILTIN_COMMANDS.len(), 24);
     }
 
     #[test]
@@ -706,6 +742,30 @@ mod tests {
         let spec = find_builtin_command("agents").expect("agents should exist");
         assert_eq!(spec.args.len(), 0);
         assert_eq!(spec.subcommands.len(), 0);
+    }
+
+    #[test]
+    fn builtin_registry_includes_mcp_with_restart_and_login() {
+        let spec = find_builtin_command("mcp").expect("mcp should exist");
+        assert!(spec.args.is_empty());
+        assert!(spec.subcommand("restart").is_some());
+        assert!(spec.subcommand("login").is_some());
+    }
+
+    #[test]
+    fn a_bracketed_rest_hint_is_shown_as_written() {
+        let args = [ArgSpec::Rest {
+            name: "arguments",
+            optional: true,
+            hint: "<temperature> [style]",
+        }];
+        assert_eq!(arg_hints_text(&args), "<temperature> [style]");
+        let args = [ArgSpec::Rest {
+            name: "target",
+            optional: true,
+            hint: "topic",
+        }];
+        assert_eq!(arg_hints_text(&args), "[target]");
     }
 
     #[test]

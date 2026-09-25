@@ -275,6 +275,7 @@ impl Host {
             }
             RunRequest::RefreshProviders => self.refresh_providers(),
             RunRequest::ReloadPlugins => self.reload_plugins(),
+            RunRequest::RestartMcp(server) => self.send(CommandKind::RestartMcp { server }),
         }
     }
 

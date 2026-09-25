@@ -59,6 +59,7 @@ impl Tool for LsTool {
             Some(p) => cx.resolve_path(Path::new(p))?,
             None => cx.workdir().to_path_buf(),
         };
+        std::fs::metadata(&target).map_err(ToolError::io_at("list", &target))?;
 
         let mut entries: Vec<String> = Vec::new();
         let mut truncated = false;
@@ -83,7 +84,7 @@ impl Tool for LsTool {
                 }
             }
         } else {
-            for entry in std::fs::read_dir(&target)? {
+            for entry in std::fs::read_dir(&target).map_err(ToolError::io_at("list", &target))? {
                 if cx.is_cancelled() {
                     return Err(ToolError::Cancelled);
                 }
@@ -157,6 +158,24 @@ mod tests {
         let out = run(dir.path(), serde_json::json!({})).unwrap();
         assert!(out.text.contains("f a.txt"));
         assert!(out.text.contains("d sub"));
+    }
+
+    #[test]
+    fn missing_path_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let missing = root.join("nope");
+        for recursive in [false, true] {
+            let input = serde_json::json!({"path":"nope","recursive":recursive});
+            let err = run(dir.path(), input).unwrap_err().to_string();
+            let prefix = format!("cannot list {}: ", missing.display());
+            assert!(err.starts_with(&prefix), "{err}");
+        }
+
+        let gone = root.join("gone");
+        let err = run(&gone, serde_json::json!({"path":null})).unwrap_err();
+        let prefix = format!("cannot list {}: ", gone.display());
+        assert!(err.to_string().starts_with(&prefix), "{err}");
     }
 
     #[test]

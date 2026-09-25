@@ -101,14 +101,14 @@ pub(crate) fn tool_row_lines(
     } else {
         Style::default().fg(theme.muted_fg)
     };
-    let mut content = vec![header_row(
-        (bullet, bullet_style),
-        verb,
-        &label.target,
-        label.stats_for(row.phase),
-        (&right, right_style),
-        max,
-    )];
+    let bullet = (bullet, bullet_style);
+    let right = (right.as_str(), right_style);
+    let stats = label.stats_for(row.phase);
+    let mut content = if row.folded {
+        vec![header_row(bullet, verb, &label.target, stats, right, max)]
+    } else {
+        wrapped_header(bullet, verb, &label.full_target, stats, right, max)
+    };
     let body = if row.folded && row.name == "agent" {
         folded_agent_body(row.phase, end, output)
     } else if row.folded {
@@ -290,6 +290,78 @@ fn header_row(
         spans.push(Span::styled(right.to_owned(), right_style));
     }
     Line::from(spans)
+}
+
+/// An unfolded row's header: [`header_row`] when everything fits on
+/// one row, else the whole target wrapped onto rows that hang under
+/// its first cell, with the stats after its last word.
+fn wrapped_header(
+    (bullet, bullet_style): (&str, Style),
+    verb: &str,
+    target: &str,
+    stats: &str,
+    (right, right_style): (&str, Style),
+    max: usize,
+) -> Vec<Line<'static>> {
+    let reserve = if right.is_empty() {
+        0
+    } else {
+        right.width() + 2
+    };
+    let room = max.saturating_sub(reserve);
+    let hang = bullet.width() + 1 + verb.width() + 1;
+    let stats_w = if stats.is_empty() {
+        0
+    } else {
+        stats.width() + 1
+    };
+    if !target.contains('\n') && hang + target.width() + stats_w <= room {
+        let bullet = (bullet, bullet_style);
+        return vec![header_row(
+            bullet,
+            verb,
+            target,
+            stats,
+            (right, right_style),
+            max,
+        )];
+    }
+    let theme = crate::theme::current();
+    let text = Style::default().fg(theme.tool_result_fg);
+    let mut lines: Vec<Line<'static>> = target
+        .lines()
+        .map(|l| Line::from(Span::styled(l.to_owned(), text)))
+        .collect();
+    if let Some(last) = lines.last_mut().filter(|_| !stats.is_empty()) {
+        let dim = Style::default().fg(theme.muted_fg);
+        last.spans.push(Span::styled(format!(" {stats}"), dim));
+    }
+    let mut lines = lines.into_iter();
+    let mut first = vec![
+        Span::styled(
+            format!("{bullet} "),
+            bullet_style.add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("{verb} "), text.add_modifier(Modifier::BOLD)),
+    ];
+    first.extend(lines.next().map(|l| l.spans).unwrap_or_default());
+    let mut rows = split_line_hanging(Line::from(first), room, 0, hang);
+    let pad = Span::styled(
+        " ".repeat(hang),
+        Style::default().add_modifier(DECORATION_MARKER),
+    );
+    for line in lines {
+        for row in split_line_hanging(line, room.saturating_sub(hang), 0, 0) {
+            rows.push(std::iter::once(pad.clone()).chain(row).collect());
+        }
+    }
+    if let Some(first) = rows.first_mut().filter(|_| !right.is_empty()) {
+        let used: usize = first.iter().map(|s| s.content.width()).sum();
+        let gap = max.saturating_sub(used + right.width()).max(2);
+        first.push(Span::raw(" ".repeat(gap)));
+        first.push(Span::styled(right.to_owned(), right_style));
+    }
+    rows.into_iter().map(Line::from).collect()
 }
 
 /// The body of a folded row. A running call shows its latest progress

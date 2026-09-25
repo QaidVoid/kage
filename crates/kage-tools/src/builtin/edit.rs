@@ -109,7 +109,7 @@ impl Tool for EditTool {
     ) -> Result<ToolOutput, ToolError> {
         let input: EditInput = serde_json::from_value(input)?;
         let path = cx.resolve_path(Path::new(&input.path))?;
-        let original = std::fs::read_to_string(&path)?;
+        let original = std::fs::read_to_string(&path).map_err(ToolError::io_at("read", &path))?;
 
         let changes = match collect_changes(&input) {
             Ok(c) => c,
@@ -139,7 +139,7 @@ impl Tool for EditTool {
         }
 
         let new_content = apply_splices(&original, &splices);
-        atomic_write(&path, new_content.as_bytes())?;
+        atomic_write(&path, new_content.as_bytes()).map_err(ToolError::io_at("write", &path))?;
 
         let diff = unified_diff(&original, &new_content, &input.path);
         let count = splices.len();
@@ -433,14 +433,17 @@ mod tests {
     }
 
     #[test]
-    fn missing_file_surfaces_io_error() {
+    fn missing_file_error_names_the_path() {
         let dir = tempfile::tempdir().unwrap();
         let err = run(
             dir.path(),
             serde_json::json!({"path":"nope.txt","old_str":"a","new_str":"b"}),
         )
-        .unwrap_err();
-        assert!(matches!(err, ToolError::Io(_)));
+        .unwrap_err()
+        .to_string();
+        let missing = dir.path().canonicalize().unwrap().join("nope.txt");
+        let prefix = format!("cannot read {}: ", missing.display());
+        assert!(err.starts_with(&prefix), "{err}");
     }
 
     #[test]

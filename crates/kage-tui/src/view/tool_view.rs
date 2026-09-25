@@ -66,6 +66,10 @@ pub struct ToolLabel {
     /// What the call acts on: a path, a command, a pattern, or the
     /// tool name for tools without a tailored summary. Always one line.
     pub target: String,
+    /// The whole target an unfolded row wraps instead of cutting. It
+    /// differs from [`Self::target`] only where that keeps the first
+    /// line: a `bash` command and an agent's description.
+    pub full_target: String,
     /// Extra facts painted after the target, such as `(+1 -1)`. Empty
     /// when there are none.
     pub stats: String,
@@ -247,14 +251,17 @@ pub fn describe(name: &str, input: &Value) -> ToolLabel {
             };
             label(["Edit", "Editing", "Edited"], path(), stats).body(ToolBody::Diff)
         }
-        "bash" => label(
-            ["Run", "Running", "Ran"],
-            one_line(field(input, "command")),
-            String::new(),
-        )
-        .body(ToolBody::Tail),
+        "bash" => {
+            let command = field(input, "command");
+            label(["Run", "Running", "Ran"], one_line(command), String::new())
+                .full(command.trim().to_owned())
+                .body(ToolBody::Tail)
+        }
         "ls" => {
-            let dir = input.get("path").and_then(Value::as_str).unwrap_or(".");
+            let dir = match field(input, "path") {
+                "" => ".",
+                path => path,
+            };
             label(["List", "Listing", "Listed"], dir.to_owned(), String::new())
                 .body(ToolBody::Hidden)
         }
@@ -270,11 +277,20 @@ pub fn describe(name: &str, input: &Value) -> ToolLabel {
             String::new(),
         ),
         "agent" => {
-            let target = match one_line(field(input, "description")) {
-                description if description.is_empty() => agent_name(input).to_owned(),
-                description => format!("{}: {description}", agent_name(input)),
+            let description = field(input, "description").trim();
+            let with_agent = |description: String| {
+                if description.is_empty() {
+                    agent_name(input).to_owned()
+                } else {
+                    format!("{}: {description}", agent_name(input))
+                }
             };
-            label(["Agent", "Agent", "Agent"], target, String::new())
+            label(
+                ["Agent", "Agent", "Agent"],
+                with_agent(one_line(description)),
+                String::new(),
+            )
+            .full(with_agent(description.to_owned()))
         }
         _ => label(
             ["Call", "Calling", "Called"],
@@ -473,14 +489,13 @@ pub fn question(name: &str, input: &Value) -> String {
 
 /// The arguments of a call as `(key, value)` rows. Keys are padded to
 /// one width so values line up. Values are cut to their first line with
-/// a `(+N lines)` note, and non-string values are compact JSON.
+/// a `(+N lines)` note, and non-string values are compact JSON. Null
+/// arguments count as absent and get no row.
 #[must_use]
 pub fn arg_rows(input: &Value) -> Vec<(String, String)> {
-    let Some(args) = input.as_object() else {
-        return Vec::new();
-    };
-    let width = args.keys().map(|k| k.width()).max().unwrap_or(0);
-    args.iter()
+    let args = present_args(input);
+    let width = args.iter().map(|(k, _)| k.width()).max().unwrap_or(0);
+    args.into_iter()
         .map(|(k, v)| (pad_to_width(k, width), one_line(&value_text(v))))
         .collect()
 }
@@ -542,6 +557,7 @@ fn label(
         verb,
         verb_live,
         verb_done,
+        full_target: target.clone(),
         target,
         stats,
         read_only: false,
@@ -552,6 +568,11 @@ fn label(
 impl ToolLabel {
     fn body(mut self, body: ToolBody) -> Self {
         self.body = body;
+        self
+    }
+
+    fn full(mut self, full_target: String) -> Self {
+        self.full_target = full_target;
         self
     }
 
@@ -626,14 +647,24 @@ fn display_name(name: &str) -> String {
 
 fn arg_summary(input: &Value) -> String {
     match input.as_object() {
-        Some(args) => args
-            .iter()
+        Some(_) => present_args(input)
+            .into_iter()
             .map(|(k, v)| format!("{k}: {}", one_line(&value_text(v))))
             .collect::<Vec<_>>()
             .join(", "),
         None if input.is_null() => String::new(),
         None => one_line(&value_text(input)),
     }
+}
+
+/// The arguments of an object input, without null ones.
+fn present_args(input: &Value) -> Vec<(&String, &Value)> {
+    input
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, v)| !v.is_null())
+        .collect()
 }
 
 fn value_text(v: &Value) -> String {
@@ -776,6 +807,33 @@ mod tests {
     fn multiline_bash_command_reads_as_one_line() {
         let l = describe("bash", &json!({"command": "cd x\ncargo build\ncargo test"}));
         assert_eq!(l.target, "cd x (+2 lines)");
+    }
+
+    #[test]
+    fn null_arguments_count_as_absent() {
+        assert_eq!(describe("ls", &json!({"path": null})).target, ".");
+        assert_eq!(
+            describe("grep", &json!({"pattern": "x", "path": null})).target,
+            "\"x\""
+        );
+        let l = describe("custom_tool", &json!({"a": null, "b": 1}));
+        assert_eq!(l.stats, "b: 1");
+        assert_eq!(
+            arg_rows(&json!({"path": null, "recursive": false})),
+            [("recursive".to_owned(), "false".to_owned())]
+        );
+    }
+
+    #[test]
+    fn full_target_keeps_every_line() {
+        let l = describe("bash", &json!({"command": "  cd x\ncargo test\n"}));
+        assert_eq!(l.target, "cd x (+1 line)");
+        assert_eq!(l.full_target, "cd x\ncargo test");
+        let read = describe("read", &json!({"path": "a.rs"}));
+        assert_eq!(read.full_target, read.target);
+        let agent = describe("agent", &json!({"agent": "explore", "description": "a\nb"}));
+        assert_eq!(agent.target, "explore: a (+1 line)");
+        assert_eq!(agent.full_target, "explore: a\nb");
     }
 
     #[test]

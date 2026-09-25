@@ -129,14 +129,21 @@ pub struct CommandOutput {
 ///
 /// # Errors
 ///
-/// [`ToolError::Cancelled`] or [`ToolError::Timeout`] after a kill, or an
-/// I/O error when the shell cannot start.
+/// [`ToolError::Cancelled`] or [`ToolError::Timeout`] after a kill, an
+/// error naming `cwd` when it does not exist, or an I/O error when the
+/// shell cannot start.
 pub fn run(
     command: &str,
     cwd: &Path,
     timeout: Duration,
     cx: &ToolContext<'_>,
 ) -> Result<CommandOutput, ToolError> {
+    if !cwd.exists() {
+        return Err(ToolError::Other(format!(
+            "working directory {} does not exist",
+            cwd.display()
+        )));
+    }
     let mut cmd = Command::new("bash");
     cmd.arg("-c")
         .arg(command)
@@ -442,6 +449,28 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(5),
             "blocked on orphaned pipe holder for {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn missing_working_directory_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let gone = dir.path().join("gone");
+        let err = run(&gone, serde_json::json!({"command":"pwd"})).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("working directory {} does not exist", gone.display())
+        );
+
+        let err = run(
+            dir.path(),
+            serde_json::json!({"command":"pwd","cwd":"null"}),
+        )
+        .unwrap_err();
+        let missing = dir.path().canonicalize().unwrap().join("null");
+        assert_eq!(
+            err.to_string(),
+            format!("working directory {} does not exist", missing.display())
         );
     }
 

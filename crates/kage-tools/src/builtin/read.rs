@@ -58,10 +58,15 @@ impl Tool for ReadTool {
 
         // Cap the read itself, not just the output: a multi-gigabyte file
         // must not be slurped into memory before truncation.
-        let file = std::fs::File::open(&path)?;
-        let total_bytes = file.metadata()?.len();
+        let file = std::fs::File::open(&path).map_err(ToolError::io_at("read", &path))?;
+        let total_bytes = file
+            .metadata()
+            .map_err(ToolError::io_at("read", &path))?
+            .len();
         let mut head = Vec::new();
-        file.take(MAX_BYTES as u64).read_to_end(&mut head)?;
+        file.take(MAX_BYTES as u64)
+            .read_to_end(&mut head)
+            .map_err(ToolError::io_at("read", &path))?;
         let truncated = total_bytes > MAX_BYTES as u64;
         let text = String::from_utf8_lossy(&head).into_owned();
 
@@ -158,15 +163,18 @@ mod tests {
     }
 
     #[test]
-    fn missing_file_surfaces_io_error() {
+    fn missing_file_error_names_the_path() {
         let dir = tempfile::tempdir().unwrap();
         let err = run(
             &ReadTool,
             dir.path(),
             serde_json::json!({"path":"missing.txt"}),
         )
-        .unwrap_err();
-        assert!(matches!(err, ToolError::Io(_)), "got {err:?}");
+        .unwrap_err()
+        .to_string();
+        let missing = dir.path().canonicalize().unwrap().join("missing.txt");
+        let prefix = format!("cannot read {}: ", missing.display());
+        assert!(err.starts_with(&prefix), "{err}");
     }
 
     #[test]

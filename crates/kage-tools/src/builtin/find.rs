@@ -61,6 +61,7 @@ impl Tool for FindTool {
             Some(p) => cx.resolve_path(Path::new(p))?,
             None => cx.workdir().to_path_buf(),
         };
+        std::fs::metadata(&root).map_err(ToolError::io_at("search", &root))?;
         let glob = Glob::new(&input.pattern)
             .map_err(|e| ToolError::InvalidInput(format!("invalid glob: {e}")))?
             .compile_matcher();
@@ -184,6 +185,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let err = run(dir.path(), serde_json::json!({"pattern":"["})).unwrap_err();
         assert!(matches!(err, ToolError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn missing_path_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = run(dir.path(), serde_json::json!({"pattern":"*","path":"nope"}))
+            .unwrap_err()
+            .to_string();
+        let missing = dir.path().canonicalize().unwrap().join("nope");
+        let prefix = format!("cannot search {}: ", missing.display());
+        assert!(err.starts_with(&prefix), "{err}");
     }
 
     #[test]

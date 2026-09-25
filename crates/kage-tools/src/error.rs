@@ -1,6 +1,6 @@
 //! Errors raised by [`Tool::execute`](crate::Tool::execute).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Failure modes shared by all tools.
 ///
@@ -47,4 +47,15 @@ pub enum ToolError {
     /// Catch-all for anything else.
     #[error("{0}")]
     Other(String),
+}
+
+impl ToolError {
+    /// Map an I/O failure on `path` to `cannot <action> <path>: <reason>`,
+    /// so the message names what the tool tried to touch.
+    pub(crate) fn io_at<'a>(
+        action: &'a str,
+        path: &'a Path,
+    ) -> impl FnOnce(std::io::Error) -> Self + 'a {
+        move |err| Self::Other(format!("cannot {action} {}: {err}", path.display()))
+    }
 }

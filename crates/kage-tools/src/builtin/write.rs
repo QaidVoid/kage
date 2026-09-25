@@ -80,7 +80,8 @@ impl Tool for WriteTool {
             });
         }
 
-        atomic_write(&target, input.content.as_bytes())?;
+        atomic_write(&target, input.content.as_bytes())
+            .map_err(ToolError::io_at("write", &target))?;
 
         let bytes = input.content.len();
         Ok(ToolOutput {

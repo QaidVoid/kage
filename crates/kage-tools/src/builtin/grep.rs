@@ -66,6 +66,7 @@ impl Tool for GrepTool {
             Some(p) => cx.resolve_path(Path::new(p))?,
             None => cx.workdir().to_path_buf(),
         };
+        std::fs::metadata(&root).map_err(ToolError::io_at("search", &root))?;
         let max = input.max_matches.unwrap_or(DEFAULT_MAX_MATCHES);
 
         let matcher = RegexMatcherBuilder::new()
@@ -230,6 +231,17 @@ mod tests {
         populate(dir.path());
         let out = run(dir.path(), serde_json::json!({"pattern":"zzz"})).unwrap();
         assert_eq!(out.text, "(no matches)");
+    }
+
+    #[test]
+    fn missing_path_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = run(dir.path(), serde_json::json!({"pattern":"x","path":"nope"}))
+            .unwrap_err()
+            .to_string();
+        let missing = dir.path().canonicalize().unwrap().join("nope");
+        let prefix = format!("cannot search {}: ", missing.display());
+        assert!(err.starts_with(&prefix), "{err}");
     }
 
     #[test]

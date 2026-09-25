@@ -207,6 +207,54 @@ mod tests {
     }
 
     #[test]
+    fn unfolded_rows_wrap_the_whole_command_under_the_verb() {
+        let command = "date -u --iso-8601=seconds; date; pwd; hostname; whoami; \
+                       echo \"SHELL=$SHELL\"; ls -a | head -n 100; echo done";
+        let input = json!({"command": command});
+        let error = "io error: No such file or directory (os error 2)";
+        let folded = rows_of(&widget("bash", input.clone(), error, true, true));
+        assert_eq!(folded.len(), 2, "{folded:?}");
+        assert!(folded[0].contains("..."), "{folded:?}");
+
+        let unfolded = rows_of(&widget("bash", input, error, true, false));
+        let header: Vec<&str> = unfolded
+            .iter()
+            .take_while(|r| !r.contains("io error"))
+            .map(String::as_str)
+            .collect();
+        assert!(header.len() > 1, "{unfolded:?}");
+        assert!(header[0].contains("\u{2717} Run date -u"), "{unfolded:?}");
+        assert!(header[0].ends_with("4.9s"), "{unfolded:?}");
+        let column = |row: &str, text: &str| {
+            row.char_indices()
+                .position(|(i, _)| row[i..].starts_with(text))
+        };
+        let text_at = column(header[0], "date").unwrap();
+        for row in &header[1..] {
+            let first = row.trim_start_matches(['\u{258e}', ' ']);
+            assert_eq!(column(row, first), Some(text_at), "{unfolded:?}");
+        }
+        let joined = header
+            .iter()
+            .map(|r| r.trim_end_matches("4.9s").trim_matches(['\u{258e}', ' ']))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(joined.ends_with(&format!("Run {command}")), "{joined:?}");
+        assert!(unfolded.last().unwrap().ends_with(error), "{unfolded:?}");
+    }
+
+    #[test]
+    fn unfolded_rows_keep_every_line_of_a_script() {
+        let input = json!({"command": "cd x\ncargo test"});
+        let folded = rows("bash", input.clone(), "(no output)\nexit: 0", false);
+        assert!(folded[0].contains("Ran cd x (+1 line)"), "{folded:?}");
+        let unfolded = rows_of(&widget("bash", input, "(no output)\nexit: 0", false, false));
+        assert!(unfolded[0].contains("Ran cd x"), "{unfolded:?}");
+        assert!(!unfolded[0].contains("(+1 line)"), "{unfolded:?}");
+        assert!(unfolded[1].ends_with("      cargo test"), "{unfolded:?}");
+    }
+
+    #[test]
     fn edit_rows_show_counts_and_the_diff() {
         let rows = rows(
             "edit",

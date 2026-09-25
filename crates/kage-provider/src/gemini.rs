@@ -18,6 +18,9 @@ use crate::{
 
 const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4_096;
+/// Placeholder Google documents for function calls that carry no real
+/// thought signature, such as history from another model.
+const SKIP_SIGNATURE: &str = "skip_thought_signature_validator";
 
 /// Google Gemini provider.
 #[derive(Debug)]
@@ -160,10 +163,22 @@ pub(crate) fn build_request_body(req: &StreamRequest) -> Value {
             _ => None,
         })
         .collect();
+    let turn_start = req
+        .messages
+        .iter()
+        .rposition(|m| {
+            m.role == Role::User && m.content.iter().any(|c| matches!(c, Content::Text { .. }))
+        })
+        .unwrap_or(0);
+    let enforced = enforces_signatures(&req.model);
     let contents: Vec<Value> = req
         .messages
         .iter()
-        .filter_map(|msg| internal_message_to_gemini(msg, &names_by_id, &req.model))
+        .enumerate()
+        .filter_map(|(i, msg)| {
+            let placeholder = enforced && i >= turn_start;
+            internal_message_to_gemini(msg, &names_by_id, &req.model, placeholder)
+        })
         .collect();
 
     let mut body = serde_json::json!({
@@ -218,6 +233,20 @@ fn thinking_config(req: &StreamRequest) -> Option<Value> {
     }
 }
 
+/// Whether `model` rejects a current-turn function call without a
+/// thought signature, which Gemini 3 and later do.
+fn enforces_signatures(model: &str) -> bool {
+    let name = model.rsplit('/').next().unwrap_or(model);
+    name.strip_prefix("gemini-")
+        .map(|rest| {
+            rest.split(|c: char| !c.is_ascii_digit())
+                .next()
+                .unwrap_or("")
+        })
+        .and_then(|major| major.parse::<u32>().ok())
+        .is_some_and(|major| major >= 3)
+}
+
 fn tool_spec_to_gemini(spec: &ToolSpec) -> Value {
     serde_json::json!({
         "name": spec.name,
@@ -230,10 +259,14 @@ fn internal_message_to_gemini(
     msg: &Message,
     names_by_id: &HashMap<String, String>,
     model: &str,
+    placeholder: bool,
 ) -> Option<Value> {
     let (role, parts) = match msg.role {
         Role::User => ("user", convert_user_parts(&msg.content)),
-        Role::Assistant => ("model", convert_assistant_parts(&msg.content, model)),
+        Role::Assistant => (
+            "model",
+            convert_assistant_parts(&msg.content, model, placeholder),
+        ),
         Role::ToolResult => ("user", convert_tool_result_parts(&msg.content, names_by_id)),
         Role::System => return None,
     };
@@ -259,11 +292,13 @@ fn convert_user_parts(blocks: &[Content]) -> Vec<Value> {
 
 /// Model parts on the wire. A thought signature `model` produced goes
 /// back on the function call that follows it, which Gemini 3 requires
-/// for every step of the current turn. Other thinking goes as
-/// `<thinking>` text.
-fn convert_assistant_parts(blocks: &[Content], model: &str) -> Vec<Value> {
+/// on the first call of every step in the current turn. With
+/// `placeholder`, a first call that has no real signature carries
+/// [`SKIP_SIGNATURE`] instead. Other thinking goes as `<thinking>` text.
+fn convert_assistant_parts(blocks: &[Content], model: &str, placeholder: bool) -> Vec<Value> {
     let mut parts = Vec::new();
     let mut signature: Option<&str> = None;
+    let mut first_call = true;
     for block in blocks {
         match block {
             Content::Text { text } => parts.push(serde_json::json!({"text": text})),
@@ -285,7 +320,10 @@ fn convert_assistant_parts(blocks: &[Content], model: &str) -> Vec<Value> {
                 });
                 if let Some(sig) = signature.take() {
                     part["thoughtSignature"] = Value::String(sig.to_owned());
+                } else if placeholder && first_call {
+                    part["thoughtSignature"] = Value::String(SKIP_SIGNATURE.to_owned());
                 }
+                first_call = false;
                 parts.push(part);
             }
             _ => {}
@@ -654,6 +692,101 @@ mod tests {
         assert!(parts[1].get("thoughtSignature").is_none());
         assert_eq!(parts[2]["text"], "<thinking>\nother model\n</thinking>");
         assert!(parts[3].get("thoughtSignature").is_none());
+    }
+
+    fn unsigned_loop() -> Vec<Message> {
+        let call = |id: &str| Content::ToolCall {
+            id: ToolCallId::new(id),
+            name: "read".into(),
+            input: serde_json::json!({}),
+        };
+        let result = |id: &str| {
+            Message::new(
+                Role::ToolResult,
+                vec![Content::ToolResultBlock {
+                    call_id: ToolCallId::new(id),
+                    output: "ok".into(),
+                    is_error: false,
+                }],
+                None,
+            )
+        };
+        let assistant = |content| Message::new(Role::Assistant, content, None);
+        vec![
+            user_msg("earlier"),
+            assistant(vec![call("x")]),
+            result("x"),
+            assistant(vec![Content::Text {
+                text: "done".into(),
+            }]),
+            user_msg("now"),
+            assistant(vec![call("a"), call("b")]),
+            result("a"),
+            result("b"),
+            assistant(vec![
+                Content::Thinking {
+                    text: "switched".into(),
+                    signature: Some(kage_core::ThinkingSignature {
+                        model: "claude-x".into(),
+                        data: "foreign".into(),
+                        redacted: false,
+                    }),
+                },
+                call("c"),
+            ]),
+            result("c"),
+            assistant(vec![Content::Text {
+                text: "all read".into(),
+            }]),
+        ]
+    }
+
+    #[test]
+    fn placeholder_signs_first_call_of_each_current_step() {
+        let req = StreamRequest::new("gemini-3-pro-preview", unsigned_loop());
+        let body = build_request_body(&req);
+        let contents = body["contents"].as_array().unwrap();
+        let sig =
+            |content: usize, part: usize| contents[content]["parts"][part].get("thoughtSignature");
+        assert!(sig(1, 0).is_none());
+        assert!(sig(3, 0).is_none());
+        assert_eq!(sig(5, 0).unwrap(), SKIP_SIGNATURE);
+        assert!(sig(5, 1).is_none());
+        assert_eq!(
+            contents[8]["parts"][0]["text"],
+            "<thinking>\nswitched\n</thinking>"
+        );
+        assert_eq!(sig(8, 1).unwrap(), SKIP_SIGNATURE);
+        assert!(sig(10, 0).is_none());
+    }
+
+    #[test]
+    fn placeholder_is_left_out_before_gemini_3() {
+        let req = StreamRequest::new("gemini-2.5-pro", unsigned_loop());
+        let body = build_request_body(&req);
+        let signed = body["contents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|c| c["parts"].as_array().unwrap())
+            .any(|p| p.get("thoughtSignature").is_some());
+        assert!(!signed);
+    }
+
+    #[test]
+    fn signature_enforcement_starts_at_gemini_3() {
+        for model in [
+            "gemini-3-flash-preview",
+            "gemini-3.1-pro-preview",
+            "models/gemini-3-pro",
+            "google/gemini-3.5-flash",
+            "gemini-10-pro",
+        ] {
+            assert!(enforces_signatures(model), "{model}");
+        }
+        for model in ["gemini-2.5-pro", "gemini-exp-1206", "gemini-", "m"] {
+            assert!(!enforces_signatures(model), "{model}");
+        }
     }
 
     #[test]

@@ -766,6 +766,59 @@ mod tests {
     }
 
     #[test]
+    fn model_picker_badges_the_active_row_only() {
+        #[derive(Debug)]
+        struct Stub {
+            meta: kage_provider::ProviderMetadata,
+            models: Vec<&'static str>,
+        }
+
+        impl kage_provider::Provider for Stub {
+            fn metadata(&self) -> &kage_provider::ProviderMetadata {
+                &self.meta
+            }
+
+            fn stream(
+                &self,
+                _req: kage_provider::StreamRequest,
+                _cancel: &kage_core::CancelFlag,
+            ) -> Result<kage_provider::EventStream, kage_provider::ProviderError> {
+                Ok(Box::new(std::iter::empty()))
+            }
+
+            fn models(&self) -> Vec<kage_provider::ProviderModel> {
+                self.models
+                    .iter()
+                    .map(|m| kage_provider::ProviderModel {
+                        id: (*m).to_owned(),
+                        name: (*m).to_owned(),
+                        ..kage_provider::ProviderModel::default()
+                    })
+                    .collect()
+            }
+        }
+
+        let registry = ProviderRegistry::new().with(std::sync::Arc::new(Stub {
+            meta: kage_provider::ProviderMetadata {
+                id: "p".to_owned(),
+                display_name: "p".to_owned(),
+                supports_caching: false,
+                supports_thinking: false,
+                supports_tool_use: true,
+            },
+            models: vec!["a", "b"],
+        }));
+        let items = available_model_items(&registry, "p:b");
+        assert_eq!(items.len(), 2);
+        let starred: Vec<_> = items.iter().filter(|i| i.badge == Some('*')).collect();
+        assert_eq!(starred.len(), 1);
+        assert_eq!(starred[0].value, "p:b");
+        // A stale active id badges nothing instead of the default row.
+        let stale = available_model_items(&registry, "p:gone");
+        assert!(stale.iter().all(|i| i.badge != Some('*')));
+    }
+
+    #[test]
     fn default_model_notice_only_when_configured_model_does_not_resolve() {
         let registry = ProviderRegistry::new().with(Arc::new(MockProvider::replaying(Vec::new())));
         assert!(default_model_notice(&registry, "mock:m", "mock:m").is_none());

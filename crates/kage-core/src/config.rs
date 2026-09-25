@@ -119,7 +119,8 @@ impl Config {
     ///
     /// The project file's `mcp`, `permissions` and
     /// `plugins.capabilities` tables are dropped unless the project is
-    /// trusted (see [`crate::trust`]).
+    /// trusted (see [`crate::trust`]). The project file's `providers` and
+    /// `acp` tables never apply: those are only read from the user config.
     pub fn load_layered(workdir: &Path) -> Result<Self> {
         let mut figment = Figment::new().merge(Serialized::defaults(Self::default()));
         if let Some(user) = Self::default_path() {

@@ -144,7 +144,7 @@ fn render(providers: &[SourceProvider]) -> String {
          #[allow(unused_imports)]\n\
          use super::{ModelCost, ModelInfo, ProviderInfo};\n\
          #[allow(unused_imports)]\n\
-         use kage_core::{Effort, Efforts, Input, Inputs, Reasoning};\n\
+         use kage_core::{Effort, Efforts, Input, Inputs, Reasoning, ReasoningField};\n\
          \n",
     );
     let _ = writeln!(out, "/// Static provider/model catalog.");
@@ -178,6 +178,12 @@ fn emit_model(out: &mut String, m: &SourceModel) {
     let _ = writeln!(out, "output: {},", opt_int(m.output));
     let _ = writeln!(out, "reasoning: {},", reasoning_expr(m.reasoning));
     let _ = writeln!(out, "input: {},", inputs_expr(m.input));
+    match m.interleaved {
+        Some(field) => {
+            let _ = writeln!(out, "interleaved: Some(ReasoningField::{field:?}),");
+        }
+        None => out.push_str("interleaved: None,\n"),
+    }
     let _ = writeln!(
         out,
         "release_date: {},",

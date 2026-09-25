@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use kage_core::{Effort, Efforts, Input, Inputs, Reasoning};
+use kage_core::{Effort, Efforts, Input, Inputs, Reasoning, ReasoningField};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -99,6 +99,10 @@ pub struct SourceModel {
     pub reasoning: Reasoning,
     /// Inputs the model accepts.
     pub input: Inputs,
+    /// Field an OpenAI-compatible model reads its reasoning back from
+    /// during a tool loop. `None` for models.dev `interleaved: true`,
+    /// which names no field.
+    pub interleaved: Option<ReasoningField>,
     /// Release date (`YYYY-MM-DD`).
     pub release_date: Option<String>,
     /// Pricing, when both input and output rates are published.
@@ -130,6 +134,8 @@ struct ApiModel {
     release_date: Option<String>,
     #[serde(default)]
     modalities: Option<ApiModalities>,
+    #[serde(default)]
+    interleaved: Option<Value>,
     #[serde(default)]
     limit: Option<ApiLimit>,
     #[serde(default)]
@@ -257,6 +263,11 @@ fn model(m: &ApiModel, api_id: &str) -> SourceModel {
             api_id,
         ),
         input,
+        interleaved: m
+            .interleaved
+            .as_ref()
+            .and_then(|v| v.get("field")?.as_str())
+            .and_then(ReasoningField::parse),
         release_date: m.release_date.clone(),
         cost,
     }
@@ -332,6 +343,7 @@ mod tests {
                 },
                 "claude-old": {
                     "id": "claude-old", "tool_call": true, "reasoning": true,
+                    "interleaved": true,
                     "reasoning_options": [{"type": "budget_tokens", "min": 1024}]
                 },
                 "no-tools": {"id": "no-tools", "tool_call": false},
@@ -345,6 +357,7 @@ mod tests {
                     "id": "glm", "name": "GLM", "tool_call": true, "reasoning": true,
                     "reasoning_options": [{"type": "toggle"}],
                     "modalities": {"input": ["text", "hologram"]},
+                    "interleaved": {"field": "reasoning_content"},
                     "limit": {"context": 400000, "input": 272000, "output": 32000}
                 }
             }
@@ -391,6 +404,8 @@ mod tests {
         assert_eq!(glm.reasoning, Reasoning::Toggle);
         assert_eq!(glm.input, Inputs::of(&[Input::Text]));
         assert_eq!(glm.input_limit, Some(272_000));
+        assert_eq!(glm.interleaved, Some(ReasoningField::ReasoningContent));
+        assert_eq!(anthropic.models[0].interleaved, None);
     }
 
     #[test]

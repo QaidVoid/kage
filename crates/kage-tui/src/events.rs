@@ -231,11 +231,14 @@ pub fn populate_from_history(
                                 buf.finish_streaming();
                             }
                         }
-                        Content::Thinking { text } => buf.push_thinking(text.clone()),
+                        Content::Thinking { text, .. } if !text.trim().is_empty() => {
+                            buf.push_thinking(text.clone());
+                        }
                         Content::ToolCall { id, name, input } => {
                             buf.push_tool_call(id.to_string(), name, input.clone());
                         }
-                        Content::ToolResultBlock { .. }
+                        Content::Thinking { .. }
+                        | Content::ToolResultBlock { .. }
                         | Content::Image { .. }
                         | Content::Custom { .. } => {}
                     }
@@ -848,6 +851,7 @@ mod tests {
             vec![
                 Content::Thinking {
                     text: "plan".into(),
+                    signature: None,
                 },
                 Content::ToolCall {
                     id: ToolCallId::new("c1"),
@@ -971,6 +975,7 @@ mod tests {
                 vec![
                     Content::Thinking {
                         text: "use ls".into(),
+                        signature: None,
                     },
                     Content::Text {
                         text: "looking now".into(),

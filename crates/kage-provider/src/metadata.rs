@@ -1,6 +1,6 @@
 //! Static description of a [`Provider`](crate::Provider) instance.
 
-use kage_core::{Inputs, Reasoning};
+use kage_core::{Inputs, Reasoning, ReasoningField};
 
 /// Description used by the registry, `kage doctor`, and the model picker UI.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -41,4 +41,7 @@ pub struct ProviderModel {
     pub reasoning: Reasoning,
     /// Inputs the model accepts. Empty when not declared.
     pub input: Inputs,
+    /// Field an OpenAI-compatible model reads its reasoning back from
+    /// during a tool loop, when it takes reasoning back.
+    pub interleaved: Option<ReasoningField>,
 }

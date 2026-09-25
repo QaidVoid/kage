@@ -126,7 +126,7 @@ variable that is unset (and has no saved key) is skipped; with
 `api_key_env = ""` it registers unconditionally, which is what
 keyless local endpoints want.
 
-Three optional model keys describe what a model accepts, since kage
+Four optional model keys describe what a model accepts, since kage
 has no catalog entry for it:
 
 - `reasoning`: `false` for a model that does not think, which sends no
@@ -137,6 +137,11 @@ has no catalog entry for it:
 - `input`: the kinds of input the model takes. Attaching an image to a
   model whose `input` leaves out `image` warns, and the image is not
   sent.
+- `interleaved`: for `kind = "openai"`, the assistant message field
+  the model reads its own reasoning back from during a tool loop,
+  `reasoning_content` or `reasoning_details` (the models.dev
+  `interleaved.field`). Left out, reasoning is sent as `<thinking>`
+  text in the message content.
 
 A model with neither `reasoning` nor `efforts` sends a level you pick
 unchanged, and no level while thinking is automatic.
@@ -183,6 +188,22 @@ models get `reasoning_effort` (`reasoning.effort` on the Responses
 API); Gemini models get `thinkingLevel` or `thinkingBudget`; and
 OpenAI-compatible models with an on/off switch get
 `thinking.type` `enabled` or `disabled`.
+
+Reasoning goes back to the model that produced it, so thinking carries
+across tool calls:
+
+- Anthropic gets its signed thinking and redacted thinking blocks back
+  unchanged, first in their assistant message. Budget thinking also
+  sends the `interleaved-thinking-2025-05-14` beta header.
+- Gemini gets each thought signature back on its function call.
+- The Responses API returns encrypted reasoning, which goes back as the
+  `encrypted_content` of its `reasoning` item.
+- OpenAI-compatible models with a catalog or config `interleaved`
+  field get the current turn's reasoning in that field. Earlier turns
+  leave it out.
+
+Anthropic and Gemini cannot verify thinking another model produced, so
+they get it as `<thinking>` text.
 
 ## base urls
 

@@ -377,6 +377,37 @@ impl Reasoning {
     }
 }
 
+/// The assistant message field an OpenAI-compatible model reads its
+/// own reasoning back from during a tool loop (models.dev
+/// `interleaved.field`).
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningField {
+    /// Reasoning text in `reasoning_content`.
+    ReasoningContent,
+    /// `OpenRouter` `reasoning_details` entries.
+    ReasoningDetails,
+}
+
+impl ReasoningField {
+    /// Wire name of the field.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReasoningContent => "reasoning_content",
+            Self::ReasoningDetails => "reasoning_details",
+        }
+    }
+
+    /// Parse a wire name produced by [`Self::as_str`].
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        [Self::ReasoningContent, Self::ReasoningDetails]
+            .into_iter()
+            .find(|f| f.as_str() == s)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

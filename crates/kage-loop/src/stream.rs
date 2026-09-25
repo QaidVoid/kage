@@ -6,7 +6,10 @@
 //! that includes executed tool outputs. This module owns the translation and
 //! the message-assembly state machine.
 
-use kage_core::{Content, LoopError, LoopEvent, Message, MessageId, Role, TokenUsage, ToolCallId};
+use kage_core::{
+    Content, LoopError, LoopEvent, Message, MessageId, Role, ThinkingSignature, TokenUsage,
+    ToolCallId,
+};
 use kage_provider::{EventStream, ProviderError, ProviderEvent};
 
 /// Output of consuming one provider stream.
@@ -48,7 +51,8 @@ pub(crate) struct PendingToolCall {
 }
 
 /// Drain `stream` into a finished message + tool-call manifest, emitting
-/// [`LoopEvent`]s along the way.
+/// [`LoopEvent`]s along the way. Thinking signatures are stamped with
+/// `model`, the model the request went to.
 ///
 /// The cancellation flag is polled between provider events. If it trips,
 /// the iterator is dropped (which signals the underlying HTTP request to
@@ -56,11 +60,12 @@ pub(crate) struct PendingToolCall {
 /// is returned.
 pub(crate) fn collect_turn<F: FnMut(LoopEvent)>(
     parent: Option<MessageId>,
+    model: &str,
     stream: EventStream,
     cancel: &kage_core::CancelFlag,
     emit: &mut F,
 ) -> Result<TurnResult, TurnFailure> {
-    let mut assembler = Assembler::new(parent);
+    let mut assembler = Assembler::new(parent, model);
     let mut started = false;
 
     for event in stream {
@@ -112,6 +117,8 @@ fn handle_event<F: FnMut(LoopEvent)>(
             assembler.push_thinking(&delta);
             emit(LoopEvent::ThinkingDelta { id, delta });
         }
+        ProviderEvent::ThinkingSignature { data } => assembler.sign_thinking(data),
+        ProviderEvent::RedactedThinking { data } => assembler.push_redacted(data),
         ProviderEvent::ToolCallStart { id: call_id, name } => {
             ensure_started(emit);
             emit(LoopEvent::ToolCallArgsDelta {
@@ -180,6 +187,7 @@ fn handle_event<F: FnMut(LoopEvent)>(
 struct Assembler {
     message_id: MessageId,
     parent: Option<MessageId>,
+    model: String,
     blocks: Vec<Content>,
     pending_tools: std::collections::HashMap<ToolCallId, String>,
     partial_args: std::collections::HashMap<ToolCallId, String>,
@@ -187,10 +195,11 @@ struct Assembler {
 }
 
 impl Assembler {
-    fn new(parent: Option<MessageId>) -> Self {
+    fn new(parent: Option<MessageId>, model: &str) -> Self {
         Self {
             message_id: MessageId::new(),
             parent,
+            model: model.to_owned(),
             blocks: Vec::new(),
             pending_tools: std::collections::HashMap::new(),
             partial_args: std::collections::HashMap::new(),
@@ -209,15 +218,54 @@ impl Assembler {
         }
     }
 
-    /// Append `delta` to the current thinking block, opening one if needed.
+    /// Append `delta` to the current thinking block, opening one if
+    /// needed. A signed block is closed, so its successor opens anew.
     fn push_thinking(&mut self, delta: &str) {
-        if let Some(Content::Thinking { text }) = self.blocks.last_mut() {
+        if let Some(Content::Thinking {
+            text,
+            signature: None,
+        }) = self.blocks.last_mut()
+        {
             text.push_str(delta);
         } else {
             self.blocks.push(Content::Thinking {
                 text: delta.to_owned(),
+                signature: None,
             });
         }
+    }
+
+    fn signature(&self, data: String, redacted: bool) -> ThinkingSignature {
+        ThinkingSignature {
+            model: self.model.clone(),
+            data,
+            redacted,
+        }
+    }
+
+    /// Sign the current thinking block with `data`, or record `data`
+    /// as an empty signed block when no unsigned block is in flight.
+    fn sign_thinking(&mut self, data: String) {
+        let signed = Some(self.signature(data, false));
+        if let Some(Content::Thinking { signature, .. }) = self.blocks.last_mut()
+            && signature.is_none()
+        {
+            *signature = signed;
+        } else {
+            self.blocks.push(Content::Thinking {
+                text: String::new(),
+                signature: signed,
+            });
+        }
+    }
+
+    /// Record a thinking block the provider sent encrypted only.
+    fn push_redacted(&mut self, data: String) {
+        let signature = Some(self.signature(data, true));
+        self.blocks.push(Content::Thinking {
+            text: String::new(),
+            signature,
+        });
     }
 
     fn begin_tool(&mut self, id: ToolCallId, name: String) {
@@ -272,7 +320,7 @@ mod tests {
             .stream(StreamRequest::new("m", vec![]), &cancel)
             .unwrap();
         let mut emitted = Vec::new();
-        collect_turn(None, stream, &cancel, &mut |ev| {
+        collect_turn(None, "m", stream, &cancel, &mut |ev| {
             emitted.push(ev);
         })
         .unwrap()
@@ -287,7 +335,7 @@ mod tests {
             .stream(StreamRequest::new("m", vec![]), &cancel)
             .unwrap();
         let mut emitted = Vec::new();
-        let res = collect_turn(None, stream, &cancel, &mut |ev| {
+        let res = collect_turn(None, "m", stream, &cancel, &mut |ev| {
             emitted.push(ev);
         })
         .unwrap();
@@ -384,12 +432,54 @@ mod tests {
         assert_eq!(result.message.content.len(), 2);
         assert!(matches!(
             &result.message.content[0],
-            Content::Thinking { text } if text == "ponder"
+            Content::Thinking { text, signature: None } if text == "ponder"
         ));
         assert!(matches!(
             &result.message.content[1],
             Content::Text { text } if text == "answer"
         ));
+    }
+
+    #[test]
+    fn signatures_close_thinking_blocks_and_carry_the_model() {
+        let result = run_collect(vec![
+            Ok(ProviderEvent::ThinkingDelta { delta: "a".into() }),
+            Ok(ProviderEvent::ThinkingSignature { data: "s1".into() }),
+            Ok(ProviderEvent::ThinkingDelta { delta: "b".into() }),
+            Ok(ProviderEvent::RedactedThinking { data: "enc".into() }),
+            Ok(ProviderEvent::TextDelta { delta: "t".into() }),
+            Ok(ProviderEvent::ThinkingSignature { data: "s2".into() }),
+            Ok(end_event()),
+        ]);
+        let sig = |data: &str, redacted| {
+            Some(ThinkingSignature {
+                model: "m".into(),
+                data: data.into(),
+                redacted,
+            })
+        };
+        assert_eq!(
+            result.message.content,
+            vec![
+                Content::Thinking {
+                    text: "a".into(),
+                    signature: sig("s1", false),
+                },
+                Content::Thinking {
+                    text: "b".into(),
+                    signature: None,
+                },
+                Content::Thinking {
+                    text: String::new(),
+                    signature: sig("enc", true),
+                },
+                Content::Text { text: "t".into() },
+                Content::Thinking {
+                    text: String::new(),
+                    signature: sig("s2", false),
+                },
+            ]
+        );
     }
 
     #[test]
@@ -547,7 +637,7 @@ mod tests {
         let stream = mock
             .stream(StreamRequest::new("m", vec![]), &cancel)
             .unwrap();
-        let res = collect_turn(None, stream, &cancel, &mut |_| {});
+        let res = collect_turn(None, "m", stream, &cancel, &mut |_| {});
         assert!(matches!(
             res,
             Err(TurnFailure::Fatal(LoopError::Provider { .. }))
@@ -565,7 +655,7 @@ mod tests {
         let stream = mock
             .stream(StreamRequest::new("m", vec![]), &cancel)
             .unwrap();
-        let res = collect_turn(None, stream, &cancel, &mut |_| {});
+        let res = collect_turn(None, "m", stream, &cancel, &mut |_| {});
         assert!(matches!(res, Err(TurnFailure::Fatal(LoopError::Cancelled))));
     }
 
@@ -578,7 +668,7 @@ mod tests {
         let stream = mock
             .stream(StreamRequest::new("m", vec![]), &cancel)
             .unwrap();
-        let res = collect_turn(None, stream, &cancel, &mut |_| {});
+        let res = collect_turn(None, "m", stream, &cancel, &mut |_| {});
         // The original ProviderError is preserved (not stringified) so
         // the run loop can classify it; Auth is not transient.
         match res {
@@ -596,7 +686,7 @@ mod tests {
         let stream = mock
             .stream(StreamRequest::new("m", vec![]), &cancel)
             .unwrap();
-        match collect_turn(None, stream, &cancel, &mut |_| {}) {
+        match collect_turn(None, "m", stream, &cancel, &mut |_| {}) {
             Err(TurnFailure::Provider(e)) => assert!(e.is_transient()),
             other => panic!("expected a transient Provider failure, got {other:?}"),
         }
@@ -610,7 +700,7 @@ mod tests {
         let stream = mock
             .stream(StreamRequest::new("m", vec![]), &cancel)
             .unwrap();
-        let res = collect_turn(Some(parent), stream, &cancel, &mut |_| {}).unwrap();
+        let res = collect_turn(Some(parent), "m", stream, &cancel, &mut |_| {}).unwrap();
         assert_eq!(res.message.parent, Some(parent));
     }
 }

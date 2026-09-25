@@ -18,6 +18,9 @@ use crate::{
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4_096;
+/// Beta that lets manual (`enabled`) thinking think between tool calls
+/// on Claude 4 models up to 4.5. The API ignores it on other models.
+const INTERLEAVED_THINKING_BETA: &str = "interleaved-thinking-2025-05-14";
 
 /// Anthropic provider implementation.
 #[derive(Debug)]
@@ -104,7 +107,7 @@ pub(crate) fn build_request_body(req: &StreamRequest, stream: bool) -> Value {
     let mut messages: Vec<Value> = req
         .messages
         .iter()
-        .filter_map(internal_message_to_anthropic)
+        .filter_map(|m| internal_message_to_anthropic(m, &req.model))
         .collect();
     if let Some(last) = messages.last_mut() {
         mark_last_block_for_caching(last);
@@ -143,10 +146,11 @@ pub(crate) fn build_request_body(req: &StreamRequest, stream: bool) -> Value {
 /// Set the thinking fields for `req`. An explicit
 /// [`crate::ThinkingConfig`] budget wins. Otherwise the level goes out
 /// as adaptive thinking with an `output_config.effort` on effort
-/// models, and as a budget elsewhere. Thinking stays off a request
-/// that continues an assistant turn, see [`continues_assistant_turn`].
+/// models, and as a budget elsewhere. Budget thinking stays off a
+/// request that continues an unsigned assistant turn, see
+/// [`continues_unsigned_turn`].
 fn apply_thinking(body: &mut Value, req: &StreamRequest) {
-    let open = !continues_assistant_turn(req);
+    let open = !continues_unsigned_turn(req);
     if let Some(thinking) = &req.thinking {
         if open {
             body["thinking"] = enabled(thinking.budget_tokens);
@@ -160,9 +164,7 @@ fn apply_thinking(body: &mut Value, req: &StreamRequest) {
         Reasoning::None | Reasoning::Fixed => {}
         Reasoning::Effort { .. } => {
             if let Some(effort) = req.reasoning.effort(level) {
-                if open {
-                    body["thinking"] = serde_json::json!({"type": "adaptive"});
-                }
+                body["thinking"] = serde_json::json!({"type": "adaptive"});
                 body["output_config"] = serde_json::json!({"effort": effort.as_str()});
             } else if level.is_off() && req.reasoning.has_toggle() {
                 body["thinking"] = serde_json::json!({"type": "disabled"});
@@ -182,19 +184,39 @@ fn enabled(budget_tokens: u32) -> Value {
     serde_json::json!({"type": "enabled", "budget_tokens": budget_tokens})
 }
 
-/// Whether this request continues the final assistant turn: a tool
-/// result follows the last assistant message, so that turn is still
-/// open. With thinking enabled, the API requires an open assistant
-/// turn to lead with its signed thinking block. kage never persists
-/// signatures, so continuation requests drop thinking instead of
-/// sending a body the API rejects.
-fn continues_assistant_turn(req: &StreamRequest) -> bool {
+/// Whether this request continues an assistant turn that does not
+/// lead with a thinking block this model signed: a tool result follows
+/// the last assistant message, so that turn is still open. With budget
+/// thinking the API requires the open turn to lead with its signed
+/// thinking block, so such requests drop thinking instead of sending a
+/// body the API rejects. Adaptive thinking has no such rule.
+fn continues_unsigned_turn(req: &StreamRequest) -> bool {
     let Some(idx) = req.messages.iter().rposition(|m| m.role == Role::Assistant) else {
         return false;
     };
-    req.messages[idx + 1..]
+    let open = req.messages[idx + 1..]
         .iter()
-        .any(|m| m.role == Role::ToolResult)
+        .any(|m| m.role == Role::ToolResult);
+    let signed = matches!(
+        req.messages[idx].content.first(),
+        Some(Content::Thinking { signature: Some(sig), .. }) if sig.model == req.model
+    );
+    open && !signed
+}
+
+/// Add `beta` to the `anthropic-beta` header, joining a value the
+/// configured extras already set.
+fn add_beta(headers: &mut Vec<(String, String)>, beta: &str) {
+    match headers
+        .iter_mut()
+        .find(|(name, _)| name.eq_ignore_ascii_case("anthropic-beta"))
+    {
+        Some((_, value)) => {
+            value.push(',');
+            value.push_str(beta);
+        }
+        None => headers.push(("anthropic-beta".to_owned(), beta.to_owned())),
+    }
 }
 
 fn mark_last_block_for_caching(message: &mut Value) {
@@ -225,10 +247,10 @@ fn tool_spec_to_anthropic(spec: &ToolSpec) -> Value {
 ///
 /// Returns `None` for messages that should not be sent (system messages live
 /// in the top-level `system` field; custom plugin content has no wire form).
-fn internal_message_to_anthropic(msg: &Message) -> Option<Value> {
+fn internal_message_to_anthropic(msg: &Message, model: &str) -> Option<Value> {
     let (role, blocks) = match msg.role {
         Role::User => ("user", convert_user_blocks(&msg.content)),
-        Role::Assistant => ("assistant", convert_assistant_blocks(&msg.content)),
+        Role::Assistant => ("assistant", convert_assistant_blocks(&msg.content, model)),
         Role::ToolResult => ("user", convert_tool_result_blocks(&msg.content)),
         Role::System => return None,
     };
@@ -252,15 +274,31 @@ fn convert_user_blocks(blocks: &[Content]) -> Vec<Value> {
         .collect()
 }
 
-fn convert_assistant_blocks(blocks: &[Content]) -> Vec<Value> {
+/// Assistant blocks on the wire. Thinking `model` signed goes back
+/// unchanged, as the API asks; other thinking cannot be verified and
+/// goes as `<thinking>` text.
+fn convert_assistant_blocks(blocks: &[Content], model: &str) -> Vec<Value> {
     blocks
         .iter()
         .filter_map(|c| match c {
             Content::Text { text } => Some(serde_json::json!({"type":"text","text":text})),
-            Content::Thinking { text } => Some(serde_json::json!({
-                "type":"thinking",
-                "thinking":text,
+            Content::Thinking {
+                signature: Some(sig),
+                ..
+            } if sig.model == model && sig.redacted => Some(serde_json::json!({
+                "type": "redacted_thinking",
+                "data": sig.data,
             })),
+            Content::Thinking {
+                text,
+                signature: Some(sig),
+            } if sig.model == model => Some(serde_json::json!({
+                "type": "thinking",
+                "thinking": text,
+                "signature": sig.data,
+            })),
+            Content::Thinking { text, .. } => Content::flattened_thinking(text)
+                .map(|text| serde_json::json!({"type":"text","text":text})),
             Content::ToolCall { id, name, input } => Some(serde_json::json!({
                 "type":"tool_use",
                 "id": id.0,
@@ -313,6 +351,12 @@ impl Provider for AnthropicProvider {
         self.models.clone()
     }
 
+    /// Thinking this model signed goes back as native blocks, and other
+    /// thinking as `<thinking>` text, see [`build_request_body`].
+    fn preserves_thinking(&self) -> bool {
+        true
+    }
+
     fn stream(
         &self,
         req: StreamRequest,
@@ -323,7 +367,10 @@ impl Provider for AnthropicProvider {
         }
         let body = build_request_body(&req, true);
         let url = format!("{}/v1/messages", self.base_url);
-        let headers = self.request_headers();
+        let mut headers = self.request_headers();
+        if body["thinking"]["type"] == "enabled" {
+            add_beta(&mut headers, INTERLEAVED_THINKING_BETA);
+        }
         let response = crate::http::send(&self.client, cancel, url, move |agent, url| {
             let mut request = agent.post(url);
             for (name, value) in &headers {
@@ -468,6 +515,15 @@ impl AnthropicStream {
             "thinking" => {
                 self.state.blocks.insert(index, BlockBuilder::Thinking);
             }
+            "redacted_thinking" => {
+                let data = block
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                self.pending
+                    .push_back(Ok(ProviderEvent::RedactedThinking { data }));
+            }
             "tool_use" => {
                 let id_str = block
                     .get("id")
@@ -518,6 +574,15 @@ impl AnthropicStream {
                     .to_owned();
                 self.pending
                     .push_back(Ok(ProviderEvent::ThinkingDelta { delta: text }));
+            }
+            "signature_delta" => {
+                let data = delta
+                    .get("signature")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned();
+                self.pending
+                    .push_back(Ok(ProviderEvent::ThinkingSignature { data }));
             }
             "input_json_delta" => {
                 let partial = delta
@@ -659,6 +724,33 @@ mod thinking_tests {
         let body = build_request_body(&request(r, ThinkingLevel::High), false);
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 20_000);
+    }
+
+    #[test]
+    fn adaptive_thinking_stays_on_for_an_unsigned_continuation() {
+        let r = effort(&[Effort::Low, Effort::High], false);
+        let mut req = request(r, ThinkingLevel::High);
+        req.messages.push(Message::new(
+            Role::Assistant,
+            vec![Content::ToolCall {
+                id: ToolCallId::new("call_1"),
+                name: "bash".into(),
+                input: serde_json::json!({}),
+            }],
+            None,
+        ));
+        req.messages.push(Message::new(
+            Role::ToolResult,
+            vec![Content::ToolResultBlock {
+                call_id: ToolCallId::new("call_1"),
+                output: "ok".into(),
+                is_error: false,
+            }],
+            None,
+        ));
+        let body = build_request_body(&req, true);
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "high");
     }
 
     #[test]

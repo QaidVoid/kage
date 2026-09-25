@@ -189,7 +189,7 @@ fn serialize_conversation(messages: &[Message]) -> String {
         out.push_str(" ===\n");
         for block in &msg.content {
             match block {
-                Content::Text { text } | Content::Thinking { text } => {
+                Content::Text { text } | Content::Thinking { text, .. } => {
                     out.push_str(text);
                     out.push('\n');
                 }

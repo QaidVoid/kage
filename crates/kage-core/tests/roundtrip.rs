@@ -25,7 +25,10 @@ fn message_roundtrips() {
 fn all_content_variants_roundtrip() {
     let blocks = [
         Content::Text { text: "x".into() },
-        Content::Thinking { text: "y".into() },
+        Content::Thinking {
+            text: "y".into(),
+            signature: None,
+        },
         Content::Image {
             source: ImageSource::Url {
                 url: "https://example.com/x.png".into(),

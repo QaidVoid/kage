@@ -28,6 +28,7 @@ fn model_entry(
             max_output: m.output.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
             reasoning: m.reasoning,
             input: m.input,
+            interleaved: m.interleaved,
         });
     }
     registry

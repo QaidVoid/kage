@@ -24,6 +24,20 @@ pub enum ProviderEvent {
         /// Thinking chunk to append.
         delta: String,
     },
+    /// Opaque data that closes the thinking block in flight and that
+    /// the provider needs back to replay it: an Anthropic signature, a
+    /// Gemini thought signature, encrypted reasoning. Stands alone as an
+    /// empty thinking block when no block is in flight.
+    ThinkingSignature {
+        /// The provider's opaque value.
+        data: String,
+    },
+    /// A thinking block the provider sent encrypted only (Anthropic
+    /// `redacted_thinking`).
+    RedactedThinking {
+        /// The encrypted block.
+        data: String,
+    },
     /// A tool call has begun. Followed by zero or more
     /// [`ProviderEvent::ToolCallArgsDelta`] then one
     /// [`ProviderEvent::ToolCallEnd`].

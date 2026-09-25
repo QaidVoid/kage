@@ -103,8 +103,8 @@ impl Provider for OpenAiResponsesProvider {
         &self.metadata
     }
 
-    /// Reasoning summaries stream back as ordinary text, so replaying
-    /// them as `reasoning` items is unsigned and accepted. Required for
+    /// Reasoning goes back as `reasoning` items: the summary text, plus
+    /// the encrypted reasoning when this model produced it. Required for
     /// reasoning models, whose `function_call` items must be preceded by
     /// their `reasoning` item on replay.
     fn preserves_thinking(&self) -> bool {
@@ -150,7 +150,7 @@ pub(crate) fn build_request_body(req: &StreamRequest, stream: bool) -> Value {
     let input: Vec<Value> = req
         .messages
         .iter()
-        .flat_map(internal_message_to_responses)
+        .flat_map(|m| internal_message_to_responses(m, &req.model))
         .collect();
 
     let mut body = serde_json::json!({
@@ -167,6 +167,7 @@ pub(crate) fn build_request_body(req: &StreamRequest, stream: bool) -> Value {
     }
     if let Some(effort) = reasoning_effort(req) {
         body["reasoning"] = serde_json::json!({ "effort": effort });
+        body["include"] = serde_json::json!(["reasoning.encrypted_content"]);
     }
     if !req.tools.is_empty() {
         body["tools"] = Value::Array(req.tools.iter().map(tool_spec_to_responses).collect());
@@ -204,7 +205,7 @@ fn tool_spec_to_responses(spec: &ToolSpec) -> Value {
 /// items. Assistant messages expand to a `message` item plus one
 /// `function_call` item per [`Content::ToolCall`]; tool results become
 /// `function_call_output` items.
-fn internal_message_to_responses(msg: &Message) -> Vec<Value> {
+fn internal_message_to_responses(msg: &Message, model: &str) -> Vec<Value> {
     match msg.role {
         Role::User => {
             let parts = convert_user_parts(&msg.content);
@@ -218,7 +219,7 @@ fn internal_message_to_responses(msg: &Message) -> Vec<Value> {
                 })]
             }
         }
-        Role::Assistant => convert_assistant_items(&msg.content),
+        Role::Assistant => convert_assistant_items(&msg.content, model),
         Role::ToolResult => convert_tool_result_items(&msg.content),
         Role::System => Vec::new(),
     }
@@ -235,7 +236,9 @@ fn convert_user_parts(blocks: &[Content]) -> Vec<Value> {
         .collect()
 }
 
-fn convert_assistant_items(blocks: &[Content]) -> Vec<Value> {
+/// Assistant items on the wire. Encrypted reasoning goes back only to
+/// the `model` that produced it.
+fn convert_assistant_items(blocks: &[Content], model: &str) -> Vec<Value> {
     let mut items: Vec<Value> = Vec::new();
     let mut text_parts: Vec<Value> = Vec::new();
     for block in blocks {
@@ -243,12 +246,24 @@ fn convert_assistant_items(blocks: &[Content]) -> Vec<Value> {
             Content::Text { text } => {
                 text_parts.push(serde_json::json!({"type":"output_text","text":text}));
             }
-            Content::Thinking { text } if !text.trim().is_empty() => {
+            Content::Thinking { text, signature } => {
+                let encrypted = signature
+                    .as_ref()
+                    .filter(|s| s.model == model && !s.redacted);
+                if text.trim().is_empty() && encrypted.is_none() {
+                    continue;
+                }
                 flush_assistant_text(&mut items, &mut text_parts);
-                items.push(serde_json::json!({
-                    "type": "reasoning",
-                    "summary": [{"type": "summary_text", "text": text}],
-                }));
+                let summary: Vec<Value> = if text.trim().is_empty() {
+                    Vec::new()
+                } else {
+                    vec![serde_json::json!({"type": "summary_text", "text": text})]
+                };
+                let mut item = serde_json::json!({"type": "reasoning", "summary": summary});
+                if let Some(sig) = encrypted {
+                    item["encrypted_content"] = Value::String(sig.data.clone());
+                }
+                items.push(item);
             }
             Content::ToolCall { id, name, input } => {
                 flush_assistant_text(&mut items, &mut text_parts);
@@ -499,6 +514,17 @@ impl ResponsesStream {
             .pointer("/item/type")
             .and_then(Value::as_str)
             .unwrap_or("");
+        if item_type == "reasoning" {
+            if let Some(data) = value
+                .pointer("/item/encrypted_content")
+                .and_then(Value::as_str)
+            {
+                self.pending.push_back(Ok(ProviderEvent::ThinkingSignature {
+                    data: data.to_owned(),
+                }));
+            }
+            return;
+        }
         if item_type != "function_call" {
             return;
         }
@@ -740,6 +766,7 @@ mod tests {
             vec![
                 Content::Thinking {
                     text: "need the file first".into(),
+                    signature: None,
                 },
                 Content::ToolCall {
                     id: ToolCallId::new("call_1"),
@@ -760,11 +787,70 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_reasoning_goes_back_to_its_own_model() {
+        let assistant = Message::new(
+            Role::Assistant,
+            vec![
+                Content::Thinking {
+                    text: String::new(),
+                    signature: Some(kage_core::ThinkingSignature {
+                        model: "gpt-5".into(),
+                        data: "enc".into(),
+                        redacted: false,
+                    }),
+                },
+                Content::ToolCall {
+                    id: ToolCallId::new("call_1"),
+                    name: "read".into(),
+                    input: serde_json::json!({}),
+                },
+            ],
+            None,
+        );
+        let history = vec![user_msg("read"), assistant];
+        let body = build_request_body(&StreamRequest::new("gpt-5", history.clone()), true);
+        assert_eq!(
+            body["input"][1],
+            serde_json::json!({"type": "reasoning", "summary": [], "encrypted_content": "enc"})
+        );
+        let body = build_request_body(&StreamRequest::new("gpt-5.1", history), true);
+        assert_eq!(body["input"][1]["type"], "function_call");
+    }
+
+    #[test]
+    fn reasoning_requests_ask_for_encrypted_reasoning() {
+        let mut req = StreamRequest::new("gpt-5", vec![user_msg("hi")]);
+        assert!(build_request_body(&req, true).get("include").is_none());
+        req.level = Some(crate::ThinkingLevel::High);
+        let body = build_request_body(&req, true);
+        assert_eq!(
+            body["include"],
+            serde_json::json!(["reasoning.encrypted_content"])
+        );
+    }
+
+    #[test]
+    fn stream_captures_encrypted_reasoning() {
+        let bytes: &[u8] = b"data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[],\"encrypted_content\":\"enc\"}}\n\ndata: [DONE]\n\n";
+        let events = collect_ok(ResponsesStream::new(
+            Box::new(std::io::Cursor::new(bytes)),
+            CancelFlag::new(),
+        ));
+        assert!(matches!(
+            &events[0],
+            ProviderEvent::ThinkingSignature { data } if data == "enc"
+        ));
+    }
+
+    #[test]
     fn blank_thinking_blocks_do_not_emit_reasoning_items() {
         let assistant = Message::new(
             Role::Assistant,
             vec![
-                Content::Thinking { text: "   ".into() },
+                Content::Thinking {
+                    text: "   ".into(),
+                    signature: None,
+                },
                 Content::Text {
                     text: "done".into(),
                 },
@@ -784,7 +870,10 @@ mod tests {
         let assistant = Message::new(
             Role::Assistant,
             vec![
-                Content::Thinking { text: "why".into() },
+                Content::Thinking {
+                    text: "why".into(),
+                    signature: None,
+                },
                 Content::Text {
                     text: "checking".into(),
                 },

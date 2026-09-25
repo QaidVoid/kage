@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use chrono::Utc;
-use kage_core::{Content, Message, Role, ToolCallId};
+use kage_core::{Content, Message, Role, ThinkingSignature, ToolCallId};
 use kage_session::{
     Compaction, EntryId, FORMAT_VERSION, Header, Label, MessageEntry, ModelChange, SessionEntry,
     SessionId, SessionReader, SessionWriter, fork, replay, resolve_entry_prefix, search,
@@ -83,6 +83,19 @@ fn full_round_trip_preserves_every_entry_kind() {
             vec![
                 Content::Thinking {
                     text: "thinking".into(),
+                    signature: Some(ThinkingSignature {
+                        model: "claude-sonnet-4-6".into(),
+                        data: "sig".into(),
+                        redacted: false,
+                    }),
+                },
+                Content::Thinking {
+                    text: String::new(),
+                    signature: Some(ThinkingSignature {
+                        model: "claude-sonnet-4-6".into(),
+                        data: "encrypted".into(),
+                        redacted: true,
+                    }),
                 },
                 Content::Text {
                     text: "answer".into(),
@@ -145,6 +158,37 @@ fn full_round_trip_preserves_every_entry_kind() {
     for (i, entry) in entries.iter().enumerate() {
         assert_eq!(&read_back[i + 1], entry);
     }
+}
+
+#[test]
+fn thinking_from_older_sessions_loads_and_writes_unchanged() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("old.jsonl");
+    let entry = SessionEntry::Message(MessageEntry {
+        id: EntryId::new(),
+        ts: Utc::now(),
+        message: Message::new(
+            Role::Assistant,
+            vec![Content::Thinking {
+                text: "hmm".into(),
+                signature: None,
+            }],
+            None,
+        ),
+        usage: None,
+    });
+    let mut w = SessionWriter::create(&path, fresh_header()).unwrap();
+    w.append(&entry).unwrap();
+    drop(w);
+
+    let raw = std::fs::read_to_string(&path).unwrap();
+    assert!(raw.contains(r#"{"type":"thinking","text":"hmm"}"#), "{raw}");
+    assert!(!raw.contains("signature"), "{raw}");
+    let read_back: Vec<SessionEntry> = SessionReader::iter(&path)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(read_back[1], entry);
 }
 
 #[test]

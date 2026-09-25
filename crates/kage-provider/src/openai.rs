@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufReader, Read};
 
-use kage_core::{CancelFlag, Content, Message, Reasoning, Role, ToolCallId};
+use kage_core::{CancelFlag, Content, Message, Reasoning, ReasoningField, Role, ToolCallId};
 use serde_json::Value;
 
 use crate::{
@@ -108,6 +108,15 @@ impl OpenAiProvider {
         }
         headers
     }
+
+    /// The field `model` reads its reasoning back from during a tool
+    /// loop, from the provider's own model list or the catalog.
+    fn interleaved(&self, model: &str) -> Option<ReasoningField> {
+        match self.models.iter().find(|m| m.id == model) {
+            Some(m) => m.interleaved,
+            None => crate::catalog::model(&self.metadata.id, model).and_then(|m| m.interleaved),
+        }
+    }
 }
 
 impl Provider for OpenAiProvider {
@@ -119,6 +128,13 @@ impl Provider for OpenAiProvider {
         self.models.clone()
     }
 
+    /// Interleaved models get the current turn's thinking in their
+    /// reasoning field; other models get it as `<thinking>` text, see
+    /// [`build_request_body`].
+    fn preserves_thinking(&self) -> bool {
+        true
+    }
+
     fn stream(
         &self,
         req: StreamRequest,
@@ -127,7 +143,8 @@ impl Provider for OpenAiProvider {
         if cancel.is_cancelled() {
             return Err(ProviderError::Cancelled);
         }
-        let body = build_request_body(&req, true);
+        let interleaved = self.interleaved(&req.model);
+        let body = build_request_body(&req, true, interleaved);
         let url = format!("{}/chat/completions", self.base_url);
         let headers = self.request_headers();
         let response = crate::http::send(&self.client, cancel, url, move |agent, url| {
@@ -144,13 +161,38 @@ impl Provider for OpenAiProvider {
         }
 
         let reader: Box<dyn Read + Send> = Box::new(response.into_body().into_reader());
-        let inner: EventStream = Box::new(OpenAiStream::new(reader, cancel.clone()));
+        let mut stream = OpenAiStream::new(reader, cancel.clone());
+        if interleaved == Some(ReasoningField::ReasoningDetails) {
+            stream = stream.keeping_reasoning_details();
+        }
+        let inner: EventStream = Box::new(stream);
         Ok(crate::cancelable::make_cancelable(inner, cancel.clone()))
     }
 }
 
-/// Build the JSON body for a Chat Completions request.
-pub(crate) fn build_request_body(req: &StreamRequest, stream: bool) -> Value {
+/// How assistant thinking goes out on one message.
+#[derive(Clone, Copy)]
+enum ThinkingReplay {
+    /// As `<thinking>` text in `content`, for models that do not take
+    /// reasoning back.
+    Text,
+    /// In the model's reasoning field, for the current turn of an
+    /// interleaved model.
+    Field(ReasoningField),
+    /// Left out, for earlier turns of an interleaved model.
+    Drop,
+}
+
+/// Build the JSON body for a Chat Completions request. `interleaved`
+/// names the field the model reads its reasoning back from: the
+/// current turn (everything after the last user message) carries its
+/// thinking there and earlier turns leave it out, as the providers
+/// ask. Without it, thinking goes as `<thinking>` text.
+pub(crate) fn build_request_body(
+    req: &StreamRequest,
+    stream: bool,
+    interleaved: Option<ReasoningField>,
+) -> Value {
     let mut messages: Vec<Value> = Vec::new();
     if let Some(system) = &req.system {
         messages.push(serde_json::json!({
@@ -158,8 +200,18 @@ pub(crate) fn build_request_body(req: &StreamRequest, stream: bool) -> Value {
             "content": system,
         }));
     }
-    for msg in &req.messages {
-        if let Some(converted) = internal_message_to_openai(msg) {
+    let turn_start = req
+        .messages
+        .iter()
+        .rposition(|m| m.role == Role::User)
+        .map_or(0, |i| i + 1);
+    for (i, msg) in req.messages.iter().enumerate() {
+        let replay = match interleaved {
+            None => ThinkingReplay::Text,
+            Some(field) if i >= turn_start => ThinkingReplay::Field(field),
+            Some(_) => ThinkingReplay::Drop,
+        };
+        if let Some(converted) = internal_message_to_openai(msg, replay, &req.model) {
             messages.extend(converted);
         }
     }
@@ -227,7 +279,11 @@ fn tool_spec_to_openai(spec: &ToolSpec) -> Value {
     })
 }
 
-fn internal_message_to_openai(msg: &Message) -> Option<Vec<Value>> {
+fn internal_message_to_openai(
+    msg: &Message,
+    replay: ThinkingReplay,
+    model: &str,
+) -> Option<Vec<Value>> {
     match msg.role {
         Role::User => {
             let blocks = convert_user_blocks(&msg.content);
@@ -240,7 +296,7 @@ fn internal_message_to_openai(msg: &Message) -> Option<Vec<Value>> {
                 })])
             }
         }
-        Role::Assistant => Some(vec![convert_assistant_message(&msg.content)]),
+        Role::Assistant => Some(vec![convert_assistant_message(&msg.content, replay, model)]),
         Role::ToolResult => Some(convert_tool_result_messages(&msg.content)),
         Role::System => None,
     }
@@ -257,12 +313,26 @@ fn convert_user_blocks(blocks: &[Content]) -> Vec<Value> {
         .collect()
 }
 
-fn convert_assistant_message(blocks: &[Content]) -> Value {
-    let mut text_parts: Vec<&str> = Vec::new();
+fn convert_assistant_message(blocks: &[Content], replay: ThinkingReplay, model: &str) -> Value {
+    let mut text_parts: Vec<String> = Vec::new();
     let mut tool_calls: Vec<Value> = Vec::new();
+    let mut reasoning = String::new();
+    let mut details: Vec<Value> = Vec::new();
     for block in blocks {
         match block {
-            Content::Text { text } => text_parts.push(text),
+            Content::Text { text } => text_parts.push(text.clone()),
+            Content::Thinking { text, signature } => match replay {
+                ThinkingReplay::Text => text_parts.extend(Content::flattened_thinking(text)),
+                ThinkingReplay::Field(_) => {
+                    reasoning.push_str(text);
+                    if let Some(sig) = signature.as_ref().filter(|s| s.model == model)
+                        && let Ok(Value::Array(entries)) = serde_json::from_str(&sig.data)
+                    {
+                        details.extend(entries);
+                    }
+                }
+                ThinkingReplay::Drop => {}
+            },
             Content::ToolCall { id, name, input } => {
                 tool_calls.push(serde_json::json!({
                     "id": id.0,
@@ -287,6 +357,20 @@ fn convert_assistant_message(blocks: &[Content]) -> Value {
     });
     if !tool_calls.is_empty() {
         msg["tool_calls"] = Value::Array(tool_calls);
+    }
+    match replay {
+        ThinkingReplay::Field(ReasoningField::ReasoningContent) if !reasoning.is_empty() => {
+            msg["reasoning_content"] = Value::String(reasoning);
+        }
+        ThinkingReplay::Field(ReasoningField::ReasoningDetails) => {
+            if details.is_empty() && !reasoning.is_empty() {
+                details.push(serde_json::json!({"type": "reasoning.text", "text": reasoning}));
+            }
+            if !details.is_empty() {
+                msg["reasoning_details"] = Value::Array(details);
+            }
+        }
+        _ => {}
     }
     msg
 }
@@ -333,6 +417,9 @@ pub struct OpenAiStream {
     finish_reason: StopReason,
     /// Token accounting from the final usage chunk.
     usage: kage_core::TokenUsage,
+    /// `OpenRouter` `reasoning_details` of the reasoning in flight;
+    /// `None` when the stream does not keep them.
+    details: Option<Vec<Value>>,
 }
 
 struct ToolCallBuilder {
@@ -354,11 +441,22 @@ impl OpenAiStream {
             tool_calls: BTreeMap::new(),
             finish_reason: StopReason::Other,
             usage: kage_core::TokenUsage::default(),
+            details: None,
         }
+    }
+
+    /// Keep the `reasoning_details` the model streams and hand them
+    /// over as the reasoning's [`ProviderEvent::ThinkingSignature`], for
+    /// models that read them back.
+    #[must_use]
+    pub fn keeping_reasoning_details(mut self) -> Self {
+        self.details = Some(Vec::new());
+        self
     }
 
     fn process_chunk(&mut self, data: &str) {
         if data == "[DONE]" {
+            self.flush_details();
             self.flush_pending_tool_calls();
             self.pending.push_back(Ok(ProviderEvent::MessageEnd {
                 stop_reason: self.finish_reason,
@@ -427,8 +525,16 @@ impl OpenAiStream {
                 delta: reasoning.to_owned(),
             }));
         }
+        if let Some(details) = self.details.as_mut()
+            && let Some(entries) = delta.get("reasoning_details").and_then(Value::as_array)
+        {
+            for entry in entries {
+                merge_detail(details, entry);
+            }
+        }
         if let Some(content) = delta.get("content").and_then(Value::as_str) {
             if !content.is_empty() {
+                self.flush_details();
                 self.pending.push_back(Ok(ProviderEvent::TextDelta {
                     delta: content.to_owned(),
                 }));
@@ -437,6 +543,7 @@ impl OpenAiStream {
         let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) else {
             return;
         };
+        self.flush_details();
         for tc in tool_calls {
             self.process_tool_call_delta(tc);
         }
@@ -483,6 +590,17 @@ impl OpenAiStream {
                 }));
             }
         }
+    }
+
+    /// Close the reasoning in flight with the `reasoning_details` kept
+    /// for it.
+    fn flush_details(&mut self) {
+        let Some(details) = self.details.as_mut().filter(|d| !d.is_empty()) else {
+            return;
+        };
+        let data = Value::Array(std::mem::take(details)).to_string();
+        self.pending
+            .push_back(Ok(ProviderEvent::ThinkingSignature { data }));
     }
 
     fn flush_pending_tool_calls(&mut self) {
@@ -551,6 +669,36 @@ impl Iterator for OpenAiStream {
     }
 }
 
+/// Add a streamed `reasoning_details` entry, extending the last entry
+/// when it continues it (same `type` and `index`), so a block streamed
+/// in many chunks is kept as one entry.
+fn merge_detail(details: &mut Vec<Value>, entry: &Value) {
+    let Some(fields) = entry.as_object() else {
+        return;
+    };
+    let continues = details.last().is_some_and(|last| {
+        last.get("type") == entry.get("type") && last.get("index") == entry.get("index")
+    });
+    let Some(last) = details
+        .last_mut()
+        .and_then(Value::as_object_mut)
+        .filter(|_| continues)
+    else {
+        details.push(entry.clone());
+        return;
+    };
+    for (key, value) in fields {
+        let appends = matches!(key.as_str(), "text" | "summary" | "data");
+        match (last.get_mut(key), value) {
+            (_, Value::Null) => {}
+            (Some(Value::String(old)), Value::String(more)) if appends => old.push_str(more),
+            _ => {
+                last.insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
+
 fn parse_finish_reason(value: &str) -> StopReason {
     match value {
         "stop" => StopReason::EndTurn,
@@ -568,7 +716,7 @@ mod tests {
     #[test]
     fn body_includes_model_and_messages() {
         let req = StreamRequest::new("gpt-4o", vec![user_msg("hi")]);
-        let body = build_request_body(&req, false);
+        let body = build_request_body(&req, false, None);
         assert_eq!(body["model"], "gpt-4o");
         // max_tokens is deprecated on Chat Completions (and rejected for
         // reasoning models); the replacement must be sent instead.
@@ -583,7 +731,7 @@ mod tests {
     fn body_prepends_system_message() {
         let mut req = StreamRequest::new("m", vec![user_msg("hi")]);
         req.system = Some("you are kage".into());
-        let body = build_request_body(&req, false);
+        let body = build_request_body(&req, false, None);
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages[0]["role"], "system");
         assert_eq!(messages[0]["content"], "you are kage");
@@ -598,7 +746,7 @@ mod tests {
             description: "read a file".into(),
             schema: serde_json::json!({"type":"object"}),
         }];
-        let body = build_request_body(&req, false);
+        let body = build_request_body(&req, false, None);
         let tools = body["tools"].as_array().unwrap();
         assert_eq!(tools[0]["type"], "function");
         assert_eq!(tools[0]["function"]["name"], "read");
@@ -609,7 +757,7 @@ mod tests {
     fn body_translates_thinking_level_to_reasoning_effort() {
         let mut req = StreamRequest::new("gpt-5", vec![user_msg("hi")]);
         req.level = Some(crate::ThinkingLevel::Medium);
-        let body = build_request_body(&req, false);
+        let body = build_request_body(&req, false, None);
         assert_eq!(body["reasoning_effort"], "medium");
     }
 
@@ -617,7 +765,7 @@ mod tests {
     fn body_caps_xhigh_at_high_for_openai() {
         let mut req = StreamRequest::new("gpt-5", vec![user_msg("hi")]);
         req.level = Some(crate::ThinkingLevel::XHigh);
-        let body = build_request_body(&req, false);
+        let body = build_request_body(&req, false, None);
         assert_eq!(body["reasoning_effort"], "high");
     }
 
@@ -625,16 +773,16 @@ mod tests {
     fn body_omits_reasoning_effort_when_level_off() {
         let mut req = StreamRequest::new("gpt-5", vec![user_msg("hi")]);
         req.level = Some(crate::ThinkingLevel::Off);
-        let body = build_request_body(&req, false);
+        let body = build_request_body(&req, false, None);
         assert!(body.get("reasoning_effort").is_none());
     }
 
     #[test]
     fn body_includes_stream_options_only_when_streaming() {
         let req = StreamRequest::new("m", vec![user_msg("hi")]);
-        let body = build_request_body(&req, false);
+        let body = build_request_body(&req, false, None);
         assert!(body.get("stream_options").is_none());
-        let body = build_request_body(&req, true);
+        let body = build_request_body(&req, true, None);
         assert_eq!(body["stream_options"]["include_usage"], true);
     }
 
@@ -650,7 +798,7 @@ mod tests {
             None,
         );
         let req = StreamRequest::new("m", vec![user_msg("read"), assistant]);
-        let body = build_request_body(&req, false);
+        let body = build_request_body(&req, false, None);
         let messages = body["messages"].as_array().unwrap();
         let last = &messages[messages.len() - 1];
         assert_eq!(last["role"], "assistant");
@@ -675,7 +823,7 @@ mod tests {
             None,
         );
         let req = StreamRequest::new("m", vec![result]);
-        let body = build_request_body(&req, false);
+        let body = build_request_body(&req, false, None);
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages[0]["role"], "tool");
         assert_eq!(messages[0]["tool_call_id"], "call_1");
@@ -866,6 +1014,165 @@ mod tests {
         assert!(headers.contains(&("X-A".to_owned(), "1".to_owned())));
     }
 
+    fn thinking(text: &str, signature: Option<kage_core::ThinkingSignature>) -> Content {
+        Content::Thinking {
+            text: text.to_owned(),
+            signature,
+        }
+    }
+
+    fn tool_loop_history() -> Vec<Message> {
+        vec![
+            user_msg("first"),
+            Message::new(
+                Role::Assistant,
+                vec![
+                    thinking("old reasoning", None),
+                    Content::Text {
+                        text: "answer".into(),
+                    },
+                ],
+                None,
+            ),
+            user_msg("second"),
+            Message::new(
+                Role::Assistant,
+                vec![
+                    thinking("need a file", None),
+                    Content::ToolCall {
+                        id: ToolCallId::new("call_1"),
+                        name: "read".into(),
+                        input: serde_json::json!({}),
+                    },
+                ],
+                None,
+            ),
+            Message::new(
+                Role::ToolResult,
+                vec![Content::ToolResultBlock {
+                    call_id: ToolCallId::new("call_1"),
+                    output: "text".into(),
+                    is_error: false,
+                }],
+                None,
+            ),
+        ]
+    }
+
+    #[test]
+    fn interleaved_models_get_only_the_current_turns_reasoning() {
+        let req = StreamRequest::new("glm", tool_loop_history());
+        let body = build_request_body(&req, true, Some(ReasoningField::ReasoningContent));
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages[1]["content"], "answer");
+        assert!(messages[1].get("reasoning_content").is_none());
+        assert_eq!(messages[3]["reasoning_content"], "need a file");
+        assert!(messages[3]["content"].is_null());
+        assert_eq!(messages[3]["tool_calls"][0]["id"], "call_1");
+    }
+
+    #[test]
+    fn other_models_get_thinking_as_text_and_no_reasoning_field() {
+        let req = StreamRequest::new("gpt", tool_loop_history());
+        let body = build_request_body(&req, true, None);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(
+            messages[1]["content"],
+            "<thinking>\nold reasoning\n</thinking>answer"
+        );
+        assert_eq!(
+            messages[3]["content"],
+            "<thinking>\nneed a file\n</thinking>"
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|m| m.get("reasoning_content").is_none()
+                    && m.get("reasoning_details").is_none())
+        );
+    }
+
+    #[test]
+    fn reasoning_details_go_back_as_kept_or_built_from_text() {
+        let details = r#"[{"type":"reasoning.encrypted","data":"enc"}]"#;
+        let signed = Some(kage_core::ThinkingSignature {
+            model: "gemini-3".into(),
+            data: details.into(),
+            redacted: false,
+        });
+        let mut history = tool_loop_history();
+        history[3].content[0] = thinking("need a file", signed);
+        let req = StreamRequest::new("gemini-3", history.clone());
+        let body = build_request_body(&req, true, Some(ReasoningField::ReasoningDetails));
+        assert_eq!(
+            body["messages"][3]["reasoning_details"],
+            serde_json::json!([{"type": "reasoning.encrypted", "data": "enc"}])
+        );
+        let req = StreamRequest::new("kimi", history);
+        let body = build_request_body(&req, true, Some(ReasoningField::ReasoningDetails));
+        assert_eq!(
+            body["messages"][3]["reasoning_details"],
+            serde_json::json!([{"type": "reasoning.text", "text": "need a file"}])
+        );
+    }
+
+    #[test]
+    fn interleaved_field_comes_from_own_models_then_catalog() {
+        let custom = OpenAiProvider::new("k").with_models(vec![ProviderModel {
+            id: "local".into(),
+            interleaved: Some(ReasoningField::ReasoningContent),
+            ..ProviderModel::default()
+        }]);
+        assert_eq!(
+            custom.interleaved("local"),
+            Some(ReasoningField::ReasoningContent)
+        );
+        assert_eq!(custom.interleaved("gpt-5"), None);
+        let deepseek = crate::compat::COMPAT_PROVIDERS
+            .iter()
+            .find(|p| p.id == "deepseek")
+            .unwrap()
+            .build("k");
+        assert_eq!(
+            deepseek.interleaved("deepseek-v4-pro"),
+            Some(ReasoningField::ReasoningContent)
+        );
+    }
+
+    #[test]
+    fn stream_keeps_reasoning_details_merged_before_the_tool_call() {
+        let bytes: &[u8] = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"let \",\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"let \",\"index\":0,\"format\":\"x\"}]}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning\":\"me\",\"reasoning_details\":[{\"type\":\"reasoning.text\",\"text\":\"me\",\"index\":0,\"signature\":\"s\"}]}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read\",\"arguments\":\"{}\"}}]}}]}\n\ndata: [DONE]\n\n";
+        let stream = OpenAiStream::new(Box::new(std::io::Cursor::new(bytes)), CancelFlag::new())
+            .keeping_reasoning_details();
+        let events = collect_ok(stream);
+        let sig = events
+            .iter()
+            .position(|e| matches!(e, ProviderEvent::ThinkingSignature { .. }))
+            .expect("details kept");
+        let start = events
+            .iter()
+            .position(|e| matches!(e, ProviderEvent::ToolCallStart { .. }))
+            .unwrap();
+        assert!(sig < start);
+        let ProviderEvent::ThinkingSignature { data } = &events[sig] else {
+            unreachable!()
+        };
+        let details: Value = serde_json::from_str(data).unwrap();
+        assert_eq!(
+            details,
+            serde_json::json!([{
+                "type": "reasoning.text", "text": "let me", "index": 0,
+                "format": "x", "signature": "s",
+            }])
+        );
+        let plain = collect_ok(stream_from_bytes(bytes));
+        assert!(
+            !plain
+                .iter()
+                .any(|e| matches!(e, ProviderEvent::ThinkingSignature { .. }))
+        );
+    }
+
     #[test]
     fn with_models_overrides_advertised_models() {
         let models = vec![ProviderModel {
@@ -908,28 +1215,28 @@ mod thinking_tests {
             &[Effort::None, Effort::Low, Effort::High, Effort::Max],
             false,
         );
-        let body = build_request_body(&request(r, ThinkingLevel::XHigh), true);
+        let body = build_request_body(&request(r, ThinkingLevel::XHigh), true, None);
         assert_eq!(body["reasoning_effort"], "max");
-        let body = build_request_body(&request(r, ThinkingLevel::Off), true);
+        let body = build_request_body(&request(r, ThinkingLevel::Off), true, None);
         assert_eq!(body["reasoning_effort"], "none");
     }
 
     #[test]
     fn toggle_models_switch_thinking_on_and_off() {
-        let on = build_request_body(&request(Reasoning::Toggle, ThinkingLevel::High), true);
+        let on = build_request_body(&request(Reasoning::Toggle, ThinkingLevel::High), true, None);
         assert_eq!(on["thinking"]["type"], "enabled");
         assert!(on.get("reasoning_effort").is_none());
-        let off = build_request_body(&request(Reasoning::Toggle, ThinkingLevel::Off), true);
+        let off = build_request_body(&request(Reasoning::Toggle, ThinkingLevel::Off), true, None);
         assert_eq!(off["thinking"]["type"], "disabled");
         let r = effort(&[Effort::Low, Effort::High], true);
-        let off = build_request_body(&request(r, ThinkingLevel::Off), true);
+        let off = build_request_body(&request(r, ThinkingLevel::Off), true, None);
         assert_eq!(off["thinking"]["type"], "disabled");
         assert!(off.get("reasoning_effort").is_none());
     }
 
     #[test]
     fn fixed_models_send_nothing() {
-        let body = build_request_body(&request(Reasoning::Fixed, ThinkingLevel::High), true);
+        let body = build_request_body(&request(Reasoning::Fixed, ThinkingLevel::High), true, None);
         assert!(body.get("reasoning_effort").is_none());
         assert!(body.get("thinking").is_none());
     }

@@ -1140,7 +1140,9 @@ fn replay_updates(history: &[Message]) -> Vec<SessionUpdate> {
     for message in history {
         for block in &message.content {
             let update = match (message.role, block) {
-                (_, Content::Text { text } | Content::Thinking { text }) if text.is_empty() => None,
+                (_, Content::Text { text } | Content::Thinking { text, .. }) if text.is_empty() => {
+                    None
+                }
                 (Role::User, Content::Text { text }) => Some(user_chunk(ContentBlock::text(text))),
                 (Role::User, Content::Image { source, mime }) => {
                     Some(user_chunk(image_block(source, mime)))
@@ -1162,7 +1164,7 @@ fn replay_event(id: MessageId, block: &Content) -> Option<LoopEvent> {
             id,
             delta: text.clone(),
         }),
-        Content::Thinking { text } => Some(LoopEvent::ThinkingDelta {
+        Content::Thinking { text, .. } => Some(LoopEvent::ThinkingDelta {
             id,
             delta: text.clone(),
         }),
@@ -2409,6 +2411,7 @@ done
                     vec![
                         Content::Thinking {
                             text: "look around".into(),
+                            signature: None,
                         },
                         text("Listing."),
                         Content::ToolCall {

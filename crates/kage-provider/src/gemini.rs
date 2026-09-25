@@ -99,6 +99,12 @@ impl Provider for GeminiProvider {
         self.models.clone()
     }
 
+    /// Thought signatures go back on their function calls, and thinking
+    /// text as `<thinking>` text, see [`build_request_body`].
+    fn preserves_thinking(&self) -> bool {
+        true
+    }
+
     fn stream(
         &self,
         req: StreamRequest,
@@ -149,7 +155,7 @@ pub(crate) fn build_request_body(req: &StreamRequest) -> Value {
     let contents: Vec<Value> = req
         .messages
         .iter()
-        .filter_map(|msg| internal_message_to_gemini(msg, &names_by_id))
+        .filter_map(|msg| internal_message_to_gemini(msg, &names_by_id, &req.model))
         .collect();
 
     let mut body = serde_json::json!({
@@ -215,10 +221,11 @@ fn tool_spec_to_gemini(spec: &ToolSpec) -> Value {
 fn internal_message_to_gemini(
     msg: &Message,
     names_by_id: &HashMap<String, String>,
+    model: &str,
 ) -> Option<Value> {
     let (role, parts) = match msg.role {
         Role::User => ("user", convert_user_parts(&msg.content)),
-        Role::Assistant => ("model", convert_assistant_parts(&msg.content)),
+        Role::Assistant => ("model", convert_assistant_parts(&msg.content, model)),
         Role::ToolResult => ("user", convert_tool_result_parts(&msg.content, names_by_id)),
         Role::System => return None,
     };
@@ -242,20 +249,41 @@ fn convert_user_parts(blocks: &[Content]) -> Vec<Value> {
         .collect()
 }
 
-fn convert_assistant_parts(blocks: &[Content]) -> Vec<Value> {
-    blocks
-        .iter()
-        .filter_map(|c| match c {
-            Content::Text { text } => Some(serde_json::json!({"text": text})),
-            Content::ToolCall { name, input, .. } => Some(serde_json::json!({
-                "functionCall": {
-                    "name": name,
-                    "args": input,
-                },
-            })),
-            _ => None,
-        })
-        .collect()
+/// Model parts on the wire. A thought signature `model` produced goes
+/// back on the function call that follows it, which Gemini 3 requires
+/// for every step of the current turn. Other thinking goes as
+/// `<thinking>` text.
+fn convert_assistant_parts(blocks: &[Content], model: &str) -> Vec<Value> {
+    let mut parts = Vec::new();
+    let mut signature: Option<&str> = None;
+    for block in blocks {
+        match block {
+            Content::Text { text } => parts.push(serde_json::json!({"text": text})),
+            Content::Thinking {
+                signature: Some(sig),
+                ..
+            } if sig.model == model && !sig.redacted => signature = Some(&sig.data),
+            Content::Thinking { text, .. } => {
+                if let Some(text) = Content::flattened_thinking(text) {
+                    parts.push(serde_json::json!({"text": text}));
+                }
+            }
+            Content::ToolCall { name, input, .. } => {
+                let mut part = serde_json::json!({
+                    "functionCall": {
+                        "name": name,
+                        "args": input,
+                    },
+                });
+                if let Some(sig) = signature.take() {
+                    part["thoughtSignature"] = Value::String(sig.to_owned());
+                }
+                parts.push(part);
+            }
+            _ => {}
+        }
+    }
+    parts
 }
 
 fn convert_tool_result_parts(
@@ -408,6 +436,11 @@ impl GeminiStream {
             return;
         }
         if let Some(call) = part.get("functionCall") {
+            if let Some(data) = part.get("thoughtSignature").and_then(Value::as_str) {
+                self.pending.push_back(Ok(ProviderEvent::ThinkingSignature {
+                    data: data.to_owned(),
+                }));
+            }
             let name = call
                 .get("name")
                 .and_then(Value::as_str)
@@ -571,6 +604,59 @@ mod tests {
             contents[1]["parts"][0]["functionCall"]["args"]["path"],
             "/x"
         );
+    }
+
+    #[test]
+    fn thought_signature_goes_back_on_its_function_call() {
+        let signed = |model: &str| {
+            Some(kage_core::ThinkingSignature {
+                model: model.into(),
+                data: "sig".into(),
+                redacted: false,
+            })
+        };
+        let call = |id: &str| Content::ToolCall {
+            id: ToolCallId::new(id),
+            name: "read".into(),
+            input: serde_json::json!({}),
+        };
+        let assistant = Message::new(
+            Role::Assistant,
+            vec![
+                Content::Thinking {
+                    text: String::new(),
+                    signature: signed("gemini-3"),
+                },
+                call("a"),
+                call("b"),
+                Content::Thinking {
+                    text: "other model".into(),
+                    signature: signed("claude-x"),
+                },
+                call("c"),
+            ],
+            None,
+        );
+        let req = StreamRequest::new("gemini-3", vec![user_msg("read"), assistant]);
+        let body = build_request_body(&req);
+        let parts = body["contents"][1]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0]["thoughtSignature"], "sig");
+        assert_eq!(parts[0]["functionCall"]["name"], "read");
+        assert!(parts[1].get("thoughtSignature").is_none());
+        assert_eq!(parts[2]["text"], "<thinking>\nother model\n</thinking>");
+        assert!(parts[3].get("thoughtSignature").is_none());
+    }
+
+    #[test]
+    fn stream_captures_thought_signature_before_its_call() {
+        let bytes: &[u8] = b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"read\",\"args\":{}},\"thoughtSignature\":\"sig\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}]}\n\n";
+        let events = collect_ok(stream_from_bytes(bytes));
+        assert!(matches!(
+            &events[1],
+            ProviderEvent::ThinkingSignature { data } if data == "sig"
+        ));
+        assert!(matches!(&events[2], ProviderEvent::ToolCallStart { .. }));
     }
 
     #[test]

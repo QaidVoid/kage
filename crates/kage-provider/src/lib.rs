@@ -70,11 +70,12 @@ pub trait Provider: Send + Sync + std::fmt::Debug {
         Vec::new()
     }
 
-    /// Whether this provider replays `Content::Thinking` blocks back
-    /// to its upstream verbatim. When `true`, the loop skips the
-    /// flatten-to-`<thinking>` rewrite so the original reasoning
-    /// reaches the next turn. Default is `false` for providers that
-    /// drop or reject unsigned thinking blocks.
+    /// Whether this provider sends `Content::Thinking` blocks back to
+    /// its upstream itself. When `true`, the loop skips the
+    /// flatten-to-`<thinking>` rewrite and the provider decides per
+    /// block: native with the signature its model produced, or as
+    /// text. Default is `false` for providers that drop or reject
+    /// thinking blocks.
     fn preserves_thinking(&self) -> bool {
         false
     }

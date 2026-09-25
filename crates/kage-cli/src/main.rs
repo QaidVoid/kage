@@ -1091,6 +1091,7 @@ fn register_custom_providers(
                 max_output: m.max_output,
                 reasoning: m.reasoning(),
                 input: m.input,
+                interleaved: m.interleaved,
             })
             .collect();
         let provider: Arc<dyn kage_provider::Provider> = match cfg.kind {

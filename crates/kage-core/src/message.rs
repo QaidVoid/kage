@@ -77,8 +77,14 @@ pub enum Content {
     },
     /// Hidden chain-of-thought emitted by the model.
     Thinking {
-        /// The thinking body.
+        /// The thinking body. Empty when the provider sent the reasoning
+        /// encrypted only.
         text: String,
+        /// Opaque provider data needed to send the block back natively.
+        /// Absent for plain thinking and in sessions written before kage
+        /// kept it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        signature: Option<ThinkingSignature>,
     },
     /// An image attached to the message.
     Image {
@@ -112,6 +118,36 @@ pub enum Content {
         /// Arbitrary JSON payload.
         data: serde_json::Value,
     },
+}
+
+impl Content {
+    /// Thinking `text` framed as `<thinking>` text, the form kage sends
+    /// to a provider that cannot take a thinking block natively. `None`
+    /// for blank thinking.
+    #[must_use]
+    pub fn flattened_thinking(text: &str) -> Option<String> {
+        if text.trim().is_empty() {
+            return None;
+        }
+        Some(format!("<thinking>\n{text}\n</thinking>"))
+    }
+}
+
+/// Opaque data a provider attached to a thinking block: an Anthropic
+/// signature or redacted thinking, a Gemini thought signature, `OpenAI`
+/// encrypted reasoning, or `OpenRouter` reasoning details. Sending it
+/// back lets the provider verify the block and continue its reasoning.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThinkingSignature {
+    /// Model that produced the block. Providers send the data back only
+    /// to this model.
+    pub model: String,
+    /// The provider's opaque value.
+    pub data: String,
+    /// Whether `data` is a whole Anthropic redacted thinking block
+    /// rather than the signature of the text.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub redacted: bool,
 }
 
 /// Reference to an image, either remote or inline.
@@ -232,6 +268,11 @@ mod tests {
             content: vec![
                 Content::Thinking {
                     text: "let me think".into(),
+                    signature: Some(ThinkingSignature {
+                        model: "claude-x".into(),
+                        data: "sig".into(),
+                        redacted: false,
+                    }),
                 },
                 Content::Text {
                     text: "the answer is 42".into(),
@@ -269,6 +310,41 @@ mod tests {
     fn role_serializes_as_snake_case() {
         let json = serde_json::to_string(&Role::ToolResult).unwrap();
         assert_eq!(json, "\"tool_result\"");
+    }
+
+    #[test]
+    fn thinking_without_a_signature_reads_and_writes_as_before() {
+        let old = r#"{"type":"thinking","text":"hmm"}"#;
+        let block: Content = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            block,
+            Content::Thinking {
+                text: "hmm".into(),
+                signature: None,
+            }
+        );
+        assert_eq!(serde_json::to_string(&block).unwrap(), old);
+
+        let redacted = Content::Thinking {
+            text: String::new(),
+            signature: Some(ThinkingSignature {
+                model: "m".into(),
+                data: "enc".into(),
+                redacted: true,
+            }),
+        };
+        let json = serde_json::to_value(&redacted).unwrap();
+        assert_eq!(json["signature"]["redacted"], true);
+        assert_eq!(serde_json::from_value::<Content>(json).unwrap(), redacted);
+    }
+
+    #[test]
+    fn flattened_thinking_frames_text_and_skips_blank() {
+        assert_eq!(
+            Content::flattened_thinking("why").as_deref(),
+            Some("<thinking>\nwhy\n</thinking>")
+        );
+        assert_eq!(Content::flattened_thinking("  "), None);
     }
 
     #[test]

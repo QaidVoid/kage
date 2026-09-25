@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::testing::{collect_ok, user_msg};
-use kage_core::{Content, Message, Role};
+use kage_core::{Content, Message, Role, ThinkingSignature};
 
 fn assistant_tool_call(id: &str, name: &str) -> Message {
     Message::new(
@@ -26,6 +26,133 @@ fn tool_result(id: &str, output: &str) -> Message {
         }],
         None,
     )
+}
+
+fn signed(model: &str, data: &str, redacted: bool) -> ThinkingSignature {
+    ThinkingSignature {
+        model: model.to_owned(),
+        data: data.to_owned(),
+        redacted,
+    }
+}
+
+fn thinking_tool_call(text: &str, signature: ThinkingSignature) -> Message {
+    Message::new(
+        Role::Assistant,
+        vec![
+            Content::Thinking {
+                text: text.to_owned(),
+                signature: Some(signature),
+            },
+            Content::ToolCall {
+                id: ToolCallId::new("call_1"),
+                name: "bash".to_owned(),
+                input: serde_json::json!({}),
+            },
+        ],
+        None,
+    )
+}
+
+fn continuation(assistant: Message) -> StreamRequest {
+    let mut req = StreamRequest::new(
+        "claude-x",
+        vec![
+            user_msg("run it"),
+            assistant,
+            tool_result("call_1", "file.rs"),
+        ],
+    );
+    req.thinking = Some(crate::ThinkingConfig {
+        budget_tokens: 12_000,
+    });
+    req
+}
+
+#[test]
+fn continuation_keeps_signed_thinking_first_and_thinking_on() {
+    let req = continuation(thinking_tool_call(
+        "list files",
+        signed("claude-x", "sig", false),
+    ));
+    let body = build_request_body(&req, true);
+    assert_eq!(body["thinking"]["type"], "enabled");
+    let blocks = body["messages"][1]["content"].as_array().unwrap();
+    assert_eq!(
+        blocks[0],
+        serde_json::json!({"type": "thinking", "thinking": "list files", "signature": "sig"})
+    );
+    assert_eq!(blocks[1]["type"], "tool_use");
+}
+
+#[test]
+fn redacted_thinking_goes_back_as_redacted_block() {
+    let req = continuation(thinking_tool_call("", signed("claude-x", "enc", true)));
+    let body = build_request_body(&req, true);
+    assert_eq!(body["thinking"]["type"], "enabled");
+    assert_eq!(
+        body["messages"][1]["content"][0],
+        serde_json::json!({"type": "redacted_thinking", "data": "enc"})
+    );
+}
+
+#[test]
+fn thinking_another_model_signed_goes_as_text_and_drops_budget_thinking() {
+    let req = continuation(thinking_tool_call("plan", signed("gemini-3", "sig", false)));
+    let body = build_request_body(&req, true);
+    assert!(body.get("thinking").is_none());
+    let blocks = body["messages"][1]["content"].as_array().unwrap();
+    assert_eq!(blocks[0]["type"], "text");
+    assert_eq!(blocks[0]["text"], "<thinking>\nplan\n</thinking>");
+    assert!(blocks[0].get("signature").is_none());
+}
+
+#[test]
+fn earlier_turns_keep_their_signed_thinking() {
+    let mut req = StreamRequest::new(
+        "claude-x",
+        vec![
+            user_msg("run it"),
+            thinking_tool_call("first", signed("claude-x", "s1", false)),
+            tool_result("call_1", "ok"),
+            Message::new(
+                Role::Assistant,
+                vec![Content::Text {
+                    text: "done".into(),
+                }],
+                None,
+            ),
+            user_msg("next"),
+        ],
+    );
+    req.thinking = Some(crate::ThinkingConfig {
+        budget_tokens: 12_000,
+    });
+    let body = build_request_body(&req, false);
+    assert_eq!(body["thinking"]["type"], "enabled");
+    assert_eq!(body["messages"][1]["content"][0]["signature"], "s1");
+}
+
+#[test]
+fn add_beta_joins_a_configured_beta_header() {
+    let mut headers = vec![("Anthropic-Beta".to_owned(), "other".to_owned())];
+    add_beta(&mut headers, INTERLEAVED_THINKING_BETA);
+    assert_eq!(
+        headers,
+        vec![(
+            "Anthropic-Beta".to_owned(),
+            format!("other,{INTERLEAVED_THINKING_BETA}")
+        )]
+    );
+    let mut headers = Vec::new();
+    add_beta(&mut headers, INTERLEAVED_THINKING_BETA);
+    assert_eq!(
+        headers,
+        vec![(
+            "anthropic-beta".to_owned(),
+            INTERLEAVED_THINKING_BETA.to_owned()
+        )]
+    );
 }
 
 #[test]
@@ -363,6 +490,28 @@ fn stream_emits_thinking_delta() {
         events.iter().any(
             |e| matches!(e, ProviderEvent::ThinkingDelta { delta } if delta == "reasoning...")
         )
+    );
+}
+
+#[test]
+fn stream_captures_signature_and_redacted_thinking() {
+    let bytes: &[u8] = b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\",\"signature\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"hmm\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"EqQB\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"enc\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+    let events = collect_ok(stream_from_bytes(bytes));
+    assert_eq!(
+        events,
+        vec![
+            ProviderEvent::ThinkingDelta {
+                delta: "hmm".into()
+            },
+            ProviderEvent::ThinkingSignature {
+                data: "EqQB".into()
+            },
+            ProviderEvent::RedactedThinking { data: "enc".into() },
+            ProviderEvent::MessageEnd {
+                stop_reason: StopReason::default(),
+                usage: kage_core::TokenUsage::default(),
+            },
+        ]
     );
 }
 

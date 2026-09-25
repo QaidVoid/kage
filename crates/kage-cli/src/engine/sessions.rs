@@ -103,7 +103,7 @@ pub(crate) fn render_session_markdown(replay: &kage_session::ReplayResult) -> St
                     let _ = writeln!(md, "{text}");
                     let _ = writeln!(md);
                 }
-                Content::Thinking { text } => {
+                Content::Thinking { text, .. } => {
                     let _ = writeln!(md, "**thinking**");
                     let _ = writeln!(md);
                     for line in text.lines() {

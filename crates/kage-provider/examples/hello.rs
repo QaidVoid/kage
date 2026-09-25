@@ -86,7 +86,11 @@ fn main() {
     let mut text_started = false;
     for ev in stream {
         match ev {
-            Ok(ProviderEvent::MessageStart) => {}
+            Ok(
+                ProviderEvent::MessageStart
+                | ProviderEvent::ThinkingSignature { .. }
+                | ProviderEvent::RedactedThinking { .. },
+            ) => {}
             Ok(ProviderEvent::TextDelta { delta }) => {
                 let _ = stdout.write_all(delta.as_bytes());
                 let _ = stdout.flush();

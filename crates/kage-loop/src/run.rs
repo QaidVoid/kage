@@ -302,16 +302,13 @@ fn push_user_text<F: FnMut(LoopEvent)>(cx: &mut AgentContext, emit: &mut F, text
 /// Rewrite persisted `Content::Thinking` blocks into inline
 /// `<thinking>...</thinking>` text before a request is built.
 ///
-/// Thinking blocks are not portable across a request boundary. kage
-/// never persists the cryptographic signature Anthropic requires to
-/// replay a native thinking block, so sending one back is rejected by
-/// that API; the `OpenAI` chat-completions and Gemini providers drop
-/// unknown content silently, losing the reasoning chain outright.
-/// Switching models mid-session makes both failure modes worse.
-/// Flattening historical thinking to plain text keeps the reasoning
-/// visible to whatever provider runs the next turn, regardless of
-/// which produced it. Providers that can accept native blocks opt out
-/// via [`Provider::preserves_thinking`].
+/// Thinking blocks are not portable across providers: a native block
+/// needs the signature of the provider and model that produced it, and
+/// providers without thinking input drop unknown content silently,
+/// losing the reasoning chain outright. Flattening historical thinking
+/// to plain text keeps the reasoning visible to whatever provider runs
+/// the next turn, regardless of which produced it. Providers that send
+/// thinking back themselves opt out via [`Provider::preserves_thinking`].
 ///
 /// Only persisted history is touched. The in-flight assistant turn is
 /// not appended to `cx.history` until after it has streamed, so live
@@ -335,10 +332,9 @@ fn flatten_thinking(history: &[Message]) -> Vec<Message> {
                 .content
                 .iter()
                 .filter_map(|c| match c {
-                    Content::Thinking { text } if text.trim().is_empty() => None,
-                    Content::Thinking { text } => Some(Content::Text {
-                        text: format!("<thinking>\n{text}\n</thinking>"),
-                    }),
+                    Content::Thinking { text, .. } => {
+                        Content::flattened_thinking(text).map(|text| Content::Text { text })
+                    }
                     other => Some(other.clone()),
                 })
                 .collect();
@@ -387,10 +383,11 @@ fn stream_one_attempt<F: FnMut(LoopEvent)>(
     cancel: &CancelFlag,
     emit: &mut F,
 ) -> Result<TurnResult, TurnFailure> {
+    let model = req.model.clone();
     let stream = provider
         .stream(req, cancel)
         .map_err(TurnFailure::Provider)?;
-    collect_turn(parent, stream, cancel, emit)
+    collect_turn(parent, &model, stream, cancel, emit)
 }
 
 /// Backoff before retry `attempt` (1-based). A provider `retry_after`

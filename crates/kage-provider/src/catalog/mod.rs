@@ -19,7 +19,7 @@ pub mod source;
 use std::path::Path;
 use std::sync::OnceLock;
 
-use kage_core::{Inputs, Reasoning};
+use kage_core::{Inputs, Reasoning, ReasoningField};
 
 use source::{SourceModel, SourceProvider};
 
@@ -55,6 +55,9 @@ pub struct ModelInfo {
     pub reasoning: Reasoning,
     /// Inputs the model accepts.
     pub input: Inputs,
+    /// Field an OpenAI-compatible model reads its reasoning back from
+    /// during a tool loop (models.dev `interleaved.field`).
+    pub interleaved: Option<ReasoningField>,
     /// ISO-8601 date string the catalog associates with this model.
     pub release_date: Option<&'static str>,
     /// Per-million-token pricing in USD, when the catalog reports it.
@@ -192,6 +195,7 @@ fn leak_model(m: &SourceModel) -> ModelInfo {
         output: m.output,
         reasoning: m.reasoning,
         input: m.input,
+        interleaved: m.interleaved,
         release_date: m.release_date.as_deref().map(leak),
         cost: m.cost,
     }

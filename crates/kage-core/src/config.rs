@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::modality::Inputs;
 use crate::options::OptionValue;
 use crate::permissions::PermissionsConfig;
-use crate::thinking::{Efforts, Reasoning};
+use crate::thinking::{Efforts, Reasoning, ReasoningField};
 
 use crate::error::Result;
 
@@ -447,6 +447,12 @@ pub struct CustomProviderModel {
     /// `video`). Empty when unknown.
     #[serde(default, skip_serializing_if = "Inputs::is_empty")]
     pub input: Inputs,
+    /// Assistant message field (`reasoning_content` or
+    /// `reasoning_details`) an `openai` kind model reads its reasoning
+    /// back from during a tool loop. Unset keeps reasoning out of
+    /// requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interleaved: Option<ReasoningField>,
 }
 
 impl CustomProviderModel {
@@ -1438,6 +1444,7 @@ default = "ask"   # keep asking
                 name = "Thinker"
                 efforts = ["low", "high"]
                 input = ["text", "image"]
+                interleaved = "reasoning_content"
 
                 [[providers.custom.local.models]]
                 id = "plain"
@@ -1462,6 +1469,11 @@ default = "ask"   # keep asking
                 }
             );
             assert!(models[0].input.contains(crate::modality::Input::Image));
+            assert_eq!(
+                models[0].interleaved,
+                Some(ReasoningField::ReasoningContent)
+            );
+            assert_eq!(models[1].interleaved, None);
             assert_eq!(models[1].reasoning(), Reasoning::None);
             assert_eq!(models[2].reasoning(), Reasoning::Unknown);
             assert!(models[2].input.is_empty());

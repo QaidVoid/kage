@@ -7,7 +7,7 @@
 #[allow(unused_imports)]
 use super::{ModelCost, ModelInfo, ProviderInfo};
 #[allow(unused_imports)]
-use kage_core::{Effort, Efforts, Input, Inputs, Reasoning};
+use kage_core::{Effort, Efforts, Input, Inputs, Reasoning, ReasoningField};
 
 /// Static provider/model catalog.
 pub static PROVIDERS: &[ProviderInfo] = &[
@@ -33,6 +33,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-06-07"),
                 cost: Some(ModelCost {
                     input: 10.000000,
@@ -58,6 +59,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-01"),
                 cost: Some(ModelCost {
                     input: 10.000000,
@@ -78,6 +80,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-10-15"),
                 cost: Some(ModelCost {
                     input: 1.000000,
@@ -98,6 +101,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-10-15"),
                 cost: Some(ModelCost {
                     input: 1.000000,
@@ -118,6 +122,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-11-24"),
                 cost: Some(ModelCost {
                     input: 5.000000,
@@ -138,6 +143,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-11-24"),
                 cost: Some(ModelCost {
                     input: 5.000000,
@@ -158,6 +164,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-02-04"),
                 cost: Some(ModelCost {
                     input: 5.000000,
@@ -183,6 +190,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-04-14"),
                 cost: Some(ModelCost {
                     input: 5.000000,
@@ -208,6 +216,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-05-28"),
                 cost: Some(ModelCost {
                     input: 5.000000,
@@ -233,6 +242,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-07-24"),
                 cost: Some(ModelCost {
                     input: 5.000000,
@@ -258,6 +268,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 4.000000,
@@ -278,6 +289,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-09-29"),
                 cost: Some(ModelCost {
                     input: 3.000000,
@@ -298,6 +310,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-09-29"),
                 cost: Some(ModelCost {
                     input: 3.000000,
@@ -318,6 +331,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-02-17"),
                 cost: Some(ModelCost {
                     input: 3.000000,
@@ -343,6 +357,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-06-29"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -366,6 +381,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2023-11-06"),
                 cost: Some(ModelCost {
                     input: 30.000000,
@@ -382,6 +398,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2023-11-06"),
                 cost: Some(ModelCost {
                     input: 10.000000,
@@ -398,6 +415,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-04-14"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -414,6 +432,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-04-14"),
                 cost: Some(ModelCost {
                     input: 0.400000,
@@ -430,6 +449,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-04-14"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -446,6 +466,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2024-05-13"),
                 cost: Some(ModelCost {
                     input: 2.500000,
@@ -462,6 +483,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2024-05-13"),
                 cost: Some(ModelCost {
                     input: 5.000000,
@@ -478,6 +500,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2024-08-06"),
                 cost: Some(ModelCost {
                     input: 2.500000,
@@ -494,6 +517,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2024-11-20"),
                 cost: Some(ModelCost {
                     input: 2.500000,
@@ -510,6 +534,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2024-07-18"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -534,6 +559,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-08-07"),
                 cost: Some(ModelCost {
                     input: 1.250000,
@@ -558,6 +584,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-08-07"),
                 cost: Some(ModelCost {
                     input: 0.250000,
@@ -582,6 +609,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-08-07"),
                 cost: Some(ModelCost {
                     input: 0.050000,
@@ -601,6 +629,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-10-06"),
                 cost: Some(ModelCost {
                     input: 15.000000,
@@ -625,6 +654,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-11-13"),
                 cost: Some(ModelCost {
                     input: 1.250000,
@@ -650,6 +680,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-12-11"),
                 cost: Some(ModelCost {
                     input: 1.750000,
@@ -669,6 +700,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-12-11"),
                 cost: Some(ModelCost {
                     input: 1.750000,
@@ -688,6 +720,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-12-11"),
                 cost: Some(ModelCost {
                     input: 21.000000,
@@ -704,6 +737,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-03-03"),
                 cost: Some(ModelCost {
                     input: 1.750000,
@@ -729,6 +763,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-02-05"),
                 cost: Some(ModelCost {
                     input: 1.750000,
@@ -754,6 +789,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-02-05"),
                 cost: Some(ModelCost {
                     input: 1.750000,
@@ -779,6 +815,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-03-05"),
                 cost: Some(ModelCost {
                     input: 2.500000,
@@ -804,6 +841,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-03-17"),
                 cost: Some(ModelCost {
                     input: 0.750000,
@@ -829,6 +867,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-03-17"),
                 cost: Some(ModelCost {
                     input: 0.200000,
@@ -848,6 +887,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-03-05"),
                 cost: Some(ModelCost {
                     input: 30.000000,
@@ -873,6 +913,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-04-23"),
                 cost: Some(ModelCost {
                     input: 5.000000,
@@ -892,6 +933,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-04-23"),
                 cost: Some(ModelCost {
                     input: 30.000000,
@@ -918,6 +960,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-07-09"),
                 cost: Some(ModelCost {
                     input: 4.000000,
@@ -944,6 +987,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-07-09"),
                 cost: Some(ModelCost {
                     input: 0.200000,
@@ -970,6 +1014,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-07-09"),
                 cost: Some(ModelCost {
                     input: 4.000000,
@@ -996,6 +1041,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-07-09"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -1021,6 +1067,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-04"),
                 cost: Some(ModelCost {
                     input: 10.000000,
@@ -1047,6 +1094,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -1073,6 +1121,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -1098,6 +1147,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio]),
+                interleaved: None,
                 release_date: Some("2026-07-06"),
                 cost: Some(ModelCost {
                     input: 4.000000,
@@ -1117,6 +1167,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2024-12-05"),
                 cost: Some(ModelCost {
                     input: 15.000000,
@@ -1136,6 +1187,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-03-19"),
                 cost: Some(ModelCost {
                     input: 150.000000,
@@ -1155,6 +1207,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-04-16"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -1174,6 +1227,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-12-20"),
                 cost: Some(ModelCost {
                     input: 1.100000,
@@ -1193,6 +1247,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-06-10"),
                 cost: Some(ModelCost {
                     input: 20.000000,
@@ -1212,6 +1267,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-04-16"),
                 cost: Some(ModelCost {
                     input: 1.100000,
@@ -1235,6 +1291,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2023-11-06"),
                 cost: Some(ModelCost {
                     input: 30.000000,
@@ -1251,6 +1308,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2023-11-06"),
                 cost: Some(ModelCost {
                     input: 10.000000,
@@ -1267,6 +1325,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-04-14"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -1283,6 +1342,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-04-14"),
                 cost: Some(ModelCost {
                     input: 0.400000,
@@ -1299,6 +1359,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-04-14"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -1315,6 +1376,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2024-05-13"),
                 cost: Some(ModelCost {
                     input: 2.500000,
@@ -1331,6 +1393,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2024-05-13"),
                 cost: Some(ModelCost {
                     input: 5.000000,
@@ -1347,6 +1410,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2024-08-06"),
                 cost: Some(ModelCost {
                     input: 2.500000,
@@ -1363,6 +1427,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2024-11-20"),
                 cost: Some(ModelCost {
                     input: 2.500000,
@@ -1379,6 +1444,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2024-07-18"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -1403,6 +1469,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-08-07"),
                 cost: Some(ModelCost {
                     input: 1.250000,
@@ -1427,6 +1494,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-08-07"),
                 cost: Some(ModelCost {
                     input: 0.250000,
@@ -1451,6 +1519,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-08-07"),
                 cost: Some(ModelCost {
                     input: 0.050000,
@@ -1470,6 +1539,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-10-06"),
                 cost: Some(ModelCost {
                     input: 15.000000,
@@ -1494,6 +1564,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-11-13"),
                 cost: Some(ModelCost {
                     input: 1.250000,
@@ -1519,6 +1590,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-12-11"),
                 cost: Some(ModelCost {
                     input: 1.750000,
@@ -1538,6 +1610,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-12-11"),
                 cost: Some(ModelCost {
                     input: 1.750000,
@@ -1557,6 +1630,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-12-11"),
                 cost: Some(ModelCost {
                     input: 21.000000,
@@ -1573,6 +1647,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-03-03"),
                 cost: Some(ModelCost {
                     input: 1.750000,
@@ -1598,6 +1673,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-02-05"),
                 cost: Some(ModelCost {
                     input: 1.750000,
@@ -1623,6 +1699,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-02-05"),
                 cost: Some(ModelCost {
                     input: 1.750000,
@@ -1648,6 +1725,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-03-05"),
                 cost: Some(ModelCost {
                     input: 2.500000,
@@ -1673,6 +1751,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-03-17"),
                 cost: Some(ModelCost {
                     input: 0.750000,
@@ -1698,6 +1777,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-03-17"),
                 cost: Some(ModelCost {
                     input: 0.200000,
@@ -1717,6 +1797,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-03-05"),
                 cost: Some(ModelCost {
                     input: 30.000000,
@@ -1742,6 +1823,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-04-23"),
                 cost: Some(ModelCost {
                     input: 5.000000,
@@ -1761,6 +1843,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-04-23"),
                 cost: Some(ModelCost {
                     input: 30.000000,
@@ -1787,6 +1870,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-07-09"),
                 cost: Some(ModelCost {
                     input: 4.000000,
@@ -1813,6 +1897,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-07-09"),
                 cost: Some(ModelCost {
                     input: 0.200000,
@@ -1839,6 +1924,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-07-09"),
                 cost: Some(ModelCost {
                     input: 4.000000,
@@ -1865,6 +1951,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-07-09"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -1890,6 +1977,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-04"),
                 cost: Some(ModelCost {
                     input: 10.000000,
@@ -1916,6 +2004,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -1942,6 +2031,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -1967,6 +2057,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio]),
+                interleaved: None,
                 release_date: Some("2026-07-06"),
                 cost: Some(ModelCost {
                     input: 4.000000,
@@ -1986,6 +2077,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2024-12-05"),
                 cost: Some(ModelCost {
                     input: 15.000000,
@@ -2005,6 +2097,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-03-19"),
                 cost: Some(ModelCost {
                     input: 150.000000,
@@ -2024,6 +2117,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-04-16"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -2043,6 +2137,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-12-20"),
                 cost: Some(ModelCost {
                     input: 1.100000,
@@ -2062,6 +2157,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-06-10"),
                 cost: Some(ModelCost {
                     input: 20.000000,
@@ -2081,6 +2177,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-04-16"),
                 cost: Some(ModelCost {
                     input: 1.100000,
@@ -2104,6 +2201,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(98304),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-07-28"),
                 cost: Some(ModelCost {
                     input: 0.600000,
@@ -2120,6 +2218,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(98304),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-07-28"),
                 cost: Some(ModelCost {
                     input: 0.200000,
@@ -2136,6 +2235,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(98304),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-07-28"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -2152,6 +2252,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2025-08-11"),
                 cost: Some(ModelCost {
                     input: 0.600000,
@@ -2168,6 +2269,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-09-30"),
                 cost: Some(ModelCost {
                     input: 0.600000,
@@ -2184,6 +2286,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2025-12-08"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -2200,6 +2303,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2025-12-08"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -2216,6 +2320,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2025-12-22"),
                 cost: Some(ModelCost {
                     input: 0.600000,
@@ -2232,6 +2337,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-01-19"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -2248,6 +2354,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-01-19"),
                 cost: Some(ModelCost {
                     input: 0.070000,
@@ -2264,6 +2371,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-02-12"),
                 cost: Some(ModelCost {
                     input: 1.000000,
@@ -2280,6 +2388,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-03-16"),
                 cost: Some(ModelCost {
                     input: 1.200000,
@@ -2296,6 +2405,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-04-07"),
                 cost: Some(ModelCost {
                     input: 1.400000,
@@ -2315,6 +2425,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-06-13"),
                 cost: Some(ModelCost {
                     input: 1.400000,
@@ -2334,6 +2445,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-08-14"),
                 cost: Some(ModelCost {
                     input: 1.400000,
@@ -2353,6 +2465,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-08-26"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -2372,6 +2485,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-09-18"),
                 cost: Some(ModelCost {
                     input: 0.370000,
@@ -2388,6 +2502,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-04-01"),
                 cost: Some(ModelCost {
                     input: 1.200000,
@@ -2411,6 +2526,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2025-12-22"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -2427,6 +2543,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-03-16"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -2446,6 +2563,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-06-13"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -2465,6 +2583,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-06-13"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -2484,6 +2603,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-08-14"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -2503,6 +2623,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-08-26"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -2522,6 +2643,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-08-14"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -2548,6 +2670,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-09-10"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -2567,6 +2690,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-09-10"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -2586,6 +2710,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-09-10"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -2605,6 +2730,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-08-12"),
                 cost: Some(ModelCost {
                     input: 0.435000,
@@ -2628,6 +2754,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-07-23"),
                 cost: Some(ModelCost {
                     input: 0.050000,
@@ -2644,6 +2771,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-12-06"),
                 cost: Some(ModelCost {
                     input: 0.590000,
@@ -2663,6 +2791,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-08-05"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -2682,6 +2811,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-08-05"),
                 cost: Some(ModelCost {
                     input: 0.075000,
@@ -2701,6 +2831,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-10-29"),
                 cost: Some(ModelCost {
                     input: 0.075000,
@@ -2720,6 +2851,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-04-22"),
                 cost: Some(ModelCost {
                     input: 0.600000,
@@ -2744,6 +2876,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-08-14"),
                 cost: Some(ModelCost {
                     input: 0.800000,
@@ -2767,6 +2900,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-05-29"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -2783,6 +2917,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-12-09"),
                 cost: Some(ModelCost {
                     input: 0.400000,
@@ -2799,6 +2934,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-12-09"),
                 cost: Some(ModelCost {
                     input: 0.400000,
@@ -2815,6 +2951,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-07-10"),
                 cost: Some(ModelCost {
                     input: 0.400000,
@@ -2831,6 +2968,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-12-02"),
                 cost: Some(ModelCost {
                     input: 0.400000,
@@ -2847,6 +2985,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-05-07"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -2863,6 +3002,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-07-10"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -2879,6 +3019,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(256000),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-12-09"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -2895,6 +3036,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-03-17"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -2911,6 +3053,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-03-17"),
                 cost: Some(ModelCost {
                     input: 0.500000,
@@ -2927,6 +3070,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-10-01"),
                 cost: Some(ModelCost {
                     input: 0.040000,
@@ -2943,6 +3087,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-10-01"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -2959,6 +3104,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-11-18"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -2975,6 +3121,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2024-11-01"),
                 cost: Some(ModelCost {
                     input: 0.500000,
@@ -2991,6 +3138,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2024-11-01"),
                 cost: Some(ModelCost {
                     input: 0.500000,
@@ -3007,6 +3155,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-05-07"),
                 cost: Some(ModelCost {
                     input: 0.400000,
@@ -3023,6 +3172,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-08-12"),
                 cost: Some(ModelCost {
                     input: 0.400000,
@@ -3042,6 +3192,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-04-29"),
                 cost: Some(ModelCost {
                     input: 1.500000,
@@ -3061,6 +3212,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-04-29"),
                 cost: Some(ModelCost {
                     input: 1.500000,
@@ -3077,6 +3229,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-07-01"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -3093,6 +3246,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-06-20"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -3112,6 +3266,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-03-16"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -3131,6 +3286,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-03-16"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -3147,6 +3303,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8000),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2023-09-27"),
                 cost: Some(ModelCost {
                     input: 0.250000,
@@ -3163,6 +3320,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-07-01"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -3179,6 +3337,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-04-17"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -3195,6 +3354,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32000),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2023-12-11"),
                 cost: Some(ModelCost {
                     input: 0.700000,
@@ -3211,6 +3371,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2024-09-01"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -3227,6 +3388,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2024-11-01"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -3243,6 +3405,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32000),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Audio]),
+                interleaved: None,
                 release_date: Some("2025-07-15"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -3262,6 +3425,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-06-13"),
                 cost: Some(ModelCost {
                     input: 1.400000,
@@ -3281,6 +3445,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-08-14"),
                 cost: Some(ModelCost {
                     input: 1.400000,
@@ -3307,6 +3472,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-08-05"),
                 cost: Some(ModelCost {
                     input: 0.350000,
@@ -3331,6 +3497,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-08-14"),
                 cost: Some(ModelCost {
                     input: 0.990000,
@@ -3354,6 +3521,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(30000),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-03-09"),
                 cost: Some(ModelCost {
                     input: 1.250000,
@@ -3370,6 +3538,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(30000),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-03-09"),
                 cost: Some(ModelCost {
                     input: 1.250000,
@@ -3394,6 +3563,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-04-17"),
                 cost: Some(ModelCost {
                     input: 1.250000,
@@ -3413,6 +3583,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-07-08"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -3437,6 +3608,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-08-12"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -3461,6 +3633,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-21"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -3477,6 +3650,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(256000),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-04-16"),
                 cost: Some(ModelCost {
                     input: 1.000000,
@@ -3500,6 +3674,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-02-23"),
                 cost: Some(ModelCost {
                     input: 0.800000,
@@ -3516,6 +3691,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-07-07"),
                 cost: Some(ModelCost {
                     input: 3.000000,
@@ -3532,6 +3708,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-07-07"),
                 cost: Some(ModelCost {
                     input: 0.700000,
@@ -3551,6 +3728,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-09-23"),
                 cost: Some(ModelCost {
                     input: 3.000000,
@@ -3570,6 +3748,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-09-23"),
                 cost: Some(ModelCost {
                     input: 0.700000,
@@ -3586,6 +3765,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65535),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf, Input::Video]),
+                interleaved: None,
                 release_date: Some("2025-12-02"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -3602,6 +3782,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(5120),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2024-12-05"),
                 cost: Some(ModelCost {
                     input: 0.060000,
@@ -3618,6 +3799,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(5120),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-12-05"),
                 cost: Some(ModelCost {
                     input: 0.035000,
@@ -3634,6 +3816,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32000),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-10-31"),
                 cost: Some(ModelCost {
                     input: 2.500000,
@@ -3650,6 +3833,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(5120),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2024-12-05"),
                 cost: Some(ModelCost {
                     input: 0.800000,
@@ -3666,6 +3850,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2024-03-13"),
                 cost: Some(ModelCost {
                     input: 0.250000,
@@ -3691,6 +3876,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-06-09"),
                 cost: Some(ModelCost {
                     input: 10.000000,
@@ -3716,6 +3902,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-01"),
                 cost: Some(ModelCost {
                     input: 10.000000,
@@ -3732,6 +3919,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-10-15"),
                 cost: Some(ModelCost {
                     input: 1.000000,
@@ -3748,6 +3936,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32000),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-08-05"),
                 cost: Some(ModelCost {
                     input: 15.000000,
@@ -3764,6 +3953,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-11-24"),
                 cost: Some(ModelCost {
                     input: 5.000000,
@@ -3784,6 +3974,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-02-05"),
                 cost: Some(ModelCost {
                     input: 5.000000,
@@ -3809,6 +4000,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-04-16"),
                 cost: Some(ModelCost {
                     input: 5.000000,
@@ -3834,6 +4026,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-05-28"),
                 cost: Some(ModelCost {
                     input: 5.000000,
@@ -3859,6 +4052,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-07-24"),
                 cost: Some(ModelCost {
                     input: 5.000000,
@@ -3884,6 +4078,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 4.000000,
@@ -3900,6 +4095,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-05-22"),
                 cost: Some(ModelCost {
                     input: 3.000000,
@@ -3916,6 +4112,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-09-29"),
                 cost: Some(ModelCost {
                     input: 3.000000,
@@ -3935,6 +4132,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-02-17"),
                 cost: Some(ModelCost {
                     input: 3.000000,
@@ -3960,6 +4158,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-06-30"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -3976,6 +4175,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(80000),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-04-01"),
                 cost: Some(ModelCost {
                     input: 0.250000,
@@ -3992,6 +4192,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2025-12-23"),
                 cost: Some(ModelCost {
                     input: 0.250000,
@@ -4008,6 +4209,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2025-12-23"),
                 cost: Some(ModelCost {
                     input: 0.075000,
@@ -4024,6 +4226,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(235929),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-08-12"),
                 cost: Some(ModelCost {
                     input: 0.500000,
@@ -4043,6 +4246,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-02-14"),
                 cost: Some(ModelCost {
                     input: 0.500000,
@@ -4067,6 +4271,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-02-14"),
                 cost: Some(ModelCost {
                     input: 0.250000,
@@ -4091,6 +4296,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-02-14"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -4107,6 +4313,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -4123,6 +4330,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4000),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-08-30"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -4139,6 +4347,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4000),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-08-30"),
                 cost: Some(ModelCost {
                     input: 2.500000,
@@ -4155,6 +4364,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-06-17"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -4171,6 +4381,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-12-01"),
                 cost: Some(ModelCost {
                     input: 0.320000,
@@ -4187,6 +4398,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(147456),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-03-24"),
                 cost: Some(ModelCost {
                     input: 0.250000,
@@ -4203,6 +4415,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-08-21"),
                 cost: Some(ModelCost {
                     input: 0.250000,
@@ -4219,6 +4432,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16000),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-01-20"),
                 cost: Some(ModelCost {
                     input: 0.700000,
@@ -4235,6 +4449,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-05-28"),
                 cost: Some(ModelCost {
                     input: 0.500000,
@@ -4251,6 +4466,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-09-22"),
                 cost: Some(ModelCost {
                     input: 0.270000,
@@ -4267,6 +4483,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-12-01"),
                 cost: Some(ModelCost {
                     input: 0.269000,
@@ -4283,6 +4500,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-09-29"),
                 cost: Some(ModelCost {
                     input: 0.270000,
@@ -4302,6 +4520,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-04-24"),
                 cost: Some(ModelCost {
                     input: 0.049000,
@@ -4321,6 +4540,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-07-31"),
                 cost: Some(ModelCost {
                     input: 0.030000,
@@ -4340,6 +4560,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-08-21"),
                 cost: Some(ModelCost {
                     input: 0.220000,
@@ -4359,6 +4580,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-04-24"),
                 cost: Some(ModelCost {
                     input: 0.784044,
@@ -4378,6 +4600,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-08-12"),
                 cost: Some(ModelCost {
                     input: 0.462000,
@@ -4397,6 +4620,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-09-10"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -4413,6 +4637,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(460800),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-08-14"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -4432,6 +4657,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-09-24"),
                 cost: Some(ModelCost {
                     input: 3.000000,
@@ -4454,6 +4680,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2025-06-17"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -4476,6 +4703,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2025-06-17"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -4502,6 +4730,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2025-06-17"),
                 cost: Some(ModelCost {
                     input: 1.250000,
@@ -4522,6 +4751,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf, Input::Audio]),
+                interleaved: None,
                 release_date: Some("2025-06-05"),
                 cost: Some(ModelCost {
                     input: 1.250000,
@@ -4552,6 +4782,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: Some(ReasoningField::ReasoningDetails),
                 release_date: Some("2025-12-17"),
                 cost: Some(ModelCost {
                     input: 0.500000,
@@ -4568,6 +4799,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-05-28"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -4598,6 +4830,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-05-07"),
                 cost: Some(ModelCost {
                     input: 0.250000,
@@ -4628,6 +4861,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-03-03"),
                 cost: Some(ModelCost {
                     input: 0.250000,
@@ -4653,6 +4887,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: Some(ReasoningField::ReasoningDetails),
                 release_date: Some("2026-02-19"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -4678,6 +4913,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: Some(ReasoningField::ReasoningDetails),
                 release_date: Some("2026-02-19"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -4708,6 +4944,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-05-19"),
                 cost: Some(ModelCost {
                     input: 1.500000,
@@ -4738,6 +4975,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-07-21"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -4768,6 +5006,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-07-21"),
                 cost: Some(ModelCost {
                     input: 0.750000,
@@ -4793,6 +5032,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-08-13"),
                 cost: Some(ModelCost {
                     input: 0.750000,
@@ -4818,6 +5058,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-09-02"),
                 cost: Some(ModelCost {
                     input: 0.750000,
@@ -4834,6 +5075,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-03-12"),
                 cost: Some(ModelCost {
                     input: 0.050000,
@@ -4850,6 +5092,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(117964),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-03-12"),
                 cost: Some(ModelCost {
                     input: 0.080000,
@@ -4866,6 +5109,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(235929),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-04-02"),
                 cost: Some(ModelCost {
                     input: 0.090000,
@@ -4882,6 +5126,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-04-02"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -4898,6 +5143,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-04-02"),
                 cost: Some(ModelCost {
                     input: 0.090000,
@@ -4914,6 +5160,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-04-02"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -4933,6 +5180,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-08-31"),
                 cost: Some(ModelCost {
                     input: 0.060000,
@@ -4957,6 +5205,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-03-04"),
                 cost: Some(ModelCost {
                     input: 0.250000,
@@ -4981,6 +5230,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-09-08"),
                 cost: Some(ModelCost {
                     input: 0.040000,
@@ -4997,6 +5247,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-07-23"),
                 cost: Some(ModelCost {
                     input: 0.021000,
@@ -5013,6 +5264,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(235929),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-08-27"),
                 cost: Some(ModelCost {
                     input: 0.060000,
@@ -5029,6 +5281,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-08-27"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -5045,6 +5298,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-09-04"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -5061,6 +5315,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-09-10"),
                 cost: Some(ModelCost {
                     input: 0.060000,
@@ -5077,6 +5332,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(235929),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-07-10"),
                 cost: Some(ModelCost {
                     input: 0.740000,
@@ -5093,6 +5349,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-08-11"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -5113,6 +5370,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-07-20"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -5129,6 +5387,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-07-23"),
                 cost: Some(ModelCost {
                     input: 0.400000,
@@ -5145,6 +5404,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(117964),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-07-23"),
                 cost: Some(ModelCost {
                     input: 0.050000,
@@ -5161,6 +5421,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-12-06"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -5177,6 +5438,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-04-05"),
                 cost: Some(ModelCost {
                     input: 0.187500,
@@ -5193,6 +5455,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-04-05"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -5217,6 +5480,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-08-10"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -5248,6 +5512,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-04-08"),
                 cost: Some(ModelCost {
                     input: 1.250000,
@@ -5279,6 +5544,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-08-05"),
                 cost: Some(ModelCost {
                     input: 1.250000,
@@ -5310,6 +5576,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-08-21"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -5342,6 +5609,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-09-02"),
                 cost: Some(ModelCost {
                     input: 1.250000,
@@ -5374,6 +5642,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-09-02"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -5390,6 +5659,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(40000),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-06-17"),
                 cost: Some(ModelCost {
                     input: 0.400000,
@@ -5406,6 +5676,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(176947),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningDetails),
                 release_date: Some("2025-10-27"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -5422,6 +5693,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningDetails),
                 release_date: Some("2025-12-23"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -5438,6 +5710,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningDetails),
                 release_date: Some("2026-02-12"),
                 cost: Some(ModelCost {
                     input: 0.270000,
@@ -5454,6 +5727,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-03-18"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -5470,6 +5744,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(512000),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-06-01"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -5486,6 +5761,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(204800),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-08-01"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -5502,6 +5778,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(209715),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-12-09"),
                 cost: Some(ModelCost {
                     input: 0.400000,
@@ -5518,6 +5795,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(209715),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-12-02"),
                 cost: Some(ModelCost {
                     input: 0.200000,
@@ -5534,6 +5812,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(104857),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-12-02"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -5550,6 +5829,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(209715),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-12-02"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -5566,6 +5846,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(102400),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2024-02-26"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -5582,6 +5863,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(104857),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2024-11-19"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -5598,6 +5880,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(209715),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-12-02"),
                 cost: Some(ModelCost {
                     input: 0.500000,
@@ -5614,6 +5897,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(104857),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-05-07"),
                 cost: Some(ModelCost {
                     input: 0.400000,
@@ -5633,6 +5917,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-04-30"),
                 cost: Some(ModelCost {
                     input: 1.500000,
@@ -5649,6 +5934,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(104857),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-08-13"),
                 cost: Some(ModelCost {
                     input: 0.400000,
@@ -5665,6 +5951,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-07-01"),
                 cost: Some(ModelCost {
                     input: 0.019000,
@@ -5681,6 +5968,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(26214),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-02-17"),
                 cost: Some(ModelCost {
                     input: 0.200000,
@@ -5700,6 +5988,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-03-16"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -5716,6 +6005,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(102400),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-03-17"),
                 cost: Some(ModelCost {
                     input: 0.351000,
@@ -5732,6 +6022,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-06-20"),
                 cost: Some(ModelCost {
                     input: 0.093750,
@@ -5748,6 +6039,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(52428),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2024-04-17"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -5764,6 +6056,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(26214),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Pdf, Input::Audio]),
+                interleaved: None,
                 release_date: Some("2025-07-15"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -5780,6 +6073,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(98304),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-07-11"),
                 cost: Some(ModelCost {
                     input: 0.570000,
@@ -5796,6 +6090,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(98304),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-09-04"),
                 cost: Some(ModelCost {
                     input: 0.600000,
@@ -5812,6 +6107,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(98304),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningDetails),
                 release_date: Some("2025-11-06"),
                 cost: Some(ModelCost {
                     input: 0.600000,
@@ -5828,6 +6124,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(235929),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: Some(ReasoningField::ReasoningDetails),
                 release_date: Some("2026-01"),
                 cost: Some(ModelCost {
                     input: 0.450000,
@@ -5844,6 +6141,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(235929),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: Some(ReasoningField::ReasoningDetails),
                 release_date: Some("2026-04-21"),
                 cost: Some(ModelCost {
                     input: 0.950000,
@@ -5860,6 +6158,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(235929),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-06-12"),
                 cost: Some(ModelCost {
                     input: 0.656200,
@@ -5879,6 +6178,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-07-16"),
                 cost: Some(ModelCost {
                     input: 0.884500,
@@ -5898,6 +6198,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-09-08"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -5917,6 +6218,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-09-08"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -5933,6 +6235,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(235929),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-12-15"),
                 cost: Some(ModelCost {
                     input: 0.050000,
@@ -5953,6 +6256,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-04-28"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -5973,6 +6277,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-03-11"),
                 cost: Some(ModelCost {
                     input: 0.080000,
@@ -5993,6 +6298,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-03-11"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -6013,6 +6319,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-06-04"),
                 cost: Some(ModelCost {
                     input: 0.600000,
@@ -6033,6 +6340,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-06-04"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -6049,6 +6357,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-08-11"),
                 cost: Some(ModelCost {
                     input: 0.080000,
@@ -6065,6 +6374,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-08-11"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -6081,6 +6391,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2023-03-01"),
                 cost: Some(ModelCost {
                     input: 0.500000,
@@ -6097,6 +6408,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(3685),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-01-25"),
                 cost: Some(ModelCost {
                     input: 1.000000,
@@ -6113,6 +6425,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2023-08-28"),
                 cost: Some(ModelCost {
                     input: 3.000000,
@@ -6129,6 +6442,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2023-11-06"),
                 cost: Some(ModelCost {
                     input: 30.000000,
@@ -6145,6 +6459,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2023-11-06"),
                 cost: Some(ModelCost {
                     input: 10.000000,
@@ -6161,6 +6476,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-04-14"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -6177,6 +6493,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-04-14"),
                 cost: Some(ModelCost {
                     input: 0.400000,
@@ -6193,6 +6510,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-04-14"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -6209,6 +6527,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2024-05-13"),
                 cost: Some(ModelCost {
                     input: 2.500000,
@@ -6225,6 +6544,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(4096),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2024-05-13"),
                 cost: Some(ModelCost {
                     input: 5.000000,
@@ -6241,6 +6561,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2024-08-06"),
                 cost: Some(ModelCost {
                     input: 2.500000,
@@ -6257,6 +6578,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2024-11-20"),
                 cost: Some(ModelCost {
                     input: 2.500000,
@@ -6273,6 +6595,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2024-07-18"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -6289,6 +6612,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2024-07-18"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -6313,6 +6637,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-08-07"),
                 cost: Some(ModelCost {
                     input: 1.250000,
@@ -6337,6 +6662,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-08-07"),
                 cost: Some(ModelCost {
                     input: 0.250000,
@@ -6361,6 +6687,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-08-07"),
                 cost: Some(ModelCost {
                     input: 0.050000,
@@ -6380,6 +6707,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-10-06"),
                 cost: Some(ModelCost {
                     input: 15.000000,
@@ -6404,6 +6732,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-11-13"),
                 cost: Some(ModelCost {
                     input: 1.250000,
@@ -6423,6 +6752,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-11-13"),
                 cost: Some(ModelCost {
                     input: 1.250000,
@@ -6447,6 +6777,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-11-13"),
                 cost: Some(ModelCost {
                     input: 1.250000,
@@ -6466,6 +6797,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-11-13"),
                 cost: Some(ModelCost {
                     input: 0.250000,
@@ -6491,6 +6823,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-12-11"),
                 cost: Some(ModelCost {
                     input: 1.750000,
@@ -6507,6 +6840,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32000),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-12-10"),
                 cost: Some(ModelCost {
                     input: 1.750000,
@@ -6531,6 +6865,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-12-11"),
                 cost: Some(ModelCost {
                     input: 1.750000,
@@ -6550,6 +6885,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-12-11"),
                 cost: Some(ModelCost {
                     input: 21.000000,
@@ -6575,6 +6911,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-02-05"),
                 cost: Some(ModelCost {
                     input: 1.750000,
@@ -6600,6 +6937,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-03-05"),
                 cost: Some(ModelCost {
                     input: 2.500000,
@@ -6625,6 +6963,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-03-17"),
                 cost: Some(ModelCost {
                     input: 0.750000,
@@ -6650,6 +6989,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-03-17"),
                 cost: Some(ModelCost {
                     input: 0.200000,
@@ -6669,6 +7009,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-03-05"),
                 cost: Some(ModelCost {
                     input: 30.000000,
@@ -6694,6 +7035,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-04-23"),
                 cost: Some(ModelCost {
                     input: 5.000000,
@@ -6713,6 +7055,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-04-23"),
                 cost: Some(ModelCost {
                     input: 30.000000,
@@ -6739,6 +7082,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-07-09"),
                 cost: Some(ModelCost {
                     input: 0.200000,
@@ -6765,6 +7109,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-07-09"),
                 cost: Some(ModelCost {
                     input: 0.200000,
@@ -6791,6 +7136,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-07-09"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -6817,6 +7163,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-07-09"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -6843,6 +7190,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-07-09"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -6869,6 +7217,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-07-09"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -6894,6 +7243,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-04"),
                 cost: Some(ModelCost {
                     input: 10.000000,
@@ -6919,6 +7269,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-04"),
                 cost: Some(ModelCost {
                     input: 10.000000,
@@ -6945,6 +7296,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -6971,6 +7323,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -6997,6 +7350,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -7023,6 +7377,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -7039,6 +7394,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Audio]),
+                interleaved: None,
                 release_date: Some("2026-01-19"),
                 cost: Some(ModelCost {
                     input: 2.500000,
@@ -7055,6 +7411,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Audio]),
+                interleaved: None,
                 release_date: Some("2026-01-19"),
                 cost: Some(ModelCost {
                     input: 0.600000,
@@ -7071,6 +7428,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-05-05"),
                 cost: Some(ModelCost {
                     input: 5.000000,
@@ -7090,6 +7448,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-08-05"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -7109,6 +7468,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-08-05"),
                 cost: Some(ModelCost {
                     input: 0.018000,
@@ -7128,6 +7488,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-10-29"),
                 cost: Some(ModelCost {
                     input: 0.075000,
@@ -7144,6 +7505,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(100000),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2024-12-05"),
                 cost: Some(ModelCost {
                     input: 15.000000,
@@ -7160,6 +7522,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(100000),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-04-16"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -7176,6 +7539,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(100000),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2024-12-20"),
                 cost: Some(ModelCost {
                     input: 1.100000,
@@ -7195,6 +7559,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-02-12"),
                 cost: Some(ModelCost {
                     input: 1.100000,
@@ -7211,6 +7576,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(100000),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-06-10"),
                 cost: Some(ModelCost {
                     input: 20.000000,
@@ -7227,6 +7593,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(100000),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-04-16"),
                 cost: Some(ModelCost {
                     input: 1.100000,
@@ -7246,6 +7613,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2025-04-16"),
                 cost: Some(ModelCost {
                     input: 1.100000,
@@ -7268,6 +7636,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2023-11-08"),
                 cost: None,
             },
@@ -7279,6 +7648,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8000),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-02-01"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -7295,6 +7665,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-07-21"),
                 cost: Some(ModelCost {
                     input: 0.090000,
@@ -7311,6 +7682,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-07-21"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -7327,6 +7699,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-07-02"),
                 cost: Some(ModelCost {
                     input: 0.060000,
@@ -7343,6 +7716,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-07-02"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -7362,6 +7736,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-09-18"),
                 cost: Some(ModelCost {
                     input: 0.075000,
@@ -7378,6 +7753,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-09-19"),
                 cost: Some(ModelCost {
                     input: 0.360000,
@@ -7394,6 +7770,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(29491),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-10-16"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -7410,6 +7787,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-01-25"),
                 cost: Some(ModelCost {
                     input: 0.260000,
@@ -7426,6 +7804,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-09-08"),
                 cost: Some(ModelCost {
                     input: 0.260000,
@@ -7442,6 +7821,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-04-28"),
                 cost: Some(ModelCost {
                     input: 0.120000,
@@ -7458,6 +7838,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-04"),
                 cost: Some(ModelCost {
                     input: 0.455000,
@@ -7474,6 +7855,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(235929),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-07-21"),
                 cost: Some(ModelCost {
                     input: 0.087500,
@@ -7490,6 +7872,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(117964),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-07-25"),
                 cost: Some(ModelCost {
                     input: 0.230000,
@@ -7506,6 +7889,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-04-28"),
                 cost: Some(ModelCost {
                     input: 0.120000,
@@ -7522,6 +7906,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(235929),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-07-29"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -7538,6 +7923,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-08-28"),
                 cost: Some(ModelCost {
                     input: 0.200000,
@@ -7554,6 +7940,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-04"),
                 cost: Some(ModelCost {
                     input: 0.080000,
@@ -7570,6 +7957,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(8192),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-04-28"),
                 cost: Some(ModelCost {
                     input: 0.117000,
@@ -7586,6 +7974,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-07-23"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -7602,6 +7991,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(235929),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-04"),
                 cost: Some(ModelCost {
                     input: 0.070000,
@@ -7618,6 +8008,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-07-28"),
                 cost: Some(ModelCost {
                     input: 0.195000,
@@ -7634,6 +8025,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(235929),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-02-03"),
                 cost: Some(ModelCost {
                     input: 0.120000,
@@ -7650,6 +8042,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-07-23"),
                 cost: Some(ModelCost {
                     input: 0.650000,
@@ -7666,6 +8059,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-09-23"),
                 cost: Some(ModelCost {
                     input: 0.780000,
@@ -7682,6 +8076,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-02-09"),
                 cost: Some(ModelCost {
                     input: 0.780000,
@@ -7698,6 +8093,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(235929),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-09"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -7714,6 +8110,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(235929),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-09"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -7730,6 +8127,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-09-23"),
                 cost: Some(ModelCost {
                     input: 0.210000,
@@ -7746,6 +8144,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-09-23"),
                 cost: Some(ModelCost {
                     input: 0.400000,
@@ -7762,6 +8161,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-10-06"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -7778,6 +8178,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-10-06"),
                 cost: Some(ModelCost {
                     input: 0.200000,
@@ -7794,6 +8195,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-10-23"),
                 cost: Some(ModelCost {
                     input: 0.104000,
@@ -7810,6 +8212,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-10-14"),
                 cost: Some(ModelCost {
                     input: 0.117000,
@@ -7826,6 +8229,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-10-14"),
                 cost: Some(ModelCost {
                     input: 0.180000,
@@ -7842,6 +8246,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-02-23"),
                 cost: Some(ModelCost {
                     input: 0.260000,
@@ -7858,6 +8263,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-02-23"),
                 cost: Some(ModelCost {
                     input: 0.195000,
@@ -7874,6 +8280,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-02-23"),
                 cost: Some(ModelCost {
                     input: 0.312500,
@@ -7890,6 +8297,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(235929),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-02-15"),
                 cost: Some(ModelCost {
                     input: 0.550000,
@@ -7906,6 +8314,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-02-23"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -7922,6 +8331,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-02-25"),
                 cost: Some(ModelCost {
                     input: 0.065000,
@@ -7938,6 +8348,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-02-16"),
                 cost: Some(ModelCost {
                     input: 0.260000,
@@ -7954,6 +8365,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-04-27"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -7970,6 +8382,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262140),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-04-22"),
                 cost: Some(ModelCost {
                     input: 0.320000,
@@ -7986,6 +8399,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(235929),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-04-17"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -8002,6 +8416,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-04-27"),
                 cost: Some(ModelCost {
                     input: 0.187500,
@@ -8018,6 +8433,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-04-20"),
                 cost: Some(ModelCost {
                     input: 1.027000,
@@ -8034,6 +8450,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-04-02"),
                 cost: Some(ModelCost {
                     input: 0.325000,
@@ -8054,6 +8471,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-07-15"),
                 cost: Some(ModelCost {
                     input: 0.030000,
@@ -8070,6 +8488,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-05-21"),
                 cost: Some(ModelCost {
                     input: 1.475000,
@@ -8086,6 +8505,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-06-02"),
                 cost: Some(ModelCost {
                     input: 0.320000,
@@ -8105,6 +8525,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-08-12"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -8124,6 +8545,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-08-14"),
                 cost: Some(ModelCost {
                     input: 0.420000,
@@ -8143,6 +8565,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-08-14"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -8163,6 +8586,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-08-26"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -8188,6 +8612,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-09-02"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -8213,6 +8638,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-09-23"),
                 cost: Some(ModelCost {
                     input: 4.000000,
@@ -8233,6 +8659,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-09-17"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -8249,6 +8676,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(14745),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-03-20"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -8265,6 +8693,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-12-08"),
                 cost: Some(ModelCost {
                     input: 1.000000,
@@ -8284,6 +8713,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-11"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -8303,6 +8733,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-06-15"),
                 cost: Some(ModelCost {
                     input: 5.000000,
@@ -8322,6 +8753,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-11"),
                 cost: Some(ModelCost {
                     input: 5.000000,
@@ -8341,6 +8773,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-08-03"),
                 cost: Some(ModelCost {
                     input: 0.950000,
@@ -8357,6 +8790,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2024-08-28"),
                 cost: Some(ModelCost {
                     input: 0.850000,
@@ -8382,6 +8816,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-09-23"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -8398,6 +8833,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-01-29"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -8417,6 +8853,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-05-29"),
                 cost: Some(ModelCost {
                     input: 0.200000,
@@ -8436,6 +8873,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-07-06"),
                 cost: Some(ModelCost {
                     input: 0.132000,
@@ -8455,6 +8893,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-04-20"),
                 cost: Some(ModelCost {
                     input: 0.180000,
@@ -8474,6 +8913,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-08-28"),
                 cost: Some(ModelCost {
                     input: 0.834000,
@@ -8500,6 +8940,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio]),
+                interleaved: None,
                 release_date: Some("2026-07-15"),
                 cost: Some(ModelCost {
                     input: 1.000000,
@@ -8526,6 +8967,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio]),
+                interleaved: None,
                 release_date: Some("2026-07-30"),
                 cost: Some(ModelCost {
                     input: 0.450000,
@@ -8552,6 +8994,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio]),
+                interleaved: None,
                 release_date: Some("2026-07-30"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -8578,6 +9021,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio]),
+                interleaved: None,
                 release_date: Some("2026-07-15"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -8594,6 +9038,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::None,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-09-17"),
                 cost: Some(ModelCost {
                     input: 2.500000,
@@ -8621,6 +9066,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-09-23"),
                 cost: Some(ModelCost {
                     input: 0.050000,
@@ -8646,6 +9092,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-01-27"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -8673,6 +9120,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-08-10"),
                 cost: Some(ModelCost {
                     input: 0.090000,
@@ -8689,6 +9137,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(1800000),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-03-31"),
                 cost: Some(ModelCost {
                     input: 1.250000,
@@ -8713,6 +9162,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-04-17"),
                 cost: Some(ModelCost {
                     input: 1.250000,
@@ -8732,6 +9182,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-07-08"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -8756,6 +9207,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-08-12"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -8780,6 +9232,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-21"),
                 cost: Some(ModelCost {
                     input: 1.600000,
@@ -8796,6 +9249,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(230400),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-04-16"),
                 cost: Some(ModelCost {
                     input: 1.000000,
@@ -8812,6 +9266,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningDetails),
                 release_date: Some("2026-04-22"),
                 cost: Some(ModelCost {
                     input: 0.140000,
@@ -8828,6 +9283,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-04-22"),
                 cost: Some(ModelCost {
                     input: 0.435000,
@@ -8844,6 +9300,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 0.140000,
@@ -8860,6 +9317,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 0.435000,
@@ -8876,6 +9334,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-09-21"),
                 cost: Some(ModelCost {
                     input: 4.350000,
@@ -8892,6 +9351,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(98304),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-07-28"),
                 cost: Some(ModelCost {
                     input: 0.600000,
@@ -8908,6 +9368,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(98304),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-07-28"),
                 cost: Some(ModelCost {
                     input: 0.130000,
@@ -8924,6 +9385,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-08-11"),
                 cost: Some(ModelCost {
                     input: 0.600000,
@@ -8940,6 +9402,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(16384),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-09-30"),
                 cost: Some(ModelCost {
                     input: 0.430000,
@@ -8956,6 +9419,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2025-12-08"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -8972,6 +9436,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningDetails),
                 release_date: Some("2025-12-22"),
                 cost: Some(ModelCost {
                     input: 0.600000,
@@ -8988,6 +9453,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(117964),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningDetails),
                 release_date: Some("2026-01-19"),
                 cost: Some(ModelCost {
                     input: 0.060500,
@@ -9004,6 +9470,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-02-12"),
                 cost: Some(ModelCost {
                     input: 0.600000,
@@ -9020,6 +9487,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-03-16"),
                 cost: Some(ModelCost {
                     input: 1.200000,
@@ -9036,6 +9504,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-04-07"),
                 cost: Some(ModelCost {
                     input: 0.964600,
@@ -9055,6 +9524,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-06-13"),
                 cost: Some(ModelCost {
                     input: 0.649600,
@@ -9074,6 +9544,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-08-14"),
                 cost: Some(ModelCost {
                     input: 1.400000,
@@ -9093,6 +9564,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-08-26"),
                 cost: Some(ModelCost {
                     input: 0.045000,
@@ -9112,6 +9584,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-09-18"),
                 cost: Some(ModelCost {
                     input: 0.370000,
@@ -9131,6 +9604,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-09-23"),
                 cost: Some(ModelCost {
                     input: 2.800000,
@@ -9147,6 +9621,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-04-01"),
                 cost: Some(ModelCost {
                     input: 1.200000,
@@ -9172,6 +9647,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-06-09"),
                 cost: Some(ModelCost {
                     input: 10.000000,
@@ -9188,6 +9664,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-04-27"),
                 cost: Some(ModelCost {
                     input: 1.000000,
@@ -9213,6 +9690,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-04-21"),
                 cost: Some(ModelCost {
                     input: 4.000000,
@@ -9238,6 +9716,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-04-27"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -9257,6 +9736,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-09-14"),
                 cost: Some(ModelCost {
                     input: 0.040000,
@@ -9276,6 +9756,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-09-14"),
                 cost: Some(ModelCost {
                     input: 0.260000,
@@ -9295,6 +9776,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-08-01"),
                 cost: Some(ModelCost {
                     input: 0.030000,
@@ -9320,6 +9802,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-04-27"),
                 cost: Some(ModelCost {
                     input: 0.750000,
@@ -9345,6 +9828,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-04-27"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -9364,6 +9848,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-04-27"),
                 cost: Some(ModelCost {
                     input: 0.884500,
@@ -9389,6 +9874,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-11"),
                 cost: Some(ModelCost {
                     input: 10.000000,
@@ -9415,6 +9901,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-11"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -9440,6 +9927,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-04-27"),
                 cost: Some(ModelCost {
                     input: 0.750000,
@@ -9466,6 +9954,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-11"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -9492,6 +9981,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-09-11"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -9516,6 +10006,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Pdf]),
+                interleaved: None,
                 release_date: Some("2026-07-08"),
                 cost: Some(ModelCost {
                     input: 1.600000,
@@ -9535,6 +10026,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-08-27"),
                 cost: Some(ModelCost {
                     input: 0.045000,
@@ -9554,6 +10046,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-08-19"),
                 cost: Some(ModelCost {
                     input: 0.561400,
@@ -9580,6 +10073,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-07-31"),
                 cost: Some(ModelCost {
                     input: 0.220000,
@@ -9599,6 +10093,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-08-21"),
                 cost: Some(ModelCost {
                     input: 0.220000,
@@ -9618,6 +10113,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-04-24"),
                 cost: Some(ModelCost {
                     input: 1.200000,
@@ -9637,6 +10133,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-08-12"),
                 cost: Some(ModelCost {
                     input: 1.320000,
@@ -9656,6 +10153,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-09-10"),
                 cost: Some(ModelCost {
                     input: 0.220000,
@@ -9676,6 +10174,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 3.000000,
@@ -9695,6 +10194,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-06-16"),
                 cost: Some(ModelCost {
                     input: 1.400000,
@@ -9714,6 +10214,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-08-14"),
                 cost: Some(ModelCost {
                     input: 1.400000,
@@ -9733,6 +10234,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-08-26"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -9752,6 +10254,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2025-08-05"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -9768,6 +10271,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(1048576),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio]),
+                interleaved: None,
                 release_date: Some("2026-07-15"),
                 cost: Some(ModelCost {
                     input: 1.000000,
@@ -9784,6 +10288,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262000),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-04-17"),
                 cost: Some(ModelCost {
                     input: 0.950000,
@@ -9800,6 +10305,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262000),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-06-12"),
                 cost: Some(ModelCost {
                     input: 0.950000,
@@ -9820,6 +10326,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-07-27"),
                 cost: Some(ModelCost {
                     input: 3.000000,
@@ -9839,6 +10346,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-03-18"),
                 cost: Some(ModelCost {
                     input: 1.200000,
@@ -9858,6 +10366,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-06-12"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -9882,6 +10391,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-08-10"),
                 cost: Some(ModelCost {
                     input: 0.350000,
@@ -9898,6 +10408,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(128000),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-06-04"),
                 cost: Some(ModelCost {
                     input: 0.600000,
@@ -9914,6 +10425,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: None,
                 release_date: Some("2026-08-11"),
                 cost: Some(ModelCost {
                     input: 0.050000,
@@ -9934,6 +10446,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-06-12"),
                 cost: Some(ModelCost {
                     input: 0.400000,
@@ -9953,6 +10466,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-08-12"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -9969,6 +10483,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-08-03"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -9988,6 +10503,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-09-10"),
                 cost: Some(ModelCost {
                     input: 0.220000,
@@ -10007,6 +10523,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-08-12"),
                 cost: Some(ModelCost {
                     input: 1.320000,
@@ -10026,6 +10543,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-06-26"),
                 cost: Some(ModelCost {
                     input: 2.100000,
@@ -10045,6 +10563,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-08-28"),
                 cost: Some(ModelCost {
                     input: 2.100000,
@@ -10064,6 +10583,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-08-28"),
                 cost: Some(ModelCost {
                     input: 2.100000,
@@ -10083,6 +10603,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-08-26"),
                 cost: Some(ModelCost {
                     input: 0.150000,
@@ -10102,6 +10623,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-08-14"),
                 cost: Some(ModelCost {
                     input: 1.400000,
@@ -10122,6 +10644,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-07-27"),
                 cost: Some(ModelCost {
                     input: 4.500000,
@@ -10142,6 +10665,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-07-27"),
                 cost: Some(ModelCost {
                     input: 4.500000,
@@ -10162,6 +10686,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-07-27"),
                 cost: Some(ModelCost {
                     input: 3.000000,
@@ -10181,6 +10706,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-06-12"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -10197,6 +10723,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-08-03"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -10220,6 +10747,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-04-21"),
                 cost: Some(ModelCost {
                     input: 0.950000,
@@ -10236,6 +10764,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-06-12"),
                 cost: Some(ModelCost {
                     input: 0.950000,
@@ -10252,6 +10781,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(262144),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-06-12"),
                 cost: Some(ModelCost {
                     input: 1.900000,
@@ -10271,6 +10801,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: true,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-07-16"),
                 cost: Some(ModelCost {
                     input: 3.000000,
@@ -10294,6 +10825,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(65536),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2025-12-16"),
                 cost: Some(ModelCost {
                     input: 0.140000,
@@ -10316,6 +10848,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-03-18"),
                 cost: Some(ModelCost {
                     input: 0.140000,
@@ -10332,6 +10865,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-03-18"),
                 cost: Some(ModelCost {
                     input: 0.435000,
@@ -10348,6 +10882,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-04-22"),
                 cost: Some(ModelCost {
                     input: 0.140000,
@@ -10364,6 +10899,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-04-22"),
                 cost: Some(ModelCost {
                     input: 0.435000,
@@ -10380,6 +10916,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-06-08"),
                 cost: Some(ModelCost {
                     input: 1.305000,
@@ -10396,6 +10933,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 0.140000,
@@ -10412,6 +10950,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 0.435000,
@@ -10428,6 +10967,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-09-21"),
                 cost: Some(ModelCost {
                     input: 4.350000,
@@ -10451,6 +10991,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-03-18"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -10467,6 +11008,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-04-22"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -10483,6 +11025,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-04-22"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -10499,6 +11042,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -10515,6 +11059,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -10538,6 +11083,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-03-18"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -10554,6 +11100,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-04-22"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -10570,6 +11117,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-04-22"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -10586,6 +11134,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -10602,6 +11151,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -10625,6 +11175,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-03-18"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -10641,6 +11192,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-04-22"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -10657,6 +11209,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-04-22"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -10673,6 +11226,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -10689,6 +11243,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(131072),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio, Input::Video]),
+                interleaved: Some(ReasoningField::ReasoningContent),
                 release_date: Some("2026-09-22"),
                 cost: Some(ModelCost {
                     input: 0.000000,
@@ -10718,6 +11273,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-04-21"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -10740,6 +11296,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-04-21"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -10756,6 +11313,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(64000),
                 reasoning: Reasoning::Fixed,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2025-10-07"),
                 cost: Some(ModelCost {
                     input: 1.250000,
@@ -10782,6 +11340,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2025-06-17"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -10808,6 +11367,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2025-06-17"),
                 cost: Some(ModelCost {
                     input: 0.100000,
@@ -10834,6 +11394,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2025-06-17"),
                 cost: Some(ModelCost {
                     input: 1.250000,
@@ -10864,6 +11425,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2025-12-17"),
                 cost: Some(ModelCost {
                     input: 0.500000,
@@ -10894,6 +11456,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-05-07"),
                 cost: Some(ModelCost {
                     input: 0.250000,
@@ -10913,6 +11476,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-06-30"),
                 cost: Some(ModelCost {
                     input: 0.250000,
@@ -10943,6 +11507,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-03-03"),
                 cost: Some(ModelCost {
                     input: 0.250000,
@@ -10967,6 +11532,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     toggle: false,
                 },
                 input: Inputs::of(&[Input::Text, Input::Image, Input::Audio, Input::Video]),
+                interleaved: None,
                 release_date: Some("2026-03-26"),
                 cost: Some(ModelCost {
                     input: 0.750000,
@@ -10992,6 +11558,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-02-19"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -11017,6 +11584,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-02-19"),
                 cost: Some(ModelCost {
                     input: 2.000000,
@@ -11047,6 +11615,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-05-19"),
                 cost: Some(ModelCost {
                     input: 1.500000,
@@ -11077,6 +11646,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-07-21"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -11107,6 +11677,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-07-21"),
                 cost: Some(ModelCost {
                     input: 0.750000,
@@ -11132,6 +11703,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-08-13"),
                 cost: Some(ModelCost {
                     input: 0.750000,
@@ -11157,6 +11729,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-09-02"),
                 cost: Some(ModelCost {
                     input: 0.750000,
@@ -11182,6 +11755,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-08-13"),
                 cost: Some(ModelCost {
                     input: 0.750000,
@@ -11212,6 +11786,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                     Input::Audio,
                     Input::Video,
                 ]),
+                interleaved: None,
                 release_date: Some("2026-07-21"),
                 cost: Some(ModelCost {
                     input: 0.300000,
@@ -11228,6 +11803,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-04-02"),
                 cost: None,
             },
@@ -11239,6 +11815,7 @@ pub static PROVIDERS: &[ProviderInfo] = &[
                 output: Some(32768),
                 reasoning: Reasoning::Toggle,
                 input: Inputs::of(&[Input::Text, Input::Image]),
+                interleaved: None,
                 release_date: Some("2026-04-02"),
                 cost: None,
             },

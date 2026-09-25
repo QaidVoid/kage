@@ -22,7 +22,9 @@
 //! every POST and the GET carry `Authorization: Bearer <token>` for the
 //! endpoint URL. A 401 asks the source for a fresh token once and
 //! retries that POST once. A 401 that stays fails the request with
-//! [`UNAUTHORIZED`], which the connection reports as
+//! [`UNAUTHORIZED`], or [`REFUSED`] when kage sends no stored token (a
+//! configured header wins, or there is no token source), which the
+//! connection reports as
 //! [`McpError::Unauthorized`](crate::McpError::Unauthorized). ureq keeps
 //! its default of dropping the header on any redirect.
 //!
@@ -65,6 +67,10 @@ use crate::server::cancel_notice;
 /// with 401 even after a token refresh. It sits outside the range
 /// JSON-RPC reserves, and servers never send it over HTTP 401.
 pub(crate) const UNAUTHORIZED: i64 = -33401;
+
+/// JSON-RPC code of the synthetic error for a POST the server answered
+/// with 401 when kage sends no stored token, so a login would not help.
+pub(crate) const REFUSED: i64 = -33403;
 
 /// JSON-RPC code of the synthetic error for any other failed POST.
 const INTERNAL: i64 = -32603;
@@ -340,7 +346,11 @@ fn post_and_forward(
             return Err(PostFailure {
                 error: io::Error::other(format!("mcp post {url}: status 401 unauthorized")),
                 fatal: false,
-                code: UNAUTHORIZED,
+                code: if endpoint.tokens.is_some() {
+                    UNAUTHORIZED
+                } else {
+                    REFUSED
+                },
             });
         }
         // The spec defines 404 as a terminated session.
@@ -1191,7 +1201,7 @@ mod tests {
             .err()
             .expect("a refused token fails the handshake");
         assert!(
-            matches!(&err, McpError::Unauthorized { server } if server == "srv"),
+            matches!(&err, McpError::Unauthorized { server, login: true } if server == "srv"),
             "{err:?}"
         );
         assert!(err.to_string().contains("kage mcp login srv"), "{err}");
@@ -1210,7 +1220,30 @@ mod tests {
         let err = McpConnection::initialize("srv", peer, inbound, &[], None)
             .err()
             .expect("a server asking for a token fails the handshake");
-        assert!(matches!(err, McpError::Unauthorized { .. }), "{err:?}");
+        assert!(
+            matches!(err, McpError::Unauthorized { login: false, .. }),
+            "{err:?}"
+        );
+        assert_eq!(err.to_string(), "server `srv` needs authorization");
+    }
+
+    #[test]
+    fn a_refused_configured_header_suggests_no_login() {
+        let (handler, _log) = guarded(|_| false);
+        let headers = BTreeMap::from([("authorization".to_owned(), "Bearer fake".to_owned())]);
+        let tokens = StaticTokens::new("tok-a", None);
+        let (peer, inbound, _reader) = open_http(
+            fake_agent(handler, usize::MAX),
+            TEST_URL,
+            &headers,
+            Some(Arc::clone(&tokens) as Arc<dyn TokenSource>),
+        )
+        .unwrap();
+        let err = McpConnection::initialize("srv", peer, inbound, &[], None)
+            .err()
+            .expect("a refused header fails the handshake");
+        assert_eq!(err.to_string(), "server `srv` needs authorization");
+        assert_eq!(tokens.refreshes(), 0);
     }
 
     #[test]

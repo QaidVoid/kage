@@ -6,7 +6,8 @@
 //! from the manager's cached catalog without a request. Reading goes
 //! through `resources/read` and caps text like a mention does
 //! ([`crate::expand::MAX_RESOURCE_TEXT`] per part and
-//! [`crate::expand::MAX_PROMPT_TEXT`] per call).
+//! [`crate::expand::MAX_PROMPT_TEXT`] per call). Errors read like a
+//! mention's, and a URI with a template placeholder is refused.
 //!
 //! The tool is not named `<server>__<tool>`, so permission gates treat
 //! it like a built-in read tool rather than an MCP tool.
@@ -20,7 +21,7 @@ use kage_tools::error::ToolError;
 use kage_tools::tool::{Tool, ToolContext};
 
 use crate::catalog::ResourceContents;
-use crate::expand::{MAX_PROMPT_TEXT, cap, decoded_len};
+use crate::expand::{ExpandError, MAX_PROMPT_TEXT, cap, decoded_len, find_placeholder, read_error};
 use crate::server::McpConnection;
 
 /// Name the model invokes.
@@ -125,10 +126,21 @@ impl Tool for McpResourceTool {
         let Some(uri) = field("uri") else {
             return Ok(output(false, listing(server)));
         };
+        if let Some(placeholder) = find_placeholder(uri) {
+            let refused = ExpandError::Placeholder {
+                server: server.name.clone(),
+                uri: uri.to_owned(),
+                placeholder: placeholder.to_owned(),
+            };
+            return Ok(output(true, refused.to_string()));
+        }
         match server.conn.read_resource(uri) {
             Ok(parts) if parts.is_empty() => Ok(output(false, format!("{uri} has no contents"))),
             Ok(parts) => Ok(output(false, contents(&server.name, parts))),
-            Err(err) => Ok(output(true, err.to_string())),
+            Err(err) => {
+                let failed = read_error(&server.name, uri, &err);
+                Ok(output(true, failed.to_string()))
+            }
         }
     }
 }
@@ -325,7 +337,11 @@ mod tests {
 
         let out = run(&tool, json!({ "server": "srv", "uri": "test://missing" }));
         assert!(out.is_error);
-        assert!(out.text.contains("resource not found"), "{}", out.text);
+        assert_eq!(out.text, "mcp srv: read test://missing: resource not found");
+
+        let out = run(&tool, json!({ "server": "srv", "uri": "test://r/{id}" }));
+        assert!(out.is_error);
+        assert_eq!(out.text, "mcp srv: test://r/{id}: fill in {id} first");
         assert_eq!(seen.lock().unwrap().len(), 4);
     }
 

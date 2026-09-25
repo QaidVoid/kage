@@ -806,6 +806,36 @@ fn first_exchange_records_a_title() {
 }
 
 #[test]
+fn a_title_that_arrives_during_the_next_run_is_recorded_when_it_ends() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::sequence(vec![
+        tool_turn("gate"),
+        text_turn("hello"),
+        tool_turn("gate"),
+        tool_turn("gate"),
+        text_turn("done"),
+    ]));
+    let id = SessionId::new();
+    let (recorder, path) = recorder_in(dir.path(), id);
+    h.engine.open(SessionSpec {
+        recorder: Some(recorder),
+        title: true,
+        ..h.spec(id)
+    });
+    prompt(&h.engine, id, "hi", Delivery::Queue);
+    prompt(&h.engine, id, "again", Delivery::Queue);
+    h.release.send(()).unwrap();
+    wait_for(&h.events, |e| {
+        matches!(e.event, Event::Host(HostEvent::TitleChanged { .. }))
+    });
+    h.release.send(()).unwrap();
+    until_runs_end(&h.events, 1);
+    h.engine.shutdown();
+    let file = std::fs::read_to_string(&path).unwrap();
+    assert!(file.contains("\"type\":\"title\""), "{file}");
+}
+
+#[test]
 fn plugin_turn_end_entries_land_in_the_session_file() {
     let dir = tempfile::tempdir().unwrap();
     let runtime = Arc::new(PluginRuntime::new().unwrap());

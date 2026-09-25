@@ -1132,11 +1132,16 @@ pub(crate) mod tests {
         pub(crate) fn refreshes(&self) -> usize {
             self.rejected.load(Ordering::SeqCst)
         }
+
+        /// Drop the stored token, like a logout.
+        pub(crate) fn forget(&self) {
+            self.bearer.lock().unwrap().clear();
+        }
     }
 
     impl TokenSource for StaticTokens {
         fn bearer(&self, _url: &str) -> Option<String> {
-            Some(self.bearer.lock().unwrap().clone())
+            Some(self.bearer.lock().unwrap().clone()).filter(|token| !token.is_empty())
         }
 
         fn rejected(&self, _url: &str) -> Option<String> {

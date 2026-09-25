@@ -203,7 +203,9 @@ fn server_url<'a>(name: &str, servers: &'a BTreeMap<String, McpServer>) -> Resul
 /// Log in to MCP server `name` of `servers` and store its tokens at
 /// `path`. Prints the authorization URL and waits for the first of the
 /// browser coming back to the loopback listener or a redirect URL
-/// arriving on `pasted`. `open` tries to show the URL in a browser.
+/// arriving on `pasted`. `open` tries to show the URL in a browser. The
+/// client id is the configured one, else the one stored by an earlier
+/// login at the same issuer, else a newly registered one.
 pub(crate) fn login(
     name: &str,
     servers: &BTreeMap<String, McpServer>,
@@ -216,7 +218,12 @@ pub(crate) fn login(
     let discovery = oauth::discover(url).map_err(|e| e.to_string())?;
     let loopback = Loopback::bind().map_err(|e| e.to_string())?;
     let redirect_uri = loopback.redirect_uri();
-    let client_id = match config.client_id {
+    let stored = McpAuthStore::load_from(path)?
+        .servers
+        .remove(&discovery.resource)
+        .filter(|entry| entry.issuer == discovery.issuer)
+        .map(|entry| entry.client_id);
+    let client_id = match config.client_id.or(stored) {
         Some(id) => id,
         None => oauth::register(&discovery, &redirect_uri).map_err(|e| e.to_string())?,
     };
@@ -257,12 +264,13 @@ pub(crate) fn login(
         },
     );
     store.save_to(path)?;
-    eprintln!("\nkage: {name} authorized");
+    eprintln!("kage: {name} authorized");
     Ok(())
 }
 
 /// The first of the browser's redirect and a pasted one. Blank lines
-/// are ignored, and a closed input leaves only the browser.
+/// are ignored, and a closed input leaves only the browser. When the
+/// browser wins, the prompt line is ended.
 fn wait_for_code(
     loopback: Loopback,
     expected: &Expected,
@@ -275,6 +283,7 @@ fn wait_for_code(
         let stopped = || OAuthError::Local("the loopback listener stopped".to_owned());
         loop {
             if browser.is_finished() {
+                eprintln!();
                 return browser.join().unwrap_or_else(|_| Err(stopped()));
             }
             match pasted.recv_timeout(POLL) {
@@ -358,7 +367,7 @@ pub(crate) fn run_login(name: &str) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("\nkage: mcp login {name}: {e}");
+            eprintln!("kage: mcp login {name}: {e}");
             ExitCode::from(1)
         }
     }
@@ -397,7 +406,7 @@ pub(crate) fn tui_login(name: &str, servers: &BTreeMap<String, McpServer>) -> Re
     let result = login(name, servers, &path, &rx, &open_browser);
     drop(rx);
     if let Err(e) = &result {
-        eprintln!("\nkage: mcp login {name}: {e}");
+        eprintln!("kage: mcp login {name}: {e}");
     }
     if !reader.is_finished() {
         eprintln!("kage: press Enter to return to kage");
@@ -764,6 +773,43 @@ mod tests {
             McpTokens::new(path).bearer(&url).as_deref(),
             Some("access-1")
         );
+    }
+
+    #[test]
+    fn a_second_login_reuses_the_stored_client() {
+        let server = FakeServer::start();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-auth.json");
+        let url = format!("{}/mcp", server.base);
+        let servers = BTreeMap::from([("remote".to_owned(), http_server(&url))]);
+        let (tx, rx) = mpsc::channel();
+        let open = |authorize: &str| {
+            let params = url_form(authorize.split_once('?').unwrap().1);
+            assert_eq!(params["client_id"], "kage-client");
+            tx.send(format!(
+                "http://127.0.0.1/callback?code=c&state={}",
+                params["state"]
+            ))
+            .unwrap();
+        };
+        login("remote", &servers, &path, &rx, &open).unwrap();
+        login("remote", &servers, &path, &rx, &open).unwrap();
+        let registered = lock(&server.seen)
+            .iter()
+            .filter(|s| s.path == "/register")
+            .count();
+        assert_eq!(registered, 1);
+        assert_eq!(server.tokens_issued().len(), 2);
+
+        let mut store = McpAuthStore::load_from(&path).unwrap();
+        store.servers.get_mut(&url).unwrap().issuer = "https://other.example.com".to_owned();
+        store.save_to(&path).unwrap();
+        login("remote", &servers, &path, &rx, &open).unwrap();
+        let registered = lock(&server.seen)
+            .iter()
+            .filter(|s| s.path == "/register")
+            .count();
+        assert_eq!(registered, 2, "another issuer's client is not reused");
     }
 
     #[test]

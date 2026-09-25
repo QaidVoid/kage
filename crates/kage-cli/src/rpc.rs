@@ -51,11 +51,12 @@ use kage_core::protocol::{
 };
 use kage_core::sync::lock;
 use kage_core::{
-    Content, ImageSource, LoopEvent, Message, MessageId, Role, SessionId,
+    Content, ImageSource, LoopError, LoopEvent, Message, MessageId, Role, SessionId,
     StopReason as CoreStopReason, ThinkingLevel, ToolCallId, ToolOutput,
 };
 use kage_jsonrpc::{Peer, RpcError};
 use kage_loop::{AgentContext, LoopConfig, TokenBudget};
+use kage_mcp::McpError;
 use kage_provider::ProviderRegistry;
 use kage_session::SessionWriter;
 use kage_tools::builtin_registry;
@@ -309,6 +310,7 @@ impl CliAcpAgent {
             commands: HashMap::new(),
             usage: HashMap::new(),
             prompted: HashSet::new(),
+            approving: HashMap::new(),
         };
         engine.subscribe(Box::new(move |envelope| bridge.handle(envelope)));
         Self {
@@ -449,10 +451,11 @@ fn session_spec(
     let skills = crate::load_skills(&workdir, plugins.as_deref());
     let system_prompt = runtime_env::build_system_prompt(system_role, &workdir, &model, &skills);
     let mut tools = builtin_registry();
+    let editor: Vec<String> = servers.keys().cloned().collect();
     let (mcp, mcp_errors) =
         crate::mcp::spawn_and_register_with(&mut tools, &workdir, plugins.as_deref(), servers);
     for (server, err) in mcp_errors {
-        eprintln!("kage: mcp `{server}`: {err}");
+        eprintln!("kage: mcp `{server}`: {}", without_login(err, &editor));
     }
     let config = kage_core::config::Config::load_layered(&workdir).unwrap_or_else(|e| {
         eprintln!("kage: rpc: {e}; using defaults");
@@ -607,6 +610,9 @@ impl Agent for CliAcpAgent {
             RunOutcome::Cancelled => Ok(PromptResponse {
                 stop_reason: StopReason::Cancelled,
             }),
+            RunOutcome::Failed {
+                error: LoopError::InvalidPrompt { message },
+            } => Err(RpcError::new(-32602, message)),
             RunOutcome::Failed { error } => Err(RpcError::internal(error.to_string())),
         }
     }
@@ -634,7 +640,7 @@ struct Bridge {
     waiters: Waiters,
     models: Arc<[SessionConfigSelectOption]>,
     shown: ShownBySession,
-    seen: HashMap<SessionId, HashSet<String>>,
+    seen: HashMap<SessionId, HashMap<String, serde_json::Value>>,
     stops: HashMap<SessionId, CoreStopReason>,
     asks: HashMap<SessionId, Vec<Ask>>,
     tree: AgentTree,
@@ -650,6 +656,9 @@ struct Bridge {
     usage: HashMap<SessionId, SessionUpdate>,
     /// Client sessions whose first run has started.
     prompted: HashSet<SessionId>,
+    /// Agent calls waiting for approval, by session and call id, with the
+    /// line their card shows again once they run.
+    approving: HashMap<(SessionId, String), String>,
 }
 
 /// A permission question in flight on its own thread.
@@ -898,19 +907,26 @@ impl Bridge {
                 input_partial,
                 ..
             }) => progress(describe_call(name, input_partial)),
+            Event::Loop(LoopEvent::ToolExecutionStart { id }) => {
+                if let Some(line) = self.approving.remove(&(session, id.to_string())) {
+                    progress(line);
+                }
+            }
             Event::Host(HostEvent::PermissionRequested {
                 request_id,
+                tool_call_id,
                 tool,
                 input,
                 ..
             }) => {
-                progress(format!(
-                    "Waiting for approval: {}",
-                    describe_call(tool, input)
-                ));
+                let line = describe_call(tool, input);
+                progress(format!("Waiting for approval: {line}"));
+                if let Some(id) = tool_call_id {
+                    self.approving.insert((session, id.to_string()), line);
+                }
                 let tool_call = ToolCallUpdate {
                     tool_call_id: call_id.clone(),
-                    title: Some(format!("{agent}: {tool}")),
+                    title: Some(format!("{agent}: {}", tool_title(tool))),
                     kind: Some(tool_kind(tool)),
                     raw_input: Some(input.clone()),
                     ..ToolCallUpdate::default()
@@ -926,6 +942,7 @@ impl Bridge {
                     }
                     .to_owned(),
                 );
+                self.approving.retain(|(s, _), _| *s != session);
                 self.end_asks(session);
             }
             _ => {}
@@ -992,7 +1009,7 @@ fn permission_call(
 ) -> ToolCallUpdate {
     ToolCallUpdate {
         tool_call_id: tool_call_id.map_or_else(String::new, ToString::to_string),
-        title: Some(tool.to_owned()),
+        title: Some(tool_title(tool)),
         kind: Some(tool_kind(tool)),
         status: Some(ToolCallStatus::Pending),
         raw_input: Some(input.clone()),
@@ -1021,9 +1038,14 @@ fn describe_call(name: &str, input: &serde_json::Value) -> String {
 }
 
 /// Translate a loop event into the matching ACP `session/update`. The
-/// first sighting of a tool call id sends `tool_call`; everything after
-/// it for that id is a `tool_call_update`.
-fn to_update(seen: &mut HashSet<String>, event: &LoopEvent) -> Option<SessionUpdate> {
+/// first sighting of a tool call id sends `tool_call`. After it, streamed
+/// input for that id sends a `tool_call_update` only when the input
+/// changed, and the later steps always do. `seen` holds the input last
+/// sent for each call.
+fn to_update(
+    seen: &mut HashMap<String, serde_json::Value>,
+    event: &LoopEvent,
+) -> Option<SessionUpdate> {
     match event {
         LoopEvent::TextDelta { delta, .. } => {
             Some(SessionUpdate::AgentMessageChunk(MessageChunk {
@@ -1044,25 +1066,22 @@ fn to_update(seen: &mut HashSet<String>, event: &LoopEvent) -> Option<SessionUpd
             id,
             name,
             input_partial,
-        } => {
-            if seen.insert(id.to_string()) {
-                Some(SessionUpdate::ToolCall(ToolCall {
-                    tool_call_id: id.to_string(),
-                    title: name.clone(),
-                    kind: tool_kind(name),
-                    status: ToolCallStatus::Pending,
-                    content: Vec::new(),
-                    raw_input: Some(input_partial.clone()),
-                }))
-            } else {
-                Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
-                    tool_call_id: id.to_string(),
-                    status: Some(ToolCallStatus::Pending),
-                    raw_input: Some(input_partial.clone()),
-                    ..ToolCallUpdate::default()
-                }))
-            }
-        }
+        } => match seen.insert(id.to_string(), input_partial.clone()) {
+            None => Some(SessionUpdate::ToolCall(ToolCall {
+                tool_call_id: id.to_string(),
+                title: tool_title(name),
+                kind: tool_kind(name),
+                status: ToolCallStatus::Pending,
+                content: Vec::new(),
+                raw_input: Some(input_partial.clone()),
+            })),
+            Some(last) if last == *input_partial => None,
+            Some(_) => Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
+                tool_call_id: id.to_string(),
+                raw_input: Some(input_partial.clone()),
+                ..ToolCallUpdate::default()
+            })),
+        },
         LoopEvent::ToolExecutionStart { id } => {
             Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate {
                 tool_call_id: id.to_string(),
@@ -1098,7 +1117,7 @@ fn to_update(seen: &mut HashSet<String>, event: &LoopEvent) -> Option<SessionUpd
 /// it: user chunks, then each assistant block and tool result mapped
 /// through [`to_update`].
 fn replay_updates(history: &[Message]) -> Vec<SessionUpdate> {
-    let mut seen = HashSet::new();
+    let mut seen = HashMap::new();
     let mut updates = Vec::new();
     for message in history {
         for block in &message.content {
@@ -1280,6 +1299,20 @@ fn editor_servers(servers: &[McpServer]) -> Result<BTreeMap<String, McpSpec>, Rp
         .collect()
 }
 
+/// `err` without the `kage mcp login` hint when it names one of the
+/// `editor`'s servers, which are not configured, so a login cannot help.
+fn without_login(err: McpError, editor: &[String]) -> McpError {
+    match err {
+        McpError::Unauthorized { server, .. } if editor.contains(&server) => {
+            McpError::Unauthorized {
+                server,
+                login: false,
+            }
+        }
+        other => other,
+    }
+}
+
 /// One `available_commands_update` entry per prompt of a live server in
 /// `servers`, named `<server>:<prompt>`. The input hint lists required
 /// arguments as `<name>` and optional ones as `[name]`, and a prompt
@@ -1430,6 +1463,17 @@ fn text_content(text: String) -> ToolCallContent {
     ToolCallContent::Content(MessageChunk {
         content: ContentBlock::text(text),
     })
+}
+
+/// The title a client shows for tool `name`: `server.tool` for an MCP
+/// tool, as the TUI shows it, else the name.
+fn tool_title(name: &str) -> String {
+    match name.split_once("__") {
+        Some((server, tool)) if !server.is_empty() && !tool.is_empty() => {
+            format!("{server}.{tool}")
+        }
+        _ => name.to_owned(),
+    }
 }
 
 /// ACP kind hint for a built-in tool name.
@@ -1814,15 +1858,16 @@ done
         assert_eq!(announced.unwrap()["update"]["sessionUpdate"], "tool_call");
         let progress = contents_of(&updates, "call_agent");
         assert_eq!(
-            progress[..3],
+            progress[..4],
             [
                 format!("general: List {path}"),
                 format!("general: Waiting for approval: List {path}"),
+                format!("general: List {path}"),
                 "general: done".to_owned(),
             ]
         );
         assert!(contents_of(&updates, "call_child").is_empty());
-        assert!(progress[3].contains("child done"), "{progress:?}");
+        assert!(progress[4].contains("child done"), "{progress:?}");
     }
 
     /// Initializes as a client that advertises subagents.
@@ -2643,6 +2688,14 @@ done
             "end_turn"
         );
         assert_eq!(h.mock.requests()[0].messages[0].content, [text("p a=x")]);
+
+        let params = serde_json::json!({
+            "sessionId": h.session,
+            "prompt": [{"type": "text", "text": "/srv:p"}],
+        });
+        let err = h.client.request("session/prompt", params).unwrap_err();
+        assert_eq!(err.code, -32602);
+        assert_eq!(err.message, "mcp srv:p: missing argument a");
     }
 
     #[test]
@@ -2684,6 +2737,24 @@ done
             err.message.contains("`old` uses the sse transport"),
             "{}",
             err.message
+        );
+    }
+
+    #[test]
+    fn editor_servers_get_no_login_hint() {
+        let editor = ["ed".to_owned()];
+        let refused = |server: &str| McpError::Unauthorized {
+            server: server.to_owned(),
+            login: true,
+        };
+        assert_eq!(
+            without_login(refused("ed"), &editor).to_string(),
+            "server `ed` needs authorization"
+        );
+        assert!(
+            without_login(refused("conf"), &editor)
+                .to_string()
+                .contains("run kage mcp login conf")
         );
     }
 
@@ -2746,7 +2817,7 @@ done
 
         let (ask, params) = until_ask(&h.inbox, &mut Vec::new());
         assert_eq!(params["sessionId"], session);
-        assert_eq!(params["toolCall"]["title"], "ed__show");
+        assert_eq!(params["toolCall"]["title"], "ed.show");
         allow(&h.client, &ask);
 
         let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
@@ -2875,17 +2946,20 @@ done
     }
 
     #[test]
-    fn a_tool_call_is_announced_once_then_updated() {
+    fn a_tool_call_is_announced_once_then_updated_when_something_changed() {
         let id = ToolCallId::new("call_1");
+        let args = |input: serde_json::Value| LoopEvent::ToolCallArgsDelta {
+            id: id.clone(),
+            name: "ed__run".into(),
+            input_partial: input,
+        };
         let events = [
-            LoopEvent::ToolCallArgsDelta {
-                id: id.clone(),
-                name: "bash".into(),
-                input_partial: serde_json::json!({}),
-            },
+            args(serde_json::json!({})),
+            args(serde_json::json!({ "command": "ls" })),
+            args(serde_json::json!({ "command": "ls" })),
             LoopEvent::ToolCallStart {
                 id: id.clone(),
-                name: "bash".into(),
+                name: "ed__run".into(),
                 input_partial: serde_json::json!({ "command": "ls" }),
             },
             LoopEvent::ToolExecutionStart { id: id.clone() },
@@ -2901,7 +2975,7 @@ done
                 output: ToolOutput::default(),
             },
         ];
-        let mut seen = HashSet::new();
+        let mut seen = HashMap::new();
         let updates: Vec<SessionUpdate> = events
             .iter()
             .filter_map(|e| to_update(&mut seen, e))
@@ -2922,18 +2996,29 @@ done
             statuses,
             [
                 Some(ToolCallStatus::Pending),
-                Some(ToolCallStatus::Pending),
+                None,
                 Some(ToolCallStatus::InProgress),
                 None,
                 Some(ToolCallStatus::Completed)
             ]
+        );
+        let SessionUpdate::ToolCall(call) = &updates[0] else {
+            unreachable!()
+        };
+        assert_eq!(call.title, "ed.run");
+        let SessionUpdate::ToolCallUpdate(update) = &updates[1] else {
+            unreachable!()
+        };
+        assert_eq!(
+            update.raw_input,
+            Some(serde_json::json!({ "command": "ls" }))
         );
     }
 
     #[test]
     fn text_maps_to_agent_message_chunks() {
         let update = to_update(
-            &mut HashSet::new(),
+            &mut HashMap::new(),
             &LoopEvent::TextDelta {
                 id: MessageId::new(),
                 delta: "hi".into(),

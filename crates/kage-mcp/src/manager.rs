@@ -26,8 +26,11 @@
 //! An HTTP server that refuses kage's token (or has none) reports
 //! [`McpError::Unauthorized`]. It is kept like a failed server but shows
 //! as [`McpServerStatus::NeedsAuth`], and a live server that starts
-//! refusing is taken down the same way. [`McpManager::spawn_all_with`]
-//! takes the [`TokenSource`] and keeps it for `restart`.
+//! refusing is taken down the same way: at the next refresh after any
+//! request was refused (a tool call included), at a refresh once its
+//! stored token is gone (a logout), or when a restart is refused.
+//! [`McpManager::spawn_all_with`] takes the [`TokenSource`] and keeps it
+//! for `restart`.
 //!
 //! While at least one live server advertises resources, the manager also
 //! registers the [`McpResourceTool`] over the cached lists, rebuilding it
@@ -51,13 +54,15 @@ use crate::tools::tools_from_connection;
 /// respawned by `restart`, including after an eviction), the live
 /// handle (`None` when it failed to spawn or was evicted as dead), the
 /// last error of a server that is not live and whether that error asks
-/// for a login, the tool names it currently contributes, and its cached
-/// catalog lists.
+/// for a login, whether the live handle signs in with a stored token,
+/// the tool names it currently contributes, and its cached catalog
+/// lists.
 struct Managed {
     spec: McpServer,
     handle: Option<McpServerHandle>,
     error: Option<String>,
     needs_auth: bool,
+    signed_in: bool,
     registered: Vec<String>,
     resources: Vec<McpResource>,
     templates: Vec<McpResourceTemplate>,
@@ -71,6 +76,7 @@ impl Managed {
             handle,
             error: None,
             needs_auth: false,
+            signed_in: false,
             registered: Vec::new(),
             resources: Vec::new(),
             templates: Vec::new(),
@@ -137,8 +143,29 @@ impl Managed {
             reg.unregister(&stale);
         }
         self.handle = None;
+        self.signed_in = false;
         self.clear_catalog();
         self.failed(error);
+    }
+
+    /// The URL this server's HTTP transport asks `tokens` a bearer for:
+    /// `None` for a stdio server, without a token source, or when a
+    /// configured `authorization` header wins.
+    fn token_url(&self, tokens: Option<&Arc<dyn TokenSource>>) -> Option<&str> {
+        let configured = self
+            .spec
+            .headers
+            .keys()
+            .any(|key| key.eq_ignore_ascii_case("authorization"));
+        tokens.and(self.spec.url.as_deref()).filter(|_| !configured)
+    }
+
+    /// Whether `tokens` has a token for this server's HTTP transport.
+    fn has_token(&self, tokens: Option<&Arc<dyn TokenSource>>) -> bool {
+        match (self.token_url(tokens), tokens) {
+            (Some(url), Some(tokens)) => tokens.bearer(url).is_some(),
+            _ => false,
+        }
     }
 
     /// Take the server down when one of `failures` says its token was
@@ -237,7 +264,11 @@ impl McpManager {
                 tokens.clone(),
             );
             let managed = match spawned {
-                Ok(handle) => Managed::new(spec.clone(), Some(handle)),
+                Ok(handle) => {
+                    let mut managed = Managed::new(spec.clone(), Some(handle));
+                    managed.signed_in = managed.has_token(tokens.as_ref());
+                    managed
+                }
                 Err(e) => {
                     let mut managed = Managed::new(spec.clone(), None);
                     managed.failed(&e);
@@ -358,8 +389,9 @@ impl McpManager {
     /// transport has died is evicted instead: its tools are
     /// unregistered, its catalog is cleared and a [`McpError::Crashed`]
     /// failure is reported (the launch spec is kept for a later
-    /// `restart`). A server that refuses kage's token is taken down the
-    /// same way and needs a login. Returns per-server failures.
+    /// `restart`). A server that refused kage's token on any request, or
+    /// whose stored token is gone, is taken down the same way and needs a
+    /// login. Returns per-server failures.
     pub fn refresh_into(&mut self, reg: &mut ToolRegistry) -> Vec<(String, McpError)> {
         let mut errors = Vec::new();
         for (name, managed) in &mut self.servers {
@@ -379,6 +411,16 @@ impl McpManager {
                 };
                 managed.evict(reg, &crash);
                 errors.push((name.clone(), crash));
+                continue;
+            }
+            let tokens = self.tokens.as_ref();
+            if conn.is_refused() || (managed.signed_in && !managed.has_token(tokens)) {
+                let denied = McpError::Unauthorized {
+                    server: name.clone(),
+                    login: managed.token_url(tokens).is_some(),
+                };
+                managed.evict(reg, &denied);
+                errors.push((name.clone(), denied));
                 continue;
             }
             let mut failures = Vec::new();
@@ -409,9 +451,11 @@ impl McpManager {
     /// child, if any), re-register its tools and reload its catalog.
     /// The name is looked up across every entry, including servers
     /// that failed to spawn or were evicted as dead, so `restart` can
-    /// bring them up from the retained spec. A failed respawn leaves a live server untouched,
-    /// so `restart` never causes downtime on its own failure, and
-    /// records the new error for a server that is not live.
+    /// bring them up from the retained spec. A failed respawn leaves a
+    /// live server untouched, so `restart` never causes downtime on its
+    /// own failure, and records the new error for a server that is not
+    /// live. The exception is a refused token: the live server is taken
+    /// down too, because its requests would be refused as well.
     ///
     /// # Errors
     ///
@@ -433,7 +477,10 @@ impl McpManager {
         let fresh = match spawned {
             Ok(fresh) => fresh,
             Err(e) => {
-                if managed.handle.is_none() {
+                if matches!(e, McpError::Unauthorized { .. }) {
+                    managed.evict(reg, &e);
+                    self.sync_resource_tool(reg);
+                } else if managed.handle.is_none() {
                     managed.failed(&e);
                 }
                 return Err(e);
@@ -443,6 +490,7 @@ impl McpManager {
             reg.unregister(&stale);
         }
         managed.handle = Some(fresh);
+        managed.signed_in = managed.has_token(self.tokens.as_ref());
         managed.error = None;
         managed.needs_auth = false;
         managed.clear_catalog();
@@ -876,9 +924,12 @@ mod tests {
     }
 
     /// An HTTP MCP server on 127.0.0.1 that answers `initialize` (and
-    /// `tools/list` with one tool) to `Bearer good` while `ready` is set
-    /// and `list` allows it, and 401 otherwise.
-    fn guarded_server(ready: Arc<AtomicBool>, list: bool) -> crate::oauth::tests::FakeServer {
+    /// `tools/list` with one tool) to `Bearer good` while `ready` is set,
+    /// and 401 otherwise and to the `refused` method.
+    fn guarded_server(
+        ready: Arc<AtomicBool>,
+        refused: Option<&'static str>,
+    ) -> crate::oauth::tests::FakeServer {
         use crate::oauth::tests::{Reply, serve};
         serve(move |request, _| {
             if request.method == "GET" {
@@ -887,7 +938,7 @@ mod tests {
             let body: serde_json::Value = serde_json::from_str(&request.body).unwrap_or_default();
             let allowed = ready.load(Ordering::SeqCst)
                 && request.header("authorization") == Some("Bearer good")
-                && (list || body["method"] != "tools/list");
+                && refused.is_none_or(|method| body["method"] != method);
             if !allowed {
                 return Reply::status(401);
             }
@@ -933,7 +984,7 @@ mod tests {
     #[test]
     fn a_refused_token_needs_auth_and_restart_sends_the_token() {
         let ready = Arc::new(AtomicBool::new(false));
-        let server = guarded_server(Arc::clone(&ready), true);
+        let server = guarded_server(Arc::clone(&ready), None);
         let tokens = crate::oauth::tests::StaticTokens::new("good", None);
         let (mut mgr, errors) = McpManager::spawn_all_with(
             &remote_config(format!("{}/mcp", server.base)),
@@ -943,7 +994,7 @@ mod tests {
         );
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert!(
-            matches!(&errors[0].1, McpError::Unauthorized { server } if server == "remote"),
+            matches!(&errors[0].1, McpError::Unauthorized { server, login: true } if server == "remote"),
             "{:?}",
             errors[0].1
         );
@@ -965,7 +1016,7 @@ mod tests {
 
     #[test]
     fn a_live_server_that_refuses_its_token_needs_auth() {
-        let server = guarded_server(Arc::new(AtomicBool::new(true)), false);
+        let server = guarded_server(Arc::new(AtomicBool::new(true)), Some("tools/list"));
         let tokens = crate::oauth::tests::StaticTokens::new("good", None);
         let (mut mgr, errors) = McpManager::spawn_all_with(
             &remote_config(format!("{}/mcp", server.base)),
@@ -984,6 +1035,76 @@ mod tests {
         assert!(mgr.is_empty());
         assert_eq!(mgr.catalog()[0].status, McpServerStatus::NeedsAuth);
         assert!(reg.get("remote__t").is_none());
+    }
+
+    /// A manager with the guarded `remote` server spawned and its tools
+    /// registered.
+    fn signed_in(
+        server: &crate::oauth::tests::FakeServer,
+        tokens: &Arc<crate::oauth::tests::StaticTokens>,
+    ) -> (McpManager, ToolRegistry) {
+        let (mut mgr, errors) = McpManager::spawn_all_with(
+            &remote_config(format!("{}/mcp", server.base)),
+            vec![],
+            None,
+            Some(Arc::clone(tokens) as Arc<dyn TokenSource>),
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        let mut reg = ToolRegistry::new();
+        assert!(mgr.register_into(&mut reg).is_empty());
+        assert!(reg.get("remote__t").is_some());
+        (mgr, reg)
+    }
+
+    fn assert_needs_auth(errors: &[(String, McpError)], mgr: &McpManager, reg: &ToolRegistry) {
+        assert!(
+            matches!(errors, [(name, McpError::Unauthorized { .. })] if name == "remote"),
+            "{errors:?}"
+        );
+        assert_eq!(mgr.catalog()[0].status, McpServerStatus::NeedsAuth);
+        assert!(mgr.is_empty());
+        assert!(reg.get("remote__t").is_none());
+    }
+
+    #[test]
+    fn a_refused_tool_call_needs_auth_at_the_next_refresh() {
+        let server = guarded_server(Arc::new(AtomicBool::new(true)), Some("tools/call"));
+        let tokens = crate::oauth::tests::StaticTokens::new("good", None);
+        let (mut mgr, mut reg) = signed_in(&server, &tokens);
+
+        let cancel = kage_core::CancelFlag::default();
+        let cx = kage_tools::tool::ToolContext::new(std::path::Path::new("."), &cancel);
+        let tool = reg.get("remote__t").unwrap();
+        let out = tool.execute(serde_json::json!({}), &cx).unwrap();
+        assert!(out.is_error);
+        assert!(out.text.contains("kage mcp login remote"), "{}", out.text);
+
+        let errors = mgr.refresh_into(&mut reg);
+        assert_needs_auth(&errors, &mgr, &reg);
+    }
+
+    #[test]
+    fn a_refused_restart_takes_the_live_server_down() {
+        let ready = Arc::new(AtomicBool::new(true));
+        let server = guarded_server(Arc::clone(&ready), None);
+        let tokens = crate::oauth::tests::StaticTokens::new("good", None);
+        let (mut mgr, mut reg) = signed_in(&server, &tokens);
+
+        ready.store(false, Ordering::SeqCst);
+        let err = mgr.restart("remote", &mut reg).unwrap_err();
+        assert_needs_auth(&[("remote".to_owned(), err)], &mgr, &reg);
+    }
+
+    #[test]
+    fn a_logout_needs_auth_at_the_next_refresh() {
+        let server = guarded_server(Arc::new(AtomicBool::new(true)), None);
+        let tokens = crate::oauth::tests::StaticTokens::new("good", None);
+        let (mut mgr, mut reg) = signed_in(&server, &tokens);
+        assert!(mgr.refresh_into(&mut reg).is_empty());
+
+        tokens.forget();
+        let errors = mgr.refresh_into(&mut reg);
+        assert_needs_auth(&errors, &mgr, &reg);
     }
 
     #[test]

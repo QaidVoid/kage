@@ -121,6 +121,12 @@ it can show the failure and restart the server later:
 - An HTTP server that refuses kage's token, or has none, is listed as
   `needs login`. Its error names the fix:
   ``server `linear` needs authorization: run kage mcp login linear, or /mcp in the TUI``.
+  A server with a configured `Authorization` header gets no such hint,
+  because a login would not change what kage sends.
+- A connected server turns into `needs login` before the next run when
+  it refused any request, a tool call included, or when its stored
+  token is gone after `kage mcp logout`. A restart that the server
+  refuses also takes the running server down.
 
 Restart a failed server with [`/mcp restart`](#the-mcp-picker). Log
 in to a server that needs it with `/mcp login` or `kage mcp login`.
@@ -134,7 +140,8 @@ tagged `mcp server`. Pick a server, or type `@<server>:`, and the popup
 lists that server's resources, matched against their URI and name,
 followed by its resource templates tagged `template: <name>`. A
 template is inserted as written, so replace its `{...}` parts
-yourself.
+yourself. A mention that still has one is refused before any request,
+for example `mcp fix: test://item/{id}: fill in {id} first`.
 
 ```text
 > what is in @everything:test://static/resource/1
@@ -167,9 +174,10 @@ The rules:
 - Only names of configured servers count. Other `@name:...` text is
   left alone and sent as typed.
 - A mention of a configured server that is not connected fails the
-  prompt with `mcp <server>: not connected`. A resource that cannot be
-  read fails it with `mcp <server>: read <uri>: <reason>`. The notice
-  shows in the transcript and nothing is sent to the model.
+  prompt with `mcp <server>: failed: <error>` or `mcp <server>: needs
+  login`. A resource that cannot be read fails it with
+  `mcp <server>: read <uri>: <reason>`. The notice shows in the
+  transcript and nothing is sent to the model.
 - Image resources are attached as images. Other binary resources
   become one line naming the URI, the MIME type and the size.
 - Text is capped at 64 KiB per resource and 256 KiB per prompt. A
@@ -193,7 +201,8 @@ servers that have resources.
 - With only `server`, it lists that server's cached resources and
   templates, without a request.
 - With `server` and `uri`, it reads the resource, with the same caps
-  as a mention. Binary parts become one line each.
+  as a mention. Binary parts become one line each. Errors read like a
+  mention's, and a URI with a `{...}` placeholder is refused.
 
 The tool goes away when no connected server offers resources. It is
 not an MCP tool name, so it follows the built-in rules rather than
@@ -279,8 +288,9 @@ client_id = "kage-4f2c"   # optional: a pre-registered client, skips registratio
 scope = "read write"      # optional: overrides the scope the server advertises
 ```
 
-Both keys are optional. Without `client_id`, the authorization server
-must offer dynamic client registration, or the login fails and names
+Both keys are optional. Without `client_id`, a login reuses the client
+an earlier login registered with the same authorization server. The
+first login needs dynamic client registration, or it fails and names
 the `client_id` key.
 
 ### `kage mcp login`
@@ -323,7 +333,8 @@ kage mcp logout linear
 ```
 
 `logout` forgets the stored token. The server needs a new login before
-it connects again.
+it connects again. A running kage notices at the next restart of the
+server or before its next run, and lists it as `needs login`.
 
 ### where tokens live
 

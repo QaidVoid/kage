@@ -10,6 +10,7 @@ use kage_core::{
     CancelFlag, LoopError, LoopEvent, Message, SessionId, TokenCost, TokenUsage, ToolOutput,
 };
 use kage_loop::{AgentContext, Hooks, LoopConfig};
+use kage_mcp::expand::ExpandError;
 use kage_mcp::{McpConnection, McpManager};
 use kage_plugin::PluginRuntime;
 use kage_provider::Provider;
@@ -215,7 +216,8 @@ impl Run {
 }
 
 /// `prompt` with its MCP prompt command and resource mentions expanded.
-/// A failure is published as a notice and fails the run.
+/// A failure is published as a notice and fails the run, as an invalid
+/// prompt when the text itself is at fault.
 fn expand(
     bus: &Bus,
     session: SessionId,
@@ -229,7 +231,12 @@ fn expand(
         Err(err) => {
             let message = err.to_string();
             notice(bus, session, message.clone());
-            Err(LoopError::Other { message })
+            Err(match err {
+                ExpandError::MissingArgument { .. } | ExpandError::Placeholder { .. } => {
+                    LoopError::InvalidPrompt { message }
+                }
+                _ => LoopError::Other { message },
+            })
         }
     }
 }

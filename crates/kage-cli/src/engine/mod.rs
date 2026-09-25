@@ -241,6 +241,9 @@ struct Session {
     pending_history: Vec<Message>,
     title: bool,
     title_pending: bool,
+    /// A generated title that arrived while a run or an idle restart held
+    /// the recorder, written when the recorder comes back.
+    late_title: Option<String>,
     plugin_tools: PluginTools,
     agents: Option<AgentSetup>,
     /// Present on sessions an `agent` call started.
@@ -423,6 +426,7 @@ impl Dispatcher {
                 pending_history: Vec::new(),
                 title,
                 title_pending,
+                late_title: None,
                 plugin_tools: PluginTools::default(),
                 agents,
                 link,
@@ -604,20 +608,13 @@ impl Dispatcher {
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
-        if let Some(recorder) = session.idle.as_mut().and_then(|i| i.recorder.as_mut()) {
-            let entry = kage_session::SessionEntry::Title(kage_session::SessionTitle {
-                id: kage_session::EntryId::new(),
-                ts: chrono::Utc::now(),
-                title: title.clone(),
-            });
-            if let Err(err) = recorder.append(&entry) {
-                notice(
-                    &self.bus,
-                    id,
-                    NoticeLevel::Error,
-                    format!("session title: {err}"),
-                );
+        match session.idle.as_mut() {
+            Some(idle) => {
+                if let Some(recorder) = idle.recorder.as_mut() {
+                    report_write(&self.bus, id, recorder.append(&title_entry(title.clone())));
+                }
             }
+            None => session.late_title = Some(title.clone()),
         }
         self.bus.publish(id, HostEvent::TitleChanged { title });
     }
@@ -791,6 +788,7 @@ impl Dispatcher {
             return;
         };
         session.idle = Some(Idle { cx, recorder });
+        record_late_title(&self.bus, id, session);
         session.usage = usage;
         session.state.working = false;
         // A set flag on an idle session would cancel any run its agents
@@ -884,6 +882,7 @@ impl Dispatcher {
             return;
         };
         session.idle = Some(idle);
+        record_late_title(&self.bus, id, session);
         let steered: Vec<String> = lock(&session.steering).drain(..).collect();
         for text in steered.into_iter().rev() {
             session.queued.push_front(vec![Content::Text { text }]);
@@ -1329,6 +1328,25 @@ fn usage_of(cx: &AgentContext) -> Usage {
 /// Whether the conversation already has an assistant reply.
 fn has_reply(cx: &AgentContext) -> bool {
     cx.history.iter().any(|m| m.role == Role::Assistant)
+}
+
+fn title_entry(title: String) -> kage_session::SessionEntry {
+    kage_session::SessionEntry::Title(kage_session::SessionTitle {
+        id: kage_session::EntryId::new(),
+        ts: chrono::Utc::now(),
+        title,
+    })
+}
+
+/// Write the title that arrived while `session` was busy, now that its
+/// recorder is back.
+fn record_late_title(bus: &Bus, id: SessionId, session: &mut Session) {
+    let Some(title) = session.late_title.take() else {
+        return;
+    };
+    if let Some(recorder) = session.idle.as_mut().and_then(|i| i.recorder.as_mut()) {
+        report_write(bus, id, recorder.append(&title_entry(title)));
+    }
 }
 
 fn thinking_entry(level: ThinkingLevel) -> kage_session::SessionEntry {

@@ -129,6 +129,9 @@ fn all_loop_errors_roundtrip() {
         },
         LoopError::Cancelled,
         LoopError::ContextOverflow,
+        LoopError::InvalidPrompt {
+            message: "w".into(),
+        },
         LoopError::Other {
             message: "z".into(),
         },

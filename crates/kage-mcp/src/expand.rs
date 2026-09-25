@@ -10,14 +10,16 @@
 //!   the rest of the text bound to its arguments ([`bind_arguments`]).
 //! - Every `@<server>:<uri>` token is read with `resources/read`, once
 //!   per distinct URI, and appended to the message as a
-//!   [`kage_core::resource_block`]. The typed text stays as it is.
+//!   [`kage_core::resource_block`]. The typed text stays as it is. A URI
+//!   that still holds a `{name}` template placeholder is refused before
+//!   any request.
 //!
 //! Resource text is capped at [`MAX_RESOURCE_TEXT`] per resource and
 //! [`MAX_PROMPT_TEXT`] per prompt, with a line saying what was cut.
 
 use std::sync::Arc;
 
-use kage_core::protocol::{McpPrompt, McpServerInfo};
+use kage_core::protocol::{McpPrompt, McpServerInfo, McpServerStatus};
 use kage_core::{Content, ImageSource, Role, resource_block};
 use serde_json::{Map, Value};
 
@@ -54,10 +56,23 @@ pub enum ExpandError {
         reason: String,
     },
     /// A mention named a configured server that is not live.
-    #[error("mcp {server}: not connected")]
+    #[error("mcp {server}: {status}")]
     NotConnected {
         /// Server name.
         server: String,
+        /// Why it is not live: `failed: <error>`, `needs login` or `not
+        /// connected`.
+        status: String,
+    },
+    /// A mentioned URI still holds a template placeholder.
+    #[error("mcp {server}: {uri}: fill in {placeholder} first")]
+    Placeholder {
+        /// Server name.
+        server: String,
+        /// The mentioned URI.
+        uri: String,
+        /// The first placeholder, braces included.
+        placeholder: String,
     },
     /// `resources/read` failed.
     #[error("mcp {server}: read {uri}: {reason}")]
@@ -99,6 +114,15 @@ pub fn find_mentions(text: &str) -> Vec<(&str, &str)> {
         .collect()
 }
 
+/// The first `{name}` template placeholder left in `uri`, braces
+/// included.
+#[must_use]
+pub fn find_placeholder(uri: &str) -> Option<&str> {
+    let start = uri.find('{')?;
+    let len = uri[start..].find('}')?;
+    (len > 1).then(|| &uri[start..=start + len])
+}
+
 /// Bind `rest` to `prompt`'s arguments: whitespace separated words in
 /// declared order, with the last declared argument taking the
 /// remainder. Absent optional arguments are left out.
@@ -136,8 +160,8 @@ pub fn bind_arguments(prompt: &McpPrompt, rest: &str) -> Result<Map<String, Valu
 /// # Errors
 ///
 /// Fails when a prompt command misses a required argument, `prompts/get`
-/// fails, a mention names a configured server that is not live, or a
-/// mentioned resource cannot be read.
+/// fails, a mention names a configured server that is not live or a URI
+/// with a template placeholder, or a mentioned resource cannot be read.
 pub fn expand(
     content: Vec<Content>,
     clients: &[(String, Arc<McpConnection>)],
@@ -151,7 +175,7 @@ pub fn expand(
     };
     let mut budget = MAX_PROMPT_TEXT;
     let mut out = Vec::with_capacity(content.len());
-    let mut mentions: Vec<(String, String)> = Vec::new();
+    let mut mentions: Vec<(String, String, Arc<McpConnection>)> = Vec::new();
     let mut first_text = true;
     for block in content {
         let Content::Text { text } = block else {
@@ -184,22 +208,30 @@ pub fn expand(
             continue;
         }
         for (server, uri) in find_mentions(&text) {
-            let known = catalog.iter().any(|info| info.name == server);
-            if known && !mentions.iter().any(|(s, u)| s == server && u == uri) {
-                mentions.push((server.to_owned(), uri.to_owned()));
+            let Some(info) = catalog.iter().find(|info| info.name == server) else {
+                continue;
+            };
+            if let Some(placeholder) = find_placeholder(uri) {
+                return Err(ExpandError::Placeholder {
+                    server: server.to_owned(),
+                    uri: uri.to_owned(),
+                    placeholder: placeholder.to_owned(),
+                });
+            }
+            let conn = live(server).ok_or_else(|| ExpandError::NotConnected {
+                server: server.to_owned(),
+                status: not_live(&info.status),
+            })?;
+            if !mentions.iter().any(|(s, u, _)| s == server && u == uri) {
+                mentions.push((server.to_owned(), uri.to_owned(), Arc::clone(conn)));
             }
         }
         out.push(Content::Text { text });
     }
-    for (server, uri) in mentions {
-        let conn = live(&server).ok_or_else(|| ExpandError::NotConnected {
-            server: server.clone(),
-        })?;
-        let parts = conn.read_resource(&uri).map_err(|err| ExpandError::Read {
-            server: server.clone(),
-            uri: uri.clone(),
-            reason: reason(&err),
-        })?;
+    for (server, uri, conn) in mentions {
+        let parts = conn
+            .read_resource(&uri)
+            .map_err(|err| read_error(&server, &uri, &err))?;
         out.extend(
             parts
                 .into_iter()
@@ -227,6 +259,24 @@ fn reason(err: &McpError) -> String {
     match err {
         McpError::Rpc { source, .. } => source.message.clone(),
         other => other.to_string(),
+    }
+}
+
+/// A failed `resources/read` of `uri` on `server`.
+pub(crate) fn read_error(server: &str, uri: &str, err: &McpError) -> ExpandError {
+    ExpandError::Read {
+        server: server.to_owned(),
+        uri: uri.to_owned(),
+        reason: reason(err),
+    }
+}
+
+/// Why a server with `status` has no live connection.
+fn not_live(status: &McpServerStatus) -> String {
+    match status {
+        McpServerStatus::Failed { error } => format!("failed: {error}"),
+        McpServerStatus::NeedsAuth => "needs login".to_owned(),
+        McpServerStatus::Connected => "not connected".to_owned(),
     }
 }
 
@@ -362,7 +412,7 @@ pub(crate) fn decoded_len(data: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use kage_core::protocol::{McpPromptArgument, McpServerStatus};
+    use kage_core::protocol::McpPromptArgument;
     use kage_jsonrpc::RpcError;
     use serde_json::json;
 
@@ -583,7 +633,32 @@ mod tests {
             ..info("down", Vec::new())
         });
         let err = expand(vec![text("@down:test://a")], &clients, &catalog).unwrap_err();
-        assert_eq!(err.to_string(), "mcp down: not connected");
+        assert_eq!(err.to_string(), "mcp down: failed: gone");
+        catalog.push(McpServerInfo {
+            status: McpServerStatus::NeedsAuth,
+            ..info("remote", Vec::new())
+        });
+        let err = expand(vec![text("@remote:test://a")], &clients, &catalog).unwrap_err();
+        assert_eq!(err.to_string(), "mcp remote: needs login");
+    }
+
+    #[test]
+    fn a_mention_with_a_template_placeholder_is_refused_before_any_request() {
+        let (clients, catalog, seen) = server();
+        let err = expand(
+            vec![text("@srv:test://a and @srv:test://item/{id}/{part}")],
+            &clients,
+            &catalog,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "mcp srv: test://item/{id}/{part}: fill in {id} first"
+        );
+        assert!(requests(&seen).is_empty());
+        assert_eq!(find_placeholder("test://a/{}"), None);
+        assert_eq!(find_placeholder("test://a/{x"), None);
+        assert_eq!(find_placeholder("test://a/x}{y}"), Some("{y}"));
     }
 
     #[test]

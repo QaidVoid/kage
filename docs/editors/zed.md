@@ -170,7 +170,10 @@ Each block of a `session/prompt` reaches the model:
 Prompt text can mention MCP resources and run MCP prompts exactly as
 in the TUI. See [mcp](/guide/mcp#resources-and-mentions). A mention or
 prompt that fails to expand fails the `session/prompt` request with
-the reason, and nothing is sent to the model.
+the reason, and nothing is sent to the model. A prompt command that
+misses a required argument, or a mention with a `{...}` placeholder
+left, is an invalid params error (`-32602`). Other expansion failures
+are internal errors (`-32603`).
 
 ## mcp prompts as commands
 
@@ -202,7 +205,14 @@ start for that session, next to your configured and plugin servers:
 An editor server replaces a configured server of the same name, and
 stderr says so. Editor servers count as your own configuration, so no
 trust prompt applies. Their tools ask before running like every MCP
-tool, unless `[permissions.mcp]` allows the server.
+tool, unless `[permissions.mcp]` allows the server. An editor server
+that fails to start is reported on stderr, without the `kage mcp
+login` hint, because `kage mcp login` only knows configured servers.
+
+Tool calls are titled like the TUI shows them: `server.tool` for an
+MCP tool (`github.create_issue` for `github__create_issue`), else the
+tool name. A call is announced once as `tool_call`. Streamed input
+sends a `tool_call_update` only when it changed.
 
 ## permission prompts
 
@@ -250,7 +260,10 @@ the top-level `agent` tool call of your session:
 
 - `tool_call_update` notifications replace that call's content with
   the agent's latest step, such as `explore: Read src/lib.rs`, and end
-  with `explore: done`, `explore: stopped` or `explore: failed`.
+  with `explore: done`, `explore: stopped` or `explore: failed`. While
+  an agent waits for approval the step reads `explore: Waiting for
+  approval: ...`, and once the call is allowed it shows the running
+  call again.
 - An agent's `session/request_permission` arrives on your session
   with the `agent` call as its tool call, a title that names the agent
   and the tool, such as `explore: bash`, and the agent's tool input as

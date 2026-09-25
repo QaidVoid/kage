@@ -205,6 +205,13 @@ pub enum LoopError {
         /// Human-readable detail.
         message: String,
     },
+    /// The prompt was refused before it reached the model, such as an
+    /// MCP prompt command missing a required argument.
+    #[error("{message}")]
+    InvalidPrompt {
+        /// Human-readable detail.
+        message: String,
+    },
     /// Anything not covered above.
     #[error("{message}")]
     Other {

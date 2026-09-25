@@ -115,22 +115,35 @@ pub enum McpError {
     },
     /// The HTTP server answered 401: kage has no token for it, or the
     /// token was refused and could not be refreshed.
-    #[error(
-        "server `{server}` needs authorization: run kage mcp login {server}, or /mcp in the TUI"
-    )]
+    #[error("server `{server}` needs authorization{}", login_hint(*.login, .server))]
     Unauthorized {
         /// Server name for context.
         server: String,
+        /// Whether kage sends a stored token, so a login is the fix. It
+        /// does not when a configured `authorization` header wins.
+        login: bool,
     },
+}
+
+fn login_hint(login: bool, server: &str) -> String {
+    if login {
+        format!(": run kage mcp login {server}, or /mcp in the TUI")
+    } else {
+        String::new()
+    }
 }
 
 impl McpError {
     /// Tag a JSON-RPC failure with the server name. The HTTP
-    /// transport's unauthorized code becomes [`McpError::Unauthorized`].
+    /// transport's unauthorized codes become [`McpError::Unauthorized`].
     fn rpc(server: &str, source: RpcError) -> Self {
-        if source.code == crate::http::UNAUTHORIZED {
+        if matches!(
+            source.code,
+            crate::http::UNAUTHORIZED | crate::http::REFUSED
+        ) {
             Self::Unauthorized {
                 server: server.to_owned(),
+                login: source.code == crate::http::UNAUTHORIZED,
             }
         } else {
             Self::Rpc {
@@ -203,6 +216,7 @@ pub struct McpConnection {
     drain: JoinHandle<()>,
     protocol_version: String,
     capabilities: serde_json::Value,
+    refused: AtomicBool,
 }
 
 impl McpConnection {
@@ -344,6 +358,7 @@ impl McpConnection {
             drain,
             protocol_version,
             capabilities,
+            refused: AtomicBool::new(false),
         })
     }
 
@@ -397,6 +412,23 @@ impl McpConnection {
     #[must_use]
     pub fn is_dead(&self) -> bool {
         self.drain.is_finished()
+    }
+
+    /// Whether an HTTP server refused kage's token on a request since the
+    /// connection opened, so the manager can take it down.
+    #[must_use]
+    pub fn is_refused(&self) -> bool {
+        self.refused.load(Ordering::SeqCst)
+    }
+
+    /// Tag a request failure with the server name, remembering a refused
+    /// token.
+    fn failure(&self, source: RpcError) -> McpError {
+        let error = McpError::rpc(&self.server, source);
+        if matches!(error, McpError::Unauthorized { .. }) {
+            self.refused.store(true, Ordering::SeqCst);
+        }
+        error
     }
 
     /// Build the `roots/list` result advertised to the server: one
@@ -463,7 +495,7 @@ impl McpConnection {
     ) -> Result<serde_json::Value, McpError> {
         self.peer
             .request_timeout(method, params, REQUEST_TIMEOUT)
-            .map_err(|source| McpError::rpc(&self.server, source))
+            .map_err(|source| self.failure(source))
     }
 
     /// Like [`Self::request`] but abandons the call when
@@ -483,7 +515,7 @@ impl McpConnection {
     ) -> Result<serde_json::Value, McpError> {
         self.peer
             .request_cancellable(method, params, should_cancel)
-            .map_err(|source| McpError::rpc(&self.server, source))
+            .map_err(|source| self.failure(source))
     }
 }
 

@@ -103,6 +103,9 @@ pub struct StatusCtx<'a> {
     /// Prompts sent during the run that were not delivered yet, listed
     /// above the input.
     pub pending: &'a [PendingPrompt],
+    /// Live agents of the main session, pinned above the pending
+    /// prompts.
+    pub agents: &'a [AgentRow],
 }
 
 /// Start card data the chrome state does not carry. Set once by the
@@ -285,18 +288,20 @@ pub fn chrome_heights(
             kage_plugin::SlotName::Activity,
             &sources,
         )),
-        input: input_height(input, status.pending.len(), width),
+        input: input_height(input, status.agents.len(), status.pending.len(), width),
         footer: 1,
     }
 }
 
 /// Input region height for `input`'s draft at terminal `width`: the
-/// rows of `pending` prompts, then the wrapped content rows, clamped
-/// to the configured bounds, plus the two rules.
+/// rows of pinned `agents` and `pending` prompts, then the wrapped
+/// content rows, clamped to the configured bounds, plus the two rules.
 #[must_use]
-pub fn input_height(input: &InputState, pending: usize, width: u16) -> u16 {
+pub fn input_height(input: &InputState, agents: usize, pending: usize, width: u16) -> u16 {
     let rows = input_visual_row_count(input.text(), input_body_width(width));
-    crate::layout::input_height_for(rows).saturating_add(pending_height(pending))
+    crate::layout::input_height_for(rows)
+        .saturating_add(agents_height(agents))
+        .saturating_add(pending_height(pending))
 }
 
 /// Width of the input's text column at terminal `width`: everything
@@ -423,8 +428,8 @@ pub(crate) use bubble::{
 };
 pub use buffer::CapturedCell;
 pub(crate) use buffer::build_block_lines;
-pub use input::PendingPrompt;
-pub(crate) use input::{INPUT_GLYPH_WIDTH, pending_height, split_pending};
+pub use input::{AgentRow, AgentRowState, PendingPrompt};
+pub(crate) use input::{INPUT_GLYPH_WIDTH, agents_height, pending_height, split_input};
 pub use modeline::input_visual_row_count;
 pub(crate) use modeline::{chrome_lines_to_ratatui, spinner_frame_index};
 pub(crate) use slot::START_SESSIONS;

@@ -345,6 +345,7 @@ impl App {
             .as_ref()
             .map(|dir| dir.display().to_string());
         let cmdline = self.cmdline.as_ref();
+        let agent_rows = self.agent_rows();
         let status = view::StatusCtx {
             model: model_label.as_deref(),
             session_id: self.status_session_id.as_deref(),
@@ -363,6 +364,7 @@ impl App {
             start: self.start_info.as_ref(),
             start_keys,
             pending: &self.pending,
+            agents: &agent_rows,
         };
         let screen_selection = self.screen_selection;
         let mut captured_rows = std::mem::take(&mut self.captured_rows);
@@ -410,12 +412,13 @@ impl App {
                 let regions = split(area, heights);
                 let mut view_regions = regions;
                 // The palette and the completion popup anchor to the
-                // input box, below the pending rows.
+                // input box, below the pinned agents and pending rows.
                 let mut box_regions = regions;
                 if approval.is_some() {
                     view_regions.input.height = 0;
                 } else {
-                    box_regions.input = view::split_pending(regions.input, status.pending.len()).1;
+                    box_regions.input =
+                        view::split_input(regions.input, agent_rows.len(), status.pending.len()).2;
                 }
                 view::render(
                     frame,

@@ -456,7 +456,7 @@ fn push_shell(buffer: &SharedBuffer, command: &str, output: &str, exit_code: Opt
 
 /// What an agent's card says it does: its running tool, else its latest
 /// tool, described with the verb of the tool's phase.
-fn agent_activity(buffer: &crate::Buffer) -> String {
+pub(super) fn agent_activity(buffer: &crate::Buffer) -> String {
     let mut latest = None;
     for block in buffer.blocks().iter().rev() {
         match block {

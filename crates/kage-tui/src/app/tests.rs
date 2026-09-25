@@ -4414,3 +4414,150 @@ fn the_main_session_change_forgets_its_agents() {
     assert!(app.agents.get(child).is_none());
     assert!(app.agent_buffers.is_empty());
 }
+
+/// The pinned rows as `(depth, agent, state)`.
+fn pinned(app: &App) -> Vec<(usize, String, crate::view::AgentRowState)> {
+    app.agent_rows()
+        .into_iter()
+        .map(|row| (row.depth, row.agent, row.state))
+        .collect()
+}
+
+#[test]
+fn the_pinned_list_shows_queued_running_and_waiting_agents_only() {
+    use crate::view::AgentRowState;
+    let (mut app, _rx, events) = app_with_events();
+    let queued = spawn_agent(&mut app, &events, "a1", "queued");
+    let running = spawn_agent(&mut app, &events, "a2", "running");
+    let asking = spawn_agent(&mut app, &events, "a3", "asking");
+    let done = spawn_agent(&mut app, &events, "a4", "done");
+    let grep = kage_core::LoopEvent::ToolCallStart {
+        id: kage_core::ToolCallId::new("c1"),
+        name: "grep".into(),
+        input_partial: serde_json::json!({ "pattern": "export ", "path": "src" }),
+    };
+    send_to(
+        &mut app,
+        &events,
+        running,
+        vec![
+            kage_core::protocol::HostEvent::RunStarted.into(),
+            grep.into(),
+            kage_core::LoopEvent::ToolExecutionStart {
+                id: kage_core::ToolCallId::new("c1"),
+            }
+            .into(),
+        ],
+    );
+    app.picker = Some(OverlayPicker::new("busy", vec![PickItem::simple("x")]));
+    send_to(
+        &mut app,
+        &events,
+        asking,
+        vec![
+            kage_core::protocol::HostEvent::RunStarted.into(),
+            bash_start("c1"),
+            permission_request("c1", 3),
+        ],
+    );
+    send_to(
+        &mut app,
+        &events,
+        done,
+        vec![
+            kage_core::protocol::HostEvent::RunStarted.into(),
+            run_ended(kage_core::protocol::RunOutcome::Completed),
+        ],
+    );
+    assert!(app.approval_panel.is_none());
+    assert_eq!(
+        pinned(&app),
+        [
+            (1, "queued".to_owned(), AgentRowState::Queued),
+            (1, "running".to_owned(), AgentRowState::Running),
+            (1, "asking".to_owned(), AgentRowState::Waiting),
+        ]
+    );
+    let rows = app.agent_rows();
+    assert_eq!(rows[0].session, queued);
+    assert_eq!(rows[0].description, "queued task");
+    assert_eq!(rows[0].elapsed_ms, None);
+    assert_eq!(rows[1].activity, "Searching \"export \" in src");
+    assert!(rows[1].elapsed_ms.is_some());
+}
+
+#[test]
+fn a_nested_agent_is_pinned_under_its_parent() {
+    let (mut app, _rx, events) = app_with_events();
+    let parent = spawn_agent(&mut app, &events, "a1", "general");
+    let sibling = spawn_agent(&mut app, &events, "a2", "explore");
+    let nested = kage_core::SessionId::new();
+    let spawned = kage_core::protocol::HostEvent::AgentSpawned {
+        parent,
+        tool_call_id: kage_core::ToolCallId::new("n1"),
+        agent: "test".into(),
+        description: "run the provider tests".into(),
+    };
+    send_to(&mut app, &events, nested, vec![spawned.into()]);
+    for session in [parent, sibling, nested] {
+        send_to(
+            &mut app,
+            &events,
+            session,
+            vec![kage_core::protocol::HostEvent::RunStarted.into()],
+        );
+    }
+    let depths: Vec<(usize, String)> = pinned(&app)
+        .into_iter()
+        .map(|(depth, agent, _)| (depth, agent))
+        .collect();
+    assert_eq!(
+        depths,
+        [
+            (1, "general".to_owned()),
+            (2, "test".to_owned()),
+            (1, "explore".to_owned()),
+        ]
+    );
+    let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+    app.render_into(&mut terminal).unwrap();
+    let rows = snapshot_rows(&terminal);
+    let general = rows
+        .iter()
+        .position(|r| r.contains(" general  general task"))
+        .unwrap();
+    assert!(rows[general + 1].starts_with("    "), "{rows:#?}");
+    assert!(rows[general + 1].contains(" test "), "{rows:#?}");
+    assert!(rows[general + 3].starts_with('\u{2500}'), "{rows:#?}");
+}
+
+#[test]
+fn the_pinned_list_hides_while_the_approval_panel_is_open() {
+    let (mut app, _rx, events) = app_with_events();
+    let child = spawn_agent(&mut app, &events, "a1", "explore");
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![kage_core::protocol::HostEvent::RunStarted.into()],
+    );
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    let pinned_row = |app: &mut App, terminal: &mut Terminal<TestBackend>| {
+        app.render_into(terminal).unwrap();
+        snapshot_rows(terminal)
+            .into_iter()
+            .any(|r| r.contains("explore  explore task"))
+    };
+    assert!(pinned_row(&mut app, &mut terminal));
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![bash_start("c1"), permission_request("c1", 4)],
+    );
+    assert!(app.approval_panel.is_some());
+    assert!(app.agent_rows().is_empty());
+    assert!(!pinned_row(&mut app, &mut terminal));
+    app.answer_permission(PermissionDecision::AllowOnce);
+    assert!(pinned_row(&mut app, &mut terminal));
+}

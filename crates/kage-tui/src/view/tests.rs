@@ -1435,3 +1435,249 @@ fn finished_agent_rows_show_their_end_and_never_the_wrapper() {
     assert!(lines.iter().all(|l| !l.contains("<agent")), "{lines:#?}");
     assert!(lines.iter().all(|l| !l.contains("</agent")), "{lines:#?}");
 }
+
+// --- Pinned agents ---
+
+fn agent_row(depth: usize, agent: &str, description: &str, activity: &str, secs: u64) -> AgentRow {
+    AgentRow {
+        session: kage_core::SessionId::new(),
+        depth,
+        agent: agent.to_owned(),
+        description: description.to_owned(),
+        state: AgentRowState::Running,
+        activity: activity.to_owned(),
+        elapsed_ms: Some(secs * 1000),
+    }
+}
+
+/// `rows` with every spinner frame read as `/`, so frames compare
+/// whatever the clock says.
+fn steady(rows: Vec<String>) -> Vec<String> {
+    rows.into_iter()
+        .map(|row| {
+            row.chars()
+                .map(|c| {
+                    if ('\u{2800}'..='\u{28ff}').contains(&c) {
+                        '/'
+                    } else {
+                        c
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn agents_status<'a>(agents: &'a [AgentRow], pending: &'a [PendingPrompt]) -> StatusCtx<'a> {
+    StatusCtx {
+        activity: Some("Waiting for 3 agents (41s, esc to interrupt)"),
+        agents,
+        pending,
+        ..StatusCtx::default()
+    }
+}
+
+#[test]
+fn three_pinned_agents_sit_between_the_working_row_and_the_input() {
+    let agents = [
+        agent_row(
+            1,
+            "explore",
+            "map exports under src/components",
+            "Searched \"export \" in src/components",
+            41,
+        ),
+        agent_row(
+            1,
+            "explore",
+            "map exports under src/routes",
+            "Read src/routes/index.ts",
+            18,
+        ),
+        agent_row(
+            1,
+            "general",
+            "check the router tests",
+            "Running cargo test -p router",
+            12,
+        ),
+    ];
+    let mut buffer = Buffer::new();
+    buffer.push_user("map the exports, then check the router tests");
+    let input = InputState::new();
+    let status = agents_status(&agents, &[]);
+    let rows = steady(snapshot_frame(
+        &mut buffer,
+        &input,
+        None,
+        &status,
+        None,
+        Rect::new(0, 0, 100, 30),
+    ));
+    let top = format!("{RULE}{RULE} INSERT {}", RULE.to_string().repeat(90));
+    let bottom = RULE.to_string().repeat(100);
+    assert_eq!(
+        rows[22..30],
+        [
+            "  Waiting for 3 agents (41s, esc to interrupt)",
+            "  / explore  map exports under src/components            Searched \"export \" in src/components \u{b7} 41s",
+            "  / explore  map exports under src/routes                            Read src/routes/index.ts \u{b7} 18s",
+            "  / general  check the router tests                              Running cargo test -p router \u{b7} 12s",
+            top.as_str(),
+            " > Ask kage anything",
+            bottom.as_str(),
+            "",
+        ],
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn pinned_agents_come_before_the_pending_prompts() {
+    let agents = [agent_row(1, "explore", "map exports", "Read src/lib.rs", 4)];
+    let pending = [PendingPrompt {
+        text: "and the routes".to_owned(),
+        queued: true,
+    }];
+    let input = InputState::new();
+    let status = agents_status(&agents, &pending);
+    let rows = snapshot_frame(
+        &mut Buffer::new(),
+        &input,
+        None,
+        &status,
+        None,
+        Rect::new(0, 0, 80, 12),
+    );
+    let agent = rows.iter().position(|r| r.contains("explore")).unwrap();
+    assert!(
+        rows[agent + 1].starts_with("  > and the routes"),
+        "{rows:#?}"
+    );
+    assert!(rows[agent + 2].starts_with(RULE), "{rows:#?}");
+}
+
+#[test]
+fn a_nested_agent_is_indented_under_its_parent() {
+    let agents = [
+        agent_row(
+            1,
+            "general",
+            "refactor the provider crate",
+            "Agent test: run the provider tests",
+            130,
+        ),
+        agent_row(
+            2,
+            "test",
+            "run the provider tests",
+            "Running cargo test -p kage-provider",
+            4,
+        ),
+    ];
+    let input = InputState::new();
+    let status = agents_status(&agents, &[]);
+    let rows = steady(snapshot_frame(
+        &mut Buffer::new(),
+        &input,
+        None,
+        &status,
+        None,
+        Rect::new(0, 0, 100, 12),
+    ));
+    let parent = rows.iter().position(|r| r.contains("general")).unwrap();
+    assert_eq!(
+        rows[parent..parent + 2],
+        [
+            "  / general  refactor the provider crate                Agent test: run the provider tests \u{b7} 2m 10s",
+            "    / test   run the provider tests                        Running cargo test -p kage-provider \u{b7} 4s",
+        ],
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn six_pinned_agents_show_four_and_fold_the_rest() {
+    let agents: Vec<AgentRow> = (1..=6)
+        .map(|n| agent_row(1, "explore", &format!("task {n}"), "Working", n))
+        .collect();
+    let input = InputState::new();
+    let status = agents_status(&agents, &[]);
+    let rows = snapshot_frame(
+        &mut Buffer::new(),
+        &input,
+        None,
+        &status,
+        None,
+        Rect::new(0, 0, 80, 16),
+    );
+    let first = rows.iter().position(|r| r.contains("task 1")).unwrap();
+    assert!(rows[first + 3].contains("task 4"), "{rows:#?}");
+    assert_eq!(rows[first + 4], "  +2 more", "{rows:#?}");
+    assert!(rows[first + 5].starts_with(RULE), "{rows:#?}");
+    assert!(rows.iter().all(|r| !r.contains("task 5")), "{rows:#?}");
+}
+
+#[test]
+fn queued_and_waiting_agents_say_so() {
+    let mut queued = agent_row(1, "explore", "map exports", "", 0);
+    queued.state = AgentRowState::Queued;
+    queued.elapsed_ms = None;
+    let mut waiting = agent_row(1, "general", "check the router tests", "", 12);
+    waiting.state = AgentRowState::Waiting;
+    let agents = [queued, waiting];
+    let input = InputState::new();
+    let status = agents_status(&agents, &[]);
+    let rows = snapshot_frame(
+        &mut Buffer::new(),
+        &input,
+        None,
+        &status,
+        None,
+        Rect::new(0, 0, 80, 12),
+    );
+    let queued = rows.iter().find(|r| r.contains("explore")).unwrap();
+    assert!(queued.starts_with("  \u{2022} explore"), "{rows:#?}");
+    assert!(queued.ends_with(" queued"), "{rows:#?}");
+    let waiting = rows.iter().find(|r| r.contains("general")).unwrap();
+    assert!(waiting.starts_with("  ! general"), "{rows:#?}");
+    assert!(
+        waiting.ends_with("waiting for approval \u{b7} 12s"),
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn a_narrow_row_cuts_the_description_before_the_activity() {
+    let agents = [agent_row(
+        1,
+        "explore",
+        "map exports under src/components",
+        "Searched \"export \" in src/components",
+        41,
+    )];
+    let input = InputState::new();
+    let status = agents_status(&agents, &[]);
+    let rows = steady(snapshot_frame(
+        &mut Buffer::new(),
+        &input,
+        None,
+        &status,
+        None,
+        Rect::new(0, 0, 80, 10),
+    ));
+    let row = rows.iter().find(|r| r.contains("explore")).unwrap();
+    assert_eq!(
+        row,
+        "  / explore  map exports under s...  Searched \"export \" in src/components \u{b7} 41s"
+    );
+}
+
+#[test]
+fn input_height_counts_the_pinned_agents() {
+    let input = InputState::new();
+    let bare = input_height(&input, 0, 0, 80);
+    assert_eq!(input_height(&input, 3, 0, 80), bare + 3);
+    assert_eq!(input_height(&input, 6, 0, 80), bare + 5);
+    assert_eq!(input_height(&input, 2, 1, 80), bare + 3);
+}

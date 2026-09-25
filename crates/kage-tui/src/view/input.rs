@@ -32,6 +32,47 @@ const PENDING_MAX_ROWS: usize = 3;
 /// Lead of a pending row, lined up with the working row.
 const PENDING_LEAD: &str = "  > ";
 
+/// Live agents pinned above the pending prompts before the rest fold
+/// into a `+N more` row.
+const AGENT_MAX_ROWS: usize = 4;
+/// Lead of a pinned agent row, lined up with the working row.
+const AGENT_LEAD: &str = "  ";
+/// Extra indent of a pinned agent per level below the main session's
+/// own agents.
+const AGENT_INDENT: &str = "  ";
+/// Glyph of a pinned agent waiting for approval.
+const AGENT_WAITING_GLYPH: &str = "!";
+
+/// Where a pinned agent is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentRowState {
+    /// Announced, but held back by the running limit.
+    Queued,
+    /// Running a turn or a tool.
+    Running,
+    /// Running, and waiting for an approval.
+    Waiting,
+}
+
+/// A live agent in the pinned list above the prompt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentRow {
+    /// The agent's session.
+    pub session: kage_core::SessionId,
+    /// Nesting under the main session: 1 for its own agents.
+    pub depth: usize,
+    /// Name of the agent definition.
+    pub agent: String,
+    /// The task description the model wrote.
+    pub description: String,
+    /// Where the agent is.
+    pub state: AgentRowState,
+    /// What a running agent does now, described like a tool row.
+    pub activity: String,
+    /// Time since its run started. `None` while queued.
+    pub elapsed_ms: Option<u64>,
+}
+
 /// A prompt sent during a run that the engine has not delivered yet.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingPrompt {
@@ -44,7 +85,18 @@ pub struct PendingPrompt {
 
 /// Rows the pending prompts take above the input's top rule.
 pub(crate) fn pending_height(count: usize) -> u16 {
-    let rows = count.min(PENDING_MAX_ROWS) + usize::from(count > PENDING_MAX_ROWS);
+    list_height(count, PENDING_MAX_ROWS)
+}
+
+/// Rows the pinned agents take above the pending prompts.
+pub(crate) fn agents_height(count: usize) -> u16 {
+    list_height(count, AGENT_MAX_ROWS)
+}
+
+/// Rows of a list of `count` entries that shows at most `max`, then a
+/// `+N more` row.
+fn list_height(count: usize, max: usize) -> u16 {
+    let rows = count.min(max) + usize::from(count > max);
     u16::try_from(rows).unwrap_or(u16::MAX)
 }
 
@@ -54,12 +106,14 @@ pub(super) fn render_input(
     input: &InputState,
     sources: &super::slot::Sources<'_>,
 ) {
-    let pending = sources.status.pending;
-    let (pending_area, area) = split_pending(regions.input, pending.len());
+    let status = sources.status;
+    let (agents_area, pending_area, area) =
+        split_input(regions.input, status.agents.len(), status.pending.len());
     if area.height < crate::layout::INPUT_CHROME_LINES || area.width == 0 {
         return;
     }
-    paint_pending(frame, pending_area, pending);
+    paint_agents(frame, agents_area, status.agents);
+    paint_pending(frame, pending_area, status.pending);
     let theme = crate::theme::current();
     let mode = input.mode();
     let shell = input.shell_armed();
@@ -144,24 +198,119 @@ pub(super) fn render_input(
     }
 }
 
-/// Split the input region into the rows of `pending` prompts and the
-/// input box. A short region keeps the box's two rules first.
-pub(crate) fn split_pending(input: Rect, pending: usize) -> (Rect, Rect) {
-    let rows = pending_height(pending).min(
-        input
-            .height
-            .saturating_sub(crate::layout::INPUT_CHROME_LINES),
-    );
-    let top = Rect {
-        height: rows,
+/// Split the input region into the pinned rows of `agents`, the rows
+/// of `pending` prompts and the input box, top to bottom. A short
+/// region keeps the box's two rules first, then the agents.
+pub(crate) fn split_input(input: Rect, agents: usize, pending: usize) -> (Rect, Rect, Rect) {
+    let room = input
+        .height
+        .saturating_sub(crate::layout::INPUT_CHROME_LINES);
+    let agent_rows = agents_height(agents).min(room);
+    let pending_rows = pending_height(pending).min(room - agent_rows);
+    let agents = Rect {
+        height: agent_rows,
+        ..input
+    };
+    let pending = Rect {
+        y: input.y + agent_rows,
+        height: pending_rows,
         ..input
     };
     let rest = Rect {
-        y: input.y + rows,
-        height: input.height - rows,
+        y: pending.bottom(),
+        height: input.height - agent_rows - pending_rows,
         ..input
     };
-    (top, rest)
+    (agents, pending, rest)
+}
+
+/// Paint the pinned agents in tree order, with names in one column
+/// and what each does right-aligned.
+fn paint_agents(frame: &mut Frame, area: Rect, agents: &[AgentRow]) {
+    if area.height == 0 {
+        return;
+    }
+    let shown = &agents[..agents.len().min(AGENT_MAX_ROWS)];
+    let name_column = shown
+        .iter()
+        .map(|row| agent_name_offset(row) + row.agent.width())
+        .max()
+        .unwrap_or(0);
+    let width = usize::from(area.width);
+    let mut lines: Vec<Line<'static>> = shown
+        .iter()
+        .map(|row| agent_line(row, name_column, width))
+        .collect();
+    if let Some(more) = agents.len().checked_sub(AGENT_MAX_ROWS).filter(|n| *n > 0) {
+        let muted = Style::default().fg(crate::theme::current().muted_fg);
+        lines.push(Line::from(Span::styled(format!("  +{more} more"), muted)));
+    }
+    frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Cells before a pinned agent's name: its indent, the glyph and a
+/// space.
+fn agent_name_offset(row: &AgentRow) -> usize {
+    AGENT_INDENT.len() * row.depth.saturating_sub(1) + 2
+}
+
+/// One pinned agent row: the lead, the glyph, the name padded to
+/// `name_column`, the description, and what the agent does with its
+/// time right-aligned one cell from the edge. The description yields
+/// to the activity down to a third of the room.
+fn agent_line(row: &AgentRow, name_column: usize, width: usize) -> Line<'static> {
+    let theme = crate::theme::current();
+    let muted = Style::default().fg(theme.muted_fg);
+    let (glyph, glyph_style) = match row.state {
+        AgentRowState::Queued => ("\u{2022}", Style::default().fg(theme.tool_pending_rule)),
+        AgentRowState::Running => (
+            super::modeline::spinner_frame(),
+            Style::default().fg(theme.tool_pending_rule),
+        ),
+        AgentRowState::Waiting => (AGENT_WAITING_GLYPH, theme.group_style("KageApproval")),
+    };
+    let (doing, doing_style) = match row.state {
+        AgentRowState::Queued => ("queued", muted),
+        AgentRowState::Running => (row.activity.as_str(), muted),
+        AgentRowState::Waiting => ("waiting for approval", theme.group_style("KageApproval")),
+    };
+    let time = row
+        .elapsed_ms
+        .map(|ms| format!(" \u{b7} {}", super::tool_view::format_seconds(ms)))
+        .unwrap_or_default();
+    let name = pad_to_width(&row.agent, name_column - agent_name_offset(row) + 2);
+    let room = width.saturating_sub(AGENT_LEAD.len() + name_column + 2 + 1);
+    let right_width = doing.width() + time.width();
+    let description = row.description.width();
+    let description_room = description
+        .min(room.saturating_sub(right_width + 2))
+        .max(description.min(room / 3));
+    let description = truncate_to_width(&row.description, description_room, "...");
+    let doing_room = room.saturating_sub(description.width() + 2 + time.width());
+    let doing = if doing.width() <= doing_room {
+        doing.to_owned()
+    } else if doing_room > 3 {
+        truncate_to_width(doing, doing_room, "...")
+    } else {
+        String::new()
+    };
+    let time = if doing.is_empty() {
+        time.trim_start_matches(" \u{b7} ").to_owned()
+    } else {
+        time
+    };
+    let gap = room.saturating_sub(description.width() + doing.width() + time.width());
+    Line::from(vec![
+        Span::raw(AGENT_LEAD),
+        Span::raw(AGENT_INDENT.repeat(row.depth.saturating_sub(1))),
+        Span::styled(glyph, glyph_style.add_modifier(Modifier::BOLD)),
+        Span::raw(" "),
+        Span::styled(name, Style::default().add_modifier(Modifier::BOLD)),
+        Span::raw(description),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(doing, doing_style),
+        Span::styled(time, muted),
+    ])
 }
 
 /// Paint the pending prompts, oldest first, each with when it will be

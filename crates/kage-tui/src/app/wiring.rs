@@ -658,6 +658,48 @@ impl App {
         Some(format!("{doing}{tail}"))
     }
 
+    /// The pinned list: the queued, running and waiting agents under
+    /// the main session in tree order, with what each does now. Empty
+    /// while the approval panel is open.
+    pub(crate) fn agent_rows(&self) -> Vec<view::AgentRow> {
+        use kage_core::protocol::AgentState;
+        let Some(main) = self
+            .active_session
+            .filter(|_| self.approval_panel.is_none())
+        else {
+            return Vec::new();
+        };
+        self.agents
+            .under(main)
+            .into_iter()
+            .filter_map(|(depth, node)| {
+                let state = match node.state {
+                    AgentState::Queued => view::AgentRowState::Queued,
+                    AgentState::Running if node.waiting > 0 => view::AgentRowState::Waiting,
+                    AgentState::Running => view::AgentRowState::Running,
+                    AgentState::Done | AgentState::Failed | AgentState::Cancelled => return None,
+                };
+                let activity = match (state, self.agent_buffers.get(&node.session)) {
+                    (view::AgentRowState::Running, Some(buffer)) => {
+                        super::engine::agent_activity(&lock(buffer))
+                    }
+                    _ => String::new(),
+                };
+                Some(view::AgentRow {
+                    session: node.session,
+                    depth,
+                    agent: node.agent.clone(),
+                    description: node.description.clone(),
+                    state,
+                    activity,
+                    elapsed_ms: node
+                        .started
+                        .map(|t| u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX)),
+                })
+            })
+            .collect()
+    }
+
     /// The active model's id: the engine's last report, else the
     /// model the host started with.
     pub(crate) fn model_id(&self, usage: Option<&crate::usage::SessionUsage>) -> Option<String> {

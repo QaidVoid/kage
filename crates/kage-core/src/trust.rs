@@ -154,19 +154,28 @@ fn config_subset(table: &toml::Table) -> Option<serde_json::Map<String, Value>> 
 /// Name to full text of each `*.md` file directly under the project
 /// agent directory.
 fn agent_files(workdir: &Path) -> serde_json::Map<String, Value> {
-    let Ok(entries) = std::fs::read_dir(crate::agents::project_dir(workdir)) else {
-        return serde_json::Map::new();
-    };
-    entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
-        .filter_map(|path| {
-            let text = std::fs::read_to_string(&path).ok()?;
-            let name = path.file_stem()?.to_string_lossy().into_owned();
-            Some((name, Value::String(text)))
-        })
-        .collect()
+    let mut out = serde_json::Map::new();
+    // Same order as loading: `.agents` replaces `.kage` under the same
+    // name, so trust covers exactly the text that would run.
+    for dir in crate::agents::project_dirs(workdir) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for path in entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
+        {
+            let Some(text) = std::fs::read_to_string(&path).ok() else {
+                continue;
+            };
+            let Some(name) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            out.insert(name, Value::String(text));
+        }
+    }
+    out
 }
 
 fn is_trusted(workdir: &Path, subset: &Value) -> bool {
@@ -234,7 +243,20 @@ fn summarize(workdir: &Path, subset: &Value) -> TrustSummary {
     if !agents.is_empty() {
         keys.push("agents");
         for name in &agents {
-            items.push(format!("project agent {name} (.kage/agents/{name}.md)"));
+            // The trust map is keyed by name with the same winner the
+            // loader picks, so the display home matches the same rule:
+            // `.agents` replaces `.kage` under one name.
+            let home = if workdir
+                .join(".agents")
+                .join("agents")
+                .join(format!("{name}.md"))
+                .exists()
+            {
+                ".agents"
+            } else {
+                ".kage"
+            };
+            items.push(format!("project agent {name} ({home}/agents/{name}.md)"));
         }
     }
     TrustSummary {
@@ -432,12 +454,65 @@ mod tests {
     }
 
     fn write_agent(project: &Path, name: &str, body: &str) -> figment::error::Result<()> {
-        let dir = crate::agents::project_dir(project);
+        write_agent_in(project, 0, name, body)
+    }
+
+    /// Write an agent file into one of the project agent homes: index 0
+    /// is `.kage/agents`, index 1 is `.agents/agents`.
+    fn write_agent_in(
+        project: &Path,
+        home: usize,
+        name: &str,
+        body: &str,
+    ) -> figment::error::Result<()> {
+        let dir = crate::agents::project_dirs(project)[home].clone();
         std::fs::create_dir_all(&dir).map_err(io)?;
         std::fs::write(dir.join(format!("{name}.md")), body).map_err(io)
     }
 
     const REVIEWER: &str = "---\ndescription: Reviews a diff.\ntools: read\n---\nReview.\n";
+
+    #[test]
+    fn dot_agents_agents_join_trust_and_win_same_names() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, "")?;
+            std::fs::remove_file(Config::project_path(&project)).map_err(io)?;
+            assert!(untrusted_project(&project).is_none());
+
+            write_agent_in(&project, 1, "scout", REVIEWER)?;
+            assert!(!project_agents_trusted(&project));
+            let summary = untrusted_project(&project).expect("untrusted");
+            assert_eq!(summary.keys, ["agents"]);
+            assert_eq!(summary.agents, ["scout"]);
+            assert_eq!(
+                summary.items,
+                ["project agent scout (.agents/agents/scout.md)"]
+            );
+
+            // Same name in both homes: the trust text is the `.agents`
+            // copy, matching what the loader runs.
+            write_agent_in(&project, 0, "scout", REVIEWER)?;
+            let subset = risky_subset(&project, project_table(&project).as_ref()).expect("subset");
+            assert_eq!(
+                subset["agents"]["scout"],
+                serde_json::Value::String(REVIEWER.into())
+            );
+            assert!(untrusted_project(&project).is_some());
+            // Editing only the shadowed `.kage` copy changes nothing
+            // covered by trust.
+            trust_project(&project).map_err(io)?;
+            assert!(project_agents_trusted(&project));
+            write_agent_in(
+                &project,
+                0,
+                "scout",
+                &REVIEWER.replace("read", "read, bash"),
+            )?;
+            assert!(project_agents_trusted(&project));
+            Ok(())
+        });
+    }
 
     #[test]
     fn project_agents_need_trust_without_a_config_file() {

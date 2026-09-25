@@ -10,6 +10,7 @@
 //! ```text
 //! ~/.config/kage/skills/<name>/SKILL.md
 //! ./.kage/skills/<name>/SKILL.md
+//! ./.agents/skills/<name>/SKILL.md
 //! ```
 //!
 //! The parent directory name is the canonical skill name; the

@@ -60,7 +60,7 @@ pub enum AgentSource {
     Builtin,
     /// The user config directory.
     User,
-    /// The project's `.kage/agents`.
+    /// The project's agent directories (`.kage/agents`, `.agents/agents`).
     Project,
 }
 
@@ -94,10 +94,17 @@ pub enum AgentError {
     },
 }
 
-/// The project agent directory of `workdir`: `<workdir>/.kage/agents`.
+/// The project agent directories of `workdir`: kage's own
+/// `<workdir>/.kage/agents`, then the cross-tool standard
+/// `<workdir>/.agents/agents`. Load order is the array order, so a
+/// definition under `.agents` replaces one of the same name under
+/// `.kage`.
 #[must_use]
-pub fn project_dir(workdir: &Path) -> PathBuf {
-    workdir.join(".kage").join("agents")
+pub fn project_dirs(workdir: &Path) -> [PathBuf; 2] {
+    [
+        workdir.join(".kage").join("agents"),
+        workdir.join(".agents").join("agents"),
+    ]
 }
 
 /// Load every `*.md` file directly under `dir`, one result per file.

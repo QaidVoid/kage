@@ -1,12 +1,12 @@
 //! Agent definition discovery: the built-ins, the user config
-//! directory and, once trusted, the project.
-
+//! directory and, once trusted, the project (`.kage/agents`, then
+/// `.agents/agents`).
 use std::path::{Path, PathBuf};
 
 use kage_core::agents::{self, AgentDefs, AgentSource};
 
 /// Load the agent definitions for `workdir`: the built-ins, then
-/// `<config dir>/agents`, then `<workdir>/.kage/agents` when the
+/// `<config dir>/agents`, then the project agent directories when the
 /// project is trusted. A later definition replaces an earlier one of
 /// the same name. Returns the definitions and one message per file
 /// that failed to load.
@@ -16,7 +16,11 @@ pub(crate) fn load(workdir: &Path) -> (AgentDefs, Vec<String>) {
         dirs.push((dir.join("agents"), AgentSource::User));
     }
     if kage_core::trust::project_agents_trusted(workdir) {
-        dirs.push((agents::project_dir(workdir), AgentSource::Project));
+        dirs.extend(
+            agents::project_dirs(workdir)
+                .into_iter()
+                .map(|dir| (dir, AgentSource::Project)),
+        );
     }
     merge(&dirs)
 }
@@ -71,5 +75,29 @@ mod tests {
         assert!(defs.get("broken").is_none());
         assert_eq!(errors.len(), 1);
         assert!(errors[0].contains("broken.md"), "{errors:?}");
+    }
+
+    #[test]
+    fn dot_agents_home_wins_over_kage_home() {
+        let kage_home = tempfile::tempdir().unwrap();
+        let agents_home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            kage_home.path().join("reviewer.md"),
+            "---\ndescription: kage reviewer\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            agents_home.path().join("reviewer.md"),
+            "---\ndescription: shared reviewer\n---\n",
+        )
+        .unwrap();
+        let (defs, errors) = merge(&[
+            (kage_home.path().to_path_buf(), AgentSource::Project),
+            (agents_home.path().to_path_buf(), AgentSource::Project),
+        ]);
+        assert!(errors.is_empty());
+        let reviewer = defs.get("reviewer").unwrap();
+        assert_eq!(reviewer.description, "shared reviewer");
+        assert_eq!(reviewer.source, AgentSource::Project);
     }
 }

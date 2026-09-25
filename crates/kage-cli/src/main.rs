@@ -698,9 +698,10 @@ pub(crate) use cli_query::{run_fork, run_resume, run_search};
 
 /// Discover and load every SKILL.md under the user config dir
 /// (`$XDG_CONFIG_HOME/kage/skills/<name>/`), the project-local
-/// `./.kage/skills/<name>/`, and any directory contributed by a plugin's
-/// `resources_discover` handler. Later entries shadow earlier ones with
-/// the same skill name. Failing skills are logged to stderr and skipped.
+/// `./.kage/skills/<name>/` and `./.agents/skills/<name>/`, and any
+/// directory contributed by a plugin's `resources_discover` handler.
+/// Later entries shadow earlier ones with the same skill name. Failing
+/// skills are logged to stderr and skipped.
 pub(crate) fn load_skills(
     workdir: &std::path::Path,
     plugin_runtime: Option<&kage_plugin::PluginRuntime>,
@@ -712,6 +713,7 @@ pub(crate) fn load_skills(
         search.push(p.join("skills"));
     }
     search.push(workdir.join(".kage").join("skills"));
+    search.push(workdir.join(".agents").join("skills"));
     if let Some(rt) = plugin_runtime {
         match rt.discover_resources() {
             Ok(entries) => search.extend(entries.skills),
@@ -882,5 +884,32 @@ mod tests {
         assert!(!page.contains("For example:"));
         assert!(page.contains("\\fBkage auth list\\fR"));
         assert!(page.contains(".SH FILES"));
+    }
+
+    #[test]
+    fn project_dot_agents_skills_shadow_dot_kage_skills() {
+        let work = tempfile::tempdir().unwrap();
+        let kage_skills = work.path().join(".kage").join("skills").join("lint");
+        let agents_skills = work.path().join(".agents").join("skills").join("lint");
+        for dir in [&kage_skills, &agents_skills] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(
+            kage_skills.join("SKILL.md"),
+            "---\ndescription: Kage lint\n---\nKage body.",
+        )
+        .unwrap();
+        std::fs::write(
+            agents_skills.join("SKILL.md"),
+            "---\ndescription: Shared lint\n---\nShared body.",
+        )
+        .unwrap();
+        let skills = load_skills(work.path(), None);
+        let lint = skills
+            .iter()
+            .find(|s| s.name == "lint")
+            .expect("lint skill");
+        assert_eq!(lint.body, "Shared body.");
+        assert_eq!(lint.description, "Shared lint");
     }
 }

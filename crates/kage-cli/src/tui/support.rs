@@ -433,7 +433,8 @@ pub(crate) fn entry_kind(entry: &kage_session::SessionEntry) -> &'static str {
 /// Iterates registered providers and pulls each one's catalog model
 /// list; when the catalog has no entry for a provider (e.g. plugin-
 /// registered providers), falls back to the live `Provider::models()`
-/// list. The active model is marked with `*`.
+/// list. The active model is marked with `*`, and each row lists the
+/// inputs the model accepts when they are known.
 pub(crate) fn available_model_items(
     registry: &ProviderRegistry,
     active: &str,
@@ -449,12 +450,13 @@ pub(crate) fn available_model_items(
             for model in catalog_models {
                 let value = format!("{provider_id}:{}", model.id);
                 let badge = if value == active { '*' } else { ' ' };
-                items.push(
+                items.push(with_inputs(
                     kage_tui::PickItem::simple(value)
                         .with_label(model.name)
                         .with_badge(badge)
                         .with_group(display_name),
-                );
+                    model.input,
+                ));
             }
             continue;
         }
@@ -466,15 +468,26 @@ pub(crate) fn available_model_items(
         for model in provider.models() {
             let value = format!("{provider_id}:{}", model.id);
             let badge = if value == active { '*' } else { ' ' };
-            items.push(
+            items.push(with_inputs(
                 kage_tui::PickItem::simple(value)
                     .with_label(&model.name)
                     .with_badge(badge)
                     .with_group(display_name),
-            );
+                model.input,
+            ));
         }
     }
     items
+}
+
+/// `item` with `input` in its right column, unless the inputs are
+/// unknown.
+fn with_inputs(item: kage_tui::PickItem, input: kage_core::Inputs) -> kage_tui::PickItem {
+    if input.is_empty() {
+        item
+    } else {
+        item.with_right(input.label())
+    }
 }
 
 /// Point the TUI's block registry at `rt`'s block renderers, replacing any

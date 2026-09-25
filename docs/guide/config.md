@@ -32,7 +32,8 @@ editor = "modeless"
 input_min_lines = 1
 input_max_lines = 8
 # default thinking level for new sessions: off, minimal, low,
-# medium, high, or xhigh. shift+tab still cycles it per session.
+# medium, high, or xhigh. left unset, kage uses high, or the nearest
+# level the model accepts. shift+tab still cycles it per session.
 # thinking_level = "medium"
 # what prints to the terminal after you quit the TUI: "full" (the
 # whole conversation as plain text), "last" (from your last prompt
@@ -214,9 +215,12 @@ endpoints, and per-provider overrides (base URL, headers, key env var).
 | `~/.local/share/kage/plugin-state/` | per-plugin `kage.store` JSON files                             |
 | `~/.local/state/kage/`              | session state (`state.json`) and input history (`history.txt`) |
 | `~/.local/state/kage/trust.json`    | trusted project configs                                        |
+| `~/.cache/kage/models.json`         | model catalog written by `kage models refresh`                 |
 
-`XDG_CONFIG_HOME` / `XDG_DATA_HOME` / `XDG_STATE_HOME` override the
-`~/.config`, `~/.local/share`, and `~/.local/state` roots. Skills and
+`XDG_CONFIG_HOME` / `XDG_DATA_HOME` / `XDG_STATE_HOME` /
+`XDG_CACHE_HOME` override the `~/.config`, `~/.local/share`,
+`~/.local/state` and `~/.cache` roots. `kage doctor` prints the four
+directories it resolved. Skills and
 templates are also discovered
 under the project-local `<workdir>/.kage/skills/` and
 `<workdir>/.kage/templates/`, plus any directory a plugin

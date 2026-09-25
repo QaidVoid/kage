@@ -83,12 +83,15 @@ pub struct AgentContext {
     /// (typically tool calls with bulky JSON arguments) at its own
     /// conservative default. `None` defers to the provider default.
     pub max_output_tokens: Option<u32>,
-    /// Active unified thinking level. Forwarded on every
-    /// [`kage_provider::StreamRequest`]; providers translate it to
-    /// their native shape (Anthropic budget tokens, `OpenAI`
-    /// `reasoning_effort`, Gemini `thinkingConfig.thinkingBudget`).
-    /// `None` leaves thinking unconfigured (provider default).
+    /// Thinking level the user chose. `None` asks for the automatic
+    /// level: high, or the nearest level the model accepts. Fitted to
+    /// [`Self::reasoning`] and forwarded on every
+    /// [`kage_provider::StreamRequest`].
     pub thinking_level: Option<kage_provider::ThinkingLevel>,
+    /// Thinking settings the active model accepts, set by the host from
+    /// the model catalog. [`kage_core::Reasoning::Unknown`] sends a
+    /// chosen level unchanged and no automatic level.
+    pub reasoning: kage_core::Reasoning,
     /// Opt-in path confinement for the built-in file tools: when
     /// `true`, every [`kage_tools::ToolContext`] the dispatcher builds
     /// resolves paths through escape-checked resolution, so reads and
@@ -112,6 +115,7 @@ impl AgentContext {
             context_window: 200_000,
             max_output_tokens: None,
             thinking_level: None,
+            reasoning: kage_core::Reasoning::Unknown,
             confine_paths: false,
             budget: TokenBudget::default(),
         }

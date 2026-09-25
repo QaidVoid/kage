@@ -8,26 +8,56 @@
 
 use std::path::Path;
 
-use kage_core::Skill;
+use kage_core::{Inputs, Reasoning, Skill};
 use kage_loop::{EnvContext, compose_system_prompt, with_skills};
 use kage_provider::ProviderRegistry;
 
-/// Look up the context-window size (input tokens) for `qualified_model`
-/// (`provider:model`). Consults the static catalog first, then falls
-/// back to the provider's own `models()` list so plugin-registered
-/// providers (which have no catalog entry) can still surface a window.
-#[must_use]
-pub fn context_window_for(registry: &ProviderRegistry, qualified_model: &str) -> Option<u64> {
+/// The catalog entry for `qualified_model` (`provider:model`), else
+/// the entry the provider itself advertises (custom and plugin
+/// providers), as a [`kage_provider::ProviderModel`].
+fn model_entry(
+    registry: &ProviderRegistry,
+    qualified_model: &str,
+) -> Option<kage_provider::ProviderModel> {
     let (provider_id, model_id) = qualified_model.split_once(':')?;
-    if let Some(catalog_model) = kage_provider::catalog::model(provider_id, model_id) {
-        return catalog_model.context;
+    if let Some(m) = kage_provider::catalog::model(provider_id, model_id) {
+        return Some(kage_provider::ProviderModel {
+            id: m.id.to_owned(),
+            name: m.name.to_owned(),
+            context: m.prompt_window(),
+            max_output: m.output.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
+            reasoning: m.reasoning,
+            input: m.input,
+        });
     }
     registry
         .get(provider_id)?
         .models()
         .into_iter()
         .find(|m| m.id == model_id)
-        .and_then(|m| m.context)
+}
+
+/// Look up how many tokens a prompt to `qualified_model`
+/// (`provider:model`) may fill: the catalog's input limit when it has
+/// one, else its context window, else the provider's own `models()`
+/// entry, so plugin-registered providers can still surface a window.
+#[must_use]
+pub fn context_window_for(registry: &ProviderRegistry, qualified_model: &str) -> Option<u64> {
+    model_entry(registry, qualified_model)?.context
+}
+
+/// Thinking settings `qualified_model` accepts, from the catalog or the
+/// provider's own model list. [`Reasoning::Unknown`] when neither
+/// knows the model.
+#[must_use]
+pub fn reasoning_for(registry: &ProviderRegistry, qualified_model: &str) -> Reasoning {
+    model_entry(registry, qualified_model).map_or(Reasoning::Unknown, |m| m.reasoning)
+}
+
+/// Inputs `qualified_model` accepts. Empty when unknown.
+#[must_use]
+pub fn input_for(registry: &ProviderRegistry, qualified_model: &str) -> Inputs {
+    model_entry(registry, qualified_model).map_or_else(Inputs::default, |m| m.input)
 }
 
 /// Look up the per-turn max output tokens for `qualified_model`.
@@ -37,18 +67,7 @@ pub fn context_window_for(registry: &ProviderRegistry, qualified_model: &str) ->
 /// registry's own model list for plugin-registered providers.
 #[must_use]
 pub fn max_output_tokens_for(registry: &ProviderRegistry, qualified_model: &str) -> Option<u32> {
-    let (provider_id, model_id) = qualified_model.split_once(':')?;
-    if let Some(catalog_model) = kage_provider::catalog::model(provider_id, model_id)
-        && let Some(raw) = catalog_model.output
-    {
-        return Some(u32::try_from(raw).unwrap_or(u32::MAX));
-    }
-    registry
-        .get(provider_id)?
-        .models()
-        .into_iter()
-        .find(|m| m.id == model_id)
-        .and_then(|m| m.max_output)
+    model_entry(registry, qualified_model)?.max_output
 }
 
 /// Build the full system prompt for an agent run: `role` (the user's

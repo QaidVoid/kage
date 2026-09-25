@@ -1,7 +1,7 @@
 //! Streaming request shape passed to [`Provider::stream`](crate::Provider::stream).
 
 pub use kage_core::ThinkingLevel;
-use kage_core::{Message, ToolSpec};
+use kage_core::{Message, Reasoning, ToolSpec};
 use serde::{Deserialize, Serialize};
 
 /// Optional thinking-budget configuration.
@@ -35,17 +35,27 @@ pub struct StreamRequest {
     /// Sampling temperature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
-    /// Optional thinking budget. Providers prefer [`Self::level`]
-    /// when both are set; this raw budget exists for callers that
-    /// need to bypass the catalog mapping (Lua hooks, tests).
+    /// Optional thinking budget. Budget-based providers send it in
+    /// place of [`Self::level`]; this raw budget exists for callers
+    /// that need to bypass the catalog mapping (Lua hooks, tests).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingConfig>,
-    /// Unified thinking effort for this turn. Providers translate it
-    /// to their native shape (Anthropic budget tokens, `OpenAI`
-    /// `reasoning_effort`, Gemini `thinkingConfig.thinkingBudget`).
-    /// When set, takes precedence over [`Self::thinking`].
+    /// Unified thinking effort for this turn, already fitted to the
+    /// model. Providers translate it to their native shape (Anthropic
+    /// adaptive effort or budget tokens, `OpenAI` `reasoning_effort`,
+    /// Gemini `thinkingConfig`). [`Self::thinking`] takes precedence
+    /// when both are set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub level: Option<ThinkingLevel>,
+    /// Thinking settings the model accepts, which pick the request
+    /// shape for [`Self::level`]. [`Reasoning::Unknown`] keeps each
+    /// provider's generic mapping.
+    #[serde(default, skip_serializing_if = "is_unknown")]
+    pub reasoning: Reasoning,
+}
+
+fn is_unknown(reasoning: &Reasoning) -> bool {
+    *reasoning == Reasoning::Unknown
 }
 
 impl StreamRequest {
@@ -60,6 +70,7 @@ impl StreamRequest {
             temperature: None,
             thinking: None,
             level: None,
+            reasoning: Reasoning::Unknown,
         }
     }
 }

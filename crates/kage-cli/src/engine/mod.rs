@@ -212,7 +212,9 @@ impl Drop for Engine {
 struct Session {
     idle: Option<Idle>,
     state: SessionState,
-    thinking: Option<ThinkingLevel>,
+    /// A thinking level chosen during a run, recorded at the next run
+    /// start.
+    thinking_changed: bool,
     /// A model switched to during a run, recorded at the next run start.
     model_changed: bool,
     usage: Usage,
@@ -414,12 +416,13 @@ impl Dispatcher {
             agents,
         } = spec;
         let usage = usage_of(&cx);
-        let state = SessionState {
+        let mut state = SessionState {
             model,
-            thinking: cx.thinking_level.unwrap_or_default(),
+            thinking: cx.thinking_level,
             permission_mode: gate.mode(),
-            working: false,
+            ..SessionState::default()
         };
+        fit_to_model(&mut state, &self.registry);
         self.bus.publish(
             id,
             HostEvent::StateChanged {
@@ -440,7 +443,7 @@ impl Dispatcher {
             Session {
                 idle: Some(Idle { cx, recorder }),
                 state,
-                thinking: None,
+                thinking_changed: false,
                 model_changed: false,
                 usage,
                 cancel,
@@ -552,18 +555,19 @@ impl Dispatcher {
     }
 
     /// Record and apply a thinking level now when idle, or at the next
-    /// run start otherwise.
-    fn set_thinking(&mut self, id: SessionId, level: ThinkingLevel) {
+    /// run start otherwise. `None` returns to the automatic level.
+    fn set_thinking(&mut self, id: SessionId, level: Option<ThinkingLevel>) {
         let session = self.sessions.get_mut(&id).expect("session checked");
         session.state.thinking = level;
+        fit_to_model(&mut session.state, &self.registry);
         match session.idle.as_mut() {
             Some(idle) => {
-                idle.cx.thinking_level = Some(level);
+                idle.cx.thinking_level = level;
                 if let Some(recorder) = idle.recorder.as_mut() {
                     report_write(&self.bus, id, recorder.append(&thinking_entry(level)));
                 }
             }
-            None => session.thinking = Some(level),
+            None => session.thinking_changed = true,
         }
         let state = session.state.clone();
         self.bus.publish(id, HostEvent::StateChanged { state });
@@ -575,6 +579,7 @@ impl Dispatcher {
         let session = self.sessions.get_mut(&id).expect("session checked");
         if session.state.model != model {
             session.state.model = model;
+            fit_to_model(&mut session.state, &self.registry);
             match session.idle.as_mut() {
                 Some(idle) => {
                     if let Some(recorder) = idle.recorder.as_mut() {
@@ -726,8 +731,22 @@ impl Dispatcher {
         self.bus.publish(id, HostEvent::StateChanged { state });
     }
 
-    fn prompt(&mut self, id: SessionId, content: Vec<Content>, delivery: Delivery) {
+    fn prompt(&mut self, id: SessionId, mut content: Vec<Content>, delivery: Delivery) {
         let session = self.sessions.get_mut(&id).expect("session checked");
+        let is_image = |c: &Content| matches!(c, Content::Image { .. });
+        if session.state.input.lacks(kage_core::Input::Image) && content.iter().any(is_image) {
+            content.retain(|c| !is_image(c));
+            let model = &session.state.model;
+            let text = if content.is_empty() {
+                format!("{model} does not accept images; nothing to send")
+            } else {
+                format!("{model} does not accept images; sent the prompt without them")
+            };
+            notice(&self.bus, id, NoticeLevel::Warning, text);
+            if content.is_empty() {
+                return;
+            }
+        }
         if session.idle.is_some() && !self.waiting.contains(&id) {
             let prompt = Message::new(Role::User, content, None);
             self.start_run(id, Work::Prompt(prompt));
@@ -769,14 +788,15 @@ impl Dispatcher {
             return;
         };
         cx.model = bare_model;
-        if let Some(window) = crate::runtime_env::context_window_for(&self.registry, &model) {
-            cx.context_window = window;
-        }
-        cx.max_output_tokens = crate::runtime_env::max_output_tokens_for(&self.registry, &model);
-        if let Some(level) = session.thinking.take() {
-            cx.thinking_level = Some(level);
+        fit_context(&mut cx, &self.registry, &model);
+        if std::mem::take(&mut session.thinking_changed) {
+            cx.thinking_level = session.state.thinking;
             if let Some(recorder) = recorder.as_mut() {
-                report_write(&self.bus, id, recorder.append(&thinking_entry(level)));
+                report_write(
+                    &self.bus,
+                    id,
+                    recorder.append(&thinking_entry(cx.thinking_level)),
+                );
             }
         }
         if std::mem::take(&mut session.model_changed)
@@ -1345,7 +1365,7 @@ fn agent_spec(
         crate::runtime_env::build_system_prompt(&def.body, &from.workdir, &model, &[]);
     let mut cx = AgentContext::new(model.clone(), &system_prompt).with_workdir(&from.workdir);
     cx.confine_paths = from.confine_paths;
-    cx.thinking_level = Some(def.thinking.unwrap_or(from.state.thinking));
+    cx.thinking_level = def.thinking.or(from.state.thinking);
     let (tools, missing) = agent_tools(&from.tools, def.tools.as_deref());
     let recorder = from.path.as_deref().and_then(Path::parent).map(|dir| {
         let header = kage_session::Header {
@@ -1486,12 +1506,40 @@ fn settle_working(bus: &Bus, id: SessionId, session: &mut Session) {
     }
 }
 
-fn thinking_entry(level: ThinkingLevel) -> kage_session::SessionEntry {
+/// Session entry recording `level`, written as [`AUTO_THINKING`] when
+/// the level is automatic.
+fn thinking_entry(level: Option<ThinkingLevel>) -> kage_session::SessionEntry {
     kage_session::SessionEntry::ThinkingLevelChange(kage_session::ThinkingLevelChange {
         id: kage_session::EntryId::new(),
         ts: chrono::Utc::now(),
-        level: level.as_str().to_owned(),
+        level: level
+            .map_or(AUTO_THINKING, ThinkingLevel::as_str)
+            .to_owned(),
     })
+}
+
+/// How the automatic thinking level is named in session entries, the
+/// ACP thinking option and the TUI.
+pub(crate) const AUTO_THINKING: &str = "default";
+
+/// Set what `cx` takes from `model` (`provider:model`): its prompt
+/// window, output cap and thinking settings.
+fn fit_context(cx: &mut AgentContext, registry: &ProviderRegistry, model: &str) {
+    if let Some(window) = crate::runtime_env::context_window_for(registry, model) {
+        cx.context_window = window;
+    }
+    cx.max_output_tokens = crate::runtime_env::max_output_tokens_for(registry, model);
+    cx.reasoning = crate::runtime_env::reasoning_for(registry, model);
+}
+
+/// Refresh the parts of `state` that follow its model and chosen
+/// thinking level: the level the next run sends, the levels the model
+/// accepts, and its inputs.
+pub(crate) fn fit_to_model(state: &mut SessionState, registry: &ProviderRegistry) {
+    let reasoning = crate::runtime_env::reasoning_for(registry, &state.model);
+    state.thinking_effective = reasoning.resolve(state.thinking);
+    state.thinking_levels = reasoning.levels();
+    state.input = crate::runtime_env::input_for(registry, &state.model);
 }
 
 /// Run a user shell command with the bash tool's runner in `cx`'s

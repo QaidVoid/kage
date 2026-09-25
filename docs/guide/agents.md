@@ -93,7 +93,7 @@ Saved as `~/.config/kage/agents/reviewer.md`, this defines the agent
 | `description` | yes | What the agent is for, at most 1024 characters. The model picks agents by it, so say when to use this one and what to give it. |
 | `tools` | no | A comma list of tool names. Without it the agent gets every tool its parent has. A listed name that matches no tool of the parent shows a warning when the agent starts. |
 | `model` | no | The model, as `provider:model`, or `inherit` (the default) for the parent's current model. A model that is not available fails the agent's run. |
-| `thinking` | no | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `inherit` (the default) for the parent's current level. |
+| `thinking` | no | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `inherit` (the default) for the parent's current level. The level is fitted to the agent's model like the main session's. |
 | `name` | no | Must equal the file stem when present. |
 
 The frontmatter takes one `key: value` per line. A value may be

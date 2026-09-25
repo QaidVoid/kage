@@ -1,11 +1,13 @@
 //! `kage doctor`: diagnostic command.
 //!
-//! Walks a fixed checklist (config, credentials, providers, plugins,
-//! sandbox) and prints one row per item with status + body. Exit code
-//! is `0` when every check is OK or WARN; `1` if any check FAILs.
+//! Lists the four directories kage resolves (config, data, state,
+//! cache), then walks a fixed checklist (config, credentials,
+//! providers, plugins, sandbox) and prints one row per item with
+//! status + body. Exit code is `0` when every check is OK or WARN; `1`
+//! if any check FAILs.
 
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
@@ -47,6 +49,8 @@ pub fn run() -> ExitCode {
     let mut stdout = io::stdout().lock();
     let _ = writeln!(stdout, "kage doctor");
     let _ = writeln!(stdout);
+    write_directories(&mut stdout, &directories());
+    let _ = writeln!(stdout);
 
     let checks = collect_checks();
     let any_fail = checks.iter().any(|c| matches!(c.status, Status::Fail));
@@ -71,6 +75,29 @@ pub fn run() -> ExitCode {
     } else {
         let _ = writeln!(stdout, "doctor: all checks ok");
         ExitCode::SUCCESS
+    }
+}
+
+/// The directories kage keeps its files in, as `(role, path)` rows:
+/// config, data, state and the cache.
+fn directories() -> [(&'static str, Result<PathBuf, String>); 4] {
+    [
+        ("config", crate::config_dir()),
+        ("data", crate::data_root()),
+        ("state", crate::state_root()),
+        ("cache", crate::cache_root()),
+    ]
+}
+
+/// Print `rows` under a `directories` heading.
+fn write_directories(out: &mut impl Write, rows: &[(&'static str, Result<PathBuf, String>)]) {
+    let _ = writeln!(out, "  directories");
+    for (role, path) in rows {
+        let shown = match path {
+            Ok(path) => path.display().to_string(),
+            Err(e) => format!("unresolved: {e}"),
+        };
+        let _ = writeln!(out, "    {role:<7}{shown}");
     }
 }
 
@@ -468,6 +495,24 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn directories_list_all_four_roles() {
+        let roles: Vec<&str> = directories().iter().map(|(role, _)| *role).collect();
+        assert_eq!(roles, ["config", "data", "state", "cache"]);
+        let mut out = Vec::new();
+        write_directories(
+            &mut out,
+            &[
+                ("config", Ok(PathBuf::from("/c/kage"))),
+                ("cache", Err("no home directory".to_owned())),
+            ],
+        );
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "  directories\n    config /c/kage\n    cache  unresolved: no home directory\n"
+        );
+    }
 
     #[test]
     fn config_check_reports_ok_with_default_inputs() {

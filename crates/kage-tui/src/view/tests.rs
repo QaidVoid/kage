@@ -1256,7 +1256,7 @@ fn the_card_reads_as_labeled_rows_with_change_hints() {
     assert_eq!(row("directory"), "   directory     /work/kage");
     assert!(row("permissions").contains("built-in tools run without asking"));
     assert!(row("permissions").ends_with("/permission to change"));
-    assert!(row("thinking").starts_with("   thinking      off"));
+    assert!(row("thinking").starts_with("   thinking      model default"));
     assert!(row("thinking").ends_with("shift+tab to change"));
     assert!(row("recent").starts_with("   recent        fix the parser tests  Today 09:30"));
     assert!(row("recent").ends_with("ctrl+s to resume"));

@@ -15,7 +15,7 @@ use kage_core::protocol::{
     SessionState,
 };
 
-use crate::engine::Commander;
+use crate::engine::{AUTO_THINKING, Commander};
 
 /// What the TUI host knows about the active session, kept current by
 /// [`mirror`].
@@ -196,12 +196,21 @@ impl Host {
             }),
             RunRequest::SwitchModel(model) => self.switch_model(&model),
             RunRequest::CycleThinkingLevel => {
-                let next = lock(&self.mirror).state.thinking.cycle();
-                self.set_thinking(next, "cycle");
+                let next = {
+                    let state = &lock(&self.mirror).state;
+                    ThinkingLevel::next_in(&state.thinking_levels, state.thinking_effective)
+                };
+                match next {
+                    Some(level) => self.set_thinking(Some(level), "cycle"),
+                    None => self.notify("this model has no thinking levels".to_owned()),
+                }
             }
-            RunRequest::SetThinkingLevel(value) => match ThinkingLevel::parse(&value) {
-                Some(level) => self.set_thinking(level, "settings"),
-                None => self.error(format!("settings: unknown thinking level: {value}")),
+            RunRequest::SetThinkingLevel(value) => match value.as_str() {
+                "" | AUTO_THINKING => self.set_thinking(None, "settings"),
+                _ => match ThinkingLevel::parse(&value) {
+                    Some(level) => self.set_thinking(Some(level), "settings"),
+                    None => self.error(format!("settings: unknown thinking level: {value}")),
+                },
             },
             RunRequest::SetPermissionMode(mode) => self.set_permission_mode(mode),
             RunRequest::CompactNow => self.send(CommandKind::Compact),
@@ -299,16 +308,19 @@ impl Host {
         }
     }
 
-    fn set_thinking(&self, level: ThinkingLevel, source: &str) {
+    /// Choose `level` for the active session, `None` for the automatic
+    /// level.
+    fn set_thinking(&self, level: Option<ThinkingLevel>, source: &str) {
+        let name = |l: Option<ThinkingLevel>| l.map_or(AUTO_THINKING, ThinkingLevel::as_str);
         let prev = lock(&self.mirror).state.thinking;
         self.send(CommandKind::SetThinking { level });
-        self.notify(format!("thinking level: {}", level.label()));
+        self.notify(format!("thinking level: {}", name(level)));
         self.update_ui(|ui| ui.state.thinking = level);
         self.plugin_event(
             "thinking_level_select",
             &serde_json::json!({
-                "prev": prev.as_str(),
-                "next": level.as_str(),
+                "prev": name(prev),
+                "next": name(level),
                 "source": source,
             }),
         );

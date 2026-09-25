@@ -139,7 +139,7 @@ Every session has three select options, returned by `session/new`,
 | id         | category        | values |
 | ---------- | --------------- | ------ |
 | `model`    | `model`         | the models the TUI model picker lists, plus the current one |
-| `thinking` | `thought_level` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
+| `thinking` | `thought_level` | `default` (high, or the nearest level the model accepts), then the levels the model accepts from `off`, `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `mode`     | `mode`          | `default` (the configured rules decide), `ask`, `allow`, `deny` |
 
 A change applies from the next turn on. `session/set_config_option`

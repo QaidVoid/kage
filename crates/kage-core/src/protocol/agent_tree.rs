@@ -275,8 +275,8 @@ fn agent_wrapper(output: &str) -> Option<(String, SessionId, AgentState)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::LoopError;
     use crate::protocol::{RequestId, SessionState};
-    use crate::{LoopError, ThinkingLevel};
 
     fn envelope(session: SessionId, event: impl Into<Event>) -> Envelope {
         Envelope {
@@ -319,9 +319,9 @@ mod tests {
         assert!(tree.apply(&envelope(child, HostEvent::RunStarted)));
         let state = SessionState {
             model: "mock:m".into(),
-            thinking: ThinkingLevel::Off,
             permission_mode: None,
             working: true,
+            ..SessionState::default()
         };
         assert!(tree.apply(&envelope(child, HostEvent::StateChanged { state })));
         let usage = Usage {

@@ -405,8 +405,9 @@ impl super::Dispatcher {
         let mut session = self.sessions.remove(&old).expect("session checked");
         let messages = cx.history.clone();
         session.usage = super::usage_of(&cx);
-        session.state.thinking = cx.thinking_level.unwrap_or_default();
-        session.thinking = None;
+        session.state.thinking = cx.thinking_level;
+        super::fit_to_model(&mut session.state, &self.registry);
+        session.thinking_changed = false;
         session.model_changed = false;
         session.title_pending = session.title && !super::has_reply(&cx);
         session.pending_history.clear();

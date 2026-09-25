@@ -39,8 +39,9 @@
 //!   (from `:model` / model picker); `cycle` and `restore` are
 //!   reserved for upcoming features.
 //! * `thinking_level_select` - the thinking level changed. Payload:
-//!   `{ prev, next, source }` where `source` is `"cycle"` or
-//!   `"settings"`.
+//!   `{ prev, next, source }` where `prev` and `next` are level names
+//!   (`"default"` for the automatic level) and `source` is `"cycle"`
+//!   or `"settings"`.
 //! * `user_bash` - an inline `!cmd` from the input pane completed.
 //!   Payload: `{ cmd, exit_code }`; `exit_code` is `nil` when the
 //!   command was killed by a signal.

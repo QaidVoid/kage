@@ -838,8 +838,7 @@ mod tests {
                 models: vec![kage_core::config::CustomProviderModel {
                     id: "llama-3".to_owned(),
                     name: "Llama 3".to_owned(),
-                    context: None,
-                    max_output: None,
+                    ..kage_core::config::CustomProviderModel::default()
                 }],
                 tool_use: true,
                 thinking: false,

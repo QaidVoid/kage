@@ -56,7 +56,8 @@ existing file, `--non-interactive` skips the prompts):
 kage init
 ```
 
-`kage doctor` checks the install end to end - it parses the config,
+`kage doctor` checks the install end to end. It prints the config,
+data, state and cache directories it resolved, parses the config,
 lists usable providers, validates discovered plugins, and reports
 the sandbox state, exiting non-zero if anything is broken:
 

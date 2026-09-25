@@ -546,6 +546,7 @@ fn with_models_overrides_advertised_models() {
         name: "Test Model".to_owned(),
         context: Some(128_000),
         max_output: Some(8_192),
+        ..ProviderModel::default()
     }];
     let provider = AnthropicProvider::new("k").with_models(models.clone());
     assert_eq!(provider.models(), models);

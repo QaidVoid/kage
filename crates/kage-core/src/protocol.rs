@@ -24,7 +24,9 @@ use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
 use crate::permissions::PermissionAction;
-use crate::{Content, LoopError, LoopEvent, Message, ThinkingLevel, TokenUsage, ToolCallId};
+use crate::{
+    Content, Inputs, LoopError, LoopEvent, Message, ThinkingLevel, TokenUsage, ToolCallId,
+};
 
 /// Stable identifier for one session.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -228,8 +230,21 @@ pub enum RunOutcome {
 pub struct SessionState {
     /// Provider-qualified model id, such as `anthropic:claude-sonnet-4-6`.
     pub model: String,
-    /// Active thinking level.
-    pub thinking: ThinkingLevel,
+    /// Thinking level the user chose. `None` means automatic: high,
+    /// or the nearest level the model accepts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingLevel>,
+    /// Level the next run sends after fitting [`Self::thinking`] to the
+    /// model. `None` when the run sends no thinking setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_effective: Option<ThinkingLevel>,
+    /// Levels the model accepts, lowest first. Empty when the model has
+    /// no thinking setting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub thinking_levels: Vec<ThinkingLevel>,
+    /// Inputs the model accepts. Empty when unknown.
+    #[serde(default, skip_serializing_if = "Inputs::is_empty")]
+    pub input: Inputs,
     /// Session permission override. `None` means the configured rules
     /// decide.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -351,8 +366,9 @@ pub enum CommandKind {
     },
     /// Use a different thinking level from the next run on.
     SetThinking {
-        /// New level.
-        level: ThinkingLevel,
+        /// New level. `None` returns to the automatic default.
+        #[serde(default)]
+        level: Option<ThinkingLevel>,
     },
     /// Override the configured permission rules for this session. `None`
     /// restores the configured rules.
@@ -480,9 +496,10 @@ mod tests {
             HostEvent::StateChanged {
                 state: SessionState {
                     model: "mock:m".into(),
-                    thinking: ThinkingLevel::High,
+                    thinking: Some(ThinkingLevel::High),
                     permission_mode: Some(PermissionAction::Ask),
                     working: true,
+                    ..SessionState::default()
                 },
             }
             .into(),

@@ -202,6 +202,14 @@ pub(crate) enum Command {
         #[arg(long)]
         revoke: bool,
     },
+    /// Manage the model catalog. kage ships a snapshot of models.dev;
+    /// `kage models refresh` fetches a newer one into the model cache,
+    /// which later runs use in place of the snapshot's model entries.
+    Models {
+        /// Models sub-action.
+        #[command(subcommand)]
+        action: ModelsAction,
+    },
     /// Model Context Protocol: expose kage's built-in tools to another
     /// agent over stdio (newline-delimited JSON-RPC) with `kage mcp
     /// serve`, or log in to remote MCP servers that need OAuth.
@@ -210,6 +218,15 @@ pub(crate) enum Command {
         #[command(subcommand)]
         action: McpAction,
     },
+}
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum ModelsAction {
+    /// Download the models.dev catalog into
+    /// `$XDG_CACHE_HOME/kage/models.json`. It can add models and update
+    /// their metadata, never provider endpoints or credentials. Only
+    /// runs when asked; kage never refreshes on its own.
+    Refresh,
 }
 
 #[derive(Subcommand, Debug)]
@@ -300,11 +317,37 @@ pub(crate) fn run_subcommand(command: Command) -> ExitCode {
         Command::Completions { shell } => run_completions(shell),
         Command::Rpc { model, system } => rpc::run(model.as_deref(), &system),
         Command::Trust { revoke } => trust::run(revoke),
+        Command::Models {
+            action: ModelsAction::Refresh,
+        } => run_models_refresh(),
         Command::Mcp { action } => match action {
             McpAction::Serve { tools } => mcp::run_serve(&tools),
             McpAction::Login { server } => mcp_auth::run_login(&server),
             McpAction::Logout { server } => mcp_auth::run_logout(&server),
         },
+    }
+}
+
+/// Implement `kage models refresh`: download the catalog into the model
+/// cache.
+fn run_models_refresh() -> ExitCode {
+    let dest = match models_cache_path() {
+        Ok(path) => path,
+        Err(e) => {
+            eprintln!("kage: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let url = kage_provider::catalog::source::MODELS_DEV_URL;
+    match kage_provider::catalog::refresh(url, &dest) {
+        Ok(count) => {
+            println!("wrote {count} models to {}", dest.display());
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("kage: models refresh: {e}");
+            ExitCode::from(1)
+        }
     }
 }
 
@@ -377,6 +420,10 @@ const MANPAGE_FILES: &[(&str, &str)] = &[
     (
         "~/.local/state/kage/",
         "Session state, input history and trusted projects (trust.json).",
+    ),
+    (
+        "~/.cache/kage/models.json",
+        "Model catalog written by kage models refresh.",
     ),
 ];
 
@@ -462,7 +509,7 @@ fn render_manpage(cmd: &clap::Command) -> io::Result<String> {
     }
     roff.control("PP", []);
     roff.text([roman(
-        "XDG_CONFIG_HOME, XDG_DATA_HOME and XDG_STATE_HOME replace the ~/.config, ~/.local/share and ~/.local/state roots.",
+        "XDG_CONFIG_HOME, XDG_DATA_HOME, XDG_STATE_HOME and XDG_CACHE_HOME replace the ~/.config, ~/.local/share, ~/.local/state and ~/.cache roots.",
     )]);
     push(roff.render());
     push(render(Man::render_version_section)?);
@@ -486,6 +533,9 @@ fn main() -> ExitCode {
 
     if let Some(code) = subcommand_print_conflict(&cli) {
         return code;
+    }
+    if let Ok(path) = models_cache_path() {
+        kage_provider::catalog::use_cache(&path);
     }
 
     if let Some(command) = cli.command {
@@ -624,6 +674,17 @@ pub(crate) fn data_root() -> Result<PathBuf, String> {
 /// Resolve `$XDG_STATE_HOME/kage` (default `~/.local/state/kage`).
 pub(crate) fn state_root() -> Result<PathBuf, String> {
     kage_core::config::Config::state_dir().ok_or_else(|| "no home directory".to_owned())
+}
+
+/// Resolve `$XDG_CACHE_HOME/kage` (default `~/.cache/kage`).
+pub(crate) fn cache_root() -> Result<PathBuf, String> {
+    Ok(xdg_dir("XDG_CACHE_HOME", ".cache")?.join("kage"))
+}
+
+/// The model cache `kage models refresh` writes:
+/// `$XDG_CACHE_HOME/kage/models.json`.
+pub(crate) fn models_cache_path() -> Result<PathBuf, String> {
+    Ok(cache_root()?.join("models.json"))
 }
 
 /// Resolve the XDG-style directory holding session files:
@@ -1022,6 +1083,8 @@ fn register_custom_providers(
                 name: m.name.clone(),
                 context: m.context,
                 max_output: m.max_output,
+                reasoning: m.reasoning(),
+                input: m.input,
             })
             .collect();
         let provider: Arc<dyn kage_provider::Provider> = match cfg.kind {
@@ -1263,8 +1326,7 @@ mod tests {
                 .map(|m| kage_provider::ProviderModel {
                     id: (*m).to_owned(),
                     name: (*m).to_owned(),
-                    context: None,
-                    max_output: None,
+                    ..kage_provider::ProviderModel::default()
                 })
                 .collect(),
         })

@@ -12,8 +12,10 @@ use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
 use serde::{Deserialize, Serialize};
 
+use crate::modality::Inputs;
 use crate::options::OptionValue;
 use crate::permissions::PermissionsConfig;
+use crate::thinking::{Efforts, Reasoning};
 
 use crate::error::Result;
 
@@ -417,7 +419,7 @@ fn default_true() -> bool {
 
 /// One model a custom provider serves
 /// (`[[providers.custom.<id>.models]]`).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct CustomProviderModel {
     /// Model id sent to the endpoint; addressable from kage as
     /// `<provider-id>:<this id>`.
@@ -431,6 +433,40 @@ pub struct CustomProviderModel {
     /// Maximum output tokens per turn, when known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output: Option<u32>,
+    /// Whether the model thinks. Left unset, thinking is unknown:
+    /// explicit levels are sent as chosen and the automatic default
+    /// sends nothing. `true` offers every level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<bool>,
+    /// Effort values the model accepts (`none`, `minimal`, `low`,
+    /// `medium`, `high`, `xhigh`, `max`). Implies `reasoning = true`
+    /// and limits the levels to these.
+    #[serde(default, skip_serializing_if = "Efforts::is_empty")]
+    pub efforts: Efforts,
+    /// Inputs the model accepts (`text`, `image`, `pdf`, `audio`,
+    /// `video`). Empty when unknown.
+    #[serde(default, skip_serializing_if = "Inputs::is_empty")]
+    pub input: Inputs,
+}
+
+impl CustomProviderModel {
+    /// The thinking settings `reasoning` and `efforts` declare.
+    #[must_use]
+    pub fn reasoning(&self) -> Reasoning {
+        match (self.reasoning, self.efforts.is_empty()) {
+            (Some(false), _) => Reasoning::None,
+            (_, false) => Reasoning::Effort {
+                efforts: self.efforts,
+                toggle: false,
+            },
+            (Some(true), true) => Reasoning::Budget {
+                min: 0,
+                max: None,
+                toggle: true,
+            },
+            (None, true) => Reasoning::Unknown,
+        }
+    }
 }
 
 /// Settings overriding a provider kage registers itself
@@ -468,10 +504,10 @@ pub struct UiConfig {
     pub input_max_lines: u16,
     /// Default thinking level for new sessions: one of the
     /// `ThinkingLevel` ladder strings (`off`, `minimal`, `low`,
-    /// `medium`, `high`, `xhigh`). Parsed and seeded at session
-    /// start; the Shift+Tab cycle still overrides it per session.
-    /// Kept as a raw string here because the ladder itself lives in
-    /// kage-provider, which sits above kage-core.
+    /// `medium`, `high`, `xhigh`). Unset means automatic: high, or the
+    /// nearest level the model accepts. Parsed and seeded at session
+    /// start; the Shift+Tab cycle still overrides it per session. Kept
+    /// as a raw string so the option registry can validate it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_level: Option<String>,
     /// What prints to the terminal after exit: `full` for the whole
@@ -1189,7 +1225,7 @@ default = "ask"   # keep asking
                 id: "meta-llama/Llama-3.3-70B-Instruct-Turbo".into(),
                 name: "Llama 3.3 70B".into(),
                 context: Some(131_072),
-                max_output: None,
+                ..CustomProviderModel::default()
             }],
             tool_use: true,
             thinking: false,
@@ -1378,6 +1414,52 @@ default = "ask"   # keep asking
                 Some("infra")
             );
             assert!(!cfg.providers.custom.contains_key("deepseek"));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn custom_models_declare_reasoning_efforts_and_input() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.toml",
+                r#"
+                [providers.custom.local]
+                base_url = "http://localhost:8080/v1"
+
+                [[providers.custom.local.models]]
+                id = "thinker"
+                name = "Thinker"
+                efforts = ["low", "high"]
+                input = ["text", "image"]
+
+                [[providers.custom.local.models]]
+                id = "plain"
+                name = "Plain"
+                reasoning = false
+
+                [[providers.custom.local.models]]
+                id = "mystery"
+                name = "Mystery"
+                "#,
+            )?;
+            let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
+            let models = &cfg.providers.custom["local"].models;
+            assert_eq!(
+                models[0].reasoning(),
+                Reasoning::Effort {
+                    efforts: Efforts::of(&[
+                        crate::thinking::Effort::Low,
+                        crate::thinking::Effort::High
+                    ]),
+                    toggle: false,
+                }
+            );
+            assert!(models[0].input.contains(crate::modality::Input::Image));
+            assert_eq!(models[1].reasoning(), Reasoning::None);
+            assert_eq!(models[2].reasoning(), Reasoning::Unknown);
+            assert!(models[2].input.is_empty());
             Ok(())
         });
     }

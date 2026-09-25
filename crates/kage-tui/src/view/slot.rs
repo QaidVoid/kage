@@ -314,12 +314,22 @@ fn labeled(name: &str, src: &Sources<'_>) -> (&'static str, String, Option<Strin
             )
         }
         _ => {
-            let level = src
-                .usage
-                .and_then(|u| u.thinking_level)
-                .map_or("off", kage_core::ThinkingLevel::label);
-            ("thinking", level.to_owned(), change(&keys.thinking))
+            let usage = src.usage;
+            let text = usage.map_or_else(|| "model default".to_owned(), thinking_text);
+            let fixed = usage.is_some_and(|u| u.thinking_levels.is_empty());
+            let hint = if fixed { None } else { change(&keys.thinking) };
+            ("thinking", text, hint)
         }
+    }
+}
+
+/// The thinking level the next run sends, marked `(auto)` when the
+/// user did not choose it, or `model default` when the run sends none.
+fn thinking_text(usage: &SessionUsage) -> String {
+    match usage.thinking_level {
+        Some(level) if usage.thinking_auto => format!("{} (auto)", level.label()),
+        Some(level) => level.label().to_owned(),
+        None => "model default".to_owned(),
     }
 }
 
@@ -759,13 +769,11 @@ fn push_usage(name: &str, u: &SessionUsage, styles: &Styles, out: &mut Vec<Span<
                 ));
             }
         }
-        "thinking" => {
-            if let Some(level) = u.thinking_level.filter(|l| !l.is_off()) {
-                out.push(Span::styled(
-                    format!("thinking {}", level.label()),
-                    styles.text,
-                ));
-            }
+        "thinking" if u.thinking_level.is_some_and(|l| !l.is_off()) => {
+            out.push(Span::styled(
+                format!("thinking {}", thinking_text(u)),
+                styles.text,
+            ));
         }
         "permission" => {
             if let Some(mode) = u.permission_mode {
@@ -868,6 +876,40 @@ mod tests {
         assert_eq!(painted("thinking", &quiet, &input), "");
         assert_eq!(painted("tokens", &quiet, &input), "");
         assert_eq!(painted("permission", &quiet, &input), "");
+    }
+
+    #[test]
+    fn the_start_card_marks_automatic_thinking() {
+        use kage_core::ThinkingLevel::{High, Low, Off};
+        let input = InputState::new();
+        let row = |usage: &SessionUsage| {
+            let status = StatusCtx::default();
+            let src = Sources::new(&status, Some(usage), &input, 80);
+            let (_, text, _) = labeled("thinking", &src);
+            text
+        };
+        let auto = SessionUsage {
+            model: "fake:m".into(),
+            thinking_level: Some(High),
+            thinking_auto: true,
+            thinking_levels: vec![Low, High],
+            ..SessionUsage::default()
+        };
+        assert_eq!(row(&auto), "high (auto)");
+        assert_eq!(painted("thinking", &auto, &input), "thinking high (auto)");
+        let chosen = SessionUsage {
+            model: "fake:m".into(),
+            thinking_level: Some(Off),
+            thinking_levels: vec![Off, High],
+            ..SessionUsage::default()
+        };
+        assert_eq!(row(&chosen), "off");
+        let plain = SessionUsage {
+            model: "fake:m".into(),
+            thinking_auto: true,
+            ..SessionUsage::default()
+        };
+        assert_eq!(row(&plain), "model default");
     }
 
     #[test]

@@ -4365,9 +4365,9 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "kage-core",
  "kage-plugin",
- "serde",
- "serde_json",
+ "kage-provider",
  "ureq",
 ]
 

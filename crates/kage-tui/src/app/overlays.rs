@@ -131,11 +131,7 @@ impl App {
     pub(crate) fn drain_clipboard_attach(&mut self) {
         while let Ok(result) = self.attach_rx.try_recv() {
             match result {
-                Ok(att) => {
-                    let note = att.placeholder();
-                    self.input.attach_image(att);
-                    self.notify(format!("attached {note}"));
-                }
+                Ok(att) => self.attach(att),
                 Err(e) => self.push_error(format!("paste image: {e}")),
             }
         }
@@ -155,11 +151,7 @@ impl App {
         // A copied/dragged image *file* arrives as its path.
         if let Some(path) = crate::image::path_if_image(text) {
             match crate::image::load_path(&path) {
-                Ok(att) => {
-                    let note = att.placeholder();
-                    self.input.attach_image(att);
-                    self.notify(format!("attached {note}"));
-                }
+                Ok(att) => self.attach(att),
                 Err(e) => self.push_error(format!("attach: {e}")),
             }
             return;
@@ -225,12 +217,36 @@ impl App {
             return;
         }
         match crate::image::load_path(std::path::Path::new(path)) {
-            Ok(att) => {
-                let note = att.placeholder();
-                self.input.attach_image(att);
-                self.notify(format!("attached {note}"));
-            }
+            Ok(att) => self.attach(att),
             Err(e) => self.push_error(format!("attach: {e}")),
+        }
+    }
+
+    /// Queue `att` for the next prompt and say so, warning when the
+    /// active model is known not to accept images: the engine drops
+    /// them from the prompt rather than let the provider fail.
+    fn attach(&mut self, att: crate::image::AttachedImage) {
+        let note = att.placeholder();
+        self.input.attach_image(att);
+        let text_only = self.session_usage.as_ref().and_then(|usage| {
+            let usage = lock(usage);
+            usage
+                .input
+                .lacks(kage_core::Input::Image)
+                .then(|| usage.model.clone())
+        });
+        let (text, kind) = match text_only {
+            Some(model) => (
+                format!("{model} does not accept images; it will not be sent"),
+                ToastKind::Warning,
+            ),
+            None => (format!("attached {note}"), ToastKind::Info),
+        };
+        if let Some(toasts) = &self.toasts {
+            toast::push_toast(
+                toasts,
+                Toast::with_kind(text, kind, toast::DEFAULT_TOAST_DURATION),
+            );
         }
     }
 

@@ -4484,9 +4484,8 @@ fn agent_state_and_usage_leave_the_footer_alone() {
     let child = spawn_agent(&mut app, &events, "a1", "explore");
     let state = kage_core::protocol::SessionState {
         model: "agent:m".into(),
-        thinking: kage_core::ThinkingLevel::Off,
-        permission_mode: None,
-        working: false,
+        thinking: Some(kage_core::ThinkingLevel::Off),
+        ..kage_core::protocol::SessionState::default()
     };
     let usage = kage_core::protocol::Usage {
         context_used: 99,

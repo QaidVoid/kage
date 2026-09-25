@@ -27,6 +27,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 
+use kage_core::ThinkingLevel;
 use kage_core::protocol::{SessionState, Usage};
 use kage_core::sync::lock;
 use mlua::{Function, Lua, RegistryKey, Table, Value};
@@ -708,7 +709,12 @@ fn context(lua: &Lua, ui: &UiState) -> mlua::Result<Table> {
     let ctx = lua.create_table()?;
     ctx.raw_set("width", ui.width)?;
     ctx.raw_set("model", ui.state.model.as_str())?;
-    ctx.raw_set("thinking", ui.state.thinking.as_str())?;
+    let thinking = ui
+        .state
+        .thinking_effective
+        .map_or("off", ThinkingLevel::as_str);
+    ctx.raw_set("thinking", thinking)?;
+    ctx.raw_set("thinking_auto", ui.state.thinking.is_none())?;
     ctx.raw_set(
         "permission_mode",
         json(serde_json::to_value(ui.state.permission_mode))?,

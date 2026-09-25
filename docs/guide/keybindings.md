@@ -283,8 +283,9 @@ Insert).
 | `v`       | Enter visual (cell selection)                |
 | `PageUp` / `PageDown` | Scroll buffer up / down 10 lines |
 
-The active thinking level shows as `thinking <level>` on the right of
-the input's top rule, hidden when off.
+The thinking level the next run sends shows as `thinking <level>` on
+the right of the input's top rule, marked `(auto)` when you have not
+chosen one, and hidden when off.
 
 ## input editing
 
@@ -434,10 +435,13 @@ These action names work after `action:`:
 Scrolling by a line count needs an argument, so it is only available
 from Lua as `kage.action.scroll(n)`.
 
-`CycleThinkingLevel` steps the thinking level (also `Shift+Tab`).
-The level a new TUI session starts on comes from
-`[ui] thinking_level` (one of `off`, `minimal`, `low`, `medium`,
-`high`, `xhigh`). The cycle still overrides it per session.
+`CycleThinkingLevel` steps the thinking level (also `Shift+Tab`),
+visiting only the levels the model accepts. The level a new TUI
+session starts on comes from `[ui] thinking_level` (one of `off`,
+`minimal`, `low`, `medium`, `high`, `xhigh`); left unset it is
+automatic: high, or the nearest level the model accepts. The cycle
+still overrides it per session. See
+[thinking](/guide/providers#thinking).
 
 ### quit and cancel hatches
 

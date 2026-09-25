@@ -361,7 +361,8 @@ fn build_request(
     }
     req.tools = tools.list_for_provider();
     req.max_output_tokens = cx.max_output_tokens;
-    req.level = cx.thinking_level;
+    req.level = cx.reasoning.resolve(cx.thinking_level);
+    req.reasoning = cx.reasoning;
     req
 }
 

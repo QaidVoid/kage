@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use kage_core::ThinkingLevel;
+use kage_core::{Inputs, ThinkingLevel};
 
 /// Snapshot of one session's running token totals plus the active
 /// model and its context window, kept current from the engine's
@@ -47,10 +47,18 @@ pub struct SessionUsage {
     /// Cumulative dollar cost across every turn this session. `0.0`
     /// when the active model has no catalog cost data.
     pub total_cost: f64,
-    /// Active unified thinking level. `None` (and `Some(Off)`) leave
-    /// the modeline pill suppressed; the renderer draws a short
-    /// "think:<level>" pill for any other variant.
+    /// Thinking level the next run sends. `None` (and `Some(Off)`)
+    /// leave the footer pill suppressed; the renderer draws
+    /// `thinking <level>` for any other variant.
     pub thinking_level: Option<ThinkingLevel>,
+    /// Whether [`Self::thinking_level`] is the automatic level rather
+    /// than one the user chose.
+    pub thinking_auto: bool,
+    /// Levels the model accepts, lowest first. Empty when the model has
+    /// no thinking setting.
+    pub thinking_levels: Vec<ThinkingLevel>,
+    /// Inputs the model accepts. Empty when unknown.
+    pub input: Inputs,
     /// Session permission mode override. `None` hides the pill (the
     /// configured `[permissions]` rules decide); the renderer draws
     /// `perm:ask` / `perm:deny` for the matching override.

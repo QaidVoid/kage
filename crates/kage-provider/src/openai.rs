@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufReader, Read};
 
-use kage_core::{CancelFlag, Content, Message, Role, ToolCallId};
+use kage_core::{CancelFlag, Content, Message, Reasoning, Role, ToolCallId};
 use serde_json::Value;
 
 use crate::{
@@ -176,11 +176,7 @@ pub(crate) fn build_request_body(req: &StreamRequest, stream: bool) -> Value {
     if let Some(temp) = req.temperature {
         body["temperature"] = serde_json::json!(temp);
     }
-    if let Some(level) = req.level
-        && let Some(effort) = level.openai_reasoning_effort()
-    {
-        body["reasoning_effort"] = serde_json::json!(effort);
-    }
+    apply_reasoning(&mut body, req);
     if !req.tools.is_empty() {
         body["tools"] = serde_json::to_value(
             req.tools
@@ -191,6 +187,33 @@ pub(crate) fn build_request_body(req: &StreamRequest, stream: bool) -> Value {
         .expect("tool spec serializes");
     }
     body
+}
+
+/// Set the reasoning fields for `req`: `reasoning_effort` with the
+/// model's own effort value on effort models, `thinking.type` on toggle
+/// models (the Z.AI, `DeepSeek` and Moonshot shape), and the generic
+/// effort mapping on budget models and models the catalog lacks.
+fn apply_reasoning(body: &mut Value, req: &StreamRequest) {
+    let Some(level) = req.level else {
+        return;
+    };
+    let toggle = |on: bool| serde_json::json!({"type": if on { "enabled" } else { "disabled" }});
+    match req.reasoning {
+        Reasoning::None | Reasoning::Fixed => {}
+        Reasoning::Effort { .. } => match req.reasoning.effort(level) {
+            Some(effort) => body["reasoning_effort"] = serde_json::json!(effort.as_str()),
+            None if level.is_off() && req.reasoning.has_toggle() => {
+                body["thinking"] = toggle(false);
+            }
+            None => {}
+        },
+        Reasoning::Toggle => body["thinking"] = toggle(!level.is_off()),
+        Reasoning::Unknown | Reasoning::Budget { .. } => {
+            if let Some(effort) = level.openai_reasoning_effort() {
+                body["reasoning_effort"] = serde_json::json!(effort);
+            }
+        }
+    }
 }
 
 fn tool_spec_to_openai(spec: &ToolSpec) -> Value {
@@ -850,9 +873,64 @@ mod tests {
             name: "Test Model".to_owned(),
             context: Some(128_000),
             max_output: Some(8_192),
+            ..ProviderModel::default()
         }];
         let provider = OpenAiProvider::new("k").with_models(models.clone());
         assert_eq!(provider.models(), models);
         assert!(OpenAiProvider::new("k").models().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod thinking_tests {
+    use kage_core::{Effort, Efforts, ThinkingLevel};
+
+    use super::*;
+
+    fn request(reasoning: Reasoning, level: ThinkingLevel) -> StreamRequest {
+        let user = Message::new(Role::User, vec![Content::Text { text: "hi".into() }], None);
+        let mut req = StreamRequest::new("m", vec![user]);
+        req.reasoning = reasoning;
+        req.level = Some(level);
+        req
+    }
+
+    fn effort(values: &[Effort], toggle: bool) -> Reasoning {
+        Reasoning::Effort {
+            efforts: Efforts::of(values),
+            toggle,
+        }
+    }
+
+    #[test]
+    fn effort_models_send_their_own_effort_values() {
+        let r = effort(
+            &[Effort::None, Effort::Low, Effort::High, Effort::Max],
+            false,
+        );
+        let body = build_request_body(&request(r, ThinkingLevel::XHigh), true);
+        assert_eq!(body["reasoning_effort"], "max");
+        let body = build_request_body(&request(r, ThinkingLevel::Off), true);
+        assert_eq!(body["reasoning_effort"], "none");
+    }
+
+    #[test]
+    fn toggle_models_switch_thinking_on_and_off() {
+        let on = build_request_body(&request(Reasoning::Toggle, ThinkingLevel::High), true);
+        assert_eq!(on["thinking"]["type"], "enabled");
+        assert!(on.get("reasoning_effort").is_none());
+        let off = build_request_body(&request(Reasoning::Toggle, ThinkingLevel::Off), true);
+        assert_eq!(off["thinking"]["type"], "disabled");
+        let r = effort(&[Effort::Low, Effort::High], true);
+        let off = build_request_body(&request(r, ThinkingLevel::Off), true);
+        assert_eq!(off["thinking"]["type"], "disabled");
+        assert!(off.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn fixed_models_send_nothing() {
+        let body = build_request_body(&request(Reasoning::Fixed, ThinkingLevel::High), true);
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("thinking").is_none());
     }
 }

@@ -26,7 +26,7 @@ pub mod tokens;
 pub mod testing;
 
 pub use cancelable::{cancellable_call, make_cancelable};
-pub use catalog::{ModelInfo, PROVIDERS, ProviderInfo};
+pub use catalog::{ModelInfo, ProviderInfo};
 pub use error::ProviderError;
 pub use event::{ProviderEvent, StopReason};
 pub use kage_core::ToolSpec;

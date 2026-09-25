@@ -14,7 +14,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufReader, Read};
 
-use kage_core::{CancelFlag, Content, Message, Role, ToolCallId};
+use kage_core::{CancelFlag, Content, Message, Reasoning, Role, ToolCallId};
 use serde_json::Value;
 
 use crate::{
@@ -165,9 +165,7 @@ pub(crate) fn build_request_body(req: &StreamRequest, stream: bool) -> Value {
     if let Some(temp) = req.temperature {
         body["temperature"] = serde_json::json!(temp);
     }
-    if let Some(level) = req.level
-        && let Some(effort) = level.openai_reasoning_effort()
-    {
+    if let Some(effort) = reasoning_effort(req) {
         body["reasoning"] = serde_json::json!({ "effort": effort });
     }
     if !req.tools.is_empty() {
@@ -181,6 +179,18 @@ pub(crate) fn build_request_body(req: &StreamRequest, stream: bool) -> Value {
 /// Unlike Chat Completions, the Responses API uses a flat `function`
 /// type (no nested `function` wrapper): `{ type, name, description,
 /// parameters }`.
+/// The `reasoning.effort` for `req`: the model's own effort value on
+/// effort models (`none` for off where the model has it), nothing on
+/// models without a setting, and the generic mapping otherwise.
+fn reasoning_effort(req: &StreamRequest) -> Option<&'static str> {
+    let level = req.level?;
+    match req.reasoning {
+        Reasoning::Effort { .. } => req.reasoning.effort(level).map(kage_core::Effort::as_str),
+        Reasoning::None | Reasoning::Fixed | Reasoning::Toggle => None,
+        Reasoning::Unknown | Reasoning::Budget { .. } => level.openai_reasoning_effort(),
+    }
+}
+
 fn tool_spec_to_responses(spec: &ToolSpec) -> Value {
     serde_json::json!({
         "type": "function",
@@ -984,9 +994,46 @@ mod tests {
             name: "Test Model".to_owned(),
             context: Some(128_000),
             max_output: Some(8_192),
+            ..ProviderModel::default()
         }];
         let provider = OpenAiResponsesProvider::new("k").with_models(models.clone());
         assert_eq!(provider.models(), models);
         assert!(OpenAiResponsesProvider::new("k").models().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod thinking_tests {
+    use kage_core::{Effort, Efforts, ThinkingLevel};
+
+    use super::*;
+
+    fn request(reasoning: Reasoning, level: ThinkingLevel) -> StreamRequest {
+        let user = Message::new(Role::User, vec![Content::Text { text: "hi".into() }], None);
+        let mut req = StreamRequest::new("m", vec![user]);
+        req.reasoning = reasoning;
+        req.level = Some(level);
+        req
+    }
+
+    fn effort(values: &[Effort], toggle: bool) -> Reasoning {
+        Reasoning::Effort {
+            efforts: Efforts::of(values),
+            toggle,
+        }
+    }
+
+    #[test]
+    fn effort_models_send_their_own_effort_values() {
+        let r = effort(
+            &[Effort::None, Effort::Low, Effort::High, Effort::XHigh],
+            false,
+        );
+        let body = build_request_body(&request(r, ThinkingLevel::XHigh), true);
+        assert_eq!(body["reasoning"]["effort"], "xhigh");
+        let body = build_request_body(&request(r, ThinkingLevel::Off), true);
+        assert_eq!(body["reasoning"]["effort"], "none");
+        let body = build_request_body(&request(Reasoning::None, ThinkingLevel::High), true);
+        assert!(body.get("reasoning").is_none());
     }
 }

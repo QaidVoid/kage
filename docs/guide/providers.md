@@ -100,6 +100,8 @@ id = "llama-3-70b"
 name = "Llama 3 70B"
 context = 131072                     # optional; tokens
 max_output = 8192                    # optional; tokens
+efforts = ["low", "medium", "high"]  # optional; see thinking below
+input = ["text", "image"]            # optional; text, image, pdf, audio, video
 
 [providers.custom.relay]
 kind = "anthropic"
@@ -123,6 +125,64 @@ available. A provider whose `api_key_env` is set to a non-empty
 variable that is unset (and has no saved key) is skipped; with
 `api_key_env = ""` it registers unconditionally, which is what
 keyless local endpoints want.
+
+Three optional model keys describe what a model accepts, since kage
+has no catalog entry for it:
+
+- `reasoning`: `false` for a model that does not think, which sends no
+  thinking setting. `true` offers every level.
+- `efforts`: the effort values the model takes (`none`, `minimal`,
+  `low`, `medium`, `high`, `xhigh`, `max`). Implies `reasoning = true`
+  and limits the levels to these.
+- `input`: the kinds of input the model takes. Attaching an image to a
+  model whose `input` leaves out `image` warns, and the image is not
+  sent.
+
+A model with neither `reasoning` nor `efforts` sends a level you pick
+unchanged, and no level while thinking is automatic.
+
+## model catalog
+
+kage ships a snapshot of the [models.dev](https://models.dev) catalog
+for its providers: model names, context and output limits, pricing,
+accepted inputs and thinking options. The model picker shows each
+model's inputs on the right.
+
+`kage models refresh` downloads the current catalog into
+`~/.cache/kage/models.json` (`$XDG_CACHE_HOME/kage`). Later runs lay
+it over the snapshot: it adds models to the providers kage knows and
+updates their metadata. It never adds a provider or changes a
+provider's endpoint or credentials. kage never refreshes on its own,
+and a missing or unreadable cache falls back to the snapshot silently.
+Delete the file to go back to the snapshot.
+
+## thinking
+
+A session's thinking level is one of `off`, `minimal`, `low`,
+`medium`, `high` and `xhigh`, or automatic. Automatic is the default:
+it sends `high`, or the nearest level the model accepts when it has no
+`high` (the higher one on a tie). A level you choose with
+`shift+tab`, the settings dialog or `[ui] thinking_level` is fitted the
+same way, and only an explicit `off` turns thinking off. `shift+tab`
+only visits levels the model accepts. The start card shows an
+automatic level as `high (auto)`.
+
+The catalog lists how each model takes thinking, and kage maps the
+level onto it:
+
+| model takes        | kage sends |
+| ------------------ | ---------- |
+| effort values      | the effort named like the level. `none` is `off`; `max` stands in for `xhigh` on a model without `xhigh` (a model with both sends `xhigh`, so `max` is not reachable) |
+| a token budget     | the level's budget (`minimal` 1024 to `xhigh` 32768 tokens), kept within the model's bounds |
+| an on/off switch   | on for any level other than `off`, shown as `high` |
+| nothing to set     | no thinking setting |
+
+On the wire: Anthropic effort models get adaptive thinking with
+`output_config.effort` and budget models `budget_tokens`; OpenAI
+models get `reasoning_effort` (`reasoning.effort` on the Responses
+API); Gemini models get `thinkingLevel` or `thinkingBudget`; and
+OpenAI-compatible models with an on/off switch get
+`thinking.type` `enabled` or `disabled`.
 
 ## base urls
 

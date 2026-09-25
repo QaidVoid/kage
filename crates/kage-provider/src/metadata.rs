@@ -1,5 +1,7 @@
 //! Static description of a [`Provider`](crate::Provider) instance.
 
+use kage_core::{Inputs, Reasoning};
+
 /// Description used by the registry, `kage doctor`, and the model picker UI.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderMetadata {
@@ -20,7 +22,7 @@ pub struct ProviderMetadata {
 /// model list this way; built-in providers can leave the
 /// [`Provider::models`](crate::Provider::models) override empty and rely
 /// on [`crate::catalog`].
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ProviderModel {
     /// Provider-scoped model id (the portion after `provider:`).
     pub id: String,
@@ -34,4 +36,9 @@ pub struct ProviderModel {
     /// stream request so the provider does not silently truncate with
     /// its conservative default.
     pub max_output: Option<u32>,
+    /// Thinking settings the model accepts. [`Reasoning::Unknown`]
+    /// when not declared.
+    pub reasoning: Reasoning,
+    /// Inputs the model accepts. Empty when not declared.
+    pub input: Inputs,
 }

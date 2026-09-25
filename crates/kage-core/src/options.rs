@@ -71,7 +71,7 @@ pub struct OptionDef {
 }
 
 /// Values [`OptionKind::Choice`] accepts for `thinking_level`: the
-/// thinking ladder, or empty for no configured level.
+/// thinking ladder, or empty for the automatic level.
 const THINKING_LEVELS: &[&str] = &["", "off", "minimal", "low", "medium", "high", "xhigh"];
 
 /// Every option.
@@ -145,7 +145,7 @@ pub const OPTIONS: &[OptionDef] = &[
             values: THINKING_LEVELS,
             default: "",
         },
-        doc: "Thinking level for new sessions, or empty for the default.",
+        doc: "Thinking level for new sessions, or empty for automatic (high, or the nearest level the model accepts).",
         since: 2,
         live: false,
     },

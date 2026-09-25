@@ -745,7 +745,12 @@ pub(super) const CLASSES: &[Class] = &[
             Field {
                 name: "thinking",
                 ty: "string",
-                doc: "Active thinking level.",
+                doc: "Thinking level the next run sends, `off` when it sends none.",
+            },
+            Field {
+                name: "thinking_auto",
+                ty: "boolean",
+                doc: "Whether the level is automatic rather than chosen.",
             },
             Field {
                 name: "permission_mode?",

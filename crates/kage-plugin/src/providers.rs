@@ -224,6 +224,7 @@ fn parse_models(spec: &Table) -> mlua::Result<Vec<ProviderModel>> {
             name,
             context,
             max_output,
+            ..ProviderModel::default()
         });
     }
     Ok(out)

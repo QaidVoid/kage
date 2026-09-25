@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufReader, Read};
 
-use kage_core::{CancelFlag, Content, Message, Role, ToolCallId};
+use kage_core::{CancelFlag, Content, Message, Reasoning, Role, ToolCallId};
 use serde_json::Value;
 
 use crate::{
@@ -167,10 +167,8 @@ pub(crate) fn build_request_body(req: &StreamRequest) -> Value {
     if let Some(temp) = req.temperature {
         body["generationConfig"]["temperature"] = serde_json::json!(temp);
     }
-    if let Some(budget) = resolve_thinking_budget(req) {
-        body["generationConfig"]["thinkingConfig"] = serde_json::json!({
-            "thinkingBudget": budget,
-        });
+    if let Some(config) = thinking_config(req) {
+        body["generationConfig"]["thinkingConfig"] = config;
     }
     if !req.tools.is_empty() {
         body["tools"] = serde_json::json!([{
@@ -180,23 +178,30 @@ pub(crate) fn build_request_body(req: &StreamRequest) -> Value {
     body
 }
 
-/// Resolve the thinking-token budget for a Gemini request.
-///
-/// Mirrors the Anthropic helper: explicit [`crate::ThinkingConfig`]
-/// wins, otherwise the [`crate::ThinkingLevel`] is looked up in the
-/// per-model catalog table or falls back to the enum's default
-/// budgets.
-fn resolve_thinking_budget(req: &StreamRequest) -> Option<u32> {
+/// The `thinkingConfig` for a Gemini request, or `None` to leave it
+/// out. An explicit [`crate::ThinkingConfig`] budget wins. Otherwise
+/// effort models get a `thinkingLevel`, toggle models the dynamic
+/// budget (`-1`), and budget models a budget within their bounds. Off
+/// sends a zero budget to models that can switch thinking off.
+fn thinking_config(req: &StreamRequest) -> Option<Value> {
     if let Some(thinking) = &req.thinking {
-        return Some(thinking.budget_tokens);
+        return Some(serde_json::json!({"thinkingBudget": thinking.budget_tokens}));
     }
     let level = req.level?;
-    if level.is_off() {
-        return None;
+    let budget = |tokens: i64| Some(serde_json::json!({"thinkingBudget": tokens}));
+    match req.reasoning {
+        Reasoning::None | Reasoning::Fixed => None,
+        Reasoning::Effort { .. } if !level.is_off() => req
+            .reasoning
+            .effort(level)
+            .map(|e| serde_json::json!({"thinkingLevel": e.as_str()})),
+        _ if level.is_off() => budget(0).filter(|_| req.reasoning.has_toggle()),
+        Reasoning::Toggle => budget(-1),
+        Reasoning::Unknown | Reasoning::Effort { .. } | Reasoning::Budget { .. } => req
+            .reasoning
+            .budget(level)
+            .and_then(|tokens| budget(i64::from(tokens))),
     }
-    crate::catalog::model("gemini", &req.model)
-        .and_then(|m| m.thinking_budget(level))
-        .or_else(|| level.default_budget_tokens())
 }
 
 fn tool_spec_to_gemini(spec: &ToolSpec) -> Value {
@@ -770,9 +775,67 @@ mod tests {
             name: "Test Model".to_owned(),
             context: Some(128_000),
             max_output: Some(8_192),
+            ..ProviderModel::default()
         }];
         let provider = GeminiProvider::new("k").with_models(models.clone());
         assert_eq!(provider.models(), models);
         assert!(GeminiProvider::new("k").models().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod thinking_tests {
+    use kage_core::{Effort, Efforts, ThinkingLevel};
+
+    use super::*;
+
+    fn request(reasoning: Reasoning, level: ThinkingLevel) -> StreamRequest {
+        let user = Message::new(Role::User, vec![Content::Text { text: "hi".into() }], None);
+        let mut req = StreamRequest::new("m", vec![user]);
+        req.reasoning = reasoning;
+        req.level = Some(level);
+        req
+    }
+
+    fn effort(values: &[Effort], toggle: bool) -> Reasoning {
+        Reasoning::Effort {
+            efforts: Efforts::of(values),
+            toggle,
+        }
+    }
+
+    fn config(reasoning: Reasoning, level: ThinkingLevel) -> Value {
+        build_request_body(&request(reasoning, level))["generationConfig"]["thinkingConfig"].clone()
+    }
+
+    #[test]
+    fn effort_models_get_a_thinking_level() {
+        let r = effort(&[Effort::Minimal, Effort::Low, Effort::High], false);
+        assert_eq!(
+            config(r, ThinkingLevel::High),
+            serde_json::json!({"thinkingLevel": "high"})
+        );
+    }
+
+    #[test]
+    fn budget_models_stay_within_bounds_and_toggle_off_to_zero() {
+        let r = Reasoning::Budget {
+            min: 0,
+            max: Some(24_576),
+            toggle: true,
+        };
+        assert_eq!(
+            config(r, ThinkingLevel::XHigh),
+            serde_json::json!({"thinkingBudget": 24_576})
+        );
+        assert_eq!(
+            config(r, ThinkingLevel::Off),
+            serde_json::json!({"thinkingBudget": 0})
+        );
+        assert_eq!(
+            config(Reasoning::Toggle, ThinkingLevel::High),
+            serde_json::json!({"thinkingBudget": -1})
+        );
+        assert!(config(Reasoning::None, ThinkingLevel::High).is_null());
     }
 }

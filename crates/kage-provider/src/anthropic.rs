@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufReader, Read};
 
-use kage_core::{CancelFlag, Content, Message, Role, TokenUsage, ToolCallId};
+use kage_core::{CancelFlag, Content, Message, Reasoning, Role, TokenUsage, ToolCallId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -176,34 +176,50 @@ pub(crate) fn build_request_body(req: &StreamRequest, stream: bool) -> Value {
     if let Some(temp) = req.temperature {
         body["temperature"] = serde_json::json!(temp);
     }
-    if let Some(budget) = resolve_thinking_budget(req)
-        && !continues_assistant_turn(req)
-    {
-        body["thinking"] = serde_json::json!({
-            "type": "enabled",
-            "budget_tokens": budget,
-        });
-    }
+    apply_thinking(&mut body, req);
     body
 }
 
-/// Resolve the thinking budget for an Anthropic request.
-///
-/// Prefers an explicit [`crate::ThinkingConfig`] when set; otherwise
-/// looks up the [`crate::ThinkingLevel`] in the catalog's per-model
-/// table (falling back to [`crate::ThinkingLevel::default_budget_tokens`]).
-/// Returns `None` when neither is set or when the level is `Off`.
-fn resolve_thinking_budget(req: &StreamRequest) -> Option<u32> {
+/// Set the thinking fields for `req`. An explicit
+/// [`crate::ThinkingConfig`] budget wins. Otherwise the level goes out
+/// as adaptive thinking with an `output_config.effort` on effort
+/// models, and as a budget elsewhere. Thinking stays off a request
+/// that continues an assistant turn, see [`continues_assistant_turn`].
+fn apply_thinking(body: &mut Value, req: &StreamRequest) {
+    let open = !continues_assistant_turn(req);
     if let Some(thinking) = &req.thinking {
-        return Some(thinking.budget_tokens);
+        if open {
+            body["thinking"] = enabled(thinking.budget_tokens);
+        }
+        return;
     }
-    let level = req.level?;
-    if level.is_off() {
-        return None;
+    let Some(level) = req.level else {
+        return;
+    };
+    match req.reasoning {
+        Reasoning::None | Reasoning::Fixed => {}
+        Reasoning::Effort { .. } => {
+            if let Some(effort) = req.reasoning.effort(level) {
+                if open {
+                    body["thinking"] = serde_json::json!({"type": "adaptive"});
+                }
+                body["output_config"] = serde_json::json!({"effort": effort.as_str()});
+            } else if level.is_off() && req.reasoning.has_toggle() {
+                body["thinking"] = serde_json::json!({"type": "disabled"});
+            }
+        }
+        Reasoning::Unknown | Reasoning::Toggle | Reasoning::Budget { .. } => {
+            if let Some(budget) = req.reasoning.budget(level)
+                && open
+            {
+                body["thinking"] = enabled(budget);
+            }
+        }
     }
-    crate::catalog::model("anthropic", &req.model)
-        .and_then(|m| m.thinking_budget(level))
-        .or_else(|| level.default_budget_tokens())
+}
+
+fn enabled(budget_tokens: u32) -> Value {
+    serde_json::json!({"type": "enabled", "budget_tokens": budget_tokens})
 }
 
 /// Whether this request continues the final assistant turn: a tool
@@ -729,3 +745,60 @@ fn parse_stop_reason(value: &str) -> StopReason {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod thinking_tests {
+    use kage_core::{Effort, Efforts, ThinkingLevel};
+
+    use super::*;
+
+    fn request(reasoning: Reasoning, level: ThinkingLevel) -> StreamRequest {
+        let user = Message::new(Role::User, vec![Content::Text { text: "hi".into() }], None);
+        let mut req = StreamRequest::new("m", vec![user]);
+        req.reasoning = reasoning;
+        req.level = Some(level);
+        req
+    }
+
+    fn effort(values: &[Effort], toggle: bool) -> Reasoning {
+        Reasoning::Effort {
+            efforts: Efforts::of(values),
+            toggle,
+        }
+    }
+
+    #[test]
+    fn effort_models_get_adaptive_thinking_and_their_effort() {
+        let r = effort(&[Effort::Low, Effort::High, Effort::Max], false);
+        let body = build_request_body(&request(r, ThinkingLevel::XHigh), false);
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "max");
+    }
+
+    #[test]
+    fn off_disables_thinking_on_toggle_effort_models() {
+        let r = effort(&[Effort::Low, Effort::High], true);
+        let body = build_request_body(&request(r, ThinkingLevel::Off), false);
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn budget_models_get_a_bounded_budget() {
+        let r = Reasoning::Budget {
+            min: 20_000,
+            max: None,
+            toggle: true,
+        };
+        let body = build_request_body(&request(r, ThinkingLevel::High), false);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 20_000);
+    }
+
+    #[test]
+    fn models_without_a_setting_send_no_thinking() {
+        let body = build_request_body(&request(Reasoning::Fixed, ThinkingLevel::High), false);
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("output_config").is_none());
+    }
+}

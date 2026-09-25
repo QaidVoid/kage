@@ -95,6 +95,10 @@ struct Harness {
 }
 
 fn harness(mock: MockProvider) -> Harness {
+    harness_on(ProviderRegistry::new().with(Arc::new(mock)))
+}
+
+fn harness_on(registry: ProviderRegistry) -> Harness {
     let (release, release_rx) = channel();
     let mut tools = ToolRegistry::new();
     tools.register(Arc::new(Gate {
@@ -104,7 +108,7 @@ fn harness(mock: MockProvider) -> Harness {
     let collector: Subscriber = Box::new(move |envelope| {
         let _ = tx.send(envelope.clone());
     });
-    let engine = Engine::start(Arc::new(ProviderRegistry::new().with(Arc::new(mock))));
+    let engine = Engine::start(Arc::new(registry));
     engine.subscribe(collector);
     Harness {
         engine,
@@ -1940,11 +1944,11 @@ fn restart_while_running_waits_for_the_next_run() {
     h.engine.send(Command::to(
         id,
         CommandKind::SetThinking {
-            level: ThinkingLevel::High,
+            level: Some(ThinkingLevel::High),
         },
     ));
     let mut events = wait_for(&h.events, |e| {
-        state_of(e).is_some_and(|s| s.thinking == ThinkingLevel::High)
+        state_of(e).is_some_and(|s| s.thinking == Some(ThinkingLevel::High))
     });
     h.release.send(()).unwrap();
     events.extend(until_runs_end(&h.events, 1));
@@ -1985,4 +1989,91 @@ fn switching_sessions_publishes_the_mcp_catalog() {
     let cloned = switch(id, CommandKind::Clone);
     let fresh = switch(cloned, CommandKind::NewSession);
     assert_eq!(switch(fresh, CommandKind::LoadSession { path }), id);
+}
+
+/// A mock provider that declares one model's thinking and inputs, like
+/// a custom provider from config.
+#[derive(Debug)]
+struct Declared {
+    mock: MockProvider,
+    model: kage_provider::ProviderModel,
+}
+
+impl kage_provider::Provider for Declared {
+    fn metadata(&self) -> &kage_provider::ProviderMetadata {
+        self.mock.metadata()
+    }
+
+    fn stream(
+        &self,
+        req: kage_provider::StreamRequest,
+        cancel: &CancelFlag,
+    ) -> Result<kage_provider::EventStream, ProviderError> {
+        self.mock.stream(req, cancel)
+    }
+
+    fn models(&self) -> Vec<kage_provider::ProviderModel> {
+        vec![self.model.clone()]
+    }
+}
+
+#[test]
+fn thinking_fits_the_model_and_images_skip_text_only_models() {
+    use kage_core::{Effort, Efforts, Input, Inputs, Reasoning};
+    let mock = MockProvider::replaying(text_turn("ok"));
+    let reasoning = Reasoning::Effort {
+        efforts: Efforts::of(&[Effort::Low, Effort::Medium]),
+        toggle: false,
+    };
+    let declared = Declared {
+        mock: mock.clone(),
+        model: kage_provider::ProviderModel {
+            id: "m".into(),
+            reasoning,
+            input: Inputs::of(&[Input::Text]),
+            ..kage_provider::ProviderModel::default()
+        },
+    };
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(declared)));
+    let id = SessionId::new();
+    h.open(id, None);
+    let seen = wait_for(&h.events, |e| state_of(e).is_some());
+    let state = seen.iter().find_map(state_of).unwrap();
+    assert_eq!(state.thinking, None);
+    assert_eq!(state.thinking_effective, Some(ThinkingLevel::Medium));
+    assert_eq!(
+        state.thinking_levels,
+        [ThinkingLevel::Low, ThinkingLevel::Medium]
+    );
+
+    h.engine.send(Command::to(
+        id,
+        CommandKind::Prompt {
+            content: vec![
+                Content::Text {
+                    text: "look".into(),
+                },
+                Content::Image {
+                    source: kage_core::ImageSource::Base64 {
+                        data: "AA==".into(),
+                    },
+                    mime: "image/png".into(),
+                },
+            ],
+            delivery: Delivery::Steer,
+        },
+    ));
+    let events = until_runs_end(&h.events, 1);
+    assert!(
+        notices(&events)
+            .iter()
+            .any(|n| n.contains("does not accept images")),
+        "{:?}",
+        notices(&events)
+    );
+    let request = mock.last_request().unwrap();
+    assert_eq!(request.level, Some(ThinkingLevel::Medium));
+    assert_eq!(request.reasoning, reasoning);
+    let sent = &request.messages.last().unwrap().content;
+    assert!(sent.iter().all(|c| !matches!(c, Content::Image { .. })));
 }

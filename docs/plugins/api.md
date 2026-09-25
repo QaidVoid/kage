@@ -601,7 +601,8 @@ Plain notification events (the handler's return value is ignored):
 
 `usage` is `{ input, output, cache_read, cache_write }`. For
 `model_select`, `source` is `"set"`. For `thinking_level_select`,
-`source` is `"cycle"` or `"settings"`. `user_bash` fires after an
+`prev` and `next` are level names (`"default"` for the automatic
+level) and `source` is `"cycle"` or `"settings"`. `user_bash` fires after an
 inline `!cmd` from the input pane completes; `exit_code` is `nil`
 when the command was killed by a signal. `tool_update` only fires
 when at least one handler is subscribed. `option_set` fires when

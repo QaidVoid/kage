@@ -119,7 +119,10 @@ impl App {
                 if let Some(usage) = &self.session_usage {
                     let mut usage = lock(usage);
                     usage.model = state.model;
-                    usage.thinking_level = Some(state.thinking);
+                    usage.thinking_level = state.thinking_effective;
+                    usage.thinking_auto = state.thinking.is_none();
+                    usage.thinking_levels = state.thinking_levels;
+                    usage.input = state.input;
                     usage.permission_mode = state.permission_mode;
                     usage.working = state.working;
                 }

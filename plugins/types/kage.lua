@@ -310,7 +310,8 @@
 ---@class kage.SlotContext
 ---@field width integer Terminal width in columns.
 ---@field model string Active `provider:model` id.
----@field thinking string Active thinking level.
+---@field thinking string Thinking level the next run sends, `off` when it sends none.
+---@field thinking_auto boolean Whether the level is automatic rather than chosen.
 ---@field permission_mode? string Session permission override, if any.
 ---@field working boolean Whether a run is in flight.
 ---@field usage? table `{ total = { input, output, cache_read, cache_write }, context_used, context_window, cost }`.
@@ -326,7 +327,7 @@
 ---@field input_min_lines integer Minimum content rows of the input box.
 ---@field input_max_lines integer Content rows the input box grows to before it scrolls.
 ---@field transcript_on_exit "full"|"last"|"none" What prints after exit: the whole transcript, from the last prompt on, or only the session path.
----@field thinking_level ""|"off"|"minimal"|"low"|"medium"|"high"|"xhigh" Thinking level for new sessions, or empty for the default.
+---@field thinking_level ""|"off"|"minimal"|"low"|"medium"|"high"|"xhigh" Thinking level for new sessions, or empty for automatic (high, or the nearest level the model accepts).
 ---@field compaction_threshold number Fraction of the context window that triggers compaction. 0 turns compaction off.
 ---@field leader string The key `<leader>` expands to when a mapping is set.
 ---@field timeoutlen integer Milliseconds a mapping that is also a prefix waits for more keys.

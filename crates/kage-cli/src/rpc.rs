@@ -61,7 +61,7 @@ use kage_provider::ProviderRegistry;
 use kage_session::SessionWriter;
 use kage_tools::builtin_registry;
 
-use crate::engine::{AgentSetup, Commander, Engine, Recorder, SessionSpec};
+use crate::engine::{AUTO_THINKING, AgentSetup, Commander, Engine, Recorder, SessionSpec};
 use crate::permissions::PermissionGate;
 use crate::runtime_env;
 
@@ -168,17 +168,23 @@ impl Shown {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Settings {
     model: String,
-    thinking: ThinkingLevel,
+    /// `None` is the automatic level, offered as `default`.
+    thinking: Option<ThinkingLevel>,
+    /// Levels the model accepts, the other `thinking` choices.
+    levels: Vec<ThinkingLevel>,
     mode: Option<PermissionAction>,
 }
 
 impl Settings {
-    fn of(spec: &SessionSpec) -> Self {
-        Self {
+    fn of(spec: &SessionSpec, registry: &ProviderRegistry) -> Self {
+        let mut state = SessionState {
             model: spec.model.clone(),
-            thinking: spec.cx.thinking_level.unwrap_or_default(),
-            mode: spec.gate.mode(),
-        }
+            thinking: spec.cx.thinking_level,
+            permission_mode: spec.gate.mode(),
+            ..SessionState::default()
+        };
+        crate::engine::fit_to_model(&mut state, registry);
+        Self::from(&state)
     }
 
     /// Sets option `id` to `value` and returns the engine command that
@@ -201,7 +207,15 @@ impl Settings {
                 })
             }
             "thinking" => {
-                let level = ThinkingLevel::parse(value).ok_or_else(invalid)?;
+                let level = if value == AUTO_THINKING {
+                    None
+                } else {
+                    let level = ThinkingLevel::parse(value).ok_or_else(invalid)?;
+                    if !self.levels.contains(&level) {
+                        return Err(invalid());
+                    }
+                    Some(level)
+                };
                 self.thinking = level;
                 Ok(CommandKind::SetThinking { level })
             }
@@ -220,6 +234,7 @@ impl From<&SessionState> for Settings {
         Self {
             model: state.model.clone(),
             thinking: state.thinking,
+            levels: state.thinking_levels.clone(),
             mode: state.permission_mode,
         }
     }
@@ -340,7 +355,7 @@ impl CliAcpAgent {
     /// config options. Updates for it wait for
     /// [`Agent::session_announced`].
     fn open(&self, client_id: String, spec: SessionSpec) -> Vec<SessionConfigOption> {
-        let settings = Settings::of(&spec);
+        let settings = Settings::of(&spec, &self.registry);
         let options = config_options(&self.models, &settings);
         let shown = Shown {
             settings,
@@ -1361,9 +1376,15 @@ fn config_options(
     if !models.iter().any(|m| m.value == settings.model) {
         model_choices.insert(0, choice(&settings.model, &settings.model, None));
     }
-    let levels = std::iter::successors(Some(ThinkingLevel::Off), |level| {
-        Some(level.cycle()).filter(|next| !next.is_off())
-    });
+    let auto = choice(
+        AUTO_THINKING,
+        "Default",
+        Some("High, or the nearest level the model accepts"),
+    );
+    let levels = settings
+        .levels
+        .iter()
+        .map(|level| choice(level.as_str(), level.label(), None));
     let mode = MODES
         .iter()
         .find(|m| m.1 == settings.mode)
@@ -1380,10 +1401,10 @@ fn config_options(
             "thinking",
             "Thinking",
             SessionConfigCategory::ThoughtLevel,
-            settings.thinking.as_str(),
-            levels
-                .map(|level| choice(level.as_str(), level.label(), None))
-                .collect(),
+            settings
+                .thinking
+                .map_or(AUTO_THINKING, ThinkingLevel::as_str),
+            std::iter::once(auto).chain(levels).collect(),
         ),
         select(
             "mode",
@@ -1589,8 +1610,7 @@ mod tests {
                 .map(|id| kage_provider::ProviderModel {
                     id: id.into(),
                     name: format!("Mock {id}"),
-                    context: None,
-                    max_output: None,
+                    ..kage_provider::ProviderModel::default()
                 })
                 .into()
         }
@@ -2482,7 +2502,7 @@ done
 
         let params = serde_json::json!({"sessionId": session, "cwd": cwd, "mcpServers": []});
         let resumed = h.client.request("session/resume", params).unwrap();
-        assert_eq!(current_values(&resumed), ["mock:m", "off", "default"]);
+        assert_eq!(current_values(&resumed), ["mock:m", "default", "default"]);
         assert_eq!(
             prompt(&h.client, &session, "next")["stopReason"],
             "end_turn"
@@ -2541,7 +2561,7 @@ done
 
         let params = serde_json::json!({"cwd": dir.path(), "mcpServers": []});
         let created = h.client.request("session/new", params).unwrap();
-        assert_eq!(current_values(&created), ["mock:m", "off", "default"]);
+        assert_eq!(current_values(&created), ["mock:m", "default", "default"]);
         let options = created["configOptions"].as_array().unwrap();
         let ids: Vec<_> = options.iter().map(|o| o["id"].as_str().unwrap()).collect();
         assert_eq!(ids, ["model", "thinking", "mode"]);
@@ -2553,12 +2573,43 @@ done
         assert_eq!(options[0]["options"][0]["description"], "Mock");
         assert_eq!(
             values_of(&options[1], "value"),
-            ["off", "minimal", "low", "medium", "high", "xhigh"]
+            [
+                "default", "off", "minimal", "low", "medium", "high", "xhigh"
+            ]
         );
         assert_eq!(
             values_of(&options[2], "value"),
             ["default", "ask", "allow", "deny"]
         );
+    }
+
+    #[test]
+    fn the_thinking_option_offers_default_and_the_model_levels() {
+        use ThinkingLevel::{High, Low};
+        let mut settings = Settings {
+            model: "m".into(),
+            thinking: None,
+            levels: vec![Low, High],
+            mode: None,
+        };
+        let options = config_options(&[], &settings);
+        let values: Vec<&str> = options[1]
+            .options
+            .iter()
+            .map(|o| o.value.as_str())
+            .collect();
+        assert_eq!(values, ["default", "low", "high"]);
+        assert_eq!(options[1].current_value, "default");
+        assert!(settings.apply(&[], "thinking", "medium").is_err());
+        assert_eq!(
+            settings.apply(&[], "thinking", "high").unwrap(),
+            CommandKind::SetThinking { level: Some(High) }
+        );
+        assert_eq!(
+            settings.apply(&[], "thinking", "default").unwrap(),
+            CommandKind::SetThinking { level: None }
+        );
+        assert_eq!(settings.thinking, None);
     }
 
     #[test]
@@ -2616,11 +2667,11 @@ done
         h.command(model("mock:other"));
         let updates = updates_until(&h.inbox, &h.session, "config_option_update");
         let update = &updates.last().unwrap()["update"];
-        assert_eq!(current_values(update), ["mock:other", "off", "default"]);
+        assert_eq!(current_values(update), ["mock:other", "default", "default"]);
 
         h.command(model("mock:other"));
         h.command(CommandKind::SetThinking {
-            level: ThinkingLevel::Low,
+            level: Some(ThinkingLevel::Low),
         });
         let updates = updates_until(&h.inbox, &h.session, "config_option_update");
         assert_eq!(update_kinds(&updates), ["config_option_update"]);
@@ -2632,7 +2683,8 @@ done
     fn states_older_than_a_client_change_are_not_sent_back() {
         let settings = |model: &str, thinking| Settings {
             model: model.into(),
-            thinking,
+            thinking: Some(thinking),
+            levels: Vec::new(),
             mode: None,
         };
         let mut shown = Shown {

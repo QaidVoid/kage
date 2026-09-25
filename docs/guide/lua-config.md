@@ -126,7 +126,8 @@ session was recorded.
 
 `thinking_level` and `compaction_threshold` set in `init.lua` apply to
 the first session, because kage starts it after `init.lua` has run. An
-empty `thinking_level` means the model's default level.
+empty `thinking_level` means the automatic level: high, or the nearest
+level the model accepts.
 
 `agent_max_depth` limits how deep [agents](/guide/agents) nest: `1`
 lets only the main session start agents. `agent_max_running` limits
@@ -531,7 +532,7 @@ An item is one of:
 | `activity` | what the run is doing and for how long, such as `Running cargo test (14s, esc to interrupt)`. The label is `Working`, `Thinking`, the running tool, `Waiting for N agents`, or `Waiting for your approval`. In an agent view it follows that agent. |
 | `context` | context use against the window, such as `12% ctx` |
 | `tokens` | total tokens and the cost when known, such as `14k tok $0.02` |
-| `thinking` | the thinking level, such as `thinking high`, hidden when off |
+| `thinking` | the thinking level the next run sends, such as `thinking high (auto)` (`auto` when you have not chosen one), hidden when off |
 | `permission` | a session permission override, such as `ask mode`, hidden when there is none |
 | `mode` | `NORMAL`, `INSERT` or `VISUAL` in vim mode, `shell` while `!` shell mode is armed, nothing otherwise |
 | `hint` | what the next keys do: the pending keys of a mapping sequence, the keys of the approval panel, the `/` palette or the `?` help, `ctrl+c again to quit` or `draft cleared, up restores it`, else a hint for the current state such as `? for shortcuts`, `tab to queue`, `ctrl+t for agents`, or `enter to steer`, `esc to go back` and `ctrl+c to stop` in an agent view |
@@ -590,7 +591,8 @@ aborted.
 | --- | --- |
 | `width` | terminal width in columns |
 | `model` | the active `provider:model` id |
-| `thinking` | the active thinking level |
+| `thinking` | the thinking level the next run sends, `"off"` when it sends none |
+| `thinking_auto` | whether that level is automatic rather than chosen |
 | `permission_mode` | the session permission override, or `nil` |
 | `working` | whether a turn is running |
 | `usage` | `{ total = { input, output, cache_read, cache_write }, context_used, context_window, cost }`, or `nil` before the first report |

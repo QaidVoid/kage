@@ -14,7 +14,10 @@ the screen, ready for your prompt.
 
 Above the input, the start card shows the model, the working
 directory, the permission summary and the thinking level, each with
-the key or command that changes it. Below them come your three most
+the key or command that changes it. The thinking level reads
+`high (auto)` until you pick one: kage uses high, or the nearest level
+the model accepts, and `model default` for a model with no thinking
+setting. Below them come your three most
 recent sessions (`Ctrl+S` opens the session picker to resume one),
 startup notices such as a missing or expiring credential with the
 `/login` command that fixes it, and a tip. The card goes away once
@@ -65,7 +68,7 @@ terminals that do not report Shift+Enter). Readline keys work
 undo), and `Up`/`Down` walk your prompt history. `Esc` clears the
 draft, and `Up` brings it back. `Ctrl+G` opens the whole draft in an
 external editor (`$VISUAL` or `$EDITOR`) for longer prompts.
-`Shift+Tab` cycles the thinking level.
+`Shift+Tab` cycles through the thinking levels the model accepts.
 
 Prefer vim? Set `editor = "vim"` under `[ui]` in config.toml (or
 toggle it in `/settings`) to get normal/insert/visual modes with

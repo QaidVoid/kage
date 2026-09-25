@@ -3,6 +3,7 @@
 //! Layering: depends on `kage-core`, `kage-jsonrpc`, and `kage-tools`.
 
 pub mod catalog;
+pub mod expand;
 mod http;
 pub mod manager;
 pub mod serve;

@@ -189,6 +189,13 @@ pub enum HostEvent {
         /// Short task description the model wrote for the user.
         description: String,
     },
+    /// The session's MCP servers and what they offer. Published when a
+    /// session opens, after a restart, and when a server's catalog
+    /// changes. The latest snapshot wins. Never recorded. Live.
+    McpServers {
+        /// Every configured server, in registration order.
+        servers: Vec<McpServerInfo>,
+    },
 }
 
 /// How a run ended.
@@ -386,6 +393,13 @@ pub enum CommandKind {
         #[serde(default)]
         path: Option<PathBuf>,
     },
+    /// Restart one MCP server of the session: now when idle, else at the
+    /// start of the next run, since in-flight calls hold the old
+    /// connection.
+    RestartMcp {
+        /// Configured server name.
+        server: String,
+    },
     /// Cancel every run and stop the engine.
     Shutdown,
 }
@@ -504,6 +518,17 @@ mod tests {
                 description: "map the exports".into(),
             }
             .into(),
+            HostEvent::McpServers {
+                servers: vec![McpServerInfo {
+                    name: "everything".into(),
+                    status: McpServerStatus::Connected,
+                    tools: 1,
+                    resources: Vec::new(),
+                    templates: Vec::new(),
+                    prompts: Vec::new(),
+                }],
+            }
+            .into(),
         ];
         for event in events {
             let value = roundtrip(&envelope(event.clone()));
@@ -526,6 +551,18 @@ mod tests {
         assert_eq!(value["type"], "agent_spawned");
         assert_eq!(value["parent"], parent.to_string());
         assert_eq!(value["tool_call_id"], "call_1");
+    }
+
+    #[test]
+    fn restart_mcp_roundtrips() {
+        let cmd = Command::active(CommandKind::RestartMcp {
+            server: "everything".into(),
+        });
+        let value = serde_json::to_value(&cmd).unwrap();
+        assert_eq!(value["type"], "restart_mcp");
+        assert_eq!(value["server"], "everything");
+        let back: Command = serde_json::from_value(value).unwrap();
+        assert_eq!(back, cmd);
     }
 
     #[test]

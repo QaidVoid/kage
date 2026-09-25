@@ -3,9 +3,11 @@
 //! Clients send [`Command`]s and observe [`kage_core::protocol::Envelope`]s
 //! through subscribers. A dispatcher thread owns the sessions and never
 //! blocks on a run: each run executes on its own thread and hands its
-//! context back when it ends. Permission questions travel over the same
-//! channels: the engine publishes `PermissionRequested` and a client
-//! answers with `ResolvePermission`.
+//! context back when it ends. MCP restarts and list reloads run off the
+//! dispatcher too: at the start of a run on its thread, or on a worker
+//! thread for a restart of an idle session. Permission questions travel
+//! over the same channels: the engine publishes `PermissionRequested` and
+//! a client answers with `ResolvePermission`.
 
 mod agent_tool;
 mod bus;
@@ -24,18 +26,18 @@ use kage_core::agents::{AgentDef, AgentDefs};
 use kage_core::config::Config;
 use kage_core::options::{OptionStore, OptionValue};
 use kage_core::protocol::{
-    Command, CommandKind, Delivery, HostEvent, NoticeLevel, PermissionDecision, RequestId,
-    RunOutcome, SessionState, Usage,
+    Command, CommandKind, Delivery, HostEvent, McpServerInfo, NoticeLevel, PermissionDecision,
+    RequestId, RunOutcome, SessionState, Usage,
 };
 use kage_core::sync::lock;
 use kage_core::{
     CancelFlag, Content, LoopError, Message, Role, SessionId, ThinkingLevel, TokenUsage, ToolOutput,
 };
 use kage_loop::{AgentContext, LoopConfig};
-use kage_mcp::McpManager;
+use kage_mcp::{McpError, McpManager};
 use kage_plugin::PluginRuntime;
 use kage_provider::ProviderRegistry;
-use kage_tools::ToolRegistry;
+use kage_tools::{Tool, ToolRegistry};
 
 pub(crate) use bus::Subscriber;
 pub(crate) use recorder::Recorder;
@@ -45,7 +47,7 @@ pub(crate) use sessions::render_session_markdown;
 use agent_tool::{AGENT_TOOL, AgentTool, Spawn};
 use bus::Bus;
 use plugin_tools::PluginTools;
-use runner::{Finished, Run, Steering, Work};
+use runner::{Finished, McpLease, Run, Steering, Work};
 
 use crate::permissions::{Asker, PermissionGate, PermissionPrompt};
 
@@ -60,8 +62,8 @@ pub(crate) struct SessionSpec {
     pub plugins: Option<Arc<PluginRuntime>>,
     pub gate: PermissionGate,
     pub loop_cfg: LoopConfig,
-    /// MCP servers whose tools are in `tools`. Restarts and tool list
-    /// changes are applied before each run.
+    /// MCP servers whose tools are in `tools`. Restarts and list changes
+    /// are applied at the start of each run, on the run thread.
     pub mcp: Option<McpManager>,
     /// Whether a client answers permission requests. Without one, `ask`
     /// verdicts are refused.
@@ -134,6 +136,7 @@ enum Input {
     Open(Box<SessionSpec>),
     Spawn(Box<Spawn>),
     Finished(Box<Finished>),
+    McpDone(Box<McpDone>),
     ShellDone {
         session: SessionId,
         command: String,
@@ -223,7 +226,10 @@ struct Session {
     plugins: Option<Arc<PluginRuntime>>,
     gate: PermissionGate,
     loop_cfg: LoopConfig,
+    /// `None` while a run start or an idle restart holds it.
     mcp: Option<McpManager>,
+    /// `RestartMcp` names that wait for the next run start.
+    mcp_restarts: Vec<String>,
     interactive: bool,
     /// Session file, when the session is recorded.
     path: Option<PathBuf>,
@@ -259,6 +265,51 @@ struct Idle {
     recorder: Option<Recorder>,
 }
 
+/// The manager back from MCP maintenance off the dispatcher, with the
+/// tool changes to apply to the session's registry.
+struct McpDone {
+    session: SessionId,
+    manager: McpManager,
+    tools: ToolDelta,
+    /// What an idle restart took from the session, so no run started
+    /// while the manager was away.
+    idle: Option<Idle>,
+}
+
+/// The tools an MCP refresh added, replaced or removed.
+struct ToolDelta {
+    removed: Vec<String>,
+    changed: Vec<Arc<dyn Tool>>,
+}
+
+impl ToolDelta {
+    fn between(before: &ToolRegistry, after: &ToolRegistry) -> Self {
+        let removed = before
+            .names()
+            .filter(|name| after.get(name).is_none())
+            .map(str::to_owned)
+            .collect();
+        let changed = after
+            .names()
+            .filter_map(|name| {
+                let tool = after.get(name)?;
+                let same = before.get(name).is_some_and(|old| Arc::ptr_eq(old, tool));
+                (!same).then(|| Arc::clone(tool))
+            })
+            .collect();
+        Self { removed, changed }
+    }
+
+    fn apply(self, tools: &mut ToolRegistry) {
+        for name in &self.removed {
+            tools.unregister(name);
+        }
+        for tool in self.changed {
+            tools.register(tool);
+        }
+    }
+}
+
 /// Open permission requests with the session that asked.
 type Asks = Arc<Mutex<HashMap<RequestId, (SessionId, mpsc::Sender<PermissionDecision>)>>>;
 
@@ -283,6 +334,7 @@ impl Dispatcher {
                 Input::Open(spec) => self.open(*spec, CancelFlag::new(), None),
                 Input::Spawn(spawn) => self.spawn(*spawn),
                 Input::Finished(finished) => self.finish(*finished),
+                Input::McpDone(done) => self.mcp_done(*done),
                 Input::ShellDone {
                     session,
                     command,
@@ -338,6 +390,10 @@ impl Dispatcher {
             },
         );
         self.bus.publish(id, HostEvent::UsageUpdated { usage });
+        if link.is_none() {
+            let servers = mcp.as_ref().map(McpManager::catalog).unwrap_or_default();
+            self.bus.publish(id, HostEvent::McpServers { servers });
+        }
         let path = recorder.as_ref().map(|r| r.path().to_path_buf());
         let workdir = cx.workdir.clone();
         let confine_paths = cx.confine_paths;
@@ -357,6 +413,7 @@ impl Dispatcher {
                 gate,
                 loop_cfg,
                 mcp,
+                mcp_restarts: Vec::new(),
                 interactive,
                 path,
                 workdir,
@@ -449,6 +506,7 @@ impl Dispatcher {
                 s.gate.set_mode(mode);
                 s.state.permission_mode = mode;
             }),
+            CommandKind::RestartMcp { server } => self.restart_mcp(id, server),
             CommandKind::Shutdown | CommandKind::ResolvePermission { .. } => {}
         }
     }
@@ -627,7 +685,20 @@ impl Dispatcher {
                 );
             }
         }
-        refresh_mcp(&self.bus, id, session);
+        let mcp = if let Some(manager) = session.mcp.take() {
+            let mut restarts = session
+                .plugins
+                .as_ref()
+                .map(|rt| rt.take_mcp_restarts())
+                .unwrap_or_default();
+            restarts.append(&mut session.mcp_restarts);
+            Some(McpLease { manager, restarts })
+        } else {
+            for name in session.mcp_restarts.drain(..) {
+                restart_failed(&self.bus, id, &name, &McpError::Unknown(name.clone()));
+            }
+            None
+        };
 
         session.usage.context_window = cx.context_window;
         session.cancel.reset();
@@ -663,6 +734,7 @@ impl Dispatcher {
             gate,
             steering: Arc::clone(&session.steering),
             plugins: session.plugins.clone(),
+            mcp,
             bus: Arc::clone(&self.bus),
         };
         let state = session.state.clone();
@@ -731,6 +803,78 @@ impl Dispatcher {
             self.end_waiting(orphan);
         }
         self.start_waiting();
+    }
+
+    /// Restart MCP server `server` now when the session is idle, or at
+    /// the next run start when a run or another restart is in flight.
+    fn restart_mcp(&mut self, id: SessionId, server: String) {
+        let session = self.sessions.get_mut(&id).expect("session checked");
+        if !session.mcp_restarts.contains(&server) {
+            session.mcp_restarts.push(server);
+        }
+        if session.idle.is_some() {
+            self.restart_now(id);
+        }
+    }
+
+    /// Apply the idle session's pending restarts on a worker thread. The
+    /// session stays busy until [`Self::mcp_done`] gives it back.
+    fn restart_now(&mut self, id: SessionId) {
+        let session = self.sessions.get_mut(&id).expect("session checked");
+        let restarts = std::mem::take(&mut session.mcp_restarts);
+        let Some(mut manager) = session.mcp.take() else {
+            for name in restarts {
+                restart_failed(&self.bus, id, &name, &McpError::Unknown(name.clone()));
+            }
+            return;
+        };
+        let idle = session.idle.take();
+        let before = session.tools.clone();
+        let bus = Arc::clone(&self.bus);
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let mut tools = before.clone();
+            refresh_mcp(&bus, id, &mut manager, &restarts, &mut tools);
+            let _ = tx.send(Input::McpDone(Box::new(McpDone {
+                session: id,
+                manager,
+                tools: ToolDelta::between(&before, &tools),
+                idle,
+            })));
+        });
+    }
+
+    /// Take back the MCP manager and its tool changes. After an idle
+    /// restart, also give the session back and start what was submitted
+    /// meanwhile: a prompt, else the restarts that arrived.
+    fn mcp_done(&mut self, done: McpDone) {
+        let McpDone {
+            session: id,
+            manager,
+            tools,
+            idle,
+        } = done;
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        tools.apply(&mut session.tools);
+        session.mcp = Some(manager);
+        let Some(idle) = idle else {
+            return;
+        };
+        session.idle = Some(idle);
+        let steered: Vec<String> = lock(&session.steering).drain(..).collect();
+        for text in steered.into_iter().rev() {
+            session.queued.push_front(vec![Content::Text { text }]);
+        }
+        if self.shutting_down {
+            return;
+        }
+        if let Some(content) = session.queued.pop_front() {
+            self.start_run(id, Work::Prompt(Message::new(Role::User, content, None)));
+        } else if !session.mcp_restarts.is_empty() {
+            self.restart_now(id);
+        }
     }
 
     /// Open a child session for an `agent` call and start it, or queue it
@@ -987,29 +1131,24 @@ fn asker(bus: &Arc<Bus>, asks: &Asks, next: &Arc<AtomicU64>, session: SessionId)
     })
 }
 
-/// Apply plugin-requested MCP restarts and announced tool list changes to
-/// the session's tools.
-fn refresh_mcp(bus: &Bus, id: SessionId, session: &mut Session) {
-    let Some(mcp) = session.mcp.as_mut() else {
-        return;
-    };
-    let restarts = session
-        .plugins
-        .as_ref()
-        .map(|rt| rt.take_mcp_restarts())
-        .unwrap_or_default();
+/// Restart `restarts`, then reload the lists `mcp`'s servers announced
+/// changes for, updating `tools`. Publishes `McpServers` after a restart
+/// or when the catalog changed, and returns the catalog.
+fn refresh_mcp(
+    bus: &Bus,
+    id: SessionId,
+    mcp: &mut McpManager,
+    restarts: &[String],
+    tools: &mut ToolRegistry,
+) -> Vec<McpServerInfo> {
+    let before = mcp.catalog();
     for name in restarts {
-        match mcp.restart(&name, &mut session.tools) {
+        match mcp.restart(name, tools) {
             Ok(()) => notice(bus, id, NoticeLevel::Info, format!("restarted `{name}`")),
-            Err(err) => notice(
-                bus,
-                id,
-                NoticeLevel::Error,
-                format!("mcp restart `{name}`: {err}"),
-            ),
+            Err(err) => restart_failed(bus, id, name, &err),
         }
     }
-    for (server, err) in mcp.refresh_into(&mut session.tools) {
+    for (server, err) in mcp.refresh_into(tools) {
         notice(
             bus,
             id,
@@ -1017,6 +1156,25 @@ fn refresh_mcp(bus: &Bus, id: SessionId, session: &mut Session) {
             format!("mcp `{server}`: {err}"),
         );
     }
+    let catalog = mcp.catalog();
+    if !restarts.is_empty() || catalog != before {
+        bus.publish(
+            id,
+            HostEvent::McpServers {
+                servers: catalog.clone(),
+            },
+        );
+    }
+    catalog
+}
+
+fn restart_failed(bus: &Bus, id: SessionId, name: &str, err: &McpError) {
+    notice(
+        bus,
+        id,
+        NoticeLevel::Error,
+        format!("mcp restart `{name}`: {err}"),
+    );
 }
 
 fn notice(bus: &Bus, id: SessionId, level: NoticeLevel, text: String) {

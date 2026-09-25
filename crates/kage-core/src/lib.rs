@@ -13,6 +13,7 @@ pub mod message;
 pub mod options;
 pub mod permissions;
 pub mod protocol;
+pub mod resource_block;
 pub mod risk;
 pub mod skills;
 pub mod sync;

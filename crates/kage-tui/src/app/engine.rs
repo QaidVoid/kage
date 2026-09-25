@@ -174,7 +174,9 @@ impl App {
                 self.run_started = None;
                 self.end_run(self.active_session.unwrap_or_default());
             }
-            HostEvent::TitleChanged { .. } | HostEvent::AgentSpawned { .. } => {}
+            HostEvent::TitleChanged { .. }
+            | HostEvent::AgentSpawned { .. }
+            | HostEvent::McpServers { .. } => {}
         }
     }
 
@@ -291,7 +293,8 @@ impl App {
             HostEvent::UsageUpdated { .. } => true,
             HostEvent::StateChanged { .. }
             | HostEvent::TitleChanged { .. }
-            | HostEvent::SessionChanged { .. } => false,
+            | HostEvent::SessionChanged { .. }
+            | HostEvent::McpServers { .. } => false,
         }
     }
 

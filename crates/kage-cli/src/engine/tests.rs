@@ -1435,3 +1435,307 @@ fn print_mode_text_names_agents_and_how_they_ended() {
         ),
     );
 }
+
+/// An in-process MCP server with tool `t`, resource `test://doc` whose
+/// text is `doc body`, and prompt `greet(name)`. Reading any other URI
+/// fails with `resource not found`.
+fn mcp_connection() -> Arc<kage_mcp::McpConnection> {
+    use kage_jsonrpc::{Inbound, RpcError};
+    use serde_json::json;
+
+    let (cli_r, srv_w) = std::io::pipe().unwrap();
+    let (srv_r, cli_w) = std::io::pipe().unwrap();
+    let (cli_peer, cli_in, _c) = kage_jsonrpc::connect(std::io::BufReader::new(cli_r), cli_w);
+    let (srv_peer, srv_in, _s) = kage_jsonrpc::connect(std::io::BufReader::new(srv_r), srv_w);
+    std::thread::spawn(move || {
+        for msg in srv_in {
+            let Inbound::Request { id, method, params } = msg else {
+                continue;
+            };
+            let outcome = match method.as_str() {
+                "initialize" => Ok(json!({
+                    "protocolVersion": kage_mcp::PROTOCOL_VERSION,
+                    "capabilities": { "tools": {}, "resources": {}, "prompts": {} },
+                })),
+                "tools/list" => Ok(json!({ "tools": [{ "name": "t", "inputSchema": {} }] })),
+                "resources/list" => Ok(json!({
+                    "resources": [{ "uri": "test://doc", "name": "Doc", "mimeType": "text/plain" }],
+                })),
+                "resources/templates/list" => Ok(json!({ "resourceTemplates": [] })),
+                "prompts/list" => Ok(json!({
+                    "prompts": [{ "name": "greet", "arguments": [{ "name": "name", "required": true }] }],
+                })),
+                "prompts/get" => Ok(json!({ "messages": [{
+                    "role": "user",
+                    "content": { "type": "text", "text": format!("Hello, {}", params["arguments"]["name"].as_str().unwrap()) },
+                }] })),
+                "resources/read" if params["uri"] == "test://doc" => Ok(json!({
+                    "contents": [{ "uri": "test://doc", "mimeType": "text/plain", "text": "doc body" }],
+                })),
+                "resources/read" => Err(RpcError::new(-32002, "resource not found")),
+                other => Err(RpcError::method_not_found(other)),
+            };
+            let _ = srv_peer.respond(&id, outcome);
+        }
+    });
+    let conn = kage_mcp::McpConnection::initialize("srv", cli_peer, cli_in, &[], None).unwrap();
+    Arc::new(conn)
+}
+
+const BROKEN_COMMAND: &str = "definitely-not-a-real-binary-xyz";
+
+/// A manager with `broken`, a server that cannot spawn, and the live
+/// server `srv`, whose tools are registered into `tools`.
+fn mcp_manager(tools: &mut ToolRegistry) -> McpManager {
+    let cfg: kage_core::config::McpConfig = serde_json::from_value(serde_json::json!({
+        "servers": { "broken": { "command": BROKEN_COMMAND } },
+    }))
+    .unwrap();
+    let (mut mcp, _errors) = McpManager::spawn_all(&cfg, Vec::new(), None);
+    mcp.adopt("srv", mcp_connection());
+    assert!(mcp.register_into(tools).is_empty());
+    mcp
+}
+
+impl Harness {
+    fn open_mcp(&self, id: SessionId, recorder: Option<Recorder>) {
+        let mut tools = self.tools.clone();
+        let mcp = mcp_manager(&mut tools);
+        self.engine.open(SessionSpec {
+            recorder,
+            tools,
+            mcp: Some(mcp),
+            ..self.spec(id)
+        });
+    }
+}
+
+fn mcp_snapshots(events: &[Envelope]) -> Vec<Vec<kage_core::protocol::McpServerInfo>> {
+    host_events(events)
+        .into_iter()
+        .filter_map(|e| match e {
+            HostEvent::McpServers { servers } => Some(servers.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn is_mcp_servers(envelope: &Envelope) -> bool {
+    matches!(envelope.event, Event::Host(HostEvent::McpServers { .. }))
+}
+
+fn first_user_content(events: &[Envelope]) -> Option<Vec<Content>> {
+    events.iter().find_map(|e| match &e.event {
+        Event::Loop(LoopEvent::MessageAppended { message }) if message.role == Role::User => {
+            Some(message.content.clone())
+        }
+        _ => None,
+    })
+}
+
+fn text(text: &str) -> Content {
+    Content::Text { text: text.into() }
+}
+
+#[test]
+fn opening_publishes_the_mcp_catalog() {
+    use kage_core::protocol::McpServerStatus;
+
+    let h = harness(MockProvider::replaying(text_turn("ok")));
+    let (plain, id) = (SessionId::new(), SessionId::new());
+    h.open(plain, None);
+    h.open_mcp(id, None);
+    let events = wait_for(&h.events, |e| e.session == id && is_mcp_servers(e));
+    let (plain_events, events): (Vec<Envelope>, Vec<Envelope>) =
+        events.into_iter().partition(|e| e.session == plain);
+    assert_eq!(mcp_snapshots(&plain_events), [Vec::new()]);
+
+    let servers = mcp_snapshots(&events).remove(0);
+    let names: Vec<&str> = servers.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["broken", "srv"]);
+    assert!(
+        matches!(&servers[0].status, McpServerStatus::Failed { error } if error.contains(BROKEN_COMMAND))
+    );
+    assert_eq!(servers[1].status, McpServerStatus::Connected);
+    assert_eq!(servers[1].tools, 1);
+    assert_eq!(servers[1].resources[0].uri, "test://doc");
+    assert_eq!(servers[1].prompts[0].name, "greet");
+
+    h.engine.send(Command::to(id, CommandKind::Compact));
+    let events = until_runs_end(&h.events, 1);
+    assert!(
+        mcp_snapshots(&events).is_empty(),
+        "an unchanged catalog is not republished"
+    );
+}
+
+#[test]
+fn a_mention_is_expanded_recorded_and_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = SessionId::new();
+    let (recorder, path) = recorder_in(dir.path(), id);
+    let mock = MockProvider::replaying(text_turn("ok"));
+    let h = harness(mock.clone());
+    h.open_mcp(id, Some(recorder));
+    let typed = "what is in @srv:test://doc.";
+    prompt(&h.engine, id, typed, Delivery::Steer);
+    let events = until_runs_end(&h.events, 1);
+    h.engine.shutdown();
+
+    assert_eq!(outcomes(&events), [RunOutcome::Completed]);
+    let expected = vec![
+        text(typed),
+        text(&kage_core::resource_block::render(
+            "test://doc",
+            Some("srv"),
+            Some("text/plain"),
+            "doc body",
+        )),
+    ];
+    assert_eq!(first_user_content(&events), Some(expected.clone()));
+    assert_eq!(mock.last_request().unwrap().messages[0].content, expected);
+    let replay = kage_session::replay(&path).unwrap();
+    assert_eq!(replay.history[0].content, expected);
+}
+
+#[test]
+fn a_prompt_command_runs_the_mcp_prompt() {
+    let mock = MockProvider::replaying(text_turn("ok"));
+    let h = harness(mock.clone());
+    let id = SessionId::new();
+    h.open_mcp(id, None);
+    prompt(&h.engine, id, "/srv:greet Ada Lovelace", Delivery::Steer);
+    let events = until_runs_end(&h.events, 1);
+
+    assert_eq!(outcomes(&events), [RunOutcome::Completed]);
+    assert_eq!(
+        mock.last_request().unwrap().messages[0].content,
+        [text("Hello, Ada Lovelace")]
+    );
+}
+
+#[test]
+fn a_failing_read_fails_the_run_and_leaves_history_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = SessionId::new();
+    let (recorder, path) = recorder_in(dir.path(), id);
+    let mock = MockProvider::replaying(text_turn("ok"));
+    let h = harness(mock.clone());
+    h.open_mcp(id, Some(recorder));
+    prompt(&h.engine, id, "read @srv:test://missing", Delivery::Steer);
+    let events = until_runs_end(&h.events, 1);
+    h.engine.shutdown();
+
+    let message = "mcp srv: read test://missing: resource not found".to_owned();
+    assert!(notices(&events).contains(&message));
+    assert_eq!(
+        outcomes(&events),
+        [RunOutcome::Failed {
+            error: LoopError::Other { message }
+        }]
+    );
+    assert_eq!(first_user_content(&events), None);
+    assert_eq!(mock.call_count(), 0);
+    assert!(kage_session::replay(&path).unwrap().history.is_empty());
+}
+
+fn restart(engine: &Engine, id: SessionId, server: &str) {
+    engine.send(Command::to(
+        id,
+        CommandKind::RestartMcp {
+            server: server.into(),
+        },
+    ));
+}
+
+fn restart_notices(events: &[Envelope]) -> Vec<String> {
+    notices(events)
+        .into_iter()
+        .filter(|n| n.starts_with("mcp restart"))
+        .collect()
+}
+
+#[test]
+fn restart_while_idle_republishes_the_catalog() {
+    use kage_core::protocol::McpServerStatus;
+
+    let h = harness(MockProvider::replaying(text_turn("ok")));
+    let id = SessionId::new();
+    h.open_mcp(id, None);
+    wait_for(&h.events, is_mcp_servers);
+
+    restart(&h.engine, id, "broken");
+    let events = wait_for(&h.events, is_mcp_servers);
+    let notices = restart_notices(&events);
+    assert_eq!(notices.len(), 1);
+    assert!(
+        notices[0].starts_with(&format!("mcp restart `broken`: spawn `{BROKEN_COMMAND}`")),
+        "{notices:?}"
+    );
+    let servers = mcp_snapshots(&events).remove(0);
+    assert!(matches!(servers[0].status, McpServerStatus::Failed { .. }));
+    assert_eq!(servers[1].status, McpServerStatus::Connected);
+
+    restart(&h.engine, id, "ghost");
+    let events = wait_for(&h.events, is_mcp_servers);
+    assert_eq!(
+        restart_notices(&events),
+        ["mcp restart `ghost`: no mcp server named `ghost`"]
+    );
+}
+
+#[test]
+fn a_prompt_during_an_idle_restart_runs_after_it() {
+    let mock = MockProvider::replaying(text_turn("ok"));
+    let h = harness(mock.clone());
+    let id = SessionId::new();
+    h.open_mcp(id, None);
+    wait_for(&h.events, is_mcp_servers);
+
+    restart(&h.engine, id, "broken");
+    prompt(&h.engine, id, "@srv:test://doc", Delivery::Steer);
+    let events = until_runs_end(&h.events, 1);
+
+    assert_eq!(outcomes(&events), [RunOutcome::Completed]);
+    let republished = events.iter().position(is_mcp_servers).unwrap();
+    let started = events
+        .iter()
+        .position(|e| matches!(e.event, Event::Host(HostEvent::RunStarted)))
+        .unwrap();
+    assert!(republished < started);
+    assert_eq!(mock.last_request().unwrap().messages[0].content.len(), 2);
+}
+
+#[test]
+fn restart_while_running_waits_for_the_next_run() {
+    let h = harness(MockProvider::sequence(vec![
+        tool_turn("gate"),
+        text_turn("done"),
+        text_turn("again"),
+    ]));
+    let id = SessionId::new();
+    h.open_mcp(id, None);
+    prompt(&h.engine, id, "go", Delivery::Steer);
+    wait_for(&h.events, is_tool_start);
+
+    restart(&h.engine, id, "broken");
+    h.engine.send(Command::to(
+        id,
+        CommandKind::SetThinking {
+            level: ThinkingLevel::High,
+        },
+    ));
+    let mut events = wait_for(&h.events, |e| {
+        state_of(e).is_some_and(|s| s.thinking == ThinkingLevel::High)
+    });
+    h.release.send(()).unwrap();
+    events.extend(until_runs_end(&h.events, 1));
+    assert!(restart_notices(&events).is_empty());
+    assert!(mcp_snapshots(&events).is_empty());
+
+    prompt(&h.engine, id, "again", Delivery::Steer);
+    let events = until_runs_end(&h.events, 1);
+    assert_eq!(restart_notices(&events).len(), 1);
+    assert_eq!(mcp_snapshots(&events).len(), 1);
+    assert_eq!(outcomes(&events), [RunOutcome::Completed]);
+}

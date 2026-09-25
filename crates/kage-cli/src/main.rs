@@ -1102,11 +1102,13 @@ fn register_custom_providers(
             ),
             kage_core::config::CustomProviderKind::Anthropic => Arc::new(
                 anthropic::AnthropicProvider::with_base_url(key, cfg.base_url.clone())
+                    .with_metadata(metadata)
                     .with_extra_headers(cfg.headers.clone())
                     .with_models(models),
             ),
             kage_core::config::CustomProviderKind::Gemini => Arc::new(
                 gemini::GeminiProvider::with_base_url(key, cfg.base_url.clone())
+                    .with_metadata(metadata)
                     .with_extra_headers(cfg.headers.clone())
                     .with_models(models),
             ),
@@ -1245,6 +1247,36 @@ fn config_sets_default_model(path: &std::path::Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_anthropic_and_gemini_providers_register_under_their_own_ids() {
+        let config: kage_core::config::Config = toml::from_str(
+            r#"
+            [providers.custom.zhipu-anthropic]
+            kind = "anthropic"
+            base_url = "http://127.0.0.1:1/anthropic"
+            api_key_env = ""
+            [[providers.custom.zhipu-anthropic.models]]
+            id = "glm-5.3"
+            name = "GLM-5.3"
+
+            [providers.custom.my-gemini]
+            kind = "gemini"
+            base_url = "http://127.0.0.1:1/gemini"
+            api_key_env = ""
+            [[providers.custom.my-gemini.models]]
+            id = "g-1"
+            name = "G 1"
+            "#,
+        )
+        .unwrap();
+        let mut registry = ProviderRegistry::new();
+        register_custom_providers(&config, &auth::AuthStore::empty(), &mut registry);
+        assert!(registry.resolve("zhipu-anthropic:glm-5.3").is_ok());
+        assert!(registry.resolve("my-gemini:g-1").is_ok());
+        assert!(registry.get("anthropic").is_none());
+        assert!(registry.get("gemini").is_none());
+    }
 
     fn summary(title: Option<&str>, prompt: Option<&str>) -> SessionSummary {
         let created_at = Utc::now();

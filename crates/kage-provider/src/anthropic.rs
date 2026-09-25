@@ -62,6 +62,14 @@ impl AnthropicProvider {
         }
     }
 
+    /// Register under `metadata` instead of the built-in identity, for a
+    /// user-declared provider that speaks this protocol.
+    #[must_use]
+    pub fn with_metadata(mut self, metadata: ProviderMetadata) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
     /// Send `headers` on every request, after the protocol's own headers.
     #[must_use]
     pub fn with_extra_headers(mut self, headers: BTreeMap<String, String>) -> Self {

@@ -7,11 +7,11 @@
 //! observed until the next chunk arrives, which can be many seconds.
 //!
 //! [`make_cancelable`] wraps an inner stream so the foreground iterator
-//! observes the cancel flag within the polling interval (25ms)
+//! returns [`ProviderError::Cancelled`] the moment the flag flips,
 //! regardless of how long the underlying network read takes. The inner
 //! stream runs on a worker thread and forwards events through a bounded
-//! channel; the outer iterator polls the channel with `recv_timeout` and
-//! returns [`ProviderError::Cancelled`] as soon as the flag flips.
+//! channel. The outer iterator blocks on that channel and a
+//! [`CancelWatch`] at once, so it never wakes while nothing happens.
 //!
 //! The worker thread keeps running the inner stream until it produces an
 //! event whose send fails (because the consumer dropped the channel),
@@ -20,27 +20,17 @@
 //! reclaimed when the next chunk arrives or the HTTP connection times
 //! out at the OS level.
 
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::Duration;
-
-use kage_core::CancelFlag;
+use crossbeam_channel::{Receiver, select_biased};
+use kage_core::{CancelFlag, CancelWatch};
 
 use crate::{EventStream, ProviderError, ProviderEvent};
-
-/// Time the foreground iterator waits between cancel-flag checks.
-///
-/// Trades responsiveness vs CPU. 25ms is below the human "instant"
-/// perception threshold: a user hitting `Esc` sees the cancel land
-/// effectively immediately. The idle iterator wakes 40 times a
-/// second checking a single atomic load, which is invisible in `top`.
-const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Bounded backlog between worker thread and consumer. Bounded so a
 /// fast-streaming provider cannot run away if the consumer is slow.
 const CHANNEL_BUFFER: usize = 32;
 
-/// Run a blocking, uncancellable closure on a worker thread and poll
-/// `cancel` from the foreground so the caller can return
+/// Run a blocking, uncancellable closure on a worker thread and wait
+/// for either its result or `cancel`, so the caller can return
 /// `ProviderError::Cancelled` long before `f` finishes.
 ///
 /// Used by each provider's `stream` impl to wrap the synchronous
@@ -56,41 +46,39 @@ const CHANNEL_BUFFER: usize = 32;
 /// # Errors
 ///
 /// - Whatever `f` returns when it completes first.
-/// - [`ProviderError::Cancelled`] when the flag is observed first or
-///   the worker thread panics.
+/// - [`ProviderError::Cancelled`] when the flag is set first or the
+///   worker thread panics.
 pub fn cancellable_call<F, T>(cancel: &CancelFlag, f: F) -> Result<T, ProviderError>
 where
     F: FnOnce() -> Result<T, ProviderError> + Send + 'static,
     T: Send + 'static,
 {
-    let (tx, rx) = mpsc::sync_channel(1);
+    let (tx, rx) = crossbeam_channel::bounded(1);
     std::thread::spawn(move || {
         let _ = tx.send(f());
     });
-    loop {
-        if cancel.is_cancelled() {
-            return Err(ProviderError::Cancelled);
-        }
-        match rx.recv_timeout(POLL_INTERVAL) {
-            Ok(r) => return r,
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => return Err(ProviderError::Cancelled),
-        }
+    if cancel.is_cancelled() {
+        return Err(ProviderError::Cancelled);
+    }
+    let watch = cancel.watch();
+    select_biased! {
+        recv(watch.receiver()) -> _ => Err(ProviderError::Cancelled),
+        recv(rx) -> reply => reply.unwrap_or(Err(ProviderError::Cancelled)),
     }
 }
 
-/// Wrap `inner` so that `cancel` is observed within [`POLL_INTERVAL`]
+/// Wrap `inner` so that `cancel` is observed as soon as it is set,
 /// regardless of how long the underlying read blocks.
 ///
 /// The inner iterator is moved onto a dedicated worker thread; the
-/// returned iterator pulls events from a channel, polling the cancel
-/// flag between recv timeouts. Once the cancel flag is set, the next
-/// `next()` call returns `Err(ProviderError::Cancelled)` and the
-/// iterator is fused; the worker thread continues until its next send
-/// fails (when the channel receiver is dropped) and then exits.
+/// returned iterator waits on its channel and a watch on the cancel
+/// flag together. Once the cancel flag is set, the next `next()` call
+/// returns `Err(ProviderError::Cancelled)` and the iterator is fused;
+/// the worker thread continues until its next send fails (when the
+/// channel receiver is dropped) and then exits.
 #[must_use]
 pub fn make_cancelable(inner: EventStream, cancel: CancelFlag) -> EventStream {
-    let (tx, rx) = mpsc::sync_channel(CHANNEL_BUFFER);
+    let (tx, rx) = crossbeam_channel::bounded(CHANNEL_BUFFER);
     std::thread::spawn(move || {
         for item in inner {
             if tx.send(item).is_err() {
@@ -98,16 +86,19 @@ pub fn make_cancelable(inner: EventStream, cancel: CancelFlag) -> EventStream {
             }
         }
     });
+    let watch = cancel.watch();
     Box::new(CancelableStream {
         rx,
         cancel,
+        watch,
         done: false,
     })
 }
 
 struct CancelableStream {
-    rx: mpsc::Receiver<Result<ProviderEvent, ProviderError>>,
+    rx: Receiver<Result<ProviderEvent, ProviderError>>,
     cancel: CancelFlag,
+    watch: CancelWatch,
     done: bool,
 }
 
@@ -118,23 +109,19 @@ impl Iterator for CancelableStream {
         if self.done {
             return None;
         }
-        loop {
-            if self.cancel.is_cancelled() {
+        if self.cancel.is_cancelled() {
+            self.done = true;
+            return Some(Err(ProviderError::Cancelled));
+        }
+        select_biased! {
+            recv(self.watch.receiver()) -> _ => {
                 self.done = true;
-                return Some(Err(ProviderError::Cancelled));
+                Some(Err(ProviderError::Cancelled))
             }
-            match self.rx.recv_timeout(POLL_INTERVAL) {
-                Ok(item) => {
-                    if matches!(&item, Err(ProviderError::Cancelled)) {
-                        self.done = true;
-                    }
-                    return Some(item);
-                }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => {
-                    self.done = true;
-                    return None;
-                }
+            recv(self.rx) -> item => {
+                let item = item.ok();
+                self.done = matches!(item, None | Some(Err(ProviderError::Cancelled)));
+                item
             }
         }
     }
@@ -142,7 +129,7 @@ impl Iterator for CancelableStream {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use super::*;
 
@@ -197,6 +184,23 @@ mod tests {
             elapsed < Duration::from_millis(500),
             "cancel observation took {elapsed:?}, expected < 500ms"
         );
+    }
+
+    #[test]
+    fn cancellable_call_returns_cancelled_while_the_closure_blocks() {
+        let cancel = CancelFlag::new();
+        let flag = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            flag.cancel();
+        });
+        let start = Instant::now();
+        let result = cancellable_call(&cancel, || {
+            std::thread::sleep(Duration::from_secs(60));
+            Ok(())
+        });
+        assert!(matches!(result, Err(ProviderError::Cancelled)));
+        assert!(start.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

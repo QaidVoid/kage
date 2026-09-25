@@ -401,20 +401,13 @@ fn retry_backoff(attempt: u32, err: &ProviderError) -> Duration {
 }
 
 /// Sleep `dur`, returning `false` if `cancel` tripped during the wait.
-/// Checked in short slices so a cancel aborts the backoff promptly
-/// instead of after the full delay.
+/// The wait wakes the moment the flag is set, so a cancel aborts the
+/// backoff at once instead of after the full delay.
 fn sleep_cancelable(cancel: &CancelFlag, dur: Duration) -> bool {
-    let slice = Duration::from_millis(100);
-    let mut left = dur;
-    while !left.is_zero() {
-        if cancel.is_cancelled() {
-            return false;
-        }
-        let step = slice.min(left);
-        std::thread::sleep(step);
-        left -= step;
+    if cancel.is_cancelled() {
+        return false;
     }
-    !cancel.is_cancelled()
+    cancel.watch().receiver().recv_timeout(dur).is_err() && !cancel.is_cancelled()
 }
 
 #[cfg(test)]

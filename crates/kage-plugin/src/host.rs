@@ -29,6 +29,7 @@ use std::sync::{Arc, Weak};
 use std::thread;
 use std::time::Duration;
 
+use crossbeam_channel::select_biased;
 use kage_core::CancelFlag;
 use mlua::Lua;
 
@@ -39,9 +40,6 @@ use crate::schedule;
 /// and before it replies, so a caller woken by the reply already sees
 /// the job accounted for in [`LuaHost::is_idle`].
 type Job = Box<dyn FnOnce(&Lua, &State) + Send>;
-
-/// How often a cancellable wait re-checks its cancel flag.
-const CANCEL_POLL: Duration = Duration::from_millis(10);
 
 /// Cloneable handle that runs jobs on the Lua owner thread.
 #[derive(Clone)]
@@ -149,15 +147,12 @@ impl LuaHost {
         f: impl FnOnce(&Lua) -> R + Send + 'static,
     ) -> Result<Option<R>, PluginError> {
         let (rx, abandoned) = self.request(f)?;
-        loop {
-            match rx.recv_timeout(CANCEL_POLL) {
-                Ok(reply) => return Ok(Some(reply)),
-                Err(RecvTimeoutError::Timeout) if cancel.is_cancelled() => {
-                    abandoned.store(true, Ordering::SeqCst);
-                    return Ok(None);
-                }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => return Err(gone()),
+        let watch = cancel.watch();
+        select_biased! {
+            recv(rx) -> reply => reply.map(Some).map_err(|_| gone()),
+            recv(watch.receiver()) -> _ => {
+                abandoned.store(true, Ordering::SeqCst);
+                Ok(None)
             }
         }
     }
@@ -165,10 +160,10 @@ impl LuaHost {
     fn request<R: Send + 'static>(
         &self,
         f: impl FnOnce(&Lua) -> R + Send + 'static,
-    ) -> Result<(Receiver<R>, Arc<AtomicBool>), PluginError> {
+    ) -> Result<(crossbeam_channel::Receiver<R>, Arc<AtomicBool>), PluginError> {
         let abandoned = Arc::new(AtomicBool::new(false));
         let skip = Arc::clone(&abandoned);
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = crossbeam_channel::bounded(1);
         self.enqueue(Box::new(move |lua, state| {
             let reply = (!skip.load(Ordering::SeqCst)).then(|| f(lua));
             state.finish();

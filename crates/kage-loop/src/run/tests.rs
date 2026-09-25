@@ -2074,3 +2074,24 @@ fn cancel_mid_dispatch_answers_every_tool_call_in_history() {
         })
     ));
 }
+
+#[test]
+fn sleep_cancelable_wakes_when_cancelled_from_another_thread() {
+    let cancel = CancelFlag::new();
+    let flag = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(50));
+        flag.cancel();
+    });
+    let start = std::time::Instant::now();
+    assert!(!sleep_cancelable(&cancel, Duration::from_secs(60)));
+    assert!(start.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn sleep_cancelable_returns_true_after_an_uncancelled_wait() {
+    assert!(sleep_cancelable(
+        &CancelFlag::new(),
+        Duration::from_millis(20)
+    ));
+}

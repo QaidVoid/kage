@@ -230,7 +230,6 @@ mod tests {
 
     #[test]
     fn span_color_resolves_a_theme_role_then_ratatui_grammar() {
-        let _guard = theme::theme_test_lock();
         theme::set_current(Theme {
             muted_fg: Color::Rgb(1, 2, 3),
             ..Theme::default()
@@ -250,7 +249,6 @@ mod tests {
         use kage_core::highlight::HlSpec;
         use kage_plugin::ChromeAttrs;
 
-        let _guard = theme::theme_test_lock();
         let mut hl = theme::groups_for("default", None)
             .unwrap()
             .into_highlights("default");

@@ -28,7 +28,14 @@ use ratatui::style::Color;
 pub use depth::ColorDepth;
 pub use groups::{ROLE_GROUPS, Slot, ThemeGroups, Themes, groups_for};
 
+#[cfg(not(test))]
 static CURRENT: RwLock<Option<Arc<Theme>>> = RwLock::new(None);
+// Per thread under test, so a test that switches the palette never
+// repaints a test running beside it.
+#[cfg(test)]
+thread_local! {
+    static CURRENT: RwLock<Option<Arc<Theme>>> = const { RwLock::new(None) };
+}
 static DEFAULT: OnceLock<Arc<Theme>> = OnceLock::new();
 
 /// Snapshot of the active theme as a cheap `Arc` clone. Returns the
@@ -36,8 +43,7 @@ static DEFAULT: OnceLock<Arc<Theme>> = OnceLock::new();
 /// leaf style helpers don't need to special-case startup ordering.
 #[must_use]
 pub fn current() -> Arc<Theme> {
-    read(&CURRENT)
-        .clone()
+    with_current(|current| read(current).clone())
         .unwrap_or_else(|| DEFAULT.get_or_init(|| Arc::new(Theme::default())).clone())
 }
 
@@ -45,29 +51,23 @@ pub fn current() -> Arc<Theme> {
 /// new palette; in-flight frames continue with the snapshot they
 /// already captured.
 pub fn set_current(theme: Theme) {
-    let mut guard = write(&CURRENT);
-    *guard = Some(Arc::new(theme));
+    with_current(|current| *write(current) = Some(Arc::new(theme)));
 }
 
-/// Serialize tests that touch the process-global theme. Tests that
-/// `set_current` and tests that assert against [`current`] must hold
-/// this lock, or parallel test threads read each other's palette.
-#[cfg(test)]
-pub(crate) static THEME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(not(test))]
+fn with_current<R>(f: impl FnOnce(&RwLock<Option<Arc<Theme>>>) -> R) -> R {
+    f(&CURRENT)
+}
 
-/// Block until the theme global is free for the duration of the test.
-/// Poison-safe: a panicking holder must not wedge every later test.
 #[cfg(test)]
-pub(crate) fn theme_test_lock() -> std::sync::MutexGuard<'static, ()> {
-    THEME_TEST_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+fn with_current<R>(f: impl FnOnce(&RwLock<Option<Arc<Theme>>>) -> R) -> R {
+    CURRENT.with(f)
 }
 
 /// Drop any host-installed theme so later tests see the default again.
 #[cfg(test)]
 pub(crate) fn reset_current_for_tests() {
-    *write(&CURRENT) = None;
+    with_current(|current| *write(current) = None);
 }
 
 /// Every color the TUI renderer might paint with. Add entries when a

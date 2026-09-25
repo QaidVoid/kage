@@ -369,7 +369,6 @@ fn the_activity_row_shows_while_working_with_elapsed_seconds() {
 
 #[test]
 fn the_palette_follows_the_highlight_table_without_a_turn_boundary() {
-    let _guard = crate::theme::theme_test_lock();
     let rt = kage_plugin::PluginRuntime::builder()
         .themes(Arc::new(crate::theme::Themes::new(None)))
         .build()
@@ -559,7 +558,6 @@ fn a_long_start_tip_wraps_instead_of_clipping() {
 
 #[test]
 fn a_theme_switch_repaints_existing_notice_rows() {
-    let _guard = crate::theme::theme_test_lock();
     let rt = kage_plugin::PluginRuntime::builder()
         .themes(Arc::new(crate::theme::Themes::new(None)))
         .build()

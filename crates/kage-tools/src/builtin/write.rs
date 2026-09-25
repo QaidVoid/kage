@@ -199,15 +199,10 @@ mod tests {
 
     #[test]
     fn confined_write_rejects_escape() {
-        let dir = tempfile::tempdir().unwrap();
-        let outside = dir
-            .path()
-            .parent()
-            .unwrap()
-            .join("outside-write-confined.txt");
-        let _ = fs::remove_file(&outside);
+        let (root, work) = nested_workdir();
+        let outside = root.path().join("outside-write-confined.txt");
         let cancel = CancelFlag::new();
-        let cx = ToolContext::new(dir.path(), &cancel).with_confine();
+        let cx = ToolContext::new(&work, &cancel).with_confine();
         let err = WriteTool
             .execute(
                 serde_json::json!({"path":"../outside-write-confined.txt","content":"x"}),
@@ -220,21 +215,24 @@ mod tests {
 
     #[test]
     fn unconfined_write_accepts_escape() {
-        let dir = tempfile::tempdir().unwrap();
-        let outside = dir
-            .path()
-            .parent()
-            .unwrap()
-            .join("outside-write-unconfined.txt");
-        let _ = fs::remove_file(&outside);
+        let (root, work) = nested_workdir();
         let out = run(
             &WriteTool,
-            dir.path(),
+            &work,
             serde_json::json!({"path":"../outside-write-unconfined.txt","content":"x"}),
         )
         .unwrap();
         assert!(!out.is_error);
-        assert_eq!(fs::read_to_string(&outside).unwrap(), "x");
-        let _ = fs::remove_file(&outside);
+        let outside = root.path().join("outside-write-unconfined.txt");
+        assert_eq!(fs::read_to_string(outside).unwrap(), "x");
+    }
+
+    /// A workdir inside its own temp root, so `..` stays private to
+    /// the test.
+    fn nested_workdir() -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let work = root.path().join("work");
+        fs::create_dir(&work).unwrap();
+        (root, work)
     }
 }

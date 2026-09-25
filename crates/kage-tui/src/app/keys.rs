@@ -6,6 +6,14 @@ use super::*;
 /// waits for the next press.
 const ESCALATION_WINDOW: Duration = Duration::from_secs(2);
 
+/// How long a key waits for a plugin terminal-input hook's verdict.
+#[cfg(not(test))]
+const HOOK_DEADLINE: Duration = kage_plugin::terminal_input::INPUT_DEADLINE;
+/// Tests check the verdict itself, so a loaded machine must not turn
+/// it into a pass-through.
+#[cfg(test)]
+const HOOK_DEADLINE: Duration = Duration::from_secs(10);
+
 /// The key that asked [`App::escalate`] to step.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Trigger {
@@ -86,7 +94,9 @@ impl App {
             return false;
         }
         let descriptor = key_event_to_json(*key);
-        snapshot.iter().any(|hook| hook.handle(&descriptor))
+        snapshot
+            .iter()
+            .any(|hook| hook.handle(&descriptor, HOOK_DEADLINE))
     }
 
     /// Dispatch one key event through the modal layers, the keymap,

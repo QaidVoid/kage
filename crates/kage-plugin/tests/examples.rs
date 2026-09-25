@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 
 use kage_core::keymap::{Lookup, Mode, Rhs};
 use kage_plugin::{
@@ -552,9 +553,10 @@ fn ui_extras_registers_chrome_autocomplete_and_raw_input() {
     // 3. Raw-input observer is registered and never consumes.
     let hooks = rt.registered_terminal_hooks();
     assert_eq!(hooks.len(), 1);
-    assert!(!hooks[0].handle(&json!({
+    let key = json!({
         "code": "char", "char": "x", "ctrl": true, "alt": false, "shift": false
-    })));
+    });
+    assert!(!hooks[0].handle(&key, Duration::from_secs(5)));
 
     // The runtime exposed an off-switch command.
     assert!(

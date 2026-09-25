@@ -11,7 +11,8 @@ use serde_json::json;
 
 use super::*;
 use crate::api::LogLevel;
-use crate::test_support::{Gate, occupy, wait_until};
+use crate::terminal_input::INPUT_DEADLINE;
+use crate::test_support::{Gate, TIMEOUT, occupy, wait_until};
 use crate::testing::runtime_with_recording;
 
 fn tool_named(rt: &PluginRuntime, name: &str) -> Arc<dyn kage_tools::Tool> {
@@ -94,10 +95,10 @@ fn slow_terminal_hook_lets_the_key_through_and_warns_once() {
     )
     .unwrap();
     let hook = rt.registered_terminal_hooks().pop().unwrap();
-    assert!(hook.handle(&json!({ "code": "enter" })));
+    assert!(hook.handle(&json!({ "code": "enter" }), TIMEOUT));
 
     for _ in 0..2 {
-        assert!(!hook.handle(&json!({ "code": "slow" })));
+        assert!(!hook.handle(&json!({ "code": "slow" }), INPUT_DEADLINE));
     }
     gate.assert_held();
     let warnings: Vec<_> = rec
@@ -110,7 +111,7 @@ fn slow_terminal_hook_lets_the_key_through_and_warns_once() {
 
     gate.open();
     wait_until(|| rt.host.is_idle());
-    assert!(hook.handle(&json!({ "code": "enter" })));
+    assert!(hook.handle(&json!({ "code": "enter" }), TIMEOUT));
 }
 
 #[test]

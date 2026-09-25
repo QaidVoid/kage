@@ -972,7 +972,6 @@ fn popup_paints_single_item_text() {
 
 #[test]
 fn popup_paints_many_items_and_highlights_selected() {
-    let _guard = crate::theme::theme_test_lock();
     let completions = crate::cmdparse::Completions {
         items: vec![
             completion("model", Some("switch model")),
@@ -1348,7 +1347,6 @@ fn the_card_lists_at_most_three_sessions() {
 
 #[test]
 fn notices_paint_in_the_warning_style() {
-    let _guard = crate::theme::theme_test_lock();
     let info = start_info(0);
     let input = InputState::new();
     let area = Rect::new(0, 0, 80, 24);

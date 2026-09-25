@@ -61,9 +61,12 @@ fn input_bounds() -> (u16, u16) {
 /// floored at 1, `max` is clamped to `min..=INPUT_CONTENT_MAX_CEILING`
 /// so an out-of-range or inverted config can never wedge the layout.
 pub fn set_input_bounds(min: u16, max: u16) {
+    *write(&INPUT_BOUNDS) = clamp_bounds(min, max);
+}
+
+fn clamp_bounds(min: u16, max: u16) -> (u16, u16) {
     let min = min.max(1);
-    let max = max.clamp(min, INPUT_CONTENT_MAX_CEILING);
-    *write(&INPUT_BOUNDS) = (min, max);
+    (min, max.clamp(min, INPUT_CONTENT_MAX_CEILING))
 }
 /// Rows the rules above and below the input content claim.
 pub const INPUT_CHROME_LINES: u16 = 2;
@@ -132,7 +135,10 @@ pub fn split(area: Rect, heights: Heights) -> Regions {
 /// [`INPUT_MIN_LINES`]..=[`INPUT_MAX_LINES`] under the default bounds.
 #[must_use]
 pub fn input_height_for(content_lines: u16) -> u16 {
-    let (cmin, cmax) = input_bounds();
+    input_height_within(content_lines, input_bounds())
+}
+
+fn input_height_within(content_lines: u16, (cmin, cmax): (u16, u16)) -> u16 {
     content_lines
         .clamp(cmin, cmax)
         .saturating_add(INPUT_CHROME_LINES)
@@ -141,21 +147,6 @@ pub fn input_height_for(content_lines: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    use std::sync::{Mutex, MutexGuard};
-
-    /// Serializes tests against the process-global `INPUT_BOUNDS`.
-    /// `configured_bounds_resize_the_input_then_restore` mutates it,
-    /// and the `split`/`input_height` tests assert the default bounds;
-    /// run in parallel, the readers observe the mutated values
-    /// (observed as flaky `left: 4, right: 3` failures).
-    static PROCESS_GLOBALS: Mutex<()> = Mutex::new(());
-
-    fn process_globals() -> MutexGuard<'static, ()> {
-        PROCESS_GLOBALS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
 
     fn heights(header: u16, activity: u16, input: u16) -> Heights {
         Heights {
@@ -196,7 +187,6 @@ mod tests {
 
     #[test]
     fn input_height_for_clamps_both_directions() {
-        let _globals = process_globals();
         assert_eq!(input_height_for(0), INPUT_MIN_LINES);
         assert_eq!(input_height_for(1), INPUT_MIN_LINES);
         assert_eq!(input_height_for(3), 3 + INPUT_CHROME_LINES);
@@ -205,29 +195,28 @@ mod tests {
     }
 
     #[test]
-    fn configured_bounds_resize_the_input_then_restore() {
-        let _globals = process_globals();
-        // Enlarge the cap, verify the input grows past the old max,
-        // then restore the default so other tests are unaffected.
-        set_input_bounds(2, 20);
-        assert_eq!(input_height_for(15), 15 + INPUT_CHROME_LINES);
-        assert_eq!(input_height_for(0), 2 + INPUT_CHROME_LINES, "min floor");
-        assert_eq!(input_height_for(99), 20 + INPUT_CHROME_LINES, "max cap");
-        let r = split(Rect::new(0, 0, 80, 40), heights(0, 0, input_height_for(99)));
-        assert_eq!(r.input.height, 20 + INPUT_CHROME_LINES);
-        // Out-of-range config is clamped, not honored verbatim.
-        set_input_bounds(0, 9999);
+    fn configured_bounds_resize_the_input() {
+        let bounds = clamp_bounds(2, 20);
+        assert_eq!(input_height_within(15, bounds), 15 + INPUT_CHROME_LINES);
         assert_eq!(
-            input_height_for(0),
+            input_height_within(0, bounds),
+            2 + INPUT_CHROME_LINES,
+            "min floor"
+        );
+        let capped = input_height_within(99, bounds);
+        assert_eq!(capped, 20 + INPUT_CHROME_LINES, "max cap");
+        let r = split(Rect::new(0, 0, 80, 40), heights(0, 0, capped));
+        assert_eq!(r.input.height, 20 + INPUT_CHROME_LINES);
+        let bounds = clamp_bounds(0, 9999);
+        assert_eq!(
+            input_height_within(0, bounds),
             1 + INPUT_CHROME_LINES,
             "min floored to 1"
         );
         assert_eq!(
-            input_height_for(9999),
+            input_height_within(9999, bounds),
             INPUT_CONTENT_MAX_CEILING + INPUT_CHROME_LINES,
             "max clamped to ceiling"
         );
-        set_input_bounds(INPUT_CONTENT_MIN_LINES, INPUT_CONTENT_MAX_LINES);
-        assert_eq!(input_height_for(20), INPUT_MAX_LINES, "restored default");
     }
 }

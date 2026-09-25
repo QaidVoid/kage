@@ -89,15 +89,16 @@ impl LuaTerminalHook {
     /// the handler explicitly returned a truthy value, meaning the
     /// host should consume the event. A Lua error or a non-boolean
     /// return logs and yields `false` so a broken hook cannot silently
-    /// eat every keystroke. No verdict within [`INPUT_DEADLINE`] also
-    /// yields `false`; the first such timeout logs a warning.
+    /// eat every keystroke. No verdict within `deadline` (the host
+    /// passes [`INPUT_DEADLINE`]) also yields `false`; the first such
+    /// timeout logs a warning.
     #[must_use]
-    pub fn handle(&self, event: &serde_json::Value) -> bool {
+    pub fn handle(&self, event: &serde_json::Value, deadline: Duration) -> bool {
         let id = self.id;
         let sink = Arc::clone(&self.sink);
         let handler = Arc::clone(&self.handler_key);
         let event = event.clone();
-        let verdict = self.host.call_within(INPUT_DEADLINE, move |lua| {
+        let verdict = self.host.call_within(deadline, move |lua| {
             run_hook(lua, id, &sink, &handler, &event)
         });
         verdict.unwrap_or_else(|| {
@@ -108,7 +109,7 @@ impl LuaTerminalHook {
                     &format!(
                         "plugin on_terminal_input #{id}: no verdict within {} ms \
                          (Lua thread busy or hook too slow); passing keys through",
-                        INPUT_DEADLINE.as_millis()
+                        deadline.as_millis()
                     ),
                 );
             }
@@ -191,6 +192,7 @@ pub(crate) fn install_on_terminal_input(
 #[cfg(test)]
 mod tests {
     use crate::PluginRuntime;
+    use crate::test_support::TIMEOUT;
 
     #[test]
     fn on_terminal_input_registers_a_hook() {
@@ -212,8 +214,8 @@ mod tests {
         )
         .unwrap();
         let hook = &rt.registered_terminal_hooks()[0];
-        assert!(hook.handle(&serde_json::json!({ "code": "char", "char": "x" })));
-        assert!(!hook.handle(&serde_json::json!({ "code": "char", "char": "y" })));
+        assert!(hook.handle(&serde_json::json!({ "code": "char", "char": "x" }), TIMEOUT));
+        assert!(!hook.handle(&serde_json::json!({ "code": "char", "char": "y" }), TIMEOUT));
     }
 
     #[test]
@@ -222,7 +224,7 @@ mod tests {
         rt.eval("kage.on_terminal_input(function(_ev) return 'nope' end)")
             .unwrap();
         let hook = &rt.registered_terminal_hooks()[0];
-        assert!(!hook.handle(&serde_json::json!({ "code": "enter" })));
+        assert!(!hook.handle(&serde_json::json!({ "code": "enter" }), TIMEOUT));
     }
 
     #[test]
@@ -231,7 +233,7 @@ mod tests {
         rt.eval("kage.on_terminal_input(function(_ev) error('boom') end)")
             .unwrap();
         let hook = &rt.registered_terminal_hooks()[0];
-        assert!(!hook.handle(&serde_json::json!({ "code": "esc" })));
+        assert!(!hook.handle(&serde_json::json!({ "code": "esc" }), TIMEOUT));
     }
 
     #[test]

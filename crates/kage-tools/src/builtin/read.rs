@@ -191,11 +191,10 @@ mod tests {
 
     #[test]
     fn confined_read_rejects_escape() {
-        let dir = tempfile::tempdir().unwrap();
-        let outside = dir.path().parent().unwrap().join("outside-read.txt");
-        fs::write(&outside, "secret").unwrap();
+        let (root, work) = nested_workdir();
+        fs::write(root.path().join("outside-read.txt"), "secret").unwrap();
         let cancel = CancelFlag::new();
-        let cx = ToolContext::new(dir.path(), &cancel).with_confine();
+        let cx = ToolContext::new(&work, &cancel).with_confine();
         let err = ReadTool
             .execute(serde_json::json!({"path":"../outside-read.txt"}), &cx)
             .unwrap_err();
@@ -204,15 +203,23 @@ mod tests {
 
     #[test]
     fn unconfined_read_accepts_escape() {
-        let dir = tempfile::tempdir().unwrap();
-        let outside = dir.path().parent().unwrap().join("outside-read.txt");
-        fs::write(&outside, "secret").unwrap();
+        let (root, work) = nested_workdir();
+        fs::write(root.path().join("outside-read.txt"), "secret").unwrap();
         let out = run(
             &ReadTool,
-            dir.path(),
+            &work,
             serde_json::json!({"path":"../outside-read.txt"}),
         )
         .unwrap();
         assert_eq!(out.text, "secret");
+    }
+
+    /// A workdir inside its own temp root, so `..` stays private to
+    /// the test.
+    fn nested_workdir() -> (tempfile::TempDir, std::path::PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let work = root.path().join("work");
+        fs::create_dir(&work).unwrap();
+        (root, work)
     }
 }

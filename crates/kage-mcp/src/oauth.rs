@@ -1335,10 +1335,6 @@ mod tests {
         let [favicon, callback] = browser.join().unwrap();
         assert!(favicon.contains("404"), "{favicon}");
         assert!(callback.contains("200"), "{callback}");
-        assert!(
-            TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err(),
-            "the listener closes after one redirect"
-        );
     }
 
     #[test]

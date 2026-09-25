@@ -9,6 +9,10 @@
 //! may drop, such as [`LoopEvent::TextDelta`]). Each variant documents
 //! which class it belongs to.
 
+mod agent_tree;
+
+pub use agent_tree::{AgentNode, AgentState, AgentTree};
+
 use std::fmt;
 use std::path::PathBuf;
 
@@ -168,6 +172,18 @@ pub enum HostEvent {
         output: String,
         /// Exit code, or `None` when a signal ended the command.
         exit_code: Option<i32>,
+    },
+    /// Another session's `agent` call started this session. Published on
+    /// the new session as its first envelope. Durable.
+    AgentSpawned {
+        /// Session whose `agent` call started this one.
+        parent: SessionId,
+        /// The parent's `agent` call.
+        tool_call_id: ToolCallId,
+        /// Name of the agent definition.
+        agent: String,
+        /// Short task description the model wrote for the user.
+        description: String,
     },
 }
 
@@ -477,6 +493,13 @@ mod tests {
                 exit_code: Some(0),
             }
             .into(),
+            HostEvent::AgentSpawned {
+                parent: SessionId::new(),
+                tool_call_id: ToolCallId("call_2".into()),
+                agent: "explore".into(),
+                description: "map the exports".into(),
+            }
+            .into(),
         ];
         for event in events {
             let value = roundtrip(&envelope(event.clone()));
@@ -485,6 +508,20 @@ mod tests {
                 Event::Host(_) => assert!(serde_json::from_value::<LoopEvent>(value).is_err()),
             }
         }
+    }
+
+    #[test]
+    fn agent_spawned_has_its_own_tag() {
+        let parent = SessionId::new();
+        let value = roundtrip(&envelope(HostEvent::AgentSpawned {
+            parent,
+            tool_call_id: ToolCallId("call_1".into()),
+            agent: "explore".into(),
+            description: "map the exports".into(),
+        }));
+        assert_eq!(value["type"], "agent_spawned");
+        assert_eq!(value["parent"], parent.to_string());
+        assert_eq!(value["tool_call_id"], "call_1");
     }
 
     #[test]

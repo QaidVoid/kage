@@ -89,6 +89,7 @@ fn summary(title: Option<&str>, prompt: Option<&str>) -> SessionSummary {
         last_user_prompt: prompt.map(str::to_owned),
         title: title.map(str::to_owned),
         entry_count: 3,
+        agent: None,
     }
 }
 

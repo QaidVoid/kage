@@ -12,6 +12,10 @@ use crate::entry::{Header, SessionEntry, SessionId};
 use crate::error::SessionError;
 use crate::reader::SessionReader;
 
+/// Kind of the [`SessionEntry::Custom`] entry that marks a session an
+/// `agent` call started. Written as the first entry after the header.
+pub const AGENT_ENTRY_KIND: &str = "kage:agent";
+
 /// One row in `kage list`. Reflects the persisted state of a session file
 /// at the moment of listing; subsequent appends will not be visible until
 /// [`list`] is called again.
@@ -29,8 +33,9 @@ pub struct SessionSummary {
     pub cwd: PathBuf,
     /// Provider-qualified model from the header.
     pub model: String,
-    /// Parent session this one was forked from, if any. Lets callers
-    /// reconstruct the fork forest from a flat directory listing.
+    /// Parent session this one was forked from or spawned by, if any.
+    /// Lets callers reconstruct the session forest from a flat directory
+    /// listing.
     pub parent_session: Option<SessionId>,
     /// Text of the most recent user message, if any.
     pub last_user_prompt: Option<String>,
@@ -40,6 +45,9 @@ pub struct SessionSummary {
     pub title: Option<String>,
     /// Total number of valid entries (including the header).
     pub entry_count: usize,
+    /// Agent definition name when an `agent` call started this session,
+    /// read from the [`AGENT_ENTRY_KIND`] entry right after the header.
+    pub agent: Option<String>,
 }
 
 /// Scan `dir` for `*.jsonl` session files and summarize each.
@@ -87,12 +95,17 @@ fn summarize_one(path: &Path) -> Option<SessionSummary> {
     let mut updated_at = header.ts;
     let mut last_user_prompt = None;
     let mut title = None;
+    let mut agent = None;
     let mut entry_count = 1;
     for item in reader {
         let Ok(entry) = item else { continue };
         entry_count += 1;
         updated_at = entry.ts();
         match &entry {
+            SessionEntry::Custom(c) if entry_count == 2 && c.kind == AGENT_ENTRY_KIND => {
+                let name = c.data.get("agent").and_then(serde_json::Value::as_str);
+                agent = Some(name.unwrap_or_default().to_owned());
+            }
             SessionEntry::Message(m) if m.message.role == kage_core::Role::User => {
                 last_user_prompt = first_text(&m.message);
             }
@@ -107,6 +120,7 @@ fn summarize_one(path: &Path) -> Option<SessionSummary> {
         last_user_prompt,
         title,
         entry_count,
+        agent,
     ))
 }
 
@@ -126,6 +140,7 @@ fn summary_from_header(
     last_user_prompt: Option<String>,
     title: Option<String>,
     entry_count: usize,
+    agent: Option<String>,
 ) -> SessionSummary {
     SessionSummary {
         id: header.session,
@@ -138,6 +153,7 @@ fn summary_from_header(
         last_user_prompt,
         title,
         entry_count,
+        agent,
     }
 }
 
@@ -151,7 +167,7 @@ mod tests {
 
     use super::*;
     use crate::entry::{
-        EntryId, FORMAT_VERSION, Header, Label, MessageEntry, SessionEntry, SessionId,
+        Custom, EntryId, FORMAT_VERSION, Header, Label, MessageEntry, SessionEntry, SessionId,
     };
     use crate::writer::SessionWriter;
 
@@ -314,5 +330,62 @@ mod tests {
         let summaries = list(dir.path()).unwrap();
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].last_user_prompt.as_deref(), Some("ok"));
+    }
+
+    fn write_agent_session(dir: &Path, name: &str, first_is_agent: bool) -> PathBuf {
+        let path = dir.join(name);
+        let header = Header {
+            version: FORMAT_VERSION,
+            session: SessionId::new(),
+            id: EntryId::new(),
+            ts: Utc::now(),
+            cwd: PathBuf::from("/work"),
+            model: "anthropic:claude".into(),
+            system_prompt: "explore".into(),
+            parent_session: Some(SessionId::new()),
+            parent_entry: None,
+        };
+        let marker = SessionEntry::Custom(Custom {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            kind: AGENT_ENTRY_KIND.into(),
+            data: serde_json::json!({ "agent": "explore", "description": "map exports" }),
+        });
+        let title = SessionEntry::Title(crate::SessionTitle {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            title: "map exports".into(),
+        });
+        let mut writer = SessionWriter::create(&path, header).unwrap();
+        let entries = if first_is_agent {
+            [marker, title]
+        } else {
+            [title, marker]
+        };
+        for entry in &entries {
+            writer.append(entry).unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn summary_reports_the_agent_of_a_spawned_session() {
+        let dir = tempdir().unwrap();
+        write_agent_session(dir.path(), "agent.jsonl", true);
+        write_agent_session(dir.path(), "late.jsonl", false);
+        write_session(dir.path(), "plain.jsonl", "hi");
+
+        let summaries = list(dir.path()).unwrap();
+        let agent_of = |file: &str| {
+            summaries
+                .iter()
+                .find(|s| s.path.ends_with(file))
+                .unwrap()
+                .agent
+                .clone()
+        };
+        assert_eq!(agent_of("agent.jsonl").as_deref(), Some("explore"));
+        assert_eq!(agent_of("late.jsonl"), None);
+        assert_eq!(agent_of("plain.jsonl"), None);
     }
 }

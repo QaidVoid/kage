@@ -166,7 +166,7 @@ impl App {
             HostEvent::PermissionResolved { request_id } => self.drop_permission(request_id),
             HostEvent::RunStarted => self.run_started = Some(Instant::now()),
             HostEvent::RunEnded { .. } => self.end_run(),
-            HostEvent::TitleChanged { .. } => {}
+            HostEvent::TitleChanged { .. } | HostEvent::AgentSpawned { .. } => {}
         }
     }
 

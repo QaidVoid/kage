@@ -123,7 +123,8 @@ pub struct Header {
     pub model: String,
     /// System prompt at creation. Subsequent changes are not reflected here.
     pub system_prompt: String,
-    /// Parent session, if this session was forked.
+    /// The session this one was forked from or spawned by, if any. A
+    /// spawned session marks itself with a `kage:agent` custom entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session: Option<SessionId>,
     /// Entry id within `parent_session` that this fork branched from.

@@ -187,7 +187,7 @@ the previous output stays on screen.
 rule), `footer` or `start` (the start card). A row slot takes
 `{ left = items, right = items, sep = string? }` and `start` takes
 `{ lines = items }`. An item is a built-in component name (`brand`,
-`title`, `model`, `widgets`, `search`, `session`, `working`,
+`breadcrumb`, `title`, `model`, `widgets`, `search`, `session`, `working`,
 `activity`, `context`, `tokens`, `thinking`, `permission`, `mode`,
 `hint`, `cwd`, `version`, and in `start` also `sessions` and
 `notices`), a span table, or a Lua component
@@ -210,6 +210,13 @@ The `header` and `activity` rows collapse while they paint nothing,
 so this header stays visible because `brand` always paints. See
 [lua config](/guide/lua-config#slots) for the defaults, what each
 component shows and the fields of `ctx`.
+
+`breadcrumb` paints only while an [agent](/guide/agents) is on screen:
+the path to it, such as `kage > explore`, its task, state, time,
+tokens and tool count. `title` paints nothing then. The default header
+is `{ left = { "breadcrumb", "title" }, right = { "widgets", "search" } }`,
+so a custom header that drops `breadcrumb` shows no trail in an agent
+view.
 
 ### `kage.register_block_renderer(kind, render | nil)`
 
@@ -377,7 +384,7 @@ string, a function, or `"<Nop>"`. `opts` takes `desc` (shown in the
 
 ```lua
 kage.keymap.set("n", "<leader>m", kage.action.OpenModelPicker, { desc = "pick a model" })
-kage.keymap.set("g", "<C-t>", ":theme set tokyo-night")
+kage.keymap.set("g", "<F6>", ":theme set tokyo-night")
 kage.keymap.set("i", "<C-l>", function() kage.ui.notify("hi") end)
 ```
 
@@ -395,7 +402,8 @@ not mappings. Shadow them with `"<Nop>"` instead.
 
 **Since API 2.** Built-in actions to use as an rhs, such as
 `kage.action.OpenModelPicker` or `kage.action.FoldAll`.
-`kage.action.scroll(n)` scrolls by `n` lines. See
+`kage.action.OpenAgents` opens the agents overlay, mapped to `<C-t>`
+by default. `kage.action.scroll(n)` scrolls by `n` lines. See
 [lua config](/guide/lua-config#rhs) for the full list.
 
 ### `kage.register_keybinding(spec, handler)` -> off
@@ -538,6 +546,12 @@ the `widgets` component paints it after the widgets.
 Remove a status entry. Equivalent to `kage.set_status(key, nil)`.
 
 ## events
+
+Events and hooks come from the session you talk to. Runs of
+[agents](/guide/agents) send plugins no events and run no hooks:
+`transform_context`, `before_provider_request` and
+`should_stop_after_turn` do not see them either. An agent can still
+call plugin tools, whose handlers run as usual.
 
 ### `kage.on(event: string, handler)` -> off
 

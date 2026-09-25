@@ -24,7 +24,7 @@ the only crate that wires the whole graph together.
 
 | Crate            | Responsibility                                      |
 | ---------------- | --------------------------------------------------- |
-| `kage-core`      | Message types, content blocks, errors, cancel flag, the engine protocol (events and commands), the keymap, option and highlight registries |
+| `kage-core`      | Message types, content blocks, errors, the cancel tree, the engine protocol (events, commands and the agent tree), agent definitions, the keymap, option and highlight registries |
 | `kage-jsonrpc`   | Shared bidirectional JSON-RPC peer over stdio       |
 | `kage-provider`  | LLM provider clients, registry, model catalog       |
 | `kage-tools`     | Tool trait, built-in tools, tool registry           |
@@ -58,6 +58,75 @@ back when it ends. Permission questions travel over the same channels:
 the engine publishes `permission_requested` and waits for the client's
 answer. The TUI renders the stream into its buffer; the ACP adapter
 turns it into `session/update` notifications.
+
+## agents
+
+An agent is an engine session with a parent link. The `agent` tool
+never touches sessions itself. It sends a spawn request to the
+dispatcher and waits on a reply channel, polling its cancel flag.
+
+```text
+parent runner thread          dispatcher                     agent runner thread
+  loop -> agent tool
+    spawn request ---------->  check the parent, definition, depth
+                               open the agent session
+                               publish agent_spawned
+                               start its run, or queue it  --->  kage-loop run()
+    wait on the reply ...                                        (own seq, file,
+                                                                  cancel flag)
+                               run finished  <-----------------
+                               send the result, start the
+                               next queued agent
+    <----------- tool result
+  loop appends the result and continues
+```
+
+The dispatcher still never blocks, and the wait graph stays a DAG: a
+parent's tool thread waits on a reply that the dispatcher sends when
+the agent's run ends, never the reverse. The link lives on the engine's
+session, with the parent, the depth and the reply channel. The first
+run that finishes takes the channel, so later runs a user starts in
+the agent never answer the parent twice. The running limit counts
+agent runs in flight, except agents that wait on their own agents, and
+queued agents start in spawn order.
+
+An agent session is built from its parent's live state: the
+definition's model and thinking level over the parent's, the parent's
+tools filtered by the definition, a clone of the parent's permission
+gate (its rules, mode and session approvals are shared), and no plugin
+runtime or MCP manager of its own. Its runs forward no plugin events
+and use the plain run hooks. The `agent` tool is registered per run,
+never stored in the session's tools, so plugin reloads and MCP
+refreshes cannot drop or duplicate it. It is registered while the
+session's depth is below `agent_max_depth`.
+
+**The cancel tree.** `CancelFlag` is a node with an optional parent.
+An agent's flag is a child of its parent's, and `is_cancelled` walks up
+the chain. Cancelling a session stops every agent below it through the
+checks every loop, tool and gate already makes, while cancelling an
+agent never reaches its parent. The dispatcher resets a session's own
+flag when its run ends, so an idle parent that was cancelled cannot
+cancel a run later started in one of its agents.
+
+**The agent tree.** Agents need one new event and no new commands.
+`agent_spawned` is published as the agent's first envelope, on the
+agent's own session:
+
+```json
+{"session":"<agent>","seq":1,"type":"agent_spawned","parent":"<parent>","tool_call_id":"<call>","agent":"explore","description":"map exports"}
+```
+
+After it, the agent publishes the usual events on its own session.
+Steering, messaging and stopping an agent are the ordinary prompt and
+cancel commands addressed to its session. Commands that replace or
+copy a session (new, resume, fork, clone) are refused for an agent.
+`AgentTree` in `kage_core::protocol` folds envelopes into one node per
+agent with its parent, state, usage, tool count, latest tool and open
+approvals. The TUI builds its cards, pinned list, drill-in views,
+breadcrumb and agents overlay from it, and routes each agent's loop
+events into that agent's own buffer. The ACP adapter uses it to find
+the client session at the root of an agent's branch, which gets the
+agent's approval requests and progress on its top-level `agent` call.
 
 ## data flow per turn
 
@@ -99,6 +168,13 @@ Tool calls and results are not separate entries: they ride inside
 `message` content blocks. The remaining entry kinds are
 `thinking_level_change`, `model_change`, `label`, `title`, and the
 plugin-defined `custom`.
+
+An agent's file sits next to its parent's. Its header's
+`parent_session` names the parent, and its first entry is a `custom`
+entry of kind `kage:agent` with the parent, the `agent` call id, the
+agent name and the task description, followed by a `title` entry.
+Session listings read that entry to hide agent files from `kage list`
+and the pickers, and `/tree` shows them under their parent.
 
 Files are append-only: the writer never rewrites prior lines, and an
 advisory lock rejects a second concurrent writer. To branch from an
@@ -154,6 +230,7 @@ reads the retained lines, so the screen never waits on Lua.
 The agent loop is human-paced (one prompt at a time, one stream at a
 time). Providers expose blocking iterators over server-sent events.
 Tools run sequentially in the simplest case, in parallel by explicit
-opt-in for the read-only ones. None of this benefits from `tokio`,
+opt-in for the read-only ones, and a batch made only of `agent` calls
+runs its agents at once on plain threads. None of this benefits from `tokio`,
 and adding it forces every layer to colour-async. The synchronous
 design keeps each crate small and the call stack readable.

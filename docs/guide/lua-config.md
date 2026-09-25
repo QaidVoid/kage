@@ -116,6 +116,8 @@ value)` is the same as assigning.
 | `compaction_threshold` | `loop.compaction_threshold` | number, 0 to 1 (0 turns compaction off) | `0.8` | next session |
 | `leader` | `keybindings.leader` | one key, such as `","` or `"<Space>"` | `"\\"` (backslash) | mappings set after it |
 | `timeoutlen` | `keybindings.timeoutlen` | integer milliseconds, 0 to 5000 | `1000` | immediately |
+| `agent_max_depth` | `agents.max_depth` | integer, 0 to 3 (0 turns the `agent` tool off) | `1` | at startup |
+| `agent_max_running` | `agents.max_running` | integer, 1 to 16 | `4` | at startup |
 
 `transcript_on_exit` picks what kage prints to the terminal after you
 quit: the whole conversation as plain text, only the part from your
@@ -125,6 +127,11 @@ session was recorded.
 `thinking_level` and `compaction_threshold` set in `init.lua` apply to
 the first session, because kage starts it after `init.lua` has run. An
 empty `thinking_level` means the model's default level.
+
+`agent_max_depth` limits how deep [agents](/guide/agents) nest: `1`
+lets only the main session start agents. `agent_max_running` limits
+how many agents run at once, and further agents wait their turn. Both
+are read once when the TUI starts, after `init.lua` has run.
 
 Every set fires the [`option_set`](#configuration-events) event. `:theme set`,
 `:mouse` and the `:settings` dialog set options too, with source
@@ -201,7 +208,10 @@ mapping in `i` or `g` would catch it while you type.
 `OpenCommandPalette`, `SearchNext`, `SearchPrev`, `YankFocusedBlock`,
 `CycleThinkingLevel`, `CyclePane`, `FocusPrev`, `FocusNext`,
 `OpenHelp`, `OpenJumpPicker`, `AttachClipboardImage`, `EnterVisual`,
-`QueuePrompt`, and the function `scroll(n)`.
+`QueuePrompt`, `OpenAgents`, and the function `scroll(n)`.
+
+`OpenAgents` opens the [agents overlay](/guide/agents#the-agents-overlay).
+`_defaults.lua` maps it to `<C-t>` in mode `g`.
 
 `QueuePrompt` sends the draft to run after the current run ends. While
 kage is idle it does nothing, so the default `<Tab>` mapping never
@@ -217,7 +227,7 @@ local map, act = kage.keymap.set, kage.action
 
 kage.opt.leader = ","
 map("n", "<leader>m", act.OpenModelPicker, { desc = "pick a model", group = "mine" })
-map("g", "<C-t>", ":theme set catppuccin-mocha", { desc = "warm theme", group = "mine" })
+map("g", "<F6>", ":theme set catppuccin-mocha", { desc = "warm theme", group = "mine" })
 map("b", "<C-d>", act.scroll(20), { desc = "scroll a page", group = "mine" })
 map({ "i", "n" }, "<F5>", function()
   local ok = kage.ui.confirm("compact", "Compact the conversation now?")
@@ -298,6 +308,8 @@ api.autocmd_create("tool_call", {
 | `desc` | shown in error messages |
 
 The events and payloads are listed in the [Lua API](/plugins/api#events).
+[Agent](/guide/agents) runs fire no events, so loop events such as
+`tool_call` come only from the session you talk to.
 These events have a match value, and every other event accepts only
 `"*"`:
 
@@ -473,7 +485,7 @@ kage's defaults are:
 
 ```lua
 local dot = " \u{B7} "
-kage.ui.set_slot("header", { left = { "title" }, right = { "widgets", "search" } })
+kage.ui.set_slot("header", { left = { "breadcrumb", "title" }, right = { "widgets", "search" } })
 kage.ui.set_slot("activity", { left = { "activity" } })
 kage.ui.set_slot("input_pill", { left = { "working", "mode" }, right = { "thinking" } })
 kage.ui.set_slot("footer", {
@@ -494,9 +506,9 @@ kage.ui.set_slot("start", {
 ```
 
 `tips` is a list of short hints, and one is picked at random on each
-load. So the header row shows only once the session has a title (or a
-widget or a search is active), and the working row only while a run
-is in flight.
+load. So the header row shows only once the session has a title, an
+agent is on screen, or a widget or a search is active, and the working
+row only while a run is in flight.
 
 An item is one of:
 
@@ -509,19 +521,20 @@ An item is one of:
 | Component | Shows |
 | --- | --- |
 | `brand` | `kage` |
-| `title` | the session title, once there is one |
+| `breadcrumb` | in an agent view, the path to the agent and its task, then its state, time, tokens and tool count, such as `kage > explore: map exports` and `running`, `41s`, `22k tok`, `14 tools`. Nothing in the main view. |
+| `title` | the session title, once there is one. Nothing while an agent is on screen. |
 | `model` | the active model, by its model picker name |
 | `widgets` | plugin widgets and `kage.set_status` entries |
 | `search` | the search match count while a search is active, such as `match 2/5` |
 | `session` | the session id, as `#<id>` |
 | `working` | a spinner while a run is in flight |
-| `activity` | what the run is doing and for how long, such as `Running cargo test (14s, esc to interrupt)`. The label is `Working`, `Thinking`, the running tool, or `Waiting for your approval`. |
+| `activity` | what the run is doing and for how long, such as `Running cargo test (14s, esc to interrupt)`. The label is `Working`, `Thinking`, the running tool, `Waiting for N agents`, or `Waiting for your approval`. In an agent view it follows that agent. |
 | `context` | context use against the window, such as `12% ctx` |
 | `tokens` | total tokens and the cost when known, such as `14k tok $0.02` |
 | `thinking` | the thinking level, such as `thinking high`, hidden when off |
 | `permission` | a session permission override, such as `ask mode`, hidden when there is none |
 | `mode` | `NORMAL`, `INSERT` or `VISUAL` in vim mode, `shell` while `!` shell mode is armed, nothing otherwise |
-| `hint` | what the next keys do: the pending keys of a mapping sequence, the keys of the approval panel, the `/` palette or the `?` help, `ctrl+c again to quit` or `draft cleared, up restores it`, else a hint for the current state such as `? for shortcuts` or `tab to queue` |
+| `hint` | what the next keys do: the pending keys of a mapping sequence, the keys of the approval panel, the `/` palette or the `?` help, `ctrl+c again to quit` or `draft cleared, up restores it`, else a hint for the current state such as `? for shortcuts`, `tab to queue`, `ctrl+t for agents`, or `enter to steer`, `esc to go back` and `ctrl+c to stop` in an agent view |
 | `cwd` | the working directory |
 | `version` | the kage version |
 | `sessions` | `start` only: the three most recent sessions with their times |
@@ -529,7 +542,8 @@ An item is one of:
 
 Keys named in hints follow your mappings. Remapping
 `OpenModelPicker` changes the start card's `ctrl+p to change`, and
-remapping `QueuePrompt` changes the footer's `tab to queue`.
+remapping `QueuePrompt` changes the footer's `tab to queue`, and
+remapping `OpenAgents` changes `ctrl+t for agents`.
 
 In `start`, some components paint differently. `brand` adds the
 version. `model`, `cwd`, `permission` and `thinking` become labeled
@@ -734,7 +748,7 @@ transcript_on_exit = "last"
 [keybindings]
 leader = " "
 timeoutlen = 600
-bindings = { "ctrl+t" = "theme set catppuccin-mocha", "<F2>" = "action:OpenModelPicker" }
+bindings = { "f6" = "theme set catppuccin-mocha", "<F2>" = "action:OpenModelPicker" }
 ```
 
 `[keybindings] bindings` always maps in mode `g`, so keep mappings that

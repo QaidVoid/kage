@@ -5,8 +5,8 @@ optional, and sane defaults work without it. `kage init` writes a
 starter one.
 
 The TUI also runs `~/.config/kage/init.lua` after this file, so
-anything set there wins. The `[ui]` and `[loop]` keys that are options
-and the `[keybindings]` table feed the same settings `init.lua` sets.
+anything set there wins. The `[ui]`, `[loop]` and `[agents]` keys
+that are options and the `[keybindings]` table feed the same settings `init.lua` sets.
 See [lua config](/guide/lua-config).
 
 Keys are grouped into tables:
@@ -59,13 +59,20 @@ suppress_warning = false
 timeoutlen = 1000
 # key -> command line, or `action:<Name>` for a built-in action
 # (see the keybindings guide). Every binding maps in mode g.
-# bindings = { "ctrl+t" = "theme set tokyo-night", "<leader>s" = "settings" }
+# bindings = { "f6" = "theme set tokyo-night", "<leader>s" = "settings" }
 
 [loop]
 # compact older history once the prompt fills this fraction of the
 # model context window (0.0-1.0). Applies on next launch; also
 # editable in the :settings dialog.
 compaction_threshold = 0.8
+
+[agents]
+# how deep agents may nest (0 to 3). 0 removes the agent tool, and 1
+# lets only the main session start agents.
+max_depth = 1
+# how many agents run at once (1 to 16). further agents wait their turn.
+max_running = 4
 
 [permissions]
 # tool permission rules. built-in tools are allowed unless configured
@@ -81,7 +88,8 @@ compaction_threshold = 0.8
 
 Every table and key is optional. Omitted values fall back to the
 defaults shown above. See [permissions](/guide/permissions) for the
-rules reference.
+rules reference and [agents](/guide/agents#limits) for the `[agents]`
+limits.
 
 ## layering
 
@@ -101,33 +109,38 @@ as `kage.opt.theme`, wins over every layer above.
 
 ## project config and trust
 
-A project file can start processes and loosen your tool rules, so
-three of its tables only apply once you trust the project:
+A project can start processes and loosen your tool rules, so these
+parts of it only apply once you trust the project:
 
-- `[mcp]` (servers and `allow_sampling`)
-- `[permissions]` (including `[permissions.mcp]`)
-- `[plugins.capabilities]`
+- `[mcp]` in `.kage/config.toml` (servers and `allow_sampling`)
+- `[permissions]` in `.kage/config.toml` (including
+  `[permissions.mcp]`)
+- `[plugins.capabilities]` in `.kage/config.toml`
+- the agent definitions in `.kage/agents/` (see
+  [agents](/guide/agents#project-agents-and-trust))
 
-Every other project key, such as `[ui]` or `[loop]`, applies without
-trust. Provider settings, `[acp.agents]`, `provider.default_model`
-and `plugins.dir` are only read from your user config.
+All of them share one trust decision. Every other project key, such
+as `[ui]`, `[loop]` or `[agents]`, applies without trust. Provider
+settings, `[acp.agents]`, `provider.default_model` and `plugins.dir`
+are only read from your user config.
 
-When the TUI starts in a project whose file sets any of these tables,
-it lists what the file asks for (server commands and URLs, sampling,
-capability grants, permission changes) and asks `Trust this project
-config? [y/N]`. Answering yes records the trust. Any other answer
-starts kage with those tables ignored.
+When the TUI starts in a project that sets any of these, it lists what
+the project asks for (server commands and URLs, sampling, capability
+grants, permission changes, project agents) and asks `Trust this
+project? [y/N]`. Answering yes records the trust. Any other answer
+starts kage with those tables and agents ignored.
 
 Print mode, `kage rpc` and `kage mcp serve` cannot ask. They print one
-warning on stderr and ignore the tables. Run `kage trust` in the
-project directory to allow them, and `kage trust --revoke` to take the
-trust back. An editor driving `kage rpc` needs `kage trust` once per
+warning on stderr and ignore the tables and agents. Run `kage trust`
+in the project directory to allow them, and `kage trust --revoke` to
+take the trust back. An editor driving `kage rpc` needs `kage trust` once per
 project.
 
 Trust covers the values as they are when you approve them. Editing a
-server command, a permission rule or a capability grant makes kage ask
-again. Reordering keys does not. The whole table is ignored while
-untrusted, even settings that only tighten your rules, such as a
+server command, a permission rule or a capability grant, or adding,
+removing or editing a project agent file, makes kage ask again.
+Reordering keys does not. The whole table is ignored while untrusted,
+even settings that only tighten your rules, such as a
 project that only adds `deny` patterns. `kage doctor` reports an
 untrusted project file.
 
@@ -170,6 +183,8 @@ endpoints, and per-provider overrides (base URL, headers, key env var).
 | `~/.config/kage/init.lua`           | trusted Lua config, TUI only ([lua config](/guide/lua-config)) |
 | `~/.config/kage/lua/`               | modules `init.lua` can `require`                               |
 | `<workdir>/.kage/config.toml`       | project-local config overlay                                   |
+| `~/.config/kage/agents/`            | agent definition `.md` files ([agents](/guide/agents))         |
+| `<workdir>/.kage/agents/`           | project agent definitions, loaded once the project is trusted  |
 | `~/.config/kage/themes/`            | user theme TOML files                                          |
 | `~/.config/kage/plugins/`           | Lua plugin scripts                                             |
 | `~/.config/kage/skills/`            | `SKILL.md` skill directories                                   |

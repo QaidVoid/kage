@@ -3,7 +3,7 @@
 `kage rpc` is a spec-conformant **Agent Client Protocol** agent:
 JSON-RPC 2.0 over stdio, one message per line (newline-delimited),
 protocol version 1. Zed speaks ACP natively, so it drives kage the
-same way it drives its other external agents - no shim, no wrapper.
+same way it drives its other external agents, with no shim or wrapper.
 
 ## start the agent
 
@@ -68,6 +68,26 @@ kage advertises `agentCapabilities.loadSession: true`, empty
 `authMethods`, and `agentInfo {name: "kage", version}`. It does not
 request `fs`/`terminal` client capabilities: kage runs its own tools
 in-process and gates them through `session/request_permission`.
+
+## agents
+
+Editor sessions can start [agents](/guide/agents). Agents are not ACP
+sessions, so they show up on the top-level `agent` tool call of your
+session:
+
+- `tool_call_update` notifications replace that call's content with
+  the agent's latest step, such as `explore: Read src/lib.rs`, and end
+  with `explore: done`, `explore: stopped` or `explore: failed`.
+- An agent's `session/request_permission` arrives on your session
+  with the `agent` call as its tool call, a title that names the agent
+  and the tool, such as `explore: bash`, and the agent's tool input as
+  `rawInput`.
+- `session/cancel` stops the turn and every agent under it.
+
+Every tool without a config rule asks over ACP, so Zed asks before
+each agent starts and before each of its tool calls, unless your
+`[permissions]` allow them. Limits come from the `[agents]` table of
+your config files.
 
 ## hand-driven smoke test
 

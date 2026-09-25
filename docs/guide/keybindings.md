@@ -25,6 +25,7 @@ switch modes or panes.
 | `Ctrl+End`       | Snap to the bottom, re-arm auto-follow      |
 | `Ctrl+P`         | Open the model picker                       |
 | `Ctrl+S`         | Open the session picker                     |
+| `Ctrl+T`         | Open the agents overlay                     |
 | `Ctrl+F`         | Search the conversation (Insert mode or modeless) |
 | `F3`             | Open the message jump picker (filter, Enter jumps) |
 | `Alt+P` / `Alt+N` | Jump to the previous / next block          |
@@ -99,6 +100,11 @@ same escalation:
    quit. The footer reads `ctrl+c again to quit`, and a second
    `Ctrl+C` within 2 seconds quits.
 
+In an agent view (see [agents](#agents)), the last two steps change:
+`Esc` goes back one level and never stops the agent, and `Ctrl+C`
+stops the agent while it runs, else goes back. Quit is only armed
+from the main view.
+
 An open popup, such as the completion popup or the command palette,
 takes `Esc` first. In vim mode `Esc` keeps its vim meaning. While an
 overlay is open (a picker, a dialog, the `:` line, the search line or
@@ -124,7 +130,12 @@ to end.
 
 While kage works, the working row above the input shows what it is
 doing and for how long, such as
-`Running cargo test (14s, esc to interrupt)`.
+`Running cargo test (14s, esc to interrupt)`. While agents run it
+counts them instead, such as `Waiting for 3 agents (41s, esc to
+interrupt)`.
+
+In an agent view, `Enter` and `Tab` send to that agent instead of the
+main session.
 
 ## approvals
 
@@ -150,6 +161,33 @@ typing meant for the prompt cannot answer it. Option 5 opens a
 one-line field: `Enter` denies the call and sends your text to the
 model, and `Esc` goes back to the options. When several calls wait,
 the title shows `1 of 3`.
+
+Requests from [agents](/guide/agents#approvals-from-agents) join the
+same queue. The title then starts with the agent's name, and option 5
+sends your text to that agent.
+
+## agents
+
+These keys drive [agents](/guide/agents#agents-in-the-tui). Click a
+row of the pinned agent list above the input, or pick one in the
+agents overlay, to open that agent. The whole view then shows it,
+with a breadcrumb in the header.
+
+| Key | Where | Effect |
+| --- | --- | --- |
+| `Ctrl+T` | anywhere | Open the agents overlay (also `/agents`) |
+| `Enter` | agent view | Steer the running agent, or message a finished one |
+| `Tab` | agent view | Queue the prompt until the agent's run ends |
+| `Esc` | agent view, empty prompt | Go back one level, to the parent agent or the main view |
+| `Ctrl+C` | agent view, empty prompt | Stop the agent while it runs, else go back |
+| `Up` / `Down`, `k` / `j` | overlay | Move the selection |
+| `Home` / `End` | overlay | Jump to the first / last row |
+| `Enter` | overlay | Open the selected agent, or the main view from the `kage` row |
+| `x` | overlay | Stop the selected agent and the agents under it |
+| `Esc` | overlay | Close the overlay |
+
+In vim mode, `Esc` in Insert mode still enters Normal mode, and `Esc`
+in Normal mode goes back from an agent view.
 
 ## search
 
@@ -334,7 +372,7 @@ leader = "<C-x>"
 # ms a mapping that is also the start of a longer one waits for
 # more keys (0 to 5000). Default 1000.
 timeoutlen = 600
-bindings = { "ctrl+t" = "theme set tokyo-night", "ctrl+l" = "action:OpenModelPicker", "<leader>s" = "settings", "<leader>q" = "quit" }
+bindings = { "f6" = "theme set tokyo-night", "ctrl+l" = "action:OpenModelPicker", "<leader>s" = "settings", "<leader>q" = "quit" }
 ```
 
 With this table, `Ctrl+X` then `s` opens the settings dialog and
@@ -373,6 +411,7 @@ These action names work after `action:`:
 | overlays   | `OpenCommandPalette`   | open the slash command palette    |
 | overlays   | `OpenJumpPicker`       | open the message jump picker      |
 | overlays   | `OpenHelp`             | open the keyboard reference       |
+| overlays   | `OpenAgents`           | open the agents overlay           |
 | folds      | `ToggleFold`           | toggle the focused block's fold   |
 | folds      | `UnfoldAll`            | open every fold                   |
 | folds      | `FoldAll`              | close every fold                  |

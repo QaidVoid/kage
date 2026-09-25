@@ -38,6 +38,7 @@ The table follows the palette's order.
 | `/model [id]`             | Switch the active model (`provider:model`). Without an id, open the model picker. |
 | `/new`                    | Start a fresh empty session, keeping the current model |
 | `/compact`                | Run a compaction pass right now                 |
+| `/agents`                 | Open the agents overlay: every agent of the session, live or finished (see [agents](/guide/agents#the-agents-overlay)) |
 | `/permission [mode]` / `/perm` | Show or set the session permission mode (`allow\|ask\|deny\|default`) |
 | `/login [provider]`       | Add or update a provider credential: suspends the TUI, runs the interactive login, then refreshes the model list in place |
 | `/settings`               | Open the settings dialog, which lists every option (see [settings](#settings)) |
@@ -46,7 +47,7 @@ The table follows the palette's order.
 | `/theme set <name>`       | Switch theme                                    |
 | `/theme current`          | Print the active theme name                     |
 | `/export [file]`          | Write the session transcript to a Markdown file (defaults to `<session-id-prefix>.md` in the working directory) |
-| `/tree`                   | Browse the session fork forest (resume, fork, delete) |
+| `/tree`                   | Browse the session fork forest (resume, fork, delete). Agent sessions sit under their parent with an `agent: ` label. |
 | `/clone`                  | Duplicate the session to a new id and continue in the clone |
 | `/keybindings` / `/keys`  | List active key bindings (config, plugin, reserved) |
 | `/attach [path]` / `/img` | Attach an image to the next prompt: a file `path`, or the OS clipboard image when no path is given |

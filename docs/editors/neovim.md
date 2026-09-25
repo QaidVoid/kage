@@ -109,3 +109,8 @@ with `vim.ui.select` so a human approves each tool call; and route
 `agent_message_chunk` / `agent_thought_chunk` content into a scratch
 buffer. Send `{ method = "session/cancel", params = { sessionId =
 session } }` (a notification, no `id`) to stop the in-flight turn.
+
+When kage starts [agents](/guide/agents), their permission requests
+arrive on the same session with titles such as `explore: bash`, and
+their progress replaces the content of the `agent` tool call. See
+[zed](/editors/zed#agents) for the details.

@@ -35,8 +35,8 @@ once you trust the project (see
 
 ## how rules evaluate
 
-Tool names are literal: `bash`, `write`, `edit`, `web_fetch`, or any
-registered MCP tool name such as `github__create_issue`. A built-in
+Tool names are literal: `bash`, `write`, `edit`, `web_fetch`,
+`agent`, or any registered MCP tool name such as `github__create_issue`. A built-in
 tool with no `[permissions.tools.<name>]` entry is always allowed.
 
 When an entry exists, the `deny` patterns are checked first, then the
@@ -125,12 +125,49 @@ comment-preserving. Project `.kage/config.toml` layers are never
 baked in. After a restart the saved rule applies like any other, so
 the tool's `deny` patterns count again.
 
+## agents
+
+[Agents](/guide/agents) use their parent's permission gate, so an
+agent never has more permission than the session that started it:
+
+- The same `[permissions]` rules apply to an agent's tool calls.
+- The permission mode is shared. `/permission ask` or `/permission
+  deny` covers every agent of the session.
+- Approvals are shared. "Yes, and allow the tool for the rest of this
+  session" covers the main session and every agent under it, and an
+  approval given in one agent applies to the others.
+- An agent asks you when its parent can ask. Its request joins the one
+  approval queue, and the panel's title starts with the agent's name.
+  Print mode refuses an agent's ask, as it refuses the main session's.
+
+`agent` is a built-in tool, so starting an agent never asks unless you
+add a rule. Its rule matches the compact JSON of the call's input,
+which holds `agent`, `description` and `prompt`:
+
+```toml
+[permissions.tools.agent]
+default = "ask"
+allow = ['*"agent":"explore"*']
+```
+
+With this rule `explore` starts without asking, and every other agent
+asks first with `Start agent <name>?`. A call without an `agent` field
+starts `general`.
+
+Over ACP every tool without a rule asks, so the editor approves the
+start of each agent, and each tool call of the agent, unless your
+config allows them.
+
+Project agents can set their own tools and model, so they only load
+once you trust the project. See
+[project config and trust](/guide/config#project-config-and-trust).
+
 ## path confinement
 
 `confine_paths = true` routes the built-in file tools through
 escape-checked resolution: a read or write must stay under the working
 directory. `bash` is unaffected; a shell can always reach the whole
-filesystem, so confine it with `deny` rules instead.
+filesystem, so confine it with `deny` rules instead. Agents inherit the setting.
 
 ## runtime mode (`:permission`)
 

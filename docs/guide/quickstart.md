@@ -81,6 +81,19 @@ waits and starts a new run when the current one ends. Prompts waiting
 for delivery show above the input until kage takes them. See
 [keybindings](/guide/keybindings#sending-while-kage-works).
 
+## agents
+
+For work that needs many tool calls, such as mapping a large codebase
+or running a test suite, kage can start agents: separate sessions that
+each work on one task and reply with the result. Several agents run
+at the same time. Each shows as a live `Agent` row, the working row
+counts them, and a list above the input keeps the running ones in
+view. Click a row in that list, or pick one in the agents overlay
+(`Ctrl+T`), to open that agent, read its transcript and steer it.
+`Esc` on an empty prompt comes back. Interrupting the
+main run stops its agents too. See [agents](/guide/agents), including
+how to write your own.
+
 ## approving tool calls
 
 By default built-in tools run without asking. When a call needs your
@@ -182,4 +195,5 @@ kage -p "summarize this Cargo.toml" --model anthropic:claude-sonnet-4-6
 
 - [Keybindings](/guide/keybindings): the full key map
 - [Commands](/guide/commands): everything the `/` palette accepts
+- [Agents](/guide/agents): delegate tasks to agents and write your own
 - [Plugins](/plugins/): extend kage in Lua

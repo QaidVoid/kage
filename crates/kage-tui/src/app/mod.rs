@@ -822,11 +822,11 @@ pub struct App {
     /// truecolor.
     color_depth: crate::theme::ColorDepth,
     /// Last DECSCUSR cursor shape we emitted to the terminal, keyed
-    /// by `(mode, pane_focused_on_input)`. Stored so [`Self::draw`]
+    /// by `(mode, pane_focused_on_input, modeless)`. Stored so [`Self::draw`]
     /// can skip the escape on frames where the cursor shape would be
     /// identical, avoiding a flicker on terminals that briefly hide
     /// the cursor when the style is reapplied.
-    last_cursor_style: Option<(Mode, bool)>,
+    last_cursor_style: Option<(Mode, bool, bool)>,
     /// Optional shared snapshot of the current session's running
     /// token totals + context window. The footer, the input rule and
     /// the working row read it. Updated by the host worker thread

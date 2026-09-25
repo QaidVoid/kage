@@ -308,21 +308,17 @@ impl App {
     pub(crate) fn sync_cursor_style(&mut self) {
         use ratatui::crossterm::cursor::SetCursorStyle;
         let pane_focused = self.input.focused_pane() == Pane::Input;
-        let key = (self.input.mode(), pane_focused);
+        let key = (self.input.mode(), pane_focused, self.input.is_modeless());
         if self.last_cursor_style == Some(key) {
             return;
         }
-        // Buffer pane focused: cursor is hidden in the input card;
-        // fall back to the user's shell-default shape so anywhere
-        // ratatui happens to paint a cursor matches ambient style.
-        // Visual + Input pane keeps the input cursor hidden during
-        // buffer-cell visual selection, but we leave the shape as
-        // Block so the next mode change starts from a sensible
-        // default.
+        // Only vim insert mode keeps the bar, as vim does. The buffer
+        // pane hides the input cursor, so it hands the shape back to
+        // the terminal's own default.
         let style = match key {
-            (Mode::Insert, true) => SetCursorStyle::SteadyBar,
-            (Mode::Normal | Mode::Visual, true) => SetCursorStyle::SteadyBlock,
-            (_, false) => SetCursorStyle::DefaultUserShape,
+            (_, false, _) => SetCursorStyle::DefaultUserShape,
+            (Mode::Insert, true, false) => SetCursorStyle::SteadyBar,
+            (_, true, _) => SetCursorStyle::SteadyBlock,
         };
         let _ = ratatui::crossterm::execute!(std::io::stdout(), style);
         self.last_cursor_style = Some(key);

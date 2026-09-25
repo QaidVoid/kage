@@ -215,7 +215,7 @@ start card while the conversation is empty.
 The override lives for the current session only and is never written
 to the config file. `/new`, a session opened from the picker and a
 clone start with the configured rules again. It short-circuits the
-per-tool rules entirely.
+per-tool rules, except a configured deny still denies.
 While `deny` is active, even allow-listed tools and tools approved in
 the panel refuse. While `ask` is active, even never-configured tools
 prompt, except the tools you approved for the session or always.

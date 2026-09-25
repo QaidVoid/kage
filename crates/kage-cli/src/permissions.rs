@@ -8,7 +8,8 @@
 //! default, ask for editor sessions). Deny synthesizes an error output, allow
 //! passes through, and ask blocks the run until an [`Asker`] delivers the
 //! answer, or, when there is none (print mode), denies with a message
-//! pointing at the config. Tools approved for the session skip the
+//! pointing at the config. A session mode short-circuits the rules, but
+//! a configured deny still denies. Tools approved for the session skip the
 //! ask, but never a deny mode or a configured deny.
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -55,7 +56,8 @@ pub(crate) struct PermissionGate {
     mcp_servers: Arc<[String]>,
     cancel: CancelFlag,
     /// Session-scoped mode override. `Some(action)` short-circuits
-    /// the per-tool rules for every call; `None` (the initial state)
+    /// the per-tool rules for every call except a configured deny;
+    /// `None` (the initial state)
     /// evaluates the configured rules, which default to allow. Never
     /// persisted: it lives and dies with this session.
     mode: Arc<Mutex<Option<PermissionAction>>>,
@@ -276,7 +278,14 @@ impl Hooks for PermissionGate {
         {
             return None;
         }
-        let (action, rule) = mode.map_or(configured, |mode| (mode, Rule::Mode));
+        // Deny wins both ways: a deny mode denies everything, and a
+        // configured deny survives an allow or ask session mode.
+        let (action, rule) = match mode {
+            None => configured,
+            Some(PermissionAction::Deny) => (PermissionAction::Deny, Rule::Mode),
+            Some(_) if configured.0 == PermissionAction::Deny => configured,
+            Some(action) => (action, Rule::Mode),
+        };
         match (action, &rule) {
             (PermissionAction::Allow, _) => None,
             (PermissionAction::Deny, Rule::Mode) => Some(error_output(
@@ -448,16 +457,30 @@ mod tests {
     }
 
     #[test]
-    fn mode_allow_overrides_deny_rules_and_shares_across_clones() {
+    fn mode_allow_does_not_override_configured_deny() {
         let gate = PermissionGate::new(rules_for(PermissionAction::Deny));
         let mut clone = gate.clone();
         gate.set_mode(Some(PermissionAction::Allow));
-        assert!(
-            clone
-                .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
-                .is_none()
+        let out = clone
+            .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+            .unwrap();
+        assert!(out.is_error);
+        assert_eq!(
+            out.text,
+            "`bash`: permission denied by [permissions.tools.bash]"
         );
         assert_eq!(clone.mode(), Some(PermissionAction::Allow));
+    }
+
+    #[test]
+    fn mode_ask_does_not_override_configured_deny() {
+        let mut gate = PermissionGate::new(rules_for(PermissionAction::Deny));
+        gate.set_mode(Some(PermissionAction::Ask));
+        let out = gate
+            .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+            .unwrap();
+        assert!(out.is_error);
+        assert!(out.text.contains("permission denied by"), "{}", out.text);
     }
 
     #[test]

@@ -145,6 +145,37 @@ impl Tool for WaitsForDeliveryTool {
     }
 }
 
+/// Replies with the call id its context carries.
+#[derive(Debug)]
+struct CallIdTool;
+
+impl Tool for CallIdTool {
+    fn name(&self) -> &'static str {
+        "call_id"
+    }
+    fn description(&self) -> &'static str {
+        "reply with the call id"
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn risk(&self) -> Risk {
+        Risk::Read
+    }
+    fn execute(
+        &self,
+        _input: serde_json::Value,
+        cx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput {
+            is_error: false,
+            text: cx.call_id().map(ToString::to_string).unwrap_or_default(),
+            structured: None,
+            terminate: false,
+        })
+    }
+}
+
 fn registry_with_echo() -> ToolRegistry {
     ToolRegistry::new()
         .with(Arc::new(EchoTool))
@@ -158,6 +189,54 @@ fn pending(name: &str, input: serde_json::Value) -> PendingToolCall {
         name: name.to_owned(),
         input,
     }
+}
+
+#[test]
+fn tools_see_their_own_call_id() {
+    let tools = ToolRegistry::new().with(Arc::new(CallIdTool));
+    let calls = || {
+        ["first", "second"].map(|id| PendingToolCall {
+            id: ToolCallId::new(id),
+            name: "call_id".to_owned(),
+            input: serde_json::json!({}),
+        })
+    };
+    let outputs = |outcome: DispatchOutcome| -> Vec<String> {
+        outcome
+            .results
+            .iter()
+            .filter_map(|m| match &m.content[0] {
+                Content::ToolResultBlock { output, .. } => Some(output.clone()),
+                _ => None,
+            })
+            .collect()
+    };
+    let cancel = CancelFlag::new();
+    let workdir = std::path::Path::new("/tmp");
+
+    let sequential = dispatch_tool_calls(
+        calls().into(),
+        &tools,
+        workdir,
+        &cancel,
+        false,
+        MessageId::new(),
+        &mut NoopHooks,
+        &mut |_| {},
+    );
+    assert_eq!(outputs(sequential), ["first", "second"]);
+
+    let parallel = dispatch_tool_calls_parallel(
+        calls().into(),
+        &tools,
+        workdir,
+        &cancel,
+        false,
+        MessageId::new(),
+        &mut NoopHooks,
+        &mut |_| {},
+    );
+    assert_eq!(outputs(parallel), ["first", "second"]);
 }
 
 #[test]

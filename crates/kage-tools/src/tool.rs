@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use kage_core::{CancelFlag, Risk, ToolOutput, ToolUpdate};
+use kage_core::{CancelFlag, Risk, ToolCallId, ToolOutput, ToolUpdate};
 
 use crate::ToolError;
 use crate::path::{resolve, resolve_under};
@@ -21,17 +21,19 @@ pub trait ProgressSink: Send + Sync {
 
 /// Per-tool override for dispatch ordering.
 ///
-/// The loop runs tools in parallel when [`crate::LoopConfig::parallel_tools`]
-/// is true. A tool returning [`ExecMode::Sequential`] from
-/// [`Tool::execution_mode`] forces its batch to fall back to sequential
-/// even when parallelism is enabled, so two such tools never race for a
-/// shared resource (e.g. the user's terminal in `bash`).
+/// The loop runs a batch of tool calls in parallel when its
+/// `parallel_tools` flag is set and no tool in the batch returns
+/// [`ExecMode::Sequential`], so two such tools never race for a shared
+/// resource (e.g. the user's terminal in `bash`). A batch in which every
+/// tool returns [`ExecMode::Parallel`] runs in parallel even when the
+/// flag is off.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecMode {
     /// Run sequentially regardless of the loop-wide parallel flag.
     Sequential,
-    /// Run in parallel when the loop permits it. Same effect as returning
-    /// `None` from [`Tool::execution_mode`]; provided for explicitness.
+    /// Safe to run alongside other calls. A batch made only of such calls
+    /// runs in parallel regardless of the loop-wide parallel flag. In a
+    /// mixed batch this has the same effect as returning `None`.
     Parallel,
 }
 
@@ -61,6 +63,9 @@ pub trait Tool: Send + Sync + std::fmt::Debug {
     /// includes this tool to run sequentially, even when the loop's
     /// `parallel_tools` flag is set. Use this for tools that own a
     /// non-shareable resource (the user's terminal, a global lock).
+    /// Returning `Some(ExecMode::Parallel)` lets a batch made only of such
+    /// tools run in parallel even when the flag is off. Use this for tools
+    /// that mostly wait and share nothing (a delegated agent).
     /// Default `None` means "follow the loop config."
     fn execution_mode(&self) -> Option<ExecMode> {
         None
@@ -82,15 +87,17 @@ pub trait Tool: Send + Sync + std::fmt::Debug {
 ///
 /// Carries the working directory the tool must respect, a cancellation flag
 /// the tool should poll at safe points for long-running work, an optional
-/// [`ProgressSink`] long-running tools call to stream progress, and the
+/// [`ProgressSink`] long-running tools call to stream progress, the
 /// opt-in path-confinement flag that switches [`ToolContext::resolve_path`]
-/// to escape-checked resolution.
+/// to escape-checked resolution, and the id of the call being served when
+/// the dispatcher knows it.
 #[derive(Clone)]
 pub struct ToolContext<'a> {
     workdir: &'a Path,
     cancel: &'a CancelFlag,
     progress: Option<Arc<dyn ProgressSink>>,
     confine: bool,
+    call_id: Option<&'a ToolCallId>,
 }
 
 impl std::fmt::Debug for ToolContext<'_> {
@@ -99,13 +106,14 @@ impl std::fmt::Debug for ToolContext<'_> {
             .field("workdir", &self.workdir)
             .field("has_progress", &self.progress.is_some())
             .field("confine", &self.confine)
+            .field("call_id", &self.call_id)
             .finish_non_exhaustive()
     }
 }
 
 impl<'a> ToolContext<'a> {
-    /// Construct a context with no progress sink and no path
-    /// confinement.
+    /// Construct a context with no progress sink, no path confinement
+    /// and no call id.
     #[must_use]
     pub fn new(workdir: &'a Path, cancel: &'a CancelFlag) -> Self {
         Self {
@@ -113,7 +121,16 @@ impl<'a> ToolContext<'a> {
             cancel,
             progress: None,
             confine: false,
+            call_id: None,
         }
+    }
+
+    /// Name the tool call this context serves, so [`Self::call_id`]
+    /// returns it.
+    #[must_use]
+    pub fn with_call_id(mut self, id: &'a ToolCallId) -> Self {
+        self.call_id = Some(id);
+        self
     }
 
     /// Attach a progress sink so [`Self::update`] can emit mid-execution
@@ -144,6 +161,13 @@ impl<'a> ToolContext<'a> {
     #[must_use]
     pub fn is_confined(&self) -> bool {
         self.confine
+    }
+
+    /// The id of the tool call this context serves. The loop always sets
+    /// it. `None` when a caller built the context without one.
+    #[must_use]
+    pub fn call_id(&self) -> Option<&ToolCallId> {
+        self.call_id
     }
 
     /// Resolve `candidate` against the context workdir. Unconfined

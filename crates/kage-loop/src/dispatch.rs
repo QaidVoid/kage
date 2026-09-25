@@ -397,7 +397,7 @@ fn execute(
         });
     };
 
-    let mut cx = ToolContext::new(workdir, cancel);
+    let mut cx = ToolContext::new(workdir, cancel).with_call_id(&call.id);
     if confine_paths {
         cx = cx.with_confine();
     }

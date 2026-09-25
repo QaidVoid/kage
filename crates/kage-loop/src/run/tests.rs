@@ -706,16 +706,16 @@ impl kage_tools::Tool for SeqSleepTool {
 }
 
 fn three_tool_call_turn() -> Vec<Result<ProviderEvent, kage_provider::ProviderError>> {
+    tool_call_turn(&["seq_sleep", "sleep", "sleep"])
+}
+
+fn tool_call_turn(names: &[&str]) -> Vec<Result<ProviderEvent, kage_provider::ProviderError>> {
     let mut events = vec![Ok(ProviderEvent::MessageStart)];
-    for i in 0..3 {
+    for (i, name) in names.iter().enumerate() {
         let id = kage_core::ToolCallId::new(format!("call_{i}"));
         events.push(Ok(ProviderEvent::ToolCallStart {
             id: id.clone(),
-            name: if i == 0 {
-                "seq_sleep".into()
-            } else {
-                "sleep".into()
-            },
+            name: (*name).into(),
         }));
         events.push(Ok(ProviderEvent::ToolCallArgsDelta {
             id: id.clone(),
@@ -763,6 +763,171 @@ fn sequential_tool_in_batch_downgrades_parallel_dispatch() {
         "expected sequential fallback, elapsed {}ms",
         elapsed.as_millis(),
     );
+}
+
+/// A barrier with a timeout: each arrival waits until `parties` calls
+/// have arrived, or gives up after `timeout`.
+#[derive(Debug)]
+struct Meet {
+    parties: usize,
+    timeout: std::time::Duration,
+    arrived: std::sync::Mutex<usize>,
+    all_here: std::sync::Condvar,
+}
+
+impl Meet {
+    fn new(parties: usize, timeout: std::time::Duration) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            parties,
+            timeout,
+            arrived: std::sync::Mutex::new(0),
+            all_here: std::sync::Condvar::new(),
+        })
+    }
+
+    /// Arrive and wait. Returns whether every party arrived in time.
+    fn arrive(&self) -> bool {
+        let mut arrived = self.arrived.lock().unwrap();
+        *arrived += 1;
+        self.all_here.notify_all();
+        let (arrived, _) = self
+            .all_here
+            .wait_timeout_while(arrived, self.timeout, |n| *n < self.parties)
+            .unwrap();
+        *arrived >= self.parties
+    }
+}
+
+/// Meets the other calls of its batch at a shared [`Meet`]. Its result is
+/// an error when the others never arrived, which is what sequential
+/// dispatch produces.
+#[derive(Debug)]
+struct MeetTool {
+    name: &'static str,
+    mode: Option<kage_tools::ExecMode>,
+    meet: std::sync::Arc<Meet>,
+}
+
+impl kage_tools::Tool for MeetTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn description(&self) -> &'static str {
+        "waits for the other calls of its batch"
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn risk(&self) -> kage_core::Risk {
+        kage_core::Risk::Read
+    }
+    fn execution_mode(&self) -> Option<kage_tools::ExecMode> {
+        self.mode
+    }
+    fn execute(
+        &self,
+        _input: serde_json::Value,
+        _cx: &kage_tools::ToolContext<'_>,
+    ) -> Result<kage_core::ToolOutput, kage_tools::ToolError> {
+        let met = self.meet.arrive();
+        Ok(kage_core::ToolOutput {
+            is_error: !met,
+            text: if met { "met" } else { "alone" }.into(),
+            structured: None,
+            terminate: false,
+        })
+    }
+}
+
+/// Run one turn calling `tools` in order, then an empty final turn,
+/// and return the tool result texts in call order.
+fn run_meet_batch(tools: Vec<MeetTool>, parallel_tools: bool) -> Vec<String> {
+    let names: Vec<&str> = tools.iter().map(|t| t.name).collect();
+    let mock = MockProvider::sequence(vec![
+        tool_call_turn(&names),
+        vec![Ok(ProviderEvent::MessageEnd {
+            stop_reason: StopReason::EndTurn,
+            usage: TokenUsage::default(),
+        })],
+    ]);
+    let mut cx = AgentContext::new("mock:m", "");
+    cx.history.push(user_msg("go"));
+    let cfg = LoopConfig {
+        parallel_tools,
+        ..LoopConfig::default()
+    };
+    let mut registry = ToolRegistry::new();
+    for tool in tools {
+        registry.register(std::sync::Arc::new(tool));
+    }
+    run(
+        &mock,
+        &registry,
+        &mut cx,
+        cfg,
+        &mut NoopHooks,
+        &CancelFlag::new(),
+        |_| {},
+    )
+    .unwrap();
+    cx.history
+        .iter()
+        .filter(|m| m.role == Role::ToolResult)
+        .flat_map(|m| &m.content)
+        .filter_map(|c| match c {
+            Content::ToolResultBlock { output, .. } => Some(output.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn all_parallel_batch_runs_in_parallel_with_parallel_tools_off() {
+    let meet = Meet::new(2, std::time::Duration::from_secs(5));
+    let tools = ["a", "b"]
+        .map(|name| MeetTool {
+            name,
+            mode: Some(kage_tools::ExecMode::Parallel),
+            meet: meet.clone(),
+        })
+        .into();
+    assert_eq!(run_meet_batch(tools, false), ["met", "met"]);
+}
+
+#[test]
+fn parallel_tool_mixed_with_default_tool_runs_sequentially() {
+    let meet = Meet::new(2, std::time::Duration::from_millis(100));
+    let tools = vec![
+        MeetTool {
+            name: "a",
+            mode: Some(kage_tools::ExecMode::Parallel),
+            meet: meet.clone(),
+        },
+        MeetTool {
+            name: "b",
+            mode: None,
+            meet,
+        },
+    ];
+    assert_eq!(run_meet_batch(tools, false), ["alone", "met"]);
+}
+
+#[test]
+fn sequential_tool_forces_sequential_dispatch_with_parallel_tools_on() {
+    let meet = Meet::new(2, std::time::Duration::from_millis(100));
+    let tools = vec![
+        MeetTool {
+            name: "a",
+            mode: Some(kage_tools::ExecMode::Parallel),
+            meet: meet.clone(),
+        },
+        MeetTool {
+            name: "b",
+            mode: Some(kage_tools::ExecMode::Sequential),
+            meet,
+        },
+    ];
+    assert_eq!(run_meet_batch(tools, true), ["alone", "met"]);
 }
 
 #[derive(Debug)]

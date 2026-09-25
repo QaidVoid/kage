@@ -183,16 +183,17 @@ where
             }
 
             let workdir = cx.workdir.clone();
-            // Parallel dispatch only when the loop is configured for it AND
-            // no tool in the batch overrides to Sequential. Any sequential
-            // tool (e.g. `bash`) forces the whole batch to single-thread
-            // execution so it cannot race with the others.
-            let any_sequential = pending.iter().any(|call| {
-                tools.get(&call.name).is_some_and(|t| {
-                    matches!(t.execution_mode(), Some(kage_tools::ExecMode::Sequential))
-                })
-            });
-            let dispatch = if config.parallel_tools && !any_sequential {
+            // Parallel dispatch when the loop is configured for it and no
+            // tool in the batch overrides to Sequential (e.g. `bash`), or
+            // when every tool in the batch declares itself Parallel.
+            let mode_of = |name: &str| tools.get(name).and_then(|t| t.execution_mode());
+            let any_sequential = pending
+                .iter()
+                .any(|call| mode_of(&call.name) == Some(kage_tools::ExecMode::Sequential));
+            let all_parallel = pending
+                .iter()
+                .all(|call| mode_of(&call.name) == Some(kage_tools::ExecMode::Parallel));
+            let dispatch = if (config.parallel_tools && !any_sequential) || all_parallel {
                 dispatch_tool_calls_parallel
             } else {
                 dispatch_tool_calls

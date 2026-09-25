@@ -232,11 +232,10 @@ pub fn expand(
         let parts = conn
             .read_resource(&uri)
             .map_err(|err| read_error(&server, &uri, &err))?;
-        out.extend(
-            parts
-                .into_iter()
-                .map(|part| resource_content(&server, part, &mut budget)),
-        );
+        for part in parts {
+            out.extend(image_label(&server, &part));
+            out.push(resource_content(&server, part, &mut budget));
+        }
     }
     Ok(out)
 }
@@ -339,8 +338,23 @@ fn embedded_resource(resource: Option<&Value>) -> Option<ResourceContents> {
     }
 }
 
+/// The binary resource block naming a mentioned image blob, sent before
+/// the image so the model and clients know where it came from.
+fn image_label(server: &str, part: &ResourceContents) -> Option<Content> {
+    match part {
+        ResourceContents::Blob {
+            uri,
+            mime_type: Some(mime),
+            data,
+        } if mime.starts_with("image/") => Some(Content::Text {
+            text: resource_block::render_binary(uri, Some(server), mime, decoded_len(data)),
+        }),
+        _ => None,
+    }
+}
+
 /// One part of a resource as content: text in a resource block, an image
-/// blob as an image, and any other blob as one line.
+/// blob as an image, and any other blob as an empty binary block.
 fn resource_content(server: &str, part: ResourceContents, budget: &mut usize) -> Content {
     match part {
         ResourceContents::Text {
@@ -365,10 +379,11 @@ fn resource_content(server: &str, part: ResourceContents, budget: &mut usize) ->
             mime_type,
             data,
         } => Content::Text {
-            text: format!(
-                "[binary resource {server}:{uri}: {}, {} bytes]",
+            text: resource_block::render_binary(
+                &uri,
+                Some(server),
                 mime_type.as_deref().unwrap_or("application/octet-stream"),
-                decoded_len(&data)
+                decoded_len(&data),
             ),
         },
     }
@@ -682,7 +697,7 @@ mod tests {
     }
 
     #[test]
-    fn blobs_become_images_or_one_line() {
+    fn blobs_become_images_or_binary_blocks() {
         let (clients, catalog, _seen) = server();
         let out = expand(
             vec![text("@srv:test://img @srv:test://bin")],
@@ -693,13 +708,24 @@ mod tests {
         assert_eq!(
             out[1..],
             [
+                text(&resource_block::render_binary(
+                    "test://img",
+                    Some("srv"),
+                    "image/png",
+                    2
+                )),
                 Content::Image {
                     source: ImageSource::Base64 {
                         data: "aGk=".into()
                     },
                     mime: "image/png".into(),
                 },
-                text("[binary resource srv:test://bin: application/zip, 2 bytes]"),
+                text(&resource_block::render_binary(
+                    "test://bin",
+                    Some("srv"),
+                    "application/zip",
+                    2
+                )),
             ]
         );
     }

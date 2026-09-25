@@ -170,6 +170,18 @@ pub fn arg_hints_text(args: &[ArgSpec]) -> String {
     args.iter().map(arg_hint_one).collect::<Vec<_>>().join(" ")
 }
 
+/// The hint a completion row shows for `spec`: its argument hints, or
+/// its subcommand names as `[restart|login]` when it takes no
+/// arguments of its own.
+#[must_use]
+pub fn spec_hint(spec: &CommandSpec) -> String {
+    if spec.args.is_empty() && !spec.subcommands.is_empty() {
+        let names: Vec<&str> = spec.subcommands.iter().map(|s| s.name).collect();
+        return format!("[{}]", names.join("|"));
+    }
+    arg_hints_text(spec.args)
+}
+
 fn arg_hint_one(arg: &ArgSpec) -> String {
     match arg {
         ArgSpec::Rest { hint, .. } if hint.starts_with(['<', '[']) => (*hint).to_owned(),

@@ -2496,12 +2496,12 @@ fn slash_tab_completes_to_lcp_and_opens_popup() {
     let cl = app.slash_palette.as_ref().expect("palette open").cmdline();
     assert_eq!(
         cl.text(),
-        "zz-one",
+        "zz-one ",
         "the next tab inserts the highlighted row"
     );
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     let cl = app.slash_palette.as_ref().expect("palette open").cmdline();
-    assert_eq!(cl.text(), "zz-two", "then tab cycles");
+    assert_eq!(cl.text(), "zz-two ", "then tab cycles");
 }
 
 #[test]
@@ -2513,8 +2513,7 @@ fn palette_tab_completes_a_typed_alias_to_its_command() {
     assert_eq!(palette_selected(&app).as_deref(), Some("permission"));
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     let cl = app.slash_palette.as_ref().expect("palette open").cmdline();
-    assert_eq!(cl.text(), "permission");
-    assert_eq!(palette_selected(&app).as_deref(), Some("permission"));
+    assert_eq!(cl.text(), "permission ");
 }
 
 #[test]
@@ -5515,6 +5514,19 @@ fn at_completion_offers_mcp_servers_then_their_resources() {
 }
 
 #[test]
+fn accepting_a_template_puts_the_cursor_on_its_placeholder() {
+    let (mut app, _rx, _events) = mcp_app();
+    type_str(&mut app, "read @everything:");
+    app.handle_key(code(KeyCode::Down));
+    app.handle_key(code(KeyCode::Down));
+    app.handle_key(code(KeyCode::Tab));
+    let text = "read @everything:test://static/resource/{id}";
+    assert_eq!(app.input.text(), text);
+    assert_eq!(app.input.cursor(), text.find('{').unwrap());
+    assert!(app.input_completion.is_none());
+}
+
+#[test]
 fn the_palette_lists_mcp_prompts_with_their_hint_and_tag() {
     let (mut app, _rx, _events) = mcp_app();
     app.apply(InputAction::OpenCommandPalette);
@@ -5538,10 +5550,66 @@ fn the_palette_lists_mcp_prompts_with_their_hint_and_tag() {
             ),
             (
                 "everything:complex_prompt".to_owned(),
-                "A prompt with arguments  [mcp]  <temperature> [style]".to_owned()
+                "<temperature> [style]  A prompt with arguments  [mcp]".to_owned()
             ),
         ]
     );
+}
+
+#[test]
+fn palette_tab_adds_a_space_so_arguments_do_not_merge() {
+    let (mut app, _rx, _events) = mcp_app();
+    for (typed, after_tab) in [
+        ("everything:co", "everything:complex_prompt "),
+        ("hel", "help "),
+    ] {
+        app.apply(InputAction::OpenCommandPalette);
+        let palette = app.slash_palette.as_mut().unwrap();
+        for c in typed.chars() {
+            crate::overlay::OverlayWidget::handle_key(palette, key(c));
+        }
+        crate::overlay::OverlayWidget::handle_key(palette, code(KeyCode::Tab));
+        assert_eq!(palette.cmdline().text(), after_tab);
+        for c in "0.7".chars() {
+            crate::overlay::OverlayWidget::handle_key(palette, key(c));
+        }
+        assert_eq!(palette.cmdline().text(), format!("{after_tab}0.7"));
+        app.slash_palette = None;
+    }
+}
+
+#[test]
+fn enter_on_a_prompt_with_required_arguments_waits_for_them() {
+    let (mut app, rx, _events) = mcp_app();
+    app.apply(InputAction::OpenCommandPalette);
+    for c in "everything:co".chars() {
+        let palette = app.slash_palette.as_mut().unwrap();
+        crate::overlay::OverlayWidget::handle_key(palette, key(c));
+    }
+    app.handle_key(code(KeyCode::Enter));
+    let palette = app.slash_palette.as_ref().expect("palette stays open");
+    assert_eq!(palette.cmdline().text(), "everything:complex_prompt ");
+    assert!(rx.try_recv().is_err(), "nothing runs");
+    for c in "0.7".chars() {
+        app.handle_key(key(c));
+    }
+    app.handle_key(code(KeyCode::Enter));
+    assert!(app.slash_palette.is_none());
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(RunRequest::Submit { text, .. }) if text == "/everything:complex_prompt 0.7"
+    ));
+
+    app.apply(InputAction::OpenCommandPalette);
+    for c in "everything:si".chars() {
+        app.handle_key(key(c));
+    }
+    app.handle_key(code(KeyCode::Enter));
+    assert!(app.slash_palette.is_none());
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(RunRequest::Submit { text, .. }) if text == "/everything:simple_prompt"
+    ));
 }
 
 #[test]
@@ -5667,15 +5735,17 @@ fn the_mcp_picker_lists_every_status_and_enter_restarts() {
     let registry = app.command_registry();
     let _ = app.run_command_validated("mcp", &registry);
     assert_eq!(app.picker_kind, Some(PickerKind::Mcp));
-    let mut terminal = Terminal::new(TestBackend::new(120, 36)).unwrap();
-    app.render_into(&mut terminal).unwrap();
-    let rows = snapshot_rows(&terminal);
-    for want in [
-        "everything  connected    11 tools \u{B7} 2 prompts \u{B7} 3 resources",
-        "linear      needs login  enter to log in",
-        "broken      failed       spawn `nope`: No such file or directory",
-    ] {
-        assert!(rows.iter().any(|r| r.contains(want)), "{want}\n{rows:#?}");
+    for (w, h) in [(120, 36), (80, 24)] {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        app.render_into(&mut terminal).unwrap();
+        let rows = snapshot_rows(&terminal);
+        for want in [
+            "everything  connected    11 tools \u{B7} 2 prompts \u{B7} 2 resources \u{B7} 1 template",
+            "linear      needs login  enter to log in",
+            "broken      failed       spawn `nope`: No such file or directory",
+        ] {
+            assert!(rows.iter().any(|r| r.contains(want)), "{want}\n{rows:#?}");
+        }
     }
     app.handle_key(code(KeyCode::Enter));
     assert!(app.picker.is_none());
@@ -5755,4 +5825,12 @@ fn the_palette_lists_mcp() {
         .map(|c| c.value.as_str())
         .collect();
     assert_eq!(values, ["mcp"]);
+    let description = palette.cmdline().completions().items[0]
+        .description
+        .clone()
+        .unwrap_or_default();
+    assert!(
+        description.starts_with("[restart|login]  list MCP servers"),
+        "{description}"
+    );
 }

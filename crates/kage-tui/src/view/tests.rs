@@ -371,6 +371,49 @@ fn unfolded_pair_shows_its_output() {
     assert!(lines.iter().any(|l| l.contains("c.rs")));
 }
 
+#[test]
+fn folded_running_rows_show_their_latest_progress_line() {
+    for (name, input) in [
+        ("fix__slow", json!({"steps": 3})),
+        ("read", json!({"path": "big.log"})),
+        ("edit", json!({"path": "a.rs", "old": "a", "new": "b"})),
+    ] {
+        let mut buffer = Buffer::new();
+        buffer.push_tool_call("c1", name, input);
+        buffer.set_tool_phase("c1", tool_view::ToolPhase::Running);
+        buffer.set_tool_progress("c1", "step 1 of 3\nstep 2 of 3");
+        let input = InputState::new();
+        let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 12));
+        assert!(
+            lines.iter().any(|l| l.trim_end().ends_with("step 2 of 3")),
+            "{name}: {lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("step 1 of 3")),
+            "{name}: {lines:?}"
+        );
+    }
+}
+
+#[test]
+fn a_single_paragraph_streamed_word_by_word_shows_every_word() {
+    let mut buffer = Buffer::new();
+    let input = InputState::new();
+    let area = Rect::new(0, 0, 60, 12);
+    let mut text = String::new();
+    for word in ["Streaming", " one", " word", " at", " a", " time"] {
+        buffer.append_assistant_delta(word);
+        text.push_str(word);
+        let _ = snapshot_lines(&mut buffer, &input, area);
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        let lines = snapshot_lines(&mut buffer, &input, area);
+        assert!(
+            lines.iter().any(|l| l.contains(&text)),
+            "{text:?}\n{lines:#?}"
+        );
+    }
+}
+
 fn push_read(buffer: &mut Buffer, id: &str, path: &str) {
     buffer.push_tool_call(id, "read", json!({"path": path}));
     buffer.push_tool_result(id, "contents", false);

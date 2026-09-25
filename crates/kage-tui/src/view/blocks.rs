@@ -56,7 +56,8 @@ pub(crate) struct ToolRow<'a> {
 /// and a right-aligned duration, exit code or state word. Folded rows
 /// show a short body by kind: nothing for read-only tools, the output
 /// tail for bash, the diff for edits, and the first lines for errors
-/// and other tools. Unfolded rows show the full body up to
+/// and other tools. A running call shows its latest progress line.
+/// Unfolded rows show the full body up to
 /// [`UNFOLDED_MAX_LINES`].
 pub(crate) fn tool_row_lines(
     row: &ToolRow<'_>,
@@ -283,11 +284,18 @@ fn header_row(
     Line::from(spans)
 }
 
-/// The body of a folded row.
+/// The body of a folded row. A running call shows its latest progress
+/// line whatever its kind.
 fn folded_body(row: &ToolRow<'_>, label: &ToolLabel, output: Vec<BodyLine>) -> Vec<Line<'static>> {
     match (row.phase, label.body) {
         (ToolPhase::Denied, _) => Vec::new(),
         (_, ToolBody::Tail) => tail(output, FOLDED_BODY_LINES),
+        (ToolPhase::Running, _) => output
+            .into_iter()
+            .rfind(|l| !l.text.trim().is_empty())
+            .map(|l| body_line(l, tool_result_style()))
+            .into_iter()
+            .collect(),
         (ToolPhase::Failed, _) => head(output, FOLDED_BODY_LINES, tool_error_style()),
         (ToolPhase::Done, ToolBody::Diff) => head(
             edit_diff(row.input).lines,

@@ -543,6 +543,20 @@ fn streaming_reparse_forces_rebuild_after_window_expires() {
 }
 
 #[test]
+fn a_height_rebuild_after_the_window_drops_the_stale_lines() {
+    let mut buf = throttled_stream_fixture();
+    buf.append_assistant_delta(" and more");
+    buf.stream_dirty_since = Some(Instant::now().checked_sub(STREAM_REPARSE_THROTTLE).unwrap());
+    assert_eq!(buf.cached_height(0, 80), None);
+    buf.set_cached_height(0, 80, 1);
+    assert!(!buf.stream_edits_pending());
+    assert!(
+        buf.cached_render_lines(0, 80).is_none(),
+        "the lines built before the delta must not be served"
+    );
+}
+
+#[test]
 fn finish_streaming_invalidates_and_clears_throttle() {
     let mut buf = throttled_stream_fixture();
     buf.append_assistant_delta(" tail");

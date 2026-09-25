@@ -121,6 +121,14 @@ impl InputState {
         self.cursor
     }
 
+    /// Move the cursor to byte offset `at`. Ignored when `at` is past
+    /// the end or not on a `char` boundary.
+    pub(crate) fn set_cursor(&mut self, at: usize) {
+        if self.text.is_char_boundary(at) {
+            self.cursor = at;
+        }
+    }
+
     /// True if there is a pending two-key sequence waiting on its second
     /// keystroke.
     #[must_use]

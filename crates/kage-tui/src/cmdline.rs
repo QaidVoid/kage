@@ -173,13 +173,13 @@ impl CommandLine {
                     CommandLineEvent::Cancelled
                 }
             }
-            KeyCode::Enter => self.submit(),
+            KeyCode::Enter => self.submit(registry, resolver),
             KeyCode::Tab => {
                 self.error = None;
                 if self.completions.items.is_empty() {
                     self.refresh(registry, resolver);
                 }
-                self.tab(true);
+                self.tab(true, registry, resolver);
                 CommandLineEvent::Pending
             }
             KeyCode::BackTab => {
@@ -187,7 +187,7 @@ impl CommandLine {
                 if self.completions.items.is_empty() {
                     self.refresh(registry, resolver);
                 }
-                self.tab(false);
+                self.tab(false, registry, resolver);
                 CommandLineEvent::Pending
             }
             KeyCode::Down if self.popup_open || self.palette => {
@@ -261,17 +261,19 @@ impl CommandLine {
     /// The palette always shows its list and keeps a row highlighted,
     /// so there the prefix step keeps the highlight, and a Tab that
     /// has no prefix to add inserts the highlighted row and starts
-    /// cycling.
-    pub fn tab(&mut self, forward: bool) {
+    /// cycling. A row the palette inserts gets a trailing space so an
+    /// argument can follow, and a single match then lists what comes
+    /// next.
+    pub fn tab(&mut self, forward: bool, registry: &[&CommandSpec], resolver: &dyn Resolver) {
         if self.completions.items.is_empty() {
             return;
         }
         if self.completions.items.len() == 1 {
             let value = self.completions.items[0].value.clone();
-            self.replace_at_anchor(&value);
+            self.insert_candidate(&value);
             self.dismiss_completions();
             if self.palette {
-                self.select_first();
+                self.refresh(registry, resolver);
             }
             return;
         }
@@ -294,7 +296,7 @@ impl CommandLine {
                 .and_then(|i| self.completions.items.get(i))
                 .map(|c| c.value.clone())
             {
-                self.replace_at_anchor(&value);
+                self.insert_candidate(&value);
                 self.popup_open = true;
             }
             return;
@@ -302,6 +304,16 @@ impl CommandLine {
         self.popup_open = true;
         self.selected = None;
         let _ = forward;
+    }
+
+    /// Put a chosen candidate in place of the token being completed,
+    /// followed in the palette by a space unless it is a directory.
+    fn insert_candidate(&mut self, value: &str) {
+        if self.palette && !value.ends_with('/') {
+            self.replace_at_anchor(&format!("{value} "));
+        } else {
+            self.replace_at_anchor(value);
+        }
     }
 
     /// Insert bracketed-paste text at the cursor and refresh the
@@ -319,7 +331,10 @@ impl CommandLine {
         self.refresh(registry, resolver);
     }
 
-    fn submit(&mut self) -> CommandLineEvent {
+    /// Take the highlighted row and submit the line. A bare command
+    /// whose first argument is required is not run: it gets a trailing
+    /// space and waits for that argument.
+    fn submit(&mut self, registry: &[&CommandSpec], resolver: &dyn Resolver) -> CommandLineEvent {
         if let Some(value) = self
             .selected
             .and_then(|i| self.completions.items.get(i))
@@ -329,10 +344,15 @@ impl CommandLine {
         }
         let trimmed = self.text.trim().to_owned();
         if trimmed.is_empty() {
-            CommandLineEvent::Cancelled
-        } else {
-            CommandLineEvent::Submit(trimmed)
+            return CommandLineEvent::Cancelled;
         }
+        if needs_argument(registry, &trimmed) {
+            self.text = format!("{trimmed} ");
+            self.cursor = self.text.len();
+            self.refresh(registry, resolver);
+            return CommandLineEvent::Pending;
+        }
+        CommandLineEvent::Submit(trimmed)
     }
 
     fn cycle(&mut self, forward: bool) {
@@ -353,7 +373,7 @@ impl CommandLine {
         };
         self.selected = Some(next);
         let value = self.completions.items[next].value.clone();
-        self.replace_at_anchor(&value);
+        self.insert_candidate(&value);
     }
 
     fn refresh(&mut self, registry: &[&CommandSpec], resolver: &dyn Resolver) {
@@ -487,6 +507,26 @@ impl CommandLine {
             palette: false,
         }
     }
+}
+
+/// Whether `text` is only a command name, followed by any of its
+/// subcommand names, whose first argument is required.
+fn needs_argument(registry: &[&CommandSpec], text: &str) -> bool {
+    let mut words = text.split_whitespace();
+    let Some(mut spec) = words
+        .next()
+        .and_then(|head| registry.iter().find(|s| s.names().any(|n| n == head)))
+        .map(|s| &**s)
+    else {
+        return false;
+    };
+    for word in words {
+        match spec.subcommand(word) {
+            Some(sub) => spec = sub,
+            None => return false,
+        }
+    }
+    spec.args.first().is_some_and(|arg| !arg.optional())
 }
 
 fn longest_common_prefix<'a, I: IntoIterator<Item = &'a str>>(values: I) -> String {

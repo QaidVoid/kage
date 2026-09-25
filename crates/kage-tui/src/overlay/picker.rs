@@ -28,6 +28,11 @@ use crate::view::truncate_to_width;
 /// Key hint painted on the picker's bottom row.
 const HELP_HINT: &str = "up/down select  enter confirm  type to filter  esc cancel";
 
+/// Widest a picker may grow on a narrow terminal, where 80% of the
+/// width would cut long rows: a 100-column row less a one-cell margin
+/// on each side.
+const NARROW_MAX_WIDTH: u16 = 98;
+
 /// Stateful picker rendered as a modal overlay.
 #[derive(Debug)]
 pub struct OverlayPicker {
@@ -98,7 +103,8 @@ impl OverlayWidget for OverlayPicker {
         // title or the key hint, clamped between a comfortable
         // minimum and 80% of available so the picker is big enough
         // to read but small enough that a tiny menu does not eat the
-        // whole screen.
+        // whole screen. Narrow terminals allow up to
+        // [`NARROW_MAX_WIDTH`] instead, so long rows are not cut early.
         let rows = self
             .items
             .iter()
@@ -122,7 +128,9 @@ impl OverlayWidget for OverlayPicker {
             .as_deref()
             .map_or(0, |n| u16::try_from(n.width() + 2).unwrap_or(u16::MAX));
         let longest = rows.max(title).max(hint).max(note);
-        let max_w = (available.width.saturating_mul(80) / 100).max(30);
+        let max_w = (available.width.saturating_mul(80) / 100)
+            .max(available.width.saturating_sub(2).min(NARROW_MAX_WIDTH))
+            .max(30);
         let want_w = longest.clamp(30, max_w);
 
         // Height: distinct groups produce a section header + blank

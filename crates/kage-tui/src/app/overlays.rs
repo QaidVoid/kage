@@ -767,9 +767,11 @@ fn mcp_offer(server: &kage_core::protocol::McpServerInfo) -> String {
     if !server.prompts.is_empty() {
         parts.push(count(server.prompts.len(), "prompt"));
     }
-    let resources = server.resources.len() + server.templates.len();
-    if resources > 0 {
-        parts.push(count(resources, "resource"));
+    if !server.resources.is_empty() {
+        parts.push(count(server.resources.len(), "resource"));
+    }
+    if !server.templates.is_empty() {
+        parts.push(count(server.templates.len(), "template"));
     }
     parts.join(" \u{b7} ")
 }

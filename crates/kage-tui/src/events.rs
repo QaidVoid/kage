@@ -129,14 +129,25 @@ pub fn apply_loop_event(buf: &mut Buffer, event: &LoopEvent) {
 }
 
 /// Paint a user prompt: its text as a user bubble, then one placeholder
-/// per attached image.
+/// per attached image. An image that follows the resource block naming
+/// it already has its `attached` line in the bubble.
 fn push_user_message(buf: &mut Buffer, message: &Message) {
     if let Some(text) = user_text(message) {
         buf.push_user(text);
     }
+    let mut labelled = false;
     for block in &message.content {
-        if let Content::Image { mime, .. } = block {
-            buf.push_custom("kage:image", format!("[image: {mime}]"), false);
+        match block {
+            Content::Text { text } => {
+                labelled = resource_block::parse(text).is_some_and(|r| is_image(&r));
+            }
+            Content::Image { mime, .. } => {
+                if !labelled {
+                    buf.push_custom("kage:image", format!("[image: {mime}]"), false);
+                }
+                labelled = false;
+            }
+            _ => labelled = false,
         }
     }
 }
@@ -278,12 +289,26 @@ fn user_text(message: &Message) -> Option<String> {
     (!text.is_empty()).then(|| text.join("\n"))
 }
 
+/// `attached <server>:<uri> (<size>)`, with the MIME type in place of
+/// the size for an image.
 fn attached_line(resource: &ResourceRef) -> String {
-    let size = crate::image::human_bytes(resource.bytes);
+    let detail = match &resource.mime {
+        Some(mime) if is_image(resource) => mime.clone(),
+        _ => crate::image::human_bytes(resource.bytes),
+    };
     match &resource.server {
-        Some(server) => format!("attached {server}:{} ({size})", resource.uri),
-        None => format!("attached {} ({size})", resource.uri),
+        Some(server) => format!("attached {server}:{} ({detail})", resource.uri),
+        None => format!("attached {} ({detail})", resource.uri),
     }
+}
+
+/// Whether `resource` stands for an image sent as its own content.
+fn is_image(resource: &ResourceRef) -> bool {
+    resource.binary
+        && resource
+            .mime
+            .as_deref()
+            .is_some_and(|m| m.starts_with("image/"))
 }
 
 /// One-line summary of a tool's input: the
@@ -1039,6 +1064,47 @@ mod tests {
             message: message.clone(),
         });
         assert!(matches!(&lock(&buf).blocks()[0], Block::User { text } if text == want));
+        let mut replayed = Buffer::new();
+        populate_from_history(&mut replayed, &[message], &HashMap::new());
+        assert!(matches!(&replayed.blocks()[0], Block::User { text } if text == want));
+    }
+
+    #[test]
+    fn binary_and_image_resources_show_as_attached_lines_live_and_on_replay() {
+        let message = Message::new(
+            Role::User,
+            vec![
+                Content::Text {
+                    text: "see @fix:test://img and @fix:test://bin".into(),
+                },
+                Content::Text {
+                    text: resource_block::render_binary("test://img", Some("fix"), "image/png", 70),
+                },
+                Content::Image {
+                    source: kage_core::ImageSource::Base64 { data: "AA".into() },
+                    mime: "image/png".into(),
+                },
+                Content::Text {
+                    text: resource_block::render_binary(
+                        "test://bin",
+                        Some("fix"),
+                        "application/octet-stream",
+                        2048,
+                    ),
+                },
+            ],
+            None,
+        );
+        let want = "see @fix:test://img and @fix:test://bin\n\
+                    attached fix:test://img (image/png)\n\
+                    attached fix:test://bin (2 KB)";
+        let (buf, mut hooks) = fresh();
+        hooks.on_event(&LoopEvent::MessageAppended {
+            message: message.clone(),
+        });
+        let blocks = lock(&buf).blocks().to_vec();
+        assert_eq!(blocks.len(), 1, "{blocks:?}");
+        assert!(matches!(&blocks[0], Block::User { text } if text == want));
         let mut replayed = Buffer::new();
         populate_from_history(&mut replayed, &[message], &HashMap::new());
         assert!(matches!(&replayed.blocks()[0], Block::User { text } if text == want));

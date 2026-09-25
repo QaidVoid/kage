@@ -409,15 +409,9 @@ pub fn complete(
         for spec in registry {
             for name in spec.names() {
                 if name.starts_with(&prefix) {
-                    let hints = crate::command::arg_hints_text(spec.args);
-                    let description = if hints.is_empty() {
-                        spec.description.to_owned()
-                    } else {
-                        format!("{}  {hints}", spec.description)
-                    };
                     items.push(Completion {
                         value: name.to_owned(),
-                        description: Some(description),
+                        description: Some(described(spec)),
                         replace_range: replace_range.clone(),
                     });
                 }
@@ -465,15 +459,9 @@ pub fn complete(
                 if !name.starts_with(&prefix) {
                     continue;
                 }
-                let hints = crate::command::arg_hints_text(sub.args);
-                let description = if hints.is_empty() {
-                    sub.description.to_owned()
-                } else {
-                    format!("{}  {hints}", sub.description)
-                };
                 items.push(Completion {
                     value: name.to_owned(),
-                    description: Some(description),
+                    description: Some(described(sub)),
                     replace_range: replace_range.clone(),
                 });
             }
@@ -505,6 +493,17 @@ pub fn complete(
     }
 
     Completions { items, anchor }
+}
+
+/// The description a completion row shows for `spec`: its hint, then
+/// its description, which ends in any `[plugin]` or `[mcp]` tag.
+fn described(spec: &CommandSpec) -> String {
+    let hint = crate::command::spec_hint(spec);
+    if hint.is_empty() {
+        spec.description.to_owned()
+    } else {
+        format!("{hint}  {}", spec.description)
+    }
 }
 
 /// Find the closest command name to `input` from the registry using a

@@ -456,7 +456,8 @@ impl App {
     /// Splice an accepted candidate into the input. Uses the item's
     /// explicit `range` when present, otherwise replaces the prefix
     /// span the host computed. Re-queries afterward so a provider can
-    /// offer a follow-up (e.g. path segments).
+    /// offer a follow-up (e.g. path segments). An MCP resource template
+    /// leaves the cursor on its first placeholder instead.
     pub(crate) fn accept_completion(&mut self, item: &kage_plugin::AutocompleteItem) {
         let cursor = self.input.cursor();
         let (start, end) = if let Some((from, to)) = item.range {
@@ -467,7 +468,24 @@ impl App {
         };
         self.input.splice(start, end, &item.value);
         self.input_completion = None;
+        if let Some(at) = self.template_placeholder(&item.value) {
+            self.input.set_cursor(start + at);
+            return;
+        }
         self.refresh_input_completion();
+    }
+
+    /// Byte offset of the first `{...}` placeholder in `value` when it
+    /// is a live MCP server's resource template mention.
+    fn template_placeholder(&self, value: &str) -> Option<usize> {
+        let (server, uri) = value.strip_prefix('@')?.split_once(':')?;
+        self.mcp_servers
+            .iter()
+            .find(|s| s.name == server)?
+            .templates
+            .iter()
+            .find(|t| t.uri_template == uri)?;
+        value.find('{')
     }
 
     /// Open the search line on the footer row, remembering the pattern

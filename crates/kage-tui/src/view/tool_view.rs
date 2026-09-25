@@ -486,12 +486,17 @@ impl ToolLabel {
         }
     }
 
-    /// The stats for a call in `phase`. A call that failed, was denied
-    /// or was interrupted shows none, since it made no such change.
+    /// The stats for a call in `phase`. A write or edit that failed,
+    /// was denied or was interrupted shows none, since it made no such
+    /// change. Other stats describe the arguments and always show.
     #[must_use]
     pub fn stats_for(&self, phase: ToolPhase) -> &str {
         match phase {
-            ToolPhase::Failed | ToolPhase::Denied | ToolPhase::Interrupted => "",
+            ToolPhase::Failed | ToolPhase::Denied | ToolPhase::Interrupted
+                if matches!(self.verb, "Write" | "Edit") =>
+            {
+                ""
+            }
             _ => &self.stats,
         }
     }
@@ -954,6 +959,21 @@ mod tests {
         assert_eq!(edit.stats_for(ToolPhase::Done), "(+1 -1)");
         assert_eq!(edit.stats_for(ToolPhase::Failed), "");
         assert_eq!(edit.stats_for(ToolPhase::Denied), "");
+    }
+
+    #[test]
+    fn failed_calls_keep_their_argument_summary() {
+        let call = describe(
+            "mcp_resource",
+            &json!({"server": "fix", "uri": "test://nope"}),
+        );
+        let done = call.stats_for(ToolPhase::Done).to_owned();
+        assert!(done.contains("test://nope"), "{done:?}");
+        for phase in [ToolPhase::Failed, ToolPhase::Denied, ToolPhase::Interrupted] {
+            assert_eq!(call.stats_for(phase), done);
+        }
+        let read = describe("read", &json!({"path": "a.rs", "start_line": 3}));
+        assert_eq!(read.stats_for(ToolPhase::Failed), "from line 3");
     }
 
     #[test]

@@ -353,8 +353,8 @@ pub fn file_completions(
 /// Built-in `@server:` completion for MCP resources.
 ///
 /// A fragment `server:` or `server:part` lists that server's resources,
-/// fuzzy matched over URI and name, then its resource templates, which
-/// are inserted as written. A fragment without `:` lists the matching
+/// fuzzy matched over URI and name with their MIME types in one
+/// column, then its resource templates, which are inserted as written. A fragment without `:` lists the matching
 /// server names as `@name:` items, which the host appends after the
 /// file items. Only servers that list resources or templates are
 /// offered. Candidates replace the whole `@...` token.
@@ -399,9 +399,16 @@ pub fn mcp_completions(
         value: format!("@{name}:{uri}"),
         range,
     };
+    let name_col = server
+        .resources
+        .iter()
+        .filter(|r| r.mime_type.is_some())
+        .map(|r| r.name.width())
+        .max()
+        .unwrap_or(0);
     let resources = server.resources.iter().filter_map(|r| {
         let detail = match &r.mime_type {
-            Some(mime) => format!("{}  {mime}", r.name),
+            Some(mime) => format!("{}  {mime}", pad_to_width(&r.name, name_col)),
             None => r.name.clone(),
         };
         Some((rank(&r.uri, &r.name)?, item(&r.uri, detail)))
@@ -688,7 +695,14 @@ mod tests {
                 "@everything:test://static/resource/{id}",
             ]
         );
-        assert_eq!(items[0].detail.as_deref(), Some("Resource 1  text/plain"));
+        assert_eq!(
+            items[0].detail.as_deref(),
+            Some("Resource 1     text/plain")
+        );
+        assert_eq!(
+            items[1].detail.as_deref(),
+            Some("Meeting notes  text/plain")
+        );
         assert_eq!(
             items[2].detail.as_deref(),
             Some("template: Static resource")

@@ -12,6 +12,8 @@
 //!
 //! [`render`] builds the block and [`parse`] reads its first line back,
 //! so a client can show a short `attached` line instead of the contents.
+//! Binary contents the model cannot read as text get an empty block
+//! from [`render_binary`] that names their size.
 
 use std::fmt::Write as _;
 
@@ -25,14 +27,35 @@ pub struct ResourceRef {
     pub uri: String,
     /// MCP server the resource came from. `None` for editor context.
     pub server: Option<String>,
-    /// Size of the contents in bytes.
+    /// MIME type, when the block names one.
+    pub mime: Option<String>,
+    /// Size of the contents in bytes, or of the binary contents the
+    /// block stands for.
     pub bytes: usize,
+    /// Whether the block stands for binary contents it does not carry.
+    pub binary: bool,
 }
 
 /// Wrap `text` in a resource block. `server` is omitted for editor
 /// context, and `mime` when it is unknown.
 #[must_use]
 pub fn render(uri: &str, server: Option<&str>, mime: Option<&str>, text: &str) -> String {
+    let mut out = attributes(uri, server, mime);
+    let _ = write!(out, ">\n{text}\n{CLOSE}");
+    out
+}
+
+/// An empty block for `bytes` of binary contents of type `mime`, with
+/// the size in a `size` attribute. An image is sent as its own content
+/// right after the block.
+#[must_use]
+pub fn render_binary(uri: &str, server: Option<&str>, mime: &str, bytes: usize) -> String {
+    let mut out = attributes(uri, server, Some(mime));
+    let _ = write!(out, " size=\"{bytes}\">\n\n{CLOSE}");
+    out
+}
+
+fn attributes(uri: &str, server: Option<&str>, mime: Option<&str>) -> String {
     let mut out = format!("{OPEN}uri=\"{}\"", escape(uri));
     if let Some(server) = server {
         let _ = write!(out, " server=\"{}\"", escape(server));
@@ -40,7 +63,6 @@ pub fn render(uri: &str, server: Option<&str>, mime: Option<&str>, text: &str) -
     if let Some(mime) = mime {
         let _ = write!(out, " mime=\"{}\"", escape(mime));
     }
-    let _ = write!(out, ">\n{text}\n{CLOSE}");
     out
 }
 
@@ -52,6 +74,8 @@ pub fn parse(text: &str) -> Option<ResourceRef> {
     let mut attrs = head.strip_prefix(OPEN)?.strip_suffix('>')?;
     let mut uri = None;
     let mut server = None;
+    let mut mime = None;
+    let mut size = None;
     while !attrs.is_empty() {
         let (name, rest) = attrs.split_once("=\"")?;
         let (value, rest) = rest.split_once('"')?;
@@ -59,7 +83,8 @@ pub fn parse(text: &str) -> Option<ResourceRef> {
         match name {
             "uri" => uri = Some(value),
             "server" => server = Some(value),
-            "mime" => {}
+            "mime" => mime = Some(value),
+            "size" => size = Some(value.parse().ok()?),
             _ => return None,
         }
         attrs = rest.strip_prefix(' ').unwrap_or(rest);
@@ -70,7 +95,9 @@ pub fn parse(text: &str) -> Option<ResourceRef> {
     Some(ResourceRef {
         uri: uri?,
         server,
-        bytes: contents.len(),
+        mime,
+        bytes: size.unwrap_or(contents.len()),
+        binary: size.is_some(),
     })
 }
 
@@ -109,7 +136,28 @@ mod tests {
             Some(ResourceRef {
                 uri: "test://static/resource/1".into(),
                 server: Some("everything".into()),
+                mime: Some("text/plain".into()),
                 bytes: 11,
+                binary: false,
+            })
+        );
+    }
+
+    #[test]
+    fn binary_blocks_carry_their_size() {
+        let block = render_binary("test://img", Some("fix"), "image/png", 2048);
+        assert_eq!(
+            block,
+            "<resource uri=\"test://img\" server=\"fix\" mime=\"image/png\" size=\"2048\">\n\n</resource>"
+        );
+        assert_eq!(
+            parse(&block),
+            Some(ResourceRef {
+                uri: "test://img".into(),
+                server: Some("fix".into()),
+                mime: Some("image/png".into()),
+                bytes: 2048,
+                binary: true,
             })
         );
     }

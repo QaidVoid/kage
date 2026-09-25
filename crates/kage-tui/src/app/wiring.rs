@@ -297,8 +297,9 @@ impl App {
     }
 
     /// Rebuild [`Self::mcp_command_specs`]: one `server:prompt` command
-    /// per prompt of a live server, whose optional argument hint lists
-    /// the prompt's arguments and whose description ends in `[mcp]`.
+    /// per prompt of a live server, whose argument hint lists the
+    /// prompt's arguments and whose description ends in `[mcp]`. The
+    /// argument is required when the prompt has a required one.
     /// Names a builtin or plugin command takes are skipped, so the
     /// palette shows only the command that runs.
     fn set_mcp_prompts(&mut self) {
@@ -332,7 +333,7 @@ impl App {
                 } else {
                     vec![OwnedArgSpec::Text {
                         name: "arguments".to_owned(),
-                        optional: true,
+                        optional: prompt.arguments.iter().all(|a| !a.required),
                         hint,
                     }]
                 };

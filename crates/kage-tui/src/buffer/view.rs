@@ -252,10 +252,15 @@ impl Buffer {
     /// Renderer hook: store the wrapped-row height it just measured
     /// for the block at `idx` at the given `width`. Subsequent frames
     /// reuse this without rebuilding the block's [`Line`]s. A timed
-    /// block is never stored, so it rebuilds every frame.
+    /// block is never stored, so it rebuilds every frame. Measuring the
+    /// live last block consumes its pending streaming edits, so its
+    /// cached lines, built before them, are dropped too.
     pub fn set_cached_height(&mut self, idx: usize, width: u16, height: u16) {
-        if idx + 1 == self.blocks.len() {
-            self.stream_dirty_since = None;
+        if idx + 1 == self.blocks.len()
+            && self.stream_dirty_since.take().is_some()
+            && let Some(slot) = self.block_render_lines.get_mut(idx)
+        {
+            *slot = None;
         }
         if self.is_timed(idx) {
             return;

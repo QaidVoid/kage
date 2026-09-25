@@ -6,6 +6,8 @@
 //! that includes executed tool outputs. This module owns the translation and
 //! the message-assembly state machine.
 
+use std::time::Instant;
+
 use kage_core::{
     Content, LoopError, LoopEvent, Message, MessageId, Role, ThinkingSignature, TokenUsage,
     ToolCallId,
@@ -52,7 +54,8 @@ pub(crate) struct PendingToolCall {
 
 /// Drain `stream` into a finished message + tool-call manifest, emitting
 /// [`LoopEvent`]s along the way. Thinking signatures are stamped with
-/// `model`, the model the request went to.
+/// `model`, the model the request went to. Each thinking block records
+/// how long it ran, from its first delta to the event that closes it.
 ///
 /// The cancellation flag is polled between provider events. If it trips,
 /// the iterator is dropped (which signals the underlying HTTP request to
@@ -192,6 +195,7 @@ struct Assembler {
     pending_tools: std::collections::HashMap<ToolCallId, String>,
     partial_args: std::collections::HashMap<ToolCallId, String>,
     tool_calls: Vec<PendingToolCall>,
+    thinking_since: Option<Instant>,
 }
 
 impl Assembler {
@@ -204,11 +208,23 @@ impl Assembler {
             pending_tools: std::collections::HashMap::new(),
             partial_args: std::collections::HashMap::new(),
             tool_calls: Vec::new(),
+            thinking_since: None,
+        }
+    }
+
+    /// Stamp the timed thinking block, the last block while one is
+    /// open, with how long it ran.
+    fn end_thinking(&mut self) {
+        if let Some(since) = self.thinking_since.take()
+            && let Some(Content::Thinking { duration_ms, .. }) = self.blocks.last_mut()
+        {
+            *duration_ms = Some(u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX));
         }
     }
 
     /// Append `delta` to the current text block, opening one if needed.
     fn push_text(&mut self, delta: &str) {
+        self.end_thinking();
         if let Some(Content::Text { text }) = self.blocks.last_mut() {
             text.push_str(delta);
         } else {
@@ -224,15 +240,19 @@ impl Assembler {
         if let Some(Content::Thinking {
             text,
             signature: None,
+            ..
         }) = self.blocks.last_mut()
         {
             text.push_str(delta);
         } else {
+            self.end_thinking();
             self.blocks.push(Content::Thinking {
                 text: delta.to_owned(),
                 signature: None,
+                duration_ms: None,
             });
         }
+        self.thinking_since.get_or_insert_with(Instant::now);
     }
 
     fn signature(&self, data: String, redacted: bool) -> ThinkingSignature {
@@ -246,6 +266,7 @@ impl Assembler {
     /// Sign the current thinking block with `data`, or record `data`
     /// as an empty signed block when no unsigned block is in flight.
     fn sign_thinking(&mut self, data: String) {
+        self.end_thinking();
         let signed = Some(self.signature(data, false));
         if let Some(Content::Thinking { signature, .. }) = self.blocks.last_mut()
             && signature.is_none()
@@ -255,20 +276,24 @@ impl Assembler {
             self.blocks.push(Content::Thinking {
                 text: String::new(),
                 signature: signed,
+                duration_ms: None,
             });
         }
     }
 
     /// Record a thinking block the provider sent encrypted only.
     fn push_redacted(&mut self, data: String) {
+        self.end_thinking();
         let signature = Some(self.signature(data, true));
         self.blocks.push(Content::Thinking {
             text: String::new(),
             signature,
+            duration_ms: None,
         });
     }
 
     fn begin_tool(&mut self, id: ToolCallId, name: String) {
+        self.end_thinking();
         self.pending_tools.insert(id, name);
     }
 
@@ -277,6 +302,7 @@ impl Assembler {
         id: ToolCallId,
         input: serde_json::Value,
     ) -> Result<(ToolCallId, String, serde_json::Value), LoopError> {
+        self.end_thinking();
         let name = self
             .pending_tools
             .remove(&id)
@@ -292,6 +318,7 @@ impl Assembler {
     }
 
     fn finish(&mut self, usage: TokenUsage) -> TurnResult {
+        self.end_thinking();
         TurnResult {
             message: Message {
                 role: Role::Assistant,
@@ -432,7 +459,7 @@ mod tests {
         assert_eq!(result.message.content.len(), 2);
         assert!(matches!(
             &result.message.content[0],
-            Content::Thinking { text, signature: None } if text == "ponder"
+            Content::Thinking { text, signature: None, duration_ms: Some(_) } if text == "ponder"
         ));
         assert!(matches!(
             &result.message.content[1],
@@ -451,6 +478,15 @@ mod tests {
             Ok(ProviderEvent::ThinkingSignature { data: "s2".into() }),
             Ok(end_event()),
         ]);
+        let mut content = result.message.content;
+        let timed: Vec<bool> = content
+            .iter_mut()
+            .map(|c| match c {
+                Content::Thinking { duration_ms, .. } => duration_ms.take().is_some(),
+                _ => false,
+            })
+            .collect();
+        assert_eq!(timed, [true, true, false, false, false]);
         let sig = |data: &str, redacted| {
             Some(ThinkingSignature {
                 model: "m".into(),
@@ -459,27 +495,71 @@ mod tests {
             })
         };
         assert_eq!(
-            result.message.content,
+            content,
             vec![
                 Content::Thinking {
                     text: "a".into(),
                     signature: sig("s1", false),
+                    duration_ms: None,
                 },
                 Content::Thinking {
                     text: "b".into(),
                     signature: None,
+                    duration_ms: None,
                 },
                 Content::Thinking {
                     text: String::new(),
                     signature: sig("enc", true),
+                    duration_ms: None,
                 },
                 Content::Text { text: "t".into() },
                 Content::Thinking {
                     text: String::new(),
                     signature: sig("s2", false),
+                    duration_ms: None,
                 },
             ]
         );
+    }
+
+    #[test]
+    fn each_thinking_block_records_how_long_it_ran() {
+        let id = ToolCallId::new("c1");
+        let events = vec![
+            (0, ProviderEvent::ThinkingDelta { delta: "a".into() }),
+            (0, ProviderEvent::ThinkingDelta { delta: "b".into() }),
+            (
+                60,
+                ProviderEvent::ToolCallStart {
+                    id: id.clone(),
+                    name: "ls".into(),
+                },
+            ),
+            (
+                0,
+                ProviderEvent::ToolCallEnd {
+                    id,
+                    input: serde_json::json!({}),
+                },
+            ),
+            (0, ProviderEvent::ThinkingDelta { delta: "c".into() }),
+            (30, end_event()),
+        ];
+        let stream: EventStream = Box::new(events.into_iter().map(|(delay, event)| {
+            std::thread::sleep(std::time::Duration::from_millis(delay));
+            Ok(event)
+        }));
+        let result = collect_turn(None, "m", stream, &CancelFlag::new(), &mut |_| {}).unwrap();
+        let durations: Vec<Option<u64>> = result
+            .message
+            .content
+            .iter()
+            .map(|c| match c {
+                Content::Thinking { duration_ms, .. } => *duration_ms,
+                _ => None,
+            })
+            .collect();
+        assert!(matches!(durations[..], [Some(a), None, Some(c)] if a >= 60 && c >= 30));
     }
 
     #[test]

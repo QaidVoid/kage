@@ -85,6 +85,11 @@ pub enum Content {
         /// kept it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         signature: Option<ThinkingSignature>,
+        /// How long the model spent on the block, in milliseconds. For
+        /// display only and never sent to a provider. Absent for
+        /// untimed blocks and in sessions written before kage kept it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
     },
     /// An image attached to the message.
     Image {
@@ -273,6 +278,7 @@ mod tests {
                         data: "sig".into(),
                         redacted: false,
                     }),
+                    duration_ms: Some(2_400),
                 },
                 Content::Text {
                     text: "the answer is 42".into(),
@@ -321,6 +327,7 @@ mod tests {
             Content::Thinking {
                 text: "hmm".into(),
                 signature: None,
+                duration_ms: None,
             }
         );
         assert_eq!(serde_json::to_string(&block).unwrap(), old);
@@ -332,10 +339,26 @@ mod tests {
                 data: "enc".into(),
                 redacted: true,
             }),
+            duration_ms: None,
         };
         let json = serde_json::to_value(&redacted).unwrap();
         assert_eq!(json["signature"]["redacted"], true);
         assert_eq!(serde_json::from_value::<Content>(json).unwrap(), redacted);
+    }
+
+    #[test]
+    fn thinking_duration_is_written_only_when_timed() {
+        let timed = Content::Thinking {
+            text: "hmm".into(),
+            signature: None,
+            duration_ms: Some(11_000),
+        };
+        let json = serde_json::to_string(&timed).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"thinking","text":"hmm","duration_ms":11000}"#
+        );
+        assert_eq!(serde_json::from_str::<Content>(&json).unwrap(), timed);
     }
 
     #[test]

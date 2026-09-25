@@ -66,15 +66,15 @@ impl Buffer {
         self.mark_stream_dirty();
     }
 
-    /// Push a finished, folded thinking block without timing, as
-    /// replayed from history.
-    pub fn push_thinking(&mut self, text: impl Into<String>) {
+    /// Push a finished, folded thinking block as replayed from history,
+    /// with the duration the session recorded for it, if any.
+    pub fn push_thinking(&mut self, text: impl Into<String>, duration_ms: Option<u64>) {
         self.push_block(Block::Thinking {
             text: text.into(),
             folded: true,
             live: false,
             started_at: Instant::now(),
-            duration_ms: None,
+            duration_ms,
             pinned: false,
         });
     }

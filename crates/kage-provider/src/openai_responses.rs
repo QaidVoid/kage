@@ -246,7 +246,9 @@ fn convert_assistant_items(blocks: &[Content], model: &str) -> Vec<Value> {
             Content::Text { text } => {
                 text_parts.push(serde_json::json!({"type":"output_text","text":text}));
             }
-            Content::Thinking { text, signature } => {
+            Content::Thinking {
+                text, signature, ..
+            } => {
                 let encrypted = signature
                     .as_ref()
                     .filter(|s| s.model == model && !s.redacted);
@@ -767,6 +769,7 @@ mod tests {
                 Content::Thinking {
                     text: "need the file first".into(),
                     signature: None,
+                    duration_ms: None,
                 },
                 Content::ToolCall {
                     id: ToolCallId::new("call_1"),
@@ -798,6 +801,7 @@ mod tests {
                         data: "enc".into(),
                         redacted: false,
                     }),
+                    duration_ms: None,
                 },
                 Content::ToolCall {
                     id: ToolCallId::new("call_1"),
@@ -850,6 +854,7 @@ mod tests {
                 Content::Thinking {
                     text: "   ".into(),
                     signature: None,
+                    duration_ms: None,
                 },
                 Content::Text {
                     text: "done".into(),
@@ -873,6 +878,7 @@ mod tests {
                 Content::Thinking {
                     text: "why".into(),
                     signature: None,
+                    duration_ms: None,
                 },
                 Content::Text {
                     text: "checking".into(),

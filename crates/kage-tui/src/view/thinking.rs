@@ -4,7 +4,7 @@
 //! A live block reads `Thinking (Ns)` with the last lines of the
 //! stream below it. Once finished and folded it collapses to
 //! `Thought for Ns`, or plain `Thought` when replayed from history
-//! without timing. Unfolded, the text renders as markdown with the
+//! without a stored duration. Unfolded, the text renders as markdown with the
 //! assistant renderer (`render_streaming` while live, `render` once
 //! it settles). The block flows through `mark_emphasis` for per-row
 //! wrapping and the reserved left column, so a focused or
@@ -114,6 +114,10 @@ mod tests {
     use crate::theme::Theme;
 
     fn rows(buf: &Buffer) -> Vec<String> {
+        rows_at(buf, 0)
+    }
+
+    fn rows_at(buf: &Buffer, index: usize) -> Vec<String> {
         let theme = Theme::default();
         let ctx = RenderCtx {
             theme: &theme,
@@ -123,7 +127,7 @@ mod tests {
             search_pattern: None,
             row_budget: None,
         };
-        ThinkingBlockWidget::from_block(&buf.blocks()[0])
+        ThinkingBlockWidget::from_block(&buf.blocks()[index])
             .unwrap()
             .lines(40, &ctx)
             .iter()
@@ -174,16 +178,34 @@ mod tests {
     #[test]
     fn replayed_thinking_reads_thought() {
         let mut buf = Buffer::new();
-        buf.push_thinking("from history");
+        buf.push_thinking("from history", None);
         assert_eq!(rows(&buf), ["Thought"]);
         buf.toggle_fold(0);
         assert!(rows(&buf).iter().any(|r| r == "from history"));
     }
 
     #[test]
+    fn replayed_thinking_reads_thought_for_only_with_a_stored_duration() {
+        let thinking = |duration_ms| kage_core::Content::Thinking {
+            text: "from history".into(),
+            signature: None,
+            duration_ms,
+        };
+        let history = [kage_core::Message::new(
+            kage_core::Role::Assistant,
+            vec![thinking(Some(11_400)), thinking(None)],
+            None,
+        )];
+        let mut buf = Buffer::new();
+        crate::populate_from_history(&mut buf, &history, &std::collections::HashMap::new(), None);
+        assert_eq!(rows_at(&buf, 0), ["Thought for 11s"]);
+        assert_eq!(rows_at(&buf, 1), ["Thought"]);
+    }
+
+    #[test]
     fn unfocused_lines_keep_gutter_blank_but_reserved() {
         let mut buf = Buffer::new();
-        buf.push_thinking("body");
+        buf.push_thinking("body", None);
         buf.toggle_fold(0);
         let theme = Theme::default();
         let ctx = RenderCtx {

@@ -808,7 +808,7 @@ fn jump_targets_truncate_and_skip_empty() {
 fn focus_moves_bump_the_version() {
     let mut buf = Buffer::new();
     buf.push_user("q");
-    buf.push_thinking("t");
+    buf.push_thinking("t", None);
     buf.push_tool_call("c1", "bash", json!({"command": "ls"}));
     buf.push_tool_result_with_duration("c1", "out", false, None);
     buf.append_assistant_delta("a");

@@ -88,6 +88,7 @@ fn full_round_trip_preserves_every_entry_kind() {
                         data: "sig".into(),
                         redacted: false,
                     }),
+                    duration_ms: Some(11_000),
                 },
                 Content::Thinking {
                     text: String::new(),
@@ -96,6 +97,7 @@ fn full_round_trip_preserves_every_entry_kind() {
                         data: "encrypted".into(),
                         redacted: true,
                     }),
+                    duration_ms: None,
                 },
                 Content::Text {
                     text: "answer".into(),
@@ -172,6 +174,7 @@ fn thinking_from_older_sessions_loads_and_writes_unchanged() {
             vec![Content::Thinking {
                 text: "hmm".into(),
                 signature: None,
+                duration_ms: None,
             }],
             None,
         ),
@@ -184,6 +187,7 @@ fn thinking_from_older_sessions_loads_and_writes_unchanged() {
     let raw = std::fs::read_to_string(&path).unwrap();
     assert!(raw.contains(r#"{"type":"thinking","text":"hmm"}"#), "{raw}");
     assert!(!raw.contains("signature"), "{raw}");
+    assert!(!raw.contains("duration_ms"), "{raw}");
     let read_back: Vec<SessionEntry> = SessionReader::iter(&path)
         .unwrap()
         .collect::<Result<_, _>>()

@@ -28,6 +28,7 @@ fn all_content_variants_roundtrip() {
         Content::Thinking {
             text: "y".into(),
             signature: None,
+            duration_ms: Some(1_500),
         },
         Content::Image {
             source: ImageSource::Url {

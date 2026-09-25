@@ -889,6 +889,7 @@ fn session_load_replays_the_whole_transcript_and_restores_the_session() {
                     Content::Thinking {
                         text: "look around".into(),
                         signature: None,
+                        duration_ms: None,
                     },
                     text("Listing."),
                     Content::ToolCall {

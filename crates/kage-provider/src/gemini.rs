@@ -672,12 +672,14 @@ mod tests {
                 Content::Thinking {
                     text: String::new(),
                     signature: signed("gemini-3"),
+                    duration_ms: None,
                 },
                 call("a"),
                 call("b"),
                 Content::Thinking {
                     text: "other model".into(),
                     signature: signed("claude-x"),
+                    duration_ms: None,
                 },
                 call("c"),
             ],
@@ -731,6 +733,7 @@ mod tests {
                         data: "foreign".into(),
                         redacted: false,
                     }),
+                    duration_ms: None,
                 },
                 call("c"),
             ]),

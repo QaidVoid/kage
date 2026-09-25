@@ -392,7 +392,7 @@ mod tests {
     fn builtins_registry_dispatches_thinking_blocks() {
         let r = BlockRenderer::with_builtins();
         let mut buf = crate::buffer::Buffer::new();
-        buf.push_thinking("thoughts");
+        buf.push_thinking("thoughts", None);
         assert!(r.widget_for(&buf.blocks()[0]).is_some());
     }
 

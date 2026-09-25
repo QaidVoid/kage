@@ -43,6 +43,7 @@ fn thinking_tool_call(text: &str, signature: ThinkingSignature) -> Message {
             Content::Thinking {
                 text: text.to_owned(),
                 signature: Some(signature),
+                duration_ms: Some(2_000),
             },
             Content::ToolCall {
                 id: ToolCallId::new("call_1"),
@@ -83,6 +84,15 @@ fn continuation_keeps_signed_thinking_first_and_thinking_on() {
         serde_json::json!({"type": "thinking", "thinking": "list files", "signature": "sig"})
     );
     assert_eq!(blocks[1]["type"], "tool_use");
+}
+
+#[test]
+fn thinking_duration_is_never_sent() {
+    for model in ["claude-x", "gemini-3"] {
+        let req = continuation(thinking_tool_call("plan", signed(model, "sig", false)));
+        let body = build_request_body(&req, true).to_string();
+        assert!(!body.contains("duration"), "{body}");
+    }
 }
 
 #[test]

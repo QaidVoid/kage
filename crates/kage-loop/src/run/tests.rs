@@ -40,6 +40,7 @@ fn flatten_thinking_rewrites_thinking_to_tagged_text() {
         Content::Thinking {
             text: "weigh the options".to_owned(),
             signature: None,
+            duration_ms: None,
         },
         Content::Text {
             text: "the answer is 42".to_owned(),
@@ -65,6 +66,7 @@ fn flatten_thinking_drops_empty_thinking_blocks() {
         Content::Thinking {
             text: "   ".to_owned(),
             signature: None,
+            duration_ms: None,
         },
         Content::Text {
             text: "done".to_owned(),
@@ -97,6 +99,7 @@ fn build_request_flattens_history_thinking() {
     cx.history.push(assistant_msg(vec![Content::Thinking {
         text: "reason".to_owned(),
         signature: None,
+        duration_ms: None,
     }]));
     let tools = ToolRegistry::new();
     let provider = MockProvider::sequence(vec![]);

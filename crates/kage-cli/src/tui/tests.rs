@@ -36,6 +36,7 @@ fn render_session_markdown_covers_roles_and_blocks() {
                 Content::Thinking {
                     text: "consider\noptions".into(),
                     signature: None,
+                    duration_ms: None,
                 },
                 Content::Text {
                     text: "answer".into(),

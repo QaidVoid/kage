@@ -47,7 +47,8 @@ pub enum Block {
         /// When the block began.
         started_at: Instant,
         /// How long the model thought, recorded when the block
-        /// finished. `None` for a block replayed from history.
+        /// finished. `None` for a block replayed from history without
+        /// a stored duration.
         duration_ms: Option<u64>,
         /// Whether the user toggled the fold while the block was live.
         /// Finishing keeps a pinned block's fold state instead of

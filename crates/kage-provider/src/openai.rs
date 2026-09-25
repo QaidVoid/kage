@@ -381,7 +381,9 @@ fn convert_assistant_message(blocks: &[Content], replay: ThinkingReplay, model: 
     for block in blocks {
         match block {
             Content::Text { text } => text_parts.push(text.clone()),
-            Content::Thinking { text, signature } => match replay {
+            Content::Thinking {
+                text, signature, ..
+            } => match replay {
                 ThinkingReplay::Text => text_parts.extend(Content::flattened_thinking(text)),
                 ThinkingReplay::Field(_) => {
                     reasoning.push_str(text);
@@ -1078,6 +1080,7 @@ mod tests {
         Content::Thinking {
             text: text.to_owned(),
             signature,
+            duration_ms: None,
         }
     }
 

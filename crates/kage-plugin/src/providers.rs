@@ -24,7 +24,7 @@
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use kage_core::{CancelFlag, sync::lock};
+use kage_core::{CancelFlag, Content, sync::lock};
 use kage_provider::{
     EventStream, Provider, ProviderError, ProviderEvent, ProviderMetadata, ProviderModel,
     StreamRequest, make_cancelable,
@@ -61,9 +61,14 @@ impl Provider for LuaProvider {
 
     fn stream(
         &self,
-        req: StreamRequest,
+        mut req: StreamRequest,
         cancel: &CancelFlag,
     ) -> Result<EventStream, ProviderError> {
+        for block in req.messages.iter_mut().flat_map(|m| &mut m.content) {
+            if let Content::Thinking { duration_ms, .. } = block {
+                *duration_ms = None;
+            }
+        }
         let req_value = serde_json::to_value(&req)
             .map_err(|e| ProviderError::Decode(format!("plugin provider: encode request: {e}")))?;
         let (tx, rx) = mpsc::channel::<Result<ProviderEvent, ProviderError>>();
@@ -364,6 +369,49 @@ mod tests {
                 stop_reason: StopReason::EndTurn,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn lua_provider_never_sees_thinking_durations() {
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval(
+            r"
+            kage.register_provider({
+                id = 'peek',
+                stream = function(req)
+                    local block = req.messages[1].content[1]
+                    return {
+                        { type = 'text_delta', delta = block.text .. ' ' .. tostring(block.duration_ms) },
+                        { type = 'message_end', stop_reason = 'end_turn',
+                          usage = { input = 0, output = 0, cache_read = 0, cache_write = 0 } },
+                    }
+                end,
+            })
+            ",
+        )
+        .unwrap();
+        let provider = rt.registered_providers().pop().unwrap();
+        let req = kage_provider::StreamRequest::new(
+            "m",
+            vec![Message::new(
+                Role::Assistant,
+                vec![kage_core::Content::Thinking {
+                    text: "plan".into(),
+                    signature: None,
+                    duration_ms: Some(2_000),
+                }],
+                None,
+            )],
+        );
+        let events: Vec<_> = provider
+            .stream(req, &CancelFlag::new())
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(matches!(
+            &events[0],
+            kage_provider::ProviderEvent::TextDelta { delta } if delta == "plan nil"
         ));
     }
 

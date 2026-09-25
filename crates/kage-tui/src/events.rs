@@ -280,8 +280,10 @@ pub fn populate_from_history(
                                 buf.finish_streaming();
                             }
                         }
-                        Content::Thinking { text, .. } if !text.trim().is_empty() => {
-                            buf.push_thinking(text.clone());
+                        Content::Thinking {
+                            text, duration_ms, ..
+                        } if !text.trim().is_empty() => {
+                            buf.push_thinking(text.clone(), *duration_ms);
                         }
                         Content::ToolCall { id, name, input } => {
                             buf.push_tool_call(id.to_string(), name, input.clone());
@@ -917,7 +919,7 @@ mod tests {
     }
 
     #[test]
-    fn replayed_thinking_has_no_timing_and_orphan_calls_are_interrupted() {
+    fn replayed_thinking_keeps_its_stored_timing_and_orphan_calls_are_interrupted() {
         let mut buf = Buffer::new();
         let history = vec![Message::new(
             Role::Assistant,
@@ -925,6 +927,12 @@ mod tests {
                 Content::Thinking {
                     text: "plan".into(),
                     signature: None,
+                    duration_ms: None,
+                },
+                Content::Thinking {
+                    text: "more".into(),
+                    signature: None,
+                    duration_ms: Some(2_300),
                 },
                 Content::ToolCall {
                     id: ToolCallId::new("c1"),
@@ -945,6 +953,14 @@ mod tests {
         ));
         assert!(matches!(
             buf.blocks()[1],
+            Block::Thinking {
+                duration_ms: Some(2_300),
+                folded: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            buf.blocks()[2],
             Block::ToolCall {
                 phase: ToolPhase::Interrupted,
                 ..
@@ -1049,6 +1065,7 @@ mod tests {
                     Content::Thinking {
                         text: "use ls".into(),
                         signature: None,
+                        duration_ms: None,
                     },
                     Content::Text {
                         text: "looking now".into(),

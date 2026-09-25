@@ -300,6 +300,7 @@ fn convert_assistant_blocks(blocks: &[Content], model: &str) -> Vec<Value> {
             Content::Thinking {
                 text,
                 signature: Some(sig),
+                ..
             } if sig.model == model => Some(serde_json::json!({
                 "type": "thinking",
                 "thinking": text,

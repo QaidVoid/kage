@@ -99,6 +99,7 @@ pub fn install_mcp(
                         url: None,
                         headers: BTreeMap::new(),
                         disabled,
+                        oauth: None,
                     },
                 );
             Ok(())

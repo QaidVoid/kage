@@ -25,6 +25,8 @@ use kage_core::config::McpServer;
 
 use kage_jsonrpc::{CancelNotice, Inbound, Peer, RpcError, connect_with};
 
+use crate::oauth::TokenSource;
+
 /// Protocol revision kage advertises in `initialize`. The server
 /// replies with the revision it wants to speak; kage records it
 /// (see [`McpConnection::protocol_version`]) and keeps working with
@@ -111,6 +113,32 @@ pub enum McpError {
         /// What is wrong with the configuration.
         detail: String,
     },
+    /// The HTTP server answered 401: kage has no token for it, or the
+    /// token was refused and could not be refreshed.
+    #[error(
+        "server `{server}` needs authorization: run kage mcp login {server}, or /mcp in the TUI"
+    )]
+    Unauthorized {
+        /// Server name for context.
+        server: String,
+    },
+}
+
+impl McpError {
+    /// Tag a JSON-RPC failure with the server name. The HTTP
+    /// transport's unauthorized code becomes [`McpError::Unauthorized`].
+    fn rpc(server: &str, source: RpcError) -> Self {
+        if source.code == crate::http::UNAUTHORIZED {
+            Self::Unauthorized {
+                server: server.to_owned(),
+            }
+        } else {
+            Self::Rpc {
+                server: server.to_owned(),
+                source,
+            }
+        }
+    }
 }
 
 /// Host-supplied handler for server-initiated MCP requests the client
@@ -196,7 +224,8 @@ impl McpConnection {
     /// # Errors
     ///
     /// Returns [`McpError::Rpc`] if `initialize` fails or the
-    /// connection drops, and [`McpError::Protocol`] if the response
+    /// connection drops, [`McpError::Unauthorized`] if an HTTP server
+    /// refuses kage's token, and [`McpError::Protocol`] if the response
     /// is not a JSON object.
     pub fn initialize(
         server: impl Into<String>,
@@ -237,10 +266,7 @@ impl McpConnection {
         });
         let result = peer
             .request_timeout("initialize", params, timeout)
-            .map_err(|source| McpError::Rpc {
-                server: server.clone(),
-                source,
-            })?;
+            .map_err(|source| McpError::rpc(&server, source))?;
         if !result.is_object() {
             return Err(McpError::Protocol {
                 server: server.clone(),
@@ -262,10 +288,7 @@ impl McpConnection {
             .cloned()
             .unwrap_or_else(|| serde_json::json!({}));
         peer.notify("notifications/initialized", serde_json::json!({}))
-            .map_err(|source| McpError::Rpc {
-                server: server.clone(),
-                source,
-            })?;
+            .map_err(|source| McpError::rpc(&server, source))?;
 
         let changed = Arc::new(ListsChanged::default());
         let progress = ProgressRoutes::default();
@@ -431,7 +454,8 @@ impl McpConnection {
     /// # Errors
     ///
     /// Returns [`McpError::Rpc`] on a JSON-RPC error or dropped
-    /// connection.
+    /// connection, and [`McpError::Unauthorized`] when an HTTP server
+    /// refuses kage's token.
     pub fn request(
         &self,
         method: &str,
@@ -439,10 +463,7 @@ impl McpConnection {
     ) -> Result<serde_json::Value, McpError> {
         self.peer
             .request_timeout(method, params, REQUEST_TIMEOUT)
-            .map_err(|source| McpError::Rpc {
-                server: self.server.clone(),
-                source,
-            })
+            .map_err(|source| McpError::rpc(&self.server, source))
     }
 
     /// Like [`Self::request`] but abandons the call when
@@ -452,7 +473,8 @@ impl McpConnection {
     /// # Errors
     ///
     /// Returns [`McpError::Rpc`] on a JSON-RPC error, a dropped
-    /// connection, or cancellation.
+    /// connection, or cancellation, and [`McpError::Unauthorized`] when
+    /// an HTTP server refuses kage's token.
     pub fn request_cancellable(
         &self,
         method: &str,
@@ -461,10 +483,7 @@ impl McpConnection {
     ) -> Result<serde_json::Value, McpError> {
         self.peer
             .request_cancellable(method, params, should_cancel)
-            .map_err(|source| McpError::Rpc {
-                server: self.server.clone(),
-                source,
-            })
+            .map_err(|source| McpError::rpc(&self.server, source))
     }
 }
 
@@ -507,10 +526,28 @@ impl McpServerHandle {
         roots: &[std::path::PathBuf],
         handler: Option<Arc<dyn ServerRequestHandler>>,
     ) -> Result<Self, McpError> {
+        Self::spawn_with(name, cfg, roots, handler, None)
+    }
+
+    /// [`Self::spawn`] with a bearer token source for an HTTP server.
+    /// The transport asks `tokens` only when `cfg` has no
+    /// `authorization` header of its own. A stdio server ignores it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::spawn`], plus [`McpError::Unauthorized`] when the
+    /// HTTP server refuses the token (or asks for one there is none of).
+    pub fn spawn_with(
+        name: impl Into<String>,
+        cfg: &McpServer,
+        roots: &[std::path::PathBuf],
+        handler: Option<Arc<dyn ServerRequestHandler>>,
+        tokens: Option<Arc<dyn TokenSource>>,
+    ) -> Result<Self, McpError> {
         let name = name.into();
         match (cfg.command.as_deref(), cfg.url.as_deref()) {
             (Some(command), None) => Self::spawn_stdio(name, command, cfg, roots, handler),
-            (None, Some(url)) => Self::connect_http(name, url, cfg, roots, handler),
+            (None, Some(url)) => Self::connect_http(name, url, cfg, roots, handler, tokens),
             (Some(_), Some(_)) => Err(McpError::Config {
                 server: name,
                 detail: "set exactly one of `command` (stdio) or `url` (http), not both".to_owned(),
@@ -568,9 +605,10 @@ impl McpServerHandle {
         cfg: &McpServer,
         roots: &[std::path::PathBuf],
         handler: Option<Arc<dyn ServerRequestHandler>>,
+        tokens: Option<Arc<dyn TokenSource>>,
     ) -> Result<Self, McpError> {
-        let (peer, inbound, _reader) =
-            crate::http::connect_http(url, &cfg.headers).map_err(|detail| McpError::Http {
+        let (peer, inbound, _reader) = crate::http::connect_http(url, &cfg.headers, tokens)
+            .map_err(|detail| McpError::Http {
                 server: name.clone(),
                 detail,
             })?;
@@ -773,6 +811,7 @@ mod tests {
             url: None,
             headers: std::collections::BTreeMap::new(),
             disabled: false,
+            oauth: None,
         }
     }
 

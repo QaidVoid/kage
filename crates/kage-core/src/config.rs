@@ -640,6 +640,25 @@ pub struct McpServer {
     /// When `true`, the server is configured but not spawned/connected.
     #[serde(default)]
     pub disabled: bool,
+    /// OAuth settings for an HTTP server that needs a login
+    /// (`[mcp.servers.<name>.oauth]`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth: Option<McpOAuth>,
+}
+
+/// OAuth settings for one HTTP MCP server. Every field is optional:
+/// without them kage registers itself with the authorization server and
+/// requests the scope the server advertises.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpOAuth {
+    /// A pre-registered client id, which skips dynamic client
+    /// registration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// The scope to request, overriding the one the server advertises.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
 }
 
 #[cfg(test)]
@@ -721,6 +740,41 @@ mod tests {
                 remote.headers.get("Authorization").map(String::as_str),
                 Some("Bearer x")
             );
+            assert!(remote.oauth.is_none());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn mcp_server_parses_the_oauth_table() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.toml",
+                r#"
+                [mcp.servers.linear]
+                url = "https://mcp.linear.app/mcp"
+
+                [mcp.servers.linear.oauth]
+                client_id = "kage-4f2c"
+                scope = "read write"
+
+                [mcp.servers.bare]
+                url = "https://mcp.example.com/mcp"
+                [mcp.servers.bare.oauth]
+                "#,
+            )?;
+            let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
+            let linear = cfg.mcp.servers.get("linear").expect("linear parsed");
+            assert_eq!(
+                linear.oauth,
+                Some(McpOAuth {
+                    client_id: Some("kage-4f2c".to_owned()),
+                    scope: Some("read write".to_owned()),
+                })
+            );
+            let bare = cfg.mcp.servers.get("bare").expect("bare parsed");
+            assert_eq!(bare.oauth, Some(McpOAuth::default()));
             Ok(())
         });
     }

@@ -1540,12 +1540,16 @@ dependencies = [
 name = "kage-mcp"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "getrandom 0.3.4",
  "kage-core",
  "kage-jsonrpc",
  "kage-tools",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "ureq",
+ "url",
 ]
 
 [[package]]

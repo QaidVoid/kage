@@ -22,6 +22,12 @@
 //! failed to spawn is kept like an evicted one, so `restart` can bring
 //! it up later and permission gates still know its name. The manager
 //! owns the [`McpServerHandle`]s, so dropping it kills every child.
+//!
+//! An HTTP server that refuses kage's token (or has none) reports
+//! [`McpError::Unauthorized`]. It is kept like a failed server but shows
+//! as [`McpServerStatus::NeedsAuth`], and a live server that starts
+//! refusing is taken down the same way. [`McpManager::spawn_all_with`]
+//! takes the [`TokenSource`] and keeps it for `restart`.
 
 use std::sync::Arc;
 
@@ -31,18 +37,21 @@ use kage_core::protocol::{
 };
 use kage_tools::ToolRegistry;
 
+use crate::oauth::TokenSource;
 use crate::server::{McpConnection, McpError, McpServerHandle};
 use crate::tools::tools_from_connection;
 
 /// One configured server: its launch spec (kept so it can be
 /// respawned by `restart`, including after an eviction), the live
 /// handle (`None` when it failed to spawn or was evicted as dead), the
-/// last error of a server that is not live, the tool names it
-/// currently contributes, and its cached catalog lists.
+/// last error of a server that is not live and whether that error asks
+/// for a login, the tool names it currently contributes, and its cached
+/// catalog lists.
 struct Managed {
     spec: McpServer,
     handle: Option<McpServerHandle>,
     error: Option<String>,
+    needs_auth: bool,
     registered: Vec<String>,
     resources: Vec<McpResource>,
     templates: Vec<McpResourceTemplate>,
@@ -50,11 +59,12 @@ struct Managed {
 }
 
 impl Managed {
-    fn new(spec: McpServer, handle: Option<McpServerHandle>, error: Option<String>) -> Self {
+    fn new(spec: McpServer, handle: Option<McpServerHandle>) -> Self {
         Self {
             spec,
             handle,
-            error,
+            error: None,
+            needs_auth: false,
             registered: Vec::new(),
             resources: Vec::new(),
             templates: Vec::new(),
@@ -108,9 +118,40 @@ impl Managed {
         self.prompts.clear();
     }
 
+    /// Record why the server is not live.
+    fn failed(&mut self, error: &McpError) {
+        self.error = Some(error.to_string());
+        self.needs_auth = matches!(error, McpError::Unauthorized { .. });
+    }
+
+    /// Take the server down: unregister its tools, drop the handle and
+    /// the catalog, and record `error`.
+    fn evict(&mut self, reg: &mut ToolRegistry, error: &McpError) {
+        for stale in self.registered.drain(..) {
+            reg.unregister(&stale);
+        }
+        self.handle = None;
+        self.clear_catalog();
+        self.failed(error);
+    }
+
+    /// Take the server down when one of `failures` says its token was
+    /// refused, and hand the failures back.
+    fn settle(&mut self, reg: &mut ToolRegistry, failures: Vec<McpError>) -> Vec<McpError> {
+        if let Some(denied) = failures
+            .iter()
+            .find(|e| matches!(e, McpError::Unauthorized { .. }))
+        {
+            self.evict(reg, denied);
+        }
+        failures
+    }
+
     fn info(&self, name: &str) -> McpServerInfo {
         let status = if self.handle.is_some() {
             McpServerStatus::Connected
+        } else if self.needs_auth {
+            McpServerStatus::NeedsAuth
         } else {
             McpServerStatus::Failed {
                 error: self.error.clone().unwrap_or_default(),
@@ -138,6 +179,9 @@ pub struct McpManager {
     /// Host handler for server-initiated requests (sampling, ...),
     /// retained so a `restart` re-injects it.
     handler: Option<Arc<dyn crate::ServerRequestHandler>>,
+    /// Bearer tokens for HTTP servers, retained so a `restart` (for
+    /// example after a login) sends them.
+    tokens: Option<Arc<dyn TokenSource>>,
 }
 
 impl McpManager {
@@ -157,28 +201,49 @@ impl McpManager {
         roots: Vec<std::path::PathBuf>,
         handler: Option<Arc<dyn crate::ServerRequestHandler>>,
     ) -> (Self, Vec<(String, McpError)>) {
+        Self::spawn_all_with(cfg, roots, handler, None)
+    }
+
+    /// [`Self::spawn_all`] with a bearer token source for HTTP servers,
+    /// kept for [`Self::restart`]. A server that refuses kage's token
+    /// stays in the manager as [`McpServerStatus::NeedsAuth`].
+    #[must_use]
+    pub fn spawn_all_with(
+        cfg: &McpConfig,
+        roots: Vec<std::path::PathBuf>,
+        handler: Option<Arc<dyn crate::ServerRequestHandler>>,
+        tokens: Option<Arc<dyn TokenSource>>,
+    ) -> (Self, Vec<(String, McpError)>) {
         let mut servers = Vec::new();
         let mut errors = Vec::new();
         for (name, spec) in &cfg.servers {
             if spec.disabled {
                 continue;
             }
-            let (handle, error) =
-                match McpServerHandle::spawn(name.clone(), spec, &roots, handler.clone()) {
-                    Ok(handle) => (Some(handle), None),
-                    Err(e) => {
-                        let detail = e.to_string();
-                        errors.push((name.clone(), e));
-                        (None, Some(detail))
-                    }
-                };
-            servers.push((name.clone(), Managed::new(spec.clone(), handle, error)));
+            let spawned = McpServerHandle::spawn_with(
+                name.clone(),
+                spec,
+                &roots,
+                handler.clone(),
+                tokens.clone(),
+            );
+            let managed = match spawned {
+                Ok(handle) => Managed::new(spec.clone(), Some(handle)),
+                Err(e) => {
+                    let mut managed = Managed::new(spec.clone(), None);
+                    managed.failed(&e);
+                    errors.push((name.clone(), e));
+                    managed
+                }
+            };
+            servers.push((name.clone(), managed));
         }
         (
             Self {
                 servers,
                 roots,
                 handler,
+                tokens,
             },
             errors,
         )
@@ -250,24 +315,28 @@ impl McpManager {
             url: None,
             headers: std::collections::BTreeMap::new(),
             disabled: false,
+            oauth: None,
         };
         let handle = McpServerHandle::from_connection(conn);
         self.servers
-            .push((name.to_owned(), Managed::new(spec, Some(handle), None)));
+            .push((name.to_owned(), Managed::new(spec, Some(handle))));
     }
 
     /// Discover and register every live server's tools, and list the
     /// resources, templates and prompts of servers that advertise them.
     /// Returns the per-server failures; a failing tool list simply
     /// contributes no tools, and a failing catalog list leaves the
-    /// tools registered.
+    /// tools registered. A server that refuses kage's token is taken
+    /// down and needs a login.
     pub fn register_into(&mut self, reg: &mut ToolRegistry) -> Vec<(String, McpError)> {
         let mut errors = Vec::new();
         for (name, managed) in &mut self.servers {
             if managed.handle.is_none() {
                 continue;
             }
-            errors.extend(managed.load_all(reg).into_iter().map(|e| (name.clone(), e)));
+            let failures = managed.load_all(reg);
+            let failures = managed.settle(reg, failures);
+            errors.extend(failures.into_iter().map(|e| (name.clone(), e)));
         }
         errors
     }
@@ -278,7 +347,8 @@ impl McpManager {
     /// transport has died is evicted instead: its tools are
     /// unregistered, its catalog is cleared and a [`McpError::Crashed`]
     /// failure is reported (the launch spec is kept for a later
-    /// `restart`). Returns per-server failures.
+    /// `restart`). A server that refuses kage's token is taken down the
+    /// same way and needs a login. Returns per-server failures.
     pub fn refresh_into(&mut self, reg: &mut ToolRegistry) -> Vec<(String, McpError)> {
         let mut errors = Vec::new();
         for (name, managed) in &mut self.servers {
@@ -292,34 +362,32 @@ impl McpManager {
                     .as_mut()
                     .and_then(McpServerHandle::exit_status)
                     .unwrap_or_else(|| "connection closed".to_owned());
-                for stale in managed.registered.drain(..) {
-                    reg.unregister(&stale);
-                }
-                managed.handle = None;
-                managed.clear_catalog();
                 let crash = McpError::Crashed {
                     server: name.clone(),
                     detail,
                 };
-                managed.error = Some(crash.to_string());
+                managed.evict(reg, &crash);
                 errors.push((name.clone(), crash));
                 continue;
             }
+            let mut failures = Vec::new();
             if conn.take_tools_changed()
                 && let Err(e) = Self::reload(managed, reg)
             {
-                errors.push((name.clone(), e));
+                failures.push(e);
             }
             if conn.take_resources_changed()
                 && let Err(e) = managed.load_resources()
             {
-                errors.push((name.clone(), e));
+                failures.push(e);
             }
             if conn.take_prompts_changed()
                 && let Err(e) = managed.load_prompts()
             {
-                errors.push((name.clone(), e));
+                failures.push(e);
             }
+            let failures = managed.settle(reg, failures);
+            errors.extend(failures.into_iter().map(|e| (name.clone(), e)));
         }
         errors
     }
@@ -341,17 +409,20 @@ impl McpManager {
     pub fn restart(&mut self, name: &str, reg: &mut ToolRegistry) -> Result<(), McpError> {
         let roots = self.roots.clone();
         let handler = self.handler.clone();
+        let tokens = self.tokens.clone();
         let managed = self
             .servers
             .iter_mut()
             .find(|(n, _)| n == name)
             .map(|(_, m)| m)
             .ok_or_else(|| McpError::Unknown(name.to_owned()))?;
-        let fresh = match McpServerHandle::spawn(name.to_owned(), &managed.spec, &roots, handler) {
+        let spawned =
+            McpServerHandle::spawn_with(name.to_owned(), &managed.spec, &roots, handler, tokens);
+        let fresh = match spawned {
             Ok(fresh) => fresh,
             Err(e) => {
                 if managed.handle.is_none() {
-                    managed.error = Some(e.to_string());
+                    managed.failed(&e);
                 }
                 return Err(e);
             }
@@ -361,8 +432,11 @@ impl McpManager {
         }
         managed.handle = Some(fresh);
         managed.error = None;
+        managed.needs_auth = false;
         managed.clear_catalog();
-        managed.load_all(reg).into_iter().next().map_or(Ok(()), Err)
+        let failures = managed.load_all(reg);
+        let failures = managed.settle(reg, failures);
+        failures.into_iter().next().map_or(Ok(()), Err)
     }
 
     /// Drop this server's previously registered tools and register
@@ -476,6 +550,7 @@ mod tests {
                 url: None,
                 headers: std::collections::BTreeMap::new(),
                 disabled: true,
+                oauth: None,
             },
         );
         cfg.servers.insert(
@@ -487,6 +562,7 @@ mod tests {
                 url: None,
                 headers: std::collections::BTreeMap::new(),
                 disabled: false,
+                oauth: None,
             },
         );
         let (mgr, errors) = McpManager::spawn_all(&cfg, vec![], None);
@@ -505,6 +581,7 @@ mod tests {
             url: None,
             headers: std::collections::BTreeMap::new(),
             disabled: false,
+            oauth: None,
         };
         cfg.servers.insert("broken".to_owned(), spec.clone());
         cfg.servers.insert(
@@ -590,6 +667,7 @@ mod tests {
             url: None,
             headers: std::collections::BTreeMap::new(),
             disabled: false,
+            oauth: None,
         };
         let mut mgr = McpManager::default();
         mgr.adopt("x", Arc::clone(&conn));
@@ -684,6 +762,7 @@ mod tests {
                 url: None,
                 headers: std::collections::BTreeMap::new(),
                 disabled: false,
+                oauth: None,
             },
         );
         let (mut mgr, _errors) = McpManager::spawn_all(&cfg, vec![], None);
@@ -735,6 +814,117 @@ mod tests {
         assert_eq!(info.tools, 1);
         assert!(info.resources.is_empty());
         assert_eq!(info.prompts.len(), 1, "prompts still load");
+    }
+
+    /// An HTTP MCP server on 127.0.0.1 that answers `initialize` (and
+    /// `tools/list` with one tool) to `Bearer good` while `ready` is set
+    /// and `list` allows it, and 401 otherwise.
+    fn guarded_server(ready: Arc<AtomicBool>, list: bool) -> crate::oauth::tests::FakeServer {
+        use crate::oauth::tests::{Reply, serve};
+        serve(move |request, _| {
+            if request.method == "GET" {
+                return Reply::status(405);
+            }
+            let body: serde_json::Value = serde_json::from_str(&request.body).unwrap_or_default();
+            let allowed = ready.load(Ordering::SeqCst)
+                && request.header("authorization") == Some("Bearer good")
+                && (list || body["method"] != "tools/list");
+            if !allowed {
+                return Reply::status(401);
+            }
+            match body["method"].as_str() {
+                Some("initialize") => Reply::json(
+                    200,
+                    &serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": body["id"],
+                        "result": { "protocolVersion": PROTOCOL_VERSION, "capabilities": {} },
+                    }),
+                ),
+                Some("tools/list") => Reply::json(
+                    200,
+                    &serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": body["id"],
+                        "result": { "tools": [{ "name": "t", "inputSchema": {} }] },
+                    }),
+                ),
+                _ => Reply::status(202),
+            }
+        })
+    }
+
+    fn remote_config(url: String) -> McpConfig {
+        let mut cfg = McpConfig::default();
+        cfg.servers.insert(
+            "remote".to_owned(),
+            McpServer {
+                command: None,
+                args: vec![],
+                env: std::collections::BTreeMap::new(),
+                url: Some(url),
+                headers: std::collections::BTreeMap::new(),
+                disabled: false,
+                oauth: None,
+            },
+        );
+        cfg
+    }
+
+    #[test]
+    fn a_refused_token_needs_auth_and_restart_sends_the_token() {
+        let ready = Arc::new(AtomicBool::new(false));
+        let server = guarded_server(Arc::clone(&ready), true);
+        let tokens = crate::oauth::tests::StaticTokens::new("good", None);
+        let (mut mgr, errors) = McpManager::spawn_all_with(
+            &remote_config(format!("{}/mcp", server.base)),
+            vec![],
+            None,
+            Some(Arc::clone(&tokens) as Arc<dyn TokenSource>),
+        );
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            matches!(&errors[0].1, McpError::Unauthorized { server } if server == "remote"),
+            "{:?}",
+            errors[0].1
+        );
+        assert_eq!(tokens.refreshes(), 1);
+        assert_eq!(mgr.catalog()[0].status, McpServerStatus::NeedsAuth);
+        assert!(
+            mgr.error("remote")
+                .is_some_and(|e| e.contains("kage mcp login remote"))
+        );
+        assert_eq!(mgr.server_names().collect::<Vec<_>>(), ["remote"]);
+
+        ready.store(true, Ordering::SeqCst);
+        let mut reg = ToolRegistry::new();
+        mgr.restart("remote", &mut reg).unwrap();
+        assert_eq!(mgr.catalog()[0].status, McpServerStatus::Connected);
+        assert!(mgr.error("remote").is_none());
+        assert!(reg.get("remote__t").is_some());
+    }
+
+    #[test]
+    fn a_live_server_that_refuses_its_token_needs_auth() {
+        let server = guarded_server(Arc::new(AtomicBool::new(true)), false);
+        let tokens = crate::oauth::tests::StaticTokens::new("good", None);
+        let (mut mgr, errors) = McpManager::spawn_all_with(
+            &remote_config(format!("{}/mcp", server.base)),
+            vec![],
+            None,
+            Some(tokens),
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(mgr.len(), 1);
+        let mut reg = ToolRegistry::new();
+        let errors = mgr.register_into(&mut reg);
+        assert!(
+            matches!(&errors[..], [(name, McpError::Unauthorized { .. })] if name == "remote"),
+            "{errors:?}"
+        );
+        assert!(mgr.is_empty());
+        assert_eq!(mgr.catalog()[0].status, McpServerStatus::NeedsAuth);
+        assert!(reg.get("remote__t").is_none());
     }
 
     #[test]

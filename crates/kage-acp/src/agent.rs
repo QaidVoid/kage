@@ -34,13 +34,16 @@ use crate::acp::{
 pub enum PermissionDecision {
     /// Run the tool call.
     Allow,
+    /// Run the tool call and allow the tool for the rest of the session.
+    AllowSession,
     /// Block it, with an optional reason for the model.
     Deny(Option<String>),
 }
 
-/// Ask the client to allow or deny `tool_call`. Blocks until the client
-/// answers or `cancelled` returns `true`. Never auto-approves: any error,
-/// cancel, or rejection resolves to [`PermissionDecision::Deny`].
+/// Ask the client to allow `tool_call` once or for the session, or to
+/// deny it. Blocks until the client answers or `cancelled` returns
+/// `true`. Never auto-approves: any error, cancel, or rejection resolves
+/// to [`PermissionDecision::Deny`].
 pub fn request_permission(
     peer: &Peer,
     session_id: &str,
@@ -58,6 +61,11 @@ pub fn request_permission(
                 kind: PermissionOptionKind::AllowOnce,
             },
             PermissionOption {
+                option_id: "allow_session".to_owned(),
+                name: format!("Allow {title} for this session"),
+                kind: PermissionOptionKind::AllowAlways,
+            },
+            PermissionOption {
                 option_id: "reject".to_owned(),
                 name: format!("Reject {title}"),
                 kind: PermissionOptionKind::RejectOnce,
@@ -70,12 +78,11 @@ pub fn request_permission(
     match peer.request_cancellable("session/request_permission", params, cancelled) {
         Ok(value) => match serde_json::from_value::<RequestPermissionResponse>(value) {
             Ok(resp) => match resp.outcome {
-                PermissionOutcome::Selected(sel) if sel.option_id == "allow" => {
-                    PermissionDecision::Allow
-                }
-                PermissionOutcome::Selected(_) => {
-                    PermissionDecision::Deny(Some("rejected by client".to_owned()))
-                }
+                PermissionOutcome::Selected(sel) => match sel.option_id.as_str() {
+                    "allow" => PermissionDecision::Allow,
+                    "allow_session" => PermissionDecision::AllowSession,
+                    _ => PermissionDecision::Deny(Some("rejected by client".to_owned())),
+                },
                 PermissionOutcome::Cancelled => {
                     PermissionDecision::Deny(Some("cancelled".to_owned()))
                 }

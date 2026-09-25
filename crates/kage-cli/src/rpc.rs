@@ -488,7 +488,11 @@ impl Agent for CliAcpAgent {
             protocol_version: PROTOCOL_VERSION,
             agent_capabilities: AgentCapabilities {
                 load_session: true,
-                prompt_capabilities: PromptCapabilities::default(),
+                prompt_capabilities: PromptCapabilities {
+                    image: true,
+                    embedded_context: true,
+                    ..PromptCapabilities::default()
+                },
                 session_capabilities: SessionCapabilities {
                     list: Some(Supported {}),
                     resume: Some(Supported {}),
@@ -559,18 +563,13 @@ impl Agent for CliAcpAgent {
 
     fn prompt(&self, req: PromptRequest, _ctx: &PromptContext) -> Result<PromptResponse, RpcError> {
         let id = self.engine_id(&req.session_id)?;
-        let text = req
-            .prompt
-            .iter()
-            .filter_map(ContentBlock::as_text)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let content = req.prompt.into_iter().map(prompt_content).collect();
         let (done, end) = mpsc::channel();
         lock(&self.waiters).insert(id, done);
         self.engine.send(Command::to(
             id,
             CommandKind::Prompt {
-                content: vec![Content::Text { text }],
+                content,
                 delivery: Delivery::Queue,
             },
         ));
@@ -886,6 +885,7 @@ impl Bridge {
                 });
             let decision = match decision {
                 PermissionDecision::Allow => Decision::AllowOnce,
+                PermissionDecision::AllowSession => Decision::AllowSession,
                 PermissionDecision::Deny(_) => Decision::Deny,
             };
             commander.send(Command::to(
@@ -1097,6 +1097,47 @@ fn image_block(source: &ImageSource, mime: &str) -> ContentBlock {
             name: url.clone(),
             mime_type: Some(mime.to_owned()),
         }),
+    }
+}
+
+/// One ACP prompt block as the content the engine receives. Embedded
+/// text becomes a resource block, images stay images, and what the model
+/// cannot take becomes one line saying what was attached.
+fn prompt_content(block: ContentBlock) -> Content {
+    let image = |data: String, mime: String| Content::Image {
+        source: ImageSource::Base64 { data },
+        mime,
+    };
+    let text = |text: String| Content::Text { text };
+    match block {
+        ContentBlock::Text(t) => text(t.text),
+        ContentBlock::Image(blob) => image(blob.data, blob.mime_type),
+        ContentBlock::Audio(_) => text("[audio omitted]".to_owned()),
+        ContentBlock::ResourceLink(link) => text(match link.uri.strip_prefix("file://") {
+            Some(path) => format!("Referenced file: {path}"),
+            None => format!("Referenced resource: {} ({})", link.uri, link.name),
+        }),
+        ContentBlock::Resource(embedded) => {
+            let field = |key: &str| {
+                embedded
+                    .resource
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+            };
+            let uri = field("uri").unwrap_or_default();
+            let mime = field("mimeType");
+            match (field("text"), field("blob"), mime) {
+                (Some(body), ..) => text(kage_core::resource_block::render(uri, None, mime, body)),
+                (None, Some(data), Some(mime)) if mime.starts_with("image/") => {
+                    image(data.to_owned(), mime.to_owned())
+                }
+                (None, Some(_), _) => text(format!(
+                    "[binary resource {uri}: {}]",
+                    mime.unwrap_or("application/octet-stream")
+                )),
+                (None, None, _) => text("[resource omitted]".to_owned()),
+            }
+        }
     }
 }
 
@@ -1717,6 +1758,120 @@ mod tests {
         let (_, terminal) = &notes[terminal.unwrap()];
         assert_eq!(terminal["update"]["subagentSessionId"], child);
         assert_eq!(terminal["update"]["state"], "cancelled");
+    }
+
+    #[test]
+    fn initialize_advertises_image_and_embedded_context() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = serve(Vec::new(), dir.path(), dir.path());
+        let params =
+            serde_json::json!({"protocolVersion": PROTOCOL_VERSION, "clientCapabilities": {}});
+        let init = h.client.request("initialize", params).unwrap();
+        let caps = &init["agentCapabilities"]["promptCapabilities"];
+        assert_eq!(caps["image"], true);
+        assert_eq!(caps["embeddedContext"], true);
+        assert_eq!(caps["audio"], false);
+    }
+
+    #[test]
+    fn prompt_blocks_reach_the_engine_as_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = serve(vec![text_turn("ok")], dir.path(), dir.path());
+        let params = serde_json::json!({
+            "sessionId": h.session,
+            "prompt": [
+                {"type": "text", "text": "review these"},
+                {"type": "resource", "resource": {
+                    "uri": "file:///w/a.rs", "mimeType": "text/rust", "text": "fn a() {}",
+                }},
+                {"type": "resource_link", "uri": "file:///w/b.rs", "name": "b.rs"},
+                {"type": "resource_link", "uri": "https://example.com/doc", "name": "doc"},
+                {"type": "image", "data": "aGk=", "mimeType": "image/png"},
+                {"type": "resource", "resource": {
+                    "uri": "file:///w/c.png", "mimeType": "image/png", "blob": "aGk=",
+                }},
+                {"type": "resource", "resource": {"uri": "file:///w/d.bin", "blob": "AAAA"}},
+                {"type": "audio", "data": "AAAA", "mimeType": "audio/wav"},
+            ],
+        });
+        let response = h.client.request("session/prompt", params).unwrap();
+        assert_eq!(response["stopReason"], "end_turn");
+        let image = || Content::Image {
+            source: ImageSource::Base64 {
+                data: "aGk=".into(),
+            },
+            mime: "image/png".into(),
+        };
+        let request = h.mock.requests().swap_remove(0);
+        assert_eq!(
+            request.messages.last().unwrap().content,
+            [
+                text("review these"),
+                text(
+                    "<resource uri=\"file:///w/a.rs\" mime=\"text/rust\">\nfn a() {}\n</resource>"
+                ),
+                text("Referenced file: /w/b.rs"),
+                text("Referenced resource: https://example.com/doc (doc)"),
+                image(),
+                image(),
+                text("[binary resource file:///w/d.bin: application/octet-stream]"),
+                text("[audio omitted]"),
+            ]
+        );
+    }
+
+    #[test]
+    fn allow_for_this_session_stops_the_next_identical_ask() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().display().to_string();
+        let input = serde_json::json!({ "path": path });
+        let h = serve(
+            vec![
+                tool_turn("call_1", "ls", input.clone()),
+                tool_turn("call_2", "ls", input),
+                text_turn("done"),
+            ],
+            dir.path(),
+            dir.path(),
+        );
+        let prompt_end = prompt_async(&h.client, &h.session, "go");
+
+        let (ask, params) = until_ask(&h.inbox, &mut Vec::new());
+        let options: Vec<_> = params["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| (o["optionId"].as_str().unwrap(), o["kind"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            options,
+            [
+                ("allow", "allow_once"),
+                ("allow_session", "allow_always"),
+                ("reject", "reject_once"),
+            ]
+        );
+        assert_eq!(params["options"][1]["name"], "Allow ls for this session");
+        let outcome =
+            serde_json::json!({"outcome": {"outcome": "selected", "optionId": "allow_session"}});
+        h.client.respond(&ask, Ok(outcome)).unwrap();
+
+        let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+        assert_eq!(response["stopReason"], "end_turn");
+        let asked_again = std::iter::from_fn(|| h.inbox.try_recv().ok())
+            .any(|message| matches!(message, Inbound::Request { .. }));
+        assert!(!asked_again);
+        let turn = h.mock.requests().swap_remove(2);
+        let results: Vec<_> = turn
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|c| match c {
+                Content::ToolResultBlock { is_error, .. } => Some(*is_error),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results, [false, false]);
     }
 
     fn usage(input: u64, output: u64) -> TokenUsage {

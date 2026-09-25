@@ -196,7 +196,10 @@ fn permission_result(
     resolver: Option<&PermissionResolver>,
     req: &RequestPermissionRequest,
 ) -> serde_json::Value {
-    let allow = matches!(resolver.map(|r| r(req)), Some(PermissionDecision::Allow));
+    let allow = matches!(
+        resolver.map(|r| r(req)),
+        Some(PermissionDecision::Allow | PermissionDecision::AllowSession)
+    );
     let outcome = match option_id(req, allow) {
         Some(option_id) => PermissionOutcome::Selected(SelectedOption { option_id }),
         None => PermissionOutcome::Cancelled,
@@ -695,7 +698,8 @@ mod tests {
                 &|| false,
             );
             let verdict = match decision {
-                crate::agent::PermissionDecision::Allow => "allowed",
+                crate::agent::PermissionDecision::Allow
+                | crate::agent::PermissionDecision::AllowSession => "allowed",
                 crate::agent::PermissionDecision::Deny(_) => "denied",
             };
             ctx.update(SessionUpdate::AgentMessageChunk(MessageChunk {

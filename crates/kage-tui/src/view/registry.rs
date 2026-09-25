@@ -379,6 +379,14 @@ mod tests {
     }
 
     #[test]
+    fn usage_is_a_custom_kind_plugins_can_override() {
+        // `None` routes `kage:usage` through the per-kind custom map
+        // (`set_custom`), which is exactly what
+        // `kage.register_block_renderer` writes.
+        assert_eq!(builtin_kind_from_name("kage:usage"), None);
+    }
+
+    #[test]
     fn builtins_registry_dispatches_assistant_blocks() {
         let r = BlockRenderer::with_builtins();
         let block = Block::Assistant {

@@ -209,6 +209,10 @@ impl App {
                 self.open_agents();
                 None
             }
+            "usage" => {
+                self.push_usage();
+                None
+            }
             "clone" => {
                 let _ = self.send_request(RunRequest::CloneSession);
                 None
@@ -706,6 +710,17 @@ impl App {
         buf.push_custom("kage:help", body, false);
     }
 
+    /// Render the `/usage` panel: session-wide token totals with the
+    /// cache counters the footer hides, then the context-window bar.
+    /// Reads the live [`SessionUsage`](crate::usage::SessionUsage)
+    /// snapshot; an unwired host renders zeros.
+    pub(crate) fn push_usage(&mut self) {
+        let usage = self.session_usage_snapshot().unwrap_or_default();
+        let body = usage_body(&usage);
+        let mut buf = lock(&self.buffer);
+        buf.push_custom("kage:usage", body, false);
+    }
+
     /// Render every event a plugin can hook with `kage.on`, grouped
     /// by dispatch kind, sourced from the single
     /// [`kage_plugin::KNOWN_EVENTS`] catalog so it cannot drift from
@@ -756,4 +771,103 @@ fn set_os_clipboard(text: String) {
         let set = clipboard.set();
         let _ = set.text(text);
     });
+}
+
+/// Width of the `/usage` context bar in cells. Fixed: the panel is
+/// static transcript text with no layout pass to measure against.
+const USAGE_BAR_WIDTH: usize = 20;
+
+/// Compact token count in Kimi's style: `999`, `188k`, `650.2M`.
+/// Millions keep one decimal trimmed of a trailing `.0`; thousands
+/// round to whole `k`. Integer math throughout: token counts never
+/// touch `f64`.
+fn compact_tokens(n: u64) -> String {
+    const MILLION: u64 = 1_000_000;
+    const HUNDRED_THOUSAND: u64 = 100_000;
+    const THOUSAND: u64 = 1_000;
+    if n >= MILLION {
+        let tenths = (n + HUNDRED_THOUSAND / 2) / HUNDRED_THOUSAND;
+        let (whole, frac) = (tenths / 10, tenths % 10);
+        if frac == 0 {
+            format!("{whole}M")
+        } else {
+            format!("{whole}.{frac}M")
+        }
+    } else if n >= THOUSAND {
+        format!("{}k", (n + THOUSAND / 2) / THOUSAND)
+    } else {
+        format!("{n}")
+    }
+}
+
+/// Cells of [`usage_bar`] that fit `used` of `total`, rounded to the
+/// nearest cell and clamped to the width. Integer math: token counts
+/// never touch `f64`.
+fn usage_bar_fill(used: u64, total: u64, width: usize) -> usize {
+    if total == 0 || used == 0 {
+        return 0;
+    }
+    let width_u64 = width as u64;
+    let filled = (used.saturating_mul(width_u64) + total / 2) / total;
+    usize::try_from(filled.min(width_u64)).unwrap_or(width)
+}
+
+/// Fixed-width context fill bar: full blocks per used cell, light
+/// shade per free cell (escapes: the source tree is ASCII-only).
+fn usage_bar(used: u64, total: u64) -> String {
+    let filled = usage_bar_fill(used, total, USAGE_BAR_WIDTH);
+    let mut bar = String::with_capacity(USAGE_BAR_WIDTH + 2);
+    bar.push('[');
+    for _ in 0..filled {
+        bar.push('\u{2588}');
+    }
+    for _ in filled..USAGE_BAR_WIDTH {
+        bar.push('\u{2591}');
+    }
+    bar.push(']');
+    bar
+}
+
+/// The `/usage` panel body for a [`SessionUsage`](crate::usage::SessionUsage)
+/// snapshot. Pure over the snapshot so tests pin the text.
+fn usage_body(usage: &crate::usage::SessionUsage) -> String {
+    let mut lines = vec!["Session usage".to_owned()];
+    lines.push(format!(
+        "  {}",
+        if usage.model.is_empty() {
+            "(no model)"
+        } else {
+            usage.model.as_str()
+        }
+    ));
+    let cost = if usage.total_cost > 0.0 {
+        format!("  (${:.2})", usage.total_cost)
+    } else {
+        String::new()
+    };
+    lines.push(format!(
+        "    input {}  output {}  cache read {}  cache write {}  total {}{cost}",
+        compact_tokens(usage.input_tokens),
+        compact_tokens(usage.output_tokens),
+        compact_tokens(usage.cache_read_tokens),
+        compact_tokens(usage.cache_write_tokens),
+        compact_tokens(usage.total_tokens()),
+    ));
+    lines.push("Context window".to_owned());
+    if usage.context_window == 0 {
+        lines.push("  (unknown window)".to_owned());
+    } else {
+        let percent = usage
+            .current_context
+            .saturating_mul(100)
+            .checked_div(usage.context_window)
+            .unwrap_or(100);
+        lines.push(format!(
+            "  {}  {percent}%  ({} / {})",
+            usage_bar(usage.current_context, usage.context_window),
+            compact_tokens(usage.current_context),
+            compact_tokens(usage.context_window),
+        ));
+    }
+    lines.join("\n")
 }

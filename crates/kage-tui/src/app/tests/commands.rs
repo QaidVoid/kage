@@ -21,6 +21,61 @@ fn events_command_lists_known_hooks_by_kind() {
 }
 
 #[test]
+fn usage_command_renders_totals_cache_and_context_bar() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer.clone(), tx);
+    let usage = crate::usage::shared_session_usage();
+    app.set_session_usage(usage.clone());
+    {
+        let mut u = lock(&usage);
+        u.model = "p:m".to_owned();
+        u.input_tokens = 650_200_000;
+        u.output_tokens = 1_800_000;
+        u.cache_read_tokens = 12_400_000;
+        u.cache_write_tokens = 3_100_000;
+        u.current_context = 190_000;
+        u.context_window = 250_000;
+        u.total_cost = 1.23;
+    }
+    app.push_usage();
+    let buf = buffer.lock().unwrap();
+    let rendered = match buf.blocks().last() {
+        Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
+        other => panic!("expected a custom block, got {other:?}"),
+    };
+    assert!(rendered.contains("Session usage"), "{rendered}");
+    assert!(rendered.contains("p:m"), "{rendered}");
+    assert!(rendered.contains("input 650.2M"), "{rendered}");
+    assert!(rendered.contains("output 1.8M"), "{rendered}");
+    assert!(rendered.contains("cache read 12.4M"), "{rendered}");
+    assert!(rendered.contains("cache write 3.1M"), "{rendered}");
+    assert!(rendered.contains("total 652M"), "{rendered}");
+    assert!(rendered.contains("($1.23)"), "{rendered}");
+    assert!(rendered.contains("Context window"), "{rendered}");
+    assert!(rendered.contains("76%"), "{rendered}");
+    assert!(rendered.contains("(190k / 250k)"), "{rendered}");
+    let bar = "\u{2588}".repeat(15) + &"\u{2591}".repeat(5);
+    assert!(rendered.contains(&bar), "{rendered}");
+}
+
+#[test]
+fn usage_command_without_window_or_cost() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer.clone(), tx);
+    app.push_usage();
+    let buf = buffer.lock().unwrap();
+    let rendered = match buf.blocks().last() {
+        Some(crate::buffer::Block::Custom { text, .. }) => text.clone(),
+        other => panic!("expected a custom block, got {other:?}"),
+    };
+    assert!(rendered.contains("input 0"), "{rendered}");
+    assert!(rendered.contains("(unknown window)"), "{rendered}");
+    assert!(!rendered.contains('$'), "{rendered}");
+}
+
+#[test]
 fn ctrl_c_interrupts_over_an_open_cmdline() {
     let (mut app, rx, _events) = app_with_events();
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));

@@ -297,6 +297,27 @@ mod tests {
     }
 
     #[test]
+    fn plugin_can_reskin_the_usage_panel() {
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval(
+            r#"
+            kage.register_block_renderer("kage:usage", function(b)
+                return { { text = "used " .. b.width, fg = "green", bold = true } }
+            end)
+            "#,
+        )
+        .unwrap();
+        let map = rt.registered_block_renderers();
+        assert_eq!(map.len(), 1);
+        let lines = map[0]
+            .render(&serde_json::json!({ "kind": "kage:usage", "text": "Usage", "width": 60 }))
+            .unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].spans[0].text, "used 60");
+        assert_eq!(lines[0].spans[0].fg.as_deref(), Some("green"));
+    }
+
+    #[test]
     fn broken_renderer_yields_no_lines_not_a_panic() {
         let rt = PluginRuntime::new().unwrap();
         rt.eval(r#"kage.register_block_renderer("b", function() error("boom") end)"#)

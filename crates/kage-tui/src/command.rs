@@ -317,6 +317,14 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         subcommands: &[],
     },
     CommandSpec {
+        name: "usage",
+        aliases: &[],
+        description: "show session token usage and context window",
+        category: CommandCategory::Both,
+        args: &[],
+        subcommands: &[],
+    },
+    CommandSpec {
         name: "new",
         aliases: &[],
         description: "start a fresh empty session, keeping the current model",
@@ -696,7 +704,7 @@ mod tests {
 
     #[test]
     fn builtin_registry_has_expected_command_count() {
-        assert_eq!(BUILTIN_COMMANDS.len(), 24);
+        assert_eq!(BUILTIN_COMMANDS.len(), 25);
     }
 
     #[test]

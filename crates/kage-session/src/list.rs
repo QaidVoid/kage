@@ -3,14 +3,20 @@
 //! [`list`] scans a directory for `*.jsonl` files, reads each one's header
 //! plus the most recent user prompt, and returns the resulting summaries
 //! sorted by creation time (newest first).
+//!
+//! A summary needs only the header, the entry after it, and the latest
+//! entry, user message and title. So each file is scanned for line
+//! boundaries and entry tags without decoding, and only those few lines
+//! are decoded, found by walking back from the end.
 
+use std::fs::File;
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 
 use crate::entry::{Header, SessionEntry, SessionId};
 use crate::error::SessionError;
-use crate::reader::SessionReader;
 
 /// Kind of the [`SessionEntry::Custom`] entry that marks a session an
 /// `agent` call started. Written as the first entry after the header.
@@ -86,42 +92,125 @@ pub fn list(dir: &Path) -> Result<Vec<SessionSummary>, SessionError> {
     Ok(summaries)
 }
 
+/// What a line's leading `"type"` tag says it holds. `Untagged` lines do
+/// not start with the tag, so only decoding tells what they are.
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Message,
+    Title,
+    Other,
+    Untagged,
+}
+
 fn summarize_one(path: &Path) -> Option<SessionSummary> {
-    let mut reader = SessionReader::iter(path).ok()?;
-    let first = reader.next()?.ok()?;
-    let SessionEntry::Header(header) = first else {
-        return None;
-    };
-    let mut updated_at = header.ts;
+    let mut file = BufReader::new(File::open(path).ok()?);
+    let mut buf = Vec::new();
+    let mut offset = 0;
+    let mut lines: Vec<(u64, Kind)> = Vec::new();
+    let mut header = None;
+    while let Ok(n) = file.read_until(b'\n', &mut buf) {
+        if n == 0 {
+            break;
+        }
+        let line = buf.trim_ascii_end();
+        if !line.is_empty() {
+            if header.is_none() {
+                let Ok(SessionEntry::Header(h)) = serde_json::from_slice(line) else {
+                    return None;
+                };
+                header = Some(h);
+            } else {
+                lines.push((offset, kind_of(line)));
+            }
+        }
+        offset += n as u64;
+        buf.clear();
+    }
+    let header = header?;
+
+    let agent = lines
+        .iter()
+        .find_map(|&(at, _)| decode_at(&mut file, at, &mut buf))
+        .and_then(|entry| match entry {
+            SessionEntry::Custom(c) if c.kind == AGENT_ENTRY_KIND => {
+                let name = c.data.get("agent").and_then(serde_json::Value::as_str);
+                Some(name.unwrap_or_default().to_owned())
+            }
+            _ => None,
+        });
+
+    let mut updated_at = None;
     let mut last_user_prompt = None;
     let mut title = None;
-    let mut agent = None;
-    let mut entry_count = 1;
-    for item in reader {
-        let Ok(entry) = item else { continue };
-        entry_count += 1;
-        updated_at = entry.ts();
-        match &entry {
-            SessionEntry::Custom(c) if entry_count == 2 && c.kind == AGENT_ENTRY_KIND => {
-                let name = c.data.get("agent").and_then(serde_json::Value::as_str);
-                agent = Some(name.unwrap_or_default().to_owned());
+    let mut invalid = 0;
+    for &(at, kind) in lines.iter().rev() {
+        let wanted = updated_at.is_none()
+            || kind == Kind::Untagged
+            || (kind == Kind::Message && last_user_prompt.is_none())
+            || (kind == Kind::Title && title.is_none());
+        if !wanted {
+            continue;
+        }
+        let Some(entry) = decode_at(&mut file, at, &mut buf) else {
+            invalid += 1;
+            continue;
+        };
+        updated_at.get_or_insert(entry.ts());
+        match entry {
+            SessionEntry::Message(m)
+                if m.message.role == kage_core::Role::User && last_user_prompt.is_none() =>
+            {
+                last_user_prompt = Some(first_text(&m.message));
             }
-            SessionEntry::Message(m) if m.message.role == kage_core::Role::User => {
-                last_user_prompt = first_text(&m.message);
-            }
-            SessionEntry::Title(t) => title = Some(t.title.clone()),
+            SessionEntry::Title(t) if title.is_none() => title = Some(t.title),
             _ => {}
         }
+        if updated_at.is_some() && last_user_prompt.is_some() && title.is_some() {
+            break;
+        }
     }
+    let updated_at = updated_at.unwrap_or(header.ts);
     Some(summary_from_header(
         header,
         path.to_path_buf(),
         updated_at,
-        last_user_prompt,
+        last_user_prompt.flatten(),
         title,
-        entry_count,
+        1 + lines.len() - invalid,
         agent,
     ))
+}
+
+fn kind_of(line: &[u8]) -> Kind {
+    match leading_tag(line) {
+        Some(b"message") => Kind::Message,
+        Some(b"title") => Kind::Title,
+        Some(_) => Kind::Other,
+        None => Kind::Untagged,
+    }
+}
+
+/// The `"type"` tag when it is the first key of `line`, the way the
+/// writer emits entries.
+fn leading_tag(line: &[u8]) -> Option<&[u8]> {
+    let rest = line
+        .trim_ascii_start()
+        .strip_prefix(b"{")?
+        .trim_ascii_start();
+    let rest = rest.strip_prefix(b"\"type\"")?.trim_ascii_start();
+    let rest = rest.strip_prefix(b":")?.trim_ascii_start();
+    let rest = rest.strip_prefix(b"\"")?;
+    let end = rest.iter().position(|&b| b == b'"')?;
+    Some(&rest[..end])
+}
+
+/// Decode the entry on the line starting at byte `at`, or `None` when it
+/// does not parse.
+fn decode_at(file: &mut BufReader<File>, at: u64, buf: &mut Vec<u8>) -> Option<SessionEntry> {
+    buf.clear();
+    file.seek(SeekFrom::Start(at)).ok()?;
+    file.read_until(b'\n', buf).ok()?;
+    serde_json::from_slice(buf).ok()
 }
 
 fn first_text(message: &kage_core::Message) -> Option<String> {
@@ -387,5 +476,150 @@ mod tests {
         assert_eq!(agent_of("agent.jsonl").as_deref(), Some("explore"));
         assert_eq!(agent_of("late.jsonl"), None);
         assert_eq!(agent_of("plain.jsonl"), None);
+    }
+
+    /// The summary a full decode of every entry gives, to check that
+    /// decoding only the needed lines agrees with it.
+    fn full_decode(path: &Path) -> SessionSummary {
+        let mut entries = crate::reader::SessionReader::iter(path)
+            .unwrap()
+            .filter_map(Result::ok);
+        let Some(SessionEntry::Header(header)) = entries.next() else {
+            panic!("no header");
+        };
+        let mut updated_at = header.ts;
+        let (mut last_user_prompt, mut title, mut agent) = (None, None, None);
+        let mut entry_count = 1;
+        for entry in entries {
+            entry_count += 1;
+            updated_at = entry.ts();
+            match entry {
+                SessionEntry::Custom(c) if entry_count == 2 && c.kind == AGENT_ENTRY_KIND => {
+                    agent = Some(c.data["agent"].as_str().unwrap_or_default().to_owned());
+                }
+                SessionEntry::Message(m) if m.message.role == Role::User => {
+                    last_user_prompt = first_text(&m.message);
+                }
+                SessionEntry::Title(t) => title = Some(t.title),
+                _ => {}
+            }
+        }
+        summary_from_header(
+            header,
+            path.to_path_buf(),
+            updated_at,
+            last_user_prompt,
+            title,
+            entry_count,
+            agent,
+        )
+    }
+
+    fn message(role: Role, content: Vec<Content>) -> SessionEntry {
+        SessionEntry::Message(MessageEntry {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            message: Message::new(role, content, None),
+            usage: None,
+        })
+    }
+
+    fn text(text: &str) -> Vec<Content> {
+        vec![Content::Text { text: text.into() }]
+    }
+
+    fn append_raw(path: &Path, line: &str) {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+        file.write_all(line.as_bytes()).unwrap();
+    }
+
+    fn title_entry(title: &str) -> SessionEntry {
+        SessionEntry::Title(crate::SessionTitle {
+            id: EntryId::new(),
+            ts: Utc::now(),
+            title: title.into(),
+        })
+    }
+
+    #[test]
+    fn early_title_and_last_user_prompt_survive_a_long_tail() {
+        let dir = tempdir().unwrap();
+        let path = write_agent_session(dir.path(), "long.jsonl", true);
+        let mut writer = SessionWriter::open(&path).unwrap();
+        writer
+            .append(&message(Role::User, text("first ask")))
+            .unwrap();
+        writer.append(&title_entry("early title")).unwrap();
+        writer
+            .append(&message(Role::User, text("second ask")))
+            .unwrap();
+        for i in 0..50 {
+            writer
+                .append(&message(Role::Assistant, text(&format!("step {i}"))))
+                .unwrap();
+            writer
+                .append(&message(Role::ToolResult, text(&format!("output {i}"))))
+                .unwrap();
+        }
+        drop(writer);
+
+        let summary = summarize_one(&path).unwrap();
+        assert_eq!(summary, full_decode(&path));
+        assert_eq!(summary.title.as_deref(), Some("early title"));
+        assert_eq!(summary.last_user_prompt.as_deref(), Some("second ask"));
+        assert_eq!(summary.agent.as_deref(), Some("explore"));
+        assert_eq!(summary.entry_count, 106);
+    }
+
+    #[test]
+    fn a_textless_last_user_message_clears_the_prompt() {
+        let dir = tempdir().unwrap();
+        let path = write_session(dir.path(), "img.jsonl", "with text");
+        let mut writer = SessionWriter::open(&path).unwrap();
+        let image = Content::Image {
+            source: kage_core::ImageSource::Url {
+                url: "https://example.com/a.png".into(),
+            },
+            mime: "image/png".into(),
+        };
+        writer.append(&message(Role::User, vec![image])).unwrap();
+        drop(writer);
+
+        let summary = summarize_one(&path).unwrap();
+        assert_eq!(summary, full_decode(&path));
+        assert_eq!(summary.last_user_prompt, None);
+    }
+
+    #[test]
+    fn a_torn_trailing_line_is_not_counted_or_dated() {
+        let dir = tempdir().unwrap();
+        let path = write_session(dir.path(), "torn.jsonl", "hi");
+        append_raw(&path, "{\"type\":\"title\",\"id\":\"01");
+
+        let summary = summarize_one(&path).unwrap();
+        assert_eq!(summary, full_decode(&path));
+        assert_eq!(summary.entry_count, 3);
+        assert_eq!(summary.title, None);
+    }
+
+    #[test]
+    fn an_entry_whose_tag_is_not_first_is_still_read() {
+        let dir = tempdir().unwrap();
+        let path = write_session(dir.path(), "late.jsonl", "hi");
+        let mut writer = SessionWriter::open(&path).unwrap();
+        writer.append(&title_entry("tagged")).unwrap();
+        drop(writer);
+        let line = format!(
+            "{{\"title\":\"untagged\",\"id\":{},\"ts\":{},\"type\":\"title\"}}\n\n",
+            serde_json::to_string(&EntryId::new()).unwrap(),
+            serde_json::to_string(&Utc::now()).unwrap(),
+        );
+        append_raw(&path, &line);
+
+        let summary = summarize_one(&path).unwrap();
+        assert_eq!(summary, full_decode(&path));
+        assert_eq!(summary.title.as_deref(), Some("untagged"));
+        assert_eq!(summary.entry_count, 5);
     }
 }

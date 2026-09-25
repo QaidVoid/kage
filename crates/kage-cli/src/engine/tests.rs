@@ -878,6 +878,38 @@ fn a_prompt_waits_for_the_shell_command_before_it() {
 }
 
 #[test]
+fn a_finished_shell_command_fires_user_bash() {
+    let runtime = Arc::new(PluginRuntime::new().unwrap());
+    runtime
+        .eval(
+            "seen = {} \
+            kage.on('user_bash', function(p) \
+                table.insert(seen, p.cmd .. '=' .. tostring(p.exit_code)) \
+            end)",
+        )
+        .unwrap();
+    let h = harness(MockProvider::replaying(text_turn("ok")));
+    let id = SessionId::new();
+    h.engine.open(SessionSpec {
+        plugins: Some(Arc::clone(&runtime)),
+        ..h.spec(id)
+    });
+    for command in ["exit 3", "kill -9 $$"] {
+        h.engine.send(Command::to(
+            id,
+            CommandKind::Shell {
+                command: command.into(),
+            },
+        ));
+        wait_for(&h.events, |e| {
+            matches!(e.event, Event::Host(HostEvent::ShellFinished { .. }))
+        });
+    }
+    let seen = runtime.eval("return table.concat(seen, ';')").unwrap();
+    assert_eq!(seen.to_string().unwrap(), "exit 3=3;kill -9 $$=nil");
+}
+
+#[test]
 fn a_compacted_session_replays_the_live_history() {
     let dir = tempfile::tempdir().unwrap();
     let mock = MockProvider::sequence(vec![

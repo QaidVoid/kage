@@ -426,51 +426,47 @@ pub(crate) fn entry_kind(entry: &kage_session::SessionEntry) -> &'static str {
 }
 
 /// Build the picker rows the App offers when the user hits `ctrl+p`.
-/// Iterates registered providers and pulls each one's catalog model
-/// list; when the catalog has no entry for a provider (e.g. plugin-
-/// registered providers), falls back to the live `Provider::models()`
-/// list. The active model is marked with `*`, and each row lists the
-/// inputs the model accepts when they are known.
+/// Iterates registered providers and lists the models each one
+/// declares (custom and plugin providers); a provider that declares
+/// none (the built-ins) falls back to its catalog model list. The
+/// active model is marked with `*`, and each row lists the inputs the
+/// model accepts when they are known.
 pub(crate) fn available_model_items(
     registry: &ProviderRegistry,
     active: &str,
 ) -> Vec<kage_tui::PickItem> {
+    let row = |value: String, label: &str, group: &str, input: kage_core::Inputs| {
+        let badge = if value == active { '*' } else { ' ' };
+        with_inputs(
+            kage_tui::PickItem::simple(value)
+                .with_label(label)
+                .with_badge(badge)
+                .with_group(group),
+            input,
+        )
+    };
     let mut items: Vec<kage_tui::PickItem> = Vec::new();
     let mut provider_ids: Vec<&str> = registry.ids().collect();
     provider_ids.sort_unstable();
     for provider_id in provider_ids {
-        let catalog_provider = kage_provider::catalog::provider(provider_id);
-        let catalog_models = catalog_provider.map_or::<&[_], _>(&[], |p| p.models);
-        if !catalog_models.is_empty() {
-            let display_name = catalog_provider.map_or(provider_id, |p| p.name);
-            for model in catalog_models {
-                let value = format!("{provider_id}:{}", model.id);
-                let badge = if value == active { '*' } else { ' ' };
-                items.push(with_inputs(
-                    kage_tui::PickItem::simple(value)
-                        .with_label(model.name)
-                        .with_badge(badge)
-                        .with_group(display_name),
-                    model.input,
-                ));
-            }
-            continue;
-        }
         let Some(provider) = registry.get(provider_id) else {
             continue;
         };
-        let metadata = provider.metadata();
-        let display_name = metadata.display_name.as_str();
-        for model in provider.models() {
+        let declared = provider.models();
+        if !declared.is_empty() {
+            let group = provider.metadata().display_name.as_str();
+            for model in declared {
+                let value = format!("{provider_id}:{}", model.id);
+                items.push(row(value, &model.name, group, model.input));
+            }
+            continue;
+        }
+        let Some(catalog) = kage_provider::catalog::provider(provider_id) else {
+            continue;
+        };
+        for model in catalog.models {
             let value = format!("{provider_id}:{}", model.id);
-            let badge = if value == active { '*' } else { ' ' };
-            items.push(with_inputs(
-                kage_tui::PickItem::simple(value)
-                    .with_label(&model.name)
-                    .with_badge(badge)
-                    .with_group(display_name),
-                model.input,
-            ));
+            items.push(row(value, model.name, catalog.name, model.input));
         }
     }
     items

@@ -186,7 +186,7 @@ pub(super) const CLASSES: &[Class] = &[
             Field {
                 name: "code",
                 ty: "string",
-                doc: "char|enter|esc|tab|backspace|up|down|left|right|home|end|pageup|pagedown|delete|insert|f1..f12|other.",
+                doc: "char|enter|esc|tab|backtab|backspace|up|down|left|right|home|end|pageup|pagedown|delete|insert|f1..f12|other.",
             },
             Field {
                 name: "char?",
@@ -229,30 +229,49 @@ pub(super) const CLASSES: &[Class] = &[
     Class {
         name: "kage.Usage",
         doc: &[
-            "Snapshot returned by `kage.context_usage`. The host fills",
-            "this in; the fields below are the conventional keys and",
-            "may vary by host version.",
+            "Snapshot returned by `kage.context_usage`. The TUI fills",
+            "it in. Token counts are session totals.",
         ],
         fields: &[
             Field {
                 name: "model",
                 ty: "string",
-                doc: "",
+                doc: "Provider-qualified model id.",
             },
             Field {
                 name: "input_tokens",
                 ty: "integer",
-                doc: "",
+                doc: "Input tokens charged across every turn.",
             },
             Field {
                 name: "output_tokens",
                 ty: "integer",
-                doc: "",
+                doc: "Output tokens across every turn.",
+            },
+            Field {
+                name: "cache_read_tokens",
+                ty: "integer",
+                doc: "Cache-read tokens across every turn.",
+            },
+            Field {
+                name: "cache_write_tokens",
+                ty: "integer",
+                doc: "Cache-write tokens across every turn.",
+            },
+            Field {
+                name: "current_context",
+                ty: "integer",
+                doc: "Tokens the latest turn used. 0 before the first turn.",
             },
             Field {
                 name: "context_window",
                 ty: "integer",
-                doc: "",
+                doc: "Context window of `model`. 0 when unknown.",
+            },
+            Field {
+                name: "working",
+                ty: "boolean",
+                doc: "Whether a run is in flight.",
             },
         ],
     },
@@ -425,6 +444,11 @@ pub(super) const CLASSES: &[Class] = &[
                 ty: "string",
                 doc: "Workdir-relative dir; defaults to the workdir.",
             },
+            Field {
+                name: "timeout_secs?",
+                ty: "integer",
+                doc: "Kill the process after this many seconds. Default 30, at least 1.",
+            },
         ],
     },
     Class {
@@ -435,6 +459,11 @@ pub(super) const CLASSES: &[Class] = &[
                 name: "code",
                 ty: "integer",
                 doc: "Exit code; -1 if killed by a signal.",
+            },
+            Field {
+                name: "timed_out",
+                ty: "boolean",
+                doc: "Whether `timeout_secs` elapsed and the process was killed.",
             },
             Field {
                 name: "stdout",
@@ -451,8 +480,8 @@ pub(super) const CLASSES: &[Class] = &[
     Class {
         name: "kage.HttpRequestOpts",
         doc: &[
-            "Options accepted by `kage.http.post`, `kage.http.delete`,",
-            "and `kage.http.post_stream`.",
+            "Options accepted by `kage.http.get`, `kage.http.post`,",
+            "`kage.http.delete`, and `kage.http.post_stream`.",
         ],
         fields: &[
             Field {
@@ -474,6 +503,11 @@ pub(super) const CLASSES: &[Class] = &[
                 name: "max_bytes?",
                 ty: "integer",
                 doc: "Response body cap. Defaults: 2 MB simple, 32 MB streamed.",
+            },
+            Field {
+                name: "timeout_secs?",
+                ty: "integer",
+                doc: "Whole-request budget in seconds. Default 30, at least 1. `post_stream` ignores it.",
             },
         ],
     },

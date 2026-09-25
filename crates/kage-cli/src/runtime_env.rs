@@ -12,43 +12,43 @@ use kage_core::{Inputs, Reasoning, Skill};
 use kage_loop::{EnvContext, compose_system_prompt, with_skills};
 use kage_provider::ProviderRegistry;
 
-/// The catalog entry for `qualified_model` (`provider:model`), else
-/// the entry the provider itself advertises (custom and plugin
-/// providers), as a [`kage_provider::ProviderModel`].
+/// The entry the provider itself declares for `qualified_model`
+/// (`provider:model`), for custom and plugin providers, else the catalog
+/// entry, as a [`kage_provider::ProviderModel`].
 fn model_entry(
     registry: &ProviderRegistry,
     qualified_model: &str,
 ) -> Option<kage_provider::ProviderModel> {
     let (provider_id, model_id) = qualified_model.split_once(':')?;
-    if let Some(m) = kage_provider::catalog::model(provider_id, model_id) {
-        return Some(kage_provider::ProviderModel {
-            id: m.id.to_owned(),
-            name: m.name.to_owned(),
-            context: m.prompt_window(),
-            max_output: m.output.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
-            reasoning: m.reasoning,
-            input: m.input,
-            interleaved: m.interleaved,
-        });
+    let declared = registry
+        .get(provider_id)
+        .and_then(|p| p.models().into_iter().find(|m| m.id == model_id));
+    if declared.is_some() {
+        return declared;
     }
-    registry
-        .get(provider_id)?
-        .models()
-        .into_iter()
-        .find(|m| m.id == model_id)
+    let m = kage_provider::catalog::model(provider_id, model_id)?;
+    Some(kage_provider::ProviderModel {
+        id: m.id.to_owned(),
+        name: m.name.to_owned(),
+        context: m.prompt_window(),
+        max_output: m.output.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
+        reasoning: m.reasoning,
+        input: m.input,
+        interleaved: m.interleaved,
+    })
 }
 
 /// Look up how many tokens a prompt to `qualified_model`
-/// (`provider:model`) may fill: the catalog's input limit when it has
-/// one, else its context window, else the provider's own `models()`
-/// entry, so plugin-registered providers can still surface a window.
+/// (`provider:model`) may fill: the provider's own `models()` entry when
+/// it declares one, so custom and plugin providers can surface a window,
+/// else the catalog's input limit or context window.
 #[must_use]
 pub fn context_window_for(registry: &ProviderRegistry, qualified_model: &str) -> Option<u64> {
     model_entry(registry, qualified_model)?.context
 }
 
-/// Thinking settings `qualified_model` accepts, from the catalog or the
-/// provider's own model list. [`Reasoning::Unknown`] when neither
+/// Thinking settings `qualified_model` accepts, from the provider's own
+/// model list or the catalog. [`Reasoning::Unknown`] when neither
 /// knows the model.
 #[must_use]
 pub fn reasoning_for(registry: &ProviderRegistry, qualified_model: &str) -> Reasoning {
@@ -64,8 +64,8 @@ pub fn input_for(registry: &ProviderRegistry, qualified_model: &str) -> Inputs {
 /// Look up the per-turn max output tokens for `qualified_model`.
 /// Saturates at `u32::MAX`. The loop forwards this on every stream
 /// request so the provider's conservative 4K-ish default never
-/// silently truncates large tool-call argument JSON. Falls back to the
-/// registry's own model list for plugin-registered providers.
+/// silently truncates large tool-call argument JSON. The provider's own
+/// model list wins over the catalog.
 #[must_use]
 pub fn max_output_tokens_for(registry: &ProviderRegistry, qualified_model: &str) -> Option<u32> {
     model_entry(registry, qualified_model)?.max_output

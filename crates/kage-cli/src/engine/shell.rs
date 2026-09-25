@@ -97,9 +97,10 @@ impl super::Dispatcher {
         });
     }
 
-    /// Show a finished shell command and add its output to the history,
-    /// recorded, for the model's next turn. A command that held the
-    /// session gives it back and starts what was submitted meanwhile.
+    /// Show a finished shell command, fire `user_bash` for plugins, and
+    /// add its output to the history, recorded, for the model's next
+    /// turn. A command that held the session gives it back and starts
+    /// what was submitted meanwhile.
     pub(super) fn shell_done(&mut self, done: ShellDone) {
         let ShellDone {
             session: id,
@@ -128,6 +129,9 @@ impl super::Dispatcher {
             record_late_title(&self.bus, id, session);
         }
         flush_pending(&self.bus, id, session);
+        if let Some(rt) = &session.plugins {
+            crate::plugins::notify_user_bash(rt, &command, exit_code);
+        }
         self.bus.publish(
             id,
             HostEvent::ShellFinished {

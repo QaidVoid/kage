@@ -643,7 +643,7 @@ Plain notification events (the handler's return value is ignored):
 | `tool_result`            | `{ id, name, is_error, text }`                    |
 | `model_select`           | `{ prev, next, source }`                          |
 | `thinking_level_select`  | `{ prev, next, source }`                          |
-| `user_bash`              | reserved, never fired                             |
+| `user_bash`              | `{ cmd, exit_code }`                              |
 | `permission_mode_select` | `{ prev, next, source }`                          |
 | `option_set`             | `{ name, old, new, source }`                      |
 | `color_scheme`           | `{ name }`                                        |
@@ -655,10 +655,11 @@ fire in the TUI only. For `model_select`, `source` is `"set"`. For
 `thinking_level_select`, `prev` and `next` are level names
 (`"default"` for the automatic level) and `source` is `"cycle"` or
 `"settings"`. For `permission_mode_select`, `prev` and `next` are
-`"default"`, `"ask"` or `"deny"` and `source` is `"command"`. kage
-accepts the `user_bash` name but does not fire it yet, so a `!` shell
-command reaches no plugin. `tool_update` only fires when at least one
-handler is subscribed. `option_set` fires when
+`"default"`, `"ask"` or `"deny"` and `source` is `"command"`.
+`user_bash` fires when a `!` shell command ends. `exit_code` is `nil`
+when a signal or a cancel ended the command, or when it failed to
+start.
+`tool_update` only fires when at least one handler is subscribed. `option_set` fires when
 `kage.opt.<name>` is assigned (`source` is `"lua"`) or a command or
 the settings dialog changes an option (`source` is `"runtime"`).
 `color_scheme` fires after the theme's base highlight groups change,

@@ -33,7 +33,12 @@ fn overridable_provider_ids() -> Vec<&'static str> {
 /// A config that fails `[providers]` validation is a hard error: the
 /// message prints and the process exits with status 1 rather than
 /// silently running against a subset of the declared providers.
+///
+/// A custom provider that replaces a catalog provider is reported on
+/// the first build only, so a rebuild inside the TUI does not print
+/// over the screen.
 pub(crate) fn build_provider_registry() -> ProviderRegistry {
+    static WARN_REPLACED: std::sync::Once = std::sync::Once::new();
     let config = match kage_core::config::Config::load_default() {
         Ok(c) => c,
         Err(e) => {
@@ -52,7 +57,14 @@ pub(crate) fn build_provider_registry() -> ProviderRegistry {
     let mut registry = ProviderRegistry::new();
     register_openai_family(&config, &store, &mut registry);
     register_compat_providers(&config, &store, &mut registry);
-    register_custom_providers(&config, &store, &mut registry);
+    let replaced = register_custom_providers(&config, &store, &mut registry);
+    WARN_REPLACED.call_once(|| {
+        for id in &replaced {
+            eprintln!(
+                "kage: [providers.custom.{id}] replaces the catalog provider `{id}` and its models"
+            );
+        }
+    });
     let ov = config.providers.overrides.get("anthropic");
     let env = ov
         .and_then(|o| o.api_key_env.as_deref())
@@ -176,12 +188,14 @@ fn register_compat_providers(
 /// Register every custom provider declared under
 /// `[providers.custom.<id>]`. A provider with an explicitly empty
 /// `api_key_env` needs no key at all (local gateways); any other
-/// missing key skips registration.
+/// missing key skips registration. A custom provider that reuses a
+/// catalog provider id replaces it. Returns the ids replaced that way.
 fn register_custom_providers(
     config: &kage_core::config::Config,
     store: &auth::AuthStore,
     registry: &mut ProviderRegistry,
-) {
+) -> Vec<String> {
+    let mut replaced = Vec::new();
     for (id, cfg) in &config.providers.custom {
         let env = cfg
             .api_key_env
@@ -234,8 +248,19 @@ fn register_custom_providers(
                     .with_models(models),
             ),
         };
+        if is_catalog_provider(id) {
+            replaced.push(id.clone());
+        }
         registry.register(provider);
     }
+    replaced
+}
+
+/// Whether `id` names a provider kage knows from its catalog or its
+/// OpenAI-compatible table.
+fn is_catalog_provider(id: &str) -> bool {
+    kage_provider::catalog::provider(id).is_some()
+        || compat::COMPAT_PROVIDERS.iter().any(|entry| entry.id == id)
 }
 
 /// Look up `provider`'s bearer credential from `env_var` (when
@@ -315,17 +340,26 @@ pub(crate) fn default_model(registry: &ProviderRegistry) -> String {
     fallback_model(registry)
 }
 
-/// Walk [`DEFAULT_MODEL_PRIORITY`], asking the catalog for each registered
-/// provider's preferred model, then take the first declared model of the
-/// first non-`acp` provider (by id) that declares any. Returns an empty
-/// string when neither yields a model.
+/// Walk [`DEFAULT_MODEL_PRIORITY`], taking each registered provider's
+/// first declared model, else the catalog's preferred model for it, then
+/// take the first declared model of the first non-`acp` provider (by id)
+/// that declares any. Returns an empty string when neither yields a
+/// model.
 fn fallback_model(registry: &ProviderRegistry) -> String {
     for candidate in DEFAULT_MODEL_PRIORITY {
-        if registry.get(candidate).is_none() {
+        let Some(provider) = registry.get(candidate) else {
             continue;
-        }
-        if let Some(model) = kage_provider::catalog::preferred_model(candidate) {
-            return format!("{candidate}:{}", model.id);
+        };
+        let model = provider
+            .models()
+            .into_iter()
+            .next()
+            .map(|m| m.id)
+            .or_else(|| {
+                kage_provider::catalog::preferred_model(candidate).map(|m| m.id.to_owned())
+            });
+        if let Some(model) = model {
+            return format!("{candidate}:{model}");
         }
     }
     let mut ids: Vec<&str> = registry.ids().filter(|id| *id != "acp").collect();
@@ -393,7 +427,8 @@ mod tests {
         )
         .unwrap();
         let mut registry = ProviderRegistry::new();
-        register_custom_providers(&config, &auth::AuthStore::empty(), &mut registry);
+        let replaced = register_custom_providers(&config, &auth::AuthStore::empty(), &mut registry);
+        assert!(replaced.is_empty());
         assert!(registry.resolve("zhipu-anthropic:glm-5.3").is_ok());
         assert!(registry.resolve("my-gemini:g-1").is_ok());
         assert!(registry.get("anthropic").is_none());
@@ -515,6 +550,47 @@ mod tests {
                 })
                 .collect(),
         })
+    }
+
+    #[test]
+    fn custom_provider_reusing_a_catalog_id_offers_its_own_models() {
+        let config: kage_core::config::Config = toml::from_str(
+            r#"
+            [providers.custom.deepseek]
+            base_url = "http://127.0.0.1:1/v1"
+            api_key_env = ""
+            display_name = "My DeepSeek"
+            [[providers.custom.deepseek.models]]
+            id = "ds-local"
+            name = "DS Local"
+            context = 4096
+            "#,
+        )
+        .unwrap();
+        assert!(is_catalog_provider("deepseek"));
+        assert!(!is_catalog_provider("my-gateway"));
+        assert!(kage_provider::catalog::provider("deepseek").is_some_and(|p| !p.models.is_empty()));
+        let mut registry = ProviderRegistry::new().with(stub("deepseek", &[]));
+        let replaced = register_custom_providers(&config, &auth::AuthStore::empty(), &mut registry);
+        assert_eq!(replaced, ["deepseek"]);
+
+        let rows: Vec<(String, Option<String>)> =
+            crate::tui::available_model_items(&registry, "deepseek:ds-local")
+                .into_iter()
+                .map(|item| (item.value, item.group))
+                .collect();
+        assert_eq!(
+            rows,
+            [(
+                "deepseek:ds-local".to_owned(),
+                Some("My DeepSeek".to_owned())
+            )]
+        );
+        assert_eq!(
+            crate::runtime_env::context_window_for(&registry, "deepseek:ds-local"),
+            Some(4096)
+        );
+        assert_eq!(fallback_model(&registry), "deepseek:ds-local");
     }
 
     #[test]

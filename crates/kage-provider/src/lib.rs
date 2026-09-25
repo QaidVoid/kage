@@ -63,9 +63,9 @@ pub trait Provider: Send + Sync + std::fmt::Debug {
     -> Result<EventStream, ProviderError>;
 
     /// Models this provider advertises for the UI picker. Built-in
-    /// providers leave this empty and let the catalog drive the picker;
-    /// plugin providers without a catalog entry return their declared
-    /// model list so users can browse and pick.
+    /// providers leave this empty and let the catalog drive the picker.
+    /// Custom and plugin providers return their declared model list,
+    /// which takes the place of any catalog entry under the same id.
     fn models(&self) -> Vec<ProviderModel> {
         Vec::new()
     }

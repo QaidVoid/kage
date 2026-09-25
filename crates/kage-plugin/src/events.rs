@@ -43,8 +43,8 @@
 //!   (`"default"` for the automatic level) and `source` is `"cycle"`
 //!   or `"settings"`.
 //! * `user_bash` - an inline `!cmd` from the input pane completed.
-//!   Payload: `{ cmd, exit_code }`; `exit_code` is `nil` when the
-//!   command was killed by a signal.
+//!   Payload: `{ cmd, exit_code }`. `exit_code` is `nil` when a signal
+//!   or a cancel ended the command, or when it failed to start.
 //! * `permission_mode_select` - the permission mode changed. Payload:
 //!   `{ prev, next, source }`.
 //! * `option_set` - an option changed. Payload: `{ name, old, new,

@@ -248,6 +248,15 @@ pub(crate) fn dispatch_run_end(rt: &PluginRuntime, ok: bool) {
     }
 }
 
+/// Queue `user_bash` after a `!` shell command ends. `exit_code` is
+/// `None` when a signal ended the command.
+pub(crate) fn notify_user_bash(rt: &PluginRuntime, cmd: &str, exit_code: Option<i32>) {
+    let payload = json!({ "cmd": cmd, "exit_code": exit_code });
+    if let Err(err) = rt.notify_event("user_bash", &payload) {
+        log_plugin_error(rt, format_args!("user_bash dispatch: {err}"));
+    }
+}
+
 fn log_plugin_error(rt: &PluginRuntime, args: std::fmt::Arguments<'_>) {
     let sink = rt.sink();
     lock(&sink).log(LogLevel::Error, &args.to_string());

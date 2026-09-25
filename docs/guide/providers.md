@@ -180,6 +180,11 @@ variable that is unset (and has no saved key) is skipped. With
 `api_key_env = ""` it registers unconditionally, which is what
 keyless local endpoints want.
 
+A custom id that matches a catalog provider, such as `deepseek`,
+replaces that provider. kage prints a warning at startup naming the
+id, and the picker offers only the models the custom provider declares.
+Built-in ids are refused; override those with `[providers.<id>]`.
+
 The provider keys `tool_use`, `thinking` and `caching` are accepted
 but change nothing: kage always sends tool definitions, and thinking
 goes back to the model as described under [thinking](#thinking).

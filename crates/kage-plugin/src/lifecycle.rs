@@ -6,9 +6,9 @@
 //! [`SharedUsage`] current after every turn so plugins read the latest
 //! numbers without an RPC. [`SharedCompactRequest`] holds an optional
 //! pending request the host drains between turns; the inner
-//! `Option<String>` is the prompt the plugin supplied (currently
-//! advisory: a future `on_compact_prepare` hook is the proper place to
-//! rewrite the compaction prompt).
+//! `Option<String>` is the prompt the plugin supplied, which the host
+//! does not use. The `compact_prepare` event is where a plugin rewrites
+//! the compaction prompt.
 
 use std::sync::{Arc, Mutex};
 

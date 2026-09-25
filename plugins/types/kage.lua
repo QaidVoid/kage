@@ -153,7 +153,7 @@
 
 --- Key descriptor handed to a `kage.on_terminal_input` handler.
 ---@class kage.KeyEvent
----@field code string char|enter|esc|tab|backspace|up|down|left|right|home|end|pageup|pagedown|delete|insert|f1..f12|other.
+---@field code string char|enter|esc|tab|backtab|backspace|up|down|left|right|home|end|pageup|pagedown|delete|insert|f1..f12|other.
 ---@field char? string Present only when code == char.
 ---@field ctrl boolean
 ---@field alt boolean
@@ -164,14 +164,17 @@
 ---@field trigger_turn? boolean Default true.
 ---@field deliver_as? "user" Only user is wired.
 
---- Snapshot returned by `kage.context_usage`. The host fills
---- this in; the fields below are the conventional keys and
---- may vary by host version.
+--- Snapshot returned by `kage.context_usage`. The TUI fills
+--- it in. Token counts are session totals.
 ---@class kage.Usage
----@field model string
----@field input_tokens integer
----@field output_tokens integer
----@field context_window integer
+---@field model string Provider-qualified model id.
+---@field input_tokens integer Input tokens charged across every turn.
+---@field output_tokens integer Output tokens across every turn.
+---@field cache_read_tokens integer Cache-read tokens across every turn.
+---@field cache_write_tokens integer Cache-write tokens across every turn.
+---@field current_context integer Tokens the latest turn used. 0 before the first turn.
+---@field context_window integer Context window of `model`. 0 when unknown.
+---@field working boolean Whether a run is in flight.
 
 --- Rich result a command handler may return instead of a string.
 ---@class kage.CommandResult
@@ -217,20 +220,23 @@
 ---@field cmd string Executable; resolved via PATH. No shell.
 ---@field args? string[] Arguments, passed verbatim.
 ---@field cwd? string Workdir-relative dir; defaults to the workdir.
+---@field timeout_secs? integer Kill the process after this many seconds. Default 30, at least 1.
 
 --- Result returned by `kage.exec`.
 ---@class kage.ExecResult
 ---@field code integer Exit code; -1 if killed by a signal.
+---@field timed_out boolean Whether `timeout_secs` elapsed and the process was killed.
 ---@field stdout string Captured standard output.
 ---@field stderr string Captured standard error.
 
---- Options accepted by `kage.http.post`, `kage.http.delete`,
---- and `kage.http.post_stream`.
+--- Options accepted by `kage.http.get`, `kage.http.post`,
+--- `kage.http.delete`, and `kage.http.post_stream`.
 ---@class kage.HttpRequestOpts
 ---@field headers? table<string, string> Request headers.
 ---@field body? string Raw request body. Mutually exclusive with `json`.
 ---@field json? table Body encoded as JSON; sets Content-Type to application/json.
 ---@field max_bytes? integer Response body cap. Defaults: 2 MB simple, 32 MB streamed.
+---@field timeout_secs? integer Whole-request budget in seconds. Default 30, at least 1. `post_stream` ignores it.
 
 --- Options for `kage.api.autocmd_create`.
 ---@class kage.AutocmdOpts
@@ -712,8 +718,8 @@ function kage.session.set_label(anchor, label) end
 ---@param opts? kage.SendOpts
 function kage.send_message(text, opts) end
 
---- Snapshot per-turn token usage. Nil until the host has run
---- at least one turn.
+--- Snapshot the session's token usage. Nil until the TUI
+--- fills it, and always in print mode and `kage rpc`.
 --- Since API 1.
 ---@return kage.Usage|nil
 function kage.context_usage() end

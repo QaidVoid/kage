@@ -25,7 +25,7 @@
 //!
 //! The handler receives a key descriptor table:
 //! ```lua
-//! { code = "char"|"enter"|"esc"|"tab"|"backspace"|"up"|"down"
+//! { code = "char"|"enter"|"esc"|"tab"|"backtab"|"backspace"|"up"|"down"
 //!        |"left"|"right"|"home"|"end"|"pageup"|"pagedown"
 //!        |"delete"|"insert"|"f1".."f12"|"other",
 //!   char = "a",        -- only when code == "char"

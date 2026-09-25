@@ -423,7 +423,7 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
             CommandSpec {
                 name: "list",
                 aliases: &[],
-                description: "list every bundled theme",
+                description: "list every bundled and user theme",
                 category: CommandCategory::Both,
                 args: &[],
                 subcommands: &[],
@@ -431,7 +431,7 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
             CommandSpec {
                 name: "set",
                 aliases: &[],
-                description: "switch to a bundled theme",
+                description: "switch to a bundled or user theme",
                 category: CommandCategory::Both,
                 args: &[ArgSpec::DynamicChoice {
                     name: "name",

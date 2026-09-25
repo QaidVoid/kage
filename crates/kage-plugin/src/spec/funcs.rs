@@ -712,8 +712,8 @@ pub(super) const FUNCS: &[Func] = &[
     },
     Func {
         doc: &[
-            "Snapshot per-turn token usage. Nil until the host has run",
-            "at least one turn.",
+            "Snapshot the session's token usage. Nil until the TUI",
+            "fills it, and always in print mode and `kage rpc`.",
         ],
         path: "kage.context_usage",
         since: 1,

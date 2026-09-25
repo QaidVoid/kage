@@ -5,7 +5,9 @@
 //! is an engine session: prompts become engine commands, and a bus
 //! subscriber turns engine events into `session/update` notifications and
 //! `session/request_permission` requests. Recorded sessions can be
-//! listed, loaded with a replay of their transcript, or resumed.
+//! listed, loaded with a replay of their transcript, or resumed. Each
+//! session offers its model, thinking level and permission mode as config
+//! options.
 //!
 //! Agent sessions started by the `agent` tool are not ACP sessions. Their
 //! permission requests and progress go to the client session at the root
@@ -20,24 +22,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use kage_acp::acp::{
-    AgentCapabilities, BlobContent, ContentBlock, Cost, Implementation, InitializeRequest,
-    InitializeResponse, ListSessionsRequest, ListSessionsResponse, LoadSessionRequest,
-    LoadSessionResponse, MessageChunk, NewSessionRequest, NewSessionResponse, PROTOCOL_VERSION,
-    PromptCapabilities, PromptRequest, PromptResponse, ResourceLink, ResumeSessionRequest,
-    ResumeSessionResponse, SessionCapabilities, SessionInfo, SessionInfoUpdate, SessionUpdate,
-    StopReason, Supported, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
-    UsageUpdate,
+    AgentCapabilities, BlobContent, ConfigOptionUpdate, ContentBlock, Cost, Implementation,
+    InitializeRequest, InitializeResponse, ListSessionsRequest, ListSessionsResponse,
+    LoadSessionRequest, LoadSessionResponse, MessageChunk, NewSessionRequest, NewSessionResponse,
+    PROTOCOL_VERSION, PromptCapabilities, PromptRequest, PromptResponse, ResourceLink,
+    ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionConfigCategory,
+    SessionConfigKind, SessionConfigOption, SessionConfigSelectOption, SessionInfo,
+    SessionInfoUpdate, SessionUpdate, SetSessionConfigOptionRequest,
+    SetSessionConfigOptionResponse, StopReason, Supported, ToolCall, ToolCallContent,
+    ToolCallStatus, ToolCallUpdate, ToolKind, UsageUpdate,
 };
 use kage_acp::agent::{Agent, PermissionDecision, PromptContext, send_update, serve_agent};
 use kage_core::permissions::PermissionAction;
 use kage_core::protocol::{
     AgentNode, AgentTree, Command, CommandKind, Delivery, Envelope, Event, HostEvent,
-    PermissionDecision as Decision, RequestId, RunOutcome, Usage,
+    PermissionDecision as Decision, RequestId, RunOutcome, SessionState, Usage,
 };
 use kage_core::sync::lock;
 use kage_core::{
     Content, ImageSource, LoopEvent, Message, MessageId, Role, SessionId,
-    StopReason as CoreStopReason, ToolOutput,
+    StopReason as CoreStopReason, ThinkingLevel, ToolOutput,
 };
 use kage_jsonrpc::{Peer, RpcError};
 use kage_loop::{AgentContext, LoopConfig, TokenBudget};
@@ -115,6 +119,122 @@ struct PromptEnd {
 
 type Waiters = Arc<Mutex<HashMap<SessionId, mpsc::Sender<PromptEnd>>>>;
 
+type ShownBySession = Arc<Mutex<HashMap<SessionId, Shown>>>;
+
+/// What a client session's config options last showed.
+struct Shown {
+    settings: Settings,
+    /// Set while the engine has yet to apply a change the client made, so
+    /// the older states it still reports are not sent back to the client.
+    catching_up: bool,
+}
+
+impl Shown {
+    /// Takes in a state the engine reported, and says whether the client
+    /// has to hear of it.
+    fn observe(&mut self, settings: &Settings) -> bool {
+        if self.catching_up {
+            self.catching_up = *settings != self.settings;
+            return false;
+        }
+        if *settings == self.settings {
+            return false;
+        }
+        self.settings = settings.clone();
+        true
+    }
+}
+
+/// The session settings a client sees and changes as config options.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Settings {
+    model: String,
+    thinking: ThinkingLevel,
+    mode: Option<PermissionAction>,
+}
+
+impl Settings {
+    fn of(spec: &SessionSpec) -> Self {
+        Self {
+            model: spec.model.clone(),
+            thinking: spec.cx.thinking_level.unwrap_or_default(),
+            mode: spec.gate.mode(),
+        }
+    }
+
+    /// Sets option `id` to `value` and returns the engine command that
+    /// makes the same change. `models` are the models the client may pick.
+    fn apply(
+        &mut self,
+        models: &[SessionConfigSelectOption],
+        id: &str,
+        value: &str,
+    ) -> Result<CommandKind, RpcError> {
+        let invalid = || RpcError::new(-32602, format!("invalid value {value} for option {id}"));
+        match id {
+            "model" => {
+                if value != self.model && !models.iter().any(|m| m.value == value) {
+                    return Err(invalid());
+                }
+                value.clone_into(&mut self.model);
+                Ok(CommandKind::SetModel {
+                    model: value.to_owned(),
+                })
+            }
+            "thinking" => {
+                let level = ThinkingLevel::parse(value).ok_or_else(invalid)?;
+                self.thinking = level;
+                Ok(CommandKind::SetThinking { level })
+            }
+            "mode" => {
+                let (_, mode, ..) = MODES.iter().find(|m| m.0 == value).ok_or_else(invalid)?;
+                self.mode = *mode;
+                Ok(CommandKind::SetPermissionMode { mode: *mode })
+            }
+            _ => Err(RpcError::new(-32602, format!("unknown config option {id}"))),
+        }
+    }
+}
+
+impl From<&SessionState> for Settings {
+    fn from(state: &SessionState) -> Self {
+        Self {
+            model: state.model.clone(),
+            thinking: state.thinking,
+            mode: state.permission_mode,
+        }
+    }
+}
+
+/// The values of the `mode` option, named as `/permission` names them,
+/// with the override each applies, a label and a description.
+const MODES: [(&str, Option<PermissionAction>, &str, &str); 4] = [
+    (
+        "default",
+        None,
+        "Default",
+        "The configured permission rules decide",
+    ),
+    (
+        "ask",
+        Some(PermissionAction::Ask),
+        "Ask",
+        "Ask before every tool call",
+    ),
+    (
+        "allow",
+        Some(PermissionAction::Allow),
+        "Allow",
+        "Run every tool call without asking",
+    ),
+    (
+        "deny",
+        Some(PermissionAction::Deny),
+        "Deny",
+        "Refuse every tool call",
+    ),
+];
+
 /// Builds the engine session for a client session from its id, working
 /// directory and model. The caller fills in the history and recorder.
 type SpecBuilder =
@@ -132,6 +252,8 @@ struct CliAcpAgent {
     spec: SpecBuilder,
     ids: Arc<Mutex<Ids>>,
     waiters: Waiters,
+    models: Arc<[SessionConfigSelectOption]>,
+    shown: ShownBySession,
 }
 
 impl CliAcpAgent {
@@ -145,11 +267,19 @@ impl CliAcpAgent {
         let engine = Engine::start(Arc::clone(&registry));
         let ids = Arc::new(Mutex::new(Ids::default()));
         let waiters = Waiters::default();
+        let models: Arc<[SessionConfigSelectOption]> =
+            crate::tui::available_model_items(&registry, "")
+                .into_iter()
+                .map(|item| choice(&item.value, &item.label, item.group.as_deref()))
+                .collect();
+        let shown = ShownBySession::default();
         let mut bridge = Bridge {
             peer,
             commander: engine.commander(),
             ids: Arc::clone(&ids),
             waiters: Arc::clone(&waiters),
+            models: Arc::clone(&models),
+            shown: Arc::clone(&shown),
             seen: HashMap::new(),
             stops: HashMap::new(),
             asks: HashMap::new(),
@@ -164,7 +294,24 @@ impl CliAcpAgent {
             spec,
             ids,
             waiters,
+            models,
+            shown,
         }
+    }
+
+    /// Opens `spec` as the client session `client_id` and returns its
+    /// config options.
+    fn open(&self, client_id: String, spec: SessionSpec) -> Vec<SessionConfigOption> {
+        let settings = Settings::of(&spec);
+        let options = config_options(&self.models, &settings);
+        let shown = Shown {
+            settings,
+            catching_up: false,
+        };
+        lock(&self.shown).insert(spec.id, shown);
+        lock(&self.ids).insert(client_id, spec.id);
+        self.engine.open(spec);
+        options
     }
 
     fn engine_id(&self, client_id: &str) -> Result<SessionId, RpcError> {
@@ -178,13 +325,13 @@ impl CliAcpAgent {
     /// Opens the recorded session `client_id` names the way the TUI resumes
     /// one: on its recorded model when that resolves, with its thinking
     /// level and token totals. With `ctx`, first replays its history and
-    /// title to the client.
+    /// title to the client. Returns the session's config options.
     fn open_recorded(
         &self,
         client_id: &str,
         cwd: &str,
         ctx: Option<&PromptContext>,
-    ) -> Result<(), RpcError> {
+    ) -> Result<Vec<SessionConfigOption>, RpcError> {
         let path = kage_session::find_by_prefix(&self.sessions, client_id)
             .map_err(|e| RpcError::internal(e.to_string()))?
             .ok_or_else(|| RpcError::new(-32602, format!("unknown session {client_id}")))?;
@@ -205,7 +352,11 @@ impl CliAcpAgent {
         }
         if lock(&self.ids).by_engine.contains_key(&id) {
             lock(&self.ids).insert(client_id.to_owned(), id);
-            return Ok(());
+            let shown = lock(&self.shown);
+            return Ok(shown
+                .get(&id)
+                .map(|shown| config_options(&self.models, &shown.settings))
+                .unwrap_or_default());
         }
         let writer = SessionWriter::open(&path).map_err(|e| RpcError::internal(e.to_string()))?;
         let model = if self.registry.resolve(&replay.model).is_ok() {
@@ -231,9 +382,7 @@ impl CliAcpAgent {
             .as_deref()
             .and_then(kage_core::ThinkingLevel::parse);
         spec.recorder = Some(Recorder::new(writer, spec.plugins.clone()));
-        lock(&self.ids).insert(client_id.to_owned(), id);
-        self.engine.open(spec);
-        Ok(())
+        Ok(self.open(client_id.to_owned(), spec))
     }
 }
 
@@ -346,11 +495,10 @@ impl Agent for CliAcpAgent {
         header.cwd.clone_from(&spec.cx.workdir);
         header.system_prompt.clone_from(&spec.cx.system_prompt);
         spec.recorder = Some(Recorder::planned(path, header, spec.plugins.clone()));
-        lock(&self.ids).insert(id.to_string(), id);
-        self.engine.open(spec);
+        let config_options = self.open(id.to_string(), spec);
         Ok(NewSessionResponse {
             session_id: id.to_string(),
-            config_options: vec![],
+            config_options,
         })
     }
 
@@ -359,8 +507,8 @@ impl Agent for CliAcpAgent {
         req: LoadSessionRequest,
         ctx: &PromptContext,
     ) -> Result<LoadSessionResponse, RpcError> {
-        self.open_recorded(&req.session_id, &req.cwd, Some(ctx))?;
-        Ok(LoadSessionResponse::default())
+        let config_options = self.open_recorded(&req.session_id, &req.cwd, Some(ctx))?;
+        Ok(LoadSessionResponse { config_options })
     }
 
     fn list_sessions(&self, req: ListSessionsRequest) -> Result<ListSessionsResponse, RpcError> {
@@ -368,8 +516,28 @@ impl Agent for CliAcpAgent {
     }
 
     fn resume_session(&self, req: ResumeSessionRequest) -> Result<ResumeSessionResponse, RpcError> {
-        self.open_recorded(&req.session_id, &req.cwd, None)?;
-        Ok(ResumeSessionResponse::default())
+        let config_options = self.open_recorded(&req.session_id, &req.cwd, None)?;
+        Ok(ResumeSessionResponse { config_options })
+    }
+
+    fn set_config_option(
+        &self,
+        req: SetSessionConfigOptionRequest,
+    ) -> Result<SetSessionConfigOptionResponse, RpcError> {
+        let id = self.engine_id(&req.session_id)?;
+        let (command, config_options) = {
+            let mut shown = lock(&self.shown);
+            let shown = shown.get_mut(&id).ok_or_else(|| {
+                RpcError::new(-32602, format!("unknown session {}", req.session_id))
+            })?;
+            let command = shown
+                .settings
+                .apply(&self.models, &req.config_id, &req.value)?;
+            shown.catching_up = true;
+            (command, config_options(&self.models, &shown.settings))
+        };
+        self.engine.send(Command::to(id, command));
+        Ok(SetSessionConfigOptionResponse { config_options })
     }
 
     fn prompt(&self, req: PromptRequest, _ctx: &PromptContext) -> Result<PromptResponse, RpcError> {
@@ -417,6 +585,8 @@ struct Bridge {
     commander: Commander,
     ids: Arc<Mutex<Ids>>,
     waiters: Waiters,
+    models: Arc<[SessionConfigSelectOption]>,
+    shown: ShownBySession,
     seen: HashMap<SessionId, HashSet<String>>,
     stops: HashMap<SessionId, CoreStopReason>,
     asks: HashMap<SessionId, Vec<Arc<AtomicBool>>>,
@@ -468,6 +638,22 @@ impl Bridge {
             Event::Host(HostEvent::UsageUpdated { usage }) => {
                 if let Some(update) = usage_update(usage) {
                     send_update(&self.peer, &client_id, update);
+                }
+            }
+            Event::Host(HostEvent::StateChanged { state }) => {
+                let settings = Settings::from(state);
+                let changed = lock(&self.shown)
+                    .get_mut(&session)
+                    .is_some_and(|shown| shown.observe(&settings));
+                if changed {
+                    let update = ConfigOptionUpdate {
+                        config_options: config_options(&self.models, &settings),
+                    };
+                    send_update(
+                        &self.peer,
+                        &client_id,
+                        SessionUpdate::ConfigOptionUpdate(update),
+                    );
                 }
             }
             Event::Host(HostEvent::TitleChanged { title }) => {
@@ -793,6 +979,79 @@ fn usage_update(usage: &Usage) -> Option<SessionUpdate> {
     }))
 }
 
+/// The model, thinking and mode options showing `settings`. The model
+/// option offers `models`, plus the current model when they lack it.
+fn config_options(
+    models: &[SessionConfigSelectOption],
+    settings: &Settings,
+) -> Vec<SessionConfigOption> {
+    let mut model_choices = models.to_vec();
+    if !models.iter().any(|m| m.value == settings.model) {
+        model_choices.insert(0, choice(&settings.model, &settings.model, None));
+    }
+    let levels = std::iter::successors(Some(ThinkingLevel::Off), |level| {
+        Some(level.cycle()).filter(|next| !next.is_off())
+    });
+    let mode = MODES
+        .iter()
+        .find(|m| m.1 == settings.mode)
+        .map_or("default", |m| m.0);
+    vec![
+        select(
+            "model",
+            "Model",
+            SessionConfigCategory::Model,
+            &settings.model,
+            model_choices,
+        ),
+        select(
+            "thinking",
+            "Thinking",
+            SessionConfigCategory::ThoughtLevel,
+            settings.thinking.as_str(),
+            levels
+                .map(|level| choice(level.as_str(), level.label(), None))
+                .collect(),
+        ),
+        select(
+            "mode",
+            "Mode",
+            SessionConfigCategory::Mode,
+            mode,
+            MODES
+                .iter()
+                .map(|(value, _, name, description)| choice(value, name, Some(description)))
+                .collect(),
+        ),
+    ]
+}
+
+fn select(
+    id: &str,
+    name: &str,
+    category: SessionConfigCategory,
+    current: &str,
+    options: Vec<SessionConfigSelectOption>,
+) -> SessionConfigOption {
+    SessionConfigOption {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        description: None,
+        category: Some(category),
+        kind: SessionConfigKind::Select,
+        current_value: current.to_owned(),
+        options,
+    }
+}
+
+fn choice(value: &str, name: &str, description: Option<&str>) -> SessionConfigSelectOption {
+    SessionConfigSelectOption {
+        value: value.to_owned(),
+        name: name.to_owned(),
+        description: description.map(str::to_owned),
+    }
+}
+
 /// One `session/list` page of the client sessions recorded in `dir`,
 /// newest activity first. The cursor is the offset of the page.
 fn list_page(dir: &Path, req: &ListSessionsRequest) -> Result<ListSessionsResponse, RpcError> {
@@ -912,7 +1171,46 @@ mod tests {
         client: Peer,
         inbox: mpsc::Receiver<Inbound>,
         mock: MockProvider,
+        commander: Commander,
+        id: SessionId,
         session: String,
+    }
+
+    impl Harness {
+        /// Sends `kind` to the open session the way a non-client change
+        /// would reach the engine.
+        fn command(&self, kind: CommandKind) {
+            self.commander.send(Command::to(self.id, kind));
+        }
+    }
+
+    /// The mock provider, offering `mock:m` and `mock:other` to pickers.
+    #[derive(Debug)]
+    struct Listed(MockProvider);
+
+    impl kage_provider::Provider for Listed {
+        fn metadata(&self) -> &kage_provider::ProviderMetadata {
+            self.0.metadata()
+        }
+
+        fn stream(
+            &self,
+            req: kage_provider::StreamRequest,
+            cancel: &kage_core::CancelFlag,
+        ) -> Result<kage_provider::EventStream, ProviderError> {
+            self.0.stream(req, cancel)
+        }
+
+        fn models(&self) -> Vec<kage_provider::ProviderModel> {
+            ["m", "other"]
+                .map(|id| kage_provider::ProviderModel {
+                    id: id.into(),
+                    name: format!("Mock {id}"),
+                    context: None,
+                    max_output: None,
+                })
+                .into()
+        }
     }
 
     /// Serves `kage rpc` over pipes on the sessions recorded in
@@ -925,7 +1223,8 @@ mod tests {
         let workdir = workdir.to_path_buf();
         let sessions = sessions.to_path_buf();
         let mock = MockProvider::sequence(scripts);
-        let provider = mock.clone();
+        let provider = Listed(mock.clone());
+        let (commander_tx, commander) = mpsc::channel();
         std::thread::spawn(move || {
             serve_agent(BufReader::new(srv_r), srv_w, |peer| {
                 let registry = Arc::new(ProviderRegistry::new().with(Arc::new(provider)));
@@ -961,8 +1260,8 @@ mod tests {
                     })
                 });
                 let agent = CliAcpAgent::new(registry, "mock:m".into(), sessions, spec, peer);
-                agent.engine.open((agent.spec)(id, "", "mock:m").unwrap());
-                lock(&agent.ids).insert(id.to_string(), id);
+                agent.open(id.to_string(), (agent.spec)(id, "", "mock:m").unwrap());
+                let _ = commander_tx.send(agent.engine.commander());
                 agent
             })
         });
@@ -971,6 +1270,8 @@ mod tests {
             client,
             inbox,
             mock,
+            commander: commander.recv_timeout(WAIT).unwrap(),
+            id,
             session: id.to_string(),
         }
     }
@@ -1295,7 +1596,10 @@ mod tests {
 
         let params = serde_json::json!({"sessionId": session, "cwd": cwd, "mcpServers": []});
         let loaded = h.client.request("session/load", params).unwrap();
-        assert_eq!(loaded, serde_json::json!({}));
+        assert_eq!(
+            current_values(&loaded),
+            ["mock:recorded", "high", "default"]
+        );
         let updates = updates_until(&h.inbox, &session, "usage_update");
         assert_eq!(
             update_kinds(&updates),
@@ -1350,7 +1654,7 @@ mod tests {
 
         let params = serde_json::json!({"sessionId": session, "cwd": cwd, "mcpServers": []});
         let resumed = h.client.request("session/resume", params).unwrap();
-        assert_eq!(resumed, serde_json::json!({}));
+        assert_eq!(current_values(&resumed), ["mock:m", "off", "default"]);
         assert_eq!(
             prompt(&h.client, &session, "next")["stopReason"],
             "end_turn"
@@ -1373,6 +1677,146 @@ mod tests {
             .map(crate::cli_loop_run::first_user_text)
             .collect();
         assert_eq!(texts, ["hello", "hi", "next"]);
+    }
+
+    fn current_values(result: &serde_json::Value) -> Vec<&str> {
+        result["configOptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["currentValue"].as_str().unwrap())
+            .collect()
+    }
+
+    fn values_of<'a>(option: &'a serde_json::Value, field: &str) -> Vec<&'a str> {
+        option["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o[field].as_str().unwrap())
+            .collect()
+    }
+
+    fn set_option(
+        h: &Harness,
+        id: &str,
+        value: &str,
+    ) -> Result<serde_json::Value, kage_jsonrpc::RpcError> {
+        let params = serde_json::json!({"sessionId": h.session, "configId": id, "value": value});
+        h.client.request("session/set_config_option", params)
+    }
+
+    #[test]
+    fn a_new_session_lists_model_thinking_and_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = serve(Vec::new(), dir.path(), dir.path());
+
+        let params = serde_json::json!({"cwd": dir.path(), "mcpServers": []});
+        let created = h.client.request("session/new", params).unwrap();
+        assert_eq!(current_values(&created), ["mock:m", "off", "default"]);
+        let options = created["configOptions"].as_array().unwrap();
+        let ids: Vec<_> = options.iter().map(|o| o["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["model", "thinking", "mode"]);
+        let categories: Vec<_> = options.iter().map(|o| o["category"].clone()).collect();
+        assert_eq!(categories, ["model", "thought_level", "mode"]);
+        assert!(options.iter().all(|o| o["type"] == "select"));
+        assert_eq!(values_of(&options[0], "value"), ["mock:m", "mock:other"]);
+        assert_eq!(values_of(&options[0], "name"), ["Mock m", "Mock other"]);
+        assert_eq!(options[0]["options"][0]["description"], "Mock");
+        assert_eq!(
+            values_of(&options[1], "value"),
+            ["off", "minimal", "low", "medium", "high", "xhigh"]
+        );
+        assert_eq!(
+            values_of(&options[2], "value"),
+            ["default", "ask", "allow", "deny"]
+        );
+    }
+
+    #[test]
+    fn setting_options_changes_the_next_turn() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = serve(vec![text_turn("ok")], dir.path(), dir.path());
+
+        let set = set_option(&h, "thinking", "high").unwrap();
+        assert_eq!(current_values(&set), ["mock:m", "high", "default"]);
+        set_option(&h, "model", "mock:other").unwrap();
+        let set = set_option(&h, "mode", "ask").unwrap();
+        assert_eq!(current_values(&set), ["mock:other", "high", "ask"]);
+
+        assert_eq!(
+            prompt(&h.client, &h.session, "hi")["stopReason"],
+            "end_turn"
+        );
+        let request = &h.mock.requests()[0];
+        assert_eq!(request.model, "other");
+        assert_eq!(request.level, Some(ThinkingLevel::High));
+        let kinds = update_kinds(&drain(&h.inbox)).join(" ");
+        assert!(!kinds.contains("config_option_update"), "{kinds}");
+    }
+
+    #[test]
+    fn unknown_options_and_values_are_invalid_params() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = serve(Vec::new(), dir.path(), dir.path());
+
+        for (id, value) in [
+            ("colour", "red"),
+            ("model", "mock:missing"),
+            ("thinking", "extreme"),
+            ("mode", "yolo"),
+        ] {
+            let err = set_option(&h, id, value).unwrap_err();
+            assert_eq!(err.code, -32602, "{id}={value}");
+        }
+        let params = serde_json::json!({"sessionId": "nope", "configId": "mode", "value": "ask"});
+        let err = h
+            .client
+            .request("session/set_config_option", params)
+            .unwrap_err();
+        assert_eq!(err.code, -32602);
+    }
+
+    #[test]
+    fn a_change_the_client_did_not_make_sends_config_option_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = serve(Vec::new(), dir.path(), dir.path());
+        let model = |model: &str| CommandKind::SetModel {
+            model: model.into(),
+        };
+
+        h.command(model("mock:other"));
+        let updates = updates_until(&h.inbox, &h.session, "config_option_update");
+        let update = &updates.last().unwrap()["update"];
+        assert_eq!(current_values(update), ["mock:other", "off", "default"]);
+
+        h.command(model("mock:other"));
+        h.command(CommandKind::SetThinking {
+            level: ThinkingLevel::Low,
+        });
+        let updates = updates_until(&h.inbox, &h.session, "config_option_update");
+        assert_eq!(update_kinds(&updates), ["config_option_update"]);
+        let update = &updates[0]["update"];
+        assert_eq!(current_values(update), ["mock:other", "low", "default"]);
+    }
+
+    #[test]
+    fn states_older_than_a_client_change_are_not_sent_back() {
+        let settings = |model: &str, thinking| Settings {
+            model: model.into(),
+            thinking,
+            mode: None,
+        };
+        let mut shown = Shown {
+            settings: settings("mock:other", ThinkingLevel::High),
+            catching_up: true,
+        };
+        assert!(!shown.observe(&settings("mock:other", ThinkingLevel::Off)));
+        assert!(!shown.observe(&settings("mock:m", ThinkingLevel::Off)));
+        assert!(!shown.observe(&settings("mock:other", ThinkingLevel::High)));
+        assert!(!shown.observe(&settings("mock:other", ThinkingLevel::High)));
+        assert!(shown.observe(&settings("mock:m", ThinkingLevel::High)));
+        assert_eq!(shown.settings.model, "mock:m");
     }
 
     #[test]

@@ -9,9 +9,13 @@
 //! session offers its model, thinking level and permission mode as config
 //! options.
 //!
-//! Agent sessions started by the `agent` tool are not ACP sessions. Their
-//! permission requests and progress go to the client session at the root
-//! of their tree, on that session's top-level `agent` call.
+//! Agent sessions started by the `agent` tool are shown as subagent
+//! sessions (draft RFD PR #1992) to a client that advertises the
+//! `subagents` capability: announced with `subagent_update` on their
+//! parent's session, streaming on their own session, and asking there.
+//! For every other client they are not ACP sessions. Their permission
+//! requests and progress go to the client session at the root of their
+//! tree, on that session's top-level `agent` call.
 
 use std::cmp::Reverse;
 use std::collections::{HashMap, HashSet};
@@ -29,8 +33,9 @@ use kage_acp::acp::{
     ResumeSessionRequest, ResumeSessionResponse, SessionCapabilities, SessionConfigCategory,
     SessionConfigKind, SessionConfigOption, SessionConfigSelectOption, SessionInfo,
     SessionInfoUpdate, SessionUpdate, SetSessionConfigOptionRequest,
-    SetSessionConfigOptionResponse, StopReason, Supported, ToolCall, ToolCallContent,
-    ToolCallStatus, ToolCallUpdate, ToolKind, UsageUpdate,
+    SetSessionConfigOptionResponse, StopReason, SubagentSessionCapabilities, SubagentState,
+    SubagentUpdate, Supported, ToolCall, ToolCallContent, ToolCallStatus, ToolCallUpdate, ToolKind,
+    UsageUpdate,
 };
 use kage_acp::agent::{Agent, PermissionDecision, PromptContext, send_update, serve_agent};
 use kage_core::permissions::PermissionAction;
@@ -41,7 +46,7 @@ use kage_core::protocol::{
 use kage_core::sync::lock;
 use kage_core::{
     Content, ImageSource, LoopEvent, Message, MessageId, Role, SessionId,
-    StopReason as CoreStopReason, ThinkingLevel, ToolOutput,
+    StopReason as CoreStopReason, ThinkingLevel, ToolCallId, ToolOutput,
 };
 use kage_jsonrpc::{Peer, RpcError};
 use kage_loop::{AgentContext, LoopConfig, TokenBudget};
@@ -102,6 +107,8 @@ pub(crate) fn run(model_override: Option<&str>, system_role: &str) -> ExitCode {
 struct Ids {
     by_client: HashMap<String, SessionId>,
     by_engine: HashMap<SessionId, String>,
+    /// Running subagents, which the client may only cancel.
+    subagents: HashMap<String, SessionId>,
 }
 
 impl Ids {
@@ -254,6 +261,7 @@ struct CliAcpAgent {
     waiters: Waiters,
     models: Arc<[SessionConfigSelectOption]>,
     shown: ShownBySession,
+    subagents: Arc<AtomicBool>,
 }
 
 impl CliAcpAgent {
@@ -273,6 +281,7 @@ impl CliAcpAgent {
                 .map(|item| choice(&item.value, &item.label, item.group.as_deref()))
                 .collect();
         let shown = ShownBySession::default();
+        let subagents = Arc::new(AtomicBool::new(false));
         let mut bridge = Bridge {
             peer,
             commander: engine.commander(),
@@ -284,6 +293,9 @@ impl CliAcpAgent {
             stops: HashMap::new(),
             asks: HashMap::new(),
             tree: AgentTree::default(),
+            subagents: Arc::clone(&subagents),
+            live: HashSet::new(),
+            ended: HashMap::new(),
         };
         engine.subscribe(Box::new(move |envelope| bridge.handle(envelope)));
         Self {
@@ -296,6 +308,7 @@ impl CliAcpAgent {
             waiters,
             models,
             shown,
+            subagents,
         }
     }
 
@@ -466,7 +479,11 @@ fn session_spec(
 }
 
 impl Agent for CliAcpAgent {
-    fn initialize(&self, _req: InitializeRequest) -> InitializeResponse {
+    fn initialize(&self, req: InitializeRequest) -> InitializeResponse {
+        self.subagents.store(
+            req.client_capabilities.supports_subagents(),
+            Ordering::SeqCst,
+        );
         InitializeResponse {
             protocol_version: PROTOCOL_VERSION,
             agent_capabilities: AgentCapabilities {
@@ -572,7 +589,14 @@ impl Agent for CliAcpAgent {
     }
 
     fn cancel(&self, session_id: &str) {
-        if let Ok(id) = self.engine_id(session_id) {
+        let id = {
+            let ids = lock(&self.ids);
+            ids.by_client
+                .get(session_id)
+                .or_else(|| ids.subagents.get(session_id))
+                .copied()
+        };
+        if let Some(id) = id {
             self.engine.send(Command::to(id, CommandKind::Cancel));
         }
     }
@@ -589,8 +613,20 @@ struct Bridge {
     shown: ShownBySession,
     seen: HashMap<SessionId, HashSet<String>>,
     stops: HashMap<SessionId, CoreStopReason>,
-    asks: HashMap<SessionId, Vec<Arc<AtomicBool>>>,
+    asks: HashMap<SessionId, Vec<Ask>>,
     tree: AgentTree,
+    /// Whether the client advertised the subagents capability.
+    subagents: Arc<AtomicBool>,
+    /// Announced subagents whose terminal state is not sent yet.
+    live: HashSet<SessionId>,
+    /// Ended runs held back until their live subagents end.
+    ended: HashMap<SessionId, PromptEnd>,
+}
+
+/// A permission question in flight on its own thread.
+struct Ask {
+    answered: Arc<AtomicBool>,
+    thread: std::thread::JoinHandle<()>,
 }
 
 impl Bridge {
@@ -600,6 +636,9 @@ impl Bridge {
         let client_id = lock(&self.ids).by_engine.get(&session).cloned();
         match client_id {
             Some(client_id) => self.handle_client(session, client_id, &envelope.event),
+            None if is_agent && self.subagents.load(Ordering::SeqCst) => {
+                self.handle_subagent(session, &envelope.event);
+            }
             None if is_agent => self.handle_agent(session, &envelope.event),
             None => {}
         }
@@ -623,16 +662,7 @@ impl Bridge {
                 input,
                 ..
             }) => {
-                let tool_call = ToolCallUpdate {
-                    tool_call_id: tool_call_id
-                        .as_ref()
-                        .map_or_else(String::new, ToString::to_string),
-                    title: Some(tool.clone()),
-                    kind: Some(tool_kind(tool)),
-                    status: Some(ToolCallStatus::Pending),
-                    raw_input: Some(input.clone()),
-                    ..ToolCallUpdate::default()
-                };
+                let tool_call = permission_call(tool_call_id.as_ref(), tool, input);
                 self.ask(session, *request_id, client_id, tool_call);
             }
             Event::Host(HostEvent::UsageUpdated { usage }) => {
@@ -671,15 +701,100 @@ impl Bridge {
                 self.end_asks(session);
                 self.seen.remove(&session);
                 let stop = self.stops.remove(&session);
-                if let Some(waiter) = lock(&self.waiters).remove(&session) {
-                    let _ = waiter.send(PromptEnd {
-                        outcome: outcome.clone(),
-                        stop,
-                    });
-                }
+                let end = PromptEnd {
+                    outcome: outcome.clone(),
+                    stop,
+                };
+                self.ended.insert(session, end);
+                self.settle(session);
             }
             Event::Host(_) => {}
         }
+    }
+
+    /// Announces an agent as a subagent of its parent's client session,
+    /// then shows its activity on its own session until it ends.
+    fn handle_subagent(&mut self, session: SessionId, event: &Event) {
+        if let Event::Host(HostEvent::AgentSpawned {
+            parent,
+            agent,
+            description,
+            ..
+        }) = event
+        {
+            let Some(parent_id) = self.client_of(*parent) else {
+                return;
+            };
+            self.live.insert(session);
+            lock(&self.ids)
+                .subagents
+                .insert(session.to_string(), session);
+            let update = SubagentUpdate {
+                subagent_session_id: session.to_string(),
+                name: Some(agent.clone()),
+                task: Some(description.clone()),
+                capabilities: Some(SubagentSessionCapabilities { cancel: true }),
+                state: None,
+            };
+            send_update(
+                &self.peer,
+                &parent_id,
+                SessionUpdate::SubagentUpdate(update),
+            );
+        } else if self.live.contains(&session) {
+            self.handle_client(session, session.to_string(), event);
+        }
+    }
+
+    /// The client's id for `session`: a client session's own id, or a
+    /// live subagent's engine id.
+    fn client_of(&self, session: SessionId) -> Option<String> {
+        let client_id = lock(&self.ids).by_engine.get(&session).cloned();
+        client_id.or_else(|| self.live.contains(&session).then(|| session.to_string()))
+    }
+
+    /// Finishes the ended run of `session` once none of its subagents is
+    /// live: a subagent sends its terminal state to its parent, and a
+    /// client session answers its waiting prompt. The RFD wants every
+    /// subagent to end before its parent does.
+    fn settle(&mut self, session: SessionId) {
+        let waits = self
+            .live
+            .iter()
+            .any(|s| self.tree.get(*s).is_some_and(|node| node.parent == session));
+        if waits {
+            return;
+        }
+        let Some(end) = self.ended.remove(&session) else {
+            return;
+        };
+        if !self.live.remove(&session) {
+            if let Some(waiter) = lock(&self.waiters).remove(&session) {
+                let _ = waiter.send(end);
+            }
+            return;
+        }
+        lock(&self.ids).subagents.remove(&session.to_string());
+        let Some(parent) = self.tree.get(session).map(|node| node.parent) else {
+            return;
+        };
+        if let Some(parent_id) = self.client_of(parent) {
+            let update = SubagentUpdate {
+                subagent_session_id: session.to_string(),
+                state: Some(match end.outcome {
+                    RunOutcome::Completed => SubagentState::Completed,
+                    RunOutcome::Cancelled => SubagentState::Cancelled,
+                    RunOutcome::Failed { .. } => SubagentState::Failed,
+                }),
+                ..SubagentUpdate::default()
+            };
+            send_update(
+                &self.peer,
+                &parent_id,
+                SessionUpdate::SubagentUpdate(update),
+            );
+        }
+        self.settle(parent);
     }
 
     /// Shows an agent's activity as the content of the root session's
@@ -750,8 +865,8 @@ impl Bridge {
     }
 
     /// Asks the client on `client_id` and resolves `request_id` of
-    /// `session` with the answer. The ask is dropped when that session's
-    /// run ends first.
+    /// `session` with the answer. The ask is withdrawn when that
+    /// session's run ends first.
     fn ask(
         &mut self,
         session: SessionId,
@@ -760,13 +875,10 @@ impl Bridge {
         tool_call: ToolCallUpdate,
     ) {
         let answered = Arc::new(AtomicBool::new(false));
-        self.asks
-            .entry(session)
-            .or_default()
-            .push(Arc::clone(&answered));
+        let flag = Arc::clone(&answered);
         let peer = self.peer.clone();
         let commander = self.commander.clone();
-        std::thread::spawn(move || {
+        let thread = std::thread::spawn(move || {
             let title = tool_call.title.clone().unwrap_or_default();
             let decision =
                 kage_acp::agent::request_permission(&peer, &client_id, tool_call, &title, &|| {
@@ -784,12 +896,38 @@ impl Bridge {
                 },
             ));
         });
+        self.asks.entry(session).or_default().push(Ask {
+            answered: flag,
+            thread,
+        });
     }
 
+    /// Withdraws the open asks of `session` and waits until each is
+    /// answered or withdrawn, so no update that follows overtakes them.
     fn end_asks(&mut self, session: SessionId) {
-        for answered in self.asks.remove(&session).unwrap_or_default() {
-            answered.store(true, Ordering::SeqCst);
+        let asks = self.asks.remove(&session).unwrap_or_default();
+        for ask in &asks {
+            ask.answered.store(true, Ordering::SeqCst);
         }
+        for ask in asks {
+            let _ = ask.thread.join();
+        }
+    }
+}
+
+/// The tool call a permission request for `tool` shows.
+fn permission_call(
+    tool_call_id: Option<&ToolCallId>,
+    tool: &str,
+    input: &serde_json::Value,
+) -> ToolCallUpdate {
+    ToolCallUpdate {
+        tool_call_id: tool_call_id.map_or_else(String::new, ToString::to_string),
+        title: Some(tool.to_owned()),
+        kind: Some(tool_kind(tool)),
+        status: Some(ToolCallStatus::Pending),
+        raw_input: Some(input.clone()),
+        ..ToolCallUpdate::default()
     }
 }
 
@@ -1374,6 +1512,211 @@ mod tests {
         );
         assert!(contents_of(&updates, "call_child").is_empty());
         assert!(progress[3].contains("child done"), "{progress:?}");
+    }
+
+    /// Initializes as a client that advertises subagents.
+    fn initialize(client: &Peer) {
+        let params = serde_json::json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "clientCapabilities": {"subagents": {}},
+        });
+        client.request("initialize", params).unwrap();
+    }
+
+    /// Starts a `session/prompt` of `text` on `session` and returns where
+    /// its response arrives.
+    fn prompt_async(
+        client: &Peer,
+        session: &str,
+        text: &str,
+    ) -> mpsc::Receiver<Result<serde_json::Value, kage_jsonrpc::RpcError>> {
+        let (done, end) = mpsc::channel();
+        let client = client.clone();
+        let params = serde_json::json!({
+            "sessionId": session,
+            "prompt": [{"type": "text", "text": text}],
+        });
+        std::thread::spawn(move || {
+            let _ = done.send(client.request("session/prompt", params));
+        });
+        end
+    }
+
+    fn is_terminal(params: &serde_json::Value) -> bool {
+        params["update"]["sessionUpdate"] == "subagent_update"
+            && !params["update"]["state"].is_null()
+    }
+
+    /// Collects notifications with their methods until a subagent's
+    /// terminal update arrives.
+    fn until_terminal(inbox: &mpsc::Receiver<Inbound>) -> Vec<(String, serde_json::Value)> {
+        let mut notes = Vec::new();
+        loop {
+            if let Inbound::Notification { method, params } =
+                inbox.recv_timeout(WAIT).expect("no terminal update")
+            {
+                let done = is_terminal(&params);
+                notes.push((method, params));
+                if done {
+                    return notes;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn subagents_stream_and_ask_on_their_own_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().display().to_string();
+        let task = serde_json::json!({"description": "list files", "prompt": "list"});
+        let h = serve(
+            vec![
+                tool_turn("call_agent", "agent", task),
+                tool_turn("call_child", "ls", serde_json::json!({ "path": path })),
+                text_turn("child done"),
+                text_turn("parent done"),
+            ],
+            dir.path(),
+            dir.path(),
+        );
+        initialize(&h.client);
+        let prompt_end = prompt_async(&h.client, &h.session, "go");
+
+        let mut updates = Vec::new();
+        let (ask, params) = until_ask(&h.inbox, &mut updates);
+        let announced = updates
+            .iter()
+            .find(|p| p["update"]["sessionUpdate"] == "subagent_update")
+            .expect("subagent announced before its ask");
+        assert_eq!(announced["sessionId"], h.session);
+        let child = announced["update"]["subagentSessionId"].clone();
+        assert_eq!(announced["update"]["name"], "general");
+        assert_eq!(announced["update"]["task"], "list files");
+        assert_eq!(announced["update"]["capabilities"]["cancel"], true);
+        assert!(announced["update"].get("state").is_none());
+        assert_eq!(params["sessionId"], child);
+        assert_eq!(params["toolCall"]["toolCallId"], "call_child");
+        assert_eq!(params["toolCall"]["title"], "ls");
+        allow(&h.client, &ask);
+
+        let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+        assert_eq!(response["stopReason"], "end_turn");
+        updates.extend(drain(&h.inbox));
+        let terminal = updates
+            .iter()
+            .position(is_terminal)
+            .expect("terminal update before the prompt answer");
+        assert_eq!(updates[terminal]["sessionId"], h.session);
+        assert_eq!(updates[terminal]["update"]["subagentSessionId"], child);
+        assert_eq!(updates[terminal]["update"]["state"], "completed");
+        let last_child = updates.iter().rposition(|p| p["sessionId"] == child);
+        assert!(last_child < Some(terminal), "{updates:#?}");
+        let own: Vec<_> = updates.iter().filter(|p| p["sessionId"] == child).collect();
+        assert!(
+            own.iter()
+                .any(|p| p["update"]["toolCallId"] == "call_child")
+        );
+        assert!(
+            own.iter()
+                .any(|p| p["update"]["content"]["text"] == "child done")
+        );
+        assert!(
+            updates
+                .iter()
+                .all(|p| p["sessionId"] == h.session || p["sessionId"] == child)
+        );
+        let root_call = contents_of(&updates, "call_agent");
+        assert_eq!(root_call.len(), 1, "{root_call:?}");
+        assert!(root_call[0].contains("child done"));
+
+        let refused = h
+            .client
+            .request(
+                "session/prompt",
+                serde_json::json!({"sessionId": child, "prompt": []}),
+            )
+            .unwrap_err();
+        assert_eq!(refused.code, -32602);
+    }
+
+    #[test]
+    fn cancelling_a_subagent_withdraws_its_ask_and_the_parent_goes_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().display().to_string();
+        let task = serde_json::json!({"description": "list files", "prompt": "list"});
+        let h = serve(
+            vec![
+                tool_turn("call_agent", "agent", task),
+                tool_turn("call_child", "ls", serde_json::json!({ "path": path })),
+                text_turn("parent done"),
+            ],
+            dir.path(),
+            dir.path(),
+        );
+        initialize(&h.client);
+        let prompt_end = prompt_async(&h.client, &h.session, "go");
+
+        let (ask, params) = until_ask(&h.inbox, &mut Vec::new());
+        let child = params["sessionId"].clone();
+        assert_ne!(child, h.session);
+        h.client
+            .notify("session/cancel", serde_json::json!({"sessionId": child}))
+            .unwrap();
+
+        let notes = until_terminal(&h.inbox);
+        let withdrawn = notes
+            .iter()
+            .position(|(method, p)| method == "$/cancel_request" && p["requestId"] == ask);
+        assert!(withdrawn.is_some(), "{notes:#?}");
+        let (_, terminal) = notes.last().unwrap();
+        assert_eq!(terminal["sessionId"], h.session);
+        assert_eq!(terminal["update"]["subagentSessionId"], child);
+        assert_eq!(terminal["update"]["state"], "cancelled");
+        let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+        assert_eq!(response["stopReason"], "end_turn");
+    }
+
+    #[test]
+    fn a_cancelled_prompt_answers_after_its_subagents_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().display().to_string();
+        let task = serde_json::json!({"description": "list files", "prompt": "list"});
+        let h = serve(
+            vec![
+                tool_turn("call_agent", "agent", task),
+                tool_turn("call_child", "ls", serde_json::json!({ "path": path })),
+            ],
+            dir.path(),
+            dir.path(),
+        );
+        initialize(&h.client);
+        let prompt_end = prompt_async(&h.client, &h.session, "go");
+
+        let (ask, params) = until_ask(&h.inbox, &mut Vec::new());
+        let child = params["sessionId"].clone();
+        h.client
+            .notify(
+                "session/cancel",
+                serde_json::json!({"sessionId": h.session}),
+            )
+            .unwrap();
+
+        let response = prompt_end.recv_timeout(WAIT).unwrap().unwrap();
+        assert_eq!(response["stopReason"], "cancelled");
+        let notes: Vec<_> = std::iter::from_fn(|| h.inbox.try_recv().ok())
+            .filter_map(|message| match message {
+                Inbound::Notification { method, params } => Some((method, params)),
+                Inbound::Request { .. } => None,
+            })
+            .collect();
+        let terminal = notes.iter().position(|(_, p)| is_terminal(p));
+        let withdrawn = notes
+            .iter()
+            .position(|(method, p)| method == "$/cancel_request" && p["requestId"] == ask);
+        assert!(withdrawn.is_some() && withdrawn < terminal, "{notes:#?}");
+        let (_, terminal) = &notes[terminal.unwrap()];
+        assert_eq!(terminal["update"]["subagentSessionId"], child);
+        assert_eq!(terminal["update"]["state"], "cancelled");
     }
 
     fn usage(input: u64, output: u64) -> TokenUsage {

@@ -37,8 +37,8 @@ pub(crate) fn execute_print_run(
     let layered = match kage_core::config::Config::load_layered(&workdir) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("kage: {e}; using defaults");
-            kage_core::config::Config::default()
+            eprintln!("kage: {e}");
+            return ExitCode::from(1);
         }
     };
     if let Err(e) = layered.permissions.validate() {

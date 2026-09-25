@@ -314,7 +314,10 @@ impl Host {
         let name = |l: Option<ThinkingLevel>| l.map_or(AUTO_THINKING, ThinkingLevel::as_str);
         let prev = lock(&self.mirror).state.thinking;
         self.send(CommandKind::SetThinking { level });
-        self.notify(format!("thinking level: {}", name(level)));
+        self.notify(format!(
+            "thinking level: {}",
+            level.map_or("auto", ThinkingLevel::as_str)
+        ));
         self.update_ui(|ui| ui.state.thinking = level);
         self.plugin_event(
             "thinking_level_select",
@@ -387,7 +390,13 @@ impl Host {
     }
 
     fn refresh_providers(&mut self) {
-        let active_ok = self.rebuild_registry();
+        let active_ok = match self.rebuild_registry() {
+            Ok(active_ok) => active_ok,
+            Err(e) => {
+                self.error(format!("providers not refreshed: {e}"));
+                return;
+            }
+        };
         let active = lock(&self.mirror).state.model.clone();
         self.publish_plugin_refresh(&active);
         if active_ok {
@@ -398,16 +407,17 @@ impl Host {
     }
 
     /// Rebuild the provider registry with plugin providers and hand it to
-    /// the engine. Returns whether the active model still resolves.
-    fn rebuild_registry(&mut self) -> bool {
-        let mut fresh = crate::build_provider_registry();
+    /// the engine. Returns whether the active model still resolves, or
+    /// the config error that kept the current registry.
+    fn rebuild_registry(&mut self) -> Result<bool, String> {
+        let mut fresh = crate::build_provider_registry()?;
         if let Some(rt) = &self.plugins {
             crate::plugins::merge_plugin_providers(rt, &mut fresh);
         }
         let active_ok = fresh.resolve(&lock(&self.mirror).state.model).is_ok();
         self.registry = Arc::new(fresh);
         self.commander.set_registry(Arc::clone(&self.registry));
-        active_ok
+        Ok(active_ok)
     }
 
     /// Re-read plugins and `init.lua` from disk and republish everything
@@ -421,7 +431,9 @@ impl Host {
         let reload = rt.reload_all(self.plugins_dir.as_deref());
         self.commander.reload_plugin_tools();
         super::support::register_block_renderers(&rt);
-        self.rebuild_registry();
+        if let Err(e) = self.rebuild_registry() {
+            self.error(format!("providers not refreshed: {e}"));
+        }
         let active = lock(&self.mirror).state.model.clone();
         self.publish_plugin_refresh(&active);
         let report = match reload {

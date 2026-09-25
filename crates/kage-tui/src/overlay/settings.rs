@@ -412,7 +412,7 @@ fn display(value: &OptionValue) -> String {
         OptionValue::Bool(false) => "off".to_owned(),
         OptionValue::Int(n) => n.to_string(),
         OptionValue::Float(x) => x.to_string(),
-        OptionValue::Str(s) if s.is_empty() => "default".to_owned(),
+        OptionValue::Str(s) if s.is_empty() => "auto".to_owned(),
         OptionValue::Str(s) => s.clone(),
     }
 }
@@ -484,6 +484,19 @@ mod tests {
                 .count();
             assert_eq!(hits, 1, "{}", def.name);
         }
+    }
+
+    #[test]
+    fn unset_thinking_level_reads_auto() {
+        let rows = rendered(&mut sample(), 120, 36);
+        let row = rows
+            .iter()
+            .find(|row| row.contains(" thinking_level "))
+            .unwrap();
+        let mut words = row
+            .split_whitespace()
+            .skip_while(|w| *w != "thinking_level");
+        assert_eq!(words.nth(1), Some("auto"), "{row}");
     }
 
     #[test]

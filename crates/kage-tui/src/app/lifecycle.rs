@@ -540,6 +540,7 @@ impl App {
                     overlay.render(modal, frame.buffer_mut(), &ctx);
                 }
                 color_depth.apply(frame.buffer_mut());
+                view::strip_decoration(frame.buffer_mut());
             })
             .map_err(|err| TuiError::Io(std::io::Error::other(err.to_string())))?;
         // Merge renderer-owned state (caches, clamped scroll, last-frame

@@ -9,6 +9,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use kage_core::protocol::CompactionCounts;
 use kage_core::resource_block::{self, ResourceRef};
 use kage_core::{Content, LoopError, LoopEvent, Message, MessageId, Role, StopReason};
 
@@ -84,11 +85,13 @@ pub fn apply_loop_event(buf: &mut Buffer, event: &LoopEvent) {
             summarized,
             summary,
         } => {
+            let counts = CompactionCounts {
+                summarized: *summarized,
+                kept: *kept,
+            };
             buf.push_custom(
                 "kage:compaction",
-                format!(
-                    "Compacted history ({summarized} messages summarized, {kept} kept)\n{summary}"
-                ),
+                compaction_text(Some(counts), summary),
                 true,
             );
         }
@@ -188,6 +191,50 @@ pub fn tool_durations(messages: &[Message]) -> ToolDurations {
     durations
 }
 
+/// The text of a `kage:compaction` block: a header line naming the
+/// message `counts` when known, over the `summary`.
+fn compaction_text(counts: Option<CompactionCounts>, summary: &str) -> String {
+    match counts {
+        Some(CompactionCounts { summarized, kept }) => {
+            format!("Compacted history ({summarized} messages summarized, {kept} kept)\n{summary}")
+        }
+        None => summary.to_owned(),
+    }
+}
+
+/// Last line of a shell block cancelled before its command finished.
+const SHELL_CANCELLED: &str = "(cancelled)";
+
+/// Last line of a shell block whose command a signal ended.
+const SHELL_KILLED: &str = "(killed by a signal)";
+
+/// The text of a finished `kage:shell` block: the `$ command` header,
+/// the output and a status line. The engine ends the output of a
+/// cancelled command with a `cancelled` line, which becomes the status.
+pub(crate) fn shell_block(command: &str, output: &str, exit_code: Option<i32>) -> String {
+    let output = output.trim_end();
+    let (output, status) = match exit_code {
+        Some(code) => (output, format!("(exit code {code})")),
+        None => match output.strip_suffix("cancelled") {
+            Some(rest) if rest.is_empty() || rest.ends_with('\n') => {
+                (rest.trim_end(), SHELL_CANCELLED.to_owned())
+            }
+            _ => (output, SHELL_KILLED.to_owned()),
+        },
+    };
+    if output.is_empty() {
+        format!("$ {command}\n{status}")
+    } else {
+        format!("$ {command}\n{output}\n{status}")
+    }
+}
+
+/// Whether `line` is the status line [`shell_block`] ends a finished
+/// shell block with.
+pub(crate) fn is_shell_status(line: &str) -> bool {
+    line.starts_with("(exit code ") || line == SHELL_CANCELLED || line == SHELL_KILLED
+}
+
 /// Pour a replayed `Vec<Message>` into a fresh [`Buffer`] so the user
 /// sees the prior conversation rendered with the current TUI styling.
 ///
@@ -197,23 +244,24 @@ pub fn tool_durations(messages: &[Message]) -> ToolDurations {
 /// merged tool composites the renderer pairs at draw time. Pass
 /// `tool_durations` to recover real durations from session entry
 /// timestamps; a call missing from the map shows none. Calls left
-/// without a result read as interrupted.
+/// without a result read as interrupted. `compaction` holds the counts
+/// of the compaction whose summary opens `messages`, when recorded.
 pub fn populate_from_history(
     buf: &mut Buffer,
     messages: &[Message],
     tool_durations: &ToolDurations,
+    compaction: Option<CompactionCounts>,
 ) {
+    let mut compaction = compaction;
     for msg in messages {
         match msg.role {
             Role::User => {
                 if let Some(text) = user_text(msg) {
                     if is_compaction_summary(&text) {
+                        let text = compaction_text(compaction.take(), &text);
                         buf.push_custom("kage:compaction", text, true);
                     } else if let Some(run) = kage_core::message::ShellRun::parse(&text) {
-                        let exit = run
-                            .exit_code
-                            .map_or_else(|| "signal".to_owned(), |c| c.to_string());
-                        let body = format!("$ {}\n{}\n(exit code {exit})", run.command, run.output);
+                        let body = shell_block(&run.command, &run.output, run.exit_code);
                         buf.push_custom("kage:shell", body, false);
                     } else {
                         buf.push_user(text);
@@ -225,7 +273,8 @@ pub fn populate_from_history(
                     match block {
                         Content::Text { text } => {
                             if is_compaction_summary(text) {
-                                buf.push_custom("kage:compaction", text.clone(), true);
+                                let text = compaction_text(compaction.take(), text);
+                                buf.push_custom("kage:compaction", text, true);
                             } else {
                                 buf.append_assistant_delta(text);
                                 buf.finish_streaming();
@@ -341,6 +390,30 @@ mod tests {
 
     use super::*;
     use crate::buffer::Block;
+
+    #[test]
+    fn a_shell_block_ends_with_a_clear_status() {
+        assert_eq!(
+            shell_block("ls", "a.rs\n", Some(0)),
+            "$ ls\na.rs\n(exit code 0)"
+        );
+        assert_eq!(
+            shell_block("sleep 9", "tick\ncancelled", None),
+            "$ sleep 9\ntick\n(cancelled)"
+        );
+        assert_eq!(
+            shell_block("sleep 9", "cancelled", None),
+            "$ sleep 9\n(cancelled)"
+        );
+        assert_eq!(
+            shell_block("yes", "not cancelled", None),
+            "$ yes\nnot cancelled\n(killed by a signal)"
+        );
+        for status in ["(exit code 0)", "(cancelled)", "(killed by a signal)"] {
+            assert!(is_shell_status(status));
+        }
+        assert!(!is_shell_status("cancelled"));
+    }
 
     struct Apply(SharedBuffer);
 
@@ -861,7 +934,7 @@ mod tests {
             ],
             None,
         )];
-        populate_from_history(&mut buf, &history, &HashMap::new());
+        populate_from_history(&mut buf, &history, &HashMap::new(), None);
         assert!(matches!(
             buf.blocks()[0],
             Block::Thinking {
@@ -998,7 +1071,7 @@ mod tests {
                 None,
             ),
         ];
-        populate_from_history(&mut buf, &history, &std::collections::HashMap::new());
+        populate_from_history(&mut buf, &history, &std::collections::HashMap::new(), None);
         let blocks = buf.blocks();
         assert!(matches!(blocks[0], Block::User { .. }));
         assert!(matches!(blocks[1], Block::Thinking { .. }));
@@ -1027,13 +1100,44 @@ mod tests {
             vec![Content::Text { text: framed }],
             None,
         )];
-        populate_from_history(&mut buf, &history, &std::collections::HashMap::new());
+        populate_from_history(&mut buf, &history, &std::collections::HashMap::new(), None);
         let blocks = buf.blocks();
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
             Block::Custom { kind, .. } => assert_eq!(kind, "kage:compaction"),
             other => panic!("expected Custom compaction block, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_replayed_compaction_keeps_its_recorded_counts() {
+        let framed = format!(
+            "{}summary{}",
+            kage_core::message::COMPACTION_SUMMARY_PREFIX,
+            kage_core::message::COMPACTION_SUMMARY_SUFFIX
+        );
+        let history = vec![Message::new(
+            Role::User,
+            vec![Content::Text { text: framed }],
+            None,
+        )];
+        let header = |counts| {
+            let mut buf = Buffer::new();
+            populate_from_history(&mut buf, &history, &HashMap::new(), counts);
+            match &buf.blocks()[0] {
+                Block::Custom { text, .. } => text.lines().next().unwrap().to_owned(),
+                other => panic!("expected a compaction block, got {other:?}"),
+            }
+        };
+        let counts = CompactionCounts {
+            summarized: 4,
+            kept: 2,
+        };
+        assert_eq!(
+            header(Some(counts)),
+            "Compacted history (4 messages summarized, 2 kept)"
+        );
+        assert!(!header(None).starts_with("Compacted history"));
     }
 
     #[test]
@@ -1046,7 +1150,7 @@ mod tests {
             }],
             None,
         )];
-        populate_from_history(&mut buf, &history, &std::collections::HashMap::new());
+        populate_from_history(&mut buf, &history, &std::collections::HashMap::new(), None);
         let blocks = buf.blocks();
         assert_eq!(blocks.len(), 1);
         assert!(matches!(blocks[0], Block::User { .. }));
@@ -1078,7 +1182,7 @@ mod tests {
         });
         assert!(matches!(&lock(&buf).blocks()[0], Block::User { text } if text == want));
         let mut replayed = Buffer::new();
-        populate_from_history(&mut replayed, &[message], &HashMap::new());
+        populate_from_history(&mut replayed, &[message], &HashMap::new(), None);
         assert!(matches!(&replayed.blocks()[0], Block::User { text } if text == want));
     }
 
@@ -1119,7 +1223,7 @@ mod tests {
         assert_eq!(blocks.len(), 1, "{blocks:?}");
         assert!(matches!(&blocks[0], Block::User { text } if text == want));
         let mut replayed = Buffer::new();
-        populate_from_history(&mut replayed, &[message], &HashMap::new());
+        populate_from_history(&mut replayed, &[message], &HashMap::new(), None);
         assert!(matches!(&replayed.blocks()[0], Block::User { text } if text == want));
     }
 
@@ -1200,7 +1304,7 @@ mod tests {
         };
         let history: Vec<Message> = turn(8_000).into_iter().chain(turn(2_000)).collect();
         let mut buf = Buffer::new();
-        populate_from_history(&mut buf, &history, &tool_durations(&history));
+        populate_from_history(&mut buf, &history, &tool_durations(&history), None);
         let durations: Vec<Option<u64>> = buf
             .blocks()
             .iter()

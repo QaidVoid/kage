@@ -13,10 +13,11 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget};
 
 use crate::keymap::HelpGroup;
 use crate::overlay::widget::{OverlayAction, OverlayCtx, OverlayWidget};
+use crate::theme::Theme;
 use crate::view::UnicodeWidthStr as _;
 
 /// Title of the static section listing the editor grammar keys.
@@ -115,6 +116,8 @@ pub struct HelpOverlay {
     rows: Vec<Row>,
     /// First visible row index.
     scroll: usize,
+    /// Visual rows from the last paint, after wrapping.
+    line_count: usize,
     /// Inner height from the last paint, used to clamp scrolling
     /// before the next frame and to size page jumps.
     viewport_rows: u16,
@@ -145,6 +148,7 @@ impl HelpOverlay {
         }
         Self {
             title: " keyboard shortcuts ".to_owned(),
+            line_count: rows.len(),
             rows,
             scroll: 0,
             viewport_rows: 1,
@@ -167,7 +171,7 @@ impl HelpOverlay {
     /// Clamp the scroll offset so the last row stays visible.
     fn clamp_scroll(&mut self) {
         let visible = usize::from(self.viewport_rows.max(1));
-        let max = self.rows.len().saturating_sub(visible);
+        let max = self.line_count.saturating_sub(visible);
         self.scroll = self.scroll.min(max);
     }
 
@@ -178,12 +182,59 @@ impl HelpOverlay {
         self.scroll = usize::try_from(moved.max(0)).unwrap_or(0);
         self.clamp_scroll();
     }
+
+    /// The reference as visual rows `width` cells wide. A description
+    /// that wraps hangs its continuation rows under its first row.
+    fn lines(&self, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+        let key_style = Style::default()
+            .fg(theme.overlay_fg)
+            .add_modifier(Modifier::BOLD);
+        let desc_style = Style::default().fg(theme.overlay_fg);
+        let header_style = Style::default()
+            .fg(theme.focus_color)
+            .add_modifier(Modifier::BOLD);
+        let key_width = self
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Key(keys, _) => Some(keys.width()),
+                Row::Header(_) => None,
+            })
+            .max()
+            .unwrap_or(0)
+            .min(KEY_COLUMN_MAX);
+        let width = usize::from(width).max(1);
+        let mut lines = Vec::with_capacity(self.rows.len());
+        for row in &self.rows {
+            let (line, hang) = match row {
+                Row::Header(title) => (Line::from(Span::styled(title.clone(), header_style)), 0),
+                Row::Key(keys, desc) => {
+                    let keys = format!("  {keys:<key_width$}  ");
+                    let hang = keys.width();
+                    let line = Line::from(vec![
+                        Span::styled(keys, key_style),
+                        Span::styled(desc.clone(), desc_style),
+                    ]);
+                    (line, hang)
+                }
+            };
+            lines.extend(
+                crate::view::split_line_hanging(line, width, 0, hang)
+                    .into_iter()
+                    .map(Line::from),
+            );
+        }
+        lines
+    }
 }
 
 impl OverlayWidget for HelpOverlay {
     fn measure(&self, available: Rect) -> Rect {
         let width = 76.min(available.width.saturating_sub(2));
-        let wanted = u16::try_from(self.rows.len()).unwrap_or(u16::MAX) + 2;
+        let rows = self
+            .lines(width.saturating_sub(2), &crate::theme::current())
+            .len();
+        let wanted = u16::try_from(rows).unwrap_or(u16::MAX).saturating_add(2);
         let height = wanted.min(available.height.saturating_sub(2));
         let x = available.x + available.width.saturating_sub(width) / 2;
         let y = available.y + available.height.saturating_sub(height) / 2;
@@ -200,48 +251,19 @@ impl OverlayWidget for HelpOverlay {
             .border_style(Style::default().fg(theme.overlay_border));
         let inner = block.inner(area);
         Widget::render(block, area, buf);
+        let lines = self.lines(inner.width, &theme);
         self.viewport_rows = inner.height;
+        self.line_count = lines.len();
         self.clamp_scroll();
-
-        let key_style = Style::default()
-            .fg(theme.overlay_fg)
-            .add_modifier(Modifier::BOLD);
-        let desc_style = Style::default().fg(theme.overlay_fg);
-        let header_style = Style::default()
-            .fg(theme.focus_color)
-            .add_modifier(Modifier::BOLD);
         let muted_style = Style::default().fg(theme.muted_fg);
-        let key_width = self
-            .rows
-            .iter()
-            .filter_map(|row| match row {
-                Row::Key(keys, _) => Some(keys.width()),
-                Row::Header(_) => None,
-            })
-            .max()
-            .unwrap_or(0)
-            .min(KEY_COLUMN_MAX);
 
-        let lines: Vec<Line> = self
-            .rows
-            .iter()
-            .map(|row| match row {
-                Row::Header(title) => Line::from(Span::styled(title.clone(), header_style)),
-                Row::Key(keys, desc) => Line::from(vec![
-                    Span::styled(format!("  {keys:<key_width$}  "), key_style),
-                    Span::styled(desc.clone(), desc_style),
-                ]),
-            })
-            .collect();
-
-        let body = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((u16::try_from(self.scroll).unwrap_or(u16::MAX), 0));
+        let body =
+            Paragraph::new(lines).scroll((u16::try_from(self.scroll).unwrap_or(u16::MAX), 0));
         Widget::render(body, inner, buf);
 
         // Scroll hint in the bottom-right corner of the box, over the
         // border row, so the affordance is visible without a footer.
-        let more_below = self.scroll + usize::from(inner.height) < self.rows.len();
+        let more_below = self.scroll + usize::from(inner.height) < self.line_count;
         if more_below && area.width > 12 {
             let hint_width = u16::try_from(MORE_HINT.width()).unwrap_or(u16::MAX);
             let x = area.x + area.width.saturating_sub(hint_width + 1);
@@ -356,6 +378,40 @@ mod tests {
         let tiny = Rect::new(0, 0, 30, 6);
         let m = h.measure(tiny);
         assert!(m.width <= tiny.width && m.height <= tiny.height);
+    }
+
+    #[test]
+    fn a_wrapped_description_hangs_under_its_first_row() {
+        let groups = [HelpGroup {
+            name: "general".to_owned(),
+            rows: vec![HelpRow {
+                lhs: "ctrl+p".to_owned(),
+                desc: "open the model picker to choose another model for this session".to_owned(),
+            }],
+        }];
+        let mut h = HelpOverlay::new(&groups, true);
+        let area = Rect::new(0, 0, 60, 12);
+        let mut buf = Buffer::empty(area);
+        let theme = crate::theme::current();
+        let ctx = OverlayCtx {
+            theme: &theme,
+            viewport: area,
+        };
+        h.render(area, &mut buf, &ctx);
+        let rows: Vec<String> = (0..area.height)
+            .map(|y| (0..area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect();
+        let first = rows.iter().position(|r| r.contains("ctrl+p")).unwrap();
+        let text = rows[first].find("open").unwrap();
+        let next = &rows[first + 1];
+        assert!(
+            next[..text]
+                .trim_start_matches('\u{2502}')
+                .trim()
+                .is_empty(),
+            "{rows:#?}"
+        );
+        assert_ne!(next.as_bytes()[text], b' ', "{rows:#?}");
     }
 
     #[test]

@@ -67,7 +67,7 @@ pub(crate) fn mark_emphasis(
 
 /// Pre-wrap `lines` to the body width and start every visual row with
 /// `prefix`. A wrapped list item hangs its continuation rows under
-/// the item's text.
+/// the item's text, and a wrapped quote repeats its gutter.
 fn prefix_rows(
     lines: Vec<Line<'static>>,
     width: u16,
@@ -76,8 +76,8 @@ fn prefix_rows(
     let body_width = usize::from(width).saturating_sub(FOCUS_RULE_WIDTH).max(1);
     let mut out: Vec<Line<'static>> = Vec::with_capacity(lines.len());
     for line in lines {
-        let hang = list_hang(&line);
-        for row_spans in split_line_hanging(line, body_width, hang) {
+        let (gutter, hang) = list_hang(&line);
+        for row_spans in split_line_hanging(line, body_width, gutter, hang) {
             let mut spans = Vec::with_capacity(row_spans.len() + 1);
             spans.push(prefix.clone());
             spans.extend(row_spans);
@@ -161,14 +161,14 @@ pub(crate) fn wrap_in_bubble_focused(
 /// minimal sequence of `Span`s, coalescing consecutive chars that
 /// share a style.
 pub(crate) fn split_line_into_rows(line: Line<'static>, max: usize) -> Vec<Vec<Span<'static>>> {
-    split_line_hanging(line, max, 0)
+    split_line_hanging(line, max, 0, 0)
 }
 
-/// Columns a list item's continuation rows indent by: any quote
-/// gutter, its leading spaces and a `\u{2022} ` or `N. ` marker. A
-/// quoted line without a marker hangs under its gutter. Zero for
-/// other lines.
-fn list_hang(line: &Line<'_>) -> usize {
+/// Columns of quote gutter a line starts with, and the columns its
+/// continuation rows indent by: the gutter, then for a list item its
+/// leading spaces and a `\u{2022} ` or `N. ` marker. Zeros for other
+/// lines.
+fn list_hang(line: &Line<'_>) -> (usize, usize) {
     let text: String = line
         .spans
         .iter()
@@ -188,21 +188,31 @@ fn list_hang(line: &Line<'_>) -> usize {
         let digits = body.bytes().take_while(u8::is_ascii_digit).count();
         match body.get(digits..digits + 2) {
             Some(". ") if digits > 0 => digits + 2,
-            _ => return gutter,
+            _ => return (gutter, gutter),
         }
     };
-    gutter + indent + marker
+    (gutter, gutter + indent + marker)
 }
 
 /// [`split_line_into_rows`] with every row after the first indented
-/// by `hang` columns of decoration, so it lines up under the text
-/// after a list marker. A hang past half of `max` is dropped.
+/// by `hang` columns, so it lines up under the text after a list
+/// marker. The first `gutter` of those columns repeat the line's own
+/// leading cells (a quote gutter), the rest are decoration. A hang
+/// past half of `max` shrinks to the gutter, and a gutter past half
+/// of `max` is dropped.
 pub(crate) fn split_line_hanging(
     line: Line<'static>,
     max: usize,
+    gutter: usize,
     hang: usize,
 ) -> Vec<Vec<Span<'static>>> {
-    let hang = if hang * 2 > max { 0 } else { hang };
+    let (gutter, hang) = if hang * 2 <= max {
+        (gutter, hang)
+    } else if gutter * 2 <= max {
+        (gutter, gutter)
+    } else {
+        (0, 0)
+    };
     if max == 0 || line.spans.is_empty() {
         return vec![Vec::new()];
     }
@@ -255,13 +265,20 @@ pub(crate) fn split_line_hanging(
     }
     ranges.push((row_start, chars.len()));
 
+    let gutter_spans = spans_for_range(&chars[..gutter.min(chars.len())]);
     let mut rows: Vec<Vec<Span<'static>>> = Vec::with_capacity(ranges.len());
     for (n, (start, end)) in ranges.into_iter().enumerate() {
-        let mut row = spans_for_range(&chars[start..end]);
-        if n > 0 && hang > 0 {
-            let pad = Style::default().add_modifier(DECORATION_MARKER);
-            row.insert(0, Span::styled(" ".repeat(hang), pad));
+        let body = spans_for_range(&chars[start..end]);
+        if n == 0 || hang == 0 {
+            rows.push(body);
+            continue;
         }
+        let mut row = gutter_spans.clone();
+        if hang > gutter {
+            let pad = Style::default().add_modifier(DECORATION_MARKER);
+            row.push(Span::styled(" ".repeat(hang - gutter), pad));
+        }
+        row.extend(body);
         rows.push(row);
     }
     rows

@@ -168,9 +168,9 @@ pub struct StartKeys {
 /// queries it to skip non-selectable cells. Plays the same role as
 /// `selectable={false}` in `OpenTUI`'s virtual DOM, but lives on the
 /// already-rendered cell grid so we don't need a parallel scene
-/// graph. `SLOW_BLINK` is unused by everything else in this crate
-/// and most terminal emulators ignore it visually, so it's a safe
-/// hijack.
+/// graph. `SLOW_BLINK` is unused by everything else in this crate,
+/// and [`strip_decoration`] clears it before a frame is flushed, so
+/// the terminal never sees it.
 pub(crate) const DECORATION_MARKER: Modifier = Modifier::SLOW_BLINK;
 
 /// True when a cell's modifier carries the decoration marker. Used
@@ -179,6 +179,15 @@ pub(crate) const DECORATION_MARKER: Modifier = Modifier::SLOW_BLINK;
 /// text.
 fn cell_is_decoration(modifier: Modifier) -> bool {
     modifier.contains(DECORATION_MARKER)
+}
+
+/// Clear [`DECORATION_MARKER`] from every cell of `buf`. The paint
+/// path runs it last, right before the frame is flushed, so the
+/// marker never reaches the terminal as a blink.
+pub(crate) fn strip_decoration(buf: &mut ratatui::buffer::Buffer) {
+    for cell in &mut buf.content {
+        cell.modifier.remove(DECORATION_MARKER);
+    }
 }
 
 /// What kind of attention a block should draw on this frame: the
@@ -446,6 +455,8 @@ pub(crate) use input::wrap_input_rows;
 pub(crate) use modeline::{
     input_cursor_position, input_scroll_offset, mode_border_color, mode_pill_style,
 };
+
+pub(crate) use bubble::split_line_hanging;
 
 // Internal helpers the test module exercises directly.
 #[cfg(test)]

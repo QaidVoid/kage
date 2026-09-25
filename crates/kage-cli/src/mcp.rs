@@ -188,7 +188,13 @@ fn sampling_handler(cfg: &McpConfig) -> Option<std::sync::Arc<dyn kage_mcp::Serv
     if !cfg.allow_sampling {
         return None;
     }
-    let registry = crate::build_provider_registry();
+    let registry = match crate::build_provider_registry() {
+        Ok(registry) => registry,
+        Err(e) => {
+            eprintln!("kage: mcp sampling: {e}");
+            return None;
+        }
+    };
     let model = crate::default_model(&registry);
     Some(std::sync::Arc::new(SamplingHandler { registry, model }))
 }

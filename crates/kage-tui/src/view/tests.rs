@@ -1793,10 +1793,11 @@ fn a_reply_shows_tables_as_columns_and_quotes_with_a_gutter() {
     let mut buffer = Buffer::new();
     buffer.append_assistant_delta(
         "| tool | calls |\n|---|---:|\n| read | 12 |\n| bash | 3 |\n\n\
-         > a quoted line long enough to wrap onto the next row\n",
+         > a quoted line long enough to wrap onto the next row\n\n\
+         > - a quoted item long enough to wrap onto the next row\n",
     );
     buffer.finish_streaming();
-    let rows = snapshot_lines(&mut buffer, &InputState::new(), Rect::new(0, 0, 40, 14));
+    let rows = snapshot_lines(&mut buffer, &InputState::new(), Rect::new(0, 0, 40, 18));
     let at = |text: &str| rows.iter().position(|r| r.contains(text)).expect(text);
     let head = at("tool  calls");
     assert!(
@@ -1807,8 +1808,13 @@ fn a_reply_shows_tables_as_columns_and_quotes_with_a_gutter() {
     assert!(rows[head + 3].contains("bash      3"), "{rows:#?}");
     assert!(rows.iter().all(|r| !r.contains('|')), "{rows:#?}");
     let quote = at("> a quoted line");
-    assert!(rows[quote + 1].starts_with("    "), "{rows:#?}");
-    assert!(!rows[quote + 1].contains('>'), "{rows:#?}");
+    let gutter = rows[quote].find("> ").unwrap();
+    assert_eq!(rows[quote + 1].find("> "), Some(gutter), "{rows:#?}");
+    assert!(rows[quote + 1][..gutter].trim().is_empty(), "{rows:#?}");
+    assert_ne!(rows[quote + 1].as_bytes()[gutter + 2], b' ', "{rows:#?}");
+    let item = at("> \u{2022} a quoted item");
+    assert!(rows[item + 1][gutter..].starts_with(">   "), "{rows:#?}");
+    assert_ne!(rows[item + 1].as_bytes()[gutter + 4], b' ', "{rows:#?}");
 }
 
 #[test]

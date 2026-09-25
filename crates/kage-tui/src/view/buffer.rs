@@ -349,7 +349,6 @@ pub(crate) fn capture_and_overlay(
                 let cell = &mut buf[(col, screen_row)];
                 let ch = cell.symbol().chars().next().unwrap_or(' ');
                 let decoration = cell_is_decoration(cell.modifier);
-                cell.modifier.remove(DECORATION_MARKER);
                 row_cells.push(CapturedCell { ch, decoration });
             }
             if vrow >= s.0 && vrow <= e.0 {
@@ -380,13 +379,6 @@ pub(crate) fn capture_and_overlay(
                 }
             }
             captured_rows.insert(vrow, row_cells);
-        }
-    } else {
-        for screen_row in area.y..area.y.saturating_add(area.height) {
-            for col in area.x..area.x.saturating_add(area.width) {
-                let cell = &mut buf[(col, screen_row)];
-                cell.modifier.remove(DECORATION_MARKER);
-            }
         }
     }
 }

@@ -152,7 +152,7 @@ pub(super) fn config_options(
     }
     let auto = choice(
         AUTO_THINKING,
-        "Default",
+        "auto",
         Some("High, or the nearest level the model accepts"),
     );
     let levels = settings

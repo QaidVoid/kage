@@ -158,6 +158,7 @@ fn session_changed_rebuilds_the_transcript() {
                 path: "/tmp/s.jsonl".into(),
                 title: None,
                 messages: vec![message],
+                compaction: None,
             },
         ))
         .unwrap();
@@ -240,6 +241,7 @@ fn pending_rows_fold_past_three_and_clear_on_session_change() {
                 path: std::path::PathBuf::from("/tmp/s.jsonl"),
                 title: None,
                 messages: Vec::new(),
+                compaction: None,
             }
             .into(),
         ],

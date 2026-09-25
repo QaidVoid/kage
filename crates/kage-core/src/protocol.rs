@@ -163,6 +163,10 @@ pub enum HostEvent {
         title: Option<String>,
         /// Conversation history, oldest first.
         messages: Vec<Message>,
+        /// Counts of the compaction whose summary opens `messages`,
+        /// when the session file records one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compaction: Option<CompactionCounts>,
     },
     /// The session title was set or generated. Durable.
     TitleChanged {
@@ -251,6 +255,15 @@ pub struct SessionState {
     pub permission_mode: Option<PermissionAction>,
     /// `true` while a run is in flight.
     pub working: bool,
+}
+
+/// Message counts of one history compaction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CompactionCounts {
+    /// Older messages the summary replaced.
+    pub summarized: usize,
+    /// Recent messages kept verbatim.
+    pub kept: usize,
 }
 
 /// Running token and cost totals for a session.
@@ -529,6 +542,7 @@ mod tests {
                 path: PathBuf::from("/tmp/s.jsonl"),
                 title: Some("t".into()),
                 messages: vec![message],
+                compaction: None,
             }
             .into(),
             HostEvent::TitleChanged { title: "t".into() }.into(),

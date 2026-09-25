@@ -144,7 +144,11 @@ impl App {
                 transient: true,
             } => self.toast(level, text),
             HostEvent::Notice { level, text, .. } => push_notice(&self.root_buffer, level, text),
-            HostEvent::SessionChanged { messages, .. } => {
+            HostEvent::SessionChanged {
+                messages,
+                compaction,
+                ..
+            } => {
                 self.set_focus(None);
                 self.drafts.clear();
                 self.pending.clear();
@@ -156,7 +160,9 @@ impl App {
                 {
                     let mut buf = lock(&self.root_buffer);
                     buf.clear();
-                    crate::events::populate_from_history(&mut buf, &messages, &durations);
+                    crate::events::populate_from_history(
+                        &mut buf, &messages, &durations, compaction,
+                    );
                 }
                 self.annotate_edits(&self.root_buffer);
                 self.on_session_changed();
@@ -343,7 +349,7 @@ impl App {
             {
                 let mut buf = lock(&buffer);
                 let durations = crate::events::tool_durations(&messages);
-                crate::events::populate_from_history(&mut buf, &messages, &durations);
+                crate::events::populate_from_history(&mut buf, &messages, &durations, None);
             }
             self.annotate_edits(&buffer);
             self.agent_buffers.insert(session, buffer);
@@ -481,10 +487,20 @@ impl App {
         }
     }
 
-    /// Queue `approval` for the panel and show its call as waiting.
+    /// Queue `approval` for the panel and show its call as waiting. An
+    /// edit whose file lacks the text to replace shows that note in
+    /// place of a diff.
     fn push_approval(&mut self, approval: PendingApproval) {
         if let Some(id) = &approval.tool_call_id {
-            lock(&self.buffer_of(approval.session)).set_tool_phase(id, ToolPhase::Waiting);
+            let missing = self
+                .edit_preview(&approval.tool, &approval.input)
+                .filter(|diff| diff.added + diff.removed == 0);
+            let shared = self.buffer_of(approval.session);
+            let mut buffer = lock(&shared);
+            buffer.set_tool_phase(id, ToolPhase::Waiting);
+            if let Some(diff) = missing {
+                buffer.set_tool_diff(id, diff);
+            }
         }
         self.permission_queue.push_back(approval);
     }
@@ -669,14 +685,12 @@ fn push_notice(buffer: &SharedBuffer, level: NoticeLevel, text: String) {
     lock(buffer).push_custom(kind, text, false);
 }
 
-/// Show a finished shell escape as a block in `buffer`.
 /// Show a finished shell command in place of its running block.
 fn push_shell(buffer: &SharedBuffer, command: &str, output: &str, exit_code: Option<i32>) {
-    let exit = exit_code.map_or_else(|| "signal".to_owned(), |c| c.to_string());
     lock(buffer).replace_custom_where(
         "kage:shell",
         |text| is_running_shell(text, command),
-        format!("$ {command}\n{}\n(exit code {exit})", output.trim_end()),
+        crate::events::shell_block(command, output, exit_code),
     );
 }
 
@@ -690,7 +704,7 @@ fn show_running_shell(buffer: &SharedBuffer, command: &str, tail: &str) {
 }
 
 /// Whether a `kage:shell` block shows `command` still running: its
-/// header without an exit line.
+/// header without a status line.
 fn is_running_shell(text: &str, command: &str) -> bool {
     text.strip_prefix("$ ")
         .and_then(|rest| rest.strip_prefix(command))
@@ -698,7 +712,7 @@ fn is_running_shell(text: &str, command: &str) -> bool {
         && !text
             .lines()
             .last()
-            .is_some_and(|line| line.starts_with("(exit code "))
+            .is_some_and(crate::events::is_shell_status)
 }
 
 /// What an agent's card says it does: its running tool, else its latest

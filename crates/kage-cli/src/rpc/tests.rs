@@ -1079,6 +1079,7 @@ fn the_thinking_option_offers_default_and_the_model_levels() {
         .map(|o| o.value.as_str())
         .collect();
     assert_eq!(values, ["default", "low", "high"]);
+    assert_eq!(options[1].options[0].name, "auto");
     assert_eq!(options[1].current_value, "default");
     assert!(settings.apply(&[], "thinking", "medium").is_err());
     assert_eq!(

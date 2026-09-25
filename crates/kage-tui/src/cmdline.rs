@@ -238,6 +238,10 @@ impl CommandLine {
                 self.refresh(registry, resolver);
                 CommandLineEvent::Pending
             }
+            KeyCode::Char('/') if self.palette && self.cursor == 0 => {
+                self.error = None;
+                CommandLineEvent::Pending
+            }
             KeyCode::Char(c) => {
                 self.error = None;
                 self.insert_char(c);
@@ -319,8 +323,13 @@ impl CommandLine {
     /// Insert bracketed-paste text at the cursor and refresh the
     /// completion set, as if one `Char` keystroke had been sent per
     /// character. Control characters (tab, newline, CR) are skipped:
-    /// this is a single-line field.
+    /// this is a single-line field. The palette drops a leading `/`
+    /// pasted at the start, since its glyph already shows one.
     pub fn paste_str(&mut self, text: &str, registry: &[&CommandSpec], resolver: &dyn Resolver) {
+        let text = match text.strip_prefix('/') {
+            Some(rest) if self.palette && self.cursor == 0 => rest,
+            _ => text,
+        };
         let clean: String = text.chars().filter(|c| !c.is_control()).collect();
         if clean.is_empty() {
             return;
@@ -998,6 +1007,27 @@ mod tests {
         assert_eq!(send(&mut cl, ctrl('u')), CommandLineEvent::Pending);
         assert_eq!(cl.text(), "rk");
         assert_eq!(cl.cursor(), 0);
+    }
+
+    #[test]
+    fn the_palette_never_doubles_its_slash() {
+        let mut cl = CommandLine::for_palette();
+        for c in "mo".chars() {
+            send(&mut cl, key(KeyCode::Char(c)));
+        }
+        assert_eq!(send(&mut cl, ctrl('u')), CommandLineEvent::Pending);
+        assert_eq!(cl.text(), "");
+        for c in "/mcp".chars() {
+            send(&mut cl, key(KeyCode::Char(c)));
+        }
+        assert_eq!(cl.text(), "mcp");
+        send(&mut cl, ctrl('u'));
+        cl.paste_str("/quit", &empty_registry(), &EmptyResolver);
+        assert_eq!(cl.text(), "quit");
+        let mut plain = typed("/x");
+        assert_eq!(plain.text(), "/x");
+        plain.paste_str("/y", &empty_registry(), &EmptyResolver);
+        assert_eq!(plain.text(), "/x/y");
     }
 
     #[test]

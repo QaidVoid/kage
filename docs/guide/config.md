@@ -2,7 +2,9 @@
 
 kage reads its configuration from `~/.config/kage/config.toml`. The file is
 optional, and sane defaults work without it. `kage init` writes a
-starter one.
+starter one. A config that does not load stops kage with the error
+instead of running on defaults, and `kage doctor` names the file to
+fix.
 
 The TUI also runs `~/.config/kage/init.lua` after this file, so
 anything set there wins. The `[ui]`, `[loop]` and `[agents]` keys

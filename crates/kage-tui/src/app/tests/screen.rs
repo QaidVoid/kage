@@ -313,6 +313,7 @@ fn start_sessions_are_listed_on_session_changes_only() {
                 path: "/tmp/s.jsonl".into(),
                 title: None,
                 messages: Vec::new(),
+                compaction: None,
             },
         ))
         .unwrap();
@@ -631,6 +632,30 @@ fn without_truecolor_no_frame_cell_keeps_a_24_bit_color() {
         !colors(&terminal)
             .iter()
             .any(|c| matches!(c, Color::Rgb(..) | Color::Indexed(_)))
+    );
+}
+
+#[test]
+fn a_frame_with_a_toast_carries_no_blink() {
+    let buffer = shared_buffer();
+    lock(&buffer).push_user("hello");
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer, tx);
+    let toasts = crate::toast::shared_toasts();
+    app.set_toasts(toasts.clone());
+    crate::toast::push_toast(&toasts, Toast::info("switched to fake:m"));
+    let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+    app.render_into(&mut terminal).unwrap();
+    assert!(
+        snapshot_rows(&terminal)
+            .iter()
+            .any(|r| r.contains("switched to fake:m"))
+    );
+    let buf = terminal.backend().buffer();
+    assert!(
+        buf.content
+            .iter()
+            .all(|cell| !cell.modifier.contains(ratatui::style::Modifier::SLOW_BLINK))
     );
 }
 

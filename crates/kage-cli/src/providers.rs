@@ -30,29 +30,22 @@ fn overridable_provider_ids() -> Vec<&'static str> {
 /// overrides for base URL and extra headers, plus every custom
 /// provider declared under `[providers.custom.*]`.
 ///
-/// A config that fails `[providers]` validation is a hard error: the
-/// message prints and the process exits with status 1 rather than
-/// silently running against a subset of the declared providers.
+/// # Errors
+///
+/// The user config does not load or fails `[providers]` validation.
+/// Callers stop rather than run against a subset of the declared
+/// providers.
 ///
 /// A custom provider that replaces a catalog provider is reported on
 /// the first build only, so a rebuild inside the TUI does not print
 /// over the screen.
-pub(crate) fn build_provider_registry() -> ProviderRegistry {
+pub(crate) fn build_provider_registry() -> Result<ProviderRegistry, String> {
     static WARN_REPLACED: std::sync::Once = std::sync::Once::new();
-    let config = match kage_core::config::Config::load_default() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("kage: config: {e}; using defaults");
-            kage_core::config::Config::default()
-        }
-    };
-    if let Err(e) = config
+    let config = kage_core::config::Config::load_default().map_err(|e| e.to_string())?;
+    config
         .providers
         .validate(BUILTIN_PROVIDER_IDS, &overridable_provider_ids())
-    {
-        eprintln!("kage: {e}");
-        std::process::exit(1);
-    }
+        .map_err(|e| e.to_string())?;
     let store = auth::AuthStore::load().unwrap_or_else(|_| auth::AuthStore::empty());
     let mut registry = ProviderRegistry::new();
     register_openai_family(&config, &store, &mut registry);
@@ -107,7 +100,7 @@ pub(crate) fn build_provider_registry() -> ProviderRegistry {
             .with_permission(acp_glue::permission_resolver())
             .with_agent_source(acp_glue::agent_source()),
     ));
-    registry
+    Ok(registry)
 }
 
 /// Register the `openai` and `openai-responses` providers, which

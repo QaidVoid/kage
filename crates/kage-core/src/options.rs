@@ -137,7 +137,7 @@ pub const OPTIONS: &[OptionDef] = &[
             values: THINKING_LEVELS,
             default: "",
         },
-        doc: "Thinking level for new sessions, or empty for automatic (high, or the nearest level the model accepts).",
+        doc: "Thinking level for new sessions, or empty for auto (high, or the nearest level the model accepts).",
         live: false,
     },
     OptionDef {

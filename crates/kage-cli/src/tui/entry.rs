@@ -16,7 +16,13 @@ use kage_tui::hostlog::LogPublisher;
 /// appropriate process exit code once the user quits.
 #[expect(clippy::too_many_lines, reason = "one linear startup sequence")]
 pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>) -> ExitCode {
-    let mut registry = crate::build_provider_registry();
+    let mut registry = match crate::build_provider_registry() {
+        Ok(registry) => registry,
+        Err(e) => {
+            eprintln!("kage: {e}");
+            return ExitCode::from(1);
+        }
+    };
     let provisional_model = model.map_or_else(|| crate::default_model(&registry), str::to_owned);
 
     // The buffer must exist before we build the plugin runtime so we can
@@ -27,14 +33,11 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>) -> Ex
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     crate::trust::confirm_project_trust(&workdir);
-    // Load user/project config. A malformed config is surfaced as an
-    // inline error block rather than silently falling back to defaults.
     let app_config = match kage_core::config::Config::load_layered(&workdir) {
         Ok(c) => c,
         Err(e) => {
-            let mut buf = lock(&buffer);
-            buf.push_custom("kage:error", format!("config: {e}"), false);
-            kage_core::config::Config::default()
+            eprintln!("kage: {e}");
+            return ExitCode::from(1);
         }
     };
     // Structurally broken permission rules are a hard error: kage
@@ -106,7 +109,13 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>) -> Ex
                 eprintln!("{}", crate::NO_CREDENTIALS_MESSAGE);
                 return ExitCode::from(1);
             }
-            registry = crate::build_provider_registry();
+            registry = match crate::build_provider_registry() {
+                Ok(registry) => registry,
+                Err(e) => {
+                    eprintln!("kage: {e}");
+                    return ExitCode::from(1);
+                }
+            };
             if let Some(rt) = plugin_runtime.as_ref() {
                 crate::plugins::merge_plugin_providers(rt, &mut registry);
             }

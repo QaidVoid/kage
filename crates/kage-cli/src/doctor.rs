@@ -268,12 +268,25 @@ fn check_config(workdir: &Path) -> Check {
                 hint: None,
             }
         }
-        Err(err) => Check {
-            name: "config",
-            status: Status::Fail,
-            body: err.to_string(),
-            hint: Some("edit ~/.config/kage/config.toml or rerun `kage init --force`".into()),
-        },
+        Err(err) => {
+            let files: Vec<String> = user
+                .iter()
+                .filter(|_| user_exists)
+                .chain(project_exists.then_some(&project))
+                .map(|path| path.display().to_string())
+                .collect();
+            let hint = if files.is_empty() {
+                "check the KAGE_* environment variables".to_owned()
+            } else {
+                format!("fix the error in {}", files.join(" or "))
+            };
+            Check {
+                name: "config",
+                status: Status::Fail,
+                body: err.to_string(),
+                hint: Some(hint),
+            }
+        }
     }
 }
 
@@ -536,7 +549,10 @@ mod tests {
         .unwrap();
         let check = run_check_config(dir.path());
         assert_eq!(check.status, Status::Fail);
-        assert!(check.hint.is_some());
+        let hint = check.hint.unwrap();
+        let project = dir.path().join(".kage").join("config.toml");
+        assert!(hint.contains(&project.display().to_string()), "{hint}");
+        assert!(!hint.contains("--force"), "{hint}");
     }
 
     #[test]

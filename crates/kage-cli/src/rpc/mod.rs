@@ -65,7 +65,13 @@ use crate::runtime_env;
 
 /// Entry point for the `Rpc` subcommand.
 pub(crate) fn run(model_override: Option<&str>, system_role: &str) -> ExitCode {
-    let registry = crate::build_provider_registry();
+    let registry = match crate::build_provider_registry() {
+        Ok(registry) => registry,
+        Err(e) => {
+            eprintln!("kage: {e}");
+            return ExitCode::from(1);
+        }
+    };
     if !crate::has_usable_provider(&registry) && model_override.is_none() {
         eprintln!(
             "kage: rpc: no provider credentials found; run `kage auth login` or set an API-key env var"
@@ -260,6 +266,8 @@ fn session_spec(
         PathBuf::from(cwd)
     };
     crate::trust::warn_if_untrusted(&workdir);
+    let config = kage_core::config::Config::load_layered(&workdir)
+        .map_err(|e| RpcError::internal(e.to_string()))?;
     let model = model.to_owned();
     let bare = runtime_env::build_system_prompt(system_role, &workdir, &model, &[]);
     let plugins = match crate::plugins_dir() {
@@ -283,10 +291,6 @@ fn session_spec(
     for (server, err) in mcp_errors {
         eprintln!("kage: mcp `{server}`: {}", without_login(err, &editor));
     }
-    let config = kage_core::config::Config::load_layered(&workdir).unwrap_or_else(|e| {
-        eprintln!("kage: rpc: {e}; using defaults");
-        kage_core::config::Config::default()
-    });
     let (defs, agent_errors) = crate::agents::load(&workdir);
     for err in agent_errors {
         eprintln!("kage: {err}");

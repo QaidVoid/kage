@@ -69,7 +69,11 @@ pub(crate) fn tool_row_lines(
     let theme = crate::theme::current();
     let mut label = describe(row.name, row.input);
     if let Some(diff) = row.diff {
-        label.stats = format!("(+{} -{})", diff.added, diff.removed);
+        label.stats = if diff.added + diff.removed == 0 {
+            String::new()
+        } else {
+            format!("(+{} -{})", diff.added, diff.removed)
+        };
     }
     let max = bubble_content_width(width);
     let (output, exit, end) = match row.name {

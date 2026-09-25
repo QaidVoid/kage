@@ -8,7 +8,7 @@ use std::time::Instant;
 use ratatui::text::Line;
 use serde_json::Value;
 
-use super::tool_view::ToolPhase;
+use super::tool_view::{EditDiff, ToolPhase};
 use super::widget::{BlockWidget, RenderCtx};
 use super::{ToolRow, tool_row_lines};
 use crate::buffer::Block;
@@ -24,6 +24,7 @@ pub struct ToolCallAloneBlockWidget {
     folded: bool,
     progress: String,
     started_at: Instant,
+    diff: Option<Arc<EditDiff>>,
 }
 
 impl ToolCallAloneBlockWidget {
@@ -38,6 +39,7 @@ impl ToolCallAloneBlockWidget {
                 folded,
                 progress,
                 started_at,
+                diff,
                 ..
             } => Some(Self {
                 name: name.clone(),
@@ -46,6 +48,7 @@ impl ToolCallAloneBlockWidget {
                 folded: *folded,
                 progress: progress.clone(),
                 started_at: *started_at,
+                diff: diff.clone(),
             }),
             _ => None,
         }
@@ -62,7 +65,7 @@ impl BlockWidget for ToolCallAloneBlockWidget {
             folded: self.folded,
             elapsed_ms: (self.phase == ToolPhase::Running).then_some(elapsed),
             output: &self.progress,
-            diff: None,
+            diff: self.diff.as_deref(),
         };
         tool_row_lines(&row, width, ctx.emphasis, ctx.row_budget)
     }

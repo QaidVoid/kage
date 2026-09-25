@@ -247,7 +247,8 @@ it sends `high`, or the nearest level the model accepts when it has no
 same way, and only an explicit `off` turns thinking off. On a model
 that cannot switch thinking off, `off` becomes its lowest level.
 `shift+tab` only visits levels the model accepts. The start card shows an
-automatic level as `high (auto)`.
+automatic level as `high (auto)`, and the settings dialog and editors
+name it `auto`.
 
 The catalog lists how each model takes thinking, and kage maps the
 level onto it:
@@ -322,5 +323,5 @@ As with all config, environment variables override file values with
 retargets `[providers.custom.mylama]`. Env var names cannot contain
 dashes, so this form only reaches ids without one (`MYLAMA` maps to
 `mylama`, never to `llama-local`). An env var whose nested name does
-not match a declared id fails the whole config load, and kage warns
-and falls back to defaults.
+not match a declared id fails the whole config load, and kage stops
+with the error.

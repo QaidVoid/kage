@@ -300,13 +300,15 @@ pub(crate) fn run_subcommand(command: Command) -> ExitCode {
             print,
             model,
             json,
-        } => run_resume(
-            id.as_deref(),
-            last,
-            print.as_deref(),
-            model.as_deref(),
-            json,
-        ),
+        } => config_error().unwrap_or_else(|| {
+            run_resume(
+                id.as_deref(),
+                last,
+                print.as_deref(),
+                model.as_deref(),
+                json,
+            )
+        }),
         Command::Fork { id, at } => run_fork(&id, &at),
         Command::Search { query } => run_search(&query),
         Command::Auth { action } => match action {
@@ -330,7 +332,9 @@ pub(crate) fn run_subcommand(command: Command) -> ExitCode {
         Command::Doctor => doctor::run(),
         Command::GenManpage { out } => run_gen_manpage(&out),
         Command::Completions { shell } => run_completions(shell),
-        Command::Rpc { model, system } => rpc::run(model.as_deref(), &system),
+        Command::Rpc { model, system } => {
+            config_error().unwrap_or_else(|| rpc::run(model.as_deref(), &system))
+        }
         Command::Trust { revoke } => trust::run(revoke),
         Command::Models {
             action: ModelsAction::Refresh,
@@ -556,6 +560,9 @@ fn main() -> ExitCode {
     if let Some(command) = cli.command {
         return run_subcommand(command);
     }
+    if let Some(code) = config_error() {
+        return code;
+    }
 
     if cli.print.is_some() {
         return run_print_mode(cli);
@@ -565,13 +572,30 @@ fn main() -> ExitCode {
     tui::run_tui(cli.model.as_deref(), &cli.system, None)
 }
 
+/// Load the layered config for the current directory before a run
+/// starts. A config that does not load stops kage with the error and
+/// the returned exit status, because running on defaults would drop
+/// custom providers and could start the first-run wizard.
+fn config_error() -> Option<ExitCode> {
+    let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let err = kage_core::config::Config::load_layered(&workdir).err()?;
+    eprintln!("kage: {err}");
+    Some(ExitCode::from(1))
+}
+
 /// One `-p` print-mode run: provider and tool setup, permission gate,
 /// session recording, and the exit code.
 fn run_print_mode(cli: Cli) -> ExitCode {
     let Some(prompt) = cli.print else {
         return tui::run_tui(cli.model.as_deref(), &cli.system, None);
     };
-    let mut registry = build_provider_registry();
+    let mut registry = match build_provider_registry() {
+        Ok(registry) => registry,
+        Err(e) => {
+            eprintln!("kage: {e}");
+            return ExitCode::from(1);
+        }
+    };
 
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let provisional_model = cli
@@ -623,17 +647,7 @@ fn run_print_mode(cli: Cli) -> ExitCode {
     for (server, err) in mcp_errors {
         eprintln!("kage: mcp `{server}`: {err}");
     }
-    // Layered config for the path-confinement flag; the permission
-    // gate itself (and its validation) is built inside
-    // `execute_print_run` from the same layered load.
-    let app_config = kage_core::config::Config::load_layered(&workdir).unwrap_or_else(|e| {
-        eprintln!("kage: {e}; using defaults");
-        kage_core::config::Config::default()
-    });
     let mut cx = AgentContext::new(resolved.model.clone(), &system_prompt).with_workdir(&workdir);
-    if app_config.permissions.confine_paths {
-        cx = cx.with_confine_paths();
-    }
     if let Some(window) = runtime_env::context_window_for(&registry, &model) {
         cx = cx.with_context_window(window);
     }

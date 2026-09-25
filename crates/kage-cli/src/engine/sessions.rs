@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use kage_core::protocol::{HostEvent, NoticeLevel};
+use kage_core::protocol::{CompactionCounts, HostEvent, NoticeLevel};
 use kage_core::{Content, Role, SessionId};
 use kage_session::{EntryId, SessionReader, SessionWriter};
 
@@ -19,17 +19,6 @@ fn find_last_entry(path: &std::path::Path) -> Result<Option<EntryId>, kage_sessi
         }
     }
     Ok(last)
-}
-
-/// The latest title recorded in the session at `path`, if any.
-fn stored_title(path: &Path) -> Option<String> {
-    SessionReader::iter(path)
-        .ok()?
-        .filter_map(|item| match item {
-            Ok(kage_session::SessionEntry::Title(title)) => Some(title.title),
-            _ => None,
-        })
-        .last()
 }
 
 /// Copy `src` up through entry `at` (an id prefix, or the latest entry)
@@ -239,6 +228,7 @@ impl super::Dispatcher {
             cx,
             recorder,
             None,
+            None,
             format!("new session: {}", short_id(new_id)),
         );
     }
@@ -298,7 +288,15 @@ impl super::Dispatcher {
             session.state.model
         );
         let recorder = super::Recorder::new(writer, session.plugins.clone());
-        self.reseat(id, new_id, cx, recorder, replay.title, message);
+        self.reseat(
+            id,
+            new_id,
+            cx,
+            recorder,
+            replay.title,
+            replay.compaction,
+            message,
+        );
         if let Some(note) = fallback {
             self.info(new_id, note);
         }
@@ -332,13 +330,14 @@ impl super::Dispatcher {
         };
         let cx = idle.cx.clone();
         let recorder = super::Recorder::new(writer, session.plugins.clone());
-        let title = stored_title(&dst);
+        let stored = kage_session::replay(&dst).ok();
         self.reseat(
             id,
             new_id,
             cx,
             recorder,
-            title,
+            stored.as_ref().and_then(|s| s.title.clone()),
+            stored.and_then(|s| s.compaction),
             format!("cloned session: {}", short_id(new_id)),
         );
     }
@@ -405,7 +404,11 @@ impl super::Dispatcher {
     /// `recorder` under `title`, keeping its tools, plugins, MCP servers and
     /// settings but not its permission mode or approvals, drop the
     /// agents of `old`, and tell clients, including the MCP catalog for
-    /// `new`.
+    /// `new` and the `compaction` counts the file records.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "each argument is separately loaded session state"
+    )]
     fn reseat(
         &mut self,
         old: SessionId,
@@ -413,6 +416,7 @@ impl super::Dispatcher {
         cx: kage_loop::AgentContext,
         recorder: super::Recorder,
         title: Option<String>,
+        compaction: Option<CompactionCounts>,
         message: String,
     ) {
         let path = recorder.path().to_path_buf();
@@ -459,6 +463,7 @@ impl super::Dispatcher {
                 path,
                 title,
                 messages,
+                compaction,
             },
         );
         self.bus.publish(new, HostEvent::StateChanged { state });

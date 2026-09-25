@@ -225,6 +225,7 @@ fn idle_esc_clears_the_search_and_a_session_change_drops_it() {
                 path: std::path::PathBuf::from("/tmp/s.jsonl"),
                 title: None,
                 messages: Vec::new(),
+                compaction: None,
             }
             .into(),
         ],

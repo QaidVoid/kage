@@ -167,6 +167,18 @@ impl Buffer {
         self.bump_version();
     }
 
+    /// Show `diff` as the change of the open call `call_id`, such as an
+    /// edit waiting for approval whose file lacks the text to replace.
+    /// No-op for an unknown id.
+    pub fn set_tool_diff(&mut self, call_id: &str, diff: EditDiff) {
+        let Some(Block::ToolCall { diff: d, .. }) = self.open_tool_call_mut(call_id) else {
+            return;
+        };
+        *d = Some(Arc::new(diff));
+        self.invalidate_pair_height(call_id);
+        self.bump_version();
+    }
+
     /// Replace the progress text of the call `call_id` with the latest
     /// tool update. No-op for an unknown id.
     pub fn set_tool_progress(&mut self, call_id: &str, text: impl Into<String>) {

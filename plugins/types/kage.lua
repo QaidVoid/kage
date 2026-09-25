@@ -333,7 +333,7 @@
 ---@field input_min_lines integer Minimum content rows of the input box.
 ---@field input_max_lines integer Content rows the input box grows to before it scrolls.
 ---@field transcript_on_exit "full"|"last"|"none" What prints after exit: the whole transcript, from the last prompt on, or only the session path and a resume hint.
----@field thinking_level ""|"off"|"minimal"|"low"|"medium"|"high"|"xhigh" Thinking level for new sessions, or empty for automatic (high, or the nearest level the model accepts).
+---@field thinking_level ""|"off"|"minimal"|"low"|"medium"|"high"|"xhigh" Thinking level for new sessions, or empty for auto (high, or the nearest level the model accepts).
 ---@field compaction_threshold number Fraction of the context window that triggers compaction. 0 turns compaction off.
 ---@field leader string The key `<leader>` expands to when a mapping is set.
 ---@field timeoutlen integer Milliseconds a mapping that is also a prefix waits for more keys.

@@ -103,6 +103,7 @@ fn a_resumed_session_shows_line_diffs_and_no_diff_for_a_failed_edit() {
         path: dir.path().join("s.jsonl"),
         title: None,
         messages,
+        compaction: None,
     };
     feed(&mut app, &events, vec![changed.into()]);
     app.set_all_folds(false);
@@ -143,4 +144,37 @@ fn the_edit_approval_previews_the_file_lines_or_says_the_text_is_gone() {
         "{rows:#?}"
     );
     assert!(!rows.iter().any(|r| r.contains("let q = 9;")), "{rows:#?}");
+}
+
+#[test]
+fn a_waiting_edit_without_its_text_shows_no_diffstat() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("sample.rs"), SAMPLE_BEFORE).unwrap();
+    let waiting_rows = |old: &str| {
+        let (mut app, _rx, events) = app_with_events();
+        app.set_workdir(dir.path().to_path_buf());
+        let id = kage_core::ToolCallId::new("c1");
+        let start = kage_core::LoopEvent::ToolCallStart {
+            id: id.clone(),
+            name: "edit".into(),
+            input_partial: sample_edit(old),
+        };
+        let request = kage_core::protocol::HostEvent::PermissionRequested {
+            request_id: kage_core::protocol::RequestId(1),
+            tool_call_id: Some(id),
+            tool: "edit".into(),
+            subject: "sample.rs".into(),
+            input: sample_edit(old),
+        };
+        feed(&mut app, &events, vec![start.into(), request.into()]);
+        edit_rows(&mut app)
+    };
+    let found = waiting_rows("let y = 2;");
+    assert!(found.iter().any(|r| r.contains("(+2 -1)")), "{found:#?}");
+    let missing = waiting_rows("let q = 9;");
+    assert!(
+        missing.iter().any(|r| r.contains("Edit sample.rs")),
+        "{missing:#?}"
+    );
+    assert!(!missing.iter().any(|r| r.contains("(+")), "{missing:#?}");
 }

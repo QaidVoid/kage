@@ -321,6 +321,7 @@ fn the_main_session_change_forgets_its_agents() {
                 path: std::path::PathBuf::from("/tmp/s.jsonl"),
                 title: None,
                 messages: Vec::new(),
+                compaction: None,
             }
             .into(),
         ],
@@ -718,6 +719,7 @@ fn the_main_session_change_while_focused_returns_to_the_main_view() {
                 path: std::path::PathBuf::from("/tmp/s.jsonl"),
                 title: None,
                 messages: Vec::new(),
+                compaction: None,
             }
             .into(),
         ],
@@ -1273,6 +1275,7 @@ fn resumed_app() -> (
                 path: std::path::PathBuf::from("/tmp/s.jsonl"),
                 title: None,
                 messages: vec![call, result],
+                compaction: None,
             }
             .into(),
         ],

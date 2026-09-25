@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+use kage_core::protocol::CompactionCounts;
 use kage_core::{Content, Message, MessageId, Role};
 
 use crate::entry::{Compaction, FORMAT_VERSION, Header, SessionEntry};
@@ -53,6 +54,9 @@ pub struct ReplayResult {
     /// Text of the most recent [`SessionEntry::Title`], or `None` if the
     /// session never recorded one.
     pub title: Option<String>,
+    /// Counts of the last [`SessionEntry::Compaction`], whose summary
+    /// opens `history`, or `None` if the session never compacted.
+    pub compaction: Option<CompactionCounts>,
 }
 
 /// Cumulative token totals replayed from a session file, plus the
@@ -105,6 +109,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
     let mut call_starts: HashMap<String, DateTime<Utc>> = HashMap::new();
     let mut tool_durations: HashMap<String, u64> = HashMap::new();
     let mut usage_total = ReplayUsage::default();
+    let mut compaction = None;
     for item in reader {
         let entry = item?;
         match entry {
@@ -152,7 +157,13 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
                 }
                 history.push(m.message);
             }
-            SessionEntry::Compaction(c) => apply_compaction(&mut history, c),
+            SessionEntry::Compaction(c) => {
+                compaction = Some(CompactionCounts {
+                    summarized: c.summarized,
+                    kept: c.kept,
+                });
+                apply_compaction(&mut history, c);
+            }
             SessionEntry::ModelChange(mc) => model = mc.model,
             SessionEntry::ThinkingLevelChange(t) => thinking_level = Some(t.level),
             SessionEntry::Title(t) => title = Some(t.title),
@@ -167,6 +178,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
         usage_total,
         thinking_level,
         title,
+        compaction,
     })
 }
 
@@ -371,6 +383,13 @@ mod tests {
         );
 
         let result = replay(&path).unwrap();
+        assert_eq!(
+            result.compaction,
+            Some(CompactionCounts {
+                summarized: 4,
+                kept: 2
+            })
+        );
         // 1 synthetic + 2 kept + 1 post-compact
         assert_eq!(result.history.len(), 4);
         assert_eq!(result.history[0].role, Role::User);

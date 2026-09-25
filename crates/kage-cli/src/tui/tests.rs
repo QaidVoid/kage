@@ -66,6 +66,7 @@ fn render_session_markdown_covers_roles_and_blocks() {
         usage_total: kage_session::ReplayUsage::default(),
         thinking_level: None,
         title: None,
+        compaction: None,
     };
     let md = render_session_markdown(&replay);
     assert!(md.starts_with("# kage session "));

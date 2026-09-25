@@ -3,7 +3,7 @@
 use kage_core::sync::read;
 use ratatui::text::Line;
 
-use crate::buffer::{Block, Buffer, ToolTopology};
+use crate::buffer::{Block, Buffer, ToolTopology, gap_between};
 use crate::view::{DECORATION_MARKER, Emphasis, build_block_lines, registry};
 
 /// How much of the conversation [`render`] prints, per the
@@ -35,7 +35,7 @@ impl TranscriptScope {
 /// conversation pane paints it without focus: folds and tool rows
 /// read as they did on screen, while bands, rules and padding are
 /// dropped and trailing spaces trimmed. User prompts start with `> `
-/// and blocks are separated by a blank line. `Last` with no user
+/// and blocks are spaced as on screen. `Last` with no user
 /// prompt, and `None`, render nothing.
 #[must_use]
 pub fn render(buffer: &Buffer, width: u16, scope: TranscriptScope) -> String {
@@ -53,6 +53,7 @@ pub fn render(buffer: &Buffer, width: u16, scope: TranscriptScope) -> String {
     let topology = ToolTopology::build(blocks);
     let registry = read(registry::global());
     let mut out: Vec<String> = Vec::new();
+    let mut above: Option<&Block> = None;
     for (idx, block) in blocks.iter().enumerate().skip(start) {
         if topology.is_hidden(idx) {
             continue;
@@ -81,9 +82,13 @@ pub fn render(buffer: &Buffer, width: u16, scope: TranscriptScope) -> String {
                 }
             }
         }
-        if !out.is_empty() {
-            out.push(String::new());
+        if let Some(above) = above {
+            out.extend(std::iter::repeat_n(
+                String::new(),
+                gap_between(above, block),
+            ));
         }
+        above = Some(block);
         out.extend(rows);
     }
     out.join("\n")
@@ -162,6 +167,23 @@ mod tests {
         buf.push_custom("kage:error", "config: bad key", false);
         assert_eq!(render(&buf, 60, TranscriptScope::Last), "");
         assert_eq!(render(&fixture(), 60, TranscriptScope::None), "");
+    }
+
+    #[test]
+    fn consecutive_tool_rows_sit_flush() {
+        let mut buf = Buffer::new();
+        buf.push_tool_call("c1", "bash", serde_json::json!({ "command": "true" }));
+        buf.push_tool_result_with_duration("c1", "", false, Some(1000));
+        buf.push_tool_call("c2", "bash", serde_json::json!({ "command": "false" }));
+        buf.push_tool_result_with_duration("c2", "", false, Some(1000));
+        buf.append_assistant_delta("Done.");
+        buf.finish_streaming();
+        let text = render(&buf, 40, TranscriptScope::Full);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 4, "{text:?}");
+        assert!(lines[0].contains("Ran true"), "{text:?}");
+        assert!(lines[1].contains("Ran false"), "{text:?}");
+        assert_eq!(&lines[2..], ["", "Done."], "{text:?}");
     }
 
     #[test]

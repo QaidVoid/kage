@@ -53,6 +53,8 @@ pub(super) struct Sources<'a> {
     pub modeless: bool,
     /// Whether `!` shell mode is armed.
     pub shell: bool,
+    /// Width of the frame, which the `breadcrumb` fits its task into.
+    pub width: u16,
 }
 
 impl<'a> Sources<'a> {
@@ -60,6 +62,7 @@ impl<'a> Sources<'a> {
         status: &'a StatusCtx<'a>,
         usage: Option<&'a SessionUsage>,
         input: &InputState,
+        width: u16,
     ) -> Self {
         let usage = usage.filter(|u| {
             !u.model.is_empty() || u.total_tokens() > 0 || u.current_context > 0 || u.working
@@ -70,6 +73,7 @@ impl<'a> Sources<'a> {
             mode: input.mode(),
             modeless: input.is_modeless(),
             shell: input.shell_armed(),
+            width,
         }
     }
 }
@@ -564,7 +568,12 @@ pub(super) fn push_builtin(
     let status = src.status;
     match name {
         "brand" => out.push(Span::styled(" kage".to_owned(), styles.text)),
-        "title" => {
+        "breadcrumb" => {
+            if let Some(crumb) = status.breadcrumb {
+                push_breadcrumb(crumb, usize::from(src.width), styles, out);
+            }
+        }
+        "title" if status.breadcrumb.is_none() => {
             if let Some(title) = status.title.filter(|t| !t.is_empty()) {
                 out.push(Span::styled(format!(" {title}"), styles.text));
             }
@@ -645,6 +654,37 @@ pub(super) fn push_builtin(
         )),
         _ => {}
     }
+}
+
+/// Paint the `breadcrumb`: `kage > explore: <task>`, then the agent's
+/// state, time, tokens and tool count. The task is cut so the row fits
+/// in `width` columns.
+fn push_breadcrumb(
+    crumb: &Breadcrumb,
+    width: usize,
+    styles: &Styles,
+    out: &mut Vec<Span<'static>>,
+) {
+    let dot = " \u{b7} ";
+    let mut stats = vec![crumb.state.to_owned()];
+    stats.extend(crumb.elapsed_ms.map(super::tool_view::format_seconds));
+    if crumb.tokens > 0 {
+        stats.push(format!("{} tok", format_token_count(crumb.tokens)));
+    }
+    let tools = usize::try_from(crumb.tool_calls).unwrap_or(usize::MAX);
+    stats.push(format!(
+        "{tools} {}",
+        if tools == 1 { "tool" } else { "tools" }
+    ));
+    let stats = format!("  {}", stats.join(dot));
+    let lead = format!(" kage > {}", crumb.trail.join(" > "));
+    let room = width.saturating_sub(lead.width() + 2 + stats.width() + 1);
+    out.push(Span::styled(lead, styles.strong));
+    if !crumb.description.is_empty() && room > 3 {
+        let task = truncate_to_width(&crumb.description, room, "...");
+        out.push(Span::styled(format!(": {task}"), styles.text));
+    }
+    out.push(Span::styled(stats, styles.text));
 }
 
 /// `match 2/5`, `match -/5` off the matches, or `no match`.
@@ -740,21 +780,36 @@ mod tests {
             cwd: Some("/w"),
             ..StatusCtx::default()
         };
-        let src = Sources::new(&status, Some(&usage), &InputState::new());
+        let crumb = Breadcrumb {
+            trail: vec!["explore".to_owned()],
+            state: "running",
+            ..Breadcrumb::default()
+        };
+        let focused = StatusCtx {
+            breadcrumb: Some(&crumb),
+            ..StatusCtx::default()
+        };
+        let src = Sources::new(&status, Some(&usage), &InputState::new(), 80);
+        let agent_src = Sources::new(&focused, Some(&usage), &InputState::new(), 80);
         let styles = Styles::uniform(Style::default());
         let row_components = kage_plugin::slots::BUILTIN_COMPONENTS
             .iter()
             .filter(|name| !matches!(**name, "sessions" | "notices"));
         for name in row_components {
             let mut out = Vec::new();
-            push_builtin(name, &src, &styles, &mut out);
+            let src = if *name == "breadcrumb" {
+                &agent_src
+            } else {
+                &src
+            };
+            push_builtin(name, src, &styles, &mut out);
             assert!(!out.is_empty(), "{name} painted nothing");
         }
     }
 
     fn painted(name: &str, usage: &SessionUsage, input: &InputState) -> String {
         let status = StatusCtx::default();
-        let src = Sources::new(&status, Some(usage), input);
+        let src = Sources::new(&status, Some(usage), input, 80);
         let mut out = Vec::new();
         push_builtin(name, &src, &Styles::uniform(Style::default()), &mut out);
         out.iter().map(|span| span.content.as_ref()).collect()
@@ -787,6 +842,44 @@ mod tests {
         assert_eq!(painted("thinking", &quiet, &input), "");
         assert_eq!(painted("tokens", &quiet, &input), "");
         assert_eq!(painted("permission", &quiet, &input), "");
+    }
+
+    #[test]
+    fn the_breadcrumb_replaces_the_title_and_cuts_its_task_to_fit() {
+        let crumb = Breadcrumb {
+            trail: vec!["explore".to_owned()],
+            description: "map exports under src/components".to_owned(),
+            state: "running",
+            elapsed_ms: Some(41_000),
+            tokens: 22_000,
+            tool_calls: 14,
+        };
+        let status = StatusCtx {
+            title: Some("fix the router"),
+            breadcrumb: Some(&crumb),
+            ..StatusCtx::default()
+        };
+        let paint = |name: &str, width: u16| {
+            let src = Sources::new(&status, None, &InputState::new(), width);
+            let mut out = Vec::new();
+            push_builtin(name, &src, &Styles::uniform(Style::default()), &mut out);
+            out.iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+        assert_eq!(paint("title", 100), "");
+        assert_eq!(
+            paint("breadcrumb", 100),
+            " kage > explore: map exports under src/components  \
+             running \u{b7} 41s \u{b7} 22k tok \u{b7} 14 tools"
+        );
+        let narrow = paint("breadcrumb", 70);
+        assert_eq!(
+            narrow,
+            " kage > explore: map exports u...  \
+             running \u{b7} 41s \u{b7} 22k tok \u{b7} 14 tools"
+        );
+        assert!(narrow.width() < 70);
     }
 
     #[test]

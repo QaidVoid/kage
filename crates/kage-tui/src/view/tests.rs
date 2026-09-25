@@ -1097,7 +1097,7 @@ fn modeline_rows(usage: Option<&SessionUsage>, width: u16) -> Vec<String> {
         .draw(|frame| {
             let status = StatusCtx::default();
             let input = InputState::new();
-            let sources = slot::Sources::new(&status, usage, &input);
+            let sources = slot::Sources::new(&status, usage, &input, width);
             slot::render_footer(frame, frame.area(), &sources);
         })
         .unwrap();

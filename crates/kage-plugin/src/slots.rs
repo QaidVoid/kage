@@ -97,9 +97,11 @@ impl SlotName {
 }
 
 /// Names of the built-in components the host implements. `sessions`
-/// and `notices` paint only in `start`.
+/// and `notices` paint only in `start`. `breadcrumb` paints the agent on
+/// screen and nothing in the main view, where `title` paints instead.
 pub const BUILTIN_COMPONENTS: &[&str] = &[
     "brand",
+    "breadcrumb",
     "title",
     "model",
     "widgets",
@@ -180,7 +182,7 @@ static DEFAULT_SPECS: LazyLock<[Arc<SlotSpec>; SLOTS]> = LazyLock::new(|| {
     let items = |names: &[&'static str]| names.iter().copied().map(SlotItem::Builtin).collect();
     [
         Arc::new(SlotSpec {
-            left: items(&["title"]),
+            left: items(&["breadcrumb", "title"]),
             right: items(&["widgets", "search"]),
             ..SlotSpec::default()
         }),

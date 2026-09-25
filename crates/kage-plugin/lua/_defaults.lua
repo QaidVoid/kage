@@ -4,7 +4,7 @@
 -- edits, Enter, Esc) are not here.
 
 local dot = " \u{B7} "
-kage.ui.set_slot("header", { left = { "title" }, right = { "widgets", "search" } })
+kage.ui.set_slot("header", { left = { "breadcrumb", "title" }, right = { "widgets", "search" } })
 kage.ui.set_slot("activity", { left = { "activity" } })
 kage.ui.set_slot("input_pill", { left = { "working", "mode" }, right = { "thinking" } })
 kage.ui.set_slot("footer", {

@@ -66,20 +66,30 @@ impl App {
                 if let LoopEvent::MessageAppended { message } = &event
                     && message.role == Role::User
                 {
-                    self.pending_delivered();
+                    self.pending_delivered(None);
                 }
-                crate::events::apply_loop_event(&mut lock(&self.buffer), &event);
+                crate::events::apply_loop_event(&mut lock(&self.root_buffer), &event);
             }
             Event::Host(event) => self.apply_host_event(event),
         }
     }
 
-    /// Drop the pending row of the prompt the engine just delivered.
-    /// Rows are counted, not matched by text, since an `input` plugin
-    /// may rewrite a prompt. The engine delivers steers first.
-    fn pending_delivered(&mut self) {
-        let at = self.pending.iter().position(|p| !p.queued).unwrap_or(0);
-        if at < self.pending.len() {
+    /// Drop the pending row of the prompt the engine just delivered to
+    /// `session` (`None` for the main session). Rows are counted, not
+    /// matched by text, since an `input` plugin may rewrite a prompt.
+    /// The engine delivers steers first.
+    fn pending_delivered(&mut self, session: Option<SessionId>) {
+        let rows = || {
+            self.pending
+                .iter()
+                .enumerate()
+                .filter(|(_, (s, _))| *s == session)
+        };
+        let at = rows()
+            .find(|(_, (_, p))| !p.queued)
+            .or_else(|| rows().next())
+            .map(|(at, _)| at);
+        if let Some(at) = at {
             self.pending.remove(at);
         }
     }
@@ -115,14 +125,15 @@ impl App {
                 text,
                 transient: true,
             } => self.toast(level, text),
-            HostEvent::Notice { level, text, .. } => push_notice(&self.buffer, level, text),
+            HostEvent::Notice { level, text, .. } => push_notice(&self.root_buffer, level, text),
             HostEvent::SessionChanged { messages, .. } => {
+                self.set_focus(None);
                 self.pending.clear();
                 self.agents.clear();
                 self.agent_buffers.clear();
                 let durations = crate::events::tool_durations(&messages);
                 {
-                    let mut buf = lock(&self.buffer);
+                    let mut buf = lock(&self.root_buffer);
                     buf.clear();
                     crate::events::populate_from_history(&mut buf, &messages, &durations);
                 }
@@ -132,7 +143,7 @@ impl App {
                 command,
                 output,
                 exit_code,
-            } => push_shell(&self.buffer, &command, &output, exit_code),
+            } => push_shell(&self.root_buffer, &command, &output, exit_code),
             HostEvent::PermissionRequested {
                 request_id,
                 tool_call_id,
@@ -174,6 +185,11 @@ impl App {
         };
         let card = match envelope.event {
             Event::Loop(event) => {
+                if let LoopEvent::MessageAppended { message } = &event
+                    && message.role == Role::User
+                {
+                    self.pending_delivered(Some(session));
+                }
                 crate::events::apply_loop_event(&mut lock(&buffer), &event);
                 matches!(
                     event,
@@ -264,7 +280,51 @@ impl App {
     fn buffer_of(&self, session: SessionId) -> SharedBuffer {
         self.agent_buffers
             .get(&session)
-            .map_or_else(|| Arc::clone(&self.buffer), Arc::clone)
+            .map_or_else(|| Arc::clone(&self.root_buffer), Arc::clone)
+    }
+
+    /// Point the transcript, the working row, the header and the input
+    /// at agent `session`, when it is an agent under the main session.
+    pub(crate) fn focus_agent(&mut self, session: SessionId) {
+        if self.agent_buffers.contains_key(&session) {
+            self.set_focus(Some(session));
+        }
+    }
+
+    /// Go back one level from the agent on screen: to its parent when
+    /// that is an agent, else to the main view.
+    pub(crate) fn leave_agent(&mut self) {
+        let parent = self
+            .focus
+            .and_then(|session| self.agents.get(session))
+            .map(|node| node.parent)
+            .filter(|parent| self.agent_buffers.contains_key(parent));
+        self.set_focus(parent);
+    }
+
+    /// Show agent `focus`, or the main session for `None` (or an unknown
+    /// agent). Each buffer keeps its own scroll, folds and block focus,
+    /// so coming back finds the view as it was left. The search, the
+    /// mouse selection, the context menu and the completion popup start
+    /// over.
+    pub(crate) fn set_focus(&mut self, focus: Option<SessionId>) {
+        let target = focus.and_then(|s| self.agent_buffers.get(&s).map(|b| (s, Arc::clone(b))));
+        let focus = target.as_ref().map(|(s, _)| *s);
+        if focus == self.focus {
+            return;
+        }
+        self.search_line = None;
+        self.search_origin = None;
+        self.search_pattern = None;
+        self.refresh_search_matches();
+        self.clear_selection();
+        self.mouse_drag_anchor = None;
+        self.context_menu = None;
+        self.input_completion = None;
+        self.focus = focus;
+        self.buffer = target.map_or_else(|| Arc::clone(&self.root_buffer), |(_, b)| b);
+        self.draw_snapshot = None;
+        lock(&self.buffer).invalidate_all_heights();
     }
 
     /// Write agent `session`'s card into the `agent` tool row of its

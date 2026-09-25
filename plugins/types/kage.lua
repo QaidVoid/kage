@@ -45,9 +45,12 @@
 ---@alias kage.SlotName "header"|"activity"|"input_pill"|"footer"|"start"
 
 --- A built-in slot component, painted by the host every frame.
---- `sessions` and `notices` paint only in `start`.
+--- `sessions` and `notices` paint only in `start`. `breadcrumb`
+--- paints the agent on screen and nothing in the main view, where
+--- `title` paints instead.
 ---@alias kage.Component
 ---| "brand"
+---| "breadcrumb"
 ---| "title"
 ---| "model"
 ---| "widgets"

@@ -188,6 +188,23 @@ impl App {
             }
         }
 
+        // Vim normal mode has no Escape action, so its plain Esc is the
+        // way back from an agent view there.
+        if self.focus.is_some()
+            && key.code == KeyCode::Esc
+            && matches!(
+                self.edit_state(),
+                EditState::NormalInput | EditState::NormalBuffer
+            )
+            && !self.input.is_pending()
+            && self.sequencer.deadline().is_none()
+            && self.screen_selection.is_none()
+            && !self.user_mapped(&key)
+        {
+            self.leave_agent();
+            return None;
+        }
+
         let routed = self.route_editor_key(key, Instant::now());
         let exit = self.apply_routed(routed);
         if exit.is_none() {
@@ -201,7 +218,9 @@ impl App {
     /// clear the search highlight, else, for Ctrl+C, arm quit, which a
     /// second press within
     /// [`ESCALATION_WINDOW`] carries out. Over an open overlay Ctrl+C
-    /// only interrupts, since the draft is out of sight.
+    /// only interrupts, since the draft is out of sight. In an agent
+    /// view Esc goes back one level and never interrupts, while Ctrl+C
+    /// stops the agent when it runs, else goes back.
     pub(crate) fn escalate(&mut self, trigger: Trigger) -> Option<AppExit> {
         let now = Instant::now();
         let previous = self
@@ -217,6 +236,12 @@ impl App {
             self.input.clear_draft();
             self.input_completion = None;
             self.escalation = Some((Escalation::DraftCleared, now + ESCALATION_WINDOW));
+        } else if self.focus.is_some() {
+            if trigger == Trigger::CtrlC && self.is_run_in_flight() {
+                self.trip_cancel();
+            } else {
+                self.leave_agent();
+            }
         } else if self.is_run_in_flight() {
             self.trip_cancel();
         } else if trigger == Trigger::Esc {

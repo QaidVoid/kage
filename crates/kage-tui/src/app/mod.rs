@@ -135,7 +135,11 @@ pub enum RunRequest {
         session: Option<kage_core::SessionId>,
     },
     /// Trip the agent loop's cancellation flag.
-    Cancel,
+    Cancel {
+        /// The agent session to stop, with the agents under it. `None`
+        /// stops the main session and every agent under it.
+        session: Option<kage_core::SessionId>,
+    },
     /// Switch to a different `provider:model` for subsequent turns.
     SwitchModel(String),
     /// Replay the session at the given path into the conversation
@@ -542,7 +546,14 @@ impl Resolver for AppResolver<'_> {
 
 /// Runtime state for the interactive TUI loop.
 pub struct App {
+    /// The buffer on screen: [`Self::root_buffer`], or the buffer of the
+    /// agent in [`Self::focus`]. Scroll, folds, search, selection and
+    /// rendering act on it.
     buffer: SharedBuffer,
+    /// The main session's transcript.
+    root_buffer: SharedBuffer,
+    /// The agent the view points at. `None` shows the main session.
+    focus: Option<kage_core::SessionId>,
     input: InputState,
     requests: Sender<RunRequest>,
     /// Available `provider:model` ids the model picker offers. Empty
@@ -840,8 +851,13 @@ pub struct App {
     /// What the start card lists. `None` until the host sets it.
     start_info: Option<view::StartInfo>,
     /// Prompts sent during a run that the engine has not delivered
-    /// yet, in send order, shown above the input.
-    pending: Vec<view::PendingPrompt>,
+    /// yet, in send order, with the agent session they went to (`None`
+    /// for the main session). Only the rows of the session on screen
+    /// show above the input.
+    pending: Vec<(Option<kage_core::SessionId>, view::PendingPrompt)>,
+    /// The screen row of each pinned agent row painted last frame, with
+    /// its session, so a click on one focuses that agent.
+    pinned_hits: Vec<(u16, kage_core::SessionId)>,
     /// What the last Esc or Ctrl+C left for the next press, and when
     /// it lapses.
     escalation: Option<(keys::Escalation, Instant)>,

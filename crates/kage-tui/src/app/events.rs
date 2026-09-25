@@ -5,11 +5,11 @@ use super::*;
 
 impl App {
     /// Resolve a submitted draft: send the prompt and its images to the
-    /// engine, steered into the run in flight or, with `queue`, held
-    /// until it ends.
+    /// session on screen, steered into the run in flight or, with
+    /// `queue`, held until it ends.
     pub(crate) fn handle_submit(&mut self, text: String, queue: bool) {
         let images = self.input.take_attached();
-        self.send_prompt(text, images, queue, None);
+        self.send_prompt(text, images, queue, self.focus);
     }
 
     /// Resolve an `InputAction::QueuePrompt`: send the draft to run
@@ -28,7 +28,8 @@ impl App {
     /// a run that happens later, so until then it shows as a pending
     /// row above the input. Steers are listed before queued prompts,
     /// the order the engine delivers them in. A prompt for an agent
-    /// `session` goes to that agent and gets no pending row.
+    /// `session` goes to that agent, and its row shows in that agent's
+    /// view.
     pub(crate) fn send_prompt(
         &mut self,
         text: String,
@@ -36,8 +37,7 @@ impl App {
         queue: bool,
         session: Option<kage_core::SessionId>,
     ) {
-        let main = session.is_none() && self.is_run_in_flight();
-        let pending = main.then(|| view::PendingPrompt {
+        let pending = self.session_running(session).then(|| view::PendingPrompt {
             text: text
                 .lines()
                 .map(str::trim)
@@ -63,9 +63,9 @@ impl App {
             let at = if pending.queued {
                 self.pending.len()
             } else {
-                self.pending.partition_point(|p| !p.queued)
+                self.pending.partition_point(|(_, p)| !p.queued)
             };
-            self.pending.insert(at, pending);
+            self.pending.insert(at, (session, pending));
         }
     }
 
@@ -254,8 +254,13 @@ impl App {
     /// Mouse left-button press: anchor a virtual-row selection at
     /// the click position. Any prior selection (and its captured
     /// text) is dropped. Focus snaps to whichever block sits under
-    /// the click so subsequent keyboard gestures act on it.
+    /// the click so subsequent keyboard gestures act on it. A press on a
+    /// pinned agent row focuses that agent instead.
     pub(crate) fn mouse_down(&mut self, row: u16, col: u16) {
+        if let Some(&(_, session)) = self.pinned_hits.iter().find(|(r, _)| *r == row) {
+            self.focus_agent(session);
+            return;
+        }
         self.captured_rows.clear();
         let mut buf = lock(&self.buffer);
         let area_y = buf.last_area_y();

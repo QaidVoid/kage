@@ -260,7 +260,7 @@ fn init_lua_can_reclaim_ctrl_c_in_one_mode() {
     app.handle_key(ctrl('c'));
     assert_eq!(
         rx.try_recv(),
-        Ok(RunRequest::Cancel),
+        Ok(RunRequest::Cancel { session: None }),
         "normal mode kept the hatch"
     );
 }
@@ -1074,7 +1074,7 @@ fn ctrl_c_in_normal_interrupts_a_run() {
     lock(&usage).working = true;
     app.handle_key(code(KeyCode::Esc));
     app.handle_key(ctrl('c'));
-    assert_eq!(rx.try_recv(), Ok(RunRequest::Cancel));
+    assert_eq!(rx.try_recv(), Ok(RunRequest::Cancel { session: None }));
 }
 
 #[test]
@@ -1117,7 +1117,7 @@ fn esc_on_an_empty_draft_while_working_interrupts() {
     app.set_editor_modeless(true);
     lock(&usage).working = true;
     app.handle_key(code(KeyCode::Esc));
-    assert_eq!(rx.try_recv(), Ok(RunRequest::Cancel));
+    assert_eq!(rx.try_recv(), Ok(RunRequest::Cancel { session: None }));
 }
 
 #[test]
@@ -1253,7 +1253,7 @@ fn ctrl_c_interrupts_over_an_open_cmdline() {
     app.handle_key(key(':'));
     assert!(app.cmdline.is_some(), "cmdline should be open");
     app.handle_key(ctrl('c'));
-    assert_eq!(rx.try_recv(), Ok(RunRequest::Cancel));
+    assert_eq!(rx.try_recv(), Ok(RunRequest::Cancel { session: None }));
     assert!(
         app.cmdline.is_some(),
         "interrupt must not close the cmdline"
@@ -1270,7 +1270,7 @@ fn cancel_command_sends_a_cancel_request() {
         matches!(result, CommandResult::Done(None)),
         "expected Done(None), got {result:?}"
     );
-    assert_eq!(rx.try_recv(), Ok(RunRequest::Cancel));
+    assert_eq!(rx.try_recv(), Ok(RunRequest::Cancel { session: None }));
 }
 
 #[test]
@@ -3954,6 +3954,24 @@ fn common_footer_hints_fit_at_80_columns_beside_the_session_facts() {
     feed(&mut app, &events, vec![permission_request("c1", 1)]);
     assert!(app.approval_panel.is_some());
     check(&mut app);
+    app.answer_permission(PermissionDecision::AllowOnce);
+    app.handle_key(code(KeyCode::Esc));
+    let child = spawn_agent(&mut app, &events, "a1", "explore");
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![kage_core::protocol::HostEvent::RunStarted.into()],
+    );
+    app.focus_agent(child);
+    check(&mut app);
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![run_ended(kage_core::protocol::RunOutcome::Completed)],
+    );
+    check(&mut app);
 }
 
 #[test]
@@ -4279,7 +4297,12 @@ fn an_agent_ask_is_labeled_and_its_feedback_goes_to_the_agent() {
             },
         ]
     );
-    assert!(app.pending.is_empty(), "no main pending row for the agent");
+    assert!(
+        app.pending
+            .iter()
+            .all(|(session, _)| *session == Some(child)),
+        "no main pending row for the agent"
+    );
 }
 
 #[test]
@@ -4565,4 +4588,305 @@ fn the_pinned_list_hides_while_the_approval_panel_is_open() {
     assert!(!pinned_row(&mut app, &mut terminal));
     app.answer_permission(PermissionDecision::AllowOnce);
     assert!(pinned_row(&mut app, &mut terminal));
+}
+
+/// A modeless App with one running `explore` agent on screen.
+fn focused_app() -> (
+    App,
+    mpsc::Receiver<RunRequest>,
+    mpsc::Sender<kage_core::protocol::Envelope>,
+    kage_core::SessionId,
+) {
+    let (mut app, rx, events) = app_with_events();
+    app.set_editor_modeless(true);
+    let child = spawn_agent(&mut app, &events, "a1", "explore");
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![kage_core::protocol::HostEvent::RunStarted.into()],
+    );
+    app.focus_agent(child);
+    assert_eq!(app.focus, Some(child));
+    (app, rx, events, child)
+}
+
+fn type_text(app: &mut App, text: &str) {
+    for c in text.chars() {
+        app.handle_key(key(c));
+    }
+}
+
+fn rendered(app: &mut App, width: u16, height: u16) -> Vec<String> {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    app.render_into(&mut terminal).unwrap();
+    snapshot_rows(&terminal)
+}
+
+fn text_delta(text: &str) -> kage_core::protocol::Event {
+    kage_core::LoopEvent::TextDelta {
+        id: kage_core::MessageId::new(),
+        delta: text.into(),
+    }
+    .into()
+}
+
+#[test]
+fn focusing_shows_the_agent_and_going_back_restores_the_main_scroll() {
+    let (mut app, _rx, events, child) = focused_app();
+    app.set_focus(None);
+    {
+        let mut buf = lock(&app.root_buffer);
+        for n in 0..40 {
+            buf.push_user(format!("main line {n}"));
+        }
+    }
+    rendered(&mut app, 60, 16);
+    app.scroll_by(-10);
+    let scroll = lock(&app.buffer).scroll();
+    assert!(scroll.is_some());
+    send_to(&mut app, &events, child, vec![text_delta("child reply")]);
+
+    app.focus_agent(child);
+    assert!(Arc::ptr_eq(&app.buffer, &app.agent_buffers[&child]));
+    let rows = rendered(&mut app, 60, 16);
+    assert!(rows.iter().any(|r| r.contains("child reply")), "{rows:#?}");
+    assert!(rows.iter().all(|r| !r.contains("main line")), "{rows:#?}");
+
+    app.leave_agent();
+    assert_eq!(app.focus, None);
+    assert!(Arc::ptr_eq(&app.buffer, &app.root_buffer));
+    assert_eq!(lock(&app.buffer).scroll(), scroll);
+}
+
+#[test]
+fn agent_deltas_repaint_while_focused() {
+    let (mut app, _rx, events, child) = focused_app();
+    rendered(&mut app, 60, 16);
+    events
+        .send(envelope(child, 9, text_delta("fresh")))
+        .unwrap();
+    assert!(app.drain_engine_events());
+    let rows = rendered(&mut app, 60, 16);
+    assert!(rows.iter().any(|r| r.contains("fresh")), "{rows:#?}");
+}
+
+#[test]
+fn enter_steers_the_focused_agent_and_tab_queues() {
+    let (mut app, rx, _events, child) = focused_app();
+    type_text(&mut app, "also defaults");
+    app.handle_key(code(KeyCode::Enter));
+    type_text(&mut app, "then routes");
+    app.handle_key(code(KeyCode::Tab));
+    assert_eq!(
+        resolutions(&rx),
+        [
+            RunRequest::Submit {
+                text: "also defaults".into(),
+                images: Vec::new(),
+                queue: false,
+                session: Some(child),
+            },
+            RunRequest::Submit {
+                text: "then routes".into(),
+                images: Vec::new(),
+                queue: true,
+                session: Some(child),
+            },
+        ]
+    );
+}
+
+#[test]
+fn esc_in_an_agent_view_clears_a_draft_then_goes_back_without_interrupting() {
+    let (mut app, rx, _events, _child) = focused_app();
+    lock(app.session_usage.as_ref().unwrap()).working = true;
+    type_text(&mut app, "draft");
+    app.handle_key(code(KeyCode::Esc));
+    assert_eq!(app.input().text(), "");
+    assert!(app.focus.is_some(), "the draft goes first");
+    app.handle_key(code(KeyCode::Esc));
+    assert_eq!(app.focus, None);
+    assert!(rx.try_recv().is_err(), "nothing was interrupted");
+}
+
+#[test]
+fn ctrl_c_in_an_agent_view_stops_it_while_running_and_goes_back_when_idle() {
+    let (mut app, rx, events, child) = focused_app();
+    assert_eq!(app.handle_key(ctrl('c')), None);
+    assert_eq!(
+        rx.try_recv(),
+        Ok(RunRequest::Cancel {
+            session: Some(child)
+        })
+    );
+    assert_eq!(app.focus, Some(child));
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![run_ended(kage_core::protocol::RunOutcome::Cancelled)],
+    );
+    assert_eq!(app.handle_key(ctrl('c')), None);
+    assert_eq!(app.focus, None);
+    assert!(rx.try_recv().is_err());
+    assert_eq!(app.handle_key(ctrl('c')), None, "the main view arms quit");
+    assert_eq!(app.footer_hint(), "ctrl+c again to quit");
+    assert_eq!(app.handle_key(ctrl('c')), Some(AppExit::Quit));
+}
+
+#[test]
+fn vim_normal_esc_goes_back_from_an_agent_view() {
+    let (mut app, rx, _events, _child) = focused_app();
+    app.set_editor_modeless(false);
+    app.handle_key(code(KeyCode::Esc));
+    assert_eq!(app.input().mode(), Mode::Normal);
+    assert!(app.focus.is_some(), "insert Esc only leaves insert mode");
+    app.handle_key(code(KeyCode::Esc));
+    assert_eq!(app.focus, None);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn pending_rows_show_in_the_view_of_their_session() {
+    let (mut app, _rx, events, child) = focused_app();
+    lock(app.session_usage.as_ref().unwrap()).working = true;
+    type_text(&mut app, "to explore");
+    app.handle_key(code(KeyCode::Enter));
+    app.set_focus(None);
+    type_text(&mut app, "to main");
+    app.handle_key(code(KeyCode::Tab));
+    let main_rows = pending_rows(&mut app);
+    assert_eq!(main_rows.len(), 1);
+    assert!(main_rows[0].starts_with("  > to main"), "{main_rows:#?}");
+
+    app.focus_agent(child);
+    let agent_rows = pending_rows(&mut app);
+    assert_eq!(agent_rows.len(), 1);
+    assert!(
+        agent_rows[0].starts_with("  > to explore"),
+        "{agent_rows:#?}"
+    );
+    send_to(&mut app, &events, child, vec![user_message("to explore")]);
+    assert!(pending_rows(&mut app).is_empty());
+    app.set_focus(None);
+    assert_eq!(pending_rows(&mut app), main_rows);
+}
+
+#[test]
+fn the_breadcrumb_names_the_agent_and_the_main_view_has_no_header() {
+    let (mut app, _rx, _events, _child) = focused_app();
+    let rows = rendered(&mut app, 100, 20);
+    assert!(
+        rows[0].starts_with(" kage > explore: explore task  running \u{b7} 0s \u{b7} 0 tools"),
+        "{rows:#?}"
+    );
+    app.set_focus(None);
+    let rows = rendered(&mut app, 100, 20);
+    assert!(rows.iter().all(|r| !r.contains("kage >")), "{rows:#?}");
+}
+
+#[test]
+fn the_placeholder_steers_a_running_agent_and_messages_a_finished_one() {
+    let (mut app, rx, events, child) = focused_app();
+    let rows = rendered(&mut app, 80, 16);
+    assert!(rows.iter().any(|r| r == " > Steer explore"), "{rows:#?}");
+    assert_eq!(
+        app.footer_hint(),
+        "enter to steer \u{b7} esc to go back \u{b7} ctrl+c to stop"
+    );
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![run_ended(kage_core::protocol::RunOutcome::Completed)],
+    );
+    let rows = rendered(&mut app, 80, 16);
+    assert!(
+        rows.iter()
+            .any(|r| r == " > Message explore (the reply stays in this agent)"),
+        "{rows:#?}"
+    );
+    assert_eq!(app.footer_hint(), "enter to send \u{b7} esc to go back");
+    type_text(&mut app, "one more");
+    app.handle_key(code(KeyCode::Enter));
+    assert_eq!(
+        rx.try_recv(),
+        Ok(RunRequest::Submit {
+            text: "one more".into(),
+            images: Vec::new(),
+            queue: false,
+            session: Some(child),
+        })
+    );
+    assert!(app.pending.is_empty(), "an idle agent starts a run at once");
+}
+
+#[test]
+fn clicking_a_pinned_row_focuses_its_agent() {
+    let (mut app, _rx, _events, child) = focused_app();
+    app.set_focus(None);
+    let rows = rendered(&mut app, 80, 24);
+    let row = rows
+        .iter()
+        .position(|r| r.contains("explore  explore task"))
+        .unwrap();
+    app.mouse_down(u16::try_from(row).unwrap(), 10);
+    assert_eq!(app.focus, Some(child));
+}
+
+#[test]
+fn the_main_session_change_while_focused_returns_to_the_main_view() {
+    let (mut app, _rx, events, _child) = focused_app();
+    feed(
+        &mut app,
+        &events,
+        vec![
+            kage_core::protocol::HostEvent::SessionChanged {
+                path: std::path::PathBuf::from("/tmp/s.jsonl"),
+                title: None,
+                messages: Vec::new(),
+            }
+            .into(),
+        ],
+    );
+    assert_eq!(app.focus, None);
+    assert!(Arc::ptr_eq(&app.buffer, &app.root_buffer));
+    assert!(app.agent_buffers.is_empty());
+}
+
+#[test]
+fn search_matches_reset_on_a_focus_change() {
+    let (mut app, _rx, _events, child) = focused_app();
+    app.set_focus(None);
+    lock(&app.root_buffer).push_user("needle here");
+    app.search_pattern = Some("needle".into());
+    app.refresh_search_matches();
+    assert_eq!(app.search_matches().len(), 1);
+    app.focus_agent(child);
+    assert_eq!(app.search_pattern, None);
+    assert!(app.search_matches().is_empty());
+}
+
+#[test]
+fn another_agents_approval_still_opens_while_focused() {
+    let (mut app, _rx, events, _child) = focused_app();
+    let other = spawn_agent(&mut app, &events, "a2", "general");
+    send_to(
+        &mut app,
+        &events,
+        other,
+        vec![
+            kage_core::protocol::HostEvent::RunStarted.into(),
+            bash_start("c1"),
+            permission_request("c1", 8),
+        ],
+    );
+    assert!(app.approval_panel.is_some());
+    let rows = rendered(&mut app, 80, 24);
+    assert!(
+        rows.iter()
+            .any(|r| r.contains("general \u{b7} Run this command?")),
+        "{rows:#?}"
+    );
 }

@@ -103,9 +103,35 @@ pub struct StatusCtx<'a> {
     /// Prompts sent during the run that were not delivered yet, listed
     /// above the input.
     pub pending: &'a [PendingPrompt],
-    /// Live agents of the main session, pinned above the pending
-    /// prompts.
+    /// Live agents under the session on screen, pinned above the
+    /// pending prompts.
     pub agents: &'a [AgentRow],
+    /// The agent on screen, for the `breadcrumb` component. `None` in
+    /// the main view, where the `title` component and the start card
+    /// paint instead.
+    pub breadcrumb: Option<&'a Breadcrumb>,
+    /// Placeholder of the empty draft in insert mode and the modeless
+    /// editor, in place of the default one.
+    pub placeholder: Option<&'a str>,
+}
+
+/// The agent on screen, as the `breadcrumb` component shows it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Breadcrumb {
+    /// Agent names from the main session's own agent down to the one on
+    /// screen.
+    pub trail: Vec<String>,
+    /// The task description the model wrote.
+    pub description: String,
+    /// Where the agent is: `queued`, `running`, `waiting`, `done`,
+    /// `failed` or `stopped`.
+    pub state: &'static str,
+    /// How long the current run has taken, or the last run took.
+    pub elapsed_ms: Option<u64>,
+    /// Input and output tokens the agent used.
+    pub tokens: u64,
+    /// Tool calls the agent made.
+    pub tool_calls: u32,
 }
 
 /// Start card data the chrome state does not carry. Set once by the
@@ -218,7 +244,7 @@ pub fn render(
             full,
         );
     }
-    let sources = slot::Sources::new(status, session_usage, input);
+    let sources = slot::Sources::new(status, session_usage, input, frame.area().width);
     slot::render_header(frame, regions.header, &sources);
     render_buffer(
         frame,
@@ -227,7 +253,7 @@ pub fn render(
         status.search_pattern,
         status.search_match_set,
     );
-    if let Some(area) = start_area(buffer, regions.buffer) {
+    if let Some(area) = start_area(buffer, regions.buffer).filter(|_| status.breadcrumb.is_none()) {
         slot::render_start(frame, area, &sources);
     }
     slot::render_activity(frame, regions.activity, &sources);
@@ -278,7 +304,7 @@ pub fn chrome_heights(
     input: &InputState,
     width: u16,
 ) -> crate::layout::Heights {
-    let sources = slot::Sources::new(status, session_usage, input);
+    let sources = slot::Sources::new(status, session_usage, input, width);
     crate::layout::Heights {
         header: u16::from(slot::row_has_content(
             kage_plugin::SlotName::Header,
@@ -428,8 +454,10 @@ pub(crate) use bubble::{
 };
 pub use buffer::CapturedCell;
 pub(crate) use buffer::build_block_lines;
+pub(crate) use input::{
+    AGENT_MAX_ROWS, INPUT_GLYPH_WIDTH, agents_height, pending_height, split_input,
+};
 pub use input::{AgentRow, AgentRowState, PendingPrompt};
-pub(crate) use input::{INPUT_GLYPH_WIDTH, agents_height, pending_height, split_input};
 pub use modeline::input_visual_row_count;
 pub(crate) use modeline::{chrome_lines_to_ratatui, spinner_frame_index};
 pub(crate) use slot::START_SESSIONS;

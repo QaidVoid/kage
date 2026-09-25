@@ -181,7 +181,12 @@ impl Host {
                     None => self.send(kind),
                 }
             }
-            RunRequest::Cancel => self.send(CommandKind::Cancel),
+            RunRequest::Cancel { session } => match session {
+                Some(session) => self
+                    .commander
+                    .send(Command::to(session, CommandKind::Cancel)),
+                None => self.send(CommandKind::Cancel),
+            },
             RunRequest::ResolvePermission {
                 request_id,
                 decision,

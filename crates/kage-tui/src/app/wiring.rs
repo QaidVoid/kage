@@ -10,7 +10,9 @@ impl App {
     pub fn new(buffer: SharedBuffer, requests: Sender<RunRequest>) -> Self {
         let (attach_tx, attach_rx) = std::sync::mpsc::channel();
         Self {
+            root_buffer: Arc::clone(&buffer),
             buffer,
+            focus: None,
             input: InputState::new(),
             requests,
             model_choices: Vec::new(),
@@ -92,6 +94,7 @@ impl App {
             key_labels: KeyLabels::default(),
             start_info: None,
             pending: Vec::new(),
+            pinned_hits: Vec::new(),
             escalation: None,
         }
     }
@@ -104,10 +107,35 @@ impl App {
         self.session_usage = Some(usage);
     }
 
-    /// Whether a run is in flight, from the engine's last reported
-    /// session state. `false` when no usage snapshot is registered.
+    /// Whether a run of the session on screen is in flight. See
+    /// [`Self::session_running`].
     pub(crate) fn is_run_in_flight(&self) -> bool {
-        self.session_usage.as_ref().is_some_and(|u| lock(u).working)
+        self.session_running(self.focus)
+    }
+
+    /// Whether a run of `session` is in flight or waiting to start: the
+    /// main session for `None`, from the engine's last reported state
+    /// (`false` without a usage snapshot), else the agent's state.
+    pub(crate) fn session_running(&self, session: Option<kage_core::SessionId>) -> bool {
+        use kage_core::protocol::AgentState;
+        match session {
+            None => self.session_usage.as_ref().is_some_and(|u| lock(u).working),
+            Some(session) => self
+                .agents
+                .get(session)
+                .is_some_and(|n| matches!(n.state, AgentState::Queued | AgentState::Running)),
+        }
+    }
+
+    /// The session whose agents the pinned list and the working row
+    /// count: the agent on screen, else the main session.
+    pub(crate) fn view_root(&self) -> Option<kage_core::SessionId> {
+        self.focus.or(self.active_session)
+    }
+
+    /// The name of the agent on screen. `None` in the main view.
+    pub(crate) fn focused_agent(&self) -> Option<&str> {
+        self.agents.get(self.focus?).map(|n| n.agent.as_str())
     }
 
     /// Register the shared toast queue. While set, App-internal
@@ -140,9 +168,12 @@ impl App {
         q.iter().map(|t| t.expires_at).min()
     }
 
-    /// Ask the engine to cancel the in-flight run.
+    /// Ask the engine to cancel the run of the session on screen, with
+    /// the agents under it.
     pub(crate) fn trip_cancel(&mut self) {
-        let _ = self.send_request(RunRequest::Cancel);
+        let _ = self.send_request(RunRequest::Cancel {
+            session: self.focus,
+        });
     }
 
     /// Snapshot the session-usage handle, returning `None` when the
@@ -530,7 +561,7 @@ impl App {
             }
             None => {}
         }
-        let working = self.is_working();
+        let working = self.is_run_in_flight();
         let draft = !self.input.text().is_empty();
         if self.input.shell_armed() {
             return if draft {
@@ -539,6 +570,9 @@ impl App {
                 "backspace to leave shell mode"
             }
             .to_owned();
+        }
+        if !draft && let Some(hint) = self.agent_hint(working) {
+            return hint;
         }
         let label =
             |app: &mut Self, action, what| app.key_label(action).map(|key| format!("{key} {what}"));
@@ -592,6 +626,24 @@ impl App {
         parts.join(HINT_SEP)
     }
 
+    /// The footer hint of an agent view with an empty draft: how to
+    /// steer or message the agent, how to go back, and how to stop it
+    /// while `working`. `None` in the main view and in visual mode.
+    fn agent_hint(&self, working: bool) -> Option<String> {
+        self.focus?;
+        let stop = "ctrl+c to stop";
+        let parts = match (self.input.is_modeless(), self.input.mode(), working) {
+            (true, _, true) => vec!["enter to steer", "esc to go back", stop],
+            (true, _, false) => vec!["enter to send", "esc to go back"],
+            (false, Mode::Insert, true) => vec!["enter to steer", stop],
+            (false, Mode::Insert, false) => vec!["enter to send", "ctrl+c to go back"],
+            (false, Mode::Normal, true) => vec![stop, "esc to go back", "i to type"],
+            (false, Mode::Normal, false) => vec!["esc to go back", "i to type"],
+            (false, Mode::Visual, _) => return None,
+        };
+        Some(parts.join(HINT_SEP))
+    }
+
     /// The key that runs `action` in the current editing state, as
     /// `ctrl+p`. A mapping from `init.lua` or `config.toml` wins over
     /// the defaults. Cached per keymap generation and editing state.
@@ -624,13 +676,22 @@ impl App {
         label
     }
 
-    /// The working row text while a run is in flight: what kage is
-    /// doing, the run's elapsed time and, when the next key would
-    /// reach the editor with an empty draft, the key that interrupts
-    /// the run. At `width` columns what kage is doing is cut first, so
-    /// the time and the key stay.
+    /// The working row text while a run of the session on screen is in
+    /// flight: what it is doing, the run's elapsed time and, in the
+    /// main view when the next key would reach the editor with an empty
+    /// draft, the key that interrupts the run. At `width` columns what
+    /// it is doing is cut first, so the time and the key stay.
     pub(crate) fn activity_label(&self, buffer: &crate::Buffer, width: u16) -> Option<String> {
-        let started = self.run_started?;
+        use kage_core::protocol::AgentState;
+        let started = match self.focus {
+            None => self.run_started?,
+            Some(session) => {
+                self.agents
+                    .get(session)
+                    .filter(|n| n.state == AgentState::Running)?
+                    .started?
+            }
+        };
         let approving = self.pending_permission.is_some();
         let doing = if approving {
             "Waiting for your approval".to_owned()
@@ -643,7 +704,7 @@ impl App {
         } else {
             view::tool_view::format_elapsed(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
         };
-        let tail = if approving || !self.input.text().is_empty() {
+        let tail = if self.focus.is_some() || approving || !self.input.text().is_empty() {
             format!(" ({elapsed})")
         } else {
             let key = if self.input.is_modeless() {
@@ -658,12 +719,13 @@ impl App {
         Some(format!("{doing}{tail}"))
     }
 
-    /// How many agents under the main session are queued or running.
+    /// How many agents under the session on screen are queued or
+    /// running.
     fn live_agents(&self) -> usize {
         use kage_core::protocol::AgentState;
-        self.active_session.map_or(0, |main| {
+        self.view_root().map_or(0, |root| {
             self.agents
-                .under(main)
+                .under(root)
                 .into_iter()
                 .filter(|(_, node)| matches!(node.state, AgentState::Queued | AgentState::Running))
                 .count()
@@ -671,18 +733,15 @@ impl App {
     }
 
     /// The pinned list: the queued, running and waiting agents under
-    /// the main session in tree order, with what each does now. Empty
-    /// while the approval panel is open.
+    /// the session on screen in tree order, with what each does now.
+    /// Empty while the approval panel is open.
     pub(crate) fn agent_rows(&self) -> Vec<view::AgentRow> {
         use kage_core::protocol::AgentState;
-        let Some(main) = self
-            .active_session
-            .filter(|_| self.approval_panel.is_none())
-        else {
+        let Some(root) = self.view_root().filter(|_| self.approval_panel.is_none()) else {
             return Vec::new();
         };
         self.agents
-            .under(main)
+            .under(root)
             .into_iter()
             .filter_map(|(depth, node)| {
                 let state = match node.state {
@@ -710,6 +769,51 @@ impl App {
                 })
             })
             .collect()
+    }
+
+    /// What the `breadcrumb` component shows for the agent on screen:
+    /// its ancestry, task, state, time, tokens and tool count. `None` in
+    /// the main view.
+    pub(crate) fn breadcrumb(&self) -> Option<view::Breadcrumb> {
+        use kage_core::protocol::AgentState;
+        let node = self.agents.get(self.focus?)?;
+        let mut trail = vec![node.agent.clone()];
+        let mut parent = node.parent;
+        while let Some(up) = self.agents.get(parent) {
+            trail.insert(0, up.agent.clone());
+            parent = up.parent;
+        }
+        let state = match node.state {
+            AgentState::Queued => "queued",
+            AgentState::Running if node.waiting > 0 => "waiting",
+            AgentState::Running => "running",
+            AgentState::Done => "done",
+            AgentState::Failed => "failed",
+            AgentState::Cancelled => "stopped",
+        };
+        let elapsed = match node.state {
+            AgentState::Running => node.started.map(|t| t.elapsed()),
+            _ => node.took,
+        };
+        Some(view::Breadcrumb {
+            trail,
+            description: node.description.clone(),
+            state,
+            elapsed_ms: elapsed.map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX)),
+            tokens: node.usage.total.input + node.usage.total.output,
+            tool_calls: node.tool_calls,
+        })
+    }
+
+    /// The empty draft's placeholder in an agent view: steer the agent
+    /// while it runs, else message it. `None` in the main view.
+    pub(crate) fn agent_placeholder(&self) -> Option<String> {
+        let agent = self.focused_agent()?;
+        Some(if self.is_run_in_flight() {
+            format!("Steer {agent}")
+        } else {
+            format!("Message {agent} (the reply stays in this agent)")
+        })
     }
 
     /// The active model's id: the engine's last report, else the

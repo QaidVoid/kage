@@ -34,7 +34,7 @@ const PENDING_LEAD: &str = "  > ";
 
 /// Live agents pinned above the pending prompts before the rest fold
 /// into a `+N more` row.
-const AGENT_MAX_ROWS: usize = 4;
+pub(crate) const AGENT_MAX_ROWS: usize = 4;
 /// Lead of a pinned agent row, lined up with the working row.
 const AGENT_LEAD: &str = "  ";
 /// Extra indent of a pinned agent per level below the main session's
@@ -148,7 +148,7 @@ pub(super) fn render_input(
 
     let placeholder = match mode {
         _ if shell => Some(INPUT_PLACEHOLDER_SHELL),
-        Mode::Insert => Some(INPUT_PLACEHOLDER_INSERT),
+        Mode::Insert => Some(status.placeholder.unwrap_or(INPUT_PLACEHOLDER_INSERT)),
         Mode::Normal => Some(INPUT_PLACEHOLDER_NORMAL),
         Mode::Visual => None,
     };

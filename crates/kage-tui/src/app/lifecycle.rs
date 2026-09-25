@@ -80,7 +80,8 @@ impl App {
             // Computed once and reused for the redraw gate below;
             // `has_running_tool_call` locks the buffer and scans every
             // block, so calling it twice per iteration is wasteful.
-            let animating = self.is_working() || self.has_running_tool_call();
+            let animating =
+                self.is_working() || self.is_run_in_flight() || self.has_running_tool_call();
             let tick = if animating {
                 // 50ms keeps the wake latency low so streamed deltas
                 // surface promptly and shaves the worst-case lag after
@@ -330,7 +331,12 @@ impl App {
         let render_width = terminal.size().map_or(80, |r| r.width);
         self.refresh_plugin_widget_texts_if_due(render_width);
         let (mut buffer, buffer_version) = self.take_draw_snapshot();
-        let session_usage = self.session_usage_snapshot();
+        let mut session_usage = self.session_usage_snapshot();
+        if self.focus.is_some()
+            && let Some(usage) = session_usage.as_mut()
+        {
+            usage.working = self.is_run_in_flight();
+        }
         let hint = self.footer_hint();
         let activity = self.activity_label(&buffer, render_width);
         let title = self
@@ -346,6 +352,14 @@ impl App {
             .map(|dir| dir.display().to_string());
         let cmdline = self.cmdline.as_ref();
         let agent_rows = self.agent_rows();
+        let pending: Vec<view::PendingPrompt> = self
+            .pending
+            .iter()
+            .filter(|(session, _)| *session == self.focus)
+            .map(|(_, p)| p.clone())
+            .collect();
+        let breadcrumb = self.breadcrumb();
+        let placeholder = self.agent_placeholder();
         let status = view::StatusCtx {
             model: model_label.as_deref(),
             session_id: self.status_session_id.as_deref(),
@@ -363,8 +377,10 @@ impl App {
             model_id: model_id.as_deref(),
             start: self.start_info.as_ref(),
             start_keys,
-            pending: &self.pending,
+            pending: &pending,
             agents: &agent_rows,
+            breadcrumb: breadcrumb.as_ref(),
+            placeholder: placeholder.as_deref(),
         };
         let screen_selection = self.screen_selection;
         let mut captured_rows = std::mem::take(&mut self.captured_rows);
@@ -401,6 +417,7 @@ impl App {
         };
         let context_menu = self.context_menu.as_ref();
         let input = &self.input;
+        let mut pinned_area = ratatui::layout::Rect::default();
         terminal
             .draw(|frame| {
                 let area = frame.area();
@@ -417,8 +434,10 @@ impl App {
                 if approval.is_some() {
                     view_regions.input.height = 0;
                 } else {
-                    box_regions.input =
-                        view::split_input(regions.input, agent_rows.len(), status.pending.len()).2;
+                    let (agents, _, input_box) =
+                        view::split_input(regions.input, agent_rows.len(), status.pending.len());
+                    pinned_area = agents;
+                    box_regions.input = input_box;
                 }
                 view::render(
                     frame,
@@ -489,6 +508,10 @@ impl App {
         lock(&self.buffer).merge_render_state(&buffer);
         self.park_draw_snapshot(buffer, buffer_version);
         self.captured_rows = captured_rows;
+        self.pinned_hits = (pinned_area.y..pinned_area.bottom())
+            .zip(agent_rows.iter().take(view::AGENT_MAX_ROWS))
+            .map(|(row, agent)| (row, agent.session))
+            .collect();
         Ok(())
     }
 

@@ -77,9 +77,9 @@ pub(crate) fn register(
     switch: SharedSwitchRequest,
 ) {
     let mut reg = lock(registry);
-    reg.insert(
-        Capability::SessionWrite,
-        Box::new(move |lua: &Lua, pkage: &Table| {
+    reg.entry(Capability::SessionWrite)
+        .or_default()
+        .push(Box::new(move |lua: &Lua, pkage: &Table| {
             let kage: Table = lua.globals().get("kage")?;
             let base_session: Table = kage.get("session")?;
             let psession = lua.create_table()?;
@@ -149,8 +149,7 @@ pub(crate) fn register(
 
             pkage.set("session", psession)?;
             Ok(())
-        }),
-    );
+        }));
 }
 
 #[cfg(test)]

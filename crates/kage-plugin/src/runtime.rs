@@ -271,6 +271,9 @@ impl std::fmt::Debug for PluginRuntime {
     }
 }
 
+/// Default Lua memory ceiling for the runtime, in bytes.
+pub const DEFAULT_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
+
 /// Builder for [`PluginRuntime`]. Lets the host inject a custom host-log
 /// sink, a config snapshot, and the workdir that gates `kage.fs.*`.
 pub struct PluginRuntimeBuilder {
@@ -283,6 +286,7 @@ pub struct PluginRuntimeBuilder {
     plugin_config: BTreeMap<String, serde_json::Value>,
     state_dir: Option<PathBuf>,
     script_budget: u64,
+    memory_limit: usize,
     defaults: &'static str,
     user_dir: Option<PathBuf>,
     options: SharedOptions,
@@ -316,14 +320,8 @@ pub const SANDBOX_REMOVALS: &[(&str, &str)] = &[
     ("os", "tmpname"),
     ("os", "getenv"),
     ("os", "setlocale"),
-    // Process-spawning and file io helpers. Plugins reach files through
-    // `kage.fs` instead.
-    ("io", "popen"),
-    ("io", "open"),
-    ("io", "tmpfile"),
-    ("io", "input"),
-    ("io", "output"),
-    ("io", "lines"),
+    // The whole `io` library. Files go through `kage.fs`.
+    ("", "io"),
     // Native code loading.
     ("package", "loadlib"),
     ("package", "cpath"),
@@ -510,16 +508,7 @@ fn guard_coroutines(lua: &Lua) -> Result<(), PluginError> {
 /// and [`freeze_shared_tables`] stops further writes into the shared
 /// originals and every table nested in them once `build` finishes (new
 /// keys raise, metatable protected).
-const SHARED_TABLES: &[&str] = &[
-    "string",
-    "table",
-    "math",
-    "os",
-    "io",
-    "coroutine",
-    "utf8",
-    "kage",
-];
+const SHARED_TABLES: &[&str] = &["string", "table", "math", "os", "coroutine", "utf8", "kage"];
 
 /// Guard the shared originals, and every table nested inside them,
 /// after all build-time installs: assignments of NEW keys raise, and a

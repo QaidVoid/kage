@@ -80,6 +80,14 @@ impl PluginRuntimeBuilder {
         self
     }
 
+    /// Set the Lua memory ceiling in bytes. Zero disables the limit.
+    /// Defaults to [`crate::runtime::DEFAULT_MEMORY_LIMIT`].
+    #[must_use]
+    pub fn memory_limit(mut self, memory_limit: usize) -> Self {
+        self.memory_limit = memory_limit;
+        self
+    }
+
     /// Set the trusted user config directory. Every load then ends by
     /// evaluating `<dir>/init.lua` in the user environment, with
     /// `require` confined to `<dir>/lua/`. Unset (the default), no user
@@ -143,6 +151,7 @@ impl PluginRuntimeBuilder {
     )]
     pub fn build(self) -> Result<PluginRuntime, PluginError> {
         let lua = Lua::new();
+        lua.set_memory_limit(self.memory_limit)?;
         apply_sandbox(&lua)?;
         watchdog::install(&lua)?;
         api::install(&lua, self.sink.clone(), self.config)?;
@@ -199,6 +208,19 @@ impl PluginRuntimeBuilder {
         highlight::install(&lua, &options.highlights)?;
         let grants = Arc::new(capabilities::parse_grants(&self.capabilities)?);
         let cap_registry = capabilities::capability_registry();
+        // Capability installers first: `mcp`/`acp` attach their
+        // declaring functions under `exec`, and every granted plugin
+        // needs the registry complete before `request_capabilities`.
+        exec::register(&cap_registry, self.workdir.clone());
+        env::register(&cap_registry, self.credential_lookup.clone());
+        http::register(&cap_registry);
+        crypto::register(&cap_registry);
+        mcp::register(
+            &cap_registry,
+            Arc::clone(&mcp_servers),
+            Arc::clone(&mcp_restart),
+        );
+        acp::register(&cap_registry, Arc::clone(&acp_agents));
         let session_entries = session_write::shared_session_entries();
         let switch_request = session_write::shared_switch_request();
         session_write::register(
@@ -206,10 +228,6 @@ impl PluginRuntimeBuilder {
             Arc::clone(&session_entries),
             Arc::clone(&switch_request),
         );
-        exec::register(&cap_registry, self.workdir.clone());
-        env::register(&cap_registry, self.credential_lookup.clone());
-        http::register(&cap_registry);
-        crypto::register(&cap_registry);
         bridge::install_suspend(&lua)?;
         capabilities::install_request_capabilities(
             &lua,
@@ -251,8 +269,8 @@ impl PluginRuntimeBuilder {
             &widget_registry,
         )?;
         status::install_status(&lua, Arc::clone(&status_map))?;
-        acp::install_acp(&lua, Arc::clone(&acp_agents))?;
-        mcp::install_mcp(&lua, Arc::clone(&mcp_servers), Arc::clone(&mcp_restart))?;
+        acp::install_acp(&lua)?;
+        mcp::install_mcp(&lua, Arc::clone(&mcp_servers))?;
         lifecycle::install_lifecycle(&lua, Arc::clone(&usage_snapshot), Arc::clone(&compact_slot))?;
         sessions::install_sessions(
             &lua,

@@ -747,16 +747,6 @@ function kage.fs.read(path) end
 ---@param content string
 function kage.fs.write(path, content) end
 
---- Declarative ACP agent config.
----@class kage.acp
-kage.acp = {}
-
---- Declare an upstream ACP agent at runtime, mirroring
---- `[acp.agents.<name>]` in config.toml. Core spawns it.
---- Since API 1.
----@param spec kage.AcpAgentSpec
-function kage.acp.add_agent(spec) end
-
 --- Register the single policy callback consulted when an
 --- upstream ACP agent asks to run a tool. It must return a
 --- boolean and must not open a dialog (no coroutine suspend):
@@ -770,22 +760,10 @@ function kage.on_acp_permission(handler) end
 ---@class kage.mcp
 kage.mcp = {}
 
---- Declare an MCP server at runtime, mirroring
---- `[mcp.servers.<name>]` in config.toml. Core spawns it.
---- Since API 1.
----@param spec kage.McpServerSpec
-function kage.mcp.add_server(spec) end
-
 --- Names of the plugin-declared MCP servers, sorted.
 --- Since API 1.
 ---@return string[]
 function kage.mcp.list_servers() end
-
---- Ask the host to restart a configured MCP server, including
---- one that failed to start. Applied at the next run start.
---- Since API 1.
----@param name string
-function kage.mcp.restart(name) end
 
 --- Theme inspection and switching.
 ---@class kage.theme
@@ -976,6 +954,31 @@ function kage.session.switch(target) end
 ---@param spec kage.ExecSpec
 ---@return kage.ExecResult
 function kage.exec(spec) end
+
+--- Declarative ACP agent config.
+---@class kage.acp
+kage.acp = {}
+
+--- Declare an upstream ACP agent at runtime, mirroring
+--- `[acp.agents.<name>]` in config.toml. Core spawns the
+--- command, so this requires the `exec` capability.
+--- Since API 1.
+---@param spec kage.AcpAgentSpec
+function kage.acp.add_agent(spec) end
+
+--- Declare an MCP server at runtime, mirroring
+--- `[mcp.servers.<name>]` in config.toml. Core spawns the
+--- command, so this requires the `exec` capability.
+--- Since API 1.
+---@param spec kage.McpServerSpec
+function kage.mcp.add_server(spec) end
+
+--- Ask the host to restart a configured MCP server,
+--- including one that failed to start. Applied at the next
+--- run start. Requires the `exec` capability.
+--- Since API 1.
+---@param name string
+function kage.mcp.restart(name) end
 
 --- Read a process environment variable. Returns the value
 --- or `nil` when unset. The grant is coarse: any variable

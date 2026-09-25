@@ -170,7 +170,7 @@ mod tests {
              kage.notify(table.concat({
                type(kage.exec), type(kage.env), type(kage.http),
                type(kage.session.fork_to), tostring(caps.exec and caps.net),
-               tostring(io.open == nil and os.execute == nil and debug == nil),
+               tostring(io == nil and os.execute == nil and debug == nil),
              }, ' '))",
         );
         let (rec, rt) = user_runtime(user.path());

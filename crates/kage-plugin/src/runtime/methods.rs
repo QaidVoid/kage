@@ -28,6 +28,7 @@ impl PluginRuntime {
             plugin_config: BTreeMap::new(),
             state_dir: None,
             script_budget: watchdog::BUDGET,
+            memory_limit: DEFAULT_MEMORY_LIMIT,
             defaults: stdlib::DEFAULTS,
             user_dir: None,
             options: SharedOptions::default(),

@@ -38,7 +38,10 @@ pub(crate) enum Capability {
     /// Inspect session entries and request a reseating rewind.
     SessionWrite,
     /// Run any subprocess (no shell, any binary on the `PATH`, any
-    /// args) rooted at the workdir. Coarse: no command allowlist.
+    /// args) rooted at the workdir, and declare subprocess-spawning
+    /// config: `kage.exec`, plus plugin-declared MCP servers and ACP
+    /// agents (the host spawns what was declared). Coarse: no command
+    /// allowlist.
     Exec,
     /// Read any process environment variable. Coarse: no per-variable
     /// allowlist, and read-only (no setter).
@@ -78,12 +81,14 @@ pub(crate) type CurrentPlugin = Arc<Mutex<Option<String>>>;
 
 /// Attaches a granted capability's API onto a single plugin's `kage`
 /// proxy table. Capabilities register one of these so this module
-/// need not know their surface.
+/// need not know their surface. Several installers may attach to one
+/// capability (`exec` covers `kage.exec` and the declare-a-subprocess
+/// config surfaces); they run in registration order.
 pub(crate) type CapabilityInstaller = Box<dyn Fn(&Lua, &Table) -> mlua::Result<()> + Send>;
 
-/// Capability -> installer, populated at runtime-build time by each
+/// Capability -> installers, populated at runtime-build time by each
 /// capability's own wiring. Empty means no capability has an API yet.
-pub(crate) type CapabilityRegistry = Arc<Mutex<HashMap<Capability, CapabilityInstaller>>>;
+pub(crate) type CapabilityRegistry = Arc<Mutex<HashMap<Capability, Vec<CapabilityInstaller>>>>;
 
 /// An empty capability registry for capabilities to register into.
 #[must_use]
@@ -171,7 +176,7 @@ pub(crate) fn install_trusted(
     let reg = registry
         .lock()
         .map_err(|_| mlua::Error::external("capability registry mutex poisoned"))?;
-    for installer in reg.values() {
+    for installer in reg.values().flatten() {
         installer(lua, pkage)?;
     }
     pkage.set(
@@ -204,7 +209,7 @@ fn attach_capability(
     let reg = registry
         .lock()
         .map_err(|_| mlua::Error::external("capability registry mutex poisoned"))?;
-    let Some(installer) = reg.get(&cap) else {
+    let Some(installers) = reg.get(&cap) else {
         return Ok(());
     };
     let env: Table = {
@@ -220,7 +225,10 @@ fn attach_capability(
     let Value::Table(pkage) = pkage else {
         return Err(mlua::Error::external("plugin kage proxy missing"));
     };
-    installer(lua, &pkage)
+    for installer in installers {
+        installer(lua, &pkage)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

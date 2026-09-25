@@ -44,9 +44,9 @@ const POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// workdir; a spec `cwd` is resolved under it and may not escape.
 pub(crate) fn register(registry: &CapabilityRegistry, workdir: PathBuf) {
     let mut reg = lock(registry);
-    reg.insert(
-        Capability::Exec,
-        Box::new(move |lua: &Lua, pkage: &Table| {
+    reg.entry(Capability::Exec)
+        .or_default()
+        .push(Box::new(move |lua: &Lua, pkage: &Table| {
             let root = workdir.clone();
             pkage.set(
                 "exec",
@@ -143,8 +143,7 @@ pub(crate) fn register(registry: &CapabilityRegistry, workdir: PathBuf) {
                 })?,
             )?;
             Ok(())
-        }),
-    );
+        }));
 }
 
 #[cfg(test)]

@@ -768,20 +768,6 @@ pub(super) const FUNCS: &[Func] = &[
     },
     Func {
         doc: &[
-            "Declare an upstream ACP agent at runtime, mirroring",
-            "`[acp.agents.<name>]` in config.toml. Core spawns it.",
-        ],
-        path: "kage.acp.add_agent",
-        since: 1,
-        params: &[Field {
-            name: "spec",
-            ty: "kage.AcpAgentSpec",
-            doc: "",
-        }],
-        ret: None,
-    },
-    Func {
-        doc: &[
             "Register the single policy callback consulted when an",
             "upstream ACP agent asks to run a tool. It must return a",
             "boolean and must not open a dialog (no coroutine suspend):",
@@ -798,39 +784,11 @@ pub(super) const FUNCS: &[Func] = &[
         ret: None,
     },
     Func {
-        doc: &[
-            "Declare an MCP server at runtime, mirroring",
-            "`[mcp.servers.<name>]` in config.toml. Core spawns it.",
-        ],
-        path: "kage.mcp.add_server",
-        since: 1,
-        params: &[Field {
-            name: "spec",
-            ty: "kage.McpServerSpec",
-            doc: "",
-        }],
-        ret: None,
-    },
-    Func {
         doc: &["Names of the plugin-declared MCP servers, sorted."],
         path: "kage.mcp.list_servers",
         since: 1,
         params: &[],
         ret: Some("string[]"),
-    },
-    Func {
-        doc: &[
-            "Ask the host to restart a configured MCP server, including",
-            "one that failed to start. Applied at the next run start.",
-        ],
-        path: "kage.mcp.restart",
-        since: 1,
-        params: &[Field {
-            name: "name",
-            ty: "string",
-            doc: "",
-        }],
-        ret: None,
     },
     Func {
         doc: &["The active theme name."],

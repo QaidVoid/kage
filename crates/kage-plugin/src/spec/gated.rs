@@ -80,6 +80,60 @@ pub(super) const GATED: &[GatedFunc] = &[
         },
     },
     GatedFunc {
+        cap: "exec",
+        func: Func {
+            doc: &[
+                "Declare an upstream ACP agent at runtime, mirroring",
+                "`[acp.agents.<name>]` in config.toml. Core spawns the",
+                "command, so this requires the `exec` capability.",
+            ],
+            path: "kage.acp.add_agent",
+            since: 1,
+            params: &[Field {
+                name: "spec",
+                ty: "kage.AcpAgentSpec",
+                doc: "",
+            }],
+            ret: None,
+        },
+    },
+    GatedFunc {
+        cap: "exec",
+        func: Func {
+            doc: &[
+                "Declare an MCP server at runtime, mirroring",
+                "`[mcp.servers.<name>]` in config.toml. Core spawns the",
+                "command, so this requires the `exec` capability.",
+            ],
+            path: "kage.mcp.add_server",
+            since: 1,
+            params: &[Field {
+                name: "spec",
+                ty: "kage.McpServerSpec",
+                doc: "",
+            }],
+            ret: None,
+        },
+    },
+    GatedFunc {
+        cap: "exec",
+        func: Func {
+            doc: &[
+                "Ask the host to restart a configured MCP server,",
+                "including one that failed to start. Applied at the next",
+                "run start. Requires the `exec` capability.",
+            ],
+            path: "kage.mcp.restart",
+            since: 1,
+            params: &[Field {
+                name: "name",
+                ty: "string",
+                doc: "",
+            }],
+            ret: None,
+        },
+    },
+    GatedFunc {
         cap: "env",
         func: Func {
             doc: &[

@@ -73,13 +73,12 @@ pub fn install_http(lua: &Lua) -> Result<(), PluginError> {
 /// granted `net` can make outbound requests.
 pub(crate) fn register(registry: &CapabilityRegistry) {
     let mut reg = lock(registry);
-    reg.insert(
-        Capability::Net,
-        Box::new(|lua: &Lua, pkage: &Table| {
+    reg.entry(Capability::Net)
+        .or_default()
+        .push(Box::new(|lua: &Lua, pkage: &Table| {
             pkage.set("http", build_http_table(lua)?)?;
             Ok(())
-        }),
-    );
+        }));
 }
 
 /// Build the populated `kage.http` table. The helpers are stateless

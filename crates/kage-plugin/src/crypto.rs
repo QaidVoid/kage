@@ -48,13 +48,12 @@ pub fn install_crypto(lua: &Lua) -> Result<(), PluginError> {
 /// `crypto` can call them.
 pub(crate) fn register(registry: &CapabilityRegistry) {
     let mut reg = lock(registry);
-    reg.insert(
-        Capability::Crypto,
-        Box::new(|lua: &Lua, pkage: &Table| {
+    reg.entry(Capability::Crypto)
+        .or_default()
+        .push(Box::new(|lua: &Lua, pkage: &Table| {
             pkage.set("crypto", build_crypto_table(lua)?)?;
             Ok(())
-        }),
-    );
+        }));
 }
 
 /// Build the populated `kage.crypto` table. The helpers are

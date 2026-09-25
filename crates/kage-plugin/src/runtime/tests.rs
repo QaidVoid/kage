@@ -19,6 +19,35 @@ fn sandbox_strips_dangerous_globals() {
 }
 
 #[test]
+fn io_library_is_gone_entirely() {
+    let rt = PluginRuntime::new().unwrap();
+    // The partial strip used to leave io.read/io.write/io.close
+    // reachable; the whole table must go.
+    for chunk in [
+        "return io == nil",
+        "return io == nil or io.read == nil",
+        "return io == nil or io.write == nil",
+    ] {
+        let v = rt.eval(chunk).unwrap();
+        assert_eq!(v.as_boolean(), Some(true), "chunk: {chunk}");
+    }
+}
+
+#[test]
+fn memory_limit_aborts_exhaustion_and_stays_usable() {
+    let rt = PluginRuntime::builder()
+        .memory_limit(8 * 1024 * 1024)
+        .build()
+        .unwrap();
+    let err = rt
+        .eval("local t = {} for i = 1, 100 do t[i] = string.rep('x', 1024 * 1024) end")
+        .unwrap_err();
+    assert!(matches!(err, PluginError::Lua(_)), "got: {err:?}");
+    let v = rt.eval("return 6 * 7").unwrap();
+    assert_eq!(v.as_integer(), Some(42));
+}
+
+#[test]
 fn benign_library_functions_still_work() {
     let rt = PluginRuntime::new().unwrap();
     let v = rt.eval("return string.len('hello')").unwrap();

@@ -30,9 +30,9 @@ pub type CredentialLookup = std::sync::Arc<dyn Fn(&str) -> Option<String> + Send
 /// string. A provider id with no stored credential answers `nil`.
 pub(crate) fn register(registry: &CapabilityRegistry, lookup: CredentialLookup) {
     let mut reg = lock(registry);
-    reg.insert(
-        Capability::Env,
-        Box::new(move |lua: &Lua, pkage: &Table| {
+    reg.entry(Capability::Env)
+        .or_default()
+        .push(Box::new(move |lua: &Lua, pkage: &Table| {
             pkage.set(
                 "env",
                 lua.create_function(|_, name: String| match std::env::var(&name) {
@@ -49,8 +49,7 @@ pub(crate) fn register(registry: &CapabilityRegistry, lookup: CredentialLookup) 
                 lua.create_function(move |_, provider: String| Ok(lookup(provider.as_str())))?,
             )?;
             Ok(())
-        }),
-    );
+        }));
 }
 
 #[cfg(test)]

@@ -2150,3 +2150,30 @@ fn thinking_fits_the_model_and_images_skip_text_only_models() {
     let sent = &request.messages.last().unwrap().content;
     assert!(sent.iter().all(|c| !matches!(c, Content::Image { .. })));
 }
+
+#[test]
+fn run_cost_comes_from_the_declared_model_price() {
+    let declared = Declared {
+        mock: MockProvider::replaying(text_turn("ok")),
+        model: kage_provider::ProviderModel {
+            id: "m".into(),
+            cost: Some(kage_core::ModelCost {
+                input: 100.0,
+                output: 1000.0,
+                cache_read: None,
+                cache_write: None,
+            }),
+            ..kage_provider::ProviderModel::default()
+        },
+    };
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(declared)));
+    let id = SessionId::new();
+    h.open(id, None);
+    prompt(&h.engine, id, "hi", Delivery::Steer);
+    let events = until_runs_end(&h.events, 1);
+    let usage = events.iter().rev().find_map(|e| match &e.event {
+        Event::Host(HostEvent::UsageUpdated { usage }) => Some(*usage),
+        _ => None,
+    });
+    assert!((usage.unwrap().cost - 0.003).abs() < 1e-12);
+}

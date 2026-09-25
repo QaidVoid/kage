@@ -78,6 +78,26 @@ pub struct ToolOutput {
     pub terminate: bool,
 }
 
+/// Per-million-token prices for one model, in USD.
+///
+/// Cache-read and cache-write are optional because not every provider
+/// distinguishes them; [`TokenCost::from_usage`] says how a missing
+/// rate is billed.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelCost {
+    /// Dollars per million input (prompt) tokens.
+    pub input: f64,
+    /// Dollars per million output (completion) tokens.
+    pub output: f64,
+    /// Dollars per million tokens read from the provider's prompt cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read: Option<f64>,
+    /// Dollars per million tokens written into the provider's prompt
+    /// cache for a future turn to reuse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write: Option<f64>,
+}
+
 /// Dollar cost of one turn's [`TokenUsage`] given a per-million pricing
 /// table. All values in USD.
 ///

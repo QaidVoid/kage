@@ -1,6 +1,6 @@
 //! Static description of a [`Provider`](crate::Provider) instance.
 
-use kage_core::{Inputs, Reasoning, ReasoningField};
+use kage_core::{Inputs, ModelCost, Reasoning, ReasoningField};
 
 /// Description used by the registry, `kage doctor`, and the model picker UI.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -22,7 +22,7 @@ pub struct ProviderMetadata {
 /// model list this way; built-in providers can leave the
 /// [`Provider::models`](crate::Provider::models) override empty and rely
 /// on [`crate::catalog`].
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ProviderModel {
     /// Provider-scoped model id (the portion after `provider:`).
     pub id: String,
@@ -44,4 +44,8 @@ pub struct ProviderModel {
     /// Field an OpenAI-compatible model reads its reasoning back from
     /// during a tool loop, when it takes reasoning back.
     pub interleaved: Option<ReasoningField>,
+    /// Per-million-token prices in USD, when declared. A provider that
+    /// declares models is priced from them alone, see
+    /// [`crate::model_cost`].
+    pub cost: Option<ModelCost>,
 }

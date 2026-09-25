@@ -12,6 +12,7 @@ use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
 use serde::{Deserialize, Serialize};
 
+use crate::event::ModelCost;
 use crate::modality::Inputs;
 use crate::options::OptionValue;
 use crate::permissions::PermissionsConfig;
@@ -338,6 +339,25 @@ impl ProvidersConfig {
                     "[providers.custom.{id}] must declare at least one [[providers.custom.{id}.models]] entry"
                 )));
             }
+            for model in &cfg.models {
+                let Some(cost) = model.cost else { continue };
+                let prices = [
+                    ("input", Some(cost.input)),
+                    ("output", Some(cost.output)),
+                    ("cache_read", cost.cache_read),
+                    ("cache_write", cost.cache_write),
+                ];
+                for (key, price) in prices {
+                    if let Some(price) = price
+                        && !(price.is_finite() && price >= 0.0)
+                    {
+                        return Err(config_error(format!(
+                            "[providers.custom.{id}] model `{}` has cost.{key} = {price}; prices must be finite and not negative",
+                            model.id
+                        )));
+                    }
+                }
+            }
         }
         for id in self.overrides.keys() {
             if !overridable_ids.contains(&id.as_str()) {
@@ -453,6 +473,11 @@ pub struct CustomProviderModel {
     /// `<thinking>` text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interleaved: Option<ReasoningField>,
+    /// Per-million-token prices in USD (`input`, `output`, and the
+    /// optional `cache_read` and `cache_write`). Left unset, the cost of
+    /// this model is unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<ModelCost>,
 }
 
 impl CustomProviderModel {
@@ -1477,6 +1502,106 @@ default = "ask"   # keep asking
             assert_eq!(models[1].reasoning(), Reasoning::None);
             assert_eq!(models[2].reasoning(), Reasoning::Unknown);
             assert!(models[2].input.is_empty());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn custom_model_cost_parses_and_bad_prices_fail_validation() {
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            jail.create_file(
+                "config.toml",
+                r#"
+                [providers.custom.local]
+                base_url = "http://localhost:8080/v1"
+
+                [[providers.custom.local.models]]
+                id = "priced"
+                name = "Priced"
+                cost = { input = 0.27, output = 1.10, cache_read = 0.07, cache_write = 0.0 }
+
+                [[providers.custom.local.models]]
+                id = "partial"
+                name = "Partial"
+                cost = { input = 1, output = 2 }
+                "#,
+            )?;
+            let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
+            let models = &cfg.providers.custom["local"].models;
+            assert_eq!(
+                models[0].cost,
+                Some(ModelCost {
+                    input: 0.27,
+                    output: 1.10,
+                    cache_read: Some(0.07),
+                    cache_write: Some(0.0),
+                })
+            );
+            assert_eq!(
+                models[1].cost,
+                Some(ModelCost {
+                    input: 1.0,
+                    output: 2.0,
+                    cache_read: None,
+                    cache_write: None,
+                })
+            );
+            cfg.providers.validate(&[], &[]).expect("valid prices pass");
+
+            for (cost, key) in [
+                ("{ input = -0.5, output = 1 }", "cost.input"),
+                ("{ input = 1, output = nan }", "cost.output"),
+                (
+                    "{ input = 1, output = 1, cache_read = inf }",
+                    "cost.cache_read",
+                ),
+                (
+                    "{ input = 1, output = 1, cache_write = -1 }",
+                    "cost.cache_write",
+                ),
+            ] {
+                jail.create_file(
+                    "bad.toml",
+                    &format!(
+                        r#"
+                        [providers.custom.local]
+                        base_url = "http://localhost:8080/v1"
+
+                        [[providers.custom.local.models]]
+                        id = "bad"
+                        name = "Bad"
+                        cost = {cost}
+                        "#
+                    ),
+                )?;
+                let cfg = Config::load(jail.directory().join("bad.toml").as_path()).unwrap();
+                let err = cfg
+                    .providers
+                    .validate(&[], &[])
+                    .expect_err("invalid price must be rejected");
+                let message = err.to_string();
+                assert!(message.contains("[providers.custom.local]"), "{message}");
+                assert!(message.contains("`bad`"), "{message}");
+                assert!(message.contains(key), "{message}");
+                assert!(message.contains("finite and not negative"), "{message}");
+            }
+
+            jail.create_file(
+                "missing.toml",
+                r#"
+                [providers.custom.local]
+                base_url = "http://localhost:8080/v1"
+
+                [[providers.custom.local.models]]
+                id = "bad"
+                name = "Bad"
+                cost = { input = 1 }
+                "#,
+            )?;
+            let err = Config::load(jail.directory().join("missing.toml").as_path())
+                .expect_err("cost without output must fail the load");
+            assert!(err.to_string().contains("output"), "{err}");
             Ok(())
         });
     }

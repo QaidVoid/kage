@@ -33,7 +33,21 @@ pub use metadata::{ProviderMetadata, ProviderModel};
 pub use registry::{ProviderRegistry, ResolvedProvider};
 pub use request::{StreamRequest, ThinkingConfig, ThinkingLevel};
 
-use kage_core::CancelFlag;
+use kage_core::{CancelFlag, ModelCost};
+
+/// Per-million-token prices for `model` as `provider` serves it. A
+/// provider that declares its own models (custom and plugin providers)
+/// is priced from those entries alone, even when its id matches a
+/// catalog provider. One that declares none is priced from the catalog
+/// entry under its id. `None` when the price is unknown.
+#[must_use]
+pub fn model_cost(provider: &dyn Provider, model: &str) -> Option<ModelCost> {
+    let declared = provider.models();
+    if declared.is_empty() {
+        return catalog::model(&provider.metadata().id, model)?.cost;
+    }
+    declared.into_iter().find(|m| m.id == model)?.cost
+}
 
 /// Boxed iterator yielded by [`Provider::stream`].
 ///

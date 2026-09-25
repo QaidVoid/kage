@@ -227,6 +227,7 @@ fn register_custom_providers(
                 reasoning: m.reasoning(),
                 input: m.input,
                 interleaved: m.interleaved,
+                cost: m.cost,
             })
             .collect();
         let provider: Arc<dyn kage_provider::Provider> = match cfg.kind {
@@ -591,6 +592,49 @@ mod tests {
             Some(4096)
         );
         assert_eq!(fallback_model(&registry), "deepseek:ds-local");
+    }
+
+    #[test]
+    fn custom_provider_reusing_a_catalog_id_is_priced_from_its_own_models() {
+        let priced = kage_provider::catalog::provider("deepseek")
+            .and_then(|p| p.models.iter().find(|m| m.cost.is_some()))
+            .expect("catalog prices a deepseek model");
+        let config: kage_core::config::Config = toml::from_str(&format!(
+            r#"
+            [providers.custom.deepseek]
+            base_url = "http://127.0.0.1:1/v1"
+            api_key_env = ""
+            [[providers.custom.deepseek.models]]
+            id = "{id}"
+            name = "Unpriced"
+            [[providers.custom.deepseek.models]]
+            id = "ds-priced"
+            name = "Priced"
+            cost = {{ input = 0.27, output = 1.10, cache_read = 0.07 }}
+            "#,
+            id = priced.id,
+        ))
+        .unwrap();
+        let mut registry = ProviderRegistry::new();
+        register_custom_providers(&config, &auth::AuthStore::empty(), &mut registry);
+        let custom = registry.get("deepseek").unwrap().as_ref();
+        assert_eq!(kage_provider::model_cost(custom, priced.id), None);
+        assert_eq!(
+            kage_provider::model_cost(custom, "ds-priced"),
+            Some(kage_core::ModelCost {
+                input: 0.27,
+                output: 1.10,
+                cache_read: Some(0.07),
+                cache_write: None,
+            })
+        );
+        assert_eq!(kage_provider::model_cost(custom, "not-declared"), None);
+
+        let catalog = stub("deepseek", &[]);
+        assert_eq!(
+            kage_provider::model_cost(catalog.as_ref(), priced.id),
+            priced.cost
+        );
     }
 
     #[test]

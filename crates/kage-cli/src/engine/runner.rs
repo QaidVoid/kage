@@ -7,7 +7,8 @@ use std::thread;
 use kage_core::protocol::{HostEvent, McpServerInfo, NoticeLevel, RunOutcome, Usage};
 use kage_core::sync::lock;
 use kage_core::{
-    CancelFlag, LoopError, LoopEvent, Message, SessionId, TokenCost, TokenUsage, ToolOutput,
+    CancelFlag, LoopError, LoopEvent, Message, ModelCost, SessionId, TokenCost, TokenUsage,
+    ToolOutput,
 };
 use kage_loop::{AgentContext, Hooks, LoopConfig};
 use kage_mcp::expand::ExpandError;
@@ -78,7 +79,6 @@ pub(super) struct Run {
     pub session: SessionId,
     pub work: Work,
     pub provider: Arc<dyn Provider>,
-    pub model: String,
     pub tools: ToolRegistry,
     pub cx: AgentContext,
     pub recorder: Option<Recorder>,
@@ -116,7 +116,6 @@ impl Run {
             session,
             work,
             provider,
-            model,
             mut tools,
             mut cx,
             mut recorder,
@@ -134,6 +133,7 @@ impl Run {
             .map(|lease| lease.refresh(session, &bus, &mut tools, done))
             .unwrap_or_default();
         bus.publish(session, HostEvent::RunStarted);
+        let price = kage_provider::model_cost(provider.as_ref(), &cx.model);
         let mut tool_names = HashMap::new();
         let mut emit = |event: LoopEvent| {
             if let Some(rt) = &plugins {
@@ -150,7 +150,7 @@ impl Run {
             };
             bus.publish(session, event);
             if let Some(turn) = turn_usage {
-                add_turn(&mut usage, &turn, &model);
+                add_turn(&mut usage, &turn, price);
                 bus.publish(session, HostEvent::UsageUpdated { usage });
             }
         };
@@ -253,18 +253,16 @@ fn notice(bus: &Bus, session: SessionId, text: String) {
     );
 }
 
-/// Fold one turn's usage into the session totals.
-fn add_turn(usage: &mut Usage, turn: &TokenUsage, model: &str) {
+/// Fold one turn's usage into the session totals, priced at `price`
+/// when the model has a known price.
+fn add_turn(usage: &mut Usage, turn: &TokenUsage, price: Option<ModelCost>) {
     let total = &mut usage.total;
     total.input += turn.input;
     total.output += turn.output;
     total.cache_read += turn.cache_read;
     total.cache_write += turn.cache_write;
     usage.context_used = turn.input + turn.output + turn.cache_read + turn.cache_write;
-    if let Some((provider_id, model_id)) = model.split_once(':')
-        && let Some(info) = kage_provider::catalog::model(provider_id, model_id)
-        && let Some(rate) = info.cost
-    {
+    if let Some(rate) = price {
         usage.cost += TokenCost::from_usage(
             turn,
             rate.input,

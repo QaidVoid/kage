@@ -658,7 +658,6 @@ impl Dispatcher {
             session: id,
             work,
             provider,
-            model,
             tools,
             cx,
             recorder,

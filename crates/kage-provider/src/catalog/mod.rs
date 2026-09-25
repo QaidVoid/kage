@@ -19,6 +19,7 @@ pub mod source;
 use std::path::Path;
 use std::sync::OnceLock;
 
+pub use kage_core::ModelCost;
 use kage_core::{Inputs, Reasoning, ReasoningField};
 
 use source::{SourceModel, SourceProvider};
@@ -71,24 +72,6 @@ impl ModelInfo {
     pub fn prompt_window(&self) -> Option<u64> {
         self.input_limit.or(self.context)
     }
-}
-
-/// Per-million-token pricing for one model, in USD.
-///
-/// Cache-read and cache-write are optional because not every provider
-/// distinguishes the two; when absent, callers should treat cached
-/// tokens at the input rate.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ModelCost {
-    /// Dollars per million input (prompt) tokens.
-    pub input: f64,
-    /// Dollars per million output (completion) tokens.
-    pub output: f64,
-    /// Dollars per million tokens read from the provider's prompt cache.
-    pub cache_read: Option<f64>,
-    /// Dollars per million tokens written into the provider's prompt
-    /// cache for a future turn to reuse.
-    pub cache_write: Option<f64>,
 }
 
 static CATALOG: OnceLock<&'static [ProviderInfo]> = OnceLock::new();

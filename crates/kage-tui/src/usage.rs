@@ -45,7 +45,7 @@ pub struct SessionUsage {
     /// spinner.
     pub working: bool,
     /// Cumulative dollar cost across every turn this session. `0.0`
-    /// when the active model has no catalog cost data.
+    /// when the active model has no known price.
     pub total_cost: f64,
     /// Thinking level the next run sends. `None` (and `Some(Off)`)
     /// leave the footer pill suppressed; the renderer draws

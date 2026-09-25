@@ -159,6 +159,8 @@ context = 131072                     # optional, in tokens
 max_output = 8192                    # optional, in tokens
 efforts = ["low", "medium", "high"]  # optional, see the model keys below
 input = ["text", "image"]            # optional: text, image, pdf, audio, video
+# optional, USD per million tokens. cache_read and cache_write are optional
+cost = { input = 0.27, output = 1.10, cache_read = 0.07, cache_write = 0.0 }
 
 [providers.custom.relay]
 kind = "anthropic"
@@ -183,14 +185,17 @@ keyless local endpoints want.
 A custom id that matches a catalog provider, such as `deepseek`,
 replaces that provider. kage prints a warning at startup naming the
 id, and the picker offers only the models the custom provider declares.
+Cost tracking follows the same rule: prices come from the custom
+models' `cost` keys, never from the catalog, even for a model id the
+catalog prices.
 Built-in ids are refused; override those with `[providers.<id>]`.
 
 The provider keys `tool_use`, `thinking` and `caching` are accepted
 but change nothing: kage always sends tool definitions, and thinking
 goes back to the model as described under [thinking](#thinking).
 
-Four optional model keys describe what a model accepts, since kage
-has no catalog entry for it:
+Five optional model keys describe what a model accepts and costs,
+since kage has no catalog entry for it:
 
 - `reasoning`: `false` for a model that does not think, which sends no
   thinking setting. `true` offers every level.
@@ -205,6 +210,13 @@ has no catalog entry for it:
   `reasoning_content` or `reasoning_details` (the models.dev
   `interleaved.field`). Left out, reasoning is sent as `<thinking>`
   text in the message content.
+- `cost`: prices in USD per million tokens, with the same fields as
+  the catalog: `input` and `output`, plus the optional `cache_read`
+  and `cache_write`. Cache reads without a price are billed at the
+  input rate and cache writes at the output rate. Every price must be
+  a finite number and not negative, or kage refuses to start. A model
+  without `cost` has no known price. Its cost counts as zero, so the
+  footer and the agents overlay show no dollar amount for it.
 
 A model with neither `reasoning` nor `efforts` sends a level you pick
 unchanged, and no level while thinking is automatic.

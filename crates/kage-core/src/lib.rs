@@ -31,7 +31,9 @@ pub use config::{
     SandboxConfig, UiConfig,
 };
 pub use error::{Error, Result};
-pub use event::{LoopError, LoopEvent, StopReason, TokenCost, TokenUsage, ToolOutput, ToolUpdate};
+pub use event::{
+    LoopError, LoopEvent, ModelCost, StopReason, TokenCost, TokenUsage, ToolOutput, ToolUpdate,
+};
 pub use message::{Content, ImageSource, Message, MessageId, Role, ThinkingSignature, ToolCallId};
 pub use modality::{Input, Inputs};
 pub use protocol::SessionId;

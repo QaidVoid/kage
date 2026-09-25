@@ -35,6 +35,7 @@ fn model_entry(
         reasoning: m.reasoning,
         input: m.input,
         interleaved: m.interleaved,
+        cost: m.cost,
     })
 }
 

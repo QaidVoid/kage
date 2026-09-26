@@ -1,6 +1,6 @@
 //! Lookup of [`Tool`] implementations by name.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use kage_core::ToolSpec;
@@ -13,7 +13,10 @@ use crate::Tool;
 /// the same instances.
 #[derive(Clone, Debug, Default)]
 pub struct ToolRegistry {
-    tools: HashMap<String, Arc<dyn Tool>>,
+    /// Sorted by name, so `list_for_provider` emits a stable tool
+    /// order: a stable prefix is what lets the provider's prompt cache
+    /// survive a restart or reload.
+    tools: BTreeMap<String, Arc<dyn Tool>>,
 }
 
 impl ToolRegistry {

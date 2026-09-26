@@ -168,7 +168,7 @@ fn clicking_a_folded_header_unfolds_it_in_place() {
             buf.append_assistant_delta(&format!("reply {i}"));
             buf.finish_streaming();
         }
-        buf.push_tool_call("c1", "bash", serde_json::json!({"command": "seq 30"}));
+        buf.push_tool_call("c1", "shell", serde_json::json!({"command": "seq 30"}));
         let out: Vec<String> = (1..=30).map(|i| format!("out {i}")).collect();
         buf.push_tool_result("c1", format!("stdout:\n{}\nexit: 0", out.join("\n")), false);
         buf.append_assistant_delta("after");

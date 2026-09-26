@@ -296,10 +296,10 @@ local g = api.augroup_create("me")
 
 api.autocmd_create("tool_call", {
   group = g,
-  pattern = "bash",
+  pattern = "shell",
   desc = "log shell calls",
   callback = function(ev)
-    kage.log("info", "bash: " .. tostring(ev.data.input.command))
+    kage.log("info", "shell: " .. tostring(ev.data.input.command))
   end,
 })
 ```
@@ -578,7 +578,7 @@ is logged and the previous output stays.
 kage keeps the output and calls `render` again only when:
 
 - an event in `events` fires. An entry is an event name, optionally
-  followed by a space and a pattern: `"tool_result bash"`,
+  followed by a space and a pattern: `"tool_result shell"`,
   `"user Tick"`.
 - `interval` milliseconds pass (at least 50).
 - `kage.api.redraw(slot)` is called. With no argument it redraws every
@@ -661,10 +661,10 @@ local g = api.augroup_create("me")
 
 api.autocmd_create("tool_call", {
   group = g,
-  pattern = "bash",
+  pattern = "shell",
   desc = "log shell calls",
   callback = function(ev)
-    kage.log("info", "bash: " .. tostring(ev.data.input.command))
+    kage.log("info", "shell: " .. tostring(ev.data.input.command))
   end,
 })
 

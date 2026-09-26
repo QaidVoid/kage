@@ -323,7 +323,7 @@ fn terminal_input_hook_cannot_swallow_approval_panel_keys() {
     feed(
         &mut app,
         &events,
-        vec![bash_start("c1"), permission_request("c1", 1)],
+        vec![shell_start("c1"), permission_request("c1", 1)],
     );
     assert!(app.approval_panel.is_some());
     std::thread::sleep(crate::overlay::approval::TYPE_AHEAD_GUARD);

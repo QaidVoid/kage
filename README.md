@@ -73,9 +73,9 @@ kage.opt.theme = "tokyo-night"
 kage.keymap.set("i", "<F2>", kage.action.OpenModelPicker, { desc = "switch model" })
 
 kage.api.autocmd_create("tool_call", {
-  pattern = "bash",
+  pattern = "shell",
   callback = function(ev)
-    kage.log("info", "bash: " .. tostring(ev.data.input.command))
+    kage.log("info", "shell: " .. tostring(ev.data.input.command))
   end,
 })
 ```

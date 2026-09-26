@@ -284,7 +284,7 @@ mod tests {
             Role::Assistant,
             vec![Content::ToolCall {
                 id: kage_core::ToolCallId::new(id),
-                name: "bash".into(),
+                name: "shell".into(),
                 input: serde_json::json!({}),
             }],
             None,

@@ -1213,7 +1213,7 @@ mod tests {
         roundtrip(
             &SessionUpdate::ToolCall(ToolCall {
                 tool_call_id: "t1".into(),
-                title: "bash".into(),
+                title: "shell".into(),
                 kind: ToolKind::Execute,
                 status: ToolCallStatus::Pending,
                 content: vec![],
@@ -1222,7 +1222,7 @@ mod tests {
             serde_json::json!({
                 "sessionUpdate": "tool_call",
                 "toolCallId": "t1",
-                "title": "bash",
+                "title": "shell",
                 "kind": "execute",
                 "status": "pending",
                 "rawInput": {"cmd": "ls"}

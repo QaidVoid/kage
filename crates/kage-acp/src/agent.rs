@@ -789,8 +789,13 @@ mod tests {
                 tool_call_id: "call-1".into(),
                 ..ToolCallUpdate::default()
             };
-            let decision =
-                request_permission(ctx.peer(), &req.session_id, tool_call, "bash", &self.cancel);
+            let decision = request_permission(
+                ctx.peer(),
+                &req.session_id,
+                tool_call,
+                "shell",
+                &self.cancel,
+            );
             assert!(matches!(decision, PermissionDecision::Deny(_)));
             Ok(PromptResponse {
                 stop_reason: StopReason::Cancelled,

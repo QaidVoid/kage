@@ -47,7 +47,7 @@ fn thinking_tool_call(text: &str, signature: ThinkingSignature) -> Message {
             },
             Content::ToolCall {
                 id: ToolCallId::new("call_1"),
-                name: "bash".to_owned(),
+                name: "shell".to_owned(),
                 input: serde_json::json!({}),
             },
         ],
@@ -299,7 +299,7 @@ fn continuation_request_drops_thinking() {
         "m",
         vec![
             user_msg("run it"),
-            assistant_tool_call("call_1", "bash"),
+            assistant_tool_call("call_1", "shell"),
             tool_result("call_1", "file.rs"),
         ],
     );
@@ -316,7 +316,7 @@ fn completed_tool_turn_keeps_thinking_on_next_request() {
         "m",
         vec![
             user_msg("run it"),
-            assistant_tool_call("call_1", "bash"),
+            assistant_tool_call("call_1", "shell"),
             tool_result("call_1", "file.rs"),
             Message::new(
                 Role::Assistant,
@@ -341,7 +341,7 @@ fn steering_after_tool_results_drops_thinking() {
         "m",
         vec![
             user_msg("run it"),
-            assistant_tool_call("call_1", "bash"),
+            assistant_tool_call("call_1", "shell"),
             tool_result("call_1", "file.rs"),
             user_msg("also check the logs"),
         ],

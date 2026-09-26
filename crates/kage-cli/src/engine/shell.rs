@@ -154,7 +154,7 @@ impl super::Dispatcher {
     }
 }
 
-/// Run a user shell command with the bash tool's runner in `cx`'s
+/// Run a user shell command with the shell tool's runner in `cx`'s
 /// workdir, streaming its tail to `cx`'s progress sink, and capture stdout
 /// and stderr together, truncated so a chatty command cannot flood the
 /// context. Returns the exit code (`None` when a signal ended the command
@@ -171,8 +171,14 @@ pub(crate) fn run_shell(
     const OUTPUT_CAP: usize = 8 * 1024;
     // The `!` shell is user-typed, so the env-scrub policy for
     // model-authored commands does not apply.
-    let output = match kage_tools::builtin::bash::run(command, cx.workdir(), Duration::MAX, &[], cx)
-    {
+    let output = match kage_tools::builtin::shell::run(
+        command,
+        cx.workdir(),
+        Duration::MAX,
+        &[],
+        kage_tools::builtin::shell::DEFAULT_SHELL,
+        cx,
+    ) {
         Ok(output) => output,
         Err(ToolError::Cancelled) => return Err(ToolError::Cancelled),
         Err(err) => return Ok((None, format!("failed to run: {err}"))),

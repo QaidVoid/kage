@@ -123,7 +123,7 @@ mod tests {
         buf.push_user("first question");
         buf.append_assistant_delta("First answer.");
         buf.finish_streaming();
-        buf.push_tool_call("c1", "bash", serde_json::json!({ "command": "echo hi" }));
+        buf.push_tool_call("c1", "shell", serde_json::json!({ "command": "echo hi" }));
         buf.push_tool_result_with_duration("c1", "hi", false, Some(1200));
         buf.push_user("second question\nwith two lines");
         buf.append_assistant_delta("Second answer.");
@@ -172,9 +172,9 @@ mod tests {
     #[test]
     fn consecutive_tool_rows_sit_flush() {
         let mut buf = Buffer::new();
-        buf.push_tool_call("c1", "bash", serde_json::json!({ "command": "true" }));
+        buf.push_tool_call("c1", "shell", serde_json::json!({ "command": "true" }));
         buf.push_tool_result_with_duration("c1", "", false, Some(1000));
-        buf.push_tool_call("c2", "bash", serde_json::json!({ "command": "false" }));
+        buf.push_tool_call("c2", "shell", serde_json::json!({ "command": "false" }));
         buf.push_tool_result_with_duration("c2", "", false, Some(1000));
         buf.append_assistant_delta("Done.");
         buf.finish_streaming();

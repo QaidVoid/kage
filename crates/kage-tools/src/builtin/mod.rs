@@ -1,24 +1,26 @@
 //! Built-in tools shipped with kage.
 
-pub mod bash;
 pub mod edit;
 pub mod find;
 pub mod grep;
 pub mod ls;
 pub mod read;
+pub mod shell;
 pub mod web_fetch;
 pub mod write;
 
 use std::sync::Arc;
 
-pub use bash::BashTool;
 pub use edit::EditTool;
 pub use find::FindTool;
 pub use grep::GrepTool;
 pub use ls::LsTool;
 pub use read::ReadTool;
+pub use shell::ShellTool;
 pub use web_fetch::WebFetchTool;
 pub use write::WriteTool;
+
+use kage_core::config::ShellConfig;
 
 use crate::ToolRegistry;
 
@@ -35,14 +37,14 @@ where
 
 /// Construct a [`ToolRegistry`] with all built-in tools registered.
 ///
-/// Includes: `read`, `write`, `edit`, `bash`, `grep`, `find`, `ls`, `web_fetch`.
+/// Includes: `read`, `write`, `edit`, `shell`, `grep`, `find`, `ls`, `web_fetch`.
 #[must_use]
 pub fn builtin_registry() -> ToolRegistry {
     ToolRegistry::new()
         .with(Arc::new(ReadTool))
         .with(Arc::new(WriteTool))
         .with(Arc::new(EditTool))
-        .with(Arc::new(BashTool::default()))
+        .with(Arc::new(ShellTool::default()))
         .with(Arc::new(GrepTool))
         .with(Arc::new(FindTool))
         .with(Arc::new(LsTool))
@@ -50,14 +52,18 @@ pub fn builtin_registry() -> ToolRegistry {
 }
 
 impl ToolRegistry {
-    /// Replace the registered `bash` tool with one that strips environment
-    /// variables matched by `patterns` from its child's environment (see
-    /// [`BashTool::with_env_scrub`]). Empty patterns leave the registry
-    /// unchanged.
+    /// Replace the registered `shell` tool with one running commands via
+    /// `cfg.shell` (default `bash`, see [`ShellTool::with_shell`]) and
+    /// stripping environment variables matched by `cfg.scrub_env` (see
+    /// [`ShellTool::with_env_scrub`]). A fully default `cfg` leaves the
+    /// registry unchanged.
     #[must_use]
-    pub fn with_env_scrub(mut self, patterns: &[String]) -> Self {
-        if !patterns.is_empty() {
-            self.register(Arc::new(BashTool::default().with_env_scrub(patterns)));
+    pub fn with_shell_config(mut self, cfg: &ShellConfig) -> Self {
+        if cfg.program.is_some() || !cfg.scrub_env.is_empty() {
+            let tool = ShellTool::default()
+                .with_env_scrub(&cfg.scrub_env)
+                .with_shell(cfg.program.as_deref());
+            self.register(Arc::new(tool));
         }
         self
     }
@@ -76,12 +82,12 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "bash",
                 "edit",
                 "find",
                 "grep",
                 "ls",
                 "read",
+                "shell",
                 "web_fetch",
                 "write"
             ],

@@ -455,7 +455,7 @@ mod tests {
         rt.eval(
             r"
             kage.override_tool({
-                name = 'bash',
+                name = 'shell',
                 description = 'filtered bash',
                 schema = { type = 'object' },
                 risk = 'write',
@@ -470,7 +470,7 @@ mod tests {
         );
         let overrides = rt.registered_tool_overrides();
         assert_eq!(overrides.len(), 1);
-        assert_eq!(overrides[0].name(), "bash");
+        assert_eq!(overrides[0].name(), "shell");
         assert_eq!(overrides[0].risk(), Risk::Write);
     }
 
@@ -486,7 +486,7 @@ mod tests {
                 execute = function() return '' end,
             })
             kage.override_tool({
-                name = 'bash',
+                name = 'shell',
                 description = '',
                 schema = {},
                 execute = function() return '' end,

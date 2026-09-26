@@ -128,7 +128,7 @@ fn all_loop_errors_roundtrip() {
             message: "x".into(),
         },
         LoopError::Tool {
-            name: "bash".into(),
+            name: "shell".into(),
             message: "y".into(),
         },
         LoopError::Cancelled,

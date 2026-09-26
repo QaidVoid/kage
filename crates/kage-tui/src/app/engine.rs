@@ -413,7 +413,7 @@ impl App {
             "queued".to_owned()
         } else if let Some(approval) = asking {
             let label = describe(&approval.tool, &approval.input);
-            let subject = if approval.tool == "bash" {
+            let subject = if approval.tool == "shell" {
                 format!("$ {}", label.target)
             } else {
                 format!("{} {}", label.verb, label.target)

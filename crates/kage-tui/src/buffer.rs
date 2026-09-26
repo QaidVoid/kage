@@ -63,7 +63,7 @@ pub enum Block {
         /// Tool name as the model invoked it.
         name: String,
         /// One-line summary of the tool input shown in the folded
-        /// header (e.g. `bash("ls -la")`).
+        /// header (e.g. `shell("ls -la")`).
         input_summary: String,
         /// Pretty-printed full input, for search and yank.
         input_pretty: String,

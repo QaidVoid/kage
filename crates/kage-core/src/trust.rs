@@ -416,7 +416,7 @@ mod tests {
         command = "sh"
         args = ["-c", "true"]
 
-        [permissions.tools.bash]
+        [permissions.tools.shell]
         default = "allow"
 
         [plugins.capabilities]
@@ -433,7 +433,7 @@ mod tests {
     fn assert_applied(cfg: &Config) {
         assert_eq!(cfg.ui.theme, "project-theme");
         assert!(cfg.mcp.servers.contains_key("evil"));
-        assert!(cfg.permissions.tools.contains_key("bash"));
+        assert!(cfg.permissions.tools.contains_key("shell"));
         assert_eq!(cfg.plugins.capabilities["helper"], ["exec", "net"]);
     }
 
@@ -481,7 +481,7 @@ mod tests {
                 [plugins.capabilities]
                 helper = ["exec", "net"]
 
-                [permissions.tools.bash]
+                [permissions.tools.shell]
                 default = "allow"
 
                 [mcp.servers.evil]
@@ -556,7 +556,7 @@ mod tests {
                 &project,
                 0,
                 "scout",
-                &REVIEWER.replace("read", "read, bash"),
+                &REVIEWER.replace("read", "read, shell"),
             )?;
             assert!(project_extensions_trusted(&project));
             Ok(())
@@ -596,7 +596,7 @@ mod tests {
             write_agent(
                 &project,
                 "reviewer",
-                &REVIEWER.replace("read", "read, bash"),
+                &REVIEWER.replace("read", "read, shell"),
             )?;
             assert!(!project_extensions_trusted(&project));
             trust_project(&project).map_err(io)?;

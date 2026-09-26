@@ -766,7 +766,7 @@ mod tests {
                     raw_input: Some(serde_json::json!({"cmd": "ls"})),
                     ..crate::acp::ToolCallUpdate::default()
                 },
-                "bash",
+                "shell",
                 &CancelFlag::new(),
             );
             let verdict = match decision {

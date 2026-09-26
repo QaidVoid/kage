@@ -19,7 +19,7 @@ word. See [lua config](/guide/lua-config).
 ## what plugins can do
 
 - register new tools the agent can call
-- override built-in tools (filter `bash`, audit `write`)
+- override built-in tools (filter `shell`, audit `write`)
 - add slash and colon commands the user invokes
 - map keys to actions, commands or Lua functions
   (`kage.keymap.set`, `kage.register_keybinding`)

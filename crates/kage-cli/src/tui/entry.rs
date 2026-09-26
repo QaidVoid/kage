@@ -47,7 +47,7 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>) -> Ex
         eprintln!("kage: {e}");
         return ExitCode::from(1);
     }
-    if let Err(e) = app_config.bash.validate() {
+    if let Err(e) = app_config.shell.validate() {
         eprintln!("kage: {e}");
         return ExitCode::from(1);
     }
@@ -163,7 +163,7 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>) -> Ex
         crate::runtime_env::build_system_prompt(system, &workdir, &qualified_model, &skills);
     let system = system_prompt.as_str();
 
-    let mut tools = kage_tools::builtin_registry().with_env_scrub(&app_config.bash.scrub_env);
+    let mut tools = kage_tools::builtin_registry().with_shell_config(&app_config.shell);
     let mut plugin_command_listing: Vec<kage_tui::command::PluginCommand> = Vec::new();
     if let Some(rt) = plugin_runtime.as_ref() {
         plugin_command_listing = support::snapshot_plugin_commands(rt);

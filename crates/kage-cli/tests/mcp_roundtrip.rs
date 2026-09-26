@@ -34,7 +34,7 @@ fn spawn_kage_mcp_serve_and_round_trip_a_builtin_tool() {
     assert!(names.contains(&"ls"), "builtin `ls` exposed: {names:?}");
     assert!(names.contains(&"read"), "builtin `read` exposed: {names:?}");
     assert!(
-        !names.contains(&"bash"),
+        !names.contains(&"shell"),
         "`bash` is not served by default: {names:?}"
     );
 

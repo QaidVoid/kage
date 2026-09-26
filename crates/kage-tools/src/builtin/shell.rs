@@ -1,4 +1,4 @@
-//! `bash` tool: run a shell command with a timeout and truncated output.
+//! `shell` tool: run a shell command with a timeout and truncated output.
 //!
 //! Commands run unsandboxed today; an OS-level isolation backend (for
 //! example bubblewrap) can land later without changing the call shape.
@@ -18,6 +18,12 @@ use serde::Deserialize;
 use crate::{ExecMode, Tool, ToolContext, ToolError, resolve, schema_for};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+/// The shell the tool runs commands with when none is configured.
+#[cfg(unix)]
+pub const DEFAULT_SHELL: &str = "bash";
+/// The shell the tool runs commands with when none is configured.
+#[cfg(not(unix))]
+pub const DEFAULT_SHELL: &str = "pwsh";
 const MAX_STREAM_BYTES: usize = 100_000;
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -53,10 +59,10 @@ impl Tail {
     }
 }
 
-/// Input shape for the `bash` tool.
+/// Input shape for the `shell` tool.
 #[derive(Debug, Deserialize, JsonSchema)]
-struct BashInput {
-    /// Shell command to run, executed via `bash -c <command>`.
+struct ShellInput {
+    /// Shell command to run.
     command: String,
     /// Optional working directory, relative to the workdir. Defaults to the workdir.
     #[serde(default, deserialize_with = "super::optional_path")]
@@ -67,12 +73,46 @@ struct BashInput {
 }
 
 /// Run a shell command.
-#[derive(Debug, Default)]
-pub struct BashTool {
+#[derive(Debug)]
+pub struct ShellTool {
+    /// Program commands run with, from `[shell] program`.
+    shell: String,
+    description: String,
     env_scrub: Arc<[String]>,
 }
 
-impl BashTool {
+impl Default for ShellTool {
+    fn default() -> Self {
+        Self {
+            shell: DEFAULT_SHELL.to_owned(),
+            description: describe_shell(DEFAULT_SHELL),
+            env_scrub: Arc::from([]),
+        }
+    }
+}
+
+/// The model-facing description for a shell program, naming it so the
+/// model writes commands in that shell's syntax.
+fn describe_shell(shell: &str) -> String {
+    let flags = shell_args(shell).join(" ");
+    format!(
+        "Run a shell command via `{shell} {flags}`. Returns combined stdout/stderr and the \
+         exit code. Default timeout is 120 seconds; output is truncated at 100KB."
+    )
+}
+
+/// The flag(s) `program` uses to run a command string. Known Windows
+/// shells get their own; everything POSIX-like, including fish and
+/// zsh, takes `-c`.
+fn shell_args(program: &str) -> &'static [&'static str] {
+    match program.trim_end_matches(".exe") {
+        "powershell" | "pwsh" => &["-NoProfile", "-Command"],
+        "cmd" => &["/C"],
+        _ => &["-c"],
+    }
+}
+
+impl ShellTool {
     /// Glob patterns (case-sensitive, matched against the whole name) of
     /// environment variables to strip from the shell child's environment.
     #[must_use]
@@ -80,20 +120,30 @@ impl BashTool {
         self.env_scrub = Arc::from(patterns);
         self
     }
+
+    /// Run commands with `shell` instead of the default (see
+    /// [`DEFAULT_SHELL`]). Unknown programs are driven with `-c`.
+    #[must_use]
+    pub fn with_shell(mut self, shell: Option<&str>) -> Self {
+        if let Some(shell) = shell {
+            shell.clone_into(&mut self.shell);
+            self.description = describe_shell(&self.shell);
+        }
+        self
+    }
 }
 
-impl Tool for BashTool {
+impl Tool for ShellTool {
     fn name(&self) -> &'static str {
-        "bash"
+        "shell"
     }
 
-    fn description(&self) -> &'static str {
-        "Run a shell command via `bash -c`. Returns combined stdout/stderr and the \
-         exit code. Default timeout is 120 seconds; output is truncated at 100KB."
+    fn description(&self) -> &str {
+        &self.description
     }
 
     fn schema(&self) -> serde_json::Value {
-        schema_for::<BashInput>()
+        schema_for::<ShellInput>()
     }
 
     fn risk(&self) -> Risk {
@@ -109,13 +159,20 @@ impl Tool for BashTool {
         input: serde_json::Value,
         cx: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
-        let input: BashInput = serde_json::from_value(input)?;
+        let input: ShellInput = serde_json::from_value(input)?;
         let timeout = Duration::from_millis(input.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
         let cwd = match &input.cwd {
             Some(c) => resolve(cx.workdir(), Path::new(c))?,
             None => cx.workdir().to_path_buf(),
         };
-        run_command(&input.command, &cwd, timeout, &self.env_scrub, cx)
+        run_command(
+            &input.command,
+            &cwd,
+            timeout,
+            &self.env_scrub,
+            &self.shell,
+            cx,
+        )
     }
 }
 
@@ -156,7 +213,7 @@ fn scrub_env(cmd: &mut Command, patterns: &[String]) {
     }
 }
 
-/// Run `command` with `bash -c` in `cwd`, in its own process group, and
+/// Run `command` with `shell` in `cwd`, in its own process group, and
 /// report the last lines of its output through `cx`'s progress sink while
 /// it runs. A cancel of `cx` or passing `timeout` kills the whole group.
 /// The child sees the environment minus the variables matched by
@@ -172,6 +229,7 @@ pub fn run(
     cwd: &Path,
     timeout: Duration,
     env_scrub: &[String],
+    shell: &str,
     cx: &ToolContext<'_>,
 ) -> Result<CommandOutput, ToolError> {
     if !cwd.exists() {
@@ -180,8 +238,8 @@ pub fn run(
             cwd.display()
         )));
     }
-    let mut cmd = Command::new("bash");
-    cmd.arg("-c")
+    let mut cmd = Command::new(shell);
+    cmd.args(shell_args(shell))
         .arg(command)
         .current_dir(cwd)
         .stdout(Stdio::piped())
@@ -217,7 +275,7 @@ pub fn run(
             kill_process_group(&mut child);
             let _ = child.wait();
             return Err(ToolError::Timeout {
-                name: "bash".into(),
+                name: "shell".into(),
                 millis: u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
             });
         }
@@ -259,6 +317,7 @@ fn run_command(
     cwd: &Path,
     timeout: Duration,
     env_scrub: &[String],
+    shell: &str,
     cx: &ToolContext<'_>,
 ) -> Result<ToolOutput, ToolError> {
     let CommandOutput {
@@ -267,7 +326,7 @@ fn run_command(
         stderr,
         stderr_truncated,
         exit_code,
-    } = run(command, cwd, timeout, env_scrub, cx)?;
+    } = run(command, cwd, timeout, env_scrub, shell, cx)?;
     let stdout_text = String::from_utf8_lossy(&stdout).into_owned();
     let stderr_text = String::from_utf8_lossy(&stderr).into_owned();
 
@@ -364,7 +423,7 @@ mod tests {
     fn run(workdir: &Path, input: serde_json::Value) -> Result<ToolOutput, ToolError> {
         let cancel = CancelFlag::new();
         let cx = ToolContext::new(workdir, &cancel);
-        BashTool::default().execute(input, &cx)
+        ShellTool::default().execute(input, &cx)
     }
 
     #[test]
@@ -386,6 +445,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn captures_stderr() {
         let dir = tempfile::tempdir().unwrap();
         let out = run(dir.path(), serde_json::json!({"command":"echo oops 1>&2"})).unwrap();
@@ -394,8 +454,10 @@ mod tests {
     }
 
     #[derive(Default)]
+    #[cfg(unix)]
     struct Collect(Mutex<Vec<String>>);
 
+    #[cfg(unix)]
     impl crate::ProgressSink for Collect {
         fn emit(&self, update: ToolUpdate) {
             lock(&self.0).push(update.content);
@@ -403,12 +465,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn streams_output_while_running() {
         let dir = tempfile::tempdir().unwrap();
         let cancel = CancelFlag::new();
         let sink = Arc::new(Collect::default());
         let cx = ToolContext::new(dir.path(), &cancel).with_progress(sink.clone());
-        let out = BashTool::default()
+        let out = ShellTool::default()
             .execute(
                 serde_json::json!({"command":"echo first; sleep 0.4; echo second"}),
                 &cx,
@@ -423,6 +486,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn timeout_returns_timeout_error() {
         let dir = tempfile::tempdir().unwrap();
         let err = run(
@@ -434,6 +498,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn timeout_reaps_pipe_holding_grandchildren() {
         // `sleep` inherits our pipes; killing only the shell leaves it
         // alive and the reader threads blocked on EOF until it exits,
@@ -454,6 +519,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn cancel_kills_the_process_group() {
         let dir = tempfile::tempdir().unwrap();
         let cancel = CancelFlag::new();
@@ -464,14 +530,22 @@ mod tests {
         });
         let started = Instant::now();
         let cx = ToolContext::new(dir.path(), &cancel);
-        let err =
-            super::run("sleep 5; echo done", dir.path(), Duration::MAX, &[], &cx).unwrap_err();
+        let err = super::run(
+            "sleep 5; echo done",
+            dir.path(),
+            Duration::MAX,
+            &[],
+            DEFAULT_SHELL,
+            &cx,
+        )
+        .unwrap_err();
         canceller.join().unwrap();
         assert!(matches!(err, ToolError::Cancelled));
         assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[test]
+    #[cfg(unix)]
     fn backgrounded_grandchild_does_not_block_success_path() {
         // Bash exits immediately; the backgrounded sleep keeps the pipe
         // write end open. Without releasing the process group before the
@@ -530,6 +604,7 @@ mod tests {
         assert!(out.text.contains('x'));
     }
 
+    #[cfg(unix)]
     fn run_with(
         workdir: &Path,
         scrub: &[String],
@@ -537,12 +612,13 @@ mod tests {
     ) -> Result<ToolOutput, ToolError> {
         let cancel = CancelFlag::new();
         let cx = ToolContext::new(workdir, &cancel);
-        BashTool::default()
+        ShellTool::default()
             .with_env_scrub(scrub)
             .execute(input, &cx)
     }
 
     #[test]
+    #[cfg(unix)]
     fn scrub_pattern_strips_the_variable_from_the_child() {
         let dir = tempfile::tempdir().unwrap();
         let out = run_with(
@@ -556,6 +632,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn scrub_glob_strips_the_suffix_family() {
         let dir = tempfile::tempdir().unwrap();
         let out = run_with(
@@ -568,6 +645,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn invalid_scrub_pattern_is_skipped_not_fatal() {
         let dir = tempfile::tempdir().unwrap();
         let out = run_with(
@@ -580,6 +658,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn child_sees_a_nonempty_environment() {
         let dir = tempfile::tempdir().unwrap();
         let out = run(
@@ -589,5 +668,44 @@ mod tests {
         .unwrap();
         assert!(!out.is_error);
         assert!(out.text.contains("has-path"), "{}", out.text);
+    }
+
+    #[test]
+    fn known_shells_get_their_own_command_flag() {
+        assert_eq!(shell_args("fish"), &["-c"]);
+        assert_eq!(shell_args("pwsh"), &["-NoProfile", "-Command"]);
+        assert_eq!(shell_args("powershell.exe"), &["-NoProfile", "-Command"]);
+        assert_eq!(shell_args("cmd"), &["/C"]);
+        assert_eq!(shell_args("bash"), &["-c"]);
+    }
+
+    #[test]
+    fn description_names_the_configured_shell() {
+        let tool = ShellTool::default().with_shell(Some("fish"));
+        assert!(
+            tool.description().contains("fish -c"),
+            "{}",
+            tool.description()
+        );
+        assert_eq!(
+            ShellTool::default().description(),
+            describe_shell(DEFAULT_SHELL)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_shell_is_used() {
+        // `$0` under `-c` is the shell as invoked: `sh` here, `bash`
+        // with the default tool.
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = CancelFlag::new();
+        let cx = ToolContext::new(dir.path(), &cancel);
+        let out = ShellTool::default()
+            .with_shell(Some("sh"))
+            .execute(serde_json::json!({"command":"echo $0"}), &cx)
+            .unwrap();
+        assert!(out.text.contains("sh"), "{}", out.text);
+        assert!(!out.text.contains("shell"), "{}", out.text);
     }
 }

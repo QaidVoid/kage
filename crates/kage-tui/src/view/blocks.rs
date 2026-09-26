@@ -6,11 +6,12 @@ use serde_json::Value;
 
 use super::modeline::spinner_frame;
 use super::tool_view::{
-    AgentEnd, BashExit, BodyLine, EditDiff, LineKind, ToolBody, ToolLabel, ToolPhase, agent_output,
-    arg_rows, bash_output, describe, edit_diff, format_elapsed, format_seconds, group_summary,
+    AgentEnd, BodyLine, EditDiff, LineKind, ShellExit, ToolBody, ToolLabel, ToolPhase,
+    agent_output, arg_rows, describe, edit_diff, format_elapsed, format_seconds, group_summary,
+    shell_output,
 };
 
-/// Output lines a folded row shows for bash, errors and unknown tools.
+/// Output lines a folded row shows for shell, errors and unknown tools.
 const FOLDED_BODY_LINES: usize = 5;
 /// Diff lines a folded edit row shows.
 const FOLDED_DIFF_LINES: usize = 10;
@@ -56,7 +57,7 @@ pub(crate) struct ToolRow<'a> {
 /// The header carries a state bullet, the verb, the target, any stats
 /// and a right-aligned duration, exit code or state word. Folded rows
 /// show a short body by kind: nothing for read-only tools, the output
-/// tail for bash, the diff for edits, and the first lines for errors
+/// tail for shell, the diff for edits, and the first lines for errors
 /// and other tools. A running call shows its latest progress line.
 /// Unfolded rows show the full body up to
 /// [`UNFOLDED_MAX_LINES`].
@@ -77,8 +78,8 @@ pub(crate) fn tool_row_lines(
     }
     let max = bubble_content_width(width);
     let (output, exit, end) = match row.name {
-        "bash" => {
-            let (output, exit) = bash_output(row.output);
+        "shell" => {
+            let (output, exit) = shell_output(row.output);
             (output, exit, None)
         }
         "agent" => {
@@ -198,7 +199,7 @@ fn phase_bullet(phase: ToolPhase, theme: &crate::theme::Theme) -> (&'static str,
 /// how it ended before its duration. Agents count whole seconds, like
 /// the other views of an agent, and a queued agent's card says so in
 /// its body.
-fn right_text(row: &ToolRow<'_>, exit: Option<BashExit>, end: Option<AgentEnd>) -> String {
+fn right_text(row: &ToolRow<'_>, exit: Option<ShellExit>, end: Option<AgentEnd>) -> String {
     let agent = row.name == "agent";
     let format = if agent {
         format_seconds
@@ -226,8 +227,8 @@ fn right_text(row: &ToolRow<'_>, exit: Option<BashExit>, end: Option<AgentEnd>) 
         ToolPhase::Running | ToolPhase::Done => elapsed.unwrap_or_default(),
         ToolPhase::Failed => {
             let status = match exit {
-                Some(BashExit::Code(code)) => Some(format!("exit {code}")),
-                Some(BashExit::Signal) => Some("signal".to_owned()),
+                Some(ShellExit::Code(code)) => Some(format!("exit {code}")),
+                Some(ShellExit::Signal) => Some("signal".to_owned()),
                 None => None,
             };
             [status, elapsed]

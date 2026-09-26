@@ -20,28 +20,28 @@ fn pattern_fires_only_for_the_matching_tool() {
     let rt = PluginRuntime::new().unwrap();
     rt.eval(
         r"
-        bash, listed = 0, 0
+        shell, listed = 0, 0
         kage.api.autocmd_create('tool_call', {
-            pattern = 'bash',
+            pattern = 'shell',
             callback = function(ev)
-                assert(ev.match == 'bash' and ev.event == 'tool_call')
-                bash = bash + 1
+                assert(ev.match == 'shell' and ev.event == 'tool_call')
+                shell = shell + 1
             end,
         })
         kage.api.autocmd_create('tool_result', {
-            pattern = { 'read', 'bash' },
+            pattern = { 'read', 'shell' },
             callback = function() listed = listed + 1 end,
         })
         ",
     )
     .unwrap();
-    for name in ["bash", "read", "edit"] {
+    for name in ["shell", "read", "edit"] {
         rt.dispatch_event("tool_call", &json!({ "name": name }))
             .unwrap();
         rt.dispatch_event("tool_result", &json!({ "name": name }))
             .unwrap();
     }
-    assert_eq!(int(&rt, "bash"), 1);
+    assert_eq!(int(&rt, "shell"), 1);
     assert_eq!(int(&rt, "listed"), 2);
 }
 

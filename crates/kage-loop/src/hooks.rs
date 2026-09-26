@@ -315,11 +315,11 @@ mod tests {
         let mut h = Recording::default();
         h.before_tool_call(
             &kage_core::ToolCallId::new("call"),
-            "bash",
+            "shell",
             &serde_json::json!({}),
         );
         h.after_tool_call(
-            "bash",
+            "shell",
             ToolOutput {
                 is_error: false,
                 text: "ok".into(),
@@ -327,8 +327,8 @@ mod tests {
                 terminate: false,
             },
         );
-        assert_eq!(h.tool_calls_before, vec!["bash"]);
-        assert_eq!(h.tool_calls_after, vec!["bash"]);
+        assert_eq!(h.tool_calls_before, vec!["shell"]);
+        assert_eq!(h.tool_calls_after, vec!["shell"]);
     }
 
     #[test]

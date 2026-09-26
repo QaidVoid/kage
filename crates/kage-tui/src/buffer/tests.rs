@@ -146,7 +146,7 @@ fn finish_streaming_marks_last_block_inert() {
 #[test]
 fn tool_call_starts_folded_then_toggles() {
     let mut buf = Buffer::new();
-    buf.push_tool_call("c1", "bash", json!({"command": "ls"}));
+    buf.push_tool_call("c1", "shell", json!({"command": "ls"}));
     assert_eq!(buf.total_lines(), 1, "folded contributes header line only");
     assert!(buf.toggle_fold(0));
     assert!(buf.total_lines() > 1, "unfolded shows body lines");
@@ -181,7 +181,7 @@ fn upsert_tool_call_refreshes_in_place_without_duplicates() {
 #[test]
 fn upsert_tool_call_appends_distinct_ids() {
     let mut buf = Buffer::new();
-    buf.upsert_tool_call("c1", "bash", json!({"command": "ls"}));
+    buf.upsert_tool_call("c1", "shell", json!({"command": "ls"}));
     buf.upsert_tool_call("c2", "read", json!({}));
     let calls = buf
         .blocks()
@@ -194,10 +194,10 @@ fn upsert_tool_call_appends_distinct_ids() {
 #[test]
 fn tool_result_inherits_name_from_matching_call() {
     let mut buf = Buffer::new();
-    buf.push_tool_call("c1", "bash", json!({"command": "ls"}));
+    buf.push_tool_call("c1", "shell", json!({"command": "ls"}));
     buf.push_tool_result("c1", "file1\nfile2\n", false);
     match &buf.blocks()[1] {
-        Block::ToolResult { name, .. } => assert_eq!(name, "bash"),
+        Block::ToolResult { name, .. } => assert_eq!(name, "shell"),
         other => panic!("expected ToolResult, got {other:?}"),
     }
 }
@@ -224,7 +224,7 @@ fn set_all_folded_only_touches_foldable_blocks() {
     let mut buf = Buffer::new();
     buf.push_user("hi");
     buf.append_assistant_delta("ok");
-    buf.push_tool_call("c1", "bash", json!({}));
+    buf.push_tool_call("c1", "shell", json!({}));
     buf.set_all_folded(false);
     assert_eq!(buf.total_lines(), 1 + 1 + 1 + 1);
 }
@@ -436,7 +436,7 @@ fn merge_render_state_skips_across_an_epoch_change() {
 fn push_tool_pairs(buf: &mut Buffer, start: usize, n: usize) {
     for i in start..start + n {
         let id = format!("c{i}");
-        buf.push_tool_call(&id, "bash", json!({"command": "ls"}));
+        buf.push_tool_call(&id, "shell", json!({"command": "ls"}));
         buf.push_tool_result_with_duration(&id, "out", false, None);
     }
 }
@@ -611,11 +611,11 @@ fn compact_drops_oldest_and_keeps_pairs_together() {
     buf.push_user("1");
     buf.push_user("2");
     buf.push_user("3");
-    buf.push_tool_call("A", "bash", json!({"command": "ls"}));
+    buf.push_tool_call("A", "shell", json!({"command": "ls"}));
     buf.push_tool_result("A", "out", false);
     buf.begin_thinking();
     buf.append_thinking_delta("hmm");
-    buf.push_tool_call("B", "bash", json!({"command": "ls"}));
+    buf.push_tool_call("B", "shell", json!({"command": "ls"}));
     buf.push_tool_result("B", "out", false);
     buf.push_user("4");
     buf.push_user("5");
@@ -634,7 +634,7 @@ fn compact_drops_oldest_and_keeps_pairs_together() {
 fn compact_frontier_extends_past_orphaned_results() {
     let mut buf = Buffer::new();
     buf.push_user("0");
-    buf.push_tool_call("A", "bash", json!({"command": "ls"}));
+    buf.push_tool_call("A", "shell", json!({"command": "ls"}));
     buf.begin_thinking();
     buf.append_thinking_delta("thinking");
     buf.push_tool_result("A", "out", false);
@@ -765,7 +765,7 @@ fn jump_targets_lists_messages_with_labels_not_thinking() {
     buf.append_thinking_delta("secret thoughts");
     buf.begin_assistant();
     buf.append_assistant_delta("the answer\nsecond line");
-    buf.push_tool_call("c1", "bash", json!({"command": "ls"}));
+    buf.push_tool_call("c1", "shell", json!({"command": "ls"}));
     buf.push_tool_result_with_duration("c1", "ok", false, None);
 
     let targets = buf.jump_targets(80);
@@ -809,7 +809,7 @@ fn focus_moves_bump_the_version() {
     let mut buf = Buffer::new();
     buf.push_user("q");
     buf.push_thinking("t", None);
-    buf.push_tool_call("c1", "bash", json!({"command": "ls"}));
+    buf.push_tool_call("c1", "shell", json!({"command": "ls"}));
     buf.push_tool_result_with_duration("c1", "out", false, None);
     buf.append_assistant_delta("a");
     buf.finish_streaming();
@@ -832,7 +832,7 @@ fn focus_moves_bump_the_version() {
 fn the_first_fold_acts_on_the_last_foldable_block() {
     let mut buf = Buffer::new();
     buf.push_user("q");
-    buf.push_tool_call("c1", "bash", json!({"command": "ls"}));
+    buf.push_tool_call("c1", "shell", json!({"command": "ls"}));
     buf.push_tool_result_with_duration("c1", "out", false, None);
     buf.append_assistant_delta("done");
     buf.finish_streaming();
@@ -846,7 +846,7 @@ fn the_first_fold_acts_on_the_last_foldable_block() {
 fn compact_shift_counts_flush_tool_rows() {
     let mut buf = Buffer::new();
     for id in ["a", "b"] {
-        buf.push_tool_call(id, "bash", json!({"command": "true"}));
+        buf.push_tool_call(id, "shell", json!({"command": "true"}));
         buf.push_tool_result(id, "exit: 0", false);
     }
     buf.push_user("next");

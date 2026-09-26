@@ -105,9 +105,9 @@ mod tests {
             .collect()
     }
 
-    fn bash_call() -> Buffer {
+    fn shell_call() -> Buffer {
         let mut buf = Buffer::new();
-        buf.push_tool_call("c1", "bash", json!({"command": "cargo test"}));
+        buf.push_tool_call("c1", "shell", json!({"command": "cargo test"}));
         buf
     }
 
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn header_text_follows_the_phase() {
-        let mut buf = bash_call();
+        let mut buf = shell_call();
         let rows = header(&buf);
         assert!(rows[0].ends_with("\u{2022} Run cargo test"), "{rows:?}");
 
@@ -148,8 +148,8 @@ mod tests {
     }
 
     #[test]
-    fn a_running_bash_shows_its_progress_tail() {
-        let mut buf = bash_call();
+    fn a_running_shell_shows_its_progress_tail() {
+        let mut buf = shell_call();
         buf.set_tool_phase("c1", ToolPhase::Running);
         let progress: Vec<String> = (1..=7).map(|i| format!("step {i}")).collect();
         buf.set_tool_progress("c1", progress.join("\n"));

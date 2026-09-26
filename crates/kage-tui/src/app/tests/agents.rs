@@ -99,19 +99,19 @@ fn an_agent_card_follows_its_latest_tool_and_asks() {
     );
 
     let input = serde_json::json!({ "command": "cargo test -p router" });
-    let bash = kage_core::LoopEvent::ToolCallStart {
+    let shell = kage_core::LoopEvent::ToolCallStart {
         id: kage_core::ToolCallId::new("c2"),
-        name: "bash".into(),
+        name: "shell".into(),
         input_partial: input.clone(),
     };
     let ask = kage_core::protocol::HostEvent::PermissionRequested {
         request_id: kage_core::protocol::RequestId(9),
         tool_call_id: Some(kage_core::ToolCallId::new("c2")),
-        tool: "bash".into(),
+        tool: "shell".into(),
         subject: "cargo test -p router".into(),
         input,
     };
-    send_to(&mut app, &events, child, vec![bash.into(), ask.into()]);
+    send_to(&mut app, &events, child, vec![shell.into(), ask.into()]);
     assert_eq!(
         progress_of(&app.buffer, "a1"),
         "Waiting for approval: $ cargo test -p router\n2 tools \u{b7} 22k tok"
@@ -146,7 +146,7 @@ fn an_agent_ask_is_labeled_and_its_feedback_goes_to_the_agent() {
         child,
         vec![
             kage_core::protocol::HostEvent::RunStarted.into(),
-            bash_start("c1"),
+            shell_start("c1"),
             permission_request("c1", 5),
         ],
     );
@@ -201,13 +201,13 @@ fn run_ends_drop_only_their_own_session_approvals() {
         &mut app,
         &events,
         first,
-        vec![bash_start("c1"), permission_request("c1", 1)],
+        vec![shell_start("c1"), permission_request("c1", 1)],
     );
     send_to(
         &mut app,
         &events,
         second,
-        vec![bash_start("c1"), permission_request("c1", 2)],
+        vec![shell_start("c1"), permission_request("c1", 2)],
     );
     let shown = |app: &App| app.pending_permission.as_ref().map(|a| a.session);
     assert_eq!(shown(&app), Some(first));
@@ -363,7 +363,7 @@ fn the_pinned_list_shows_queued_running_and_waiting_agents_only() {
         asking,
         vec![
             kage_core::protocol::HostEvent::RunStarted.into(),
-            bash_start("c1"),
+            shell_start("c1"),
             permission_request("c1", 3),
         ],
     );
@@ -460,7 +460,7 @@ fn the_pinned_list_hides_while_the_approval_panel_is_open() {
         &mut app,
         &events,
         child,
-        vec![bash_start("c1"), permission_request("c1", 4)],
+        vec![shell_start("c1"), permission_request("c1", 4)],
     );
     assert!(app.approval_panel.is_some());
     assert!(app.agent_rows().is_empty());
@@ -752,7 +752,7 @@ fn another_agents_approval_still_opens_while_focused() {
         other,
         vec![
             kage_core::protocol::HostEvent::RunStarted.into(),
-            bash_start("c1"),
+            shell_start("c1"),
             permission_request("c1", 8),
         ],
     );
@@ -912,7 +912,7 @@ fn the_agents_overlay_fits_80_by_24_and_stays_live() {
         &mut app,
         &events,
         general,
-        vec![bash_start("c1"), permission_request("c1", 5)],
+        vec![shell_start("c1"), permission_request("c1", 5)],
     );
     let rows = rendered(&mut app, 80, 24);
     assert!(
@@ -1132,9 +1132,9 @@ fn allowing_a_tool_for_the_session_answers_its_queued_asks() {
         &mut app,
         &events,
         vec![
-            bash_start("c1"),
-            bash_start("c2"),
-            bash_start("c3"),
+            shell_start("c1"),
+            shell_start("c2"),
+            shell_start("c3"),
             read("c1", 1),
             permission_request("c2", 2),
             read("c3", 3),
@@ -1157,7 +1157,7 @@ fn allowing_a_tool_for_the_session_answers_its_queued_asks() {
     assert_eq!(tool_phase(&app, "c2"), ToolPhase::Waiting);
     assert_eq!(
         app.pending_permission.as_ref().map(|a| a.tool.as_str()),
-        Some("bash")
+        Some("shell")
     );
     assert!(app.permission_queue.is_empty());
     let rows = rendered(&mut app, 100, 30);
@@ -1189,7 +1189,7 @@ fn ctrl_t_opens_the_agents_overlay_over_an_approval_that_keeps_its_keys() {
         &mut app,
         &events,
         general,
-        vec![bash_start("c1"), permission_request("c1", 5)],
+        vec![shell_start("c1"), permission_request("c1", 5)],
     );
     assert!(app.approval_panel.is_some());
     app.handle_key(ctrl('t'));

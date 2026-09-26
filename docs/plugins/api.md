@@ -235,7 +235,7 @@ rule), `footer` or `start` (the start card). A row slot takes
 keeps and recomputes only when a listed event fires, the interval
 (at least 50 ms) passes, the slot is set, `kage.api.redraw` is called
 or the width changes. An `events` entry may add a pattern after a
-space, such as `"tool_result bash"`. `nil` restores the default spec.
+space, such as `"tool_result shell"`. `nil` restores the default spec.
 Unknown slots, components and events raise.
 
 ```lua
@@ -317,7 +317,7 @@ interactive picker, use [`kage.ui.select`](#blocking-dialogs). See
 ### `kage.register_tool(spec)`
 
 Register a new tool. The agent can call it the same way it calls
-built-in `read` or `bash`. Spec fields:
+built-in `read` or `shell`. Spec fields:
 
 ```lua
 {
@@ -345,7 +345,7 @@ return {
 ### `kage.override_tool(spec)`
 
 Same shape as `register_tool` but replaces the existing entry by name.
-Useful for filtering `bash` or auditing `write`. The override replaces
+Useful for filtering `shell` or auditing `write`. The override replaces
 the tool, so it must do the work itself. The host logs a warning if no
 tool with that name was previously registered.
 
@@ -733,7 +733,7 @@ event name.
 local group = kage.api.augroup_create("myplugin")
 kage.api.autocmd_create("tool_result", {
   group = group,
-  pattern = { "bash", "write" },
+  pattern = { "shell", "write" },
   callback = function(ev)
     -- ev = { id, event, match, group, data }
     if ev.data.is_error then kage.ui.notify(ev.match .. " failed") end

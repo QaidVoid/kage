@@ -54,7 +54,12 @@ editor = "modeless"
 # to a named subset; an empty list loads everything in the dir.
 enabled = []
 
-[bash]
+[shell]
+# Program the shell tool runs commands with: `bash` (the default on
+# Linux and macOS), `pwsh` (the default on Windows), `fish`, `zsh`, or
+# an absolute path. Known Windows shells get their own command flag;
+# every other program is driven with `-c`.
+# program = "fish"
 # Glob patterns of environment variables to hide from shell commands
 # (case-sensitive, matched against the whole name). Empty leaves the
 # environment untouched.

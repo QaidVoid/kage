@@ -56,7 +56,7 @@ pub struct PermissionsConfig {
     /// historical behavior: paths resolve against the workdir but
     /// may escape it).
     pub confine_paths: bool,
-    /// Per-tool rules, keyed by literal tool name (`bash`,
+    /// Per-tool rules, keyed by literal tool name (`shell`,
     /// `write`, `github__create_issue`, ...). No glob keys in
     /// v1: ordering overlapping patterns deterministically is not
     /// worth the confusion yet.
@@ -169,7 +169,7 @@ mod tests {
             confine_paths: false,
             mcp: BTreeMap::new(),
             tools: [(
-                "bash".to_owned(),
+                "shell".to_owned(),
                 ToolPermissionRules {
                     default,
                     allow: allow.iter().map(|s| (*s).to_owned()).collect(),
@@ -184,36 +184,39 @@ mod tests {
     #[test]
     fn missing_tool_entry_allows() {
         let cfg = PermissionsConfig::default();
-        assert_eq!(cfg.check("bash", "rm -rf /"), PermissionAction::Allow);
+        assert_eq!(cfg.check("shell", "rm -rf /"), PermissionAction::Allow);
         assert!(cfg.is_default());
     }
 
     #[test]
     fn deny_beats_allow() {
         let cfg = rules(PermissionAction::Allow, &["git *"], &["git push *", "rm *"]);
-        assert_eq!(cfg.check("bash", "git status"), PermissionAction::Allow);
-        assert_eq!(cfg.check("bash", "git push origin"), PermissionAction::Deny);
-        assert_eq!(cfg.check("bash", "rm -rf /tmp/x"), PermissionAction::Deny);
+        assert_eq!(cfg.check("shell", "git status"), PermissionAction::Allow);
+        assert_eq!(
+            cfg.check("shell", "git push origin"),
+            PermissionAction::Deny
+        );
+        assert_eq!(cfg.check("shell", "rm -rf /tmp/x"), PermissionAction::Deny);
     }
 
     #[test]
     fn default_applies_when_no_pattern_matches() {
         let cfg = rules(PermissionAction::Ask, &["cargo *"], &[]);
-        assert_eq!(cfg.check("bash", "cargo test"), PermissionAction::Allow);
-        assert_eq!(cfg.check("bash", "make all"), PermissionAction::Ask);
+        assert_eq!(cfg.check("shell", "cargo test"), PermissionAction::Allow);
+        assert_eq!(cfg.check("shell", "make all"), PermissionAction::Ask);
     }
 
     #[test]
     fn entry_default_allow_keeps_yolo_for_unmatched() {
         let cfg = rules(PermissionAction::Allow, &[], &["curl *"]);
-        assert_eq!(cfg.check("bash", "echo hi"), PermissionAction::Allow);
-        assert_eq!(cfg.check("bash", "curl http://x"), PermissionAction::Deny);
+        assert_eq!(cfg.check("shell", "echo hi"), PermissionAction::Allow);
+        assert_eq!(cfg.check("shell", "curl http://x"), PermissionAction::Deny);
     }
 
     #[test]
     fn rules_are_per_tool() {
         let cfg = rules(PermissionAction::Deny, &[], &[]);
-        assert_eq!(cfg.check("bash", "echo hi"), PermissionAction::Deny);
+        assert_eq!(cfg.check("shell", "echo hi"), PermissionAction::Deny);
         assert_eq!(cfg.check("write", "{}"), PermissionAction::Allow);
     }
 
@@ -259,16 +262,16 @@ mod tests {
         let src = r#"
             confine_paths = true
 
-            [tools.bash]
+            [tools.shell]
             default = "ask"
             allow = ["git *"]
             deny = ["rm -rf *"]
         "#;
         let cfg: PermissionsConfig = toml::from_str(src).unwrap();
         assert!(cfg.confine_paths);
-        assert_eq!(cfg.check("bash", "rm -rf /"), PermissionAction::Deny);
-        assert_eq!(cfg.check("bash", "git status"), PermissionAction::Allow);
-        assert_eq!(cfg.check("bash", "ls"), PermissionAction::Ask);
+        assert_eq!(cfg.check("shell", "rm -rf /"), PermissionAction::Deny);
+        assert_eq!(cfg.check("shell", "git status"), PermissionAction::Allow);
+        assert_eq!(cfg.check("shell", "ls"), PermissionAction::Ask);
         assert!(!cfg.is_default());
     }
 

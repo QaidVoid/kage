@@ -349,7 +349,11 @@ fn the_activity_row_shows_while_working_with_elapsed_seconds() {
     let row = row.unwrap_or_else(|| panic!("{rows:?}"));
     assert!(rows[row + 1].starts_with('\u{2500}'), "{rows:?}");
     app.run_started = Instant::now().checked_sub(Duration::from_secs(14));
-    lock(&buffer).push_tool_call("c1", "bash", serde_json::json!({ "command": "cargo test" }));
+    lock(&buffer).push_tool_call(
+        "c1",
+        "shell",
+        serde_json::json!({ "command": "cargo test" }),
+    );
     lock(&buffer).set_tool_phase("c1", crate::view::tool_view::ToolPhase::Running);
     let rows = snapshot_rows(&render_app(&mut app));
     assert!(
@@ -524,7 +528,7 @@ fn the_working_row_cuts_the_command_before_its_time_and_key() {
     app.set_editor_modeless(true);
     app.run_started = Instant::now().checked_sub(Duration::from_secs(2));
     let command = "for i in 1 2 3 4 5 6 7 8 9 10; do echo $i; sleep 1; done; echo all done";
-    lock(&buffer).push_tool_call("c1", "bash", serde_json::json!({ "command": command }));
+    lock(&buffer).push_tool_call("c1", "shell", serde_json::json!({ "command": command }));
     lock(&buffer).set_tool_phase("c1", crate::view::tool_view::ToolPhase::Running);
     let label = app.activity_label(&lock(&buffer), 80).unwrap();
     assert!(label.starts_with("Running for i in"), "{label}");

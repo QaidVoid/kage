@@ -50,7 +50,14 @@ transcript_on_exit = "full"
 # if non-empty, only these plugin file stems load.
 enabled = []
 
-[bash]
+[shell]
+# Program the shell tool runs commands with: `bash` (the default on
+# Linux and macOS), `pwsh` (the default on Windows), `fish`, `zsh`, or
+# an absolute path. The tool description and the prompt's environment
+# block name it, so the model writes commands in that shell's syntax.
+# Known Windows shells (powershell, pwsh, cmd) get their own command
+# flag; every other program is driven with `-c`.
+# program = "fish"
 # Glob patterns of environment variables to hide from shell commands
 # (case-sensitive, matched against the whole name, so "*_TOKEN" covers
 # GITHUB_TOKEN). Empty leaves the environment untouched.
@@ -83,7 +90,7 @@ max_running = 4
 # tool permission rules. built-in tools are allowed unless configured
 # and MCP tools ask. see the permissions guide for the full reference.
 # confine_paths = false
-# [permissions.tools.bash]
+# [permissions.tools.shell]
 # default = "ask"
 # allow = ["git *"]
 # deny = ["rm -rf *"]

@@ -289,7 +289,7 @@ fn user_block_is_one_band_row_with_a_prompt_glyph() {
 #[test]
 fn streaming_tool_call_reads_verb_first() {
     let mut buffer = Buffer::new();
-    buffer.push_tool_call("c1", "bash", json!({"command": "ls -la"}));
+    buffer.push_tool_call("c1", "shell", json!({"command": "ls -la"}));
     let input = InputState::new();
     let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 8));
     let header = lines
@@ -298,7 +298,7 @@ fn streaming_tool_call_reads_verb_first() {
         .expect("tool header present");
     assert!(header.contains("\u{2022} Run ls -la"), "{header:?}");
     assert!(
-        !header.contains('[') && !header.contains("bash"),
+        !header.contains('[') && !header.contains("shell"),
         "{header:?}"
     );
     assert!(!lines.iter().any(|l| l.contains("\"command\"")));
@@ -307,7 +307,7 @@ fn streaming_tool_call_reads_verb_first() {
 #[test]
 fn unfolded_tool_call_without_output_shows_its_arguments() {
     let mut buffer = Buffer::new();
-    buffer.push_tool_call("c1", "bash", json!({"command": "ls -la"}));
+    buffer.push_tool_call("c1", "shell", json!({"command": "ls -la"}));
     assert!(buffer.toggle_fold(0));
     let input = InputState::new();
     let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 12));
@@ -318,9 +318,9 @@ fn unfolded_tool_call_without_output_shows_its_arguments() {
 }
 
 #[test]
-fn failed_bash_pair_shows_a_cross_and_the_exit_code() {
+fn failed_shell_pair_shows_a_cross_and_the_exit_code() {
     let mut buffer = Buffer::new();
-    buffer.push_tool_call("c1", "bash", json!({"command": "false"}));
+    buffer.push_tool_call("c1", "shell", json!({"command": "false"}));
     buffer.push_tool_result("c1", "stderr:\nnope\nexit: 1", true);
     let input = InputState::new();
     let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 80, 12));
@@ -425,7 +425,7 @@ fn consecutive_reads_render_as_one_explored_row() {
     push_read(&mut buffer, "r1", "a.rs");
     push_read(&mut buffer, "r2", "b.rs");
     push_read(&mut buffer, "r3", "c.rs");
-    buffer.push_tool_call("b1", "bash", json!({"command": "cargo test"}));
+    buffer.push_tool_call("b1", "shell", json!({"command": "cargo test"}));
     buffer.push_tool_result("b1", "stdout:\nok\nexit: 0", false);
     let input = InputState::new();
     let lines = snapshot_lines(&mut buffer, &input, Rect::new(0, 0, 60, 20));
@@ -1790,20 +1790,21 @@ fn wrapped_list_items_hang_under_their_text() {
 fn a_reply_shows_tables_as_columns_and_quotes_with_a_gutter() {
     let mut buffer = Buffer::new();
     buffer.append_assistant_delta(
-        "| tool | calls |\n|---|---:|\n| read | 12 |\n| bash | 3 |\n\n\
+        "| tool | calls |\n|---|---:|\n| read | 12 |\n| shell | 3 |\n\n\
          > a quoted line long enough to wrap onto the next row\n\n\
          > - a quoted item long enough to wrap onto the next row\n",
     );
     buffer.finish_streaming();
     let rows = snapshot_lines(&mut buffer, &InputState::new(), Rect::new(0, 0, 40, 18));
     let at = |text: &str| rows.iter().position(|r| r.contains(text)).expect(text);
-    let head = at("tool  calls");
+    let head = at("tool   calls");
     assert!(
-        rows[head + 1].contains("\u{2500}\u{2500}\u{2500}\u{2500}  \u{2500}"),
+        rows[head + 1]
+            .contains("\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}  \u{2500}\u{2500}\u{2500}\u{2500}"),
         "{rows:#?}"
     );
-    assert!(rows[head + 2].contains("read     12"), "{rows:#?}");
-    assert!(rows[head + 3].contains("bash      3"), "{rows:#?}");
+    assert!(rows[head + 2].contains("read      12"), "{rows:#?}");
+    assert!(rows[head + 3].contains("shell      3"), "{rows:#?}");
     assert!(rows.iter().all(|r| !r.contains('|')), "{rows:#?}");
     let quote = at("> a quoted line");
     let gutter = rows[quote].find("> ").unwrap();
@@ -1838,7 +1839,7 @@ fn a_pinned_view_shows_when_new_output_arrives_below() {
 #[test]
 fn unfolding_while_scrolled_up_is_not_new_output() {
     let mut buffer = Buffer::new();
-    buffer.push_tool_call("c1", "bash", json!({"command": "seq 30"}));
+    buffer.push_tool_call("c1", "shell", json!({"command": "seq 30"}));
     let out: Vec<String> = (1..=30).map(|i| format!("out {i}")).collect();
     buffer.push_tool_result("c1", format!("stdout:\n{}\nexit: 0", out.join("\n")), false);
     for i in 0..30 {
@@ -1857,7 +1858,7 @@ fn unfolding_while_scrolled_up_is_not_new_output() {
     );
 }
 
-/// A prompt, a reply, three bash calls with their results, a closing
+/// A prompt, a reply, three shell calls with their results, a closing
 /// reply and a second prompt: blocks 0, 1, 2, 4, 6, 8 and 9 paint.
 fn tool_burst() -> Buffer {
     let mut buffer = Buffer::new();
@@ -1869,7 +1870,7 @@ fn tool_burst() -> Buffer {
         ("b2", "cargo test"),
         ("b3", "git status"),
     ] {
-        buffer.push_tool_call(id, "bash", json!({"command": cmd}));
+        buffer.push_tool_call(id, "shell", json!({"command": cmd}));
         buffer.push_tool_result(id, "exit: 0", false);
     }
     buffer.append_assistant_delta("All green.");

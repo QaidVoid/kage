@@ -268,7 +268,7 @@ the top-level `agent` tool call of your session:
   call again.
 - An agent's `session/request_permission` arrives on your session
   with the `agent` call as its tool call, a title that names the agent
-  and the tool, such as `explore: bash`, and the agent's tool input as
+  and the tool, such as `explore: shell`, and the agent's tool input as
   `rawInput`.
 
 Either way, `session/cancel` on your session stops the turn and every

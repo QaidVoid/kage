@@ -123,7 +123,7 @@ fn events_from_other_sessions_are_ignored() {
 fn run_ended_stops_every_running_tool() {
     use crate::view::tool_view::ToolPhase;
     let (mut app, _rx, events) = app_with_events();
-    feed(&mut app, &events, vec![bash_start("c1")]);
+    feed(&mut app, &events, vec![shell_start("c1")]);
     assert!(app.has_running_tool_call());
     feed(
         &mut app,

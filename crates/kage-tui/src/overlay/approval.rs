@@ -252,7 +252,7 @@ impl ApprovalPanel {
         let field = |key| self.input.get(key).and_then(Value::as_str).unwrap_or("");
         let plain = |s: String| Line::from(Span::styled(s, text));
         let lines = match self.tool.as_str() {
-            "bash" => {
+            "shell" => {
                 let wrap = width.saturating_sub(INDENT_WIDTH + 2);
                 let rows = field("command")
                     .trim()
@@ -330,7 +330,7 @@ impl ApprovalPanel {
             Vec::new()
         };
         if let Some(field) = &self.feedback {
-            let what = if self.tool == "bash" {
+            let what = if self.tool == "shell" {
                 "command"
             } else {
                 "call"
@@ -443,7 +443,7 @@ mod tests {
     fn opened() -> (ApprovalPanel, Instant) {
         let at = Instant::now();
         (
-            ApprovalPanel::new("bash", &json!({"command": "ls"}), None, at),
+            ApprovalPanel::new("shell", &json!({"command": "ls"}), None, at),
             at + Duration::from_millis(500),
         )
     }
@@ -464,20 +464,20 @@ mod tests {
     }
 
     #[test]
-    fn bash_shows_the_command_and_five_options() {
+    fn shell_shows_the_command_and_five_options() {
         let at = Instant::now();
-        let panel = ApprovalPanel::new("bash", &json!({"command": "cargo test"}), None, at);
+        let panel = ApprovalPanel::new("shell", &json!({"command": "cargo test"}), None, at);
         let rows = rows(&panel, 80, 0);
         assert!(rows[0].contains("Run this command?"), "{rows:#?}");
         assert_eq!(rows[1], "   $ cargo test");
         assert_eq!(rows[3], " > 1. Yes");
         assert_eq!(
             rows[4],
-            "   2. Yes, and allow bash for the rest of this session"
+            "   2. Yes, and allow shell for the rest of this session"
         );
         assert_eq!(
             rows[5],
-            "   3. Yes, and always allow bash (saved to config.toml)"
+            "   3. Yes, and always allow shell (saved to config.toml)"
         );
         assert_eq!(rows[7], "   5. No, and tell kage what to do instead");
         assert!(rows[8].chars().all(|c| c == '\u{2500}'), "{rows:#?}");
@@ -488,7 +488,7 @@ mod tests {
     fn a_wrapped_command_hangs_under_its_first_word() {
         let at = Instant::now();
         let command = "cargo test --workspace --all-features --no-fail-fast";
-        let panel = ApprovalPanel::new("bash", &json!({ "command": command }), None, at);
+        let panel = ApprovalPanel::new("shell", &json!({ "command": command }), None, at);
         let rows = rows(&panel, 30, 0);
         assert_eq!(rows[1], "   $ cargo test --workspace");
         assert_eq!(rows[2], "     --all-features");
@@ -496,10 +496,10 @@ mod tests {
     }
 
     #[test]
-    fn long_bash_commands_wrap_to_six_lines() {
+    fn long_shell_commands_wrap_to_six_lines() {
         let at = Instant::now();
         let command = (0..10).map(|i| format!("step{i}")).collect::<Vec<_>>();
-        let panel = ApprovalPanel::new("bash", &json!({"command": command.join("\n")}), None, at);
+        let panel = ApprovalPanel::new("shell", &json!({"command": command.join("\n")}), None, at);
         let rows = rows(&panel, 40, 0);
         assert_eq!(rows[1], "   $ step0");
         assert_eq!(rows[6], "     step5");
@@ -562,7 +562,7 @@ mod tests {
     #[test]
     fn keys_inside_the_guard_are_dropped() {
         let at = Instant::now();
-        let mut panel = ApprovalPanel::new("bash", &json!({"command": "ls"}), None, at);
+        let mut panel = ApprovalPanel::new("shell", &json!({"command": "ls"}), None, at);
         let early = at + Duration::from_millis(100);
         assert_eq!(
             panel.handle_key_at(key(KeyCode::Char('y')), early),
@@ -680,7 +680,7 @@ mod tests {
     #[test]
     fn the_count_shows_the_pending_requests_only_with_a_queue() {
         let at = Instant::now();
-        let panel = ApprovalPanel::new("bash", &json!({"command": "ls"}), None, at);
+        let panel = ApprovalPanel::new("shell", &json!({"command": "ls"}), None, at);
         assert!(rows(&panel, 80, 1)[0].ends_with(" 1 of 2 \u{2500}\u{2500}"));
         assert!(!rows(&panel, 80, 0)[0].contains(" of "));
     }
@@ -689,7 +689,7 @@ mod tests {
     fn an_agent_request_names_the_agent() {
         let at = Instant::now();
         let input = json!({"command": "cargo test"});
-        let mut panel = ApprovalPanel::new("bash", &input, Some(("explore", "map src")), at);
+        let mut panel = ApprovalPanel::new("shell", &input, Some(("explore", "map src")), at);
         let options = rows(&panel, 80, 0);
         assert!(
             options[0]
@@ -724,7 +724,7 @@ mod tests {
     fn a_short_area_drops_summary_lines_first() {
         let at = Instant::now();
         let command = (0..6).map(|i| format!("s{i}")).collect::<Vec<_>>();
-        let panel = ApprovalPanel::new("bash", &json!({"command": command.join("\n")}), None, at);
+        let panel = ApprovalPanel::new("shell", &json!({"command": command.join("\n")}), None, at);
         let mut terminal = Terminal::new(TestBackend::new(40, 10)).unwrap();
         terminal
             .draw(|frame| panel.render(frame, frame.area(), 0))

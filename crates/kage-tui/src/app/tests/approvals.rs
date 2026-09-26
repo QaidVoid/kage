@@ -13,7 +13,7 @@ fn permission_requests_open_a_prompt_and_answer_through_requests() {
             kage_core::protocol::HostEvent::PermissionRequested {
                 request_id,
                 tool_call_id: None,
-                tool: "bash".into(),
+                tool: "shell".into(),
                 subject: "ls".into(),
                 input: serde_json::json!({ "command": "ls" }),
             },
@@ -39,7 +39,7 @@ fn tool_timing_excludes_the_approval_wait() {
     feed(
         &mut app,
         &events,
-        vec![bash_start("c1"), permission_request("c1", 1)],
+        vec![shell_start("c1"), permission_request("c1", 1)],
     );
     assert_eq!(tool_phase(&app, "c1"), ToolPhase::Waiting);
     std::thread::sleep(std::time::Duration::from_millis(60));
@@ -81,7 +81,7 @@ fn a_denied_call_reads_denied_after_its_result() {
     feed(
         &mut app,
         &events,
-        vec![bash_start("c1"), permission_request("c1", 1)],
+        vec![shell_start("c1"), permission_request("c1", 1)],
     );
     app.answer_permission(PermissionDecision::Deny);
     assert_eq!(tool_phase(&app, "c1"), ToolPhase::Denied);
@@ -100,8 +100,8 @@ fn a_request_resolved_elsewhere_resumes_the_call() {
         &mut app,
         &events,
         vec![
-            bash_start("c1"),
-            bash_start("c2"),
+            shell_start("c1"),
+            shell_start("c2"),
             permission_request("c1", 1),
             permission_request("c2", 2),
         ],
@@ -127,7 +127,7 @@ fn the_approval_panel_replaces_the_input_below_the_buffer() {
     feed(
         &mut app,
         &events,
-        vec![bash_start("c1"), permission_request("c1", 1)],
+        vec![shell_start("c1"), permission_request("c1", 1)],
     );
     let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
     app.render_into(&mut terminal).unwrap();
@@ -256,7 +256,7 @@ fn answering_moves_the_row_from_waiting_to_approved() {
     feed(
         &mut app,
         &events,
-        vec![bash_start("c1"), permission_request("c1", 1)],
+        vec![shell_start("c1"), permission_request("c1", 1)],
     );
     assert_eq!(tool_phase(&app, "c1"), ToolPhase::Waiting);
     app.approval_key_at(code(KeyCode::Enter), past_guard());

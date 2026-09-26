@@ -164,9 +164,9 @@ mod tests {
     }
 
     #[test]
-    fn bash_rows_never_show_the_model_labels() {
+    fn shell_rows_never_show_the_model_labels() {
         let rows = rows(
-            "bash",
+            "shell",
             json!({"command": "echo hi"}),
             "stdout:\nhi\nthere\n\nexit: 0",
             false,
@@ -182,10 +182,10 @@ mod tests {
     }
 
     #[test]
-    fn folded_bash_shows_the_last_five_lines() {
+    fn folded_shell_shows_the_last_five_lines() {
         let out: Vec<String> = (1..=8).map(|i| format!("line {i}")).collect();
         let text = format!("stdout:\n{}\nexit: 0", out.join("\n"));
-        let rows = rows("bash", json!({"command": "seq 8"}), &text, false);
+        let rows = rows("shell", json!({"command": "seq 8"}), &text, false);
         assert!(rows[1].ends_with("... 3 earlier lines"), "{rows:?}");
         assert!(
             rows[2].ends_with("line 4") && rows[6].ends_with("line 8"),
@@ -194,9 +194,9 @@ mod tests {
     }
 
     #[test]
-    fn failed_bash_shows_its_exit_code() {
+    fn failed_shell_shows_its_exit_code() {
         let rows = rows(
-            "bash",
+            "shell",
             json!({"command": "false"}),
             "stderr:\nboom\nexit: 1",
             true,
@@ -212,11 +212,11 @@ mod tests {
                        echo \"SHELL=$SHELL\"; ls -a | head -n 100; echo done";
         let input = json!({"command": command});
         let error = "io error: No such file or directory (os error 2)";
-        let folded = rows_of(&widget("bash", input.clone(), error, true, true));
+        let folded = rows_of(&widget("shell", input.clone(), error, true, true));
         assert_eq!(folded.len(), 2, "{folded:?}");
         assert!(folded[0].contains("..."), "{folded:?}");
 
-        let unfolded = rows_of(&widget("bash", input, error, true, false));
+        let unfolded = rows_of(&widget("shell", input, error, true, false));
         let header: Vec<&str> = unfolded
             .iter()
             .take_while(|r| !r.contains("io error"))
@@ -246,9 +246,15 @@ mod tests {
     #[test]
     fn unfolded_rows_keep_every_line_of_a_script() {
         let input = json!({"command": "cd x\ncargo test"});
-        let folded = rows("bash", input.clone(), "(no output)\nexit: 0", false);
+        let folded = rows("shell", input.clone(), "(no output)\nexit: 0", false);
         assert!(folded[0].contains("Ran cd x (+1 line)"), "{folded:?}");
-        let unfolded = rows_of(&widget("bash", input, "(no output)\nexit: 0", false, false));
+        let unfolded = rows_of(&widget(
+            "shell",
+            input,
+            "(no output)\nexit: 0",
+            false,
+            false,
+        ));
         assert!(unfolded[0].contains("Ran cd x"), "{unfolded:?}");
         assert!(!unfolded[0].contains("(+1 line)"), "{unfolded:?}");
         assert!(unfolded[1].ends_with("      cargo test"), "{unfolded:?}");

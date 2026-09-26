@@ -467,7 +467,7 @@ kage mcp serve
 
 By default only the read-only tools are served: `read`, `grep`,
 `find`, and `ls`. Pick the set with `--tools`, a comma-separated list
-of built-in names (`read`, `write`, `edit`, `bash`, `ls`, `find`,
+of built-in names (`read`, `write`, `edit`, `shell`, `ls`, `find`,
 `grep`, `web_fetch`). An unknown name is an error.
 
 ```sh

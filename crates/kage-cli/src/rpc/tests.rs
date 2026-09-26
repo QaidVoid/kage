@@ -1598,7 +1598,7 @@ fn ordinary_endings_map_to_end_turn() {
 
 #[test]
 fn built_in_tools_get_kind_hints() {
-    assert_eq!(tool_kind("bash"), ToolKind::Execute);
+    assert_eq!(tool_kind("shell"), ToolKind::Execute);
     assert_eq!(tool_kind("grep"), ToolKind::Search);
     assert_eq!(tool_kind("github__create_issue"), ToolKind::Other);
 }

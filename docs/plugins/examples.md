@@ -139,37 +139,37 @@ A plugin that shows the running shell command in the header's
 widget area and adds a key to copy the last one into a toast:
 
 ```lua
-local group = kage.api.augroup_create("bash-watch")
+local group = kage.api.augroup_create("shell-watch")
 local last
 
 kage.api.autocmd_create("tool_call", {
   group = group,
-  pattern = "bash",
+  pattern = "shell",
   callback = function(ev)
     last = tostring(ev.data.input.command)
-    kage.set_status("bash", "$ " .. last)
+    kage.set_status("shell", "$ " .. last)
   end,
 })
 
 kage.api.autocmd_create("agent_end", {
   group = group,
   callback = function()
-    kage.clear_status("bash")
+    kage.clear_status("shell")
   end,
 })
 
 kage.keymap.set("g", "<F6>", function()
   kage.ui.notify(last or "no shell command yet")
-end, { desc = "show the last shell command", group = "bash watch" })
+end, { desc = "show the last shell command", group = "shell watch" })
 ```
 
-`pattern = "bash"` limits the first autocmd to the `bash` tool. The
+`pattern = "shell"` limits the first autocmd to the `shell` tool. The
 mapping has a `desc`, so it appears in the `?` reference under
-`bash watch`.
+`shell watch`.
 
-## safer bash
+## safer shell
 
-Override the built-in `bash` tool to refuse destructive commands. The
+Override the built-in `shell` tool to refuse destructive commands. The
 override replaces the tool, so it runs the command itself through
 `kage.exec`, which needs the `exec` [capability](/plugins/capabilities):
 
@@ -180,8 +180,8 @@ if not caps.exec then return end
 local blocked = { "rm %-rf /", "mkfs", ":(){" }
 
 kage.override_tool({
-  name = "bash",
-  description = "Run a bash command, refusing destructive ones.",
+  name = "shell",
+  description = "Run a shell command, refusing destructive ones.",
   schema = {
     type = "object",
     properties = { command = { type = "string" } },

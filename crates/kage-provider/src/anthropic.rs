@@ -761,7 +761,7 @@ mod thinking_tests {
             Role::Assistant,
             vec![Content::ToolCall {
                 id: ToolCallId::new("call_1"),
-                name: "bash".into(),
+                name: "shell".into(),
                 input: serde_json::json!({}),
             }],
             None,

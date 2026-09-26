@@ -17,7 +17,7 @@
 //! remains outside the threat model.
 //!
 //! Built-in tools use the looser [`kage_tools::resolve`] (no escape check)
-//! because the model already has shell access via `bash`; plugins keep the
+//! because the model already has shell access via the `shell` tool; plugins keep the
 //! tighter check because they are third-party code in a sandbox.
 
 use std::path::{Path, PathBuf};

@@ -7,7 +7,7 @@
 //! calls through this module, so a tool reads the same everywhere.
 //!
 //! Everything here is a display transform. The text the model receives
-//! is never touched: [`bash_output`] and [`agent_output`] strip the
+//! is never touched: [`shell_output`] and [`agent_output`] strip the
 //! model-facing labels and wrapper from a copy for painting only.
 
 use kage_core::event::AGENT_NO_REPLY_TEXT as NO_REPLY;
@@ -45,7 +45,7 @@ pub enum ToolPhase {
 pub enum ToolBody {
     /// Nothing: read-only tools only show their header.
     Hidden,
-    /// The last lines of the output (`bash`).
+    /// The last lines of the output (`shell`).
     Tail,
     /// The change as `-` and `+` lines (`edit`).
     Diff,
@@ -68,7 +68,7 @@ pub struct ToolLabel {
     pub target: String,
     /// The whole target an unfolded row wraps instead of cutting. It
     /// differs from [`Self::target`] only where that keeps the first
-    /// line: a `bash` command and an agent's description.
+    /// line: a `shell` command and an agent's description.
     pub full_target: String,
     /// Extra facts painted after the target, such as `(+1 -1)`. Empty
     /// when there are none.
@@ -188,9 +188,9 @@ impl EditDiff {
     }
 }
 
-/// How a `bash` command ended, read from its output text.
+/// How a `shell` command ended, read from its output text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BashExit {
+pub enum ShellExit {
     /// The command exited with this code.
     Code(i32),
     /// The command was killed by a signal.
@@ -251,7 +251,7 @@ pub fn describe(name: &str, input: &Value) -> ToolLabel {
             };
             label(["Edit", "Editing", "Edited"], path(), stats).body(ToolBody::Diff)
         }
-        "bash" => {
+        "shell" => {
             let command = field(input, "command");
             label(["Run", "Running", "Ran"], one_line(command), String::new())
                 .full(command.trim().to_owned())
@@ -372,18 +372,18 @@ pub fn file_edit_diff(input: &Value, content: &str, side: EditSide) -> Option<Ed
     Some(diff)
 }
 
-/// Split `bash` output text into display lines and the exit status.
+/// Split `shell` output text into display lines and the exit status.
 ///
 /// Drops the `stdout:` label and the trailing `exit: N` line, which are
 /// meant for the model. A dim `stderr` marker separates the streams
 /// only when both have output. `(no output)` gives no lines. Text that
 /// does not end in an `exit:` line comes back whole with no status.
 #[must_use]
-pub fn bash_output(text: &str) -> (Vec<BodyLine>, Option<BashExit>) {
+pub fn shell_output(text: &str) -> (Vec<BodyLine>, Option<ShellExit>) {
     let (rest, exit) = match text.rsplit_once("\nexit: ") {
-        Some((rest, "signal")) => (rest, Some(BashExit::Signal)),
+        Some((rest, "signal")) => (rest, Some(ShellExit::Signal)),
         Some((rest, code)) => match code.parse() {
-            Ok(code) => (rest, Some(BashExit::Code(code))),
+            Ok(code) => (rest, Some(ShellExit::Code(code))),
             Err(_) => (text, None),
         },
         None => (text, None),
@@ -469,7 +469,7 @@ pub fn agent_stats(tool_calls: u32, tokens: u64) -> String {
 /// `Edit src/lib.rs?`.
 #[must_use]
 pub fn question(name: &str, input: &Value) -> String {
-    if name == "bash" {
+    if name == "shell" {
         return "Run this command?".to_owned();
     }
     if name == "agent" {
@@ -727,7 +727,7 @@ mod tests {
                 "a.rs",
             ),
             (
-                "bash",
+                "shell",
                 json!({"command": "cargo test"}),
                 "Running",
                 "Ran",
@@ -795,7 +795,7 @@ mod tests {
         assert_eq!(write.stats, "(2 lines)");
 
         assert_eq!(
-            describe("bash", &json!({"command": "ls"})).body,
+            describe("shell", &json!({"command": "ls"})).body,
             ToolBody::Tail
         );
         assert!(describe("grep", &json!({"pattern": "x"})).read_only);
@@ -804,8 +804,11 @@ mod tests {
     }
 
     #[test]
-    fn multiline_bash_command_reads_as_one_line() {
-        let l = describe("bash", &json!({"command": "cd x\ncargo build\ncargo test"}));
+    fn multiline_shell_command_reads_as_one_line() {
+        let l = describe(
+            "shell",
+            &json!({"command": "cd x\ncargo build\ncargo test"}),
+        );
         assert_eq!(l.target, "cd x (+2 lines)");
     }
 
@@ -827,7 +830,7 @@ mod tests {
 
     #[test]
     fn full_target_keeps_every_line() {
-        let l = describe("bash", &json!({"command": "  cd x\ncargo test\n"}));
+        let l = describe("shell", &json!({"command": "  cd x\ncargo test\n"}));
         assert_eq!(l.target, "cd x (+1 line)");
         assert_eq!(l.full_target, "cd x\ncargo test");
         let read = describe("read", &json!({"path": "a.rs"}));
@@ -841,7 +844,7 @@ mod tests {
     fn partial_input_describes_without_panicking() {
         assert_eq!(describe("edit", &Value::Null).target, "");
         assert_eq!(describe("edit", &json!({"path": "a"})).stats, "");
-        assert_eq!(describe("bash", &json!({})).target, "");
+        assert_eq!(describe("shell", &json!({})).target, "");
     }
 
     #[test]
@@ -941,25 +944,25 @@ mod tests {
     }
 
     #[test]
-    fn bash_output_stdout_only() {
-        let (lines, exit) = bash_output("stdout:\nhello\nworld\n\nexit: 0");
+    fn shell_output_stdout_only() {
+        let (lines, exit) = shell_output("stdout:\nhello\nworld\n\nexit: 0");
         assert_eq!(
             texts(&lines),
             [(LineKind::Text, "hello"), (LineKind::Text, "world")]
         );
-        assert_eq!(exit, Some(BashExit::Code(0)));
+        assert_eq!(exit, Some(ShellExit::Code(0)));
     }
 
     #[test]
-    fn bash_output_stderr_only_has_no_marker() {
-        let (lines, exit) = bash_output("stderr:\noops\n\nexit: 0");
+    fn shell_output_stderr_only_has_no_marker() {
+        let (lines, exit) = shell_output("stderr:\noops\n\nexit: 0");
         assert_eq!(texts(&lines), [(LineKind::Text, "oops")]);
-        assert_eq!(exit, Some(BashExit::Code(0)));
+        assert_eq!(exit, Some(ShellExit::Code(0)));
     }
 
     #[test]
-    fn bash_output_both_streams_get_a_marker() {
-        let (lines, _) = bash_output("stdout:\nout\n\nstderr:\nerr\n\nexit: 0");
+    fn shell_output_both_streams_get_a_marker() {
+        let (lines, _) = shell_output("stdout:\nout\n\nstderr:\nerr\n\nexit: 0");
         assert_eq!(
             texts(&lines),
             [
@@ -971,26 +974,26 @@ mod tests {
     }
 
     #[test]
-    fn bash_output_no_output() {
-        let (lines, exit) = bash_output("(no output)\nexit: 0");
+    fn shell_output_no_output() {
+        let (lines, exit) = shell_output("(no output)\nexit: 0");
         assert!(lines.is_empty());
-        assert_eq!(exit, Some(BashExit::Code(0)));
+        assert_eq!(exit, Some(ShellExit::Code(0)));
     }
 
     #[test]
-    fn bash_output_non_zero_exit_and_signal() {
-        let (lines, exit) = bash_output("stderr:\nboom\n\nexit: 101");
+    fn shell_output_non_zero_exit_and_signal() {
+        let (lines, exit) = shell_output("stderr:\nboom\n\nexit: 101");
         assert_eq!(texts(&lines), [(LineKind::Text, "boom")]);
-        assert_eq!(exit, Some(BashExit::Code(101)));
+        assert_eq!(exit, Some(ShellExit::Code(101)));
 
-        let (lines, exit) = bash_output("(no output)\nexit: signal");
+        let (lines, exit) = shell_output("(no output)\nexit: signal");
         assert!(lines.is_empty());
-        assert_eq!(exit, Some(BashExit::Signal));
+        assert_eq!(exit, Some(ShellExit::Signal));
     }
 
     #[test]
-    fn bash_output_without_exit_line_is_kept_whole() {
-        let (lines, exit) = bash_output("bash timed out after 150ms");
+    fn shell_output_without_exit_line_is_kept_whole() {
+        let (lines, exit) = shell_output("bash timed out after 150ms");
         assert_eq!(
             texts(&lines),
             [(LineKind::Text, "bash timed out after 150ms")]
@@ -1001,7 +1004,7 @@ mod tests {
     #[test]
     fn questions_name_the_action() {
         assert_eq!(
-            question("bash", &json!({"command": "ls"})),
+            question("shell", &json!({"command": "ls"})),
             "Run this command?"
         );
         assert_eq!(
@@ -1123,13 +1126,13 @@ mod tests {
             "edit",
             &json!({"path": "a.rs", "old_str": "x", "new_str": "y"}),
         );
-        let bash = describe("bash", &json!({"command": "make"}));
+        let shell = describe("shell", &json!({"command": "make"}));
         for phase in [ToolPhase::Streaming, ToolPhase::Queued, ToolPhase::Waiting] {
-            assert_eq!(bash.verb_for(phase, false), "Run");
+            assert_eq!(shell.verb_for(phase, false), "Run");
         }
-        assert_eq!(bash.verb_for(ToolPhase::Running, false), "Running");
-        assert_eq!(bash.verb_for(ToolPhase::Done, false), "Ran");
-        assert_eq!(bash.verb_for(ToolPhase::Failed, true), "Ran");
+        assert_eq!(shell.verb_for(ToolPhase::Running, false), "Running");
+        assert_eq!(shell.verb_for(ToolPhase::Done, false), "Ran");
+        assert_eq!(shell.verb_for(ToolPhase::Failed, true), "Ran");
         assert_eq!(edit.verb_for(ToolPhase::Failed, false), "Edit");
         assert_eq!(edit.verb_for(ToolPhase::Denied, false), "Edit");
         assert_eq!(edit.verb_for(ToolPhase::Interrupted, false), "Edit");

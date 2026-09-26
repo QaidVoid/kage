@@ -375,7 +375,7 @@ fn is_image(resource: &ResourceRef) -> bool {
 
 /// One-line summary of a tool's input: the
 /// [`crate::view::tool_view::describe`] target, such as the path for
-/// `read` or the command for `bash`.
+/// `read` or the command for `shell`.
 pub(crate) fn summarize_input(name: &str, input: &serde_json::Value) -> String {
     if matches!(input, serde_json::Value::Null) {
         return String::new();
@@ -463,9 +463,9 @@ mod tests {
     }
 
     #[test]
-    fn summarize_bash_uses_command_field() {
+    fn summarize_shell_uses_command_field() {
         assert_eq!(
-            summarize_input("bash", &json!({"command": "ls -la"})),
+            summarize_input("shell", &json!({"command": "ls -la"})),
             "ls -la"
         );
     }
@@ -570,7 +570,7 @@ mod tests {
         let cid = ToolCallId::new("c1");
         hooks.on_event(&LoopEvent::ToolCallStart {
             id: cid.clone(),
-            name: "bash".into(),
+            name: "shell".into(),
             input_partial: json!({"cmd": "ls"}),
         });
         hooks.on_event(&LoopEvent::ToolCallEnd {
@@ -585,7 +585,7 @@ mod tests {
         let buf = buf.lock().unwrap();
         assert_eq!(buf.blocks().len(), 2);
         match &buf.blocks()[0] {
-            Block::ToolCall { name, .. } => assert_eq!(name, "bash"),
+            Block::ToolCall { name, .. } => assert_eq!(name, "shell"),
             other => panic!("expected ToolCall, got {other:?}"),
         }
         match &buf.blocks()[1] {
@@ -599,7 +599,7 @@ mod tests {
         }
     }
 
-    fn bash_output(text: &str, is_error: bool) -> ToolOutput {
+    fn shell_output(text: &str, is_error: bool) -> ToolOutput {
         ToolOutput {
             is_error,
             text: text.into(),
@@ -618,13 +618,13 @@ mod tests {
         };
         hooks.on_event(&LoopEvent::ToolCallArgsDelta {
             id: cid.clone(),
-            name: "bash".into(),
+            name: "shell".into(),
             input_partial: json!({}),
         });
         assert_eq!(phase(&buf), ToolPhase::Streaming);
         hooks.on_event(&LoopEvent::ToolCallStart {
             id: cid.clone(),
-            name: "bash".into(),
+            name: "shell".into(),
             input_partial: json!({"command": "make"}),
         });
         assert_eq!(phase(&buf), ToolPhase::Queued);
@@ -632,7 +632,7 @@ mod tests {
         assert_eq!(phase(&buf), ToolPhase::Running);
         hooks.on_event(&LoopEvent::ToolCallEnd {
             id: cid,
-            output: bash_output("stderr:\nno\nexit: 2", true),
+            output: shell_output("stderr:\nno\nexit: 2", true),
         });
         assert_eq!(phase(&buf), ToolPhase::Failed);
     }
@@ -640,7 +640,7 @@ mod tests {
     fn bash_start(id: &str, command: &str) -> LoopEvent {
         LoopEvent::ToolCallStart {
             id: ToolCallId::new(id),
-            name: "bash".into(),
+            name: "shell".into(),
             input_partial: json!({ "command": command }),
         }
     }
@@ -665,7 +665,7 @@ mod tests {
 
         hooks.on_event(&LoopEvent::ToolCallEnd {
             id: ToolCallId::new("c1"),
-            output: bash_output("stdout:\none\nexit: 0", false),
+            output: shell_output("stdout:\none\nexit: 0", false),
         });
         let durations: Vec<Option<u64>> = lock(&buf)
             .blocks()
@@ -696,7 +696,7 @@ mod tests {
         });
         hooks.on_event(&LoopEvent::ToolCallEnd {
             id: cid,
-            output: bash_output(kage_core::event::TOOL_CANCELLED_TEXT, true),
+            output: shell_output(kage_core::event::TOOL_CANCELLED_TEXT, true),
         });
         assert_eq!(phases(&buf), [ToolPhase::Interrupted]);
         let mut buf = lock(&buf);
@@ -728,7 +728,7 @@ mod tests {
         lock(&buf).set_tool_phase("c1", ToolPhase::Waiting);
         hooks.on_event(&LoopEvent::ToolCallEnd {
             id: ToolCallId::new("c1"),
-            output: bash_output("`bash`: permission prompt cancelled", true),
+            output: shell_output("`bash`: permission prompt cancelled", true),
         });
         assert_eq!(phases(&buf), [ToolPhase::Interrupted]);
         assert!(matches!(
@@ -746,7 +746,7 @@ mod tests {
         hooks.on_event(&bash_start("call_0", "echo first"));
         hooks.on_event(&LoopEvent::ToolCallEnd {
             id: ToolCallId::new("call_0"),
-            output: bash_output("stdout:\nfirst\nexit: 0", false),
+            output: shell_output("stdout:\nfirst\nexit: 0", false),
         });
         hooks.on_event(&LoopEvent::MessageAppended {
             message: Message::new(
@@ -759,7 +759,7 @@ mod tests {
         });
         hooks.on_event(&LoopEvent::ToolCallArgsDelta {
             id: ToolCallId::new("call_0"),
-            name: "bash".into(),
+            name: "shell".into(),
             input_partial: json!({}),
         });
         hooks.on_event(&bash_start("call_0", "echo second"));
@@ -768,7 +768,7 @@ mod tests {
         });
         hooks.on_event(&LoopEvent::ToolCallEnd {
             id: ToolCallId::new("call_0"),
-            output: bash_output("stdout:\nsecond\nexit: 0", false),
+            output: shell_output("stdout:\nsecond\nexit: 0", false),
         });
         let mut buf = lock(&buf);
         let commands: Vec<String> = buf
@@ -802,7 +802,7 @@ mod tests {
         let cid = ToolCallId::new("c1");
         hooks.on_event(&LoopEvent::ToolCallStart {
             id: cid.clone(),
-            name: "bash".into(),
+            name: "shell".into(),
             input_partial: json!({"command": "make"}),
         });
         for content in ["compiling a", "compiling a\ncompiling b"] {
@@ -865,7 +865,7 @@ mod tests {
         );
         hooks.on_event(&LoopEvent::ToolCallEnd {
             id: cid,
-            output: bash_output("stdout:\nall done\nexit: 0", false),
+            output: shell_output("stdout:\nall done\nexit: 0", false),
         });
         let done = rendered(&buf);
         assert!(
@@ -936,7 +936,7 @@ mod tests {
                 },
                 Content::ToolCall {
                     id: ToolCallId::new("c1"),
-                    name: "bash".into(),
+                    name: "shell".into(),
                     input: json!({"command": "ls"}),
                 },
             ],
@@ -1276,7 +1276,7 @@ mod tests {
             Role::Assistant,
             vec![Content::ToolCall {
                 id: ToolCallId::new("c1"),
-                name: "bash".into(),
+                name: "shell".into(),
                 input: json!({}),
             }],
             None,

@@ -284,7 +284,7 @@ fn session_spec(
     };
     let skills = crate::load_skills(&workdir, plugins.as_deref());
     let system_prompt = runtime_env::build_system_prompt(system_role, &workdir, &model, &skills);
-    let mut tools = builtin_registry().with_env_scrub(&config.bash.scrub_env);
+    let mut tools = builtin_registry().with_shell_config(&config.shell);
     let editor: Vec<String> = servers.keys().cloned().collect();
     let (mcp, mcp_errors) =
         crate::mcp::spawn_and_register_with(&mut tools, &workdir, plugins.as_deref(), servers);
@@ -301,9 +301,9 @@ fn session_spec(
         .validate()
         .map_err(|e| RpcError::internal(format!("permissions: {e}")))?;
     config
-        .bash
+        .shell
         .validate()
-        .map_err(|e| RpcError::internal(format!("bash: {e}")))?;
+        .map_err(|e| RpcError::internal(format!("shell: {e}")))?;
     let mut cx = AgentContext::new(model.clone(), &system_prompt).with_workdir(&workdir);
     if config.permissions.confine_paths {
         cx = cx.with_confine_paths();

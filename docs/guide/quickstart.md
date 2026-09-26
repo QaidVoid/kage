@@ -117,8 +117,8 @@ replaces the input box:
    $ cargo test -p parser
 
  > 1. Yes
-   2. Yes, and allow bash for the rest of this session
-   3. Yes, and always allow bash (saved to config.toml)
+   2. Yes, and allow shell for the rest of this session
+   3. Yes, and always allow shell (saved to config.toml)
    4. No
    5. No, and tell kage what to do instead
 ------------------------------------------------------------------
@@ -149,7 +149,7 @@ cycles focus between the input and buffer panes.
 
 Type `!` on an empty prompt to switch to shell mode (the prompt glyph
 becomes `!` and the placeholder reads `Run a shell command (backspace
-leaves shell mode)`). `enter` runs the line with `bash` in the session
+leaves shell mode)`). `enter` runs the line with `shell` in the session
 working directory, and the prompt returns to normal. The command shows
 as its own block with the tail of its output while it runs. `esc`
 stops it and kills the process. On an idle session, prompts you send

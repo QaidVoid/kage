@@ -190,7 +190,7 @@ where
 
             let workdir = cx.workdir.clone();
             // Parallel dispatch when the loop is configured for it and no
-            // tool in the batch overrides to Sequential (e.g. `bash`), or
+            // tool in the batch overrides to Sequential (e.g. `shell`), or
             // when every tool in the batch declares itself Parallel.
             let mode_of = |name: &str| tools.get(name).and_then(|t| t.execution_mode());
             let any_sequential = pending

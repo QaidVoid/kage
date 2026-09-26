@@ -20,7 +20,7 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use kage_core::config::{Config, McpConfig, McpServer};
+use kage_core::config::{Config, McpConfig, McpServer, ShellConfig};
 use kage_core::permissions::{PermissionAction, PermissionsConfig};
 use kage_mcp::{McpError, McpManager};
 use kage_plugin::PluginRuntime;
@@ -40,16 +40,16 @@ pub(crate) fn run_serve(tools: &[String]) -> ExitCode {
     };
     crate::trust::warn_if_untrusted(&workdir);
     let permissions = config.permissions;
-    let bash = config.bash;
+    let shell = config.shell;
     if let Err(e) = permissions.validate() {
         eprintln!("kage: mcp serve: {e}");
         return ExitCode::from(1);
     }
-    if let Err(e) = bash.validate() {
+    if let Err(e) = shell.validate() {
         eprintln!("kage: mcp serve: {e}");
         return ExitCode::from(1);
     }
-    let registry = match serve_registry(tools, &bash.scrub_env) {
+    let registry = match serve_registry(tools, &shell) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("kage: mcp serve: {e}");
@@ -78,8 +78,8 @@ pub(crate) fn run_serve(tools: &[String]) -> ExitCode {
 /// # Errors
 ///
 /// A message naming the first unknown tool and the known ones.
-fn serve_registry(tools: &[String], env_scrub: &[String]) -> Result<ToolRegistry, String> {
-    let mut registry = kage_tools::builtin_registry().with_env_scrub(env_scrub);
+fn serve_registry(tools: &[String], shell: &ShellConfig) -> Result<ToolRegistry, String> {
+    let mut registry = kage_tools::builtin_registry().with_shell_config(shell);
     let wanted: Vec<&str> = tools.iter().map(|t| t.trim()).collect();
     if let Some(unknown) = wanted.iter().find(|t| registry.get(t).is_none()) {
         let mut known: Vec<&str> = registry.names().collect();
@@ -304,6 +304,8 @@ mod tests {
 
     use kage_core::permissions::{PermissionAction, PermissionsConfig, ToolPermissionRules};
 
+    use kage_core::config::ShellConfig;
+
     use super::{SamplingHandler, merge_extra, serve_registry, serve_verdict};
 
     fn names(tools: &[&str]) -> Vec<String> {
@@ -344,16 +346,16 @@ mod tests {
 
     #[test]
     fn serve_registry_keeps_only_listed_tools() {
-        let reg = serve_registry(&names(&["read", "ls"]), &[]).unwrap();
+        let reg = serve_registry(&names(&["read", "ls"]), &ShellConfig::default()).unwrap();
         let mut listed: Vec<&str> = reg.names().collect();
         listed.sort_unstable();
         assert_eq!(listed, vec!["ls", "read"]);
-        assert!(reg.get("bash").is_none());
+        assert!(reg.get("shell").is_none());
     }
 
     #[test]
     fn serve_registry_rejects_unknown_tools() {
-        let err = serve_registry(&names(&["read", "nope"]), &[]).unwrap_err();
+        let err = serve_registry(&names(&["read", "nope"]), &ShellConfig::default()).unwrap_err();
         assert!(err.contains("`nope`"), "{err}");
     }
 
@@ -361,7 +363,7 @@ mod tests {
     fn serve_verdict_refuses_ask_and_deny() {
         let mut permissions = PermissionsConfig::default();
         for (tool, default) in [
-            ("bash", PermissionAction::Ask),
+            ("shell", PermissionAction::Ask),
             ("write", PermissionAction::Deny),
         ] {
             permissions.tools.insert(
@@ -374,7 +376,7 @@ mod tests {
         }
         let input = serde_json::json!({});
         assert!(serve_verdict(&permissions, "read", &input).is_none());
-        let ask = serve_verdict(&permissions, "bash", &input).unwrap();
+        let ask = serve_verdict(&permissions, "shell", &input).unwrap();
         assert!(ask.contains("cannot prompt"), "{ask}");
         let deny = serve_verdict(&permissions, "write", &input).unwrap();
         assert!(

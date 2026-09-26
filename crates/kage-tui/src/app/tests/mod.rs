@@ -148,10 +148,10 @@ fn feed(
     app.drain_engine_events();
 }
 
-fn bash_start(id: &str) -> kage_core::protocol::Event {
+fn shell_start(id: &str) -> kage_core::protocol::Event {
     kage_core::LoopEvent::ToolCallStart {
         id: kage_core::ToolCallId::new(id),
-        name: "bash".into(),
+        name: "shell".into(),
         input_partial: serde_json::json!({ "command": "ls" }),
     }
     .into()
@@ -161,7 +161,7 @@ fn permission_request(id: &str, request: u64) -> kage_core::protocol::Event {
     kage_core::protocol::HostEvent::PermissionRequested {
         request_id: kage_core::protocol::RequestId(request),
         tool_call_id: Some(kage_core::ToolCallId::new(id)),
-        tool: "bash".into(),
+        tool: "shell".into(),
         subject: "ls".into(),
         input: serde_json::json!({ "command": "ls" }),
     }

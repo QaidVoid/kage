@@ -389,7 +389,7 @@ mod tests {
             confine_paths: false,
             mcp: std::collections::BTreeMap::new(),
             tools: [(
-                "bash".to_owned(),
+                "shell".to_owned(),
                 ToolPermissionRules {
                     default,
                     allow: Vec::new(),
@@ -401,7 +401,7 @@ mod tests {
         }
     }
 
-    fn bash_input() -> serde_json::Value {
+    fn shell_input() -> serde_json::Value {
         serde_json::json!({"command": "ls"})
     }
 
@@ -409,7 +409,7 @@ mod tests {
     fn no_config_allows_every_call() {
         let mut gate = PermissionGate::new(PermissionsConfig::default());
         assert!(
-            gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+            gate.before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
                 .is_none()
         );
         assert!(
@@ -427,13 +427,13 @@ mod tests {
         let mut gate = PermissionGate::new(rules_for(PermissionAction::Allow));
         gate.set_mode(Some(PermissionAction::Deny));
         let out = gate
-            .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+            .before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
             .unwrap();
         assert!(out.is_error);
         assert!(out.text.contains("permission mode is deny"), "{}", out.text);
         gate.set_mode(None);
         assert!(
-            gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+            gate.before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
                 .is_none()
         );
     }
@@ -447,7 +447,7 @@ mod tests {
         let handle = std::thread::spawn(move || {
             let mut gate = gate;
             let out =
-                gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input());
+                gate.before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input());
             let _ = done_tx.send(out.is_none());
         });
         let ask = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -462,12 +462,12 @@ mod tests {
         let mut clone = gate.clone();
         gate.set_mode(Some(PermissionAction::Allow));
         let out = clone
-            .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+            .before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
             .unwrap();
         assert!(out.is_error);
         assert_eq!(
             out.text,
-            "`bash`: permission denied by [permissions.tools.bash]"
+            "`shell`: permission denied by [permissions.tools.shell]"
         );
         assert_eq!(clone.mode(), Some(PermissionAction::Allow));
     }
@@ -477,7 +477,7 @@ mod tests {
         let mut gate = PermissionGate::new(rules_for(PermissionAction::Deny));
         gate.set_mode(Some(PermissionAction::Ask));
         let out = gate
-            .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+            .before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
             .unwrap();
         assert!(out.is_error);
         assert!(out.text.contains("permission denied by"), "{}", out.text);
@@ -487,12 +487,12 @@ mod tests {
     fn deny_by_rule_synthesizes_error_output() {
         let mut gate = PermissionGate::new(rules_for(PermissionAction::Deny));
         let out = gate
-            .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+            .before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
             .unwrap();
         assert!(out.is_error);
         assert_eq!(
             out.text,
-            "`bash`: permission denied by [permissions.tools.bash]"
+            "`shell`: permission denied by [permissions.tools.shell]"
         );
     }
 
@@ -500,12 +500,12 @@ mod tests {
     fn ask_without_channel_denies_non_interactively() {
         let mut gate = PermissionGate::new(rules_for(PermissionAction::Ask));
         let out = gate
-            .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+            .before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
             .unwrap();
         assert!(out.is_error);
         assert!(out.text.contains("non-interactive"), "{}", out.text);
         assert!(
-            out.text.contains("[permissions.tools.bash]"),
+            out.text.contains("[permissions.tools.shell]"),
             "{}",
             out.text
         );
@@ -519,11 +519,11 @@ mod tests {
         let handle = std::thread::spawn(move || {
             let mut gate = gate;
             let out =
-                gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input());
+                gate.before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input());
             let _ = done_tx.send(out.is_none());
         });
         let ask = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        assert_eq!(ask.tool, "bash");
+        assert_eq!(ask.tool, "shell");
         assert_eq!(ask.subject, "ls");
         ask.reply.send(PermissionDecision::AllowOnce).unwrap();
         handle.join().unwrap();
@@ -538,7 +538,7 @@ mod tests {
         let handle = std::thread::spawn(move || {
             let mut gate = gate;
             let out =
-                gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input());
+                gate.before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input());
             let _ = done_tx.send(out.map(|o| o.text));
         });
         let ask = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -548,7 +548,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .unwrap()
             .unwrap();
-        assert_eq!(text, "`bash`: denied by user");
+        assert_eq!(text, "`shell`: denied by user");
     }
 
     #[test]
@@ -564,7 +564,7 @@ mod tests {
         let handle = std::thread::spawn(move || {
             let mut gate = gate;
             let allowed = gate
-                .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+                .before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
                 .is_none();
             let _ = done_tx.send(allowed);
         });
@@ -576,29 +576,29 @@ mod tests {
         let mut gate2 = gate2;
         assert!(
             gate2
-                .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+                .before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
                 .is_none()
         );
         assert_eq!(
-            lock(&gate2.rules).check("bash", "anything"),
+            lock(&gate2.rules).check("shell", "anything"),
             PermissionAction::Allow
         );
         // The decision landed in the user config file.
         let saved = Config::load(&path).unwrap();
         assert_eq!(
-            saved.permissions.check("bash", "anything"),
+            saved.permissions.check("shell", "anything"),
             PermissionAction::Allow
         );
     }
 
-    /// Run one bash call on `gate` under ask mode, answer the ask with
+    /// Run one shell call on `gate` under ask mode, answer the ask with
     /// `decision`, and return whether the call was allowed.
     fn answer_ask(gate: &PermissionGate, decision: PermissionDecision) -> bool {
         let (ask_tx, ask_rx) = channel_asker();
         let mut gate = gate.clone().with_asker(ask_tx);
         gate.set_mode(Some(PermissionAction::Ask));
         let handle = std::thread::spawn(move || {
-            gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+            gate.before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
                 .is_none()
         });
         let ask = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -619,10 +619,13 @@ mod tests {
         assert!(answer_ask(&gate, PermissionDecision::AllowSession));
         let mut gate = gate.with_asker(panicking_asker());
         assert!(
-            gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+            gate.before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
                 .is_none()
         );
-        assert_eq!(lock(&gate.rules).check("bash", "ls"), PermissionAction::Ask);
+        assert_eq!(
+            lock(&gate.rules).check("shell", "ls"),
+            PermissionAction::Ask
+        );
         assert!(!path.exists());
     }
 
@@ -635,12 +638,12 @@ mod tests {
         assert!(answer_ask(&gate, PermissionDecision::AllowAlways));
         let mut gate = gate.with_asker(panicking_asker());
         assert!(
-            gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+            gate.before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
                 .is_none()
         );
         let saved = Config::load(&path).unwrap();
         assert_eq!(
-            saved.permissions.check("bash", "anything"),
+            saved.permissions.check("shell", "anything"),
             PermissionAction::Allow
         );
     }
@@ -720,7 +723,7 @@ mod tests {
         assert_eq!(gate.mode(), None);
         let mut gate = gate;
         let out = gate
-            .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+            .before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
             .unwrap();
         assert!(out.text.contains("non-interactive"), "{}", out.text);
         assert!(call(&mut gate, "write").is_none());
@@ -729,19 +732,19 @@ mod tests {
     #[test]
     fn a_configured_deny_pattern_outlives_a_session_approval() {
         let mut rules = rules_for(PermissionAction::Ask);
-        rules.tools.get_mut("bash").unwrap().deny = vec!["rm *".to_owned()];
+        rules.tools.get_mut("shell").unwrap().deny = vec!["rm *".to_owned()];
         let gate = PermissionGate::new(rules);
         assert!(answer_ask(&gate, PermissionDecision::AllowSession));
         let mut gate = gate.with_asker(panicking_asker());
         gate.set_mode(None);
         assert!(
-            gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+            gate.before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
                 .is_none()
         );
         let out = gate
             .before_tool_call(
                 &kage_core::ToolCallId::new("call"),
-                "bash",
+                "shell",
                 &serde_json::json!({"command": "rm -rf target"}),
             )
             .unwrap();
@@ -755,7 +758,7 @@ mod tests {
         let mut gate = gate;
         gate.set_mode(Some(PermissionAction::Deny));
         let out = gate
-            .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+            .before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
             .unwrap();
         assert!(out.text.contains("permission mode is deny"), "{}", out.text);
     }
@@ -771,7 +774,7 @@ mod tests {
         let handle = std::thread::spawn(move || {
             let mut gate = gate;
             let out =
-                gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input());
+                gate.before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input());
             let _ = done_tx.send(out.map(|o| o.text));
         });
         let ask = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -783,7 +786,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .unwrap()
             .unwrap();
-        assert_eq!(text, "`bash`: permission prompt cancelled");
+        assert_eq!(text, "`shell`: permission prompt cancelled");
         drop(ask);
     }
 
@@ -795,7 +798,7 @@ mod tests {
         let handle = std::thread::spawn(move || {
             let mut gate = gate;
             let out =
-                gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input());
+                gate.before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input());
             let _ = done_tx.send(out.map(|o| o.text));
         });
         // Receive the ask and drop its reply sender entirely.
@@ -828,7 +831,7 @@ mod tests {
         let out = call(&mut gate, "github__create_issue").unwrap();
         assert!(out.is_error);
         assert!(out.text.contains("non-interactive"), "{}", out.text);
-        assert!(call(&mut gate, "bash").is_none());
+        assert!(call(&mut gate, "shell").is_none());
         assert!(call(&mut gate, "other__tool").is_none());
     }
 
@@ -916,12 +919,12 @@ mod tests {
         let hooks: &mut dyn Hooks = &mut gate;
         assert!(
             hooks
-                .before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+                .before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
                 .is_none()
         );
         let noop: &mut dyn Hooks = &mut NoopHooks;
         assert!(
-            noop.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &bash_input())
+            noop.before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
                 .is_none()
         );
     }

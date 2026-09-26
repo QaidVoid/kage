@@ -182,7 +182,7 @@ fn the_plugin_session_list_refreshes_only_when_sessions_change() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(lock(&list).len(), 1);
 
-    feed(&mut app, &events, vec![bash_start("c1")]);
+    feed(&mut app, &events, vec![shell_start("c1")]);
     app.refresh_plugin_session_list_if_stale();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 

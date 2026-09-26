@@ -13,7 +13,7 @@ they ask unless you allow their server (see
 # symlinks that point outside it are rejected. default false.
 confine_paths = false
 
-[permissions.tools.bash]
+[permissions.tools.shell]
 # what happens when neither the deny nor the allow list matches.
 # "allow" (the default), "ask", or "deny".
 default = "ask"
@@ -34,7 +34,7 @@ once you trust the project (see
 
 ## how rules evaluate
 
-Tool names are literal: `bash`, `write`, `edit`, `web_fetch`,
+Tool names are literal: `shell`, `write`, `edit`, `web_fetch`,
 `agent`, or any registered MCP tool name such as `github__create_issue`. A built-in
 tool with no `[permissions.tools.<name>]` entry is always allowed.
 
@@ -51,7 +51,7 @@ An entry with only a `deny` list keeps everything else allowed, so you
 can block a few dangerous calls without opting into prompts:
 
 ```toml
-[permissions.tools.bash]
+[permissions.tools.shell]
 deny = ["curl *", "wget *"]
 ```
 
@@ -193,7 +193,7 @@ once you trust the project. See
 
 `confine_paths = true` routes the built-in file tools through
 escape-checked resolution: a read or write must stay under the working
-directory. `bash` is unaffected, because a shell can always reach the whole
+directory. `shell` is unaffected, because a shell can always reach the whole
 filesystem. Confine it with `deny` rules instead. Agents inherit the setting.
 
 ## runtime mode (`/permission`)

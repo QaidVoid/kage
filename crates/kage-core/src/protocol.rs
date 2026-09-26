@@ -523,7 +523,7 @@ mod tests {
             HostEvent::PermissionRequested {
                 request_id: RequestId(3),
                 tool_call_id: Some(ToolCallId("call_1".into())),
-                tool: "bash".into(),
+                tool: "shell".into(),
                 subject: "ls".into(),
                 input: serde_json::json!({ "command": "ls" }),
             }

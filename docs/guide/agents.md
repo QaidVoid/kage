@@ -75,7 +75,7 @@ later definition replaces an earlier one of the same name.
 ```markdown
 ---
 description: Reviews a diff for bugs and missing tests. Give it the change to review.
-tools: read, grep, find, ls, bash
+tools: read, grep, find, ls, shell
 model: anthropic:claude-sonnet-4-6
 thinking: high
 ---
@@ -386,7 +386,7 @@ its own session:
 - An agent's approval request arrives as `session/request_permission`
   on the editor's session. The tool call is the top-level `agent`
   call, its title names the agent and the tool, such as
-  `explore: bash`, and `rawInput` is the agent's tool input.
+  `explore: shell`, and `rawInput` is the agent's tool input.
 
 In both cases `session/cancel` on the editor's session stops the run
 and every agent under it. See [zed](/editors/zed#agents) for the wire

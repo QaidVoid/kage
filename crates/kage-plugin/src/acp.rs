@@ -220,11 +220,11 @@ mod tests {
     fn permission_handler_allow_deny_and_absent() {
         let lua = lua_with_kage();
         install_acp(&lua).unwrap();
-        let payload = serde_json::json!({"tool": "bash"});
+        let payload = serde_json::json!({"tool": "shell"});
 
         assert_eq!(decide(&lua, &payload), None, "no handler => None");
 
-        lua.load("kage.on_acp_permission(function(req) return req.tool == 'bash' end)")
+        lua.load("kage.on_acp_permission(function(req) return req.tool == 'shell' end)")
             .exec()
             .unwrap();
         assert_eq!(decide(&lua, &payload), Some(true));

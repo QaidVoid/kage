@@ -49,9 +49,9 @@ pub struct Config {
     /// per tool, plus the opt-in path-confinement flag.
     #[serde(default, skip_serializing_if = "PermissionsConfig::is_default")]
     pub permissions: crate::permissions::PermissionsConfig,
-    /// Shell tool policy (`[bash]`).
-    #[serde(default, skip_serializing_if = "BashConfig::is_default")]
-    pub bash: BashConfig,
+    /// Shell tool policy (`[shell]`).
+    #[serde(default, skip_serializing_if = "ShellConfig::is_default")]
+    pub shell: ShellConfig,
 }
 
 impl Config {
@@ -609,10 +609,15 @@ pub struct PluginsConfig {
     pub config: BTreeMap<String, serde_json::Value>,
 }
 
-/// The `[bash]` table: shell tool policy.
+/// The `[shell]` table: shell tool policy.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct BashConfig {
+pub struct ShellConfig {
+    /// Program the shell tool runs commands with (`bash`, `fish`, an
+    /// absolute path, ...). Defaults to `bash`. Known Windows shells get
+    /// their own command flag; every other program is driven with `-c`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
     /// Glob patterns of environment variable names the shell tool strips
     /// from its child's environment. Matched case-sensitively against the
     /// whole name, so `*_TOKEN` covers `GITHUB_TOKEN` and `PATH` names one
@@ -621,26 +626,29 @@ pub struct BashConfig {
     pub scrub_env: Vec<String>,
 }
 
-impl BashConfig {
+impl ShellConfig {
     /// Whether nothing is configured.
     #[must_use]
     pub fn is_default(&self) -> bool {
-        self.scrub_env.is_empty()
+        self.program.is_none() && self.scrub_env.is_empty()
     }
 
     /// Reject patterns that could never match: they are empty or do not
     /// compile as globs, which would silently disable a rule the user
     /// wrote.
     pub fn validate(&self) -> Result<()> {
+        if self.program.as_ref().is_some_and(String::is_empty) {
+            return Err(config_error("[shell] program must not be empty".to_owned()));
+        }
         for pattern in &self.scrub_env {
             if pattern.is_empty() {
                 return Err(config_error(
-                    "[bash] scrub_env patterns must be non-empty".to_owned(),
+                    "[shell] scrub_env patterns must be non-empty".to_owned(),
                 ));
             }
             if let Err(e) = globset::Glob::new(pattern) {
                 return Err(config_error(format!(
-                    "[bash] scrub_env pattern `{pattern}` does not compile: {e}"
+                    "[shell] scrub_env pattern `{pattern}` does not compile: {e}"
                 )));
             }
         }
@@ -1076,20 +1084,34 @@ mod tests {
     }
 
     #[test]
-    fn bash_scrub_env_parses_and_validates() {
-        let cfg: Config = toml::from_str("[bash]\nscrub_env = [\"*_TOKEN\", \"PATH\"]\n").unwrap();
+    fn shell_scrub_env_parses_and_validates() {
+        let cfg: Config = toml::from_str("[shell]\nscrub_env = [\"*_TOKEN\", \"PATH\"]\n").unwrap();
         assert_eq!(
-            cfg.bash.scrub_env,
+            cfg.shell.scrub_env,
             vec!["*_TOKEN".to_owned(), "PATH".to_owned()]
         );
-        cfg.bash.validate().unwrap();
+        cfg.shell.validate().unwrap();
     }
 
     #[test]
-    fn bash_scrub_env_rejects_bad_globs() {
-        let cfg: Config = toml::from_str("[bash]\nscrub_env = [\"[\"]\n").unwrap();
-        let err = cfg.bash.validate().unwrap_err().to_string();
-        assert!(err.contains("[bash] scrub_env"), "{err}");
+    fn shell_scrub_env_rejects_bad_globs() {
+        let cfg: Config = toml::from_str("[shell]\nscrub_env = [\"[\"]\n").unwrap();
+        let err = cfg.shell.validate().unwrap_err().to_string();
+        assert!(err.contains("[shell] scrub_env"), "{err}");
+    }
+
+    #[test]
+    fn shell_program_parses() {
+        let cfg: Config = toml::from_str("[shell]\nprogram = \"fish\"\n").unwrap();
+        assert_eq!(cfg.shell.program.as_deref(), Some("fish"));
+        assert!(cfg.shell.validate().is_ok());
+    }
+
+    #[test]
+    fn shell_program_rejects_empty() {
+        let cfg: Config = toml::from_str("[shell]\nprogram = \"\"\n").unwrap();
+        let err = cfg.shell.validate().unwrap_err().to_string();
+        assert!(err.contains("[shell] program"), "{err}");
     }
 
     const HAND_WRITTEN: &str = r#"# my kage config
@@ -1159,7 +1181,7 @@ default = "ask"   # keep asking
             &path,
             &[
                 (
-                    vec!["permissions", "tools", "bash", "default"],
+                    vec!["permissions", "tools", "shell", "default"],
                     str_value("allow"),
                 ),
                 (
@@ -1170,7 +1192,7 @@ default = "ask"   # keep asking
         )
         .unwrap();
         let expected = format!(
-            "{HAND_WRITTEN}\n[permissions.tools.bash]\ndefault = \"allow\"\n\n[loop]\ncompaction_threshold = 0.6\n"
+            "{HAND_WRITTEN}\n[permissions.tools.shell]\ndefault = \"allow\"\n\n[loop]\ncompaction_threshold = 0.6\n"
         );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
         let cfg = Config::load(&path).unwrap();
@@ -1203,7 +1225,7 @@ default = "ask"   # keep asking
         let path = dir.path().join("config.toml");
         std::fs::write(
             &path,
-            "ui.theme = \"default\"\n\n[permissions]\ntools = { bash = { default = \"ask\" } }\n",
+            "ui.theme = \"default\"\n\n[permissions]\ntools = { grep = { default = \"ask\" } }\n",
         )
         .unwrap();
         Config::save_keys(
@@ -1211,7 +1233,7 @@ default = "ask"   # keep asking
             &[
                 (vec!["ui", "theme"], str_value("ayu")),
                 (
-                    vec!["permissions", "tools", "bash", "default"],
+                    vec!["permissions", "tools", "shell", "default"],
                     str_value("allow"),
                 ),
                 (
@@ -1224,7 +1246,7 @@ default = "ask"   # keep asking
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(
             body.starts_with(
-                "ui.theme = \"ayu\"\n\n[permissions]\ntools = { bash = { default = \"allow\" }"
+                "ui.theme = \"ayu\"\n\n[permissions]\ntools = { grep = { default = \"ask\" }"
             ),
             "{body}"
         );
@@ -1352,7 +1374,7 @@ default = "ask"   # keep asking
                 [permissions]
                 confine_paths = true
 
-                [permissions.tools.bash]
+                [permissions.tools.shell]
                 default = "ask"
                 allow = ["git *"]
                 deny = ["rm -rf *"]
@@ -1361,11 +1383,11 @@ default = "ask"   # keep asking
             let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
             assert!(cfg.permissions.confine_paths);
             assert_eq!(
-                cfg.permissions.check("bash", "git status"),
+                cfg.permissions.check("shell", "git status"),
                 crate::permissions::PermissionAction::Allow
             );
             assert_eq!(
-                cfg.permissions.check("bash", "rm -rf /"),
+                cfg.permissions.check("shell", "rm -rf /"),
                 crate::permissions::PermissionAction::Deny
             );
             Ok(())

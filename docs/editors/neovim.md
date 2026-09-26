@@ -124,7 +124,7 @@ from it. kage replays the transcript as `session/update`
 notifications before it answers.
 
 When kage starts [agents](/guide/agents), their permission requests
-arrive on the same session with titles such as `explore: bash`, and
+arrive on the same session with titles such as `explore: shell`, and
 their progress replaces the content of the `agent` tool call. A client
 that advertises the `subagents` capability sees each agent as its own
 session instead. See [zed](/editors/zed#agents) for the details.

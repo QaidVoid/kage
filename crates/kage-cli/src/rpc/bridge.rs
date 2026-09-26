@@ -528,7 +528,7 @@ pub(super) fn tool_kind(name: &str) -> ToolKind {
         "read" | "ls" => ToolKind::Read,
         "grep" | "find" => ToolKind::Search,
         "write" | "edit" => ToolKind::Edit,
-        "bash" => ToolKind::Execute,
+        "shell" => ToolKind::Execute,
         "web_fetch" => ToolKind::Fetch,
         _ => ToolKind::Other,
     }

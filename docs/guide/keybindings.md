@@ -84,7 +84,7 @@ prefixes all key off an empty prompt, so every surface stays one
 keystroke away without a mode switch. With text in the prompt they
 are typed as literal characters. In shell mode the placeholder reads
 `Run a shell command (backspace leaves shell mode)`. `enter` runs the
-line with `bash` and shows its output live, and `esc` stops the
+line with `shell` and shows its output live, and `esc` stops the
 command while it runs. `backspace` or `esc` on the empty shell prompt
 leaves shell mode. See
 [running shell commands](/guide/quickstart#running-shell-commands).

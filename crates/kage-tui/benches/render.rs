@@ -80,7 +80,7 @@ fn representative_buffer() -> Buffer {
         let call_id = format!("call-{turn}");
         buffer.push_tool_call(
             call_id.clone(),
-            "bash",
+            "shell",
             serde_json::json!({ "command": "cargo nextest run" }),
         );
         buffer.push_tool_result_with_duration(call_id, tool_output(turn), false, Some(420));

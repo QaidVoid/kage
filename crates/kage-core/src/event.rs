@@ -490,12 +490,12 @@ mod tests {
     #[test]
     fn loop_error_serializes_with_kind_tag() {
         let err = LoopError::Tool {
-            name: "bash".into(),
+            name: "shell".into(),
             message: "exit 1".into(),
         };
         let json = serde_json::to_value(&err).unwrap();
         assert_eq!(json["kind"], "tool");
-        assert_eq!(json["name"], "bash");
+        assert_eq!(json["name"], "shell");
     }
 
     #[test]

@@ -13,16 +13,20 @@
 //! channel. The outer iterator blocks on that channel and a
 //! [`CancelWatch`] at once, so it never wakes while nothing happens.
 //!
-//! The worker thread keeps running the inner stream until it produces an
-//! event whose send fails (because the consumer dropped the channel),
+//! The worker thread keeps running the inner stream until it produces
+//! an event whose send fails (because the consumer dropped the channel),
 //! the inner stream finishes, or the underlying connection closes.
-//! Bounded resource leak: at most one worker thread per cancelled turn,
-//! reclaimed when the next chunk arrives or the HTTP connection times
-//! out at the OS level.
+//! Cancelling does not leave that worker holding a live connection: the
+//! consumer shuts the request's sockets down through
+//! [`KillRegistry`](crate::interrupt::KillRegistry), so a worker
+//! blocked in a read wakes with a connection error and exits instead of
+//! draining toward the idle deadline.
+use std::sync::Arc;
 
 use crossbeam_channel::{Receiver, select_biased};
 use kage_core::{CancelFlag, CancelWatch};
 
+use crate::interrupt::KillRegistry;
 use crate::{EventStream, ProviderError, ProviderEvent};
 
 /// Bounded backlog between worker thread and consumer. Bounded so a
@@ -39,16 +43,20 @@ const CHANNEL_BUFFER: usize = 32;
 /// cancel flag would not be observed until the HTTP server replies
 /// (potentially many seconds for slow providers).
 ///
-/// On cancel the spawned thread is detached - it continues until `f`
-/// returns naturally and the result is discarded. The connection it
-/// holds is reclaimed at OS-level HTTP keepalive timeout.
+/// On cancel the request's sockets are shut down through `kill`, so the
+/// detached thread's blocked connect or read fails promptly and the
+/// thread exits instead of holding a half-open connection.
 ///
 /// # Errors
 ///
 /// - Whatever `f` returns when it completes first.
 /// - [`ProviderError::Cancelled`] when the flag is set first or the
 ///   worker thread panics.
-pub fn cancellable_call<F, T>(cancel: &CancelFlag, f: F) -> Result<T, ProviderError>
+pub fn cancellable_call<F, T>(
+    cancel: &CancelFlag,
+    kill: &KillRegistry,
+    f: F,
+) -> Result<T, ProviderError>
 where
     F: FnOnce() -> Result<T, ProviderError> + Send + 'static,
     T: Send + 'static,
@@ -58,11 +66,15 @@ where
         let _ = tx.send(f());
     });
     if cancel.is_cancelled() {
+        kill.shutdown_all();
         return Err(ProviderError::Cancelled);
     }
     let watch = cancel.watch();
     select_biased! {
-        recv(watch.receiver()) -> _ => Err(ProviderError::Cancelled),
+        recv(watch.receiver()) -> _ => {
+            kill.shutdown_all();
+            Err(ProviderError::Cancelled)
+        }
         recv(rx) -> reply => reply.unwrap_or(Err(ProviderError::Cancelled)),
     }
 }
@@ -74,10 +86,15 @@ where
 /// returned iterator waits on its channel and a watch on the cancel
 /// flag together. Once the cancel flag is set, the next `next()` call
 /// returns `Err(ProviderError::Cancelled)` and the iterator is fused;
-/// the worker thread continues until its next send fails (when the
-/// channel receiver is dropped) and then exits.
+/// the request's sockets are shut down through `kill`, so the worker
+/// thread's blocked read fails and it exits rather than holding the
+/// connection open.
 #[must_use]
-pub fn make_cancelable(inner: EventStream, cancel: CancelFlag) -> EventStream {
+pub fn make_cancelable(
+    inner: EventStream,
+    cancel: CancelFlag,
+    kill: Arc<KillRegistry>,
+) -> EventStream {
     let (tx, rx) = crossbeam_channel::bounded(CHANNEL_BUFFER);
     std::thread::spawn(move || {
         for item in inner {
@@ -91,6 +108,7 @@ pub fn make_cancelable(inner: EventStream, cancel: CancelFlag) -> EventStream {
         rx,
         cancel,
         watch,
+        kill,
         done: false,
     })
 }
@@ -99,6 +117,7 @@ struct CancelableStream {
     rx: Receiver<Result<ProviderEvent, ProviderError>>,
     cancel: CancelFlag,
     watch: CancelWatch,
+    kill: Arc<KillRegistry>,
     done: bool,
 }
 
@@ -110,11 +129,13 @@ impl Iterator for CancelableStream {
             return None;
         }
         if self.cancel.is_cancelled() {
+            self.kill.shutdown_all();
             self.done = true;
             return Some(Err(ProviderError::Cancelled));
         }
         select_biased! {
             recv(self.watch.receiver()) -> _ => {
+                self.kill.shutdown_all();
                 self.done = true;
                 Some(Err(ProviderError::Cancelled))
             }
@@ -129,9 +150,16 @@ impl Iterator for CancelableStream {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use super::*;
+
+    /// Tests stream in-memory iterators; there is no socket to tear
+    /// down, so the empty registry's shutdown is a no-op.
+    fn no_kill() -> Arc<KillRegistry> {
+        Arc::new(KillRegistry::new())
+    }
 
     fn boxed(events: Vec<Result<ProviderEvent, ProviderError>>) -> EventStream {
         Box::new(events.into_iter())
@@ -146,7 +174,7 @@ mod tests {
                 delta: "hello".into(),
             }),
         ]);
-        let mut s = make_cancelable(inner, cancel);
+        let mut s = make_cancelable(inner, cancel, no_kill());
         assert!(matches!(s.next(), Some(Ok(ProviderEvent::MessageStart))));
         assert!(matches!(
             s.next(),
@@ -190,7 +218,7 @@ mod tests {
     fn returns_cancelled_while_inner_is_blocked() {
         let (inner, entered, _release) = stalled();
         let cancel = CancelFlag::new();
-        let mut s = make_cancelable(Box::new(inner), cancel.clone());
+        let mut s = make_cancelable(Box::new(inner), cancel.clone(), no_kill());
         std::thread::spawn(move || {
             let _ = entered.recv();
             cancel.cancel();
@@ -211,7 +239,7 @@ mod tests {
             let _ = entered.recv();
             flag.cancel();
         });
-        let result = cancellable_call(&cancel, move || {
+        let result = cancellable_call(&cancel, &no_kill(), move || {
             inner.next();
             Ok(())
         });
@@ -223,7 +251,7 @@ mod tests {
         let (inner, _entered, _release) = stalled();
         let cancel = CancelFlag::new();
         cancel.cancel();
-        let mut s = make_cancelable(Box::new(inner), cancel);
+        let mut s = make_cancelable(Box::new(inner), cancel, no_kill());
         assert!(matches!(s.next(), Some(Err(ProviderError::Cancelled))));
         assert!(s.next().is_none());
     }
@@ -238,7 +266,7 @@ mod tests {
                 delta: "after".into(),
             }),
         ]);
-        let mut s = make_cancelable(inner, cancel);
+        let mut s = make_cancelable(inner, cancel, no_kill());
         assert!(matches!(s.next(), Some(Ok(ProviderEvent::MessageStart))));
         assert!(matches!(s.next(), Some(Err(ProviderError::Cancelled))));
         assert!(s.next().is_none());

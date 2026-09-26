@@ -26,8 +26,8 @@ use std::sync::{Arc, Mutex};
 
 use kage_core::{CancelFlag, Content, sync::lock};
 use kage_provider::{
-    EventStream, Provider, ProviderError, ProviderEvent, ProviderMetadata, ProviderModel,
-    StreamRequest, make_cancelable,
+    EventStream, KillRegistry, Provider, ProviderError, ProviderEvent, ProviderMetadata,
+    ProviderModel, StreamRequest, make_cancelable,
 };
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 
@@ -90,6 +90,9 @@ impl Provider for LuaProvider {
         Ok(make_cancelable(
             Box::new(ChannelStream { rx }),
             cancel.clone(),
+            // Lua streams have no socket to tear down; an empty registry
+            // makes the shutdown a no-op and cancel stays cooperative.
+            Arc::new(KillRegistry::new()),
         ))
     }
 

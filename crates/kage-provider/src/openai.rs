@@ -24,7 +24,6 @@ pub struct OpenAiProvider {
     api_key: String,
     base_url: String,
     metadata: ProviderMetadata,
-    client: crate::http::HttpClient,
     /// Extra headers sent on every request, after the protocol's own.
     extra_headers: BTreeMap<String, String>,
     /// Models advertised from `Provider::models` (custom providers);
@@ -98,7 +97,6 @@ impl OpenAiProvider {
             dialect: Dialect::detect(&metadata.id, &base_url),
             base_url,
             metadata,
-            client: crate::http::HttpClient::new(),
             extra_headers: BTreeMap::new(),
             models: Vec::new(),
         }
@@ -174,7 +172,7 @@ impl Provider for OpenAiProvider {
         let body = build_request_body(&req, true, interleaved, self.dialect);
         let url = format!("{}/chat/completions", self.base_url);
         let headers = self.request_headers();
-        let response = crate::http::send(&self.client, cancel, url, move |agent, url| {
+        let (response, kill) = crate::http::send(cancel, url, move |agent, url| {
             let mut request = agent.post(url);
             for (name, value) in &headers {
                 request = request.header(name.as_str(), value.as_str());
@@ -193,7 +191,11 @@ impl Provider for OpenAiProvider {
             stream = stream.keeping_reasoning_details();
         }
         let inner: EventStream = Box::new(stream);
-        Ok(crate::cancelable::make_cancelable(inner, cancel.clone()))
+        Ok(crate::cancelable::make_cancelable(
+            inner,
+            cancel.clone(),
+            kill,
+        ))
     }
 }
 

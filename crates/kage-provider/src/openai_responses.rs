@@ -31,7 +31,6 @@ pub struct OpenAiResponsesProvider {
     api_key: String,
     base_url: String,
     metadata: ProviderMetadata,
-    client: crate::http::HttpClient,
     /// Extra headers sent on every request, after the protocol's own.
     extra_headers: BTreeMap<String, String>,
     /// Models advertised from `Provider::models` (custom providers);
@@ -59,7 +58,6 @@ impl OpenAiResponsesProvider {
                 supports_thinking: true,
                 supports_tool_use: true,
             },
-            client: crate::http::HttpClient::new(),
             extra_headers: BTreeMap::new(),
             models: Vec::new(),
         }
@@ -126,7 +124,7 @@ impl Provider for OpenAiResponsesProvider {
         let body = build_request_body(&req, true);
         let url = format!("{}/responses", self.base_url);
         let headers = self.request_headers();
-        let response = crate::http::send(&self.client, cancel, url, move |agent, url| {
+        let (response, kill) = crate::http::send(cancel, url, move |agent, url| {
             let mut request = agent.post(url);
             for (name, value) in &headers {
                 request = request.header(name.as_str(), value.as_str());
@@ -141,7 +139,11 @@ impl Provider for OpenAiResponsesProvider {
 
         let reader: Box<dyn Read + Send> = Box::new(response.into_body().into_reader());
         let inner: EventStream = Box::new(ResponsesStream::new(reader, cancel.clone()));
-        Ok(crate::cancelable::make_cancelable(inner, cancel.clone()))
+        Ok(crate::cancelable::make_cancelable(
+            inner,
+            cancel.clone(),
+            kill,
+        ))
     }
 }
 

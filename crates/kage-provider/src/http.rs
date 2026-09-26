@@ -1,22 +1,21 @@
 //! Shared `ureq` plumbing used by every HTTP provider.
 //!
-//! The pooled `HttpClient`, `send`, `read_error_body` and the
-//! status-to-error mapping are provider-agnostic, so each provider
-//! depends on this module rather than on a sibling provider.
+//! `send`, `read_error_body` and the status-to-error mapping are
+//! provider-agnostic, so each provider depends on this module rather
+//! than on a sibling provider. Every request runs on a fresh agent
+//! over the interruptible transport from [`crate::interrupt`], which
+//! is what lets a cancel close the connection instead of leaving it
+//! draining toward the idle deadline.
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
-use kage_core::{
-    CancelFlag,
-    sync::{read, write},
-};
+use kage_core::CancelFlag;
 
 use crate::ProviderError;
+use crate::interrupt::{InterruptibleConnector, KillRegistry};
 
-/// Construct a [`ureq::Agent`] with status-code-as-error disabled so we
-/// can surface the upstream response body in [`ProviderError::Http`]
-/// instead of throwing it away.
+/// The configuration behind every provider request.
 ///
 /// Timeout values, given ureq 3.x's chained deadlines: a phase's
 /// deadline is the minimum over the phase itself, its preceding phases,
@@ -40,8 +39,7 @@ use crate::ProviderError;
 /// stays unset so an active generation is never capped by total time.
 ///
 /// Every request names kage and its version as the `User-Agent`.
-fn build_agent() -> ureq::Agent {
-    use std::time::Duration;
+fn build_config() -> ureq::config::Config {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
         .user_agent(concat!("kage/", env!("CARGO_PKG_VERSION")))
@@ -51,118 +49,53 @@ fn build_agent() -> ureq::Agent {
         .timeout_send_body(Some(Duration::from_secs(600)))
         .timeout_recv_body(Some(Duration::from_secs(600)))
         .build()
-        .new_agent()
 }
 
-/// A pooled [`ureq::Agent`] that can swap its connection pool out from
-/// under itself when a connection turns out to be dead.
+/// Build a fresh, single-request agent over the interruptible
+/// transport, with its sockets registered under `kill`.
 ///
-/// ureq keeps idle keep-alive sockets in a per-host pool and hands one
-/// back to the next request. If that socket is half-dead - the server
-/// silently dropped it, or it is wedged behind backpressure - the
-/// reused connection stalls on connect/send and the request fails with
-/// a transport timeout. ureq 3.x exposes no way to evict a single
-/// pooled connection, so [`recycle`](Self::recycle) replaces the whole
-/// agent with a fresh one; the old pool (and every socket in it) is
-/// dropped, and the next [`agent`](Self::agent) snapshot dials a brand
-/// new connection. Keep-alive reuse is otherwise preserved, so this
-/// only pays the reconnect cost when a connection actually went bad.
+/// The agent is deliberately not shared or pooled: a pooled keep-alive
+/// socket is handed to the next request without passing through any
+/// connector, so a reused connection could never be registered for
+/// shutdown. Dialing fresh per request costs a TLS handshake per call
+/// and buys a guarantee in return: every connection kage opens can be
+/// torn down on cancel.
+fn build_agent(kill: &Arc<KillRegistry>) -> ureq::Agent {
+    ureq::Agent::with_parts(
+        build_config(),
+        InterruptibleConnector::new(Arc::clone(kill)),
+        ureq::unversioned::resolver::DefaultResolver::default(),
+    )
+}
+
+/// Run a provider's request-and-headers call on a fresh interruptible
+/// agent, waiting on the response and a watch on `cancel` together so a
+/// slow provider does not delay cancellation (see
+/// [`crate::cancelable::cancellable_call`]).
 ///
-/// Cloning shares the same swappable slot, so a clone moved onto a
-/// worker thread recycles the pool the foreground will see next.
-#[derive(Debug, Clone)]
-pub(crate) struct HttpClient {
-    agent: Arc<RwLock<ureq::Agent>>,
-}
-
-impl HttpClient {
-    /// Build a client with a fresh pooled agent.
-    pub(crate) fn new() -> Self {
-        Self {
-            agent: Arc::new(RwLock::new(build_agent())),
-        }
-    }
-
-    /// Snapshot the current agent for one request. The clone shares the
-    /// live pool, so it still benefits from keep-alive; a concurrent
-    /// [`recycle`](Self::recycle) only affects *later* snapshots.
-    fn agent(&self) -> ureq::Agent {
-        // A poisoned lock means some thread panicked while holding the
-        // guard. The agent handle behind it is still a valid, usable
-        // value (recycle, the only writer, swaps it in one move and
-        // cannot panic mid-update), so recovering the guard is correct
-        // here - not a swallowed failure.
-        read(&self.agent).clone()
-    }
-
-    /// Drop the pooled connections by swapping in a fresh agent so the
-    /// next [`agent`](Self::agent) snapshot dials a new connection.
-    fn recycle(&self) {
-        let fresh = build_agent();
-        let mut guard = write(&self.agent);
-        *guard = fresh;
-    }
-
-    /// Map a transport-time [`ureq::Error`] onto a [`ProviderError`],
-    /// first recycling the pool when the failure implicates a dead or
-    /// stale connection so the next attempt dials fresh.
-    fn on_transport_error(&self, err: ureq::Error, url: &str) -> ProviderError {
-        if is_stale_connection_error(&err) {
-            self.recycle();
-        }
-        map_ureq_error(err, url)
-    }
-}
-
-/// True for transport failures that point at a dead or stalled
-/// connection - the DNS/connect/send phases, an outright connect
-/// failure, or a reset/aborted socket - rather than a slow but live
-/// server still streaming a response. On these the pooled keep-alive
-/// socket is suspect, so the caller recycles the agent to force a fresh
-/// dial; a `RecvResponse`/`RecvBody` timeout is *not* included because
-/// that is a slow generation, where reconnecting would only restart it.
-fn is_stale_connection_error(err: &ureq::Error) -> bool {
-    match err {
-        ureq::Error::Timeout(phase) => matches!(
-            phase,
-            ureq::Timeout::Connect | ureq::Timeout::SendRequest | ureq::Timeout::SendBody
-        ),
-        ureq::Error::ConnectionFailed => true,
-        ureq::Error::Io(e) => matches!(
-            e.kind(),
-            std::io::ErrorKind::ConnectionReset
-                | std::io::ErrorKind::ConnectionAborted
-                | std::io::ErrorKind::BrokenPipe
-        ),
-        _ => false,
-    }
-}
-
-/// Run a provider's request-and-headers call on `client`, waiting on the
-/// response and a watch on `cancel` together so a slow provider does not
-/// delay cancellation (see [`crate::cancelable::cancellable_call`]).
-///
-/// `build` receives a pooled agent snapshot and `url`, and issues the
-/// POST; on a stale-connection failure the client's pool is recycled
-/// before the error is returned, so the *next* call dials a fresh
-/// connection rather than reusing the wedged socket. A transport error
+/// Returns the response plus the [`KillRegistry`] holding that
+/// request's sockets: pass it to
+/// [`make_cancelable`](crate::cancelable::make_cancelable) so
+/// cancelling the stream shuts the connection down instead of leaving
+/// the worker reading toward the idle deadline. `build` receives the
+/// per-request agent and `url` and issues the POST. A transport error
 /// names the host and port of `url`, never its path or query.
 pub(crate) fn send<F>(
-    client: &HttpClient,
     cancel: &CancelFlag,
     url: String,
     build: F,
-) -> Result<ureq::http::Response<ureq::Body>, ProviderError>
+) -> Result<(ureq::http::Response<ureq::Body>, Arc<KillRegistry>), ProviderError>
 where
     F: FnOnce(&ureq::Agent, &str) -> Result<ureq::http::Response<ureq::Body>, ureq::Error>
         + Send
         + 'static,
 {
-    let client = client.clone();
-    crate::cancelable::cancellable_call(cancel, move || {
-        let agent = client.agent();
-        build(&agent, &url).map_err(|e| client.on_transport_error(e, &url))
-    })
+    let kill = Arc::new(KillRegistry::new());
+    let agent = build_agent(&kill);
+    let response = crate::cancelable::cancellable_call(cancel, &kill, move || {
+        build(&agent, &url).map_err(|err| map_ureq_error(err, &url))
+    })?;
+    Ok((response, kill))
 }
 
 /// Read the body of a non-2xx response into a [`ProviderError`].
@@ -293,53 +226,6 @@ fn url_host(url: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn stale_classifier_flags_send_phase_timeouts_only() {
-        assert!(is_stale_connection_error(&ureq::Error::Timeout(
-            ureq::Timeout::SendRequest
-        )));
-        assert!(is_stale_connection_error(&ureq::Error::Timeout(
-            ureq::Timeout::SendBody
-        )));
-        assert!(is_stale_connection_error(&ureq::Error::Timeout(
-            ureq::Timeout::Connect
-        )));
-        assert!(is_stale_connection_error(&ureq::Error::ConnectionFailed));
-        // A slow generation (response/body recv) is a live server, not
-        // a dead socket: reconnecting would only restart the work.
-        assert!(!is_stale_connection_error(&ureq::Error::Timeout(
-            ureq::Timeout::RecvResponse
-        )));
-        assert!(!is_stale_connection_error(&ureq::Error::Timeout(
-            ureq::Timeout::RecvBody
-        )));
-    }
-
-    #[test]
-    fn on_transport_error_recycles_then_maps() {
-        let client = HttpClient::new();
-        // A send-phase timeout is a stale-connection error: this drives
-        // the recycle path (must not panic) and still maps to a
-        // transport error so the caller surfaces it unchanged.
-        let mapped = client.on_transport_error(
-            ureq::Error::Timeout(ureq::Timeout::SendRequest),
-            "http://localhost/v1",
-        );
-        assert!(matches!(mapped, ProviderError::Transport(_)));
-        // A bare status code is not a connection problem; it must map
-        // to an HTTP error with an empty body for the caller to fill.
-        let mapped = client.on_transport_error(ureq::Error::StatusCode(503), "http://localhost/v1");
-        assert!(matches!(
-            mapped,
-            ProviderError::Http {
-                status: 503,
-                body
-            } if body.is_empty()
-        ));
-        // The client is still usable after a recycle.
-        let _ = client.agent();
-    }
 
     #[test]
     fn transport_error_names_the_host_but_not_the_path_or_credentials() {

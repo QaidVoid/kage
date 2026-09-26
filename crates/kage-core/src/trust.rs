@@ -26,12 +26,14 @@ pub struct TrustSummary {
     /// The project's `.kage` directory.
     pub path: PathBuf,
     /// The risky parts the project sets, in the order `mcp`,
-    /// `permissions`, `plugins.capabilities`, `agents`.
+    /// `permissions`, `plugins.capabilities`, `agents`, `skills`.
     pub keys: Vec<&'static str>,
-    /// One human-readable line per server, grant, rule or agent.
+    /// One human-readable line per server, grant, rule, agent or skill.
     pub items: Vec<String>,
     /// Names of the project agents.
     pub agents: Vec<String>,
+    /// Names of the project skills.
+    pub skills: Vec<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -52,10 +54,11 @@ pub fn untrusted_project(workdir: &Path) -> Option<TrustSummary> {
     Some(summarize(workdir, &subset))
 }
 
-/// Whether `workdir`'s project agents may load: the project has
-/// nothing that needs trust, or its current risky settings are trusted.
+/// Whether `workdir`'s project extensions (agents and skills) may load:
+/// the project has nothing that needs trust, or its current risky
+/// settings are trusted.
 #[must_use]
-pub fn project_agents_trusted(workdir: &Path) -> bool {
+pub fn project_extensions_trusted(workdir: &Path) -> bool {
     untrusted_project(workdir).is_none()
 }
 
@@ -117,8 +120,8 @@ fn project_table(workdir: &Path) -> Option<toml::Table> {
     toml::from_str(&text).ok()
 }
 
-/// The risky config tables of `table` plus the project agent files, or
-/// `None` when there are neither.
+/// The risky config tables of `table` plus the project agent and skill
+/// files, or `None` when there are none.
 fn risky_subset(workdir: &Path, table: Option<&toml::Table>) -> Option<Value> {
     let mut out = match table {
         Some(table) => config_subset(table)?,
@@ -127,6 +130,10 @@ fn risky_subset(workdir: &Path, table: Option<&toml::Table>) -> Option<Value> {
     let agents = agent_files(workdir);
     if !agents.is_empty() {
         out.insert("agents".to_owned(), Value::Object(agents));
+    }
+    let skills = skill_files(workdir);
+    if !skills.is_empty() {
+        out.insert("skills".to_owned(), Value::Object(skills));
     }
     (!out.is_empty()).then_some(Value::Object(out))
 }
@@ -170,6 +177,35 @@ fn agent_files(workdir: &Path) -> serde_json::Map<String, Value> {
                 continue;
             };
             let Some(name) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            out.insert(name, Value::String(text));
+        }
+    }
+    out
+}
+
+/// Name to full SKILL.md text of each project skill, in the same load
+/// order as `crate::load_skills_dir` callers use: `.kage` first so the
+/// `.agents` copy replaces it under one name.
+fn skill_files(workdir: &Path) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    for dir in [
+        workdir.join(".kage").join("skills"),
+        workdir.join(".agents").join("skills"),
+    ] {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for path in entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|p| p.is_dir())
+        {
+            let Ok(text) = std::fs::read_to_string(path.join("SKILL.md")) else {
+                continue;
+            };
+            let Some(name) = path.file_name().map(|s| s.to_string_lossy().into_owned()) else {
                 continue;
             };
             out.insert(name, Value::String(text));
@@ -243,20 +279,22 @@ fn summarize(workdir: &Path, subset: &Value) -> TrustSummary {
     if !agents.is_empty() {
         keys.push("agents");
         for name in &agents {
-            // The trust map is keyed by name with the same winner the
-            // loader picks, so the display home matches the same rule:
-            // `.agents` replaces `.kage` under one name.
-            let home = if workdir
-                .join(".agents")
-                .join("agents")
-                .join(format!("{name}.md"))
-                .exists()
-            {
-                ".agents"
-            } else {
-                ".kage"
-            };
+            let home = extension_home(workdir, &format!("agents/{name}.md"));
             items.push(format!("project agent {name} ({home}/agents/{name}.md)"));
+        }
+    }
+    let skills: Vec<String> = subset
+        .get("skills")
+        .and_then(Value::as_object)
+        .map(|files| files.keys().cloned().collect())
+        .unwrap_or_default();
+    if !skills.is_empty() {
+        keys.push("skills");
+        for name in &skills {
+            let home = extension_home(workdir, &format!("skills/{name}/SKILL.md"));
+            items.push(format!(
+                "project skill {name} ({home}/skills/{name}/SKILL.md)"
+            ));
         }
     }
     TrustSummary {
@@ -264,6 +302,17 @@ fn summarize(workdir: &Path, subset: &Value) -> TrustSummary {
         keys,
         items,
         agents,
+        skills,
+    }
+}
+
+/// Whether `.agents` or `.kage` provides one extension file, matching the
+/// loader: an `.agents` entry replaces the `.kage` entry of the same name.
+fn extension_home(workdir: &Path, relative: &str) -> &'static str {
+    if workdir.join(".agents").join(relative).exists() {
+        ".agents"
+    } else {
+        ".kage"
     }
 }
 
@@ -481,7 +530,7 @@ mod tests {
             assert!(untrusted_project(&project).is_none());
 
             write_agent_in(&project, 1, "scout", REVIEWER)?;
-            assert!(!project_agents_trusted(&project));
+            assert!(!project_extensions_trusted(&project));
             let summary = untrusted_project(&project).expect("untrusted");
             assert_eq!(summary.keys, ["agents"]);
             assert_eq!(summary.agents, ["scout"]);
@@ -502,14 +551,14 @@ mod tests {
             // Editing only the shadowed `.kage` copy changes nothing
             // covered by trust.
             trust_project(&project).map_err(io)?;
-            assert!(project_agents_trusted(&project));
+            assert!(project_extensions_trusted(&project));
             write_agent_in(
                 &project,
                 0,
                 "scout",
                 &REVIEWER.replace("read", "read, bash"),
             )?;
-            assert!(project_agents_trusted(&project));
+            assert!(project_extensions_trusted(&project));
             Ok(())
         });
     }
@@ -521,11 +570,11 @@ mod tests {
             let project = setup(jail, "")?;
             std::fs::remove_file(Config::project_path(&project)).map_err(io)?;
             assert!(untrusted_project(&project).is_none());
-            assert!(project_agents_trusted(&project));
+            assert!(project_extensions_trusted(&project));
 
             write_agent(&project, "reviewer", REVIEWER)?;
             write_agent(&project, "auditor", REVIEWER)?;
-            assert!(!project_agents_trusted(&project));
+            assert!(!project_extensions_trusted(&project));
             let summary = untrusted_project(&project).expect("untrusted");
             assert_eq!(summary.path, project.join(".kage"));
             assert_eq!(summary.keys, ["agents"]);
@@ -541,7 +590,7 @@ mod tests {
             trust_project(&project)
                 .map_err(io)?
                 .expect("agents to trust");
-            assert!(project_agents_trusted(&project));
+            assert!(project_extensions_trusted(&project));
             assert!(untrusted_project(&project).is_none());
 
             write_agent(
@@ -549,12 +598,12 @@ mod tests {
                 "reviewer",
                 &REVIEWER.replace("read", "read, bash"),
             )?;
-            assert!(!project_agents_trusted(&project));
+            assert!(!project_extensions_trusted(&project));
             trust_project(&project).map_err(io)?;
-            assert!(project_agents_trusted(&project));
+            assert!(project_extensions_trusted(&project));
 
             write_agent(&project, "extra", REVIEWER)?;
-            assert!(!project_agents_trusted(&project));
+            assert!(!project_extensions_trusted(&project));
             Ok(())
         });
     }
@@ -579,12 +628,59 @@ mod tests {
                     .items
                     .contains(&"project agent reviewer (.kage/agents/reviewer.md)".to_owned())
             );
-            assert!(!project_agents_trusted(&project));
+            assert!(!project_extensions_trusted(&project));
             assert_dropped(&load(&project)?);
 
             trust_project(&project).map_err(io)?;
-            assert!(project_agents_trusted(&project));
+            assert!(project_extensions_trusted(&project));
             assert_applied(&load(&project)?);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn project_skills_need_trust_and_edit_invalidates() {
+        const HELPER: &str = "---\ndescription: Helps.\n---\nDo the thing.\n";
+        let _globals = process_globals();
+        figment::Jail::expect_with(|jail| {
+            let project = setup(jail, RISKY)?;
+            trust_project(&project).map_err(io)?;
+            assert_applied(&load(&project)?);
+
+            let dir = project.join(".kage").join("skills").join("helper");
+            std::fs::create_dir_all(&dir).map_err(io)?;
+            std::fs::write(dir.join("SKILL.md"), HELPER).map_err(io)?;
+            let summary = untrusted_project(&project).expect("untrusted");
+            assert_eq!(
+                summary.keys,
+                ["mcp", "permissions", "plugins.capabilities", "skills"]
+            );
+            assert_eq!(summary.skills, ["helper"]);
+            assert!(
+                summary
+                    .items
+                    .contains(&"project skill helper (.kage/skills/helper/SKILL.md)".to_owned())
+            );
+            assert!(!project_extensions_trusted(&project));
+            assert_dropped(&load(&project)?);
+
+            trust_project(&project).map_err(io)?;
+            assert!(project_extensions_trusted(&project));
+            assert_applied(&load(&project)?);
+
+            std::fs::write(dir.join("SKILL.md"), HELPER.replace("thing", "task")).map_err(io)?;
+            assert!(!project_extensions_trusted(&project));
+            trust_project(&project).map_err(io)?;
+
+            // `.agents` shadows `.kage` under one skill name, so the
+            // shadowed copy is not part of the trusted fingerprint.
+            let shadowed = project.join(".agents").join("skills").join("helper");
+            std::fs::create_dir_all(&shadowed).map_err(io)?;
+            std::fs::write(shadowed.join("SKILL.md"), HELPER).map_err(io)?;
+            assert!(untrusted_project(&project).expect("untrusted").skills == ["helper"]);
+            trust_project(&project).map_err(io)?;
+            std::fs::write(dir.join("SKILL.md"), "totally different").map_err(io)?;
+            assert!(project_extensions_trusted(&project));
             Ok(())
         });
     }

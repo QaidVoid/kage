@@ -712,8 +712,12 @@ pub(crate) fn load_skills(
     if let Ok(p) = config_dir() {
         search.push(p.join("skills"));
     }
-    search.push(workdir.join(".kage").join("skills"));
-    search.push(workdir.join(".agents").join("skills"));
+    // Project skills are instructions headed for the system prompt, so
+    // they wait for the same first-run trust decision as project agents.
+    if kage_core::trust::project_extensions_trusted(workdir) {
+        search.push(workdir.join(".kage").join("skills"));
+        search.push(workdir.join(".agents").join("skills"));
+    }
     if let Some(rt) = plugin_runtime {
         match rt.discover_resources() {
             Ok(entries) => search.extend(entries.skills),
@@ -831,6 +835,10 @@ pub(crate) fn build_session_path(dir: &std::path::Path, session: SessionId) -> P
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::result_large_err,
+    reason = "figment::Jail closures must return figment::Error"
+)]
 mod tests {
     use super::*;
 
@@ -887,29 +895,46 @@ mod tests {
     }
 
     #[test]
-    fn project_dot_agents_skills_shadow_dot_kage_skills() {
-        let work = tempfile::tempdir().unwrap();
-        let kage_skills = work.path().join(".kage").join("skills").join("lint");
-        let agents_skills = work.path().join(".agents").join("skills").join("lint");
-        for dir in [&kage_skills, &agents_skills] {
-            std::fs::create_dir_all(dir).unwrap();
-        }
-        std::fs::write(
-            kage_skills.join("SKILL.md"),
-            "---\ndescription: Kage lint\n---\nKage body.",
-        )
-        .unwrap();
-        std::fs::write(
-            agents_skills.join("SKILL.md"),
-            "---\ndescription: Shared lint\n---\nShared body.",
-        )
-        .unwrap();
-        let skills = load_skills(work.path(), None);
-        let lint = skills
-            .iter()
-            .find(|s| s.name == "lint")
-            .expect("lint skill");
-        assert_eq!(lint.body, "Shared body.");
-        assert_eq!(lint.description, "Shared lint");
+    fn project_skills_wait_for_trust_then_dot_agents_shadows_dot_kage() {
+        figment::Jail::expect_with(|jail| {
+            let root = jail.directory().to_path_buf();
+            for (key, dir) in [
+                ("HOME", "home"),
+                ("XDG_CONFIG_HOME", "config"),
+                ("XDG_STATE_HOME", "state"),
+            ] {
+                jail.set_env(key, root.join(dir).to_string_lossy().as_ref());
+            }
+            let project = root.join("project");
+            let kage_skills = project.join(".kage").join("skills").join("lint");
+            let agents_skills = project.join(".agents").join("skills").join("lint");
+            for dir in [&kage_skills, &agents_skills] {
+                std::fs::create_dir_all(dir).unwrap();
+            }
+            std::fs::write(
+                kage_skills.join("SKILL.md"),
+                "---\ndescription: Kage lint\n---\nKage body.",
+            )
+            .unwrap();
+            std::fs::write(
+                agents_skills.join("SKILL.md"),
+                "---\ndescription: Shared lint\n---\nShared body.",
+            )
+            .unwrap();
+
+            // Cloned project: skill instructions stay out of the prompt
+            // until the first-run trust decision.
+            assert!(load_skills(&project, None).is_empty());
+            kage_core::trust::trust_project(&project).unwrap();
+
+            let skills = load_skills(&project, None);
+            let lint = skills
+                .iter()
+                .find(|s| s.name == "lint")
+                .expect("lint skill");
+            assert_eq!(lint.body, "Shared body.");
+            assert_eq!(lint.description, "Shared lint");
+            Ok(())
+        });
     }
 }

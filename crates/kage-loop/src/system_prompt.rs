@@ -80,7 +80,14 @@ pub fn with_skills(system: String, skills: &[Skill]) -> String {
     out.push_str("\n<skills>\n");
     for skill in skills {
         out.push_str("<skill name=\"");
-        out.push_str(&skill.name);
+        // The name lands inside a quoted attribute; a name carrying a
+        // quote would otherwise forge extra attributes.
+        let escaped = skill
+            .name
+            .replace('&', "&amp;")
+            .replace('"', "&quot;")
+            .replace('<', "&lt;");
+        out.push_str(&escaped);
         out.push_str("\">\n");
         if !skill.description.is_empty() {
             out.push_str(skill.description.trim());
@@ -139,6 +146,24 @@ mod tests {
         assert!(out.contains("</skills>"));
         // Empty list is a no-op.
         assert_eq!(with_skills(base.clone(), &[]), base);
+    }
+
+    #[test]
+    fn skill_name_is_escaped_in_the_attribute() {
+        let base = "role".to_owned();
+        let skill = Skill {
+            name: "x\" onload=\"alert(1)\" data-\"<a".into(),
+            description: "d".into(),
+            body: "Body & <more> text".into(),
+            disable_model_invocation: false,
+            path: Path::new("/x").to_path_buf(),
+        };
+        let out = with_skills(base, std::slice::from_ref(&skill));
+        assert!(
+            out.contains("<skill name=\"x&quot; onload=&quot;alert(1)&quot; data-&quot;&lt;a\">")
+        );
+        // Bodies stay verbatim.
+        assert!(out.contains("Body & <more> text"));
     }
 
     #[test]

@@ -549,11 +549,14 @@ fn untrusted_notice(summary: &kage_core::trust::TrustSummary) -> String {
     let mut ignored: Vec<String> = summary
         .keys
         .iter()
-        .filter(|key| **key != "agents")
+        .filter(|key| **key != "agents" && **key != "skills")
         .map(|key| (*key).to_owned())
         .collect();
     if !summary.agents.is_empty() {
         ignored.push(format!("agents ({})", summary.agents.join(", ")));
+    }
+    if !summary.skills.is_empty() {
+        ignored.push(format!("skills ({})", summary.skills.join(", ")));
     }
     format!(
         "project settings ignored because the project is not trusted: {}. \
@@ -754,14 +757,15 @@ mod tests {
     fn untrusted_notice_names_what_is_ignored_and_the_fix() {
         let summary = kage_core::trust::TrustSummary {
             path: PathBuf::from("/p/.kage"),
-            keys: vec!["mcp", "permissions", "agents"],
+            keys: vec!["mcp", "permissions", "agents", "skills"],
             items: Vec::new(),
             agents: vec!["reviewer".to_owned()],
+            skills: vec!["helper".to_owned()],
         };
         assert_eq!(
             untrusted_notice(&summary),
             "project settings ignored because the project is not trusted: mcp, permissions, \
-             agents (reviewer). Run `kage trust` here and restart to use them."
+             agents (reviewer), skills (helper). Run `kage trust` here and restart to use them."
         );
     }
 

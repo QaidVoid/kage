@@ -1650,6 +1650,7 @@ dependencies = [
  "clap_mangen",
  "crossbeam-channel",
  "dirs",
+ "figment",
  "kage-acp",
  "kage-core",
  "kage-jsonrpc",

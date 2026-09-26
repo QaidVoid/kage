@@ -43,6 +43,7 @@ toml.workspace = true
 ulid.workspace = true
 
 [dev-dependencies]
+figment = { workspace = true, features = ["test"] }
 kage-core.workspace = true
 kage-mcp = { path = "../kage-mcp" }
 kage-provider = { workspace = true, features = ["testing"] }

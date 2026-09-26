@@ -109,7 +109,7 @@ fn instruction_files(workdir: &Path) -> Vec<(std::path::PathBuf, &'static str)> 
     if let Ok(dir) = crate::config_dir() {
         files.push((dir.join("AGENTS.md"), "user_instructions"));
     }
-    if kage_core::trust::project_agents_trusted(workdir) {
+    if kage_core::trust::project_extensions_trusted(workdir) {
         files.push((
             workdir.join(".kage").join("AGENTS.md"),
             "project_instructions",

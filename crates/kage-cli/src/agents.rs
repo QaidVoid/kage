@@ -15,7 +15,7 @@ pub(crate) fn load(workdir: &Path) -> (AgentDefs, Vec<String>) {
     if let Ok(dir) = crate::config_dir() {
         dirs.push((dir.join("agents"), AgentSource::User));
     }
-    if kage_core::trust::project_agents_trusted(workdir) {
+    if kage_core::trust::project_extensions_trusted(workdir) {
         dirs.extend(
             agents::project_dirs(workdir)
                 .into_iter()

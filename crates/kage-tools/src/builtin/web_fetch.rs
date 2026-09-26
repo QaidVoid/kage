@@ -20,6 +20,11 @@ use crate::{Tool, ToolContext, ToolError, schema_for};
 
 const DEFAULT_MAX_BYTES: u64 = 2_000_000;
 
+/// Hard ceiling on the body kept regardless of what the model asks
+/// for: the body lands in the conversation context, so an unbounded
+/// model-controlled cap could pull arbitrary amounts of data in.
+const ABSOLUTE_MAX_BYTES: u64 = 5_000_000;
+
 /// Whole-request budget: resolving, connecting, redirects, and the body.
 const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -31,7 +36,8 @@ const MAX_REDIRECTS: u32 = 5;
 struct WebFetchInput {
     /// HTTP or HTTPS URL to fetch.
     url: String,
-    /// Cap on response body bytes read. Defaults to 2,000,000.
+    /// Cap on response body bytes read. Defaults to 2,000,000 and is
+    /// hard-capped at 5,000,000.
     #[serde(default)]
     max_bytes: Option<u64>,
 }
@@ -48,7 +54,8 @@ impl Tool for WebFetchTool {
     fn description(&self) -> &'static str {
         "Fetch an HTTP(S) URL and return its body as readable text. HTML is \
          stripped to plain text. Refuses to fetch private, loopback, or \
-         link-local addresses. Body is capped at 2MB by default."
+         link-local addresses. Body is capped at 2MB by default, 5MB at \
+         most."
     }
 
     fn schema(&self) -> serde_json::Value {
@@ -81,7 +88,7 @@ impl Tool for WebFetchTool {
         }
         ssrf::check(&parsed)?;
 
-        let max_bytes = input.max_bytes.unwrap_or(DEFAULT_MAX_BYTES);
+        let max_bytes = effective_max_bytes(input.max_bytes);
         fetch(
             &ssrf::guarded_agent(agent_config(TIMEOUT)),
             &parsed,
@@ -95,6 +102,14 @@ fn agent_config(timeout: Duration) -> ureq::config::Config {
         .timeout_global(Some(timeout))
         .max_redirects(MAX_REDIRECTS)
         .build()
+}
+
+/// The body budget in effect: the model's request, never above the
+/// absolute ceiling.
+fn effective_max_bytes(requested: Option<u64>) -> u64 {
+    requested
+        .unwrap_or(DEFAULT_MAX_BYTES)
+        .min(ABSOLUTE_MAX_BYTES)
 }
 
 fn fetch(agent: &ureq::Agent, parsed: &url::Url, max_bytes: u64) -> Result<ToolOutput, ToolError> {
@@ -126,7 +141,7 @@ fn fetch(agent: &ureq::Agent, parsed: &url::Url, max_bytes: u64) -> Result<ToolO
         .to_owned();
     let mut reader = response.into_body().into_reader();
     let mut buf = Vec::new();
-    let mut taken = (&mut reader).take(max_bytes + 1);
+    let mut taken = (&mut reader).take(max_bytes.saturating_add(1));
     // A read error here means the body arrived incomplete; surface
     // it rather than hand the model a silently-truncated page as a
     // success. (Size-capping is the `take` above, not an error.)
@@ -195,7 +210,7 @@ mod tests {
 
     /// Serve every connection on a loopback listener from a thread,
     /// answering each request line's path with `respond(port, path)`.
-    fn serve(respond: fn(u16, &str) -> String) -> SocketAddr {
+    fn serve(respond: impl Fn(u16, &str) -> String + Send + 'static) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {
@@ -237,9 +252,18 @@ mod tests {
         path: &str,
         timeout: Duration,
     ) -> Result<ToolOutput, ToolError> {
+        fetch_capped(addr, path, timeout, DEFAULT_MAX_BYTES)
+    }
+
+    fn fetch_capped(
+        addr: SocketAddr,
+        path: &str,
+        timeout: Duration,
+        max_bytes: u64,
+    ) -> Result<ToolOutput, ToolError> {
         let agent = ssrf::guarded_agent_allowing(agent_config(timeout), addr);
         let url = url::Url::parse(&format!("http://{addr}{path}")).unwrap();
-        fetch(&agent, &url, DEFAULT_MAX_BYTES)
+        fetch(&agent, &url, max_bytes)
     }
 
     #[test]
@@ -291,5 +315,31 @@ mod tests {
         let err = fetch_from(addr, "/", Duration::from_millis(300)).unwrap_err();
         assert!(err.to_string().contains("timed out"), "{err}");
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn requested_caps_clamp_to_the_absolute_ceiling() {
+        assert_eq!(effective_max_bytes(None), DEFAULT_MAX_BYTES);
+        assert_eq!(effective_max_bytes(Some(1_000)), 1_000);
+        assert_eq!(
+            effective_max_bytes(Some(ABSOLUTE_MAX_BYTES)),
+            ABSOLUTE_MAX_BYTES
+        );
+        assert_eq!(effective_max_bytes(Some(u64::MAX)), ABSOLUTE_MAX_BYTES);
+    }
+
+    #[test]
+    fn a_body_over_the_ceiling_is_cut_even_when_asked_for_more() {
+        let capped_len = usize::try_from(ABSOLUTE_MAX_BYTES).unwrap();
+        let body = "x".repeat(capped_len + 1024);
+        let addr = serve(move |_, _| ok(&body));
+        let cap = effective_max_bytes(Some(u64::MAX));
+        let out = fetch_capped(addr, "/big", Duration::from_secs(30), cap).unwrap();
+        assert_eq!(
+            out.structured.unwrap()["truncated"],
+            serde_json::json!(true)
+        );
+        let marker = format!("\n\n[... truncated at {cap} bytes ...]");
+        assert_eq!(out.text.len(), capped_len + marker.len());
     }
 }

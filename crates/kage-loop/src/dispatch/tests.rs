@@ -284,6 +284,42 @@ fn tool_updates_are_emitted_before_tool_call_end() {
 }
 
 #[test]
+fn unknown_tool_error_names_the_registered_tools() {
+    let tools = registry_with_echo();
+    let cancel = CancelFlag::new();
+    let parent = MessageId::new();
+    let mut hooks = NoopHooks;
+    let mut emitted = Vec::new();
+
+    let outcome = dispatch_tool_calls(
+        vec![pending("websearch", serde_json::json!({}))],
+        &tools,
+        std::path::Path::new("/tmp"),
+        &cancel,
+        false,
+        parent,
+        &mut hooks,
+        &mut |ev| emitted.push(ev),
+    );
+    assert_eq!(outcome.results.len(), 1);
+    let Some(Content::ToolResultBlock {
+        output, is_error, ..
+    }) = outcome.results[0].content.first()
+    else {
+        panic!("expected tool result: {:?}", outcome.results[0].content);
+    };
+    assert!(*is_error);
+    assert!(
+        output.contains("tool 'websearch' is not registered"),
+        "{output}"
+    );
+    assert!(
+        output.contains("Available tools: echo, err, progress"),
+        "{output}"
+    );
+}
+
+#[test]
 fn tool_updates_are_emitted_while_the_tool_runs() {
     let (tx, rx) = std::sync::mpsc::channel();
     let tools = ToolRegistry::new().with(Arc::new(WaitsForDeliveryTool {

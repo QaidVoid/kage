@@ -451,9 +451,16 @@ fn execute(
     progress: Option<Arc<dyn ProgressSink>>,
 ) -> Result<ToolOutput, LoopError> {
     let Some(tool) = tools.get(&call.name) else {
+        // Name the alternatives: models reach for tools from their
+        // training data (`bash`, `todowrite`, `websearch`), and a bare
+        // refusal leaves them retrying the same unknown name.
+        let known = tools.names().collect::<Vec<_>>().join(", ");
         return Ok(ToolOutput {
             is_error: true,
-            text: format!("tool '{}' is not registered", call.name),
+            text: format!(
+                "tool '{}' is not registered. Available tools: {known}",
+                call.name
+            ),
             structured: None,
             terminate: false,
         });

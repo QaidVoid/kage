@@ -886,6 +886,57 @@ fn parallel_batch_keeps_successful_outputs_when_one_panics() {
     assert!(!err2 && out2.contains("\"i\":2"));
 }
 
+/// A panicking tool in a sequential batch must surface the panic. The
+/// synthetic cancel for the calls that did not run is bookkeeping, not
+/// the cause, and must not overwrite the concrete error.
+#[test]
+fn sequential_batch_reports_the_panic_not_a_synthetic_cancel() {
+    let tools = ToolRegistry::new()
+        .with(Arc::new(EchoTool))
+        .with(Arc::new(PanicTool));
+    let cancel = CancelFlag::new();
+    let parent = MessageId::new();
+    let mut hooks = NoopHooks;
+
+    let outcome = dispatch_tool_calls(
+        vec![
+            pending("echo", serde_json::json!({"i": 0})),
+            pending("panic", serde_json::json!({})),
+            pending("echo", serde_json::json!({"i": 2})),
+        ],
+        &tools,
+        std::path::Path::new("/tmp"),
+        &cancel,
+        false,
+        parent,
+        &mut hooks,
+        &mut |_| {},
+    );
+    assert_eq!(
+        outcome.error,
+        Some(LoopError::Other {
+            message: "tool thread panicked".into()
+        })
+    );
+    assert_eq!(outcome.results.len(), 3);
+    let as_block = |msg: &Message| match &msg.content[0] {
+        Content::ToolResultBlock {
+            output, is_error, ..
+        } => (output.clone(), *is_error),
+        other => panic!("unexpected content: {other:?}"),
+    };
+    let (out0, err0) = as_block(&outcome.results[0]);
+    assert!(
+        !err0 && out0.contains("\"i\":0"),
+        "panic must not discard earlier outputs"
+    );
+    let (_, err1) = as_block(&outcome.results[1]);
+    assert!(err1);
+    let (out2, err2) = as_block(&outcome.results[2]);
+    assert!(err2);
+    assert!(out2.contains("tool did not run"), "{out2}");
+}
+
 #[test]
 fn parallel_cancelled_call_synthesizes_and_keeps_others() {
     let tools = ToolRegistry::new()

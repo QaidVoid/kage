@@ -284,7 +284,13 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
                 }
             }
         } else {
-            record_batch_error(&mut error, &LoopError::Cancelled);
+            // The call did not run because the batch already failed or
+            // the run was cancelled. Record the cancel only when it is
+            // the actual cause: the synthetic bookkeeping entry must not
+            // overwrite a concrete error from an earlier call.
+            if error.is_none() {
+                record_batch_error(&mut error, &LoopError::Cancelled);
+            }
             None
         };
 

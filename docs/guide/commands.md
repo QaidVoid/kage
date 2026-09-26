@@ -49,7 +49,7 @@ The table follows the palette's order.
 | `/new`                    | Start a fresh empty session, keeping the current model |
 | `/compact`                | Run a compaction pass right now                 |
 | `/agents`                 | Open the agents overlay: every agent of the session, live or finished (see [agents](/guide/agents#the-agents-overlay)) |
-| `/permission [mode]` / `/perm` | Without a mode, show the session permission mode. `ask` or `deny` override the configured rules for this session, and `allow` or `default` return to them (see [permissions](/guide/permissions)) |
+| `/permission [mode]` / `/perm` | Without a mode, show the session permission mode. `allow`, `ask` or `deny` override the configured rules for this session (`allow` runs everything; configured denies still deny), and `default` returns to them (see [permissions](/guide/permissions)) |
 | `/login [provider]`       | Add or update a provider credential: suspends the TUI, runs the interactive login, then refreshes the model list in place |
 | `/mcp`                    | Open the MCP servers picker: status per server, `enter` restarts a server or logs in to one that needs it (see [mcp](/guide/mcp#the-mcp-picker)) |
 | `/mcp restart <server>`   | Restart an MCP server: now when idle, else when the next run starts |

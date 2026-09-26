@@ -354,10 +354,24 @@ impl ApprovalPanel {
             return lines;
         }
         let tool = &self.tool;
+        // An approval for an MCP tool (`<server>__<tool>`) covers the
+        // whole server: the gate widens the grant, so the labels say
+        // so instead of promising per-tool behavior.
+        let mcp_server = tool.split_once("__").map(|(server, _)| server);
+        let (session_label, always_label) = match mcp_server {
+            Some(server) => (
+                format!("Yes, and allow all {server} tools for the rest of this session"),
+                format!("Yes, and always allow all {server} tools (saved to config.toml)"),
+            ),
+            None => (
+                format!("Yes, and allow {tool} for the rest of this session"),
+                format!("Yes, and always allow {tool} (saved to config.toml)"),
+            ),
+        };
         let labels = [
             "Yes".to_owned(),
-            format!("Yes, and allow {tool} for the rest of this session"),
-            format!("Yes, and always allow {tool} (saved to config.toml)"),
+            session_label,
+            always_label,
             "No".to_owned(),
             format!("No, and tell {} what to do instead", self.asker()),
         ];
@@ -482,6 +496,21 @@ mod tests {
         assert_eq!(rows[7], "   5. No, and tell kage what to do instead");
         assert!(rows[8].chars().all(|c| c == '\u{2500}'), "{rows:#?}");
         assert!(rows.iter().all(|r| !r.contains('{')), "{rows:#?}");
+    }
+
+    #[test]
+    fn mcp_labels_offer_the_whole_server() {
+        let at = Instant::now();
+        let panel = ApprovalPanel::new("github__create_issue", &json!({"title": "t"}), None, at);
+        let rows = rows(&panel, 100, 0);
+        assert_eq!(
+            rows[4],
+            "   2. Yes, and allow all github tools for the rest of this session"
+        );
+        assert_eq!(
+            rows[5],
+            "   3. Yes, and always allow all github tools (saved to config.toml)"
+        );
     }
 
     #[test]

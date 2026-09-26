@@ -62,8 +62,9 @@ pub struct PermissionsConfig {
     /// worth the confusion yet.
     pub tools: BTreeMap<String, ToolPermissionRules>,
     /// Action for tools of an MCP server, keyed by server name, when
-    /// the tool has no `[permissions.tools.<name>]` entry. Servers
-    /// not listed here ask.
+    /// the tool has no `[permissions.tools.<name>]` entry. The key
+    /// `*` covers every server; an explicit server entry wins over
+    /// the wildcard. Servers matching neither ask.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub mcp: BTreeMap<String, PermissionAction>,
 }
@@ -76,14 +77,14 @@ impl PermissionsConfig {
     }
 
     /// The action for a tool of MCP server `server` that has no
-    /// per-tool entry: the `[permissions.mcp]` entry, or `ask` when
-    /// the server is not listed.
+    /// per-tool entry: the `[permissions.mcp]` entry for the server,
+    /// else the `*` wildcard, else `ask`.
     #[must_use]
     pub fn mcp_action(&self, server: &str) -> PermissionAction {
-        self.mcp
-            .get(server)
-            .copied()
-            .unwrap_or(PermissionAction::Ask)
+        if let Some(action) = self.mcp.get(server) {
+            return *action;
+        }
+        self.mcp.get("*").copied().unwrap_or(PermissionAction::Ask)
     }
 
     /// Reject structurally broken configuration so `kage` refuses to
@@ -298,5 +299,27 @@ mod tests {
         assert_eq!(cfg.mcp_action("github"), PermissionAction::Allow);
         assert_eq!(cfg.mcp_action("shell"), PermissionAction::Deny);
         assert_eq!(cfg.mcp_action("fs"), PermissionAction::Ask);
+    }
+
+    #[test]
+    fn mcp_wildcard_covers_unlisted_servers() {
+        let src = r#"
+            [mcp]
+            "*" = "allow"
+            shell = "deny"
+        "#;
+        let cfg: PermissionsConfig = toml::from_str(src).unwrap();
+        assert_eq!(cfg.mcp_action("github"), PermissionAction::Allow);
+        assert_eq!(cfg.mcp_action("fs"), PermissionAction::Allow);
+        assert_eq!(cfg.mcp_action("shell"), PermissionAction::Deny);
+        let cfg: PermissionsConfig = toml::from_str("[mcp]\nshell = \"deny\"\n").unwrap();
+        assert_eq!(cfg.mcp_action("github"), PermissionAction::Ask);
+    }
+
+    #[test]
+    fn mcp_wildcard_parses_when_only_key() {
+        let cfg: PermissionsConfig = toml::from_str("[mcp]\n\"*\" = \"allow\"\n").unwrap();
+        assert_eq!(cfg.mcp_action("anything"), PermissionAction::Allow);
+        assert!(!cfg.is_default());
     }
 }

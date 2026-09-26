@@ -24,8 +24,9 @@ deny = ["rm -rf *"]
 
 [permissions.mcp]
 # action for the tools of one MCP server: "allow", "ask", or "deny".
-# servers not listed here ask.
+# servers not listed here fall back to the "*" wildcard, then ask.
 github = "allow"
+# "*" = "allow"
 ```
 
 A `[permissions]` table in a project's `.kage/config.toml` applies only
@@ -62,7 +63,8 @@ this order:
 
 1. a `[permissions.tools.<server>__<tool>]` entry, evaluated as above;
 2. otherwise the server's action under `[permissions.mcp]`;
-3. otherwise `ask`.
+3. otherwise the `"*"` wildcard under `[permissions.mcp]`;
+4. otherwise `ask`.
 
 So an unconfigured MCP tool always asks, while a per-tool entry can
 tighten or loosen one tool of an allowed or denied server:
@@ -75,8 +77,19 @@ github = "allow"
 default = "ask"
 ```
 
+The wildcard yolo's every server at once; an explicit server entry
+beats it, so `"*" = "allow"` with `shell = "deny"` allows everything
+but the shell server:
+
+```toml
+[permissions.mcp]
+"*" = "allow"
+shell = "deny"
+```
+
 This matters most in print mode, which cannot ask: MCP tools there are
-refused until you allow the server or the tool.
+refused until you allow the server, the tool, or all of them through
+the wildcard.
 
 The ask default covers every configured server, whenever its tools
 appear: at startup, after `/mcp restart`, after an OAuth login, or
@@ -138,8 +151,14 @@ which refuses the call, and `ctrl+t` opens the agents overlay so you
 can look before you answer. The tool's row in the conversation reads
 `waiting` until you answer, then runs or reads `denied`.
 
-Both "allow" scopes cover the tool by name, every call of it, for the
-rest of the session. `/new`, a session opened from the picker and a
+For an MCP tool the panel says so and the grants widen to the whole
+server: option 2 allows every tool of `github` until the session ends,
+and option 3 saves `[permissions.mcp] github = "allow"` instead of a
+per-tool rule. The server scope is the point: per-tool prompts are
+exactly the noise an approval is meant to end.
+
+Both allow scopes cover the tool (or server) by name, every call, for
+the rest of the session. `/new`, a session opened from the picker and a
 clone start without them. They are checked before `/permission ask`,
 so an approved tool stops asking even in ask mode, and `/permission
 default` keeps them. They never lift a refusal:
@@ -200,15 +219,18 @@ filesystem. Confine it with `deny` rules instead. Agents inherit the setting.
 
 Switch modes without touching the config file. In the TUI:
 
+    /permission allow   # every call runs this session: the yolo switch
     /permission ask     # every tool call prompts this session
     /permission deny    # every tool call is refused this session
     /permission default # back to the configured rules (allow-all
                         # unless you configured [permissions])
 
-`allow` is an alias of `default`, and `/perm` is short for
+`allow` overrides the configured rules for the session, MCP servers
+included, so nothing prompts; only the tools' `deny` patterns and
+`/permission deny` still refuse. `/perm` is short for
 `/permission`. The `:` command line takes the same command. With no
 argument, `/permission` shows the current mode, such as
-`permission mode: ask`. An active override shows as `ask mode` or
+`permission mode: ask`. An active override shows as `allow mode`, `ask mode` or
 `deny mode` in the footer, and as `ask mode for this session` on the
 start card while the conversation is empty.
 
@@ -219,6 +241,15 @@ per-tool rules, except a configured deny still denies.
 While `deny` is active, even allow-listed tools and tools approved in
 the panel refuse. While `ask` is active, even never-configured tools
 prompt, except the tools you approved for the session or always.
+
+## yolo (`--yolo`)
+
+`kage --yolo` starts the session in allow mode, the same effect as
+`/permission allow` at startup: every tool call runs without asking,
+MCP servers included, while configured `deny` patterns still refuse.
+With print mode, `kage -p --yolo "..."` lifts the usual
+non-interactive refusal, so asks run instead of failing. `--yolo` is
+never written to the config file and does not survive the session.
 
 ## validation
 

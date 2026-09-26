@@ -29,6 +29,7 @@ pub(crate) fn execute_print_run(
     plugin_runtime: Option<Arc<kage_plugin::PluginRuntime>>,
     mcp: Option<kage_mcp::McpManager>,
     json_mode: bool,
+    yolo: bool,
 ) -> ExitCode {
     use kage_core::protocol::{Command, CommandKind, Delivery, Event, HostEvent, RunOutcome};
 
@@ -83,6 +84,13 @@ pub(crate) fn execute_print_run(
         .unwrap_or_default();
     let engine = crate::engine::Engine::start(registry);
     engine.subscribe(printer);
+    let gate =
+        crate::permissions::PermissionGate::new(layered.permissions).with_mcp_servers(mcp_servers);
+    // A yolo run parks the gate in allow mode: no asks, but a
+    // configured deny still denies.
+    if yolo {
+        gate.set_mode(Some(kage_core::permissions::PermissionAction::Allow));
+    }
     engine.open(crate::engine::SessionSpec {
         id: session,
         model: model.to_owned(),
@@ -90,8 +98,7 @@ pub(crate) fn execute_print_run(
         recorder: writer.map(|w| crate::engine::Recorder::new(w, plugin_runtime.clone())),
         tools,
         plugins: plugin_runtime,
-        gate: crate::permissions::PermissionGate::new(layered.permissions)
-            .with_mcp_servers(mcp_servers),
+        gate,
         loop_cfg: LoopConfig {
             compaction_threshold: layered.loop_settings.compaction_threshold,
             ..LoopConfig::default()

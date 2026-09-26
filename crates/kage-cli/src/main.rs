@@ -98,6 +98,12 @@ struct Cli {
     #[arg(long = "no-session")]
     no_session: bool,
 
+    /// Start the session in allow mode: every tool call runs without
+    /// asking, MCP servers included. A configured deny still denies.
+    /// Same effect as `/permission allow`, applied at startup.
+    #[arg(long)]
+    yolo: bool,
+
     /// Emit one JSON object per event on stdout instead of plain text.
     /// Only meaningful with `-p/--print`. Each line carries the event's
     /// `type` (such as `text_delta`, `tool_call_start`, `message_appended`,
@@ -569,7 +575,7 @@ fn main() -> ExitCode {
     }
 
     // No subcommand and no `-p`: drop into the interactive TUI.
-    tui::run_tui(cli.model.as_deref(), &cli.system, None)
+    tui::run_tui(cli.model.as_deref(), &cli.system, None, cli.yolo)
 }
 
 /// Load the layered config for the current directory before a run
@@ -617,7 +623,7 @@ fn configured_shell(workdir: &std::path::Path) -> Option<String> {
 /// session recording, and the exit code.
 fn run_print_mode(cli: Cli) -> ExitCode {
     let Some(prompt) = cli.print else {
-        return tui::run_tui(cli.model.as_deref(), &cli.system, None);
+        return tui::run_tui(cli.model.as_deref(), &cli.system, None, cli.yolo);
     };
     let mut registry = match build_provider_registry() {
         Ok(registry) => registry,
@@ -705,6 +711,7 @@ fn run_print_mode(cli: Cli) -> ExitCode {
         plugin_runtime,
         Some(mcp_manager),
         cli.json,
+        cli.yolo,
     );
     if let Err(err) = state::record_last_model(&model) {
         eprintln!("kage: {err}");

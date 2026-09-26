@@ -43,7 +43,7 @@ pub(crate) fn run_resume(
         }
     };
     let Some(prompt) = print else {
-        return tui::run_tui(model_override, DEFAULT_SYSTEM, Some(path));
+        return tui::run_tui(model_override, DEFAULT_SYSTEM, Some(path), false);
     };
 
     let replay = match kage_session::replay(&path) {
@@ -142,6 +142,7 @@ pub(crate) fn run_resume(
         plugin_runtime,
         Some(mcp_manager),
         json,
+        false,
     );
     if let Err(err) = state::record_last_model(&model) {
         eprintln!("kage: {err}");

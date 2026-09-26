@@ -15,7 +15,7 @@ use kage_tui::hostlog::LogPublisher;
 /// when given, the way the session picker resumes one. Returns the
 /// appropriate process exit code once the user quits.
 #[expect(clippy::too_many_lines, reason = "one linear startup sequence")]
-pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>) -> ExitCode {
+pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo: bool) -> ExitCode {
     let mut registry = match crate::build_provider_registry() {
         Ok(registry) => registry,
         Err(e) => {
@@ -205,6 +205,9 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>) -> Ex
     let (plugin_refresh_tx, plugin_refresh_rx) = mpsc::channel::<PluginRefresh>();
     let gate = crate::permissions::PermissionGate::new(app_config.permissions.clone())
         .with_mcp_servers(mcp_manager.server_names().map(str::to_owned).collect());
+    if yolo {
+        gate.set_mode(Some(kage_core::permissions::PermissionAction::Allow));
+    }
 
     let (agent_defs, agent_errors) = crate::agents::load(&workdir);
     for err in agent_errors {

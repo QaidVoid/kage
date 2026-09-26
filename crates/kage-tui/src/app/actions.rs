@@ -324,7 +324,8 @@ impl App {
         let arg = rest.trim();
         let parsed = match arg {
             "" => None,
-            "allow" | "default" => Some(None),
+            "allow" => Some(Some(kage_core::permissions::PermissionAction::Allow)),
+            "default" => Some(None),
             "ask" => Some(Some(kage_core::permissions::PermissionAction::Ask)),
             "deny" => Some(Some(kage_core::permissions::PermissionAction::Deny)),
             other => {
@@ -340,6 +341,9 @@ impl App {
                 .as_ref()
                 .and_then(|u| lock(u).permission_mode);
             let label = match current {
+                Some(kage_core::permissions::PermissionAction::Allow) => {
+                    "allow (yolo: every call runs, configured denies still deny)".to_owned()
+                }
                 Some(kage_core::permissions::PermissionAction::Ask) => "ask".to_owned(),
                 Some(kage_core::permissions::PermissionAction::Deny) => "deny".to_owned(),
                 _ => "default (configured rules)".to_owned(),

@@ -64,6 +64,9 @@ pub(crate) struct PermissionGate {
     /// Tools the user allowed for this session. They skip an ask, but
     /// not a deny mode or a configured deny. Never persisted.
     session_allowed: Arc<Mutex<BTreeSet<String>>>,
+    /// MCP servers the user allowed for this session (an "allow" answer
+    /// on one of the server's tools). Same limits as `session_allowed`.
+    session_allowed_servers: Arc<Mutex<BTreeSet<String>>>,
     /// Where "always allow" decisions are written. `None` (every
     /// production construction) resolves [`Config::default_path`] at
     /// write time; tests point it at a tempdir.
@@ -85,6 +88,7 @@ impl PermissionGate {
             cancel: CancelFlag::new(),
             mode: Arc::new(Mutex::new(None)),
             session_allowed: Arc::new(Mutex::new(BTreeSet::new())),
+            session_allowed_servers: Arc::new(Mutex::new(BTreeSet::new())),
             config_path: None,
         }
     }
@@ -101,6 +105,7 @@ impl PermissionGate {
     pub(crate) fn reset_session(&self) {
         *lock(&self.mode) = None;
         lock(&self.session_allowed).clear();
+        lock(&self.session_allowed_servers).clear();
     }
 
     /// Current session mode override, `None` when the configured
@@ -215,7 +220,26 @@ impl PermissionGate {
     }
 
     fn allow_for_session(&self, tool: &str) {
+        if let Some(server) = self.mcp_server_of(tool) {
+            // One approval covers every tool of the server: per-tool
+            // prompts for an MCP server are exactly the noise an
+            // approval is meant to end.
+            lock(&self.session_allowed_servers).insert(server.to_owned());
+            return;
+        }
         lock(&self.session_allowed).insert(tool.to_owned());
+    }
+
+    /// Whether a session approval covers `tool`: the exact tool, or
+    /// any of the session-allowed MCP servers.
+    fn session_allows(&self, tool: &str) -> bool {
+        if lock(&self.session_allowed).contains(tool) {
+            return true;
+        }
+        if let Some(server) = self.mcp_server_of(tool) {
+            return lock(&self.session_allowed_servers).contains(server);
+        }
+        false
     }
 
     /// Record an "always allow" for `tool`: flip the shared rules so
@@ -225,11 +249,7 @@ impl PermissionGate {
     /// IO failures only eprintln: the in-memory flip already holds
     /// for this session.
     fn persist_allow_always(&self, tool: &str) {
-        lock(&self.rules)
-            .tools
-            .entry(tool.to_owned())
-            .or_default()
-            .default = PermissionAction::Allow;
+        let server = self.mcp_server_of(tool).map(str::to_owned);
         let path = match &self.config_path {
             Some(p) => Some(p.clone()),
             None => Config::default_path(),
@@ -238,6 +258,20 @@ impl PermissionGate {
             eprintln!("kage: persist permission: no home directory; not persisted");
             return;
         };
+        if let Some(server) = server {
+            lock(&self.rules)
+                .mcp
+                .insert(server.clone(), PermissionAction::Allow);
+            if let Err(e) = save_mcp_allow_always(&path, &server) {
+                eprintln!("kage: persist permission: {e}");
+            }
+            return;
+        }
+        lock(&self.rules)
+            .tools
+            .entry(tool.to_owned())
+            .or_default()
+            .default = PermissionAction::Allow;
         if let Err(e) = save_allow_always(&path, tool) {
             eprintln!("kage: persist permission: {e}");
         }
@@ -262,6 +296,23 @@ fn save_allow_always(path: &Path, tool: &str) -> Result<(), String> {
     .map_err(|e| format!("save: {e}"))
 }
 
+/// Set `[permissions.mcp.<server>] = "allow"` in the user config at
+/// `path`, leaving every other line of the file as written.
+///
+/// # Errors
+///
+/// A string describing the save failure, for the caller's eprintln.
+fn save_mcp_allow_always(path: &Path, server: &str) -> Result<(), String> {
+    Config::save_keys(
+        path,
+        &[(
+            vec!["permissions", "mcp", server],
+            OptionValue::Str("allow".to_owned()),
+        )],
+    )
+    .map_err(|e| format!("save: {e}"))
+}
+
 impl Hooks for PermissionGate {
     fn before_tool_call(
         &mut self,
@@ -274,7 +325,7 @@ impl Hooks for PermissionGate {
         let configured = self.configured_action(name, &subject);
         if mode != Some(PermissionAction::Deny)
             && configured.0 != PermissionAction::Deny
-            && lock(&self.session_allowed).contains(name)
+            && self.session_allows(name)
         {
             return None;
         }
@@ -927,5 +978,111 @@ mod tests {
             noop.before_tool_call(&kage_core::ToolCallId::new("call"), "shell", &shell_input())
                 .is_none()
         );
+    }
+
+    #[test]
+    fn allow_session_answer_on_mcp_tool_covers_the_server() {
+        let (ask_tx, ask_rx) = channel_asker();
+        let gate = github_gate(PermissionsConfig::default()).with_asker(ask_tx);
+        let observer = gate.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let mut gate = gate;
+            let first = call(&mut gate, "github__create_issue").is_none();
+            let _ = done_tx.send(first);
+        });
+        let ask = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        ask.reply.send(PermissionDecision::AllowSession).unwrap();
+        handle.join().unwrap();
+        assert!(done_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        // Every other tool of the same server now runs silently.
+        let mut silent = observer.clone().with_asker(panicking_asker());
+        assert!(call(&mut silent, "github__list_issues").is_none());
+        // `reset_session` (a new or switched session) drops it again:
+        // the call asks. Run it on a thread and answer, or the ask
+        // parks forever.
+        let mut fresh = observer;
+        fresh.reset_session();
+        let (done2_tx, done2_rx) = mpsc::channel();
+        let handle2 = std::thread::spawn(move || {
+            let out = call(&mut fresh, "github__list_issues");
+            let _ = done2_tx.send(out.map(|o| o.is_error));
+        });
+        let ask2 = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        ask2.reply.send(PermissionDecision::Deny).unwrap();
+        handle2.join().unwrap();
+        assert_eq!(
+            done2_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn allow_always_answer_on_mcp_persists_the_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let (ask_tx, ask_rx) = channel_asker();
+        let gate = github_gate(PermissionsConfig::default())
+            .with_asker(ask_tx)
+            .with_persist_path(path.clone());
+        let (done_tx, done_rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let mut gate = gate;
+            let allowed = call(&mut gate, "github__create_issue").is_none();
+            let _ = done_tx.send(allowed);
+        });
+        let ask = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        ask.reply.send(PermissionDecision::AllowAlways).unwrap();
+        handle.join().unwrap();
+        assert!(done_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        // The server (not the single tool) is persisted and effective.
+        let saved = Config::load(&path).unwrap();
+        assert_eq!(
+            saved.permissions.mcp_action("github"),
+            PermissionAction::Allow
+        );
+        assert!(saved.permissions.tools.is_empty());
+    }
+
+    #[test]
+    fn configured_tool_deny_survives_server_session_allow() {
+        let mut rules = PermissionsConfig::default();
+        rules.tools.insert(
+            "github__force_push".to_owned(),
+            ToolPermissionRules {
+                default: PermissionAction::Deny,
+                allow: Vec::new(),
+                deny: Vec::new(),
+            },
+        );
+        let (ask_tx, ask_rx) = channel_asker();
+        let gate = github_gate(rules).with_asker(ask_tx);
+        let observer = gate.clone();
+        let handle = std::thread::spawn(move || {
+            let mut gate = gate;
+            call(&mut gate, "github__list_issues");
+        });
+        let ask = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        ask.reply.send(PermissionDecision::AllowSession).unwrap();
+        handle.join().unwrap();
+        // The server is session-allowed, but the per-tool deny stands.
+        let mut gate = observer;
+        let out = call(&mut gate, "github__force_push").unwrap();
+        assert!(out.is_error);
+        assert!(out.text.contains("permissions.tools"), "{}", out.text);
+    }
+
+    #[test]
+    fn mcp_wildcard_allow_skips_the_ask_but_not_a_server_deny() {
+        let mut rules = PermissionsConfig::default();
+        rules.mcp.insert("*".to_owned(), PermissionAction::Allow);
+        rules.mcp.insert("shell".to_owned(), PermissionAction::Deny);
+        let asker: Asker = Arc::new(|_| panic!("wildcard allow must not ask"));
+        let mut gate = PermissionGate::new(rules)
+            .with_mcp_servers(vec!["github".to_owned(), "shell".to_owned()])
+            .with_asker(asker);
+        assert!(call(&mut gate, "github__create_issue").is_none());
+        let out = call(&mut gate, "shell__exec").unwrap();
+        assert!(out.is_error);
     }
 }

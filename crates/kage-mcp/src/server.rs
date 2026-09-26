@@ -613,6 +613,13 @@ impl McpServerHandle {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // Own process group, so the kill on drop also reaches
+            // grandchildren such as the `node` behind `npx` or `bunx`.
+            process.process_group(0);
+        }
         let mut child = process.spawn().map_err(|source| McpError::Spawn {
             command: command.to_owned(),
             source,
@@ -687,10 +694,25 @@ impl McpServerHandle {
 impl Drop for McpServerHandle {
     fn drop(&mut self) {
         if let Some(child) = &mut self.child {
-            let _ = child.kill();
+            kill_process_group(child);
             let _ = child.wait();
         }
     }
+}
+
+/// Kill the child and everything it spawned. A launcher like `bunx`
+/// leaves its server running when killed alone, and that orphan can
+/// reset the terminal modes after kage has already exited.
+fn kill_process_group(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let pgid = nix::unistd::Pid::from_raw(child.id().cast_signed());
+        if nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL).is_err() {
+            let _ = child.kill();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = child.kill();
 }
 
 #[cfg(test)]

@@ -1718,6 +1718,7 @@ dependencies = [
  "kage-core",
  "kage-jsonrpc",
  "kage-tools",
+ "nix",
  "serde_json",
  "sha2",
  "thiserror 2.0.18",

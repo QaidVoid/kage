@@ -11,13 +11,17 @@
 //! lifecycle wrapper is only meaningful with a real tty.
 //!
 //! `InputReader` reads terminal events on a thread so the run loop
-//! can wait on them next to engine events.
+//! can wait on them next to engine events. It drops OSC replies
+//! (`ESC ] 11;rgb:... BEL`) that reach the input after the program
+//! which asked for them has gone: crossterm would report them as
+//! typed keys, and their BEL as `Ctrl+G`.
 //!
 //! [`forward_typed_lines`] reads lines from the terminal while the TUI
 //! is suspended and stops on request, so a host flow that waits for
 //! either typed input or something else can hand the terminal back
 //! without asking for a key press.
 
+use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Once, mpsc};
@@ -50,6 +54,10 @@ const KITTY_FLAGS: KeyboardEnhancementFlags = KeyboardEnhancementFlags::DISAMBIG
 
 /// How often [`forward_typed_lines`] checks its stop flag.
 const LINE_POLL: Duration = Duration::from_millis(50);
+
+/// How long a possible OSC reply may pause before its held keys are
+/// delivered as typed. A terminal writes a reply in one burst.
+const REPLY_GAP: Duration = Duration::from_millis(50);
 
 /// Owns the terminal while the TUI is running. Restoring is automatic on
 /// drop and via a panic hook so a crashing run never strands the tty.
@@ -264,12 +272,17 @@ impl InputReader {
         let thread = {
             let (stop, reading) = (Arc::clone(&stop), Arc::clone(&reading));
             thread::spawn(move || {
+                let mut replies = ReplyFilter::default();
+                let mut ready = VecDeque::new();
                 loop {
                     reading.store(true, Ordering::SeqCst);
                     if stop.load(Ordering::SeqCst) {
                         break;
                     }
-                    let event = event::read();
+                    let event = match ready.pop_front() {
+                        Some(event) => Ok(event),
+                        None => next_event(&mut replies, &mut ready),
+                    };
                     reading.store(false, Ordering::SeqCst);
                     let failed = event.is_err();
                     if event_tx.send(event).is_err() || failed || resume_rx.recv().is_err() {
@@ -314,6 +327,81 @@ impl Drop for InputReader {
             let _ = thread.join();
         }
     }
+}
+
+/// Read until an event gets past `replies`, queueing any others it
+/// releases along with it in `ready`.
+fn next_event(replies: &mut ReplyFilter, ready: &mut VecDeque<Event>) -> io::Result<Event> {
+    loop {
+        if replies.holding() && !event::poll(REPLY_GAP)? {
+            ready.extend(replies.release());
+        } else {
+            ready.extend(replies.push(event::read()?));
+        }
+        if let Some(event) = ready.pop_front() {
+            return Ok(event);
+        }
+    }
+}
+
+/// Holds keys that may spell an OSC reply and drops them once one
+/// completes. crossterm reads `ESC ]` as `Alt+]`, the reply body as
+/// plain characters, and the BEL or ST terminator as `Ctrl+G` or
+/// `Alt+\`. Keys that stop matching `Ps ; ...` are released as typed.
+#[derive(Default)]
+struct ReplyFilter {
+    held: Vec<Event>,
+    body: String,
+}
+
+impl ReplyFilter {
+    fn holding(&self) -> bool {
+        !self.held.is_empty()
+    }
+
+    /// Feed one event; returns the events to deliver now.
+    fn push(&mut self, event: Event) -> Vec<Event> {
+        if !self.holding() {
+            if is_key(&event, KeyModifiers::ALT, ']') {
+                self.held.push(event);
+                return Vec::new();
+            }
+            return vec![event];
+        }
+        if let Event::Key(key) = &event
+            && let KeyCode::Char(c) = key.code
+            && (key.modifiers - KeyModifiers::SHIFT).is_empty()
+            && (self.body.contains(';')
+                || c.is_ascii_digit()
+                || (c == ';' && !self.body.is_empty()))
+        {
+            self.body.push(c);
+            self.held.push(event);
+            return Vec::new();
+        }
+        if self.body.contains(';')
+            && (is_key(&event, KeyModifiers::CONTROL, 'g')
+                || is_key(&event, KeyModifiers::ALT, '\\'))
+        {
+            self.held.clear();
+            self.body.clear();
+            return Vec::new();
+        }
+        let mut out = self.release();
+        out.extend(self.push(event));
+        out
+    }
+
+    /// Give up on the held keys and hand them back as typed.
+    fn release(&mut self) -> Vec<Event> {
+        self.body.clear();
+        std::mem::take(&mut self.held)
+    }
+}
+
+fn is_key(event: &Event, modifiers: KeyModifiers, c: char) -> bool {
+    matches!(event, Event::Key(key)
+        if key.code == KeyCode::Char(c) && key.modifiers == modifiers)
 }
 
 /// Send each line typed on the terminal to `tx` until `stop` is set,
@@ -395,10 +483,69 @@ mod tests {
     use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
     use ratatui::widgets::Paragraph;
 
-    use super::edit_line;
+    use super::{ReplyFilter, edit_line};
 
     fn key(code: KeyCode) -> Event {
         Event::Key(KeyEvent::from(code))
+    }
+
+    fn chord(modifiers: KeyModifiers, c: char) -> Event {
+        Event::Key(KeyEvent::new(KeyCode::Char(c), modifiers))
+    }
+
+    /// The events crossterm reports for `bytes` read from the terminal.
+    fn parsed(bytes: &str) -> Vec<Event> {
+        let mut events = Vec::new();
+        let mut chars = bytes.chars();
+        while let Some(c) = chars.next() {
+            events.push(match c {
+                '\x1b' => chord(KeyModifiers::ALT, chars.next().unwrap()),
+                '\x07' => chord(KeyModifiers::CONTROL, 'g'),
+                c => key(KeyCode::Char(c)),
+            });
+        }
+        events
+    }
+
+    fn filter(events: Vec<Event>) -> (Vec<Event>, ReplyFilter) {
+        let mut replies = ReplyFilter::default();
+        let out = events.into_iter().flat_map(|e| replies.push(e)).collect();
+        (out, replies)
+    }
+
+    #[test]
+    fn osc_colour_replies_are_dropped() {
+        for reply in [
+            "\x1b]10;rgb:c0c0/caca/f5f5\x07\x1b]11;rgb:1a1a/1b1b/2626\x07",
+            "\x1b]11;rgb:1a1a/1b1b/2626\x1b\\",
+        ] {
+            let (out, replies) = filter(parsed(reply));
+            assert!(out.is_empty(), "{reply:?} leaked {out:?}");
+            assert!(!replies.holding());
+        }
+    }
+
+    #[test]
+    fn keys_around_a_reply_still_arrive_in_order() {
+        let (out, _) = filter(parsed("a\x1b]11;rgb:1/2/3\x07b"));
+        assert_eq!(out, parsed("ab"));
+    }
+
+    #[test]
+    fn keys_that_stop_matching_a_reply_are_released_as_typed() {
+        for typed in ["\x1b]x", "\x1b];", "\x1b]1x", "\x1b]1\x07", "\x1b]\x1b]x"] {
+            let (out, replies) = filter(parsed(typed));
+            assert_eq!(out, parsed(typed), "{typed:?}");
+            assert!(!replies.holding());
+        }
+    }
+
+    #[test]
+    fn an_unfinished_reply_is_released_on_timeout() {
+        let (out, mut replies) = filter(parsed("\x1b]11;rg"));
+        assert!(out.is_empty());
+        assert_eq!(replies.release(), parsed("\x1b]11;rg"));
+        assert!(!replies.holding());
     }
 
     #[test]

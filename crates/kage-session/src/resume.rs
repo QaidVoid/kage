@@ -83,17 +83,17 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
     let mut reader = SessionReader::iter(path)?;
     let first = reader
         .next()
-        .ok_or_else(|| empty_file_error(path))?
+        .ok_or_else(|| SessionError::Empty {
+            path: path.to_path_buf(),
+        })?
         .map_err(|e| match e {
             SessionError::Decode { .. } | SessionError::Io { .. } => e,
-            SessionError::UnsupportedVersion { .. } => {
-                unreachable!("reader does not produce UnsupportedVersion")
-            }
-            SessionError::Encode { .. } => unreachable!("reader does not produce Encode"),
-            SessionError::Locked { .. } => unreachable!("reader does not produce Locked"),
+            other => unreachable!("reader items are decode or io errors only: {other}"),
         })?;
     let SessionEntry::Header(header) = first else {
-        return Err(missing_header_error(path));
+        return Err(SessionError::MissingHeader {
+            path: path.to_path_buf(),
+        });
     };
     ensure_supported_version(path, header.version)?;
 
@@ -114,13 +114,8 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
         let entry = item?;
         match entry {
             SessionEntry::Header(_) => {
-                return Err(SessionError::Decode {
+                return Err(SessionError::SecondHeader {
                     path: path.to_path_buf(),
-                    line: 0,
-                    source: serde_json::from_str::<SessionEntry>(
-                        "{\"err\":\"second header in file\"}",
-                    )
-                    .unwrap_err(),
                 });
             }
             SessionEntry::Message(m) => {
@@ -219,23 +214,6 @@ fn ensure_supported_version(path: &Path, version: u32) -> Result<(), SessionErro
         found: version,
         supported: FORMAT_VERSION,
     })
-}
-
-fn empty_file_error(path: &Path) -> SessionError {
-    SessionError::Decode {
-        path: path.to_path_buf(),
-        line: 0,
-        source: serde_json::from_str::<SessionEntry>("").unwrap_err(),
-    }
-}
-
-fn missing_header_error(path: &Path) -> SessionError {
-    SessionError::Decode {
-        path: path.to_path_buf(),
-        line: 1,
-        source: serde_json::from_str::<SessionEntry>("{\"err\":\"first entry not a header\"}")
-            .unwrap_err(),
-    }
 }
 
 /// Find the session file in `dir` whose id starts with `prefix`. Returns
@@ -511,6 +489,46 @@ mod tests {
             }
             other => panic!("expected UnsupportedVersion, got {other:?}"),
         }
+    }
+
+    /// The structural failures used to surface as laundered serde
+    /// messages (`missing field 'type' ...`); they must name the real
+    /// problem instead.
+    #[test]
+    fn structural_failures_name_the_real_problem() {
+        let dir = tempdir().unwrap();
+
+        let empty = dir.path().join("empty.jsonl");
+        std::fs::write(&empty, b"").unwrap();
+        let err = replay(&empty).unwrap_err();
+        assert!(matches!(err, SessionError::Empty { .. }), "{err:?}");
+        assert_eq!(
+            err.to_string(),
+            format!("session {} is empty", empty.display())
+        );
+
+        let headerless = dir.path().join("headerless.jsonl");
+        // A decodable entry first: a bad *trailing* line is treated as
+        // a torn write by the reader, so it must decode to be refused
+        // as headerless.
+        let entry = serde_json::to_string(&message_entry(Role::User, "hi")).unwrap();
+        std::fs::write(&headerless, format!("{entry}\n")).unwrap();
+        let err = replay(&headerless).unwrap_err();
+        assert!(matches!(err, SessionError::MissingHeader { .. }), "{err:?}");
+        assert!(err.to_string().contains("first entry is not a header"));
+
+        let path = dir.path().join("two-headers.jsonl");
+        write(
+            &path,
+            fresh_header(),
+            &[
+                SessionEntry::Header(fresh_header()),
+                message_entry(Role::User, "hi"),
+            ],
+        );
+        let err = replay(&path).unwrap_err();
+        assert!(matches!(err, SessionError::SecondHeader { .. }), "{err:?}");
+        assert!(err.to_string().contains("second header in file"));
     }
 
     #[test]

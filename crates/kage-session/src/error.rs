@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use crate::entry::EntryId;
+
 /// Anything that can go wrong reading or writing a session file.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
@@ -57,5 +59,34 @@ pub enum SessionError {
     Locked {
         /// Path of the locked file.
         path: PathBuf,
+    },
+    /// Session file exists but holds no entries at all.
+    #[error("session {path} is empty")]
+    Empty {
+        /// Path of the offending file.
+        path: PathBuf,
+    },
+    /// First entry of the session file is not a header, so the file
+    /// can neither be replayed nor forked from.
+    #[error("session {path}: first entry is not a header")]
+    MissingHeader {
+        /// Path of the offending file.
+        path: PathBuf,
+    },
+    /// A header appeared again after the first entry. A session file
+    /// carries exactly one header, at the top.
+    #[error("session {path}: second header in file")]
+    SecondHeader {
+        /// Path of the offending file.
+        path: PathBuf,
+    },
+    /// A fork or rewind named an entry id the source session does not
+    /// have.
+    #[error("session {path} has no entry {at}")]
+    EntryNotFound {
+        /// Path of the source file.
+        path: PathBuf,
+        /// The requested entry id.
+        at: EntryId,
     },
 }

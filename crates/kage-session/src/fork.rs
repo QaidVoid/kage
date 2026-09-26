@@ -34,11 +34,13 @@ pub fn fork(
     at: EntryId,
 ) -> Result<(), SessionError> {
     let mut reader = SessionReader::iter(src)?;
-    let first = reader
-        .next()
-        .ok_or_else(|| missing_header_error(src, "session is empty"))??;
+    let first = reader.next().ok_or_else(|| SessionError::Empty {
+        path: src.to_path_buf(),
+    })??;
     let SessionEntry::Header(parent_header) = first else {
-        return Err(missing_header_error(src, "first entry is not a header"));
+        return Err(SessionError::MissingHeader {
+            path: src.to_path_buf(),
+        });
     };
 
     let new_header = Header {
@@ -74,13 +76,9 @@ pub fn fork(
         // partial dst file is still on disk; remove it so the caller is not
         // left with a confusing half-fork.
         let _ = std::fs::remove_file(dst);
-        return Err(SessionError::Decode {
+        return Err(SessionError::EntryNotFound {
             path: src.to_path_buf(),
-            line: 0,
-            source: serde_json::from_str::<SessionEntry>(&format!(
-                "{{\"err\":\"entry id {at} not found\"}}"
-            ))
-            .unwrap_err(),
+            at,
         });
     }
     Ok(())
@@ -120,15 +118,6 @@ pub fn resolve_entry_prefix(src: &Path, prefix: &str) -> Result<EntryId, Session
         });
     }
     Ok(matches.remove(0))
-}
-
-fn missing_header_error(path: &Path, msg: &str) -> SessionError {
-    SessionError::Decode {
-        path: path.to_path_buf(),
-        line: 0,
-        source: serde_json::from_str::<SessionEntry>(&format!("{{\"err\":\"{msg}\"}}"))
-            .unwrap_err(),
-    }
 }
 
 #[cfg(test)]
@@ -269,7 +258,8 @@ mod tests {
 
         let dst = dir.path().join("forked.jsonl");
         let err = fork(&src, &dst, SessionId::new(), EntryId::new()).unwrap_err();
-        assert!(matches!(err, SessionError::Decode { .. }));
+        assert!(matches!(err, SessionError::EntryNotFound { .. }), "{err:?}");
+        assert!(err.to_string().contains("has no entry"), "{err}");
         assert!(!dst.exists(), "fork should clean up its dst on error");
     }
 

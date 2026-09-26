@@ -596,13 +596,13 @@ impl OpenAiStream {
                 merge_detail(details, entry);
             }
         }
-        if let Some(content) = delta.get("content").and_then(Value::as_str) {
-            if !content.is_empty() {
-                self.flush_details();
-                self.pending.push_back(Ok(ProviderEvent::TextDelta {
-                    delta: content.to_owned(),
-                }));
-            }
+        if let Some(content) = delta.get("content").and_then(Value::as_str)
+            && !content.is_empty()
+        {
+            self.flush_details();
+            self.pending.push_back(Ok(ProviderEvent::TextDelta {
+                delta: content.to_owned(),
+            }));
         }
         let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) else {
             return;
@@ -636,14 +636,14 @@ impl OpenAiStream {
         if let Some(id) = id_str {
             entry.id = ToolCallId::new(id);
         }
-        if !entry.started {
-            if let Some(n) = name {
-                entry.started = true;
-                self.pending.push_back(Ok(ProviderEvent::ToolCallStart {
-                    id: entry.id.clone(),
-                    name: n.to_owned(),
-                }));
-            }
+        if !entry.started
+            && let Some(n) = name
+        {
+            entry.started = true;
+            self.pending.push_back(Ok(ProviderEvent::ToolCallStart {
+                id: entry.id.clone(),
+                name: n.to_owned(),
+            }));
         }
         if let Some(partial) = args {
             entry.args.push_str(partial);

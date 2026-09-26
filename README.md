@@ -39,7 +39,7 @@ Status: pre-1.0. Things still move.
 
 ## Install
 
-kage builds from source on Linux, macOS and WSL. You need Rust 1.87 or
+kage builds from source on Linux, macOS and WSL. You need Rust 1.88 or
 newer and a C compiler. Lua is vendored.
 
 ```sh

@@ -174,18 +174,18 @@ impl Connector<()> for InterruptibleConnector {
         // reach of the kill registry. Fail instead of silently bypassing
         // the proxy. (The socks-proxy feature is not enabled, so this is
         // an unlikely configuration.)
-        if let Some(proxy) = details.config.proxy() {
-            if matches!(
+        if let Some(proxy) = details.config.proxy()
+            && matches!(
                 proxy.protocol(),
                 ProxyProtocol::Socks4
                     | ProxyProtocol::Socks4A
                     | ProxyProtocol::Socks5
                     | ProxyProtocol::Socks5h
-            ) {
-                return Err(Error::Other(
-                    "SOCKS proxies are not supported for cancelable provider connections".into(),
-                ));
-            }
+            )
+        {
+            return Err(Error::Other(
+                "SOCKS proxies are not supported for cancelable provider connections".into(),
+            ));
         }
 
         // Run ureq's CONNECT-proxy hop first. With a proxy configured it

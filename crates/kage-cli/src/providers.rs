@@ -268,12 +268,11 @@ pub(crate) fn lookup_key_with_env(
     env_var: &str,
     store: &auth::AuthStore,
 ) -> Option<String> {
-    if !env_var.is_empty() {
-        if let Ok(v) = std::env::var(env_var) {
-            if !v.is_empty() {
-                return Some(v);
-            }
-        }
+    if !env_var.is_empty()
+        && let Ok(v) = std::env::var(env_var)
+        && !v.is_empty()
+    {
+        return Some(v);
     }
     store.access_token(provider).map(str::to_owned)
 }

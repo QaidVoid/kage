@@ -95,32 +95,33 @@ pub(super) fn render_buffer(
     // streaming append. `user_moved` makes the scroll one-shot instead
     // of re-firing every frame while focus rests on a block the user
     // deliberately scrolled away.
-    if user_moved && let Some(di) = focus {
-        if let (Some(&rendered_height), Some(&rendered_start)) = (heights.get(di), tops.get(di)) {
-            // A focus index past `heights` (host reset shrank the
-            // buffer between frames) skips the follow-scroll
-            // instead of panicking the render.
-            let rendered_end = rendered_start.saturating_add(rendered_height);
-            // Absolute anchors: the viewport can show the block's top
-            // row at the viewport top (`rendered_start`) or its bottom
-            // row at the viewport bottom (`end - visible`); anything
-            // between keeps the whole block on screen.
-            let top_align = rendered_start;
-            let bottom_align = rendered_end.saturating_sub(visible);
-            let current = buffer
-                .scroll()
-                .map_or(max_scroll_back, |top| top.min(max_scroll_back));
-            let in_view = current >= bottom_align && current <= top_align;
-            if !in_view {
-                // Tall blocks always align their top; otherwise bring
-                // the nearest edge into view.
-                let target = if rendered_height > visible || current < bottom_align {
-                    top_align
-                } else {
-                    bottom_align
-                };
-                buffer.set_scroll(target.min(max_scroll_back));
-            }
+    if user_moved
+        && let Some(di) = focus
+        && let (Some(&rendered_height), Some(&rendered_start)) = (heights.get(di), tops.get(di))
+    {
+        // A focus index past `heights` (host reset shrank the
+        // buffer between frames) skips the follow-scroll
+        // instead of panicking the render.
+        let rendered_end = rendered_start.saturating_add(rendered_height);
+        // Absolute anchors: the viewport can show the block's top
+        // row at the viewport top (`rendered_start`) or its bottom
+        // row at the viewport bottom (`end - visible`); anything
+        // between keeps the whole block on screen.
+        let top_align = rendered_start;
+        let bottom_align = rendered_end.saturating_sub(visible);
+        let current = buffer
+            .scroll()
+            .map_or(max_scroll_back, |top| top.min(max_scroll_back));
+        let in_view = current >= bottom_align && current <= top_align;
+        if !in_view {
+            // Tall blocks always align their top; otherwise bring
+            // the nearest edge into view.
+            let target = if rendered_height > visible || current < bottom_align {
+                top_align
+            } else {
+                bottom_align
+            };
+            buffer.set_scroll(target.min(max_scroll_back));
         }
     }
 

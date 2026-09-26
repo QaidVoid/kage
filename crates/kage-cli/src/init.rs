@@ -109,17 +109,17 @@ pub fn run(force: bool, non_interactive: bool) -> ExitCode {
 /// auth / config paths will surface their own errors later).
 fn ensure_directories<W: Write>(out: &mut W) -> Result<(), String> {
     let mut created = Vec::new();
-    if let Ok(dir) = crate::data_root() {
-        if !dir.exists() {
-            fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-            created.push(dir);
-        }
+    if let Ok(dir) = crate::data_root()
+        && !dir.exists()
+    {
+        fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+        created.push(dir);
     }
-    if let Ok(dir) = crate::sessions_dir() {
-        if !dir.exists() {
-            fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
-            created.push(dir);
-        }
+    if let Ok(dir) = crate::sessions_dir()
+        && !dir.exists()
+    {
+        fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+        created.push(dir);
     }
     if let Some(config_path) = Config::default_path()
         && let Some(parent) = config_path.parent()

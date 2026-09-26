@@ -178,11 +178,11 @@ impl InputState {
         // Count prefix: digits 1-9 always, `0` only after a count has
         // already started (otherwise `0` is the "go to line start"
         // motion).
-        if let KeyCode::Char(c @ '0'..='9') = key.code {
-            if !(c == '0' && self.pending_count.is_none()) {
-                self.accumulate_count(c);
-                return Vec::new();
-            }
+        if let KeyCode::Char(c @ '0'..='9') = key.code
+            && !(c == '0' && self.pending_count.is_none())
+        {
+            self.accumulate_count(c);
+            return Vec::new();
         }
 
         // Operator entry: stash the operator and wait for a motion or

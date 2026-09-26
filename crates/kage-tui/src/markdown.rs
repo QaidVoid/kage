@@ -325,11 +325,11 @@ impl RenderState {
                 self.style_stack.pop();
             }
             TagEnd::Link => {
-                if let Some(dest) = self.link_dest.take() {
-                    if self.link_text.trim() != dest {
-                        let shown = dest.strip_prefix("mailto:").unwrap_or(&dest);
-                        self.push_text(format!(" ({shown})"), dim_style());
-                    }
+                if let Some(dest) = self.link_dest.take()
+                    && self.link_text.trim() != dest
+                {
+                    let shown = dest.strip_prefix("mailto:").unwrap_or(&dest);
+                    self.push_text(format!(" ({shown})"), dim_style());
                 }
                 self.link_text.clear();
                 self.style_stack.pop();

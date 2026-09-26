@@ -949,12 +949,12 @@ mod tests {
         let (hold_tx, hold_rx) = std::sync::mpsc::channel::<()>();
         thread::spawn(move || {
             for msg in srv_in {
-                if let Inbound::Request { id, method, .. } = msg {
-                    if method == "initialize" {
-                        let _ = responder.respond(&id, Ok(result));
-                        let _ = hold_rx.recv();
-                        return;
-                    }
+                if let Inbound::Request { id, method, .. } = msg
+                    && method == "initialize"
+                {
+                    let _ = responder.respond(&id, Ok(result));
+                    let _ = hold_rx.recv();
+                    return;
                 }
             }
         });

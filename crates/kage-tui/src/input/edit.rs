@@ -20,10 +20,11 @@ impl InputState {
         if self.cursor > line_end {
             self.cursor = line_end;
         }
-        if self.cursor == line_end && line_end > line_start {
-            if let Some((_, pw)) = prev_char(&self.text, self.cursor) {
-                self.cursor -= pw;
-            }
+        if self.cursor == line_end
+            && line_end > line_start
+            && let Some((_, pw)) = prev_char(&self.text, self.cursor)
+        {
+            self.cursor -= pw;
         }
     }
 

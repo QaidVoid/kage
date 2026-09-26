@@ -72,10 +72,8 @@ fn fill_and_replace(
 ) -> io::Result<()> {
     file.write_all(content)?;
     file.sync_all()?;
-    if !private {
-        if let Ok(meta) = fs::metadata(target) {
-            fs::set_permissions(temp, meta.permissions())?;
-        }
+    if !private && let Ok(meta) = fs::metadata(target) {
+        fs::set_permissions(temp, meta.permissions())?;
     }
     fs::rename(temp, target)?;
     #[cfg(unix)]

@@ -92,13 +92,31 @@ impl Default for ShellTool {
 }
 
 /// The model-facing description for a shell program, naming it so the
-/// model writes commands in that shell's syntax.
+/// model writes commands in that shell's syntax. Models default to
+/// bash constructs no matter what the tool says, so shells that are
+/// not bash get an explicit contrast note with the common translations.
 fn describe_shell(shell: &str) -> String {
     let flags = shell_args(shell).join(" ");
-    format!(
+    let mut out = format!(
         "Run a shell command via `{shell} {flags}`. Returns combined stdout/stderr and the \
          exit code. Default timeout is 120 seconds; output is truncated at 100KB."
-    )
+    );
+    match shell.trim_end_matches(".exe") {
+        "fish" => out.push_str(
+            " Commands run in fish, NOT bash: `export FOO=bar` is `set -x FOO bar`, \
+             `$(cmd)` is `(cmd)`, and `VAR=value cmd` is `env VAR=value cmd`.",
+        ),
+        "powershell" | "pwsh" => out.push_str(
+            " Commands run in PowerShell, NOT bash: bash constructs like \
+             `export` or `VAR=value cmd` do not work; use `$env:FOO = 'bar'`.",
+        ),
+        "nushell" => out.push_str(
+            " Commands run in Nushell, NOT bash: bash constructs like \
+             `export`, `$(cmd)`, and `VAR=value cmd` do not work.",
+        ),
+        _ => {}
+    }
+    out
 }
 
 /// The flag(s) `program` uses to run a command string. Known Windows
@@ -686,6 +704,17 @@ mod tests {
             tool.description().contains("fish -c"),
             "{}",
             tool.description()
+        );
+        assert!(
+            tool.description().contains("NOT bash"),
+            "{}",
+            tool.description()
+        );
+        let bash = ShellTool::default();
+        assert!(
+            !bash.description().contains("NOT bash"),
+            "{}",
+            bash.description()
         );
         assert_eq!(
             ShellTool::default().description(),

@@ -164,7 +164,18 @@ where
             cx.budget.add(turn.usage);
             let turn_usage = turn.usage;
             let assistant_id = turn.message.id;
-            let pending = turn.tool_calls.clone();
+            let mut pending = turn.tool_calls.clone();
+            // An aliased call (`bash` for `shell`) keeps the model's
+            // name in the recorded history but runs, is gated, and is
+            // mode-checked under the tool's real name.
+            for call in &mut pending {
+                if let Some(tool) = tools.get(&call.name) {
+                    let canonical = tool.name();
+                    if canonical != call.name {
+                        call.name = canonical.to_owned();
+                    }
+                }
+            }
             append(cx, &mut emit, turn.message);
 
             let had_tool_calls = !pending.is_empty();

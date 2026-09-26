@@ -17,6 +17,11 @@ pub struct ToolRegistry {
     /// order: a stable prefix is what lets the provider's prompt cache
     /// survive a restart or reload.
     tools: BTreeMap<String, Arc<dyn Tool>>,
+    /// Alternate names that resolve to a registered tool, used when a
+    /// model reaches for a familiar name (`bash`) that the registry
+    /// hosts under another (`shell`). Aliases never appear in
+    /// listings.
+    aliases: BTreeMap<String, String>,
 }
 
 impl ToolRegistry {
@@ -49,10 +54,33 @@ impl ToolRegistry {
         self.tools.remove(name)
     }
 
-    /// Look up a tool by name.
+    /// Register `from` as an alternate name for the tool registered
+    /// under `to`. Lookup through [`Self::get`] follows aliases;
+    /// listings and [`Self::names`] never show them.
+    ///
+    /// Returns `self` for chaining.
+    #[must_use]
+    pub fn alias(mut self, from: &str, to: &str) -> Self {
+        self.aliases.insert(from.to_owned(), to.to_owned());
+        self
+    }
+
+    /// Look up a tool by name, following alias chains. A missing
+    /// target, or an alias cycle, resolves to `None`.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&Arc<dyn Tool>> {
-        self.tools.get(name)
+        let mut current = name;
+        // Alias chains are bounded in practice; the cap only exists to
+        // turn a hand-written cycle into `None` instead of a hang.
+        for _ in 0..8 {
+            match self.tools.get(current) {
+                Some(tool) => return Some(tool),
+                None => {
+                    current = self.aliases.get(current)?;
+                }
+            }
+        }
+        None
     }
 
     /// Number of registered tools.
@@ -169,6 +197,42 @@ mod tests {
         let mut specs: Vec<String> = r.list_for_provider().into_iter().map(|s| s.name).collect();
         specs.sort();
         assert_eq!(specs, vec!["farewell", "greet"]);
+    }
+
+    #[test]
+    fn alias_resolves_to_the_target_tool() {
+        let r = ToolRegistry::new()
+            .with(echo("shell"))
+            .alias("bash", "shell");
+        assert_eq!(r.get("bash").unwrap().name(), "shell");
+        assert!(r.get("nope").is_none());
+        // Aliases are invisible to listings.
+        assert_eq!(r.names().collect::<Vec<_>>(), vec!["shell"]);
+    }
+
+    #[test]
+    fn alias_chains_resolve_and_cycles_stop() {
+        let r = ToolRegistry::new()
+            .with(echo("c"))
+            .alias("a", "b")
+            .alias("b", "c");
+        assert_eq!(r.get("a").unwrap().name(), "c");
+        let r = ToolRegistry::new()
+            .with(echo("x"))
+            .alias("p", "q")
+            .alias("q", "p");
+        assert!(r.get("p").is_none());
+    }
+
+    #[test]
+    fn alias_survives_a_renamed_target() {
+        // A plugin override under the real name keeps the alias working.
+        let mut r = ToolRegistry::new()
+            .with(echo("shell"))
+            .alias("bash", "shell");
+        r.register(echo("shell2"));
+        r.register(echo("shell"));
+        assert_eq!(r.get("bash").unwrap().name(), "shell");
     }
 
     #[test]

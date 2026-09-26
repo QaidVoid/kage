@@ -41,6 +41,10 @@ where
 #[must_use]
 pub fn builtin_registry() -> ToolRegistry {
     ToolRegistry::new()
+        // Models reach for `bash` from training priors even when the
+        // listed tool is `shell` (possibly running fish or pwsh);
+        // accept the old reflex instead of failing the call.
+        .alias("bash", "shell")
         .with(Arc::new(ReadTool))
         .with(Arc::new(WriteTool))
         .with(Arc::new(EditTool))

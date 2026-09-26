@@ -7,6 +7,7 @@
 //! prompt. `$VISUAL` wins over `$EDITOR`; without either, `Ctrl+G`
 //! toasts instead of launching anything.
 
+use std::io::Write as _;
 use std::process::Command;
 
 use super::Tui;
@@ -20,6 +21,20 @@ fn editor_command() -> Option<String> {
         }
     }
     None
+}
+
+/// Create `path` exclusively, writable by the owner only. The draft
+/// can hold pasted secrets, `/tmp` is shared, and `create_new` also
+/// refuses to follow a planted symlink.
+fn create_private(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(path)
 }
 
 /// Why the editor run failed and how to fix it, from the shell's exit
@@ -90,7 +105,10 @@ impl super::App {
                 .map(|d| d.as_nanos())
                 .unwrap_or_default()
         ));
-        if let Err(e) = std::fs::write(&path, self.input.text()) {
+        let written =
+            create_private(&path).and_then(|mut file| file.write_all(self.input.text().as_bytes()));
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&path);
             self.notify(format!("editor: {e}"));
             return;
         }
@@ -178,5 +196,21 @@ mod tests {
         let chord = key(KeyCode::Char('g'), KeyModifiers::CONTROL);
         assert!(app.keyboard_modal_open());
         assert!(!app.external_edit_key(chord));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_draft_file_is_created_private_and_exclusive() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("draft.txt");
+        {
+            let mut file = create_private(&path).unwrap();
+            file.write_all(b"pasted secret draft").unwrap();
+        }
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert!(create_private(&path).is_err(), "second create is refused");
     }
 }

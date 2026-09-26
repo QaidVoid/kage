@@ -525,7 +525,9 @@ fn run_shell_capture_truncates_large_output() {
 
 #[test]
 fn run_shell_capture_runs_in_the_given_workdir() {
-    let dir = std::env::temp_dir();
+    // `pwd` prints the physical path; on macOS temp_dir sits behind the
+    // /var -> /private/var symlink, so compare against the real path.
+    let dir = std::env::temp_dir().canonicalize().unwrap();
     let (_, out) = capture("pwd", &dir);
     assert!(out.trim().starts_with(dir.to_str().unwrap()), "{out}");
 }

@@ -25,8 +25,9 @@
 //! [`UNAUTHORIZED`], or [`REFUSED`] when kage sends no stored token (a
 //! configured header wins, or there is no token source), which the
 //! connection reports as
-//! [`McpError::Unauthorized`](crate::McpError::Unauthorized). ureq keeps
-//! its default of dropping the header on any redirect.
+//! [`McpError::Unauthorized`](crate::McpError::Unauthorized). Redirects
+//! are never followed, so configured headers and bearer tokens never
+//! reach another host than the configured endpoint.
 //!
 //! One simplification over the spec: a POST failure closes the
 //! transport only when the server could not have routed the request at
@@ -48,8 +49,9 @@
 //! Synchronous throughout: blocking `ureq` calls and `std::thread`, no
 //! async, matching the rest of the workspace. The GET pump and request
 //! threads are detached and may stay parked on an open remote stream
-//! until the server closes it or the process exits; closing the
-//! transport only takes away the pipe writer they forward into.
+//! until the server closes it, the 600 s idle deadline fires, or the
+//! process exits; closing the transport only takes away the pipe
+//! writer they forward into.
 
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -131,7 +133,32 @@ pub(crate) fn connect_http(
     headers: &BTreeMap<String, String>,
     tokens: Option<Arc<dyn TokenSource>>,
 ) -> Result<(Peer, Receiver<Inbound>, JoinHandle<()>), String> {
-    open_http(ureq::Agent::new_with_defaults(), url, headers, tokens)
+    open_http(transport_agent(), url, headers, tokens)
+}
+
+/// Transport deadlines, mirroring `kage_provider::http::build_agent`:
+/// without them every phase is unbounded, so a server that accepts the
+/// connection and never answers parks a thread and socket forever.
+/// `recv_body` is an idle bound recomputed on every read, so long
+/// tool calls and the GET stream are never capped in total;
+/// `recv_response` stays unset so a streaming response cannot die
+/// mid-flight while data keeps arriving. Redirects are never
+/// followed: an MCP endpoint has no reason to redirect, and not
+/// following keeps configured headers and bearer tokens on the
+/// configured host.
+fn transport_config() -> ureq::config::Config {
+    ureq::Agent::config_builder()
+        .timeout_resolve(Some(Duration::from_secs(15)))
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_send_request(Some(Duration::from_secs(600)))
+        .timeout_send_body(Some(Duration::from_secs(600)))
+        .timeout_recv_body(Some(Duration::from_secs(600)))
+        .max_redirects(0)
+        .build()
+}
+
+fn transport_agent() -> ureq::Agent {
+    transport_config().new_agent()
 }
 
 /// [`connect_http`] against an explicit agent, so tests can run the
@@ -384,6 +411,16 @@ fn post_and_forward(
         }
     }
     let status = response.status().as_u16();
+    // With redirects never followed (see `transport_config`), a 3xx
+    // arrives here as a plain response. There is nothing to act on:
+    // fail the request instead of forwarding an empty success.
+    if !response.status().is_success() {
+        return Err(PostFailure {
+            error: io::Error::other(format!("mcp post {url}: status {status}")),
+            fatal: false,
+            code: INTERNAL,
+        });
+    }
     let content_type = response
         .headers()
         .get("content-type")
@@ -784,8 +821,14 @@ mod tests {
     /// The first `quota` POST requests get responses, later ones get a
     /// dropped connection; GET requests always get through.
     fn fake_agent(handler: Handler, quota: usize) -> ureq::Agent {
+        fake_agent_with(Config::default(), handler, quota)
+    }
+
+    /// [`fake_agent`] against an explicit config, so tests can run the
+    /// production transport config against the in-process fake server.
+    fn fake_agent_with(config: Config, handler: Handler, quota: usize) -> ureq::Agent {
         ureq::Agent::with_parts(
-            Config::default(),
+            config,
             FakeServerConnector {
                 handler,
                 served: Arc::new(AtomicUsize::new(0)),
@@ -1200,14 +1243,11 @@ mod tests {
     }
 
     #[test]
-    fn authorization_is_not_forwarded_across_a_redirect() {
+    fn a_redirect_is_not_followed() {
         let log: Log = Arc::new(Mutex::new(Vec::new()));
         let recorded = Arc::clone(&log);
         let handler = fixed(move |request: &HttpRequest| -> Vec<u8> {
             recorded.lock().unwrap().push(request.clone());
-            if request.headers.get("host").map(String::as_str) == Some("other.test") {
-                return initialize_response();
-            }
             response_bytes(
                 "HTTP/1.1 303 See Other",
                 None,
@@ -1215,30 +1255,30 @@ mod tests {
                 "",
             )
         });
-        let tokens = StaticTokens::new("tok-secret", None);
         let (peer, inbound, _reader) = open_http(
-            fake_agent(handler, usize::MAX),
+            fake_agent_with(transport_config(), handler, usize::MAX),
             TEST_URL,
             &BTreeMap::new(),
-            Some(tokens),
+            None,
         )
         .unwrap();
-        let _ = McpConnection::initialize_with_timeout(
+        let err = McpConnection::initialize_with_timeout(
             "srv",
             peer,
             inbound,
             &[],
             None,
             Duration::from_secs(5),
-        );
+        )
+        .err()
+        .expect("a redirect without following fails the request");
+        assert!(err.to_string().contains("status 303"), "{err}");
         let log = log.lock().unwrap();
-        let first = &log[0];
-        assert_eq!(authorization(first), Some("Bearer tok-secret"));
-        let moved = log
-            .iter()
-            .find(|r| r.headers.get("host").map(String::as_str) == Some("other.test"))
-            .expect("the redirect is followed");
-        assert_eq!(authorization(moved), None);
+        assert_eq!(log.len(), 1, "the redirect target is never contacted");
+        assert_eq!(
+            log[0].headers.get("host").map(String::as_str),
+            Some("mcp.test")
+        );
     }
 
     #[test]

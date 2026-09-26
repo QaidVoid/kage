@@ -18,6 +18,15 @@
 //! [`PermissionResolver`] (the host backs it with
 //! `kage.on_acp_permission`); with no resolver, or on deny, the call
 //! is rejected. kage never auto-approves an upstream agent's tools.
+//!
+//! Every turn is a one-shot bridge. A fresh agent process and a fresh
+//! ACP session are started per turn, and only the latest user turn's
+//! text is forwarded - kage's history is not replayed, so the
+//! upstream has no memory of earlier turns beyond that one message.
+//! The upstream's `stopReason` is collapsed to
+//! [`StopReason::EndTurn`]: `max_tokens` cutoffs and refusals are
+//! indistinguishable from a normal end, and token usage is not
+//! reported (always zero).
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};

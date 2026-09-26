@@ -82,3 +82,9 @@ handler that errors or returns a non-boolean also denies.
 - `kage.on_acp_permission` is a synchronous policy callback. An
   interactive "ask the human" prompt for an upstream tool is not
   available in v1. The handler must decide programmatically.
+- Every turn starts a **fresh agent process and session**, and only
+  the latest user message is forwarded. The upstream has no memory
+  of the conversation beyond that message.
+- The upstream's stop reason is collapsed to a normal end: a
+  `max_tokens` cutoff or a refusal is not distinguished, and token
+  usage is not reported for ACP turns.

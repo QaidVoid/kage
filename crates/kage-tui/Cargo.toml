@@ -30,7 +30,6 @@ ignore.workspace = true
 image = { version = "0.25.9", default-features = false, features = ["png"] }
 kage-core.workspace = true
 kage-plugin.workspace = true
-nix.workspace = true
 pulldown-cmark.workspace = true
 ratatui.workspace = true
 serde.workspace = true
@@ -42,12 +41,13 @@ unicode-width = "0.2.2"
 
 [dev-dependencies]
 chrono.workspace = true
-criterion = {
-  version = "0.8.2",
-  default-features = false,
-  features = ["cargo_bench_support"]
-}
+criterion.version = "0.8.2"
+criterion.default-features = false
+criterion.features = ["cargo_bench_support"]
 tempfile.workspace = true
 
 [lints]
 workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true

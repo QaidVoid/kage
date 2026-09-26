@@ -29,6 +29,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender};
+#[cfg(unix)]
 use nix::sys::signal::{Signal, raise};
 use ratatui::DefaultTerminal;
 use ratatui::crossterm::cursor::SetCursorStyle;
@@ -319,9 +320,23 @@ impl Drop for InputReader {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
         self.resume = None;
-        // A blocked read returns on the resize this signal reports.
-        if self.reading.load(Ordering::SeqCst) {
-            let _ = raise(Signal::SIGWINCH);
+        #[cfg(unix)]
+        {
+            // A blocked read returns on the resize this signal reports.
+            if self.reading.load(Ordering::SeqCst) {
+                let _ = raise(Signal::SIGWINCH);
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows has no SIGWINCH and a blocked console read cannot
+            // be interrupted; detach instead of blocking Drop forever.
+            // The stop flag ends the thread after its current read, and
+            // process exit reclaims it regardless.
+            if self.reading.load(Ordering::SeqCst) {
+                let _ = self.thread.take();
+                return;
+            }
         }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();

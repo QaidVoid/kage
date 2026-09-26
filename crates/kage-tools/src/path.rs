@@ -152,6 +152,7 @@ fn canonicalize_with_missing_tail(path: &Path) -> Result<PathBuf, ToolError> {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
     use super::*;
@@ -249,6 +250,7 @@ mod tests {
         assert_eq!(resolved, file.canonicalize().unwrap());
     }
 
+    #[cfg(unix)]
     #[test]
     fn resolve_under_symlink_that_escapes_is_rejected() {
         let outer = workdir();
@@ -311,6 +313,7 @@ mod tests {
         assert_eq!(resolved, dir.path().canonicalize().unwrap().join("new.txt"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn resolve_under_dangling_symlink_tail_is_not_resolved_through() {
         // A dangling symlink inside the workdir cannot be canonicalized,

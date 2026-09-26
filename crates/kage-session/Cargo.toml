@@ -18,7 +18,6 @@ workspace = true
 chrono.workspace = true
 grep.workspace = true
 kage-core.workspace = true
-nix.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -26,3 +25,6 @@ ulid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true

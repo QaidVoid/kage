@@ -144,6 +144,7 @@ fn write_confined(root: &Path, resolved: &Path, content: &[u8]) -> std::io::Resu
 #[cfg(test)]
 mod tests {
     use std::fs;
+    #[cfg(unix)]
     use std::os::unix::fs::symlink;
 
     use tempfile::tempdir;
@@ -247,6 +248,7 @@ mod tests {
         assert_eq!(out, mlua::Value::Boolean(true));
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_through_dangling_symlink_parent_is_rejected() {
         let dir = tempdir().unwrap();
@@ -262,6 +264,7 @@ mod tests {
         assert!(!parent.join("escape-target").join("x.txt").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_onto_dangling_symlink_name_is_rejected() {
         let dir = tempdir().unwrap();
@@ -273,6 +276,7 @@ mod tests {
         assert!(!parent.join("escape-file").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn write_through_symlink_into_workdir_still_works() {
         let dir = tempdir().unwrap();

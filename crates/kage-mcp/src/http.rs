@@ -567,21 +567,9 @@ fn spawn_get_pump(endpoint: Endpoint, shared: SharedState, out: OutSlot) {
 
 #[cfg(test)]
 mod tests {
-    use std::fmt;
-    use std::os::unix::net::UnixStream;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
 
     use super::*;
-    use crate::server::{McpConnection, McpError};
-    use crate::test_support::{HttpRequest, StaticTokens, read_request, wait_until};
-    use ureq::config::Config;
-    use ureq::http::Uri;
-    use ureq::unversioned::resolver::{ResolvedSocketAddrs, Resolver};
-    use ureq::unversioned::transport::{
-        Buffers, ConnectionDetails, Connector, LazyBuffers, NextTimeout, Transport,
-    };
 
     #[test]
     fn frame_joins_multi_line_data_and_skips_comments() {
@@ -614,387 +602,283 @@ mod tests {
         assert_eq!(pipe_rx.read(&mut eof).unwrap(), 0);
     }
 
-    /// The handler each test server call goes through: one recorded
-    /// request in, the HTTP response written to the connection.
-    type Handler = Arc<dyn Fn(&HttpRequest, &mut UnixStream) + Send + Sync>;
+    /// The fake-server harness below runs the transport over a
+    /// `UnixStream::pair`, which does not exist on Windows.
+    #[cfg(unix)]
+    mod over_unix_stream {
+        use std::fmt;
+        use std::os::unix::net::UnixStream;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
 
-    /// A [`Handler`] answering every request with the full response
-    /// `respond` builds.
-    fn fixed(respond: impl Fn(&HttpRequest) -> Vec<u8> + Send + Sync + 'static) -> Handler {
-        Arc::new(move |request, stream| {
-            let _ = stream.write_all(&respond(request));
-        })
-    }
+        use super::*;
+        use crate::server::{McpConnection, McpError};
+        use crate::test_support::{HttpRequest, StaticTokens, read_request, wait_until};
+        use ureq::config::Config;
+        use ureq::http::Uri;
+        use ureq::unversioned::resolver::{ResolvedSocketAddrs, Resolver};
+        use ureq::unversioned::transport::{
+            Buffers, ConnectionDetails, Connector, LazyBuffers, NextTimeout, Transport,
+        };
 
-    /// Build a full HTTP/1.1 response with a fixed body.
-    fn response_bytes(
-        status_line: &str,
-        content_type: Option<&str>,
-        extra: &[(&str, &str)],
-        body: &str,
-    ) -> Vec<u8> {
-        let mut head = format!(
-            "{status_line}\r\ncontent-length: {}\r\nconnection: close\r\n",
-            body.len()
-        );
-        if let Some(ct) = content_type {
-            head.push_str("content-type: ");
-            head.push_str(ct);
-            head.push_str("\r\n");
-        }
-        for (name, value) in extra {
-            head.push_str(name);
-            head.push_str(": ");
-            head.push_str(value);
-            head.push_str("\r\n");
-        }
-        head.push_str("\r\n");
-        let mut out = head.into_bytes();
-        out.extend_from_slice(body.as_bytes());
-        out
-    }
+        /// The handler each test server call goes through: one recorded
+        /// request in, the HTTP response written to the connection.
+        type Handler = Arc<dyn Fn(&HttpRequest, &mut UnixStream) + Send + Sync>;
 
-    /// Client end of one fake connection: the socket to the in-process
-    /// server thread plus ureq's lazy buffers, mirroring
-    /// ureq's own `TcpTransport`.
-    struct FakeTransport {
-        stream: UnixStream,
-        buffers: LazyBuffers,
-        timeout_read: Option<Duration>,
-        timeout_write: Option<Duration>,
-    }
-
-    impl fmt::Debug for FakeTransport {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.debug_struct("FakeTransport").finish_non_exhaustive()
-        }
-    }
-
-    /// Map a socket error the way ureq's own transports do: an
-    /// elapsed timeout surfaces as EAGAIN (`WouldBlock`) on a
-    /// `UnixStream`, everything else stays an io error.
-    fn transport_error(e: io::Error, timeout: NextTimeout) -> ureq::Error {
-        if e.kind() == io::ErrorKind::WouldBlock {
-            ureq::Error::Timeout(timeout.reason)
-        } else {
-            ureq::Error::Io(e)
-        }
-    }
-
-    /// Apply `timeout` to `stream` only when it changed, like ureq's
-    /// `maybe_update_timeout`.
-    fn apply_timeout(
-        timeout: NextTimeout,
-        previous: &mut Option<Duration>,
-        stream: &UnixStream,
-        set: fn(&UnixStream, Option<Duration>) -> io::Result<()>,
-    ) -> Result<(), ureq::Error> {
-        let wanted = timeout.not_zero().map(|d| *d);
-        if wanted != *previous {
-            set(stream, wanted).map_err(ureq::Error::Io)?;
-            *previous = wanted;
-        }
-        Ok(())
-    }
-
-    impl Transport for FakeTransport {
-        fn buffers(&mut self) -> &mut dyn Buffers {
-            &mut self.buffers
-        }
-
-        fn transmit_output(
-            &mut self,
-            amount: usize,
-            timeout: NextTimeout,
-        ) -> Result<(), ureq::Error> {
-            apply_timeout(
-                timeout,
-                &mut self.timeout_write,
-                &self.stream,
-                UnixStream::set_write_timeout,
-            )?;
-            let output = &self.buffers.output()[..amount];
-            self.stream
-                .write_all(output)
-                .map_err(|e| transport_error(e, timeout))
-        }
-
-        fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, ureq::Error> {
-            apply_timeout(
-                timeout,
-                &mut self.timeout_read,
-                &self.stream,
-                UnixStream::set_read_timeout,
-            )?;
-            let input = self.buffers.input_append_buf();
-            match self.stream.read(input) {
-                Ok(n) => {
-                    self.buffers.input_appended(n);
-                    Ok(n > 0)
-                }
-                Err(e) => Err(transport_error(e, timeout)),
-            }
-        }
-
-        fn is_open(&mut self) -> bool {
-            // Responses are sent with `connection: close`, so the
-            // transport is never pooled.
-            false
-        }
-    }
-
-    /// Connector standing in for the remote endpoint: every connection
-    /// is a `UnixStream::pair`, the server side served by a thread that
-    /// parses one request and answers through the test handler. The
-    /// first `quota` non-GET requests get responses; any later one gets
-    /// a dropped connection (no response), which the client reads as a
-    /// transport failure.
-    struct FakeServerConnector {
-        handler: Handler,
-        served: Arc<AtomicUsize>,
-        quota: usize,
-    }
-
-    impl fmt::Debug for FakeServerConnector {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.debug_struct("FakeServerConnector")
-                .finish_non_exhaustive()
-        }
-    }
-
-    impl Connector<()> for FakeServerConnector {
-        type Out = FakeTransport;
-
-        fn connect(
-            &self,
-            details: &ConnectionDetails,
-            _: Option<()>,
-        ) -> Result<Option<FakeTransport>, ureq::Error> {
-            let (client, mut remote) = UnixStream::pair().map_err(ureq::Error::Io)?;
-            let handler = Arc::clone(&self.handler);
-            let served = Arc::clone(&self.served);
-            let quota = self.quota;
-            std::thread::spawn(move || {
-                let Some(request) = read_request(&mut remote) else {
-                    return;
-                };
-                if request.method != "GET" && served.fetch_add(1, Ordering::SeqCst) >= quota {
-                    // Over quota: stop answering entirely; the client
-                    // sees EOF and reports a transport failure.
-                    return;
-                }
-                handler(&request, &mut remote);
-                let _ = remote.flush();
-            });
-            let buffers = LazyBuffers::new(
-                details.config.input_buffer_size(),
-                details.config.output_buffer_size(),
-            );
-            Ok(Some(FakeTransport {
-                stream: client,
-                buffers,
-                timeout_read: None,
-                timeout_write: None,
-            }))
-        }
-    }
-
-    /// Resolver that answers every host with a fixed address without
-    /// touching DNS, so the fake agent never reaches the network.
-    #[derive(Debug)]
-    struct NoResolver;
-
-    impl Resolver for NoResolver {
-        fn resolve(
-            &self,
-            _: &Uri,
-            _: &Config,
-            _: NextTimeout,
-        ) -> Result<ResolvedSocketAddrs, ureq::Error> {
-            let mut addrs = self.empty();
-            addrs.push("10.0.0.1:1".parse().unwrap());
-            Ok(addrs)
-        }
-    }
-
-    /// An agent whose HTTP traffic is answered by `handler` in-process.
-    /// The first `quota` POST requests get responses, later ones get a
-    /// dropped connection; GET requests always get through.
-    fn fake_agent(handler: Handler, quota: usize) -> ureq::Agent {
-        fake_agent_with(Config::default(), handler, quota)
-    }
-
-    /// [`fake_agent`] against an explicit config, so tests can run the
-    /// production transport config against the in-process fake server.
-    fn fake_agent_with(config: Config, handler: Handler, quota: usize) -> ureq::Agent {
-        ureq::Agent::with_parts(
-            config,
-            FakeServerConnector {
-                handler,
-                served: Arc::new(AtomicUsize::new(0)),
-                quota,
-            },
-            NoResolver,
-        )
-    }
-
-    /// Run `f` on its own thread and return its result, or `None` when
-    /// it has not finished within 5 s.
-    fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(f());
-        });
-        rx.recv_timeout(Duration::from_secs(5)).ok()
-    }
-
-    /// The URL tests hand to [`open_http`]; never dialed, the fake
-    /// connector ignores it.
-    const TEST_URL: &str = "http://mcp.test/mcp";
-
-    /// The `initialize` answer the fake servers send.
-    fn initialize_response() -> Vec<u8> {
-        response_bytes(
-            "HTTP/1.1 200 OK",
-            Some("application/json"),
-            &[],
-            &serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "result": {
-                    "protocolVersion": "2025-06-18",
-                    "capabilities": { "tools": {} }
-                }
+        /// A [`Handler`] answering every request with the full response
+        /// `respond` builds.
+        fn fixed(respond: impl Fn(&HttpRequest) -> Vec<u8> + Send + Sync + 'static) -> Handler {
+            Arc::new(move |request, stream| {
+                let _ = stream.write_all(&respond(request));
             })
-            .to_string(),
-        )
-    }
+        }
 
-    #[test]
-    fn http_round_trip_json_with_session_echo() {
-        let log: Arc<Mutex<Vec<HttpRequest>>> = Arc::new(Mutex::new(Vec::new()));
-        let recorded = Arc::clone(&log);
-        let handler = fixed(move |request: &HttpRequest| -> Vec<u8> {
-            recorded.lock().unwrap().push(request.clone());
-            if request.method == "GET" {
-                return response_bytes("HTTP/1.1 405 Method Not Allowed", None, &[], "");
+        /// Build a full HTTP/1.1 response with a fixed body.
+        fn response_bytes(
+            status_line: &str,
+            content_type: Option<&str>,
+            extra: &[(&str, &str)],
+            body: &str,
+        ) -> Vec<u8> {
+            let mut head = format!(
+                "{status_line}\r\ncontent-length: {}\r\nconnection: close\r\n",
+                body.len()
+            );
+            if let Some(ct) = content_type {
+                head.push_str("content-type: ");
+                head.push_str(ct);
+                head.push_str("\r\n");
             }
-            let body: serde_json::Value =
-                serde_json::from_str(&request.body).unwrap_or(serde_json::Value::Null);
-            match body.get("method").and_then(|m| m.as_str()) {
-                Some("initialize") => response_bytes(
-                    "HTTP/1.1 200 OK",
-                    Some("application/json"),
-                    &[("mcp-session-id", "sess-1")],
-                    &serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "result": {
-                            "protocolVersion": "2025-06-18",
-                            "capabilities": { "tools": {} }
-                        }
-                    })
-                    .to_string(),
-                ),
-                Some("notifications/initialized") => {
-                    response_bytes("HTTP/1.1 202 Accepted", None, &[], "")
+            for (name, value) in extra {
+                head.push_str(name);
+                head.push_str(": ");
+                head.push_str(value);
+                head.push_str("\r\n");
+            }
+            head.push_str("\r\n");
+            let mut out = head.into_bytes();
+            out.extend_from_slice(body.as_bytes());
+            out
+        }
+
+        /// Client end of one fake connection: the socket to the in-process
+        /// server thread plus ureq's lazy buffers, mirroring
+        /// ureq's own `TcpTransport`.
+        struct FakeTransport {
+            stream: UnixStream,
+            buffers: LazyBuffers,
+            timeout_read: Option<Duration>,
+            timeout_write: Option<Duration>,
+        }
+
+        impl fmt::Debug for FakeTransport {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_struct("FakeTransport").finish_non_exhaustive()
+            }
+        }
+
+        /// Map a socket error the way ureq's own transports do: an
+        /// elapsed timeout surfaces as EAGAIN (`WouldBlock`) on a
+        /// `UnixStream`, everything else stays an io error.
+        fn transport_error(e: io::Error, timeout: NextTimeout) -> ureq::Error {
+            if e.kind() == io::ErrorKind::WouldBlock {
+                ureq::Error::Timeout(timeout.reason)
+            } else {
+                ureq::Error::Io(e)
+            }
+        }
+
+        /// Apply `timeout` to `stream` only when it changed, like ureq's
+        /// `maybe_update_timeout`.
+        fn apply_timeout(
+            timeout: NextTimeout,
+            previous: &mut Option<Duration>,
+            stream: &UnixStream,
+            set: fn(&UnixStream, Option<Duration>) -> io::Result<()>,
+        ) -> Result<(), ureq::Error> {
+            let wanted = timeout.not_zero().map(|d| *d);
+            if wanted != *previous {
+                set(stream, wanted).map_err(ureq::Error::Io)?;
+                *previous = wanted;
+            }
+            Ok(())
+        }
+
+        impl Transport for FakeTransport {
+            fn buffers(&mut self) -> &mut dyn Buffers {
+                &mut self.buffers
+            }
+
+            fn transmit_output(
+                &mut self,
+                amount: usize,
+                timeout: NextTimeout,
+            ) -> Result<(), ureq::Error> {
+                apply_timeout(
+                    timeout,
+                    &mut self.timeout_write,
+                    &self.stream,
+                    UnixStream::set_write_timeout,
+                )?;
+                let output = &self.buffers.output()[..amount];
+                self.stream
+                    .write_all(output)
+                    .map_err(|e| transport_error(e, timeout))
+            }
+
+            fn await_input(&mut self, timeout: NextTimeout) -> Result<bool, ureq::Error> {
+                apply_timeout(
+                    timeout,
+                    &mut self.timeout_read,
+                    &self.stream,
+                    UnixStream::set_read_timeout,
+                )?;
+                let input = self.buffers.input_append_buf();
+                match self.stream.read(input) {
+                    Ok(n) => {
+                        self.buffers.input_appended(n);
+                        Ok(n > 0)
+                    }
+                    Err(e) => Err(transport_error(e, timeout)),
                 }
-                Some("tools/list") => response_bytes(
-                    "HTTP/1.1 200 OK",
-                    Some("application/json"),
-                    &[],
-                    &serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": 2,
-                        "result": { "tools": [ { "name": "t", "inputSchema": {} } ] }
-                    })
-                    .to_string(),
-                ),
-                _ => response_bytes("HTTP/1.1 500 Internal Server Error", None, &[], ""),
             }
-        });
-        let (peer, inbound, _reader) = open_http(
-            fake_agent(handler, usize::MAX),
-            TEST_URL,
-            &BTreeMap::new(),
-            None,
-        )
-        .unwrap();
-        let conn = McpConnection::initialize("srv", peer, inbound, &[], None).unwrap();
-        assert_eq!(conn.protocol_version(), "2025-06-18");
-        let tools = conn.list_tools().unwrap();
-        assert_eq!(
-            tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
-            ["t"]
-        );
-        assert!(wait_until(|| log
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|r| r.method == "GET")));
-        let log = log.lock().unwrap();
-        assert_eq!(log.iter().filter(|r| r.method == "GET").count(), 1);
-        let init = log
-            .iter()
-            .find(|r| r.method == "POST" && r.body.contains("\"initialize\""))
-            .unwrap();
-        assert!(!init.headers.contains_key("mcp-session-id"));
-        let listed = log
-            .iter()
-            .find(|r| r.method == "POST" && r.body.contains("\"tools/list\""))
-            .unwrap();
-        assert_eq!(
-            listed.headers.get("mcp-session-id").map(String::as_str),
-            Some("sess-1")
-        );
-        assert!(listed.headers.contains_key("mcp-protocol-version"));
-    }
 
-    #[test]
-    fn http_round_trip_sse_response() {
-        let handler = fixed(|request: &HttpRequest| -> Vec<u8> {
-            if request.method == "GET" {
-                return response_bytes("HTTP/1.1 405 Method Not Allowed", None, &[], "");
+            fn is_open(&mut self) -> bool {
+                // Responses are sent with `connection: close`, so the
+                // transport is never pooled.
+                false
             }
-            let body: serde_json::Value =
-                serde_json::from_str(&request.body).unwrap_or(serde_json::Value::Null);
-            match body.get("method").and_then(|m| m.as_str()) {
-                Some("initialize") => response_bytes(
-                    "HTTP/1.1 200 OK",
-                    Some("text/event-stream"),
-                    &[("mcp-session-id", "sess-2")],
-                    &format!(
-                        "event: message\ndata: {}\n\n",
-                        serde_json::json!({
-                            "jsonrpc": "2.0",
-                            "id": 1,
-                            "result": {
-                                "protocolVersion": "2025-06-18",
-                                "capabilities": {}
-                            }
-                        })
-                    ),
-                ),
-                Some("notifications/initialized") => {
-                    response_bytes("HTTP/1.1 202 Accepted", None, &[], "")
-                }
-                _ => response_bytes("HTTP/1.1 500 Internal Server Error", None, &[], ""),
-            }
-        });
-        let (peer, inbound, _reader) = open_http(
-            fake_agent(handler, usize::MAX),
-            TEST_URL,
-            &BTreeMap::new(),
-            None,
-        )
-        .unwrap();
-        let conn = McpConnection::initialize("srv", peer, inbound, &[], None).unwrap();
-        assert_eq!(conn.protocol_version(), "2025-06-18");
-    }
+        }
 
-    #[test]
-    fn later_requests_carry_the_negotiated_version() {
-        for sse in [false, true] {
+        /// Connector standing in for the remote endpoint: every connection
+        /// is a `UnixStream::pair`, the server side served by a thread that
+        /// parses one request and answers through the test handler. The
+        /// first `quota` non-GET requests get responses; any later one gets
+        /// a dropped connection (no response), which the client reads as a
+        /// transport failure.
+        struct FakeServerConnector {
+            handler: Handler,
+            served: Arc<AtomicUsize>,
+            quota: usize,
+        }
+
+        impl fmt::Debug for FakeServerConnector {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_struct("FakeServerConnector")
+                    .finish_non_exhaustive()
+            }
+        }
+
+        impl Connector<()> for FakeServerConnector {
+            type Out = FakeTransport;
+
+            fn connect(
+                &self,
+                details: &ConnectionDetails,
+                _: Option<()>,
+            ) -> Result<Option<FakeTransport>, ureq::Error> {
+                let (client, mut remote) = UnixStream::pair().map_err(ureq::Error::Io)?;
+                let handler = Arc::clone(&self.handler);
+                let served = Arc::clone(&self.served);
+                let quota = self.quota;
+                std::thread::spawn(move || {
+                    let Some(request) = read_request(&mut remote) else {
+                        return;
+                    };
+                    if request.method != "GET" && served.fetch_add(1, Ordering::SeqCst) >= quota {
+                        // Over quota: stop answering entirely; the client
+                        // sees EOF and reports a transport failure.
+                        return;
+                    }
+                    handler(&request, &mut remote);
+                    let _ = remote.flush();
+                });
+                let buffers = LazyBuffers::new(
+                    details.config.input_buffer_size(),
+                    details.config.output_buffer_size(),
+                );
+                Ok(Some(FakeTransport {
+                    stream: client,
+                    buffers,
+                    timeout_read: None,
+                    timeout_write: None,
+                }))
+            }
+        }
+
+        /// Resolver that answers every host with a fixed address without
+        /// touching DNS, so the fake agent never reaches the network.
+        #[derive(Debug)]
+        struct NoResolver;
+
+        impl Resolver for NoResolver {
+            fn resolve(
+                &self,
+                _: &Uri,
+                _: &Config,
+                _: NextTimeout,
+            ) -> Result<ResolvedSocketAddrs, ureq::Error> {
+                let mut addrs = self.empty();
+                addrs.push("10.0.0.1:1".parse().unwrap());
+                Ok(addrs)
+            }
+        }
+
+        /// An agent whose HTTP traffic is answered by `handler` in-process.
+        /// The first `quota` POST requests get responses, later ones get a
+        /// dropped connection; GET requests always get through.
+        fn fake_agent(handler: Handler, quota: usize) -> ureq::Agent {
+            fake_agent_with(Config::default(), handler, quota)
+        }
+
+        /// [`fake_agent`] against an explicit config, so tests can run the
+        /// production transport config against the in-process fake server.
+        fn fake_agent_with(config: Config, handler: Handler, quota: usize) -> ureq::Agent {
+            ureq::Agent::with_parts(
+                config,
+                FakeServerConnector {
+                    handler,
+                    served: Arc::new(AtomicUsize::new(0)),
+                    quota,
+                },
+                NoResolver,
+            )
+        }
+
+        /// Run `f` on its own thread and return its result, or `None` when
+        /// it has not finished within 5 s.
+        fn within<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(f());
+            });
+            rx.recv_timeout(Duration::from_secs(5)).ok()
+        }
+
+        /// The URL tests hand to [`open_http`]; never dialed, the fake
+        /// connector ignores it.
+        const TEST_URL: &str = "http://mcp.test/mcp";
+
+        /// The `initialize` answer the fake servers send.
+        fn initialize_response() -> Vec<u8> {
+            response_bytes(
+                "HTTP/1.1 200 OK",
+                Some("application/json"),
+                &[],
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": { "tools": {} }
+                    }
+                })
+                .to_string(),
+            )
+        }
+
+        #[test]
+        fn http_round_trip_json_with_session_echo() {
             let log: Arc<Mutex<Vec<HttpRequest>>> = Arc::new(Mutex::new(Vec::new()));
             let recorded = Arc::clone(&log);
             let handler = fixed(move |request: &HttpRequest| -> Vec<u8> {
@@ -1002,20 +886,38 @@ mod tests {
                 if request.method == "GET" {
                     return response_bytes("HTTP/1.1 405 Method Not Allowed", None, &[], "");
                 }
-                if !request.body.contains("\"initialize\"") {
-                    return response_bytes("HTTP/1.1 202 Accepted", None, &[], "");
-                }
-                let reply = serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "id": 1,
-                    "result": { "protocolVersion": "2025-03-26", "capabilities": {} }
-                });
-                if sse {
-                    let body = format!("data: {reply}\n\n");
-                    response_bytes("HTTP/1.1 200 OK", Some("text/event-stream"), &[], &body)
-                } else {
-                    let body = reply.to_string();
-                    response_bytes("HTTP/1.1 200 OK", Some("application/json"), &[], &body)
+                let body: serde_json::Value =
+                    serde_json::from_str(&request.body).unwrap_or(serde_json::Value::Null);
+                match body.get("method").and_then(|m| m.as_str()) {
+                    Some("initialize") => response_bytes(
+                        "HTTP/1.1 200 OK",
+                        Some("application/json"),
+                        &[("mcp-session-id", "sess-1")],
+                        &serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "result": {
+                                "protocolVersion": "2025-06-18",
+                                "capabilities": { "tools": {} }
+                            }
+                        })
+                        .to_string(),
+                    ),
+                    Some("notifications/initialized") => {
+                        response_bytes("HTTP/1.1 202 Accepted", None, &[], "")
+                    }
+                    Some("tools/list") => response_bytes(
+                        "HTTP/1.1 200 OK",
+                        Some("application/json"),
+                        &[],
+                        &serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 2,
+                            "result": { "tools": [ { "name": "t", "inputSchema": {} } ] }
+                        })
+                        .to_string(),
+                    ),
+                    _ => response_bytes("HTTP/1.1 500 Internal Server Error", None, &[], ""),
                 }
             });
             let (peer, inbound, _reader) = open_http(
@@ -1026,336 +928,445 @@ mod tests {
             )
             .unwrap();
             let conn = McpConnection::initialize("srv", peer, inbound, &[], None).unwrap();
-            assert_eq!(conn.protocol_version(), "2025-03-26");
+            assert_eq!(conn.protocol_version(), "2025-06-18");
+            let tools = conn.list_tools().unwrap();
+            assert_eq!(
+                tools.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+                ["t"]
+            );
             assert!(wait_until(|| log
                 .lock()
                 .unwrap()
                 .iter()
                 .any(|r| r.method == "GET")));
             let log = log.lock().unwrap();
-            let version = |r: &HttpRequest| r.headers.get("mcp-protocol-version").cloned();
-            assert_eq!(version(&log[0]), None, "sse: {sse}");
-            let initialized = log
+            assert_eq!(log.iter().filter(|r| r.method == "GET").count(), 1);
+            let init = log
                 .iter()
-                .find(|r| r.body.contains("notifications/initialized"))
-                .expect("the second post");
+                .find(|r| r.method == "POST" && r.body.contains("\"initialize\""))
+                .unwrap();
+            assert!(!init.headers.contains_key("mcp-session-id"));
+            let listed = log
+                .iter()
+                .find(|r| r.method == "POST" && r.body.contains("\"tools/list\""))
+                .unwrap();
             assert_eq!(
-                version(initialized).as_deref(),
-                Some("2025-03-26"),
-                "sse: {sse}"
+                listed.headers.get("mcp-session-id").map(String::as_str),
+                Some("sess-1")
             );
-            let get = log.iter().find(|r| r.method == "GET").expect("the stream");
-            assert_eq!(version(get).as_deref(), Some("2025-03-26"), "sse: {sse}");
+            assert!(listed.headers.contains_key("mcp-protocol-version"));
         }
-    }
 
-    #[test]
-    fn transport_failure_fails_the_request_and_marks_connection_dead() {
-        let handler = fixed(|request: &HttpRequest| -> Vec<u8> {
-            if request.method == "GET" {
-                return response_bytes("HTTP/1.1 405 Method Not Allowed", None, &[], "");
-            }
-            let body: serde_json::Value =
-                serde_json::from_str(&request.body).unwrap_or(serde_json::Value::Null);
-            match body.get("method").and_then(|m| m.as_str()) {
-                Some("initialize") => initialize_response(),
-                Some("notifications/initialized") => {
-                    response_bytes("HTTP/1.1 202 Accepted", None, &[], "")
+        #[test]
+        fn http_round_trip_sse_response() {
+            let handler = fixed(|request: &HttpRequest| -> Vec<u8> {
+                if request.method == "GET" {
+                    return response_bytes("HTTP/1.1 405 Method Not Allowed", None, &[], "");
                 }
-                _ => response_bytes("HTTP/1.1 500 Internal Server Error", None, &[], ""),
-            }
-        });
-        // Two responses cover the initialize handshake; the tools/list
-        // POST is the dropped third request.
-        let (peer, inbound, _reader) =
-            open_http(fake_agent(handler, 2), TEST_URL, &BTreeMap::new(), None).unwrap();
-        let conn = Arc::new(McpConnection::initialize("srv", peer, inbound, &[], None).unwrap());
-        assert!(!conn.is_dead());
-        let caller = Arc::clone(&conn);
-        let err = within(move || caller.list_tools())
-            .expect("a failed POST must not leave the request hanging")
-            .unwrap_err();
-        match err {
-            McpError::Rpc { source, .. } => {
-                assert!(source.message.contains("mcp post"), "got {source:?}");
-            }
-            other => panic!("expected an rpc error, got {other:?}"),
-        }
-        assert!(wait_until(|| conn.is_dead()));
-    }
-
-    /// A handler answering `initialize` and 202 to everything else when
-    /// `accept` passes the request, and 401 otherwise. GETs get 405.
-    fn guarded(accept: impl Fn(&HttpRequest) -> bool + Send + Sync + 'static) -> (Handler, Log) {
-        let log: Log = Arc::new(Mutex::new(Vec::new()));
-        let recorded = Arc::clone(&log);
-        let handler = fixed(move |request: &HttpRequest| -> Vec<u8> {
-            recorded.lock().unwrap().push(request.clone());
-            if request.method == "GET" {
-                return response_bytes("HTTP/1.1 405 Method Not Allowed", None, &[], "");
-            }
-            if !accept(request) {
-                return response_bytes("HTTP/1.1 401 Unauthorized", None, &[], "");
-            }
-            if request.body.contains("\"initialize\"") {
-                initialize_response()
-            } else {
-                response_bytes("HTTP/1.1 202 Accepted", None, &[], "")
-            }
-        });
-        (handler, log)
-    }
-
-    type Log = Arc<Mutex<Vec<HttpRequest>>>;
-
-    fn authorization(request: &HttpRequest) -> Option<&str> {
-        request.headers.get("authorization").map(String::as_str)
-    }
-
-    #[test]
-    fn the_bearer_is_sent_and_a_configured_header_wins() {
-        let (handler, log) = guarded(|r| authorization(r) == Some("Bearer tok-a"));
-        let tokens = StaticTokens::new("tok-a", None);
-        let (peer, inbound, _reader) = open_http(
-            fake_agent(handler, usize::MAX),
-            TEST_URL,
-            &BTreeMap::new(),
-            Some(tokens),
-        )
-        .unwrap();
-        McpConnection::initialize("srv", peer, inbound, &[], None).unwrap();
-        assert!(wait_until(|| log
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|r| r.method == "GET")));
-        let log = log.lock().unwrap();
-        assert!(log.len() >= 3, "initialize, initialized and the stream");
-        for request in log.iter() {
-            assert_eq!(
-                authorization(request),
-                Some("Bearer tok-a"),
-                "{}",
-                request.method
-            );
-        }
-
-        let (handler, log) = guarded(|r| authorization(r) == Some("Bearer configured"));
-        let headers =
-            BTreeMap::from([("Authorization".to_owned(), "Bearer configured".to_owned())]);
-        let tokens = StaticTokens::new("tok-a", Some("tok-b"));
-        let (peer, inbound, _reader) = open_http(
-            fake_agent(handler, usize::MAX),
-            TEST_URL,
-            &headers,
-            Some(Arc::clone(&tokens) as Arc<dyn TokenSource>),
-        )
-        .unwrap();
-        McpConnection::initialize("srv", peer, inbound, &[], None).unwrap();
-        assert_eq!(tokens.refreshes(), 0);
-        let log = log.lock().unwrap();
-        assert!(
-            log.iter()
-                .all(|r| authorization(r) == Some("Bearer configured"))
-        );
-    }
-
-    #[test]
-    fn one_401_refreshes_the_token_and_retries() {
-        let (handler, log) = guarded(|r| authorization(r) == Some("Bearer fresh"));
-        let tokens = StaticTokens::new("stale", Some("fresh"));
-        let (peer, inbound, _reader) = open_http(
-            fake_agent(handler, usize::MAX),
-            TEST_URL,
-            &BTreeMap::new(),
-            Some(Arc::clone(&tokens) as Arc<dyn TokenSource>),
-        )
-        .unwrap();
-        McpConnection::initialize("srv", peer, inbound, &[], None).unwrap();
-        assert_eq!(tokens.refreshes(), 1);
-        let log = log.lock().unwrap();
-        let initialize: Vec<Option<&str>> = log
-            .iter()
-            .filter(|r| r.body.contains("\"initialize\""))
-            .map(authorization)
-            .collect();
-        assert_eq!(initialize, [Some("Bearer stale"), Some("Bearer fresh")]);
-    }
-
-    #[test]
-    fn a_second_401_fails_with_unauthorized() {
-        let (handler, log) = guarded(|_| false);
-        let tokens = StaticTokens::new("stale-secret", Some("fresh-secret"));
-        let (peer, inbound, _reader) = open_http(
-            fake_agent(handler, usize::MAX),
-            TEST_URL,
-            &BTreeMap::new(),
-            Some(Arc::clone(&tokens) as Arc<dyn TokenSource>),
-        )
-        .unwrap();
-        let err = McpConnection::initialize("srv", peer, inbound, &[], None)
-            .err()
-            .expect("a refused token fails the handshake");
-        assert!(
-            matches!(&err, McpError::Unauthorized { server, login: true } if server == "srv"),
-            "{err:?}"
-        );
-        assert!(err.to_string().contains("kage mcp login srv"), "{err}");
-        assert!(!format!("{err} {err:?}").contains("secret"), "{err:?}");
-        assert_eq!(tokens.refreshes(), 1);
-        assert_eq!(log.lock().unwrap().len(), 2, "one retry, no more");
-
-        let (handler, _log) = guarded(|_| false);
-        let (peer, inbound, _reader) = open_http(
-            fake_agent(handler, usize::MAX),
-            TEST_URL,
-            &BTreeMap::new(),
-            None,
-        )
-        .unwrap();
-        let err = McpConnection::initialize("srv", peer, inbound, &[], None)
-            .err()
-            .expect("a server asking for a token fails the handshake");
-        assert!(
-            matches!(err, McpError::Unauthorized { login: false, .. }),
-            "{err:?}"
-        );
-        assert_eq!(err.to_string(), "server `srv` needs authorization");
-    }
-
-    #[test]
-    fn a_refused_configured_header_suggests_no_login() {
-        let (handler, _log) = guarded(|_| false);
-        let headers = BTreeMap::from([("authorization".to_owned(), "Bearer fake".to_owned())]);
-        let tokens = StaticTokens::new("tok-a", None);
-        let (peer, inbound, _reader) = open_http(
-            fake_agent(handler, usize::MAX),
-            TEST_URL,
-            &headers,
-            Some(Arc::clone(&tokens) as Arc<dyn TokenSource>),
-        )
-        .unwrap();
-        let err = McpConnection::initialize("srv", peer, inbound, &[], None)
-            .err()
-            .expect("a refused header fails the handshake");
-        assert_eq!(err.to_string(), "server `srv` needs authorization");
-        assert_eq!(tokens.refreshes(), 0);
-    }
-
-    #[test]
-    fn a_redirect_is_not_followed() {
-        let log: Log = Arc::new(Mutex::new(Vec::new()));
-        let recorded = Arc::clone(&log);
-        let handler = fixed(move |request: &HttpRequest| -> Vec<u8> {
-            recorded.lock().unwrap().push(request.clone());
-            response_bytes(
-                "HTTP/1.1 303 See Other",
+                let body: serde_json::Value =
+                    serde_json::from_str(&request.body).unwrap_or(serde_json::Value::Null);
+                match body.get("method").and_then(|m| m.as_str()) {
+                    Some("initialize") => response_bytes(
+                        "HTTP/1.1 200 OK",
+                        Some("text/event-stream"),
+                        &[("mcp-session-id", "sess-2")],
+                        &format!(
+                            "event: message\ndata: {}\n\n",
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "result": {
+                                    "protocolVersion": "2025-06-18",
+                                    "capabilities": {}
+                                }
+                            })
+                        ),
+                    ),
+                    Some("notifications/initialized") => {
+                        response_bytes("HTTP/1.1 202 Accepted", None, &[], "")
+                    }
+                    _ => response_bytes("HTTP/1.1 500 Internal Server Error", None, &[], ""),
+                }
+            });
+            let (peer, inbound, _reader) = open_http(
+                fake_agent(handler, usize::MAX),
+                TEST_URL,
+                &BTreeMap::new(),
                 None,
-                &[("location", "http://other.test/mcp")],
-                "",
             )
-        });
-        let (peer, inbound, _reader) = open_http(
-            fake_agent_with(transport_config(), handler, usize::MAX),
-            TEST_URL,
-            &BTreeMap::new(),
-            None,
-        )
-        .unwrap();
-        let err = McpConnection::initialize_with_timeout(
-            "srv",
-            peer,
-            inbound,
-            &[],
-            None,
-            Duration::from_secs(5),
-        )
-        .err()
-        .expect("a redirect without following fails the request");
-        assert!(err.to_string().contains("status 303"), "{err}");
-        let log = log.lock().unwrap();
-        assert_eq!(log.len(), 1, "the redirect target is never contacted");
-        assert_eq!(
-            log[0].headers.get("host").map(String::as_str),
-            Some("mcp.test")
-        );
-    }
+            .unwrap();
+            let conn = McpConnection::initialize("srv", peer, inbound, &[], None).unwrap();
+            assert_eq!(conn.protocol_version(), "2025-06-18");
+        }
 
-    #[test]
-    fn server_request_during_a_streaming_call_is_answered() {
-        let (roots_tx, roots_rx) = std::sync::mpsc::channel::<serde_json::Value>();
-        let roots_rx = Mutex::new(roots_rx);
-        let handler: Handler = Arc::new(move |request, stream| {
-            if request.method == "GET" {
-                let _ = stream.write_all(&response_bytes(
-                    "HTTP/1.1 405 Method Not Allowed",
-                    None,
-                    &[],
-                    "",
-                ));
-                return;
-            }
-            let body: serde_json::Value =
-                serde_json::from_str(&request.body).unwrap_or(serde_json::Value::Null);
-            let response = match body.get("method").and_then(|m| m.as_str()) {
-                Some("initialize") => initialize_response(),
-                Some("notifications/initialized") => {
-                    response_bytes("HTTP/1.1 202 Accepted", None, &[], "")
-                }
-                Some("tools/call") => {
-                    let ask = serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": "roots-1",
-                        "method": "roots/list",
-                    });
-                    let _ = write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
-                         connection: close\r\n\r\ndata: {ask}\n\n"
-                    );
-                    let _ = stream.flush();
-                    let Ok(roots) = roots_rx
-                        .lock()
-                        .unwrap()
-                        .recv_timeout(Duration::from_secs(10))
-                    else {
-                        return;
-                    };
+        #[test]
+        fn later_requests_carry_the_negotiated_version() {
+            for sse in [false, true] {
+                let log: Arc<Mutex<Vec<HttpRequest>>> = Arc::new(Mutex::new(Vec::new()));
+                let recorded = Arc::clone(&log);
+                let handler = fixed(move |request: &HttpRequest| -> Vec<u8> {
+                    recorded.lock().unwrap().push(request.clone());
+                    if request.method == "GET" {
+                        return response_bytes("HTTP/1.1 405 Method Not Allowed", None, &[], "");
+                    }
+                    if !request.body.contains("\"initialize\"") {
+                        return response_bytes("HTTP/1.1 202 Accepted", None, &[], "");
+                    }
                     let reply = serde_json::json!({
                         "jsonrpc": "2.0",
-                        "id": body["id"],
-                        "result": {
-                            "content": [ { "type": "text", "text": roots["roots"][0]["uri"] } ]
-                        }
+                        "id": 1,
+                        "result": { "protocolVersion": "2025-03-26", "capabilities": {} }
                     });
-                    let _ = write!(stream, "data: {reply}\n\n");
-                    return;
+                    if sse {
+                        let body = format!("data: {reply}\n\n");
+                        response_bytes("HTTP/1.1 200 OK", Some("text/event-stream"), &[], &body)
+                    } else {
+                        let body = reply.to_string();
+                        response_bytes("HTTP/1.1 200 OK", Some("application/json"), &[], &body)
+                    }
+                });
+                let (peer, inbound, _reader) = open_http(
+                    fake_agent(handler, usize::MAX),
+                    TEST_URL,
+                    &BTreeMap::new(),
+                    None,
+                )
+                .unwrap();
+                let conn = McpConnection::initialize("srv", peer, inbound, &[], None).unwrap();
+                assert_eq!(conn.protocol_version(), "2025-03-26");
+                assert!(wait_until(|| log
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r.method == "GET")));
+                let log = log.lock().unwrap();
+                let version = |r: &HttpRequest| r.headers.get("mcp-protocol-version").cloned();
+                assert_eq!(version(&log[0]), None, "sse: {sse}");
+                let initialized = log
+                    .iter()
+                    .find(|r| r.body.contains("notifications/initialized"))
+                    .expect("the second post");
+                assert_eq!(
+                    version(initialized).as_deref(),
+                    Some("2025-03-26"),
+                    "sse: {sse}"
+                );
+                let get = log.iter().find(|r| r.method == "GET").expect("the stream");
+                assert_eq!(version(get).as_deref(), Some("2025-03-26"), "sse: {sse}");
+            }
+        }
+
+        #[test]
+        fn transport_failure_fails_the_request_and_marks_connection_dead() {
+            let handler = fixed(|request: &HttpRequest| -> Vec<u8> {
+                if request.method == "GET" {
+                    return response_bytes("HTTP/1.1 405 Method Not Allowed", None, &[], "");
                 }
-                None if body["id"] == "roots-1" => {
-                    let _ = roots_tx.send(body["result"].clone());
+                let body: serde_json::Value =
+                    serde_json::from_str(&request.body).unwrap_or(serde_json::Value::Null);
+                match body.get("method").and_then(|m| m.as_str()) {
+                    Some("initialize") => initialize_response(),
+                    Some("notifications/initialized") => {
+                        response_bytes("HTTP/1.1 202 Accepted", None, &[], "")
+                    }
+                    _ => response_bytes("HTTP/1.1 500 Internal Server Error", None, &[], ""),
+                }
+            });
+            // Two responses cover the initialize handshake; the tools/list
+            // POST is the dropped third request.
+            let (peer, inbound, _reader) =
+                open_http(fake_agent(handler, 2), TEST_URL, &BTreeMap::new(), None).unwrap();
+            let conn =
+                Arc::new(McpConnection::initialize("srv", peer, inbound, &[], None).unwrap());
+            assert!(!conn.is_dead());
+            let caller = Arc::clone(&conn);
+            let err = within(move || caller.list_tools())
+                .expect("a failed POST must not leave the request hanging")
+                .unwrap_err();
+            match err {
+                McpError::Rpc { source, .. } => {
+                    assert!(source.message.contains("mcp post"), "got {source:?}");
+                }
+                other => panic!("expected an rpc error, got {other:?}"),
+            }
+            assert!(wait_until(|| conn.is_dead()));
+        }
+
+        /// A handler answering `initialize` and 202 to everything else when
+        /// `accept` passes the request, and 401 otherwise. GETs get 405.
+        fn guarded(
+            accept: impl Fn(&HttpRequest) -> bool + Send + Sync + 'static,
+        ) -> (Handler, Log) {
+            let log: Log = Arc::new(Mutex::new(Vec::new()));
+            let recorded = Arc::clone(&log);
+            let handler = fixed(move |request: &HttpRequest| -> Vec<u8> {
+                recorded.lock().unwrap().push(request.clone());
+                if request.method == "GET" {
+                    return response_bytes("HTTP/1.1 405 Method Not Allowed", None, &[], "");
+                }
+                if !accept(request) {
+                    return response_bytes("HTTP/1.1 401 Unauthorized", None, &[], "");
+                }
+                if request.body.contains("\"initialize\"") {
+                    initialize_response()
+                } else {
                     response_bytes("HTTP/1.1 202 Accepted", None, &[], "")
                 }
-                _ => response_bytes("HTTP/1.1 500 Internal Server Error", None, &[], ""),
-            };
-            let _ = stream.write_all(&response);
-        });
-        let (peer, inbound, _reader) = open_http(
-            fake_agent(handler, usize::MAX),
-            TEST_URL,
-            &BTreeMap::new(),
-            None,
-        )
-        .unwrap();
-        let roots = [std::path::PathBuf::from("/work/project")];
-        let conn = McpConnection::initialize("srv", peer, inbound, &roots, None).unwrap();
-        let result = within(move || {
-            conn.request(
-                "tools/call",
-                serde_json::json!({ "name": "t", "arguments": {} }),
+            });
+            (handler, log)
+        }
+
+        type Log = Arc<Mutex<Vec<HttpRequest>>>;
+
+        fn authorization(request: &HttpRequest) -> Option<&str> {
+            request.headers.get("authorization").map(String::as_str)
+        }
+
+        #[test]
+        fn the_bearer_is_sent_and_a_configured_header_wins() {
+            let (handler, log) = guarded(|r| authorization(r) == Some("Bearer tok-a"));
+            let tokens = StaticTokens::new("tok-a", None);
+            let (peer, inbound, _reader) = open_http(
+                fake_agent(handler, usize::MAX),
+                TEST_URL,
+                &BTreeMap::new(),
+                Some(tokens),
             )
-        })
-        .expect("the call must finish while the server asks for roots")
-        .unwrap();
-        assert_eq!(result["content"][0]["text"], "file:///work/project");
+            .unwrap();
+            McpConnection::initialize("srv", peer, inbound, &[], None).unwrap();
+            assert!(wait_until(|| log
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|r| r.method == "GET")));
+            let log = log.lock().unwrap();
+            assert!(log.len() >= 3, "initialize, initialized and the stream");
+            for request in log.iter() {
+                assert_eq!(
+                    authorization(request),
+                    Some("Bearer tok-a"),
+                    "{}",
+                    request.method
+                );
+            }
+
+            let (handler, log) = guarded(|r| authorization(r) == Some("Bearer configured"));
+            let headers =
+                BTreeMap::from([("Authorization".to_owned(), "Bearer configured".to_owned())]);
+            let tokens = StaticTokens::new("tok-a", Some("tok-b"));
+            let (peer, inbound, _reader) = open_http(
+                fake_agent(handler, usize::MAX),
+                TEST_URL,
+                &headers,
+                Some(Arc::clone(&tokens) as Arc<dyn TokenSource>),
+            )
+            .unwrap();
+            McpConnection::initialize("srv", peer, inbound, &[], None).unwrap();
+            assert_eq!(tokens.refreshes(), 0);
+            let log = log.lock().unwrap();
+            assert!(
+                log.iter()
+                    .all(|r| authorization(r) == Some("Bearer configured"))
+            );
+        }
+
+        #[test]
+        fn one_401_refreshes_the_token_and_retries() {
+            let (handler, log) = guarded(|r| authorization(r) == Some("Bearer fresh"));
+            let tokens = StaticTokens::new("stale", Some("fresh"));
+            let (peer, inbound, _reader) = open_http(
+                fake_agent(handler, usize::MAX),
+                TEST_URL,
+                &BTreeMap::new(),
+                Some(Arc::clone(&tokens) as Arc<dyn TokenSource>),
+            )
+            .unwrap();
+            McpConnection::initialize("srv", peer, inbound, &[], None).unwrap();
+            assert_eq!(tokens.refreshes(), 1);
+            let log = log.lock().unwrap();
+            let initialize: Vec<Option<&str>> = log
+                .iter()
+                .filter(|r| r.body.contains("\"initialize\""))
+                .map(authorization)
+                .collect();
+            assert_eq!(initialize, [Some("Bearer stale"), Some("Bearer fresh")]);
+        }
+
+        #[test]
+        fn a_second_401_fails_with_unauthorized() {
+            let (handler, log) = guarded(|_| false);
+            let tokens = StaticTokens::new("stale-secret", Some("fresh-secret"));
+            let (peer, inbound, _reader) = open_http(
+                fake_agent(handler, usize::MAX),
+                TEST_URL,
+                &BTreeMap::new(),
+                Some(Arc::clone(&tokens) as Arc<dyn TokenSource>),
+            )
+            .unwrap();
+            let err = McpConnection::initialize("srv", peer, inbound, &[], None)
+                .err()
+                .expect("a refused token fails the handshake");
+            assert!(
+                matches!(&err, McpError::Unauthorized { server, login: true } if server == "srv"),
+                "{err:?}"
+            );
+            assert!(err.to_string().contains("kage mcp login srv"), "{err}");
+            assert!(!format!("{err} {err:?}").contains("secret"), "{err:?}");
+            assert_eq!(tokens.refreshes(), 1);
+            assert_eq!(log.lock().unwrap().len(), 2, "one retry, no more");
+
+            let (handler, _log) = guarded(|_| false);
+            let (peer, inbound, _reader) = open_http(
+                fake_agent(handler, usize::MAX),
+                TEST_URL,
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+            let err = McpConnection::initialize("srv", peer, inbound, &[], None)
+                .err()
+                .expect("a server asking for a token fails the handshake");
+            assert!(
+                matches!(err, McpError::Unauthorized { login: false, .. }),
+                "{err:?}"
+            );
+            assert_eq!(err.to_string(), "server `srv` needs authorization");
+        }
+
+        #[test]
+        fn a_refused_configured_header_suggests_no_login() {
+            let (handler, _log) = guarded(|_| false);
+            let headers = BTreeMap::from([("authorization".to_owned(), "Bearer fake".to_owned())]);
+            let tokens = StaticTokens::new("tok-a", None);
+            let (peer, inbound, _reader) = open_http(
+                fake_agent(handler, usize::MAX),
+                TEST_URL,
+                &headers,
+                Some(Arc::clone(&tokens) as Arc<dyn TokenSource>),
+            )
+            .unwrap();
+            let err = McpConnection::initialize("srv", peer, inbound, &[], None)
+                .err()
+                .expect("a refused header fails the handshake");
+            assert_eq!(err.to_string(), "server `srv` needs authorization");
+            assert_eq!(tokens.refreshes(), 0);
+        }
+
+        #[test]
+        fn a_redirect_is_not_followed() {
+            let log: Log = Arc::new(Mutex::new(Vec::new()));
+            let recorded = Arc::clone(&log);
+            let handler = fixed(move |request: &HttpRequest| -> Vec<u8> {
+                recorded.lock().unwrap().push(request.clone());
+                response_bytes(
+                    "HTTP/1.1 303 See Other",
+                    None,
+                    &[("location", "http://other.test/mcp")],
+                    "",
+                )
+            });
+            let (peer, inbound, _reader) = open_http(
+                fake_agent_with(transport_config(), handler, usize::MAX),
+                TEST_URL,
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+            let err = McpConnection::initialize_with_timeout(
+                "srv",
+                peer,
+                inbound,
+                &[],
+                None,
+                Duration::from_secs(5),
+            )
+            .err()
+            .expect("a redirect without following fails the request");
+            assert!(err.to_string().contains("status 303"), "{err}");
+            let log = log.lock().unwrap();
+            assert_eq!(log.len(), 1, "the redirect target is never contacted");
+            assert_eq!(
+                log[0].headers.get("host").map(String::as_str),
+                Some("mcp.test")
+            );
+        }
+
+        #[test]
+        fn server_request_during_a_streaming_call_is_answered() {
+            let (roots_tx, roots_rx) = std::sync::mpsc::channel::<serde_json::Value>();
+            let roots_rx = Mutex::new(roots_rx);
+            let handler: Handler = Arc::new(move |request, stream| {
+                if request.method == "GET" {
+                    let _ = stream.write_all(&response_bytes(
+                        "HTTP/1.1 405 Method Not Allowed",
+                        None,
+                        &[],
+                        "",
+                    ));
+                    return;
+                }
+                let body: serde_json::Value =
+                    serde_json::from_str(&request.body).unwrap_or(serde_json::Value::Null);
+                let response = match body.get("method").and_then(|m| m.as_str()) {
+                    Some("initialize") => initialize_response(),
+                    Some("notifications/initialized") => {
+                        response_bytes("HTTP/1.1 202 Accepted", None, &[], "")
+                    }
+                    Some("tools/call") => {
+                        let ask = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": "roots-1",
+                            "method": "roots/list",
+                        });
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                         connection: close\r\n\r\ndata: {ask}\n\n"
+                        );
+                        let _ = stream.flush();
+                        let Ok(roots) = roots_rx
+                            .lock()
+                            .unwrap()
+                            .recv_timeout(Duration::from_secs(10))
+                        else {
+                            return;
+                        };
+                        let reply = serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": body["id"],
+                            "result": {
+                                "content": [ { "type": "text", "text": roots["roots"][0]["uri"] } ]
+                            }
+                        });
+                        let _ = write!(stream, "data: {reply}\n\n");
+                        return;
+                    }
+                    None if body["id"] == "roots-1" => {
+                        let _ = roots_tx.send(body["result"].clone());
+                        response_bytes("HTTP/1.1 202 Accepted", None, &[], "")
+                    }
+                    _ => response_bytes("HTTP/1.1 500 Internal Server Error", None, &[], ""),
+                };
+                let _ = stream.write_all(&response);
+            });
+            let (peer, inbound, _reader) = open_http(
+                fake_agent(handler, usize::MAX),
+                TEST_URL,
+                &BTreeMap::new(),
+                None,
+            )
+            .unwrap();
+            let roots = [std::path::PathBuf::from("/work/project")];
+            let conn = McpConnection::initialize("srv", peer, inbound, &roots, None).unwrap();
+            let result = within(move || {
+                conn.request(
+                    "tools/call",
+                    serde_json::json!({ "name": "t", "arguments": {} }),
+                )
+            })
+            .expect("the call must finish while the server asks for roots")
+            .unwrap();
+            assert_eq!(result["content"][0]["text"], "file:///work/project");
+        }
     }
 }

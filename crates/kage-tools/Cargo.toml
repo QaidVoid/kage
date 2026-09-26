@@ -20,7 +20,6 @@ grep.workspace = true
 html2text.workspace = true
 ignore.workspace = true
 kage-core.workspace = true
-nix.workspace = true
 schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -32,3 +31,6 @@ url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true

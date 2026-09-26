@@ -455,6 +455,11 @@ pub enum ContentBlock {
     ResourceLink(ResourceLink),
     /// An embedded resource.
     Resource(EmbeddedResource),
+    /// A block type this build does not know. Keeping it means one
+    /// unknown block cannot fail the whole update it rode in on;
+    /// matches against it contribute nothing (no text to show).
+    #[serde(other)]
+    Unknown,
 }
 
 impl ContentBlock {
@@ -931,6 +936,19 @@ mod tests {
                 "authMethods": []
             }),
         );
+    }
+
+    /// An unknown block type decodes to [`ContentBlock::Unknown`] so
+    /// the update carrying it stays usable.
+    #[test]
+    fn unknown_content_block_decodes_without_failing() {
+        let block: ContentBlock =
+            serde_json::from_value(serde_json::json!({"type": "hologram"})).unwrap();
+        assert_eq!(block, ContentBlock::Unknown);
+        assert_eq!(block.as_text(), None);
+        let known: ContentBlock =
+            serde_json::from_value(serde_json::json!({"type": "text", "text": "hi"})).unwrap();
+        assert_eq!(known, ContentBlock::text("hi"));
     }
 
     #[test]

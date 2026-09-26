@@ -599,6 +599,75 @@ mod tests {
         server.join().unwrap().unwrap();
     }
 
+    /// Sends a message chunk whose content block has a type kage does
+    /// not know, then a normal text chunk.
+    struct NewBlockAgent;
+
+    impl Agent for NewBlockAgent {
+        fn initialize(&self, req: InitializeRequest) -> InitializeResponse {
+            EchoAgent.initialize(req)
+        }
+
+        fn new_session(&self, req: NewSessionRequest) -> Result<NewSessionResponse, RpcError> {
+            EchoAgent.new_session(req)
+        }
+
+        fn prompt(
+            &self,
+            _req: PromptRequest,
+            ctx: &PromptContext,
+        ) -> Result<PromptResponse, RpcError> {
+            ctx.peer()
+                .notify(
+                    "session/update",
+                    serde_json::json!({
+                        "sessionId": ctx.session_id(),
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "hologram", "data": "zzz"}
+                        }
+                    }),
+                )
+                .unwrap();
+            ctx.update(SessionUpdate::AgentMessageChunk(MessageChunk {
+                content: ContentBlock::text("after unknown block"),
+            }));
+            Ok(PromptResponse {
+                stop_reason: crate::acp::StopReason::EndTurn,
+            })
+        }
+
+        fn cancel(&self, _session_id: &str) {}
+    }
+
+    #[test]
+    fn unknown_block_type_keeps_the_stream() {
+        let (srv_r, cli_w) = std::io::pipe().unwrap();
+        let (cli_r, srv_w) = std::io::pipe().unwrap();
+        let server =
+            thread::spawn(move || serve_agent(BufReader::new(srv_r), srv_w, |_| NewBlockAgent));
+
+        let cancel = CancelFlag::new();
+        let stream = run_turn(
+            BufReader::new(cli_r),
+            cli_w,
+            "hi".to_owned(),
+            "/tmp".to_owned(),
+            &cancel,
+            None,
+            Duration::from_secs(10),
+        )
+        .expect("turn starts");
+
+        let events: Vec<_> = stream.take(2).map(Result::unwrap).collect();
+        assert!(matches!(
+            &events[0],
+            ProviderEvent::TextDelta { delta } if delta == "after unknown block"
+        ));
+        assert!(matches!(events[1], ProviderEvent::MessageEnd { .. }));
+        server.join().unwrap().unwrap();
+    }
+
     #[test]
     fn session_new_tolerates_unmodelled_config_options() {
         let created: SessionCreated = serde_json::from_value(serde_json::json!({

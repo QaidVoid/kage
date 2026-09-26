@@ -56,5 +56,6 @@ pub(super) fn prompt_content(block: ContentBlock) -> Content {
                 (None, None, _) => text("[resource omitted]".to_owned()),
             }
         }
+        ContentBlock::Unknown => text("[unsupported block omitted]".to_owned()),
     }
 }

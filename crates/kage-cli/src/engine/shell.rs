@@ -65,6 +65,7 @@ impl super::Dispatcher {
         self.bus.publish(id, HostEvent::StateChanged { state });
         let cancel = session.cancel.child();
         let workdir = session.workdir.clone();
+        let shell = session.shell.clone();
         let progress = Arc::new(ShellProgress {
             bus: Arc::clone(&self.bus),
             session: id,
@@ -78,15 +79,16 @@ impl super::Dispatcher {
                 structured: None,
             });
             let cx = ToolContext::new(&workdir, &cancel).with_progress(progress.clone());
-            let (exit_code, output) = run_shell(&progress.command, &cx).unwrap_or_else(|_| {
-                let tail = lock(&progress.tail);
-                let output = if tail.trim().is_empty() {
-                    "cancelled".to_owned()
-                } else {
-                    format!("{}\ncancelled", tail.trim_end())
-                };
-                (None, output)
-            });
+            let (exit_code, output) = run_shell(&progress.command, shell.as_deref(), &cx)
+                .unwrap_or_else(|_| {
+                    let tail = lock(&progress.tail);
+                    let output = if tail.trim().is_empty() {
+                        "cancelled".to_owned()
+                    } else {
+                        format!("{}\ncancelled", tail.trim_end())
+                    };
+                    (None, output)
+                });
             let _ = tx.send(Input::ShellDone(Box::new(ShellDone {
                 session: id,
                 command: progress.command.clone(),
@@ -97,7 +99,7 @@ impl super::Dispatcher {
         });
     }
 
-    /// Show a finished shell command, fire `user_bash` for plugins, and
+    /// Show a finished shell command, fire `user_shell` for plugins, and
     /// add its output to the history, recorded, for the model's next
     /// turn. A command that held the session gives it back and starts
     /// what was submitted meanwhile.
@@ -130,7 +132,7 @@ impl super::Dispatcher {
         }
         flush_pending(&self.bus, id, session);
         if let Some(rt) = &session.plugins {
-            crate::plugins::notify_user_bash(rt, &command, exit_code);
+            crate::plugins::notify_user_shell(rt, &command, exit_code);
         }
         self.bus.publish(
             id,
@@ -157,8 +159,10 @@ impl super::Dispatcher {
 /// Run a user shell command with the shell tool's runner in `cx`'s
 /// workdir, streaming its tail to `cx`'s progress sink, and capture stdout
 /// and stderr together, truncated so a chatty command cannot flood the
-/// context. Returns the exit code (`None` when a signal ended the command
-/// or it failed to spawn) and the output.
+/// context. The command runs in `shell`, falling back to the platform
+/// default when the session has no `[shell] program`. Returns the exit
+/// code (`None` when a signal ended the command or it failed to spawn)
+/// and the output.
 ///
 /// # Errors
 ///
@@ -166,6 +170,7 @@ impl super::Dispatcher {
 /// killed.
 pub(crate) fn run_shell(
     command: &str,
+    shell: Option<&str>,
     cx: &ToolContext<'_>,
 ) -> Result<(Option<i32>, String), ToolError> {
     const OUTPUT_CAP: usize = 8 * 1024;
@@ -176,7 +181,7 @@ pub(crate) fn run_shell(
         cx.workdir(),
         Duration::MAX,
         &[],
-        kage_tools::builtin::shell::DEFAULT_SHELL,
+        shell.unwrap_or(kage_tools::builtin::shell::DEFAULT_SHELL),
         cx,
     ) {
         Ok(output) => output,

@@ -583,6 +583,36 @@ fn config_error() -> Option<ExitCode> {
     Some(ExitCode::from(1))
 }
 
+/// Open the print-mode session recorder, unless `no_session`. A failed
+/// open stops the run: an unrecorded `-p` turn loses its transcript.
+fn open_session_writer(
+    no_session: bool,
+    model: &str,
+    system_prompt: &str,
+) -> Option<kage_session::SessionWriter> {
+    if no_session {
+        return None;
+    }
+    match open_session(model, system_prompt) {
+        Ok(w) => {
+            eprintln!("kage: recording session to {}", w.path().display());
+            Some(w)
+        }
+        Err(e) => {
+            eprintln!("kage: failed to open session file: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// The configured shell program for `workdir` (`[shell] program`),
+/// when the layered config loads.
+fn configured_shell(workdir: &std::path::Path) -> Option<String> {
+    kage_core::config::Config::load_layered(workdir)
+        .ok()
+        .and_then(|c| c.shell.program)
+}
+
 /// One `-p` print-mode run: provider and tool setup, permission gate,
 /// session recording, and the exit code.
 fn run_print_mode(cli: Cli) -> ExitCode {
@@ -598,12 +628,18 @@ fn run_print_mode(cli: Cli) -> ExitCode {
     };
 
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let shell = configured_shell(&workdir);
     let provisional_model = cli
         .model
         .clone()
         .unwrap_or_else(|| default_model(&registry));
-    let bare_prompt =
-        runtime_env::build_system_prompt(&cli.system, &workdir, &provisional_model, &[]);
+    let bare_prompt = runtime_env::build_system_prompt(
+        &cli.system,
+        &workdir,
+        &provisional_model,
+        &[],
+        shell.as_deref(),
+    );
     let plugin_runtime = match plugins_dir() {
         Ok(dir) => match setup_runtime(&dir, &workdir, &provisional_model, &bare_prompt) {
             Ok(rt) => rt,
@@ -641,7 +677,8 @@ fn run_print_mode(cli: Cli) -> ExitCode {
         }
     };
     let skills = load_skills(&workdir, plugin_runtime.as_deref());
-    let system_prompt = runtime_env::build_system_prompt(&cli.system, &workdir, &model, &skills);
+    let system_prompt =
+        runtime_env::build_system_prompt(&cli.system, &workdir, &model, &skills, shell.as_deref());
 
     let mut tools = builtin_registry();
     let (mcp_manager, mcp_errors) =
@@ -656,20 +693,7 @@ fn run_print_mode(cli: Cli) -> ExitCode {
     if let Some(out) = runtime_env::max_output_tokens_for(&registry, &model) {
         cx = cx.with_max_output_tokens(out);
     }
-    let writer = if cli.no_session {
-        None
-    } else {
-        match open_session(&model, &system_prompt) {
-            Ok(w) => {
-                eprintln!("kage: recording session to {}", w.path().display());
-                Some(w)
-            }
-            Err(e) => {
-                eprintln!("kage: failed to open session file: {e}");
-                return ExitCode::from(1);
-            }
-        }
-    };
+    let writer = open_session_writer(cli.no_session, &model, &system_prompt);
 
     let exit = execute_print_run(
         Arc::new(registry),

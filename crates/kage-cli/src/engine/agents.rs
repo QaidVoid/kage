@@ -258,8 +258,13 @@ fn agent_spec(
         .model
         .clone()
         .unwrap_or_else(|| from.state.model.clone());
-    let system_prompt =
-        crate::runtime_env::build_system_prompt(&def.body, &from.workdir, &model, &[]);
+    let system_prompt = crate::runtime_env::build_system_prompt(
+        &def.body,
+        &from.workdir,
+        &model,
+        &[],
+        from.shell.as_deref(),
+    );
     let mut cx = AgentContext::new(model.clone(), &system_prompt).with_workdir(&from.workdir);
     cx.confine_paths = from.confine_paths;
     cx.thinking_level = def.thinking.or(from.state.thinking);
@@ -291,6 +296,7 @@ fn agent_spec(
         interactive: from.interactive,
         title: false,
         agents: Some(setup.clone()),
+        shell: from.shell.clone(),
     };
     (spec, missing)
 }

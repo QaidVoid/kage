@@ -42,7 +42,7 @@
 //!   `{ prev, next, source }` where `prev` and `next` are level names
 //!   (`"default"` for the automatic level) and `source` is `"cycle"`
 //!   or `"settings"`.
-//! * `user_bash` - an inline `!cmd` from the input pane completed.
+//! * `user_shell` - an inline `!cmd` from the input pane completed.
 //!   Payload: `{ cmd, exit_code }`. `exit_code` is `nil` when a signal
 //!   or a cancel ended the command, or when it failed to start.
 //! * `permission_mode_select` - the permission mode changed. Payload:
@@ -146,7 +146,7 @@ pub const KNOWN_EVENTS: &[(&str, &str, &str)] = &[
         "thinking level changed",
     ),
     (
-        "user_bash",
+        "user_shell",
         "notification",
         "inline `!cmd` from input completed",
     ),

@@ -150,6 +150,7 @@ impl Harness {
             interactive: true,
             title: false,
             agents: None,
+            shell: None,
         }
     }
 }
@@ -485,10 +486,11 @@ fn denied_permission_refuses_the_tool() {
 }
 
 fn capture(command: &str, dir: &std::path::Path) -> (Option<i32>, String) {
-    run_shell(command, &ToolContext::new(dir, &CancelFlag::new())).unwrap()
+    run_shell(command, None, &ToolContext::new(dir, &CancelFlag::new())).unwrap()
 }
 
 #[test]
+#[cfg(unix)]
 fn run_shell_capture_combines_streams_and_exit_code() {
     let dir = std::env::temp_dir();
     let (code, out) = capture("echo out; echo err >&2", &dir);
@@ -498,6 +500,7 @@ fn run_shell_capture_combines_streams_and_exit_code() {
 }
 
 #[test]
+#[cfg(unix)]
 fn run_shell_capture_reports_failure_and_signal() {
     let dir = std::env::temp_dir();
     let (code, out) = capture("exit 3", &dir);
@@ -508,6 +511,7 @@ fn run_shell_capture_reports_failure_and_signal() {
 }
 
 #[test]
+#[cfg(unix)]
 fn run_shell_capture_truncates_large_output() {
     let dir = std::env::temp_dir();
     let (_, out) = capture("yes | head -c 100000", &dir);
@@ -813,6 +817,7 @@ fn shell_output_reaches_the_next_request() {
 }
 
 #[test]
+#[cfg(unix)]
 fn a_shell_command_streams_its_output_and_a_cancel_kills_it() {
     let h = harness(MockProvider::replaying(text_turn("ok")));
     let id = SessionId::new();
@@ -848,6 +853,7 @@ fn a_shell_command_streams_its_output_and_a_cancel_kills_it() {
 }
 
 #[test]
+#[cfg(unix)]
 fn a_prompt_waits_for_the_shell_command_before_it() {
     let mock = MockProvider::replaying(text_turn("ok"));
     let h = harness(mock.clone());
@@ -880,12 +886,13 @@ fn a_prompt_waits_for_the_shell_command_before_it() {
 }
 
 #[test]
-fn a_finished_shell_command_fires_user_bash() {
+#[cfg(unix)]
+fn a_finished_shell_command_fires_user_shell() {
     let runtime = Arc::new(PluginRuntime::new().unwrap());
     runtime
         .eval(
             "seen = {} \
-            kage.on('user_bash', function(p) \
+            kage.on('user_shell', function(p) \
                 table.insert(seen, p.cmd .. '=' .. tostring(p.exit_code)) \
             end)",
         )
@@ -998,6 +1005,7 @@ fn first_exchange_records_a_title() {
         interactive: true,
         title: true,
         agents: None,
+        shell: None,
     });
     prompt(&h.engine, id, "hi", Delivery::Steer);
     let seen = wait_for(&h.events, |e| {
@@ -1072,6 +1080,7 @@ fn plugin_turn_end_entries_land_in_the_session_file() {
         loop_cfg: LoopConfig::default(),
         mcp: None,
         interactive: true,
+        shell: None,
         title: false,
         agents: None,
     });

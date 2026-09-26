@@ -269,7 +269,7 @@ fn session_spec(
     let config = kage_core::config::Config::load_layered(&workdir)
         .map_err(|e| RpcError::internal(e.to_string()))?;
     let model = model.to_owned();
-    let bare = runtime_env::build_system_prompt(system_role, &workdir, &model, &[]);
+    let bare = runtime_env::build_system_prompt(system_role, &workdir, &model, &[], None);
     let plugins = match crate::plugins_dir() {
         Ok(dir) => {
             crate::plugins::setup_runtime(&dir, &workdir, &model, &bare).unwrap_or_else(|e| {
@@ -283,7 +283,13 @@ fn session_spec(
         }
     };
     let skills = crate::load_skills(&workdir, plugins.as_deref());
-    let system_prompt = runtime_env::build_system_prompt(system_role, &workdir, &model, &skills);
+    let system_prompt = runtime_env::build_system_prompt(
+        system_role,
+        &workdir,
+        &model,
+        &skills,
+        config.shell.program.as_deref(),
+    );
     let mut tools = builtin_registry().with_shell_config(&config.shell);
     let editor: Vec<String> = servers.keys().cloned().collect();
     let (mcp, mcp_errors) =
@@ -330,6 +336,7 @@ fn session_spec(
         interactive: true,
         title: true,
         agents: Some(agents),
+        shell: config.shell.program.clone(),
     })
 }
 

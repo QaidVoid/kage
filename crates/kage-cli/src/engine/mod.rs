@@ -74,6 +74,9 @@ pub(crate) struct SessionSpec {
     /// Whether a client answers permission requests. Without one, `ask`
     /// verdicts are refused.
     pub interactive: bool,
+    /// Program user `!` commands and the shell tool run with, from
+    /// `[shell] program`. `None` uses the platform default.
+    pub shell: Option<String>,
     /// Generate and record a title after the first completed exchange.
     pub title: bool,
     /// Agent definitions and limits. `None` means no `agent` tool.
@@ -244,6 +247,8 @@ struct Session {
     pending_history: Vec<Message>,
     /// User shell commands still running.
     shells: usize,
+    /// Program shell commands run with (`[shell] program`).
+    shell: Option<String>,
     title: bool,
     title_pending: bool,
     /// A generated title that arrived while a run or an idle restart held
@@ -329,6 +334,7 @@ impl Dispatcher {
             interactive,
             title,
             agents,
+            shell,
         } = spec;
         let usage = usage_of(&cx);
         let mut state = SessionState {
@@ -371,6 +377,7 @@ impl Dispatcher {
                 mcp,
                 mcp_restarts: Vec::new(),
                 interactive,
+                shell,
                 path,
                 workdir,
                 pending_history: Vec::new(),

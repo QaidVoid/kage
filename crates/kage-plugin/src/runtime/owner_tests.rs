@@ -242,10 +242,10 @@ fn dispatch_without_subscribers_skips_the_owner() {
 #[test]
 fn notify_event_returns_before_its_handler_runs() {
     let rt = PluginRuntime::new().unwrap();
-    rt.eval("hits = 0; kage.on('user_bash', function(p) hits = hits + p.n end)")
+    rt.eval("hits = 0; kage.on('user_shell', function(p) hits = hits + p.n end)")
         .unwrap();
     let busy = occupy(&rt.host);
-    rt.notify_event("user_bash", &json!({ "n": 2 })).unwrap();
+    rt.notify_event("user_shell", &json!({ "n": 2 })).unwrap();
     busy.assert_held();
     busy.open();
     assert_eq!(rt.eval("return hits").unwrap().as_integer(), Some(2));

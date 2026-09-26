@@ -62,8 +62,13 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>) -> Ex
     // Build the plugin runtime against a bare prompt first; skills land
     // below once plugins have had a chance to contribute extra dirs via
     // `resources_discover`.
-    let bare_prompt =
-        crate::runtime_env::build_system_prompt(system, &workdir, &provisional_model, &[]);
+    let bare_prompt = crate::runtime_env::build_system_prompt(
+        system,
+        &workdir,
+        &provisional_model,
+        &[],
+        app_config.shell.program.as_deref(),
+    );
     // Resolve once up-front so the same paths are shared by initial load,
     // the file-system watcher, and the worker's reload handler.
     let plugins_dir_path = match crate::plugins_dir() {
@@ -159,8 +164,13 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>) -> Ex
     let registry = Arc::new(registry);
 
     let skills = crate::load_skills(&workdir, plugin_runtime.as_deref());
-    let system_prompt =
-        crate::runtime_env::build_system_prompt(system, &workdir, &qualified_model, &skills);
+    let system_prompt = crate::runtime_env::build_system_prompt(
+        system,
+        &workdir,
+        &qualified_model,
+        &skills,
+        app_config.shell.program.as_deref(),
+    );
     let system = system_prompt.as_str();
 
     let mut tools = kage_tools::builtin_registry().with_shell_config(&app_config.shell);
@@ -257,6 +267,7 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>) -> Ex
         interactive: true,
         title: true,
         agents: Some(agents),
+        shell: app_config.shell.program.clone(),
     });
     if let Some(path) = resume {
         engine.send(Command::active(CommandKind::LoadSession { path }));

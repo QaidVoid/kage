@@ -79,10 +79,20 @@ pub fn max_output_tokens_for(registry: &ProviderRegistry, qualified_model: &str)
 /// non-empty).
 ///
 /// `model` is the qualified `provider:model` id; `workdir` is the
-/// agent's effective working directory (the host's cwd).
+/// agent's effective working directory (the host's cwd). `shell` is the
+/// program shell commands actually run with (`[shell] program`); when
+/// `None`, the user's `$SHELL` is reported.
 #[must_use]
-pub fn build_system_prompt(role: &str, workdir: &Path, model: &str, skills: &[Skill]) -> String {
-    let shell_owned = std::env::var("SHELL").ok();
+pub fn build_system_prompt(
+    role: &str,
+    workdir: &Path,
+    model: &str,
+    skills: &[Skill],
+    shell: Option<&str>,
+) -> String {
+    let shell_owned = shell
+        .map(str::to_owned)
+        .or_else(|| std::env::var("SHELL").ok());
     let date_owned = chrono::Utc::now().date_naive().to_string();
     let env = EnvContext {
         cwd: workdir,
@@ -155,7 +165,7 @@ mod tests {
 
     #[test]
     fn build_includes_role_and_env_block() {
-        let out = build_system_prompt("you are kage.", Path::new("/tmp/work"), "x:y", &[]);
+        let out = build_system_prompt("you are kage.", Path::new("/tmp/work"), "x:y", &[], None);
         assert!(out.starts_with("you are kage."));
         assert!(out.contains("<environment>"));
         assert!(out.contains("cwd: /tmp/work"));
@@ -243,6 +253,7 @@ mod tests {
             Path::new("/tmp"),
             "x:y",
             std::slice::from_ref(&skill),
+            None,
         );
         assert!(out.contains("<skills>"));
         assert!(out.contains("code-review"));

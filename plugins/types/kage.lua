@@ -102,7 +102,7 @@
 ---| "tool_result"
 ---| "model_select"
 ---| "thinking_level_select"
----| "user_bash"
+---| "user_shell"
 ---| "permission_mode_select"
 ---| "option_set"
 ---| "color_scheme"

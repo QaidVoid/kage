@@ -178,6 +178,7 @@ fn test_agent(
             mcp,
             interactive: true,
             title: true,
+            shell: None,
             agents: Some(AgentSetup {
                 defs: Arc::new(AgentDefs::builtin()),
                 max_depth: 1,

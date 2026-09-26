@@ -100,6 +100,7 @@ pub(crate) fn execute_print_run(
         interactive: false,
         title: false,
         agents: Some(agents),
+        shell: layered.shell.program.clone(),
     });
     engine.send(Command::active(CommandKind::Prompt {
         content: vec![Content::Text { text: prompt }],

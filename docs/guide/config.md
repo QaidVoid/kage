@@ -50,6 +50,13 @@ transcript_on_exit = "full"
 # if non-empty, only these plugin file stems load.
 enabled = []
 
+[bash]
+# Glob patterns of environment variables to hide from shell commands
+# (case-sensitive, matched against the whole name, so "*_TOKEN" covers
+# GITHUB_TOKEN). Empty leaves the environment untouched.
+# scrub_env = ["*_TOKEN", "*_SECRET", "*_KEY", "*_PASSWORD"]
+scrub_env = []
+
 [keybindings]
 # the key <leader> expands to in bindings: one key, default a backslash.
 # leader = "<C-x>"

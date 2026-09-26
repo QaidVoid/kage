@@ -49,6 +49,9 @@ pub struct Config {
     /// per tool, plus the opt-in path-confinement flag.
     #[serde(default, skip_serializing_if = "PermissionsConfig::is_default")]
     pub permissions: crate::permissions::PermissionsConfig,
+    /// Shell tool policy (`[bash]`).
+    #[serde(default, skip_serializing_if = "BashConfig::is_default")]
+    pub bash: BashConfig,
 }
 
 impl Config {
@@ -606,6 +609,45 @@ pub struct PluginsConfig {
     pub config: BTreeMap<String, serde_json::Value>,
 }
 
+/// The `[bash]` table: shell tool policy.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BashConfig {
+    /// Glob patterns of environment variable names the shell tool strips
+    /// from its child's environment. Matched case-sensitively against the
+    /// whole name, so `*_TOKEN` covers `GITHUB_TOKEN` and `PATH` names one
+    /// variable exactly. Empty leaves the environment untouched.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scrub_env: Vec<String>,
+}
+
+impl BashConfig {
+    /// Whether nothing is configured.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self.scrub_env.is_empty()
+    }
+
+    /// Reject patterns that could never match: they are empty or do not
+    /// compile as globs, which would silently disable a rule the user
+    /// wrote.
+    pub fn validate(&self) -> Result<()> {
+        for pattern in &self.scrub_env {
+            if pattern.is_empty() {
+                return Err(config_error(
+                    "[bash] scrub_env patterns must be non-empty".to_owned(),
+                ));
+            }
+            if let Err(e) = globset::Glob::new(pattern) {
+                return Err(config_error(format!(
+                    "[bash] scrub_env pattern `{pattern}` does not compile: {e}"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// The `[keybindings]` table: chord overrides plus the leader key and
 /// the sequence timeout.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1031,6 +1073,23 @@ mod tests {
                 .expect("removed [sandbox] keys must stay tolerated in existing configs");
             Ok(())
         });
+    }
+
+    #[test]
+    fn bash_scrub_env_parses_and_validates() {
+        let cfg: Config = toml::from_str("[bash]\nscrub_env = [\"*_TOKEN\", \"PATH\"]\n").unwrap();
+        assert_eq!(
+            cfg.bash.scrub_env,
+            vec!["*_TOKEN".to_owned(), "PATH".to_owned()]
+        );
+        cfg.bash.validate().unwrap();
+    }
+
+    #[test]
+    fn bash_scrub_env_rejects_bad_globs() {
+        let cfg: Config = toml::from_str("[bash]\nscrub_env = [\"[\"]\n").unwrap();
+        let err = cfg.bash.validate().unwrap_err().to_string();
+        assert!(err.contains("[bash] scrub_env"), "{err}");
     }
 
     const HAND_WRITTEN: &str = r#"# my kage config

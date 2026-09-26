@@ -68,7 +68,19 @@ struct BashInput {
 
 /// Run a shell command.
 #[derive(Debug, Default)]
-pub struct BashTool;
+pub struct BashTool {
+    env_scrub: Arc<[String]>,
+}
+
+impl BashTool {
+    /// Glob patterns (case-sensitive, matched against the whole name) of
+    /// environment variables to strip from the shell child's environment.
+    #[must_use]
+    pub fn with_env_scrub(mut self, patterns: &[String]) -> Self {
+        self.env_scrub = Arc::from(patterns);
+        self
+    }
+}
 
 impl Tool for BashTool {
     fn name(&self) -> &'static str {
@@ -103,7 +115,7 @@ impl Tool for BashTool {
             Some(c) => resolve(cx.workdir(), Path::new(c))?,
             None => cx.workdir().to_path_buf(),
         };
-        run_command(&input.command, &cwd, timeout, cx)
+        run_command(&input.command, &cwd, timeout, &self.env_scrub, cx)
     }
 }
 
@@ -123,9 +135,32 @@ pub struct CommandOutput {
     pub exit_code: Option<i32>,
 }
 
+/// Give `cmd` the parent environment minus the names matched by `patterns`,
+/// so a model-authored command cannot read variables the user withheld.
+/// Invalid patterns are skipped; config validation refuses them at startup.
+fn scrub_env(cmd: &mut Command, patterns: &[String]) {
+    if patterns.is_empty() {
+        return;
+    }
+    let matchers: Vec<_> = patterns
+        .iter()
+        .filter_map(|p| globset::Glob::new(p).ok().map(|g| g.compile_matcher()))
+        .collect();
+    let parent: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os().collect();
+    cmd.env_clear();
+    for (name, value) in parent {
+        let name = name.to_string_lossy();
+        if !matchers.iter().any(|m| m.is_match(name.as_ref())) {
+            cmd.env(name.into_owned(), value);
+        }
+    }
+}
+
 /// Run `command` with `bash -c` in `cwd`, in its own process group, and
 /// report the last lines of its output through `cx`'s progress sink while
 /// it runs. A cancel of `cx` or passing `timeout` kills the whole group.
+/// The child sees the environment minus the variables matched by
+/// `env_scrub`.
 ///
 /// # Errors
 ///
@@ -136,6 +171,7 @@ pub fn run(
     command: &str,
     cwd: &Path,
     timeout: Duration,
+    env_scrub: &[String],
     cx: &ToolContext<'_>,
 ) -> Result<CommandOutput, ToolError> {
     if !cwd.exists() {
@@ -151,6 +187,7 @@ pub fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());
+    scrub_env(&mut cmd, env_scrub);
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -221,6 +258,7 @@ fn run_command(
     command: &str,
     cwd: &Path,
     timeout: Duration,
+    env_scrub: &[String],
     cx: &ToolContext<'_>,
 ) -> Result<ToolOutput, ToolError> {
     let CommandOutput {
@@ -229,7 +267,7 @@ fn run_command(
         stderr,
         stderr_truncated,
         exit_code,
-    } = run(command, cwd, timeout, cx)?;
+    } = run(command, cwd, timeout, env_scrub, cx)?;
     let stdout_text = String::from_utf8_lossy(&stdout).into_owned();
     let stderr_text = String::from_utf8_lossy(&stderr).into_owned();
 
@@ -326,7 +364,7 @@ mod tests {
     fn run(workdir: &Path, input: serde_json::Value) -> Result<ToolOutput, ToolError> {
         let cancel = CancelFlag::new();
         let cx = ToolContext::new(workdir, &cancel);
-        BashTool.execute(input, &cx)
+        BashTool::default().execute(input, &cx)
     }
 
     #[test]
@@ -370,7 +408,7 @@ mod tests {
         let cancel = CancelFlag::new();
         let sink = Arc::new(Collect::default());
         let cx = ToolContext::new(dir.path(), &cancel).with_progress(sink.clone());
-        let out = BashTool
+        let out = BashTool::default()
             .execute(
                 serde_json::json!({"command":"echo first; sleep 0.4; echo second"}),
                 &cx,
@@ -426,7 +464,8 @@ mod tests {
         });
         let started = Instant::now();
         let cx = ToolContext::new(dir.path(), &cancel);
-        let err = super::run("sleep 5; echo done", dir.path(), Duration::MAX, &cx).unwrap_err();
+        let err =
+            super::run("sleep 5; echo done", dir.path(), Duration::MAX, &[], &cx).unwrap_err();
         canceller.join().unwrap();
         assert!(matches!(err, ToolError::Cancelled));
         assert!(started.elapsed() < Duration::from_secs(3));
@@ -489,5 +528,66 @@ mod tests {
         .unwrap();
         assert!(!out.is_error);
         assert!(out.text.contains('x'));
+    }
+
+    fn run_with(
+        workdir: &Path,
+        scrub: &[String],
+        input: serde_json::Value,
+    ) -> Result<ToolOutput, ToolError> {
+        let cancel = CancelFlag::new();
+        let cx = ToolContext::new(workdir, &cancel);
+        BashTool::default()
+            .with_env_scrub(scrub)
+            .execute(input, &cx)
+    }
+
+    #[test]
+    fn scrub_pattern_strips_the_variable_from_the_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = run_with(
+            dir.path(),
+            &["HOME".to_owned()],
+            serde_json::json!({"command": "test -z \"$HOME\" && echo stripped"}),
+        )
+        .unwrap();
+        assert!(!out.is_error);
+        assert!(out.text.contains("stripped"), "{}", out.text);
+    }
+
+    #[test]
+    fn scrub_glob_strips_the_suffix_family() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = run_with(
+            dir.path(),
+            &["*OME".to_owned()],
+            serde_json::json!({"command": "test -z \"$HOME\" && echo stripped"}),
+        )
+        .unwrap();
+        assert!(out.text.contains("stripped"), "{}", out.text);
+    }
+
+    #[test]
+    fn invalid_scrub_pattern_is_skipped_not_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = run_with(
+            dir.path(),
+            &["[".to_owned()],
+            serde_json::json!({"command": "test -n \"$PATH\" && echo has-path"}),
+        )
+        .unwrap();
+        assert!(out.text.contains("has-path"), "{}", out.text);
+    }
+
+    #[test]
+    fn child_sees_a_nonempty_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = run(
+            dir.path(),
+            serde_json::json!({"command": "test -n \"$PATH\" && echo has-path"}),
+        )
+        .unwrap();
+        assert!(!out.is_error);
+        assert!(out.text.contains("has-path"), "{}", out.text);
     }
 }

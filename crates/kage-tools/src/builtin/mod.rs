@@ -42,11 +42,25 @@ pub fn builtin_registry() -> ToolRegistry {
         .with(Arc::new(ReadTool))
         .with(Arc::new(WriteTool))
         .with(Arc::new(EditTool))
-        .with(Arc::new(BashTool))
+        .with(Arc::new(BashTool::default()))
         .with(Arc::new(GrepTool))
         .with(Arc::new(FindTool))
         .with(Arc::new(LsTool))
         .with(Arc::new(WebFetchTool))
+}
+
+impl ToolRegistry {
+    /// Replace the registered `bash` tool with one that strips environment
+    /// variables matched by `patterns` from its child's environment (see
+    /// [`BashTool::with_env_scrub`]). Empty patterns leave the registry
+    /// unchanged.
+    #[must_use]
+    pub fn with_env_scrub(mut self, patterns: &[String]) -> Self {
+        if !patterns.is_empty() {
+            self.register(Arc::new(BashTool::default().with_env_scrub(patterns)));
+        }
+        self
+    }
 }
 
 #[cfg(test)]

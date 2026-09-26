@@ -169,7 +169,10 @@ pub(crate) fn run_shell(
     cx: &ToolContext<'_>,
 ) -> Result<(Option<i32>, String), ToolError> {
     const OUTPUT_CAP: usize = 8 * 1024;
-    let output = match kage_tools::builtin::bash::run(command, cx.workdir(), Duration::MAX, cx) {
+    // The `!` shell is user-typed, so the env-scrub policy for
+    // model-authored commands does not apply.
+    let output = match kage_tools::builtin::bash::run(command, cx.workdir(), Duration::MAX, &[], cx)
+    {
         Ok(output) => output,
         Err(ToolError::Cancelled) => return Err(ToolError::Cancelled),
         Err(err) => return Ok((None, format!("failed to run: {err}"))),

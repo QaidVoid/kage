@@ -31,25 +31,31 @@ use kage_tools::ToolRegistry;
 /// verdict is refused because there is no one to ask.
 pub(crate) fn run_serve(tools: &[String]) -> ExitCode {
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let registry = match serve_registry(tools) {
+    let config = match Config::load_layered(&workdir) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("kage: mcp serve: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    crate::trust::warn_if_untrusted(&workdir);
+    let permissions = config.permissions;
+    let bash = config.bash;
+    if let Err(e) = permissions.validate() {
+        eprintln!("kage: mcp serve: {e}");
+        return ExitCode::from(1);
+    }
+    if let Err(e) = bash.validate() {
+        eprintln!("kage: mcp serve: {e}");
+        return ExitCode::from(1);
+    }
+    let registry = match serve_registry(tools, &bash.scrub_env) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("kage: mcp serve: {e}");
             return ExitCode::from(2);
         }
     };
-    crate::trust::warn_if_untrusted(&workdir);
-    let permissions = match Config::load_layered(&workdir) {
-        Ok(c) => c.permissions,
-        Err(e) => {
-            eprintln!("kage: mcp serve: {e}");
-            return ExitCode::from(1);
-        }
-    };
-    if let Err(e) = permissions.validate() {
-        eprintln!("kage: mcp serve: {e}");
-        return ExitCode::from(1);
-    }
     let gate = |name: &str, input: &serde_json::Value| serve_verdict(&permissions, name, input);
     match kage_mcp::serve(
         &registry,
@@ -72,8 +78,8 @@ pub(crate) fn run_serve(tools: &[String]) -> ExitCode {
 /// # Errors
 ///
 /// A message naming the first unknown tool and the known ones.
-fn serve_registry(tools: &[String]) -> Result<ToolRegistry, String> {
-    let mut registry = kage_tools::builtin_registry();
+fn serve_registry(tools: &[String], env_scrub: &[String]) -> Result<ToolRegistry, String> {
+    let mut registry = kage_tools::builtin_registry().with_env_scrub(env_scrub);
     let wanted: Vec<&str> = tools.iter().map(|t| t.trim()).collect();
     if let Some(unknown) = wanted.iter().find(|t| registry.get(t).is_none()) {
         let mut known: Vec<&str> = registry.names().collect();
@@ -338,7 +344,7 @@ mod tests {
 
     #[test]
     fn serve_registry_keeps_only_listed_tools() {
-        let reg = serve_registry(&names(&["read", "ls"])).unwrap();
+        let reg = serve_registry(&names(&["read", "ls"]), &[]).unwrap();
         let mut listed: Vec<&str> = reg.names().collect();
         listed.sort_unstable();
         assert_eq!(listed, vec!["ls", "read"]);
@@ -347,7 +353,7 @@ mod tests {
 
     #[test]
     fn serve_registry_rejects_unknown_tools() {
-        let err = serve_registry(&names(&["read", "nope"])).unwrap_err();
+        let err = serve_registry(&names(&["read", "nope"]), &[]).unwrap_err();
         assert!(err.contains("`nope`"), "{err}");
     }
 

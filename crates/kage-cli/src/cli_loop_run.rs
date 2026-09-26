@@ -45,6 +45,11 @@ pub(crate) fn execute_print_run(
         eprintln!("kage: {e}");
         return ExitCode::from(1);
     }
+    if let Err(e) = layered.bash.validate() {
+        eprintln!("kage: {e}");
+        return ExitCode::from(1);
+    }
+    let tools = tools.with_env_scrub(&layered.bash.scrub_env);
     if layered.permissions.confine_paths {
         cx.confine_paths = true;
     }

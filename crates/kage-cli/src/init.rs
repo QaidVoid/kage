@@ -54,6 +54,13 @@ editor = "modeless"
 # to a named subset; an empty list loads everything in the dir.
 enabled = []
 
+[bash]
+# Glob patterns of environment variables to hide from shell commands
+# (case-sensitive, matched against the whole name). Empty leaves the
+# environment untouched.
+# scrub_env = ["*_TOKEN", "*_SECRET", "*_KEY", "*_PASSWORD"]
+scrub_env = []
+
 [keybindings]
 # `bindings` maps a key to a command line, or to `action:<Name>` for a
 # built-in action. See the keybindings guide.

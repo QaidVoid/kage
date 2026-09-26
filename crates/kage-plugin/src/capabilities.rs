@@ -68,6 +68,20 @@ pub(crate) enum Capability {
 }
 
 impl Capability {
+    /// Every capability, in the order docs and the generated stub
+    /// list them. Exhaustive: adding a variant without adding it here
+    /// fails the capability-alias test in `spec::tests`.
+    pub(crate) const ALL: &[Capability] = &[
+        Self::SessionWrite,
+        Self::Exec,
+        Self::Env,
+        Self::Net,
+        Self::Crypto,
+        Self::Context,
+        Self::Provider,
+        Self::FsWrite,
+    ];
+
     /// Parse a wire name (as used in config and
     /// `kage.request_capabilities`). Unknown names are rejected loudly
     /// rather than silently dropped, so a config typo is visible.
@@ -82,8 +96,12 @@ impl Capability {
             "provider" => Ok(Self::Provider),
             "fs_write" => Ok(Self::FsWrite),
             other => Err(format!(
-                "unknown capability {other:?} (known: session_write, exec, env, net, crypto, \
-                 context, provider, fs_write)"
+                "unknown capability {other:?} (known: {})",
+                Self::ALL
+                    .iter()
+                    .map(|c| c.name())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )),
         }
     }

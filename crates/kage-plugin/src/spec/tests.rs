@@ -78,6 +78,31 @@ fn surface_has_no_duplicate_func_paths() {
     }
 }
 
+/// The stub's `kage.Capability` alias is hand-maintained in the spec,
+/// so the generator's drift gate cannot catch a variant list that lags
+/// the enum (this is exactly how `crypto`, `context`, `provider` and
+/// `fs_write` went missing). Pin the two together: same names, no
+/// extras, none missing.
+#[test]
+fn capability_alias_covers_every_capability() {
+    let alias = surface()
+        .aliases
+        .iter()
+        .find(|a| a.name == "kage.Capability")
+        .expect("kage.Capability alias is declared");
+    let mut declared: Vec<&str> = alias.variants.to_vec();
+    declared.sort_unstable();
+    let mut wire: Vec<&str> = crate::capabilities::Capability::ALL
+        .iter()
+        .map(|c| c.name())
+        .collect();
+    wire.sort_unstable();
+    assert_eq!(
+        declared, wire,
+        "kage.Capability alias and Capability::ALL disagree"
+    );
+}
+
 /// The anti-drift guarantee extended to capability-gated funcs:
 /// granted, they resolve on that plugin's proxy; ungranted, they
 /// are absent (per-plugin isolation, not a runtime error).

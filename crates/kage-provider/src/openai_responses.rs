@@ -158,6 +158,11 @@ pub(crate) fn build_request_body(req: &StreamRequest, stream: bool) -> Value {
         "input": input,
         "max_output_tokens": req.max_output_tokens.unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS),
         "stream": stream,
+        // The API default is `store: true`, which retains the whole
+        // request (system prompt, history, tool definitions) at OpenAI
+        // for 30 days. kage replays history itself and encrypted
+        // reasoning on reasoning models, so nothing needs storing.
+        "store": false,
     });
     if let Some(system) = &req.system {
         body["instructions"] = Value::String(system.clone());
@@ -656,6 +661,15 @@ mod tests {
         assert_eq!(input[0]["role"], "user");
         assert_eq!(input[0]["content"][0]["type"], "input_text");
         assert_eq!(input[0]["content"][0]["text"], "hi");
+    }
+
+    /// The API default is `store: true`; kage must always opt out so
+    /// requests are not retained at `OpenAI`.
+    #[test]
+    fn requests_opt_out_of_server_side_storage() {
+        let req = StreamRequest::new("gpt-5", vec![user_msg("hi")]);
+        let body = build_request_body(&req, true);
+        assert_eq!(body["store"], false);
     }
 
     #[test]

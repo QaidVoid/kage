@@ -31,6 +31,7 @@ use kage_core::sync::lock;
 use mlua::{Lua, Table, Value};
 use serde_json::json;
 
+use crate::capabilities::{Capability, CapabilityRegistry};
 use crate::error::PluginError;
 
 /// Generation of the `kage` plugin API surface.
@@ -104,6 +105,25 @@ pub fn default_host_log() -> SharedHostLog {
     ))
 }
 
+/// Register the `context` installer that exposes `kage.config()`
+/// including `system_prompt` on a granted plugin's proxy.
+///
+/// The shared binding from [`install`] hides the prompt, so reading it
+/// is an explicit capability rather than something every plugin gets.
+pub(crate) fn register(registry: &CapabilityRegistry, config: serde_json::Value) {
+    let mut reg = lock(registry);
+    reg.entry(Capability::Context)
+        .or_default()
+        .push(Box::new(move |lua: &Lua, pkage: &Table| {
+            let config_for_lua = config.clone();
+            pkage.set(
+                "config",
+                lua.create_function(move |lua, ()| json_to_lua(lua, &config_for_lua))?,
+            )?;
+            Ok(())
+        }));
+}
+
 /// Install the `kage` table on `lua`'s globals, wired to `sink` for
 /// plugin-driven notifications and to `config` for `kage.config()`.
 pub fn install(
@@ -175,10 +195,16 @@ pub fn install(
         })?,
     )?;
 
-    let config_for_lua = config;
+    // `system_prompt` is conversation text: the shared binding hides it
+    // and the `context` capability installer (see [`register`]) exposes
+    // the full value on granted plugins' proxies.
+    let mut public_config = config;
+    if let Some(object) = public_config.as_object_mut() {
+        object.remove("system_prompt");
+    }
     kage.set(
         "config",
-        lua.create_function(move |lua, ()| json_to_lua(lua, &config_for_lua))?,
+        lua.create_function(move |lua, ()| json_to_lua(lua, &public_config))?,
     )?;
 
     // Base `kage.plugin_config()` returns an empty table: only a loaded

@@ -31,7 +31,15 @@
 
 --- An elevated capability a plugin may request. Granted
 --- per-plugin in `[plugins.capabilities]`.
----@alias kage.Capability "session_write"|"exec"|"env"|"net"
+---@alias kage.Capability
+---| "session_write"
+---| "exec"
+---| "fs_write"
+---| "context"
+---| "provider"
+---| "env"
+---| "net"
+---| "crypto"
 
 --- Where the current value of an option came from.
 ---@alias kage.OptionSource "default"|"toml"|"lua"|"runtime"
@@ -73,7 +81,12 @@
 --- accept. Notification events ignore the handler return;
 --- transform events chain it; predicate and session-op events
 --- interpret it. `user` fires only through
---- `kage.api.autocmd_exec`.
+--- `kage.api.autocmd_exec`. The nine text-bearing events
+--- (`transform_context`, `before_provider_request`,
+--- `compact_prepare`, `before_agent_start`, `message_start`,
+--- `message_update`, `message_end`,
+--- `after_provider_response`, `user`) require the `context`
+--- capability.
 ---@alias kage.Event
 ---| "before_agent_start"
 ---| "agent_start"
@@ -439,6 +452,8 @@ function kage.log(level, message) end
 --- A copy of the host-supplied configuration table. Mutating
 --- the returned table does not propagate back to the host or to
 --- disk; use `kage.store` for state that must persist.
+--- `system_prompt` is conversation text: present only with the
+--- `context` capability, absent otherwise.
 --- Since API 1.
 ---@return table
 function kage.config() end
@@ -671,18 +686,15 @@ function kage.clear_status(key) end
 --- Returns `off`, which removes this subscription. Calling
 --- it again, or from inside a handler, is safe. An unknown
 --- event name logs one warning and subscribes to nothing.
+--- The nine text-bearing events (see `kage.Event`) require
+--- the `context` capability; registering one without the
+--- grant logs a warning and subscribes to nothing.
 --- An alias over `kage.api.autocmd_create`.
 --- Since API 1.
 ---@param event kage.Event
 ---@param handler fun(payload: any): any
 ---@return fun()
 function kage.on(event, handler) end
-
---- Register a new LLM provider implementation. Advanced; see
---- the example plugins for a realistic shape.
---- Since API 1.
----@param spec kage.ProviderSpec
-function kage.register_provider(spec) end
 
 --- Session inspection and control.
 ---@class kage.session
@@ -699,24 +711,11 @@ function kage.session.list() end
 ---@param at? string
 function kage.session.fork(at) end
 
---- Append a custom entry to the session JSONL. `kind` is a
---- namespaced string; `data` is any table (defaults to {}).
---- Since API 1.
----@param kind string
----@param data? table
-function kage.session.append_entry(kind, data) end
-
 --- Write a label pointing at entry id `anchor`. Nil clears.
 --- Since API 1.
 ---@param anchor string
 ---@param label? string
 function kage.session.set_label(anchor, label) end
-
---- Queue a synthetic message delivered between turns.
---- Since API 1.
----@param text string
----@param opts? kage.SendOpts
-function kage.send_message(text, opts) end
 
 --- Snapshot the session's token usage. Nil until the TUI
 --- fills it, and always in print mode and `kage rpc`.
@@ -740,12 +739,6 @@ kage.fs = {}
 ---@param path string
 ---@return string
 function kage.fs.read(path) end
-
---- Write a file under the workdir. Same restriction as read.
---- Since API 1.
----@param path string
----@param content string
-function kage.fs.write(path, content) end
 
 --- Register the single policy callback consulted when an
 --- upstream ACP agent asks to run a tool. It must return a
@@ -1134,3 +1127,36 @@ function kage.crypto.to_hex(data) end
 ---@param text string
 ---@return string
 function kage.crypto.from_hex(text) end
+
+--- Append a custom entry to the session JSONL. `kind` is a
+--- namespaced string; `data` is any table (defaults to
+--- {}). Requires `session_write`: session content is not
+--- writable from the base surface.
+--- Since API 1.
+---@param kind string
+---@param data? table
+function kage.session.append_entry(kind, data) end
+
+--- Queue a synthetic message delivered between turns as a
+--- real user turn. Requires `session_write`: the queued
+--- text enters the conversation and the session file.
+--- Since API 1.
+---@param text string
+---@param opts? kage.SendOpts
+function kage.send_message(text, opts) end
+
+--- Register a new LLM provider implementation. The handler
+--- sees the full outgoing request and produces the response
+--- stream. Requires the `provider` capability; reaching the
+--- network or reading credentials still needs `net`/`env`.
+--- Since API 1.
+---@param spec kage.ProviderSpec
+function kage.register_provider(spec) end
+
+--- Write a file under the workdir. Same restriction as
+--- read. Requires the `fs_write` capability; `kage.fs.read`
+--- stays on the base surface.
+--- Since API 1.
+---@param path string
+---@param content string
+function kage.fs.write(path, content) end

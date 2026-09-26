@@ -266,7 +266,9 @@ fn reload_clears_autocmds_and_groups() {
         "kage.api.autocmd_create('user', { group = kage.api.augroup_create('g'), callback = print })",
     )
     .unwrap();
-    let rt = PluginRuntime::new().unwrap();
+    let mut caps = std::collections::BTreeMap::new();
+    caps.insert("a".to_owned(), vec!["context".to_owned()]);
+    let rt = PluginRuntime::builder().capabilities(caps).build().unwrap();
     crate::loader::load_dir(dir.path(), &rt).unwrap();
     rt.eval("kage.api.autocmd_create('user', { callback = print })")
         .unwrap();

@@ -51,6 +51,20 @@ pub(crate) enum Capability {
     /// Call synchronous cryptographic primitives via `kage.crypto`.
     /// Stateless pure functions over byte strings.
     Crypto,
+    /// See conversation and prompt text, and rewrite what the model
+    /// sees: the `transform_context`, `before_provider_request`,
+    /// `compact_prepare`, and text-bearing notification events, plus
+    /// `kage.config().system_prompt`. Coarse: granting it hands over
+    /// the whole transcript.
+    Context,
+    /// Register an LLM provider via `kage.register_provider`, whose
+    /// handler sees the full outgoing request and fabricates the
+    /// response stream. Reaching the network or reading credentials
+    /// still needs `net`/`env` on top.
+    Provider,
+    /// Create or overwrite files under the workdir via `kage.fs.write`.
+    /// Reading (`kage.fs.read`) stays on the base surface.
+    FsWrite,
 }
 
 impl Capability {
@@ -64,9 +78,28 @@ impl Capability {
             "env" => Ok(Self::Env),
             "net" => Ok(Self::Net),
             "crypto" => Ok(Self::Crypto),
+            "context" => Ok(Self::Context),
+            "provider" => Ok(Self::Provider),
+            "fs_write" => Ok(Self::FsWrite),
             other => Err(format!(
-                "unknown capability {other:?} (known: session_write, exec, env, net, crypto)"
+                "unknown capability {other:?} (known: session_write, exec, env, net, crypto, \
+                 context, provider, fs_write)"
             )),
+        }
+    }
+
+    /// The wire name, for messages that tell a user or plugin author
+    /// which capability to grant.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::SessionWrite => "session_write",
+            Self::Exec => "exec",
+            Self::Env => "env",
+            Self::Net => "net",
+            Self::Crypto => "crypto",
+            Self::Context => "context",
+            Self::Provider => "provider",
+            Self::FsWrite => "fs_write",
         }
     }
 }

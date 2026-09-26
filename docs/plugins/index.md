@@ -37,21 +37,27 @@ word. See [lua config](/guide/lua-config).
 - intercept raw key events before the dispatcher
   (`kage.on_terminal_input`)
 - subscribe to about 25 events (lifecycle, message stream, tool
-  calls, option and theme changes) with patterns and groups, transform
-  the context or provider request, rewrite or replace the compaction
-  summary, and veto session ops
-- trigger compaction, fork sessions, inject messages, and write
-  custom session entries and labels
+  calls, option and theme changes) with patterns and groups, veto
+  session ops, and, with the `context` capability, transform the
+  context or provider request and watch the message stream
+- trigger compaction, fork sessions and, with the `session_write`
+  capability, inject messages and write custom session entries
 - keep private state across restarts (`kage.store`) and read their own
   settings from `[plugins.config.<name>]` (`kage.plugin_config`)
 
 ## what plugins cannot do by default
 
 - spawn subprocesses
-- read or write arbitrary filesystem paths (`kage.fs.*` is workdir-scoped)
+- write files (`kage.fs.write` needs `fs_write`; reads are
+  workdir-scoped)
 - make outbound network requests (`kage.http` requires the `net`
   capability and applies SSRF filtering, not a host allow-list)
-- rewrite or reseat the live session
+- see conversation text: the message-stream events, the history and
+  provider-request transforms and the system prompt need `context`
+- rewrite or reseat the live session, inject messages or append
+  custom entries (`session_write`)
+- register an LLM provider (`provider`)
+- read environment variables
 - load native shared libraries
 - `require` other files
 - start background threads (timers run on kage's single Lua thread)
@@ -61,8 +67,9 @@ The sandbox strips `os.execute`, the whole `io` library, `load`,
 other escape hatches before your code runs. Routine `string`, `math`
 and `table` functions stay.
 
-Subprocess access, session rewriting, environment variables and
-network access are available as opt-in, per-plugin
+Subprocess access, file writes, session rewriting, conversation
+text, environment variables and network access are available as
+opt-in, per-plugin
 [capabilities](/plugins/capabilities) the user grants in config. They
 are closed by default and loud when granted.
 
@@ -105,7 +112,7 @@ Type `:hello` or `/hello`. You should see a transient toast.
 - [Lua config](/guide/lua-config): options, keymaps, autocmds,
   highlight groups and slots, from `init.lua`
 - [Capabilities](/plugins/capabilities): the opt-in tier for
-  subprocesses, session rewriting, environment variables and network
-  access
+  subprocesses, file writes, session rewriting, conversation text,
+  environment variables and network access
 - [Examples](/plugins/examples): longer plugins that demonstrate
   the patterns

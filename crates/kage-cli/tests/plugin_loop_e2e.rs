@@ -110,10 +110,16 @@ fn model_invokes_a_lua_registered_tool_through_the_loop() {
 
 #[test]
 fn loop_streams_from_a_lua_registered_provider() {
-    let rt = PluginRuntime::new().expect("runtime builds");
+    let mut caps = std::collections::BTreeMap::new();
+    caps.insert("fake_provider".to_owned(), vec!["provider".to_owned()]);
+    let rt = PluginRuntime::builder()
+        .capabilities(caps)
+        .build()
+        .expect("runtime builds");
     rt.eval_plugin(
         "fake_provider",
-        "kage.register_provider({ \
+        "kage.request_capabilities({'provider'}); \
+        kage.register_provider({ \
             id = 'fakeprov', \
             stream = function(req) \
                 return { \

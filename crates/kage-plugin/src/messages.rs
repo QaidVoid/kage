@@ -21,9 +21,10 @@
 
 use std::sync::{Arc, Mutex};
 
+use kage_core::sync::lock;
 use mlua::{Lua, Table, Value};
 
-use crate::error::PluginError;
+use crate::capabilities::{Capability, CapabilityRegistry};
 
 /// Role under which a queued plugin message should be delivered. Today
 /// only [`PendingRole::User`] is wired through to the loop; the other
@@ -63,28 +64,39 @@ pub fn shared_pending_messages() -> SharedPendingMessages {
     Arc::new(Mutex::new(Vec::new()))
 }
 
-/// Install `kage.send_message` on the running Lua state.
-pub fn install_send_message(lua: &Lua, queue: SharedPendingMessages) -> Result<(), PluginError> {
-    let kage: Table = lua.globals().get("kage")?;
-    let queue_for_lua = queue;
-    kage.set(
-        "send_message",
-        lua.create_function(move |_, (text, opts): (Value, Option<Table>)| {
-            let text = string_arg(&text)
-                .ok_or_else(|| mlua::Error::external("kage.send_message: text must be a string"))?;
-            let (trigger_turn, deliver_as) = parse_opts(opts.as_ref())?;
-            let mut queue_guard = queue_for_lua
-                .lock()
-                .map_err(|_| mlua::Error::external("plugin send_message mutex poisoned"))?;
-            queue_guard.push(PendingMessage {
-                text,
-                trigger_turn,
-                deliver_as,
-            });
-            Ok(mlua::Value::Nil)
-        })?,
-    )?;
-    Ok(())
+/// Register the `session_write` installer that attaches
+/// `kage.send_message` to a granted plugin's `kage` proxy.
+///
+/// Synthetic messages become real `Role::User` turns in the live
+/// conversation and the session file, so they are session content and
+/// ride the existing `session_write` capability instead of the base
+/// surface.
+pub(crate) fn register(registry: &CapabilityRegistry, queue: SharedPendingMessages) {
+    let mut reg = lock(registry);
+    reg.entry(Capability::SessionWrite)
+        .or_default()
+        .push(Box::new(move |lua: &Lua, pkage: &Table| {
+            let queue_for_lua = Arc::clone(&queue);
+            pkage.set(
+                "send_message",
+                lua.create_function(move |_, (text, opts): (Value, Option<Table>)| {
+                    let text = string_arg(&text).ok_or_else(|| {
+                        mlua::Error::external("kage.send_message: text must be a string")
+                    })?;
+                    let (trigger_turn, deliver_as) = parse_opts(opts.as_ref())?;
+                    let mut queue_guard = queue_for_lua
+                        .lock()
+                        .map_err(|_| mlua::Error::external("plugin send_message mutex poisoned"))?;
+                    queue_guard.push(PendingMessage {
+                        text,
+                        trigger_turn,
+                        deliver_as,
+                    });
+                    Ok(mlua::Value::Nil)
+                })?,
+            )?;
+            Ok(())
+        }));
 }
 
 /// Pull a string out of an `mlua::Value`, returning `None` for any
@@ -147,10 +159,27 @@ mod tests {
 
     use super::*;
 
+    const CAP: &str = "session_write";
+
+    /// A runtime whose plugin `t` holds `session_write`, so `send` can
+    /// request the capability and exercise the granted path.
+    fn granted_runtime() -> PluginRuntime {
+        let mut caps = std::collections::BTreeMap::new();
+        caps.insert("t".to_owned(), vec![CAP.to_owned()]);
+        PluginRuntime::builder().capabilities(caps).build().unwrap()
+    }
+
+    fn send(rt: &PluginRuntime, code: &str) -> Result<mlua::Value, crate::error::PluginError> {
+        rt.eval_plugin(
+            "t",
+            &format!("kage.request_capabilities({{'{CAP}'}}); {code}"),
+        )
+    }
+
     #[test]
     fn send_message_with_text_only_queues_a_user_message_with_defaults() {
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval("kage.send_message('look at this')").unwrap();
+        let rt = granted_runtime();
+        send(&rt, "kage.send_message('look at this')").unwrap();
         let drained = rt.take_pending_messages();
         assert_eq!(
             drained,
@@ -164,9 +193,12 @@ mod tests {
 
     #[test]
     fn send_message_respects_trigger_turn_false() {
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval("kage.send_message('keep idle', { trigger_turn = false })")
-            .unwrap();
+        let rt = granted_runtime();
+        send(
+            &rt,
+            "kage.send_message('keep idle', { trigger_turn = false })",
+        )
+        .unwrap();
         let drained = rt.take_pending_messages();
         assert_eq!(drained.len(), 1);
         assert!(!drained[0].trigger_turn);
@@ -174,9 +206,8 @@ mod tests {
 
     #[test]
     fn take_pending_messages_drains_the_queue() {
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval("kage.send_message('one'); kage.send_message('two')")
-            .unwrap();
+        let rt = granted_runtime();
+        send(&rt, "kage.send_message('one'); kage.send_message('two')").unwrap();
         let drained = rt.take_pending_messages();
         assert_eq!(drained.len(), 2);
         // Subsequent drain returns nothing.
@@ -185,10 +216,8 @@ mod tests {
 
     #[test]
     fn deliver_as_assistant_rejected_with_helpful_error() {
-        let rt = PluginRuntime::new().unwrap();
-        let err = rt
-            .eval("kage.send_message('hi', { deliver_as = 'assistant' })")
-            .unwrap_err();
+        let rt = granted_runtime();
+        let err = send(&rt, "kage.send_message('hi', { deliver_as = 'assistant' })").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("deliver_as"));
         assert!(msg.contains("assistant"));
@@ -196,35 +225,42 @@ mod tests {
 
     #[test]
     fn deliver_as_system_rejected_with_helpful_error() {
-        let rt = PluginRuntime::new().unwrap();
-        let err = rt
-            .eval("kage.send_message('hi', { deliver_as = 'system' })")
-            .unwrap_err();
+        let rt = granted_runtime();
+        let err = send(&rt, "kage.send_message('hi', { deliver_as = 'system' })").unwrap_err();
         assert!(err.to_string().contains("system"));
     }
 
     #[test]
     fn unknown_deliver_as_rejected() {
-        let rt = PluginRuntime::new().unwrap();
-        let err = rt
-            .eval("kage.send_message('hi', { deliver_as = 'robot' })")
-            .unwrap_err();
+        let rt = granted_runtime();
+        let err = send(&rt, "kage.send_message('hi', { deliver_as = 'robot' })").unwrap_err();
         assert!(err.to_string().contains("robot"));
     }
 
     #[test]
     fn non_string_text_rejected() {
-        let rt = PluginRuntime::new().unwrap();
-        let err = rt.eval("kage.send_message(42)").unwrap_err();
+        let rt = granted_runtime();
+        let err = send(&rt, "kage.send_message(42)").unwrap_err();
         assert!(err.to_string().contains("string"));
     }
 
     #[test]
     fn non_boolean_trigger_turn_rejected() {
-        let rt = PluginRuntime::new().unwrap();
-        let err = rt
-            .eval("kage.send_message('hi', { trigger_turn = 'sometimes' })")
-            .unwrap_err();
+        let rt = granted_runtime();
+        let err = send(
+            &rt,
+            "kage.send_message('hi', { trigger_turn = 'sometimes' })",
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("trigger_turn"));
+    }
+
+    #[test]
+    fn send_message_is_absent_without_the_capability() {
+        let rt = PluginRuntime::new().unwrap();
+        let out = rt
+            .eval_plugin("u", "return kage.send_message == nil")
+            .unwrap();
+        assert_eq!(out, mlua::Value::Boolean(true));
     }
 }

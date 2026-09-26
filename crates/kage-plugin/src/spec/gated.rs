@@ -528,4 +528,99 @@ pub(super) const GATED: &[GatedFunc] = &[
             ret: Some("string"),
         },
     },
+    GatedFunc {
+        cap: "session_write",
+        func: Func {
+            doc: &[
+                "Append a custom entry to the session JSONL. `kind` is a",
+                "namespaced string; `data` is any table (defaults to",
+                "{}). Requires `session_write`: session content is not",
+                "writable from the base surface.",
+            ],
+            path: "kage.session.append_entry",
+            since: 1,
+            params: &[
+                Field {
+                    name: "kind",
+                    ty: "string",
+                    doc: "",
+                },
+                Field {
+                    name: "data?",
+                    ty: "table",
+                    doc: "",
+                },
+            ],
+            ret: None,
+        },
+    },
+    GatedFunc {
+        cap: "session_write",
+        func: Func {
+            doc: &[
+                "Queue a synthetic message delivered between turns as a",
+                "real user turn. Requires `session_write`: the queued",
+                "text enters the conversation and the session file.",
+            ],
+            path: "kage.send_message",
+            since: 1,
+            params: &[
+                Field {
+                    name: "text",
+                    ty: "string",
+                    doc: "",
+                },
+                Field {
+                    name: "opts?",
+                    ty: "kage.SendOpts",
+                    doc: "",
+                },
+            ],
+            ret: None,
+        },
+    },
+    GatedFunc {
+        cap: "provider",
+        func: Func {
+            doc: &[
+                "Register a new LLM provider implementation. The handler",
+                "sees the full outgoing request and produces the response",
+                "stream. Requires the `provider` capability; reaching the",
+                "network or reading credentials still needs `net`/`env`.",
+            ],
+            path: "kage.register_provider",
+            since: 1,
+            params: &[Field {
+                name: "spec",
+                ty: "kage.ProviderSpec",
+                doc: "",
+            }],
+            ret: None,
+        },
+    },
+    GatedFunc {
+        cap: "fs_write",
+        func: Func {
+            doc: &[
+                "Write a file under the workdir. Same restriction as",
+                "read. Requires the `fs_write` capability; `kage.fs.read`",
+                "stays on the base surface.",
+            ],
+            path: "kage.fs.write",
+            since: 1,
+            params: &[
+                Field {
+                    name: "path",
+                    ty: "string",
+                    doc: "",
+                },
+                Field {
+                    name: "content",
+                    ty: "string",
+                    doc: "",
+                },
+            ],
+            ret: None,
+        },
+    },
 ];

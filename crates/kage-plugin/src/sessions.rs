@@ -76,9 +76,10 @@ pub fn shared_session_ops() -> SharedSessionOps {
     Arc::new(Mutex::new(Vec::new()))
 }
 
-/// Install `kage.session.list()`, `kage.session.fork(at?)`,
-/// `kage.session.append_entry(kind, data?)`, and
+/// Install `kage.session.list()`, `kage.session.fork(at?)`, and
 /// `kage.session.set_label(anchor, label?)` on the running Lua state.
+/// `append_entry` is session content, so it is attached only through
+/// the `session_write` capability (see [`session_write::register`]).
 pub fn install_sessions(
     lua: &Lua,
     list: SharedSessionList,
@@ -124,33 +125,6 @@ pub fn install_sessions(
         })?,
     )?;
 
-    let append_ops = Arc::clone(&ops);
-    session.set(
-        "append_entry",
-        lua.create_function(move |_lua, (kind, data): (Value, Value)| {
-            let kind = string_arg(&kind).ok_or_else(|| {
-                mlua::Error::external("kage.session.append_entry: kind must be a string")
-            })?;
-            if kind.is_empty() {
-                return Err(mlua::Error::external(
-                    "kage.session.append_entry: kind must be a non-empty namespaced string",
-                ));
-            }
-            let data_json = match data {
-                Value::Nil => serde_json::Value::Object(serde_json::Map::new()),
-                other => lua_to_json(other)?,
-            };
-            let mut q = append_ops
-                .lock()
-                .map_err(|_| mlua::Error::external("plugin session ops mutex poisoned"))?;
-            q.push(PendingSessionOp::AppendCustom {
-                kind,
-                data: data_json,
-            });
-            Ok(mlua::Value::Nil)
-        })?,
-    )?;
-
     let label_ops = ops;
     session.set(
         "set_label",
@@ -186,6 +160,37 @@ pub fn install_sessions(
     Ok(())
 }
 
+/// Build the `kage.session.append_entry(kind, data?)` binding. Used by
+/// the `session_write` capability installer; session content belongs
+/// behind the grant, not on the base surface.
+pub(crate) fn append_entry_function(
+    lua: &Lua,
+    ops: SharedSessionOps,
+) -> mlua::Result<mlua::Function> {
+    lua.create_function(move |_lua, (kind, data): (Value, Value)| {
+        let kind = string_arg(&kind).ok_or_else(|| {
+            mlua::Error::external("kage.session.append_entry: kind must be a string")
+        })?;
+        if kind.is_empty() {
+            return Err(mlua::Error::external(
+                "kage.session.append_entry: kind must be a non-empty namespaced string",
+            ));
+        }
+        let data_json = match data {
+            Value::Nil => serde_json::Value::Object(serde_json::Map::new()),
+            other => lua_to_json(other)?,
+        };
+        let mut q = ops
+            .lock()
+            .map_err(|_| mlua::Error::external("plugin session ops mutex poisoned"))?;
+        q.push(PendingSessionOp::AppendCustom {
+            kind,
+            data: data_json,
+        });
+        Ok(mlua::Value::Nil)
+    })
+}
+
 fn string_arg(v: &Value) -> Option<String> {
     match v {
         Value::String(s) => s.to_str().ok().map(|s| s.to_owned()),
@@ -196,6 +201,14 @@ fn string_arg(v: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use crate::PluginRuntime;
+
+    /// A runtime whose plugin `t` holds `session_write`, for tests that
+    /// exercise the granted path of session-content APIs.
+    fn granted_session_write() -> PluginRuntime {
+        let mut caps = std::collections::BTreeMap::new();
+        caps.insert("t".to_owned(), vec!["session_write".to_owned()]);
+        PluginRuntime::builder().capabilities(caps).build().unwrap()
+    }
 
     #[test]
     fn session_list_returns_empty_table_by_default() {
@@ -254,9 +267,13 @@ mod tests {
 
     #[test]
     fn append_entry_with_kind_and_table_data_queues_a_custom_op() {
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval("kage.session.append_entry('plugin:tps', { note = 'first' })")
-            .unwrap();
+        let rt = granted_session_write();
+        rt.eval_plugin(
+            "t",
+            "kage.request_capabilities({'session_write'}); \
+             kage.session.append_entry('plugin:tps', { note = 'first' })",
+        )
+        .unwrap();
         let drained = rt.take_pending_session_ops();
         assert_eq!(drained.len(), 1);
         match &drained[0] {
@@ -272,9 +289,13 @@ mod tests {
 
     #[test]
     fn append_entry_with_nil_data_defaults_to_empty_object() {
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval("kage.session.append_entry('plugin:bookmark')")
-            .unwrap();
+        let rt = granted_session_write();
+        rt.eval_plugin(
+            "t",
+            "kage.request_capabilities({'session_write'}); \
+             kage.session.append_entry('plugin:bookmark')",
+        )
+        .unwrap();
         let drained = rt.take_pending_session_ops();
         match &drained[0] {
             crate::sessions::PendingSessionOp::AppendCustom { data, .. } => {
@@ -288,16 +309,35 @@ mod tests {
 
     #[test]
     fn append_entry_rejects_empty_kind() {
-        let rt = PluginRuntime::new().unwrap();
-        let err = rt.eval("kage.session.append_entry('')").unwrap_err();
+        let rt = granted_session_write();
+        let err = rt
+            .eval_plugin(
+                "t",
+                "kage.request_capabilities({'session_write'}); kage.session.append_entry('')",
+            )
+            .unwrap_err();
         assert!(err.to_string().contains("kind"));
     }
 
     #[test]
     fn append_entry_rejects_non_string_kind() {
-        let rt = PluginRuntime::new().unwrap();
-        let err = rt.eval("kage.session.append_entry(42)").unwrap_err();
+        let rt = granted_session_write();
+        let err = rt
+            .eval_plugin(
+                "t",
+                "kage.request_capabilities({'session_write'}); kage.session.append_entry(42)",
+            )
+            .unwrap_err();
         assert!(err.to_string().contains("string"));
+    }
+
+    #[test]
+    fn append_entry_is_absent_without_the_capability() {
+        let rt = PluginRuntime::new().unwrap();
+        let out = rt
+            .eval_plugin("u", "return kage.session.append_entry == nil")
+            .unwrap();
+        assert_eq!(out, mlua::Value::Boolean(true));
     }
 
     #[test]
@@ -339,9 +379,11 @@ mod tests {
 
     #[test]
     fn take_pending_session_ops_drains_the_queue() {
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval(
-            "kage.session.append_entry('plugin:a'); \
+        let rt = granted_session_write();
+        rt.eval_plugin(
+            "t",
+            "kage.request_capabilities({'session_write'}); \
+             kage.session.append_entry('plugin:a'); \
              kage.session.set_label('e1', 'l1')",
         )
         .unwrap();

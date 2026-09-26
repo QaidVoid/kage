@@ -19,6 +19,11 @@
 -- that returns nil leaves whatever the previous handler produced.
 -- A handler that errors is logged and skipped; the previous payload
 -- survives.
+--
+-- The transform hooks see the whole conversation and system prompt,
+-- so they need the `context` capability: request it here and grant it
+-- in [plugins.capabilities], or kage.on silently drops the hook.
+kage.request_capabilities({ 'context' })
 
 local SECRET_PATTERNS = {
     'sk%-[%w_%-]+',           -- OpenAI/Anthropic-style keys

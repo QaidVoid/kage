@@ -291,9 +291,15 @@ mod tests {
     fn plugin_session_ops_are_written_at_turn_end() {
         let dir = tempfile::tempdir().unwrap();
         let (path, header) = header(dir.path());
-        let runtime = Arc::new(PluginRuntime::new().unwrap());
+        let mut caps = std::collections::BTreeMap::new();
+        caps.insert("t".to_owned(), vec!["session_write".to_owned()]);
+        let runtime = Arc::new(PluginRuntime::builder().capabilities(caps).build().unwrap());
         runtime
-            .eval("kage.session.append_entry('plugin:tps', { rate = 12.5 })")
+            .eval_plugin(
+                "t",
+                "kage.request_capabilities({'session_write'}); \
+                 kage.session.append_entry('plugin:tps', { rate = 12.5 })",
+            )
             .unwrap();
         let anchor = EntryId::new();
         runtime

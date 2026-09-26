@@ -154,8 +154,8 @@ impl PluginRuntimeBuilder {
         lua.set_memory_limit(self.memory_limit)?;
         apply_sandbox(&lua)?;
         watchdog::install(&lua)?;
-        api::install(&lua, self.sink.clone(), self.config)?;
-        plugin_fs::install_fs(&lua, self.workdir.clone())?;
+        api::install(&lua, self.sink.clone(), self.config.clone())?;
+        plugin_fs::install_fs(&lua, &self.workdir)?;
         http::install_http(&lua)?;
         crypto::install_crypto(&lua)?;
         store::install_base(&lua)?;
@@ -184,7 +184,13 @@ impl PluginRuntimeBuilder {
         let plugin_envs: Arc<Mutex<HashMap<String, RegistryKey>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let current_plugin: CurrentPlugin = Arc::new(Mutex::new(None));
-        let autocmds = autocmd::install(&lua, self.sink.clone(), Arc::clone(&current_plugin))?;
+        let grants = Arc::new(capabilities::parse_grants(&self.capabilities)?);
+        let autocmds = autocmd::install(
+            &lua,
+            self.sink.clone(),
+            Arc::clone(&current_plugin),
+            Arc::clone(&grants),
+        )?;
         schedule::install(
             &lua,
             self.sink.clone(),
@@ -206,7 +212,6 @@ impl PluginRuntimeBuilder {
         options.load_theme();
         options::install(&lua, &options)?;
         highlight::install(&lua, &options.highlights)?;
-        let grants = Arc::new(capabilities::parse_grants(&self.capabilities)?);
         let cap_registry = capabilities::capability_registry();
         // Capability installers first: `mcp`/`acp` attach their
         // declaring functions under `exec`, and every granted plugin
@@ -227,7 +232,17 @@ impl PluginRuntimeBuilder {
             &cap_registry,
             Arc::clone(&session_entries),
             Arc::clone(&switch_request),
+            Arc::clone(&session_ops_slot),
         );
+        messages::register(&cap_registry, Arc::clone(&pending_messages_slot));
+        plugin_fs::register(&cap_registry, self.workdir.clone());
+        providers::register(
+            &cap_registry,
+            weak_host.clone(),
+            self.sink.clone(),
+            &provider_registry,
+        );
+        api::register(&cap_registry, self.config);
         bridge::install_suspend(&lua)?;
         capabilities::install_request_capabilities(
             &lua,
@@ -256,12 +271,6 @@ impl PluginRuntimeBuilder {
             self.sink.clone(),
             &command_override_registry,
         )?;
-        providers::install_register_provider(
-            &lua,
-            weak_host.clone(),
-            self.sink.clone(),
-            &provider_registry,
-        )?;
         widgets::install_register_widget(
             &lua,
             weak_host.clone(),
@@ -278,7 +287,6 @@ impl PluginRuntimeBuilder {
             Arc::clone(&fork_slot),
             Arc::clone(&session_ops_slot),
         )?;
-        messages::install_send_message(&lua, Arc::clone(&pending_messages_slot))?;
         theme::install_theme(&lua, &options)?;
         let slots = slots::install(&lua, &host, self.sink.clone(), Arc::clone(&current_plugin))?;
         block_renderers::install_block_renderers(

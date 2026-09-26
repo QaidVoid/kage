@@ -570,10 +570,26 @@ mod tests {
 
     use super::*;
 
+    /// A runtime whose plugin `t` holds `session_write`, so it can
+    /// request the capability and call `kage.send_message`.
+    fn granted_runtime() -> PluginRuntime {
+        let mut caps = std::collections::BTreeMap::new();
+        caps.insert("t".to_owned(), vec!["session_write".to_owned()]);
+        PluginRuntime::builder().capabilities(caps).build().unwrap()
+    }
+
+    fn send(rt: &PluginRuntime, code: &str) {
+        rt.eval_plugin(
+            "t",
+            &format!("kage.request_capabilities({{'session_write'}}); {code}"),
+        )
+        .unwrap();
+    }
+
     #[test]
     fn get_steering_returns_send_message_payload_when_inner_is_empty() {
-        let rt = Arc::new(PluginRuntime::new().unwrap());
-        rt.eval("kage.send_message('please continue')").unwrap();
+        let rt = Arc::new(granted_runtime());
+        send(&rt, "kage.send_message('please continue')");
         let mut hooks = PluginEventHooks::new(NoopHooks, Arc::clone(&rt));
         assert_eq!(hooks.get_steering(), Some("please continue".to_owned()));
         // Queue exhausted after one drain.
@@ -588,8 +604,8 @@ mod tests {
                 self.0.take()
             }
         }
-        let rt = Arc::new(PluginRuntime::new().unwrap());
-        rt.eval("kage.send_message('plugin says hi')").unwrap();
+        let rt = Arc::new(granted_runtime());
+        send(&rt, "kage.send_message('plugin says hi')");
         let mut hooks =
             PluginEventHooks::new(InnerOnce(Some("user typed this".into())), Arc::clone(&rt));
         // First poll: inner wins.
@@ -655,9 +671,11 @@ mod tests {
 
     #[test]
     fn send_message_drains_in_fifo_order() {
-        let rt = Arc::new(PluginRuntime::new().unwrap());
-        rt.eval("kage.send_message('first'); kage.send_message('second')")
-            .unwrap();
+        let rt = Arc::new(granted_runtime());
+        send(
+            &rt,
+            "kage.send_message('first'); kage.send_message('second')",
+        );
         let mut hooks = PluginEventHooks::new(NoopHooks, Arc::clone(&rt));
         assert_eq!(hooks.get_steering(), Some("first".to_owned()));
         assert_eq!(hooks.get_steering(), Some("second".to_owned()));

@@ -363,10 +363,16 @@ fn origin(desc: Option<&str>, owner: Option<&str>) -> Arc<str> {
 
 /// Install the autocmd primitives on `kage.api` and return the metadata
 /// handle the runtime reads subscriber counts from.
+///
+/// `grants` is consulted at registration time: an event whose payload
+/// carries conversation text ([`events::required_capability`]) is only
+/// accepted from plugins holding that capability; other registrations
+/// are dropped with one warning naming the capability to grant.
 pub(crate) fn install(
     lua: &Lua,
     sink: SharedHostLog,
     current: CurrentPlugin,
+    grants: crate::capabilities::Grants,
 ) -> Result<SharedAutocmds, PluginError> {
     let shared = SharedAutocmds::default();
     lua.set_app_data(Arc::clone(&shared));
@@ -374,7 +380,7 @@ pub(crate) fn install(
     let api: Table = lua.globals().get::<Table>("kage")?.get("api")?;
     api.set(
         "autocmd_create",
-        create_fn(lua, Arc::clone(&shared), current)?,
+        create_fn(lua, Arc::clone(&shared), current, sink.clone(), grants)?,
     )?;
 
     let autocmds = Arc::clone(&shared);
@@ -442,10 +448,34 @@ fn create_fn(
     lua: &Lua,
     autocmds: SharedAutocmds,
     current: CurrentPlugin,
+    sink: SharedHostLog,
+    grants: crate::capabilities::Grants,
 ) -> mlua::Result<Function> {
     lua.create_function(move |lua, (event, opts): (String, Table)| {
         if !is_known(&event) {
             return Err(fail(format!("autocmd_create: unknown event '{event}'")));
+        }
+        let owner = lock(&current).clone();
+        if let Some(cap) = crate::events::required_capability(&event) {
+            // Outside a plugin chunk (user `init.lua`, host eval) there
+            // is no grant to consult: that caller is the trusted user,
+            // mirroring `install_trusted`.
+            let granted = match owner.as_deref() {
+                None => true,
+                Some(plugin) => grants.get(plugin).is_some_and(|set| set.contains(&cap)),
+            };
+            if !granted {
+                let subject = owner.as_deref().unwrap_or("?");
+                lock(&sink).log(
+                    LogLevel::Warn,
+                    &format!(
+                        "plugin {subject}: '{event}' needs the {} capability; \
+                         hook ignored, grant it in [plugins.capabilities]",
+                        cap.name()
+                    ),
+                );
+                return Ok(mlua::Value::Nil);
+            }
         }
         let Value::Function(callback) = opts.get::<Value>("callback")? else {
             return Err(fail(
@@ -456,7 +486,6 @@ fn create_fn(
         let once = opts.get::<Option<bool>>("once")?.unwrap_or(false);
         let desc = opts.get::<Option<String>>("desc")?;
         let group: Value = opts.get("group")?;
-        let owner = lock(&current).clone();
         let id = {
             let mut autocmds = lock(&autocmds);
             let group = match group {
@@ -478,7 +507,7 @@ fn create_fn(
         };
         let callbacks: Table = lua.named_registry_value(CALLBACKS_KEY)?;
         callbacks.raw_set(id, callback)?;
-        Ok(id)
+        Ok(mlua::Value::Integer(id))
     })
 }
 

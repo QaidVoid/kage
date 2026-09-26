@@ -22,20 +22,25 @@
 
 use std::path::{Path, PathBuf};
 
+use kage_core::sync::lock;
 use kage_tools::resolve_under;
 use mlua::{Lua, Table};
 
+use crate::capabilities::{Capability, CapabilityRegistry};
 use crate::error::PluginError;
 
-/// Install `kage.fs.read` and `kage.fs.write` on the running Lua state.
+/// Install `kage.fs.read` on the running Lua state.
 ///
-/// Both helpers anchor at `workdir`. Pass an absolute path here; relative
+/// The helper anchors at `workdir`. Pass an absolute path here; relative
 /// paths are interpreted against the process cwd at install time.
-pub fn install_fs(lua: &Lua, workdir: PathBuf) -> Result<(), PluginError> {
+/// `kage.fs.write` is attached separately through the `fs_write`
+/// capability (see [`register`]), so an ungranted plugin can look but
+/// not touch.
+pub fn install_fs(lua: &Lua, workdir: &Path) -> Result<(), PluginError> {
     let kage: Table = lua.globals().get("kage")?;
     let fs = lua.create_table()?;
 
-    let read_root = workdir.clone();
+    let read_root = workdir.to_path_buf();
     fs.set(
         "read",
         lua.create_function(move |_, path: String| {
@@ -45,19 +50,40 @@ pub fn install_fs(lua: &Lua, workdir: PathBuf) -> Result<(), PluginError> {
         })?,
     )?;
 
-    let write_root = workdir;
-    fs.set(
-        "write",
-        lua.create_function(move |_, (path, content): (String, mlua::String)| {
-            let resolved = resolve(&write_root, &path)?;
-            write_confined(&write_root, &resolved, content.as_bytes().as_ref())
-                .map_err(|err| mlua::Error::external(format!("write {path}: {err}")))?;
-            Ok(())
-        })?,
-    )?;
-
     kage.set("fs", fs)?;
     Ok(())
+}
+
+/// Register the `fs_write` installer that shadows `kage.fs` on a
+/// granted plugin's `kage` proxy with one that adds `write`, reading
+/// through to the shared base table.
+pub(crate) fn register(registry: &CapabilityRegistry, workdir: PathBuf) {
+    let mut reg = lock(registry);
+    reg.entry(Capability::FsWrite)
+        .or_default()
+        .push(Box::new(move |lua: &Lua, pkage: &Table| {
+            let kage: Table = lua.globals().get("kage")?;
+            let base_fs: Table = kage.get("fs")?;
+            let pfs = lua.create_table()?;
+
+            let write_root = workdir.clone();
+            pfs.set(
+                "write",
+                lua.create_function(move |_, (path, content): (String, mlua::String)| {
+                    let resolved = resolve(&write_root, &path)?;
+                    write_confined(&write_root, &resolved, content.as_bytes().as_ref())
+                        .map_err(|err| mlua::Error::external(format!("write {path}: {err}")))?;
+                    Ok(())
+                })?,
+            )?;
+
+            let mt = lua.create_table()?;
+            mt.set("__index", base_fs)?;
+            mt.set("__metatable", false)?;
+            pfs.set_metatable(Some(mt))?;
+            pkage.set("fs", pfs)?;
+            Ok(())
+        }));
 }
 
 fn resolve(root: &Path, candidate: &str) -> mlua::Result<PathBuf> {
@@ -124,6 +150,28 @@ mod tests {
 
     use crate::PluginRuntime;
 
+    /// A runtime whose plugin `t` holds `fs_write`, for exercising the
+    /// granted write path.
+    fn granted_fs_write(workdir: &std::path::Path) -> PluginRuntime {
+        let mut caps = std::collections::BTreeMap::new();
+        caps.insert("t".to_owned(), vec!["fs_write".to_owned()]);
+        PluginRuntime::builder()
+            .workdir(workdir.to_path_buf())
+            .capabilities(caps)
+            .build()
+            .unwrap()
+    }
+
+    fn granted_write(
+        rt: &PluginRuntime,
+        code: &str,
+    ) -> Result<mlua::Value, crate::error::PluginError> {
+        rt.eval_plugin(
+            "t",
+            &format!("kage.request_capabilities({{'fs_write'}}); {code}"),
+        )
+    }
+
     #[test]
     fn read_inside_workdir_succeeds() {
         let dir = tempdir().unwrap();
@@ -139,11 +187,8 @@ mod tests {
     #[test]
     fn write_then_read_round_trips() {
         let dir = tempdir().unwrap();
-        let rt = PluginRuntime::builder()
-            .workdir(dir.path().to_path_buf())
-            .build()
-            .unwrap();
-        rt.eval("kage.fs.write('out/log.txt', 'hi')").unwrap();
+        let rt = granted_fs_write(dir.path());
+        granted_write(&rt, "kage.fs.write('out/log.txt', 'hi')").unwrap();
         let on_disk = fs::read_to_string(dir.path().join("out/log.txt")).unwrap();
         assert_eq!(on_disk, "hi");
     }
@@ -174,11 +219,8 @@ mod tests {
     fn dot_dot_over_missing_component_rejects_and_writes_nothing() {
         let dir = tempdir().unwrap();
         let parent = dir.path().parent().unwrap();
-        let rt = PluginRuntime::builder()
-            .workdir(dir.path().to_path_buf())
-            .build()
-            .unwrap();
-        let res = rt.eval("kage.fs.write('a/../../escape.txt', 'x')");
+        let rt = granted_fs_write(dir.path());
+        let res = granted_write(&rt, "kage.fs.write('a/../../escape.txt', 'x')");
         assert!(res.is_err(), "traversal must error, got {res:?}");
         assert!(!parent.join("escape.txt").exists());
         assert!(!dir.path().join("a").exists());
@@ -187,12 +229,22 @@ mod tests {
     #[test]
     fn dot_dot_over_missing_component_staying_inside_writes() {
         let dir = tempdir().unwrap();
+        let rt = granted_fs_write(dir.path());
+        granted_write(&rt, "kage.fs.write('missing/../ok.txt', 'hi')").unwrap();
+        assert_eq!(fs::read_to_string(dir.path().join("ok.txt")).unwrap(), "hi");
+    }
+
+    #[test]
+    fn write_is_absent_without_fs_write_capability() {
+        let dir = tempdir().unwrap();
         let rt = PluginRuntime::builder()
             .workdir(dir.path().to_path_buf())
             .build()
             .unwrap();
-        rt.eval("kage.fs.write('missing/../ok.txt', 'hi')").unwrap();
-        assert_eq!(fs::read_to_string(dir.path().join("ok.txt")).unwrap(), "hi");
+        let out = rt
+            .eval_plugin("u", "return kage.fs.write == nil and kage.fs.read ~= nil")
+            .unwrap();
+        assert_eq!(out, mlua::Value::Boolean(true));
     }
 
     #[test]
@@ -200,11 +252,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let parent = dir.path().parent().unwrap();
         symlink("../escape-target", dir.path().join("dangling")).unwrap();
-        let rt = PluginRuntime::builder()
-            .workdir(dir.path().to_path_buf())
-            .build()
-            .unwrap();
-        let res = rt.eval("kage.fs.write('dangling/x.txt', 'x')");
+        let rt = granted_fs_write(dir.path());
+        let res = granted_write(&rt, "kage.fs.write('dangling/x.txt', 'x')");
         assert!(res.is_err(), "symlinked parent must error, got {res:?}");
         assert!(
             !parent.join("escape-target").exists(),
@@ -218,11 +267,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let parent = dir.path().parent().unwrap();
         symlink("../escape-file", dir.path().join("link")).unwrap();
-        let rt = PluginRuntime::builder()
-            .workdir(dir.path().to_path_buf())
-            .build()
-            .unwrap();
-        let res = rt.eval("kage.fs.write('link', 'x')");
+        let rt = granted_fs_write(dir.path());
+        let res = granted_write(&rt, "kage.fs.write('link', 'x')");
         assert!(res.is_err(), "symlink target must error, got {res:?}");
         assert!(!parent.join("escape-file").exists());
     }
@@ -232,11 +278,8 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::create_dir(dir.path().join("sub")).unwrap();
         symlink("sub", dir.path().join("alias")).unwrap();
-        let rt = PluginRuntime::builder()
-            .workdir(dir.path().to_path_buf())
-            .build()
-            .unwrap();
-        rt.eval("kage.fs.write('alias/x.txt', 'hi')").unwrap();
+        let rt = granted_fs_write(dir.path());
+        granted_write(&rt, "kage.fs.write('alias/x.txt', 'hi')").unwrap();
         assert_eq!(
             fs::read_to_string(dir.path().join("sub/x.txt")).unwrap(),
             "hi"

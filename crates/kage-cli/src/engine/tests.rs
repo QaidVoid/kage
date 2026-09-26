@@ -1043,10 +1043,14 @@ fn a_title_that_arrives_during_the_next_run_is_recorded_when_it_ends() {
 #[test]
 fn plugin_turn_end_entries_land_in_the_session_file() {
     let dir = tempfile::tempdir().unwrap();
-    let runtime = Arc::new(PluginRuntime::new().unwrap());
+    let mut caps = std::collections::BTreeMap::new();
+    caps.insert("t".to_owned(), vec!["session_write".to_owned()]);
+    let runtime = Arc::new(PluginRuntime::builder().capabilities(caps).build().unwrap());
     runtime
-        .eval(
-            "kage.on('turn_end', function() \
+        .eval_plugin(
+            "t",
+            "kage.request_capabilities({'session_write'}); \
+            kage.on('turn_end', function() \
                 kage.session.append_entry('plugin:mark', { ok = true }) \
             end)",
         )
@@ -1561,13 +1565,17 @@ fn new_session_waits_for_agents_then_drops_them() {
 #[test]
 fn agent_runs_skip_plugin_events_and_session_ops() {
     let dir = tempfile::tempdir().unwrap();
-    let runtime = Arc::new(PluginRuntime::new().unwrap());
+    let mut caps = std::collections::BTreeMap::new();
+    caps.insert("t".to_owned(), vec!["session_write".to_owned()]);
+    let runtime = Arc::new(PluginRuntime::builder().capabilities(caps).build().unwrap());
     runtime
-        .eval(
-            "kage.session.append_entry('plugin:queued', {}) \
-             kage.on('turn_start', function() \
+        .eval_plugin(
+            "t",
+            "kage.request_capabilities({'session_write'}); \
+            kage.session.append_entry('plugin:queued', {}) \
+            kage.on('turn_start', function() \
                 kage.session.append_entry('plugin:turn', {}) \
-             end)",
+            end)",
         )
         .unwrap();
     let h = harness(MockProvider::sequence(vec![

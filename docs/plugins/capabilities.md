@@ -1,8 +1,9 @@
 # capabilities
 
 The plugin sandbox is closed by default: no subprocesses, no
-filesystem outside the workdir, no rewriting the live session, no
-environment variables and no network. A few
+filesystem outside the workdir, no writing files at all, no rewriting
+the live session, no conversation text, no environment variables and
+no network. A few
 plugins genuinely need more. Those powers are **capabilities**: opt-in,
 per-plugin, and only ever attached to the one plugin that was granted
 them.
@@ -82,6 +83,54 @@ and `kage.acp.add_agent(spec)` (see
 [acp](/editors/acp-client#configure-from-a-plugin)). Declaring a
 server or agent is naming a command for kage to run, so it needs the
 same grant as running one.
+
+### `fs_write`
+
+```lua
+kage.fs.write("notes/todo.txt", "ship it\n")
+```
+
+Attaches `kage.fs.write` alongside the always-available
+`kage.fs.read`: a plugin can always look, but writing takes the
+explicit grant. Paths resolve under the workdir and the write is
+confined to it, including through symlinks; missing parent
+directories are created and then re-verified against the workdir.
+
+### `context`
+
+Subscribe to the events that carry conversation text, and read the
+system prompt.
+
+| surface | effect |
+| --- | --- |
+| `transform_context` | see and rewrite the message history each turn |
+| `before_provider_request` | see and rewrite the serialized provider request |
+| `compact_prepare` | steer or replace the compaction summary |
+| `before_agent_start` | see the system prompt and first user message |
+| `message_start` / `message_update` / `message_end` / `after_provider_response` | observe the message stream |
+| `user` | receive custom `user` events |
+| `kage.config().system_prompt` | the full system prompt; without the grant the key is absent |
+
+A `kage.on` (or `kage.api.autocmd_create`) registration for one of
+these from an ungranted plugin is dropped with a warning naming the
+capability to grant. The rest of the event table (`agent_start`,
+`turn_start`, `tool_call`, `tool_result`, option and theme changes,
+...) stays open to every plugin, because those payloads carry no
+conversation text.
+
+### `provider`
+
+```lua
+kage.register_provider({ id = "mine", stream = function(req) ... end })
+```
+
+Attaches `kage.register_provider`, which teaches kage a new LLM
+provider implementation. This is the widest power in the tier: the
+plugin's `stream` function sees every request body (system prompt,
+full history, tools) and produces whatever the model is supposed to
+say. A streaming provider usually makes outbound requests via
+`kage.http.post_stream`, so grant `net` alongside it. See
+[providers](/plugins/api#providers).
 
 ### `env`
 
@@ -165,10 +214,11 @@ would.
   exactly as confined as before this tier existed.
 - Per-plugin attachment. A grant to `rewind` does nothing for any
   other plugin in the same runtime.
-- No shell in `exec`, workdir-scoped `cwd`.
+- No shell in `exec`, workdir-scoped `cwd` and `fs` writes.
 - `net` requests are SSRF-checked and size-capped.
-- Session reseats are host-applied between turns and pass through the
-  `session_before_switch` veto.
+- Conversation text (message stream, history transforms, the system
+  prompt) needs `context`; session reseats are host-applied between
+  turns and pass through the `session_before_switch` veto.
 
 ## see it in use
 

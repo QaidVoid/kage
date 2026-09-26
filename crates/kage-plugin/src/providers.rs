@@ -32,6 +32,7 @@ use kage_provider::{
 use mlua::{Function, Lua, RegistryKey, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog, json_to_lua, lua_to_json};
+use crate::capabilities::{Capability, CapabilityRegistry};
 use crate::error::PluginError;
 use crate::host::{self, LuaHost, WeakHost};
 use crate::watchdog;
@@ -260,50 +261,63 @@ pub fn registered_providers() -> RegisteredProviders {
     Arc::new(Mutex::new(Vec::new()))
 }
 
-/// Install `kage.register_provider` on the running Lua state.
-pub(crate) fn install_register_provider(
-    lua: &Lua,
+/// Register the `provider` installer that attaches
+/// `kage.register_provider` to a granted plugin's `kage` proxy.
+///
+/// A registered provider's handler sees the full outgoing request and
+/// fabricates the response stream, so registration is not base
+/// surface. Reading stored credentials (`env`) and outbound HTTP
+/// (`net`) stay separately gated.
+pub(crate) fn register(
+    registry: &CapabilityRegistry,
     host: WeakHost,
     sink: SharedHostLog,
     registered: &RegisteredProviders,
-) -> Result<(), PluginError> {
+) {
     let registered = Arc::downgrade(registered);
-    let kage: Table = lua.globals().get("kage")?;
-    kage.set(
-        "register_provider",
-        lua.create_function(move |lua, spec: Table| {
-            let id: String = spec.get("id")?;
-            let display_name: Option<String> = spec.get("display_name").ok();
-            let supports_caching: bool = spec.get("supports_caching").unwrap_or(false);
-            let supports_thinking: bool = spec.get("supports_thinking").unwrap_or(false);
-            let supports_tool_use: bool = spec.get("supports_tool_use").unwrap_or(true);
-            let preserves_thinking: bool = spec.get("preserves_thinking").unwrap_or(false);
-            let stream: Function = spec.get("stream")?;
-            let models = parse_models(&spec)?;
-            let key = lua.create_registry_value(stream)?;
-            let metadata = ProviderMetadata {
-                id: id.clone(),
-                display_name: display_name.unwrap_or_else(|| id.clone()),
-                supports_caching,
-                supports_thinking,
-                supports_tool_use,
-            };
-            let provider = LuaProvider {
-                metadata,
-                models,
-                preserves_thinking,
-                host: host.upgrade()?,
-                sink: sink.clone(),
-                handler_key: Arc::new(key),
-            };
-            host::upgrade(&registered)?
-                .lock()
-                .map_err(|_| mlua::Error::external("plugin providers registry poisoned"))?
-                .push(Arc::new(provider));
+    let mut reg = lock(registry);
+    reg.entry(Capability::Provider)
+        .or_default()
+        .push(Box::new(move |lua: &Lua, pkage: &Table| {
+            let weak_host = host.clone();
+            let sink = sink.clone();
+            let registered = registered.clone();
+            pkage.set(
+                "register_provider",
+                lua.create_function(move |lua, spec: Table| {
+                    let id: String = spec.get("id")?;
+                    let display_name: Option<String> = spec.get("display_name").ok();
+                    let supports_caching: bool = spec.get("supports_caching").unwrap_or(false);
+                    let supports_thinking: bool = spec.get("supports_thinking").unwrap_or(false);
+                    let supports_tool_use: bool = spec.get("supports_tool_use").unwrap_or(true);
+                    let preserves_thinking: bool = spec.get("preserves_thinking").unwrap_or(false);
+                    let stream: Function = spec.get("stream")?;
+                    let models = parse_models(&spec)?;
+                    let key = lua.create_registry_value(stream)?;
+                    let metadata = ProviderMetadata {
+                        id: id.clone(),
+                        display_name: display_name.unwrap_or_else(|| id.clone()),
+                        supports_caching,
+                        supports_thinking,
+                        supports_tool_use,
+                    };
+                    let provider = LuaProvider {
+                        metadata,
+                        models,
+                        preserves_thinking,
+                        host: weak_host.upgrade()?,
+                        sink: sink.clone(),
+                        handler_key: Arc::new(key),
+                    };
+                    host::upgrade(&registered)?
+                        .lock()
+                        .map_err(|_| mlua::Error::external("plugin providers registry poisoned"))?
+                        .push(Arc::new(provider));
+                    Ok(())
+                })?,
+            )?;
             Ok(())
-        })?,
-    )?;
-    Ok(())
+        }));
 }
 
 #[cfg(test)]
@@ -313,10 +327,29 @@ mod tests {
 
     use crate::PluginRuntime;
 
+    /// A runtime whose plugin `t` holds `provider`, for exercising the
+    /// granted registration path.
+    fn granted_runtime() -> PluginRuntime {
+        let mut caps = std::collections::BTreeMap::new();
+        caps.insert("t".to_owned(), vec!["provider".to_owned()]);
+        PluginRuntime::builder().capabilities(caps).build().unwrap()
+    }
+
+    fn eval_provider(
+        rt: &PluginRuntime,
+        body: &str,
+    ) -> Result<mlua::Value, crate::error::PluginError> {
+        rt.eval_plugin(
+            "t",
+            &format!("kage.request_capabilities({{'provider'}}); {body}"),
+        )
+    }
+
     #[test]
     fn lua_provider_streams_table_of_events() {
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval(
+        let rt = granted_runtime();
+        eval_provider(
+            &rt,
             r"
             kage.register_provider({
                 id = 'fake',
@@ -374,8 +407,8 @@ mod tests {
 
     #[test]
     fn lua_provider_never_sees_thinking_durations() {
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval(
+        let rt = granted_runtime();
+        eval_provider(&rt,
             r"
             kage.register_provider({
                 id = 'peek',
@@ -417,8 +450,9 @@ mod tests {
 
     #[test]
     fn lua_provider_streams_iterator_function() {
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval(
+        let rt = granted_runtime();
+        eval_provider(
+            &rt,
             r"
             kage.register_provider({
                 id = 'iter',
@@ -450,8 +484,9 @@ mod tests {
 
     #[test]
     fn lua_provider_streams_via_emit_callback() {
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval(
+        let rt = granted_runtime();
+        eval_provider(
+            &rt,
             r"
             kage.register_provider({
                 id = 'emitter',
@@ -492,8 +527,9 @@ mod tests {
     fn lua_provider_stream_observes_cancel_while_handler_runs() {
         use kage_provider::ProviderError;
 
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval(
+        let rt = granted_runtime();
+        eval_provider(
+            &rt,
             r"
             kage.register_provider({
                 id = 'hang',
@@ -526,8 +562,9 @@ mod tests {
 
     #[test]
     fn malformed_event_propagates_as_provider_error() {
-        let rt = PluginRuntime::new().unwrap();
-        rt.eval(
+        let rt = granted_runtime();
+        eval_provider(
+            &rt,
             r"
             kage.register_provider({
                 id = 'bad',

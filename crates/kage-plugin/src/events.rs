@@ -90,8 +90,8 @@ use mlua::{Lua, Table, Value};
 
 use crate::api::{LogLevel, SharedHostLog, json_to_lua, lua_to_json};
 use crate::autocmd;
+use crate::capabilities::Capability;
 use crate::error::PluginError;
-
 /// Every event name `kage.on` and `kage.api.autocmd_create` recognise, with its dispatch kind and
 /// a one-line summary. The single source of truth for runtime
 /// introspection (`:events`) so the catalog cannot drift from what
@@ -198,6 +198,26 @@ pub const KNOWN_EVENTS: &[(&str, &str, &str)] = &[
     ),
     ("session_before_fork", "veto", "veto/patch a fork point"),
 ];
+
+/// The capability an event requires when its payload carries
+/// conversation or prompt text: the transforms, the system-prompt
+/// notification, and every stream event a plugin could reassemble a
+/// transcript from. Everything else is base surface. `tool_call`/
+/// `tool_result` intentionally stay base (documented residual).
+pub(crate) fn required_capability(event: &str) -> Option<Capability> {
+    match event {
+        "transform_context"
+        | "before_provider_request"
+        | "compact_prepare"
+        | "before_agent_start"
+        | "message_start"
+        | "message_update"
+        | "message_end"
+        | "after_provider_response"
+        | "user" => Some(Capability::Context),
+        _ => None,
+    }
+}
 
 /// Fire every handler subscribed to `event_name`, passing `payload`
 /// converted to a Lua table.

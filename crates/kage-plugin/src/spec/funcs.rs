@@ -104,6 +104,8 @@ pub(super) const FUNCS: &[Func] = &[
             "A copy of the host-supplied configuration table. Mutating",
             "the returned table does not propagate back to the host or to",
             "disk; use `kage.store` for state that must persist.",
+            "`system_prompt` is conversation text: present only with the",
+            "`context` capability, absent otherwise.",
         ],
         path: "kage.config",
         since: 1,
@@ -600,6 +602,9 @@ pub(super) const FUNCS: &[Func] = &[
             "Returns `off`, which removes this subscription. Calling",
             "it again, or from inside a handler, is safe. An unknown",
             "event name logs one warning and subscribes to nothing.",
+            "The nine text-bearing events (see `kage.Event`) require",
+            "the `context` capability; registering one without the",
+            "grant logs a warning and subscribes to nothing.",
             "An alias over `kage.api.autocmd_create`.",
         ],
         path: "kage.on",
@@ -617,20 +622,6 @@ pub(super) const FUNCS: &[Func] = &[
             },
         ],
         ret: Some("fun()"),
-    },
-    Func {
-        doc: &[
-            "Register a new LLM provider implementation. Advanced; see",
-            "the example plugins for a realistic shape.",
-        ],
-        path: "kage.register_provider",
-        since: 1,
-        params: &[Field {
-            name: "spec",
-            ty: "kage.ProviderSpec",
-            doc: "",
-        }],
-        ret: None,
     },
     Func {
         doc: &["Sessions the host knows about: `{ id, value }` each."],
@@ -654,27 +645,6 @@ pub(super) const FUNCS: &[Func] = &[
         ret: None,
     },
     Func {
-        doc: &[
-            "Append a custom entry to the session JSONL. `kind` is a",
-            "namespaced string; `data` is any table (defaults to {}).",
-        ],
-        path: "kage.session.append_entry",
-        since: 1,
-        params: &[
-            Field {
-                name: "kind",
-                ty: "string",
-                doc: "",
-            },
-            Field {
-                name: "data?",
-                ty: "table",
-                doc: "",
-            },
-        ],
-        ret: None,
-    },
-    Func {
         doc: &["Write a label pointing at entry id `anchor`. Nil clears."],
         path: "kage.session.set_label",
         since: 1,
@@ -687,24 +657,6 @@ pub(super) const FUNCS: &[Func] = &[
             Field {
                 name: "label?",
                 ty: "string",
-                doc: "",
-            },
-        ],
-        ret: None,
-    },
-    Func {
-        doc: &["Queue a synthetic message delivered between turns."],
-        path: "kage.send_message",
-        since: 1,
-        params: &[
-            Field {
-                name: "text",
-                ty: "string",
-                doc: "",
-            },
-            Field {
-                name: "opts?",
-                ty: "kage.SendOpts",
                 doc: "",
             },
         ],
@@ -747,24 +699,6 @@ pub(super) const FUNCS: &[Func] = &[
             doc: "",
         }],
         ret: Some("string"),
-    },
-    Func {
-        doc: &["Write a file under the workdir. Same restriction as read."],
-        path: "kage.fs.write",
-        since: 1,
-        params: &[
-            Field {
-                name: "path",
-                ty: "string",
-                doc: "",
-            },
-            Field {
-                name: "content",
-                ty: "string",
-                doc: "",
-            },
-        ],
-        ret: None,
     },
     Func {
         doc: &[

@@ -43,9 +43,28 @@ fn make_runtime(workdir: PathBuf) -> (std::sync::Arc<std::sync::Mutex<Recording>
         .sink(sink)
         .config(json!({"name": "kage", "model": "anthropic:test"}))
         .workdir(workdir)
+        .capabilities(capabilities_all())
         .build()
         .unwrap();
     (rec, rt)
+}
+
+/// Every capability, for tests that exercise the fixture through the
+/// granted per-plugin path.
+fn capabilities_all() -> std::collections::BTreeMap<String, Vec<String>> {
+    std::collections::BTreeMap::from([(
+        "fixture".to_owned(),
+        vec![
+            "session_write".to_owned(),
+            "exec".to_owned(),
+            "env".to_owned(),
+            "net".to_owned(),
+            "crypto".to_owned(),
+            "context".to_owned(),
+            "provider".to_owned(),
+            "fs_write".to_owned(),
+        ],
+    )])
 }
 
 const FIXTURE: &str = r"
@@ -103,11 +122,15 @@ kage.log('info', 'fixture done')
 fn fixture_plugin_drives_every_surface() {
     let dir = tempfile::tempdir().unwrap();
     let (rec, rt) = make_runtime(dir.path().to_path_buf());
-    rt.eval(FIXTURE).expect("fixture loads cleanly");
+    rt.eval_plugin(
+        "fixture",
+        &format!("kage.request_capabilities({{ 'context', 'provider', 'fs_write' }})\n{FIXTURE}"),
+    )
+    .expect("fixture loads cleanly");
 
     // kage.config visible from Lua.
     let captured: String = rt
-        .eval("return captured_model")
+        .eval_plugin("fixture", "return captured_model")
         .unwrap()
         .as_string()
         .unwrap()
@@ -121,7 +144,11 @@ fn fixture_plugin_drives_every_surface() {
         .unwrap();
     rt.dispatch_event("message_end", &json!({"usage": {"output": 8}}))
         .unwrap();
-    let counter: i64 = rt.eval("return counter").unwrap().as_integer().unwrap();
+    let counter: i64 = rt
+        .eval_plugin("fixture", "return counter")
+        .unwrap()
+        .as_integer()
+        .unwrap();
     assert_eq!(counter, 20);
 
     // register_tool: invoke through the Tool trait the host would route into.
@@ -169,7 +196,7 @@ fn fixture_plugin_drives_every_surface() {
     let on_disk = std::fs::read_to_string(dir.path().join("round-trip.txt")).unwrap();
     assert_eq!(on_disk, "hello from lua");
     let fs_value: String = rt
-        .eval("return fs_round_trip")
+        .eval_plugin("fixture", "return fs_round_trip")
         .unwrap()
         .as_string()
         .unwrap()
@@ -180,7 +207,7 @@ fn fixture_plugin_drives_every_surface() {
 
     // http rejected loopback URL.
     let blocked: bool = rt
-        .eval("return http_blocked")
+        .eval_plugin("fixture", "return http_blocked")
         .unwrap()
         .as_boolean()
         .unwrap();

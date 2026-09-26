@@ -8,9 +8,19 @@ runtime. Copy whichever fits and tweak.
 
 `plugins/examples/tps.lua` reports the throughput of each run as a
 toast. It adds up the output tokens of every `message_end` payload and
-divides by the run's wall-clock time when `agent_end` fires:
+divides by the run's wall-clock time when `agent_end` fires.
+`message_end` carries message text, so it needs the `context`
+[capability](/plugins/capabilities#context); the plugin requests it at
+load and you grant it with:
+
+```toml
+[plugins.capabilities]
+tps = ["context"]
+```
 
 ```lua
+kage.request_capabilities({ "context" })
+
 local started_at, total_output = nil, 0
 
 kage.on("agent_start", function()
@@ -85,11 +95,14 @@ It also registers `/confirm-delete` (`kage.ui.confirm`), `/ask-name`
 ## throughput in the footer
 
 The same readout as a footer component instead of a toast. The
-component recomputes only when `message_end` fires, so it costs
+component recomputes only when `message_end` fires (a `context`
+event, so the same grant applies), so it costs
 nothing between turns. Autocmds fire in creation order, so the `kage.on`
 handler updates `last` before the component reads it:
 
 ```lua
+kage.request_capabilities({ "context" })
+
 local start_ms, last = nil, ""
 
 kage.api.hl_set("TpsReadout", { link = "KageMuted" })

@@ -14,7 +14,13 @@ fn fresh_lua_with_kage() -> Lua {
 fn lua_with_kage(sink: SharedHostLog) -> Lua {
     let lua = Lua::new();
     api::install(&lua, sink.clone(), json!({})).unwrap();
-    crate::autocmd::install(&lua, sink, Arc::new(Mutex::new(None))).unwrap();
+    crate::autocmd::install(
+        &lua,
+        sink,
+        Arc::new(Mutex::new(None)),
+        Arc::new(std::collections::HashMap::new()),
+    )
+    .unwrap();
     crate::stdlib::install(&lua).unwrap();
     lua
 }

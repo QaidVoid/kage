@@ -98,7 +98,10 @@ equivalent Lua value.
 ### `kage.config()`
 
 Return a copy of the host-supplied table `{ model, cwd, system_prompt }`.
-Changing the copy does not reach the host.
+Changing the copy does not reach the host. `system_prompt` is
+conversation text, so it is present only for a plugin granted the
+`context` [capability](/plugins/capabilities#context); without the
+grant the key is absent.
 
 ### `kage.plugin_config()`
 
@@ -612,6 +615,14 @@ one warning and subscribes to nothing. `kage.on` is an alias over
 [`kage.api.autocmd_create`](#autocmds): the handler receives the
 payload alone.
 
+Nine events carry conversation text (`transform_context`,
+`before_provider_request`, `compact_prepare`, `before_agent_start`,
+`message_start`, `message_update`, `message_end`,
+`after_provider_response` and `user`) and need the `context`
+[capability](/plugins/capabilities#context). Registering one without
+the grant logs a warning naming it and subscribes to nothing. The
+rest of the table below is open to every plugin.
+
 The call returns an `off` function that removes this subscription.
 Calling `off` more than once does nothing. A handler may call `off`
 while it runs, for itself or another subscription, and the change
@@ -668,8 +679,11 @@ and once at the end of every load. `user` fires only through
 
 ### transform hooks
 
-These chain: each handler receives the value the previous one
-produced and returns a replacement, or `nil` for "no change".
+All three need the `context`
+[capability](/plugins/capabilities#context): they read and rewrite
+conversation text. These chain: each handler receives the value the
+previous one produced and returns a replacement, or `nil` for "no
+change".
 
 - `transform_context`: the argument is the message-history array,
   and the loop replaces history with whatever the last handler
@@ -845,7 +859,9 @@ request between turns and writes a new session file.
 
 ### `kage.session.append_entry(kind: string, data?: table)`
 
-Append a custom entry to the session JSONL. `kind` is a non-empty
+Requires the `session_write`
+[capability](/plugins/capabilities#session_write). Append a custom
+entry to the session JSONL. `kind` is a non-empty
 namespaced string such as `"my-plugin:bookmark"`. `data` is any
 table, JSON-serialized (defaults to `{}`). The host writes it
 between turns. Pair it with a custom block renderer to display
@@ -861,7 +877,10 @@ conversation.
 
 ### `kage.send_message(text: string, opts?: table)`
 
-Queue a synthetic message the host delivers between turns:
+Requires the `session_write`
+[capability](/plugins/capabilities#session_write): a synthetic
+message is session content. Queue a synthetic message the host
+delivers between turns:
 
 ```lua
 kage.send_message("re-run the tests", { trigger_turn = true })
@@ -904,7 +923,10 @@ workdir tree raise an error.
 
 ### `kage.fs.write(path: string, contents: string)`
 
-Write a file under the workdir. Same path restriction as `read`.
+Requires the `fs_write`
+[capability](/plugins/capabilities#fs_write). Write a file under the
+workdir. Same path restriction as `read`, including through
+symlinks; missing parent directories are created.
 
 ## http
 
@@ -944,7 +966,9 @@ capability; `list_servers` needs no grant.
 
 ### `kage.register_provider(spec)`
 
-Register a new LLM provider implementation. This is advanced. A
+Requires the `provider`
+[capability](/plugins/capabilities#provider). Register a new LLM
+provider implementation. This is advanced. A
 streaming provider makes outbound requests via `kage.http.post_stream`,
 so it also needs the `net` capability. See `plugins/types/kage.lua` for the
 full spec shape.

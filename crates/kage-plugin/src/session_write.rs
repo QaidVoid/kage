@@ -30,6 +30,7 @@ use mlua::{Lua, Table, Value};
 
 use crate::api::json_to_lua;
 use crate::capabilities::{Capability, CapabilityRegistry};
+use crate::sessions::SharedSessionOps;
 
 /// Host-maintained snapshot of the current session's entries, each a
 /// JSON object the host defines (at least `{ id, kind, ts }`, plus
@@ -69,12 +70,15 @@ pub(crate) fn shared_switch_request() -> SharedSwitchRequest {
 ///
 /// The installer runs (via `request_capabilities`) against a granted
 /// plugin's `kage` proxy and shadows its `session` table with one
-/// that adds `entries`, `switch`, and `fork_to` while delegating
-/// everything else to the shared base `session` table.
+/// that adds `entries`, `append_entry`, `switch`, and `fork_to` while
+/// delegating everything else to the shared base `session` table. It
+/// also attaches `kage.send_message`: a synthetic user turn is
+/// session content.
 pub(crate) fn register(
     registry: &CapabilityRegistry,
     entries: SharedSessionEntries,
     switch: SharedSwitchRequest,
+    ops: SharedSessionOps,
 ) {
     let mut reg = lock(registry);
     reg.entry(Capability::SessionWrite)
@@ -146,6 +150,9 @@ pub(crate) fn register(
                     Ok(())
                 })?,
             )?;
+
+            let append_entry = crate::sessions::append_entry_function(lua, Arc::clone(&ops))?;
+            psession.set("append_entry", append_entry)?;
 
             pkage.set("session", psession)?;
             Ok(())

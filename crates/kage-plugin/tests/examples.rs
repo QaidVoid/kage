@@ -747,10 +747,20 @@ fn undo_with_only_one_exchange_has_nothing_to_undo() {
 }
 
 fn load_block_demo(sink: SharedHostLog) -> PluginRuntime {
-    let rt = PluginRuntime::builder().sink(sink).build().unwrap();
+    let mut caps = std::collections::BTreeMap::new();
+    caps.insert(
+        "block_renderer_demo".to_owned(),
+        vec!["session_write".to_owned()],
+    );
+    let rt = PluginRuntime::builder()
+        .sink(sink)
+        .capabilities(caps)
+        .build()
+        .unwrap();
     let source = std::fs::read_to_string(examples_dir().join("block_renderer_demo.lua"))
         .expect("read block_renderer_demo.lua");
-    rt.eval(&source).expect("block_renderer_demo.lua loads");
+    rt.eval_plugin("block_renderer_demo", &source)
+        .expect("block_renderer_demo.lua loads");
     rt
 }
 

@@ -13,6 +13,10 @@
 -- there is no separate "open_picker" API because ui.select already
 -- is the picker.
 
+-- Appending entries writes session content, so this capability is
+-- requested up front and must be granted in [plugins.capabilities].
+kage.request_capabilities({ 'session_write' })
+
 kage.register_block_renderer('demo:card', function(block)
     local title = block.text
     local w = math.max(20, math.min(block.width - 2, 60))

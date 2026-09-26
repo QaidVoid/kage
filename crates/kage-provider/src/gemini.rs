@@ -251,8 +251,82 @@ fn tool_spec_to_gemini(spec: &ToolSpec) -> Value {
     serde_json::json!({
         "name": spec.name,
         "description": spec.description,
-        "parameters": spec.schema,
+        "parameters": gemini_schema(&spec.schema),
     })
+}
+
+/// Map a draft-2020-12 JSON Schema (what `schemars` emits) into the
+/// `OpenAPI` subset Gemini's `functionDeclarations.parameters` accepts:
+/// `$ref`s inlined from `$defs`, draft keys dropped, `type` arrays
+/// (how `Option<T>` fields arrive) turned into Gemini's `nullable`
+/// flag, and `uint*` formats renamed to the ones Gemini knows.
+fn gemini_schema(schema: &Value) -> Value {
+    let defs = schema.get("$defs").cloned().unwrap_or(Value::Null);
+    convert_schema(schema, &defs, 0)
+}
+
+fn convert_schema(value: &Value, defs: &Value, depth: usize) -> Value {
+    // Cycle guard: schemars output for plain structs is acyclic, but a
+    // hand-written schema could reference itself.
+    if depth > 16 {
+        return value.clone();
+    }
+    match value {
+        Value::Object(map) => {
+            // Inline the referenced definition whole; it is converted
+            // like any other schema node.
+            if let Some(Value::String(reference)) = map.get("$ref")
+                && let Some(target) = defs.get(reference.trim_start_matches("#/$defs/"))
+            {
+                return convert_schema(target, defs, depth + 1);
+            }
+            let mut out = serde_json::Map::new();
+            for (key, val) in map {
+                match key.as_str() {
+                    "$schema" | "$ref" | "$defs" => {}
+                    "type" => match val {
+                        Value::String(t) => {
+                            out.insert("type".to_owned(), Value::String(t.clone()));
+                        }
+                        // `[T, "null"]` is OpenAPI's forbidden spelling
+                        // of an optional value; Gemini wants `nullable`.
+                        Value::Array(types) => {
+                            let base = types.iter().find(|t| t.as_str() != Some("null"));
+                            if let Some(base) = base {
+                                out.insert("type".to_owned(), base.clone());
+                                if types.contains(&Value::String("null".into())) {
+                                    out.insert("nullable".to_owned(), Value::Bool(true));
+                                }
+                            }
+                        }
+                        other => {
+                            out.insert("type".to_owned(), other.clone());
+                        }
+                    },
+                    "format" => {
+                        let name = val.as_str().unwrap_or_default();
+                        let mapped = match name {
+                            "uint32" => "int32",
+                            "uint64" => "int64",
+                            other => other,
+                        };
+                        out.insert("format".to_owned(), Value::String(mapped.to_owned()));
+                    }
+                    _ => {
+                        out.insert(key.clone(), convert_schema(val, defs, depth + 1));
+                    }
+                }
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| convert_schema(item, defs, depth + 1))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
 }
 
 fn internal_message_to_gemini(
@@ -635,6 +709,52 @@ mod tests {
         let decls = body["tools"][0]["functionDeclarations"].as_array().unwrap();
         assert_eq!(decls[0]["name"], "read");
         assert_eq!(decls[0]["parameters"]["type"], "object");
+    }
+
+    /// `edit`'s derived schema is the shape that used to go over the
+    /// wire raw: `$schema`, `$defs` + `$ref`, a `type` array from the
+    /// `Option<Vec<..>>` field, and a `uint32` format. Gemini's
+    /// `OpenAPI` subset rejects those.
+    #[test]
+    fn tool_schema_is_mapped_to_the_openapi_subset() {
+        let schema = serde_json::json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "$defs": {
+                "Range": {
+                    "type": "object",
+                    "properties": {
+                        "start": {"format": "uint32", "minimum": 0, "type": "integer"}
+                    }
+                }
+            },
+            "properties": {
+                "path": {"type": "string"},
+                "changes": {
+                    "type": ["array", "null"],
+                    "items": {"$ref": "#/$defs/Range"}
+                }
+            },
+            "required": ["path"],
+            "type": "object"
+        });
+        let mut req = StreamRequest::new("m", vec![user_msg("hi")]);
+        req.tools = vec![ToolSpec {
+            name: "edit".into(),
+            description: "edit a file".into(),
+            schema,
+        }];
+        let body = build_request_body(&req);
+        let params = &body["tools"][0]["functionDeclarations"][0]["parameters"];
+        let text = params.to_string();
+        assert!(!text.contains("$schema"), "{text}");
+        assert!(!text.contains("$ref"), "{text}");
+        assert!(!text.contains("$defs"), "{text}");
+        let changes = &params["properties"]["changes"];
+        assert_eq!(changes["type"], "array");
+        assert_eq!(changes["nullable"], true);
+        let start = &changes["items"]["properties"]["start"];
+        assert_eq!(start["format"], "int32");
+        assert_eq!(params["properties"]["path"]["type"], "string");
     }
 
     #[test]

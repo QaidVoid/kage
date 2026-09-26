@@ -16,7 +16,13 @@ use schemars::JsonSchema;
 #[must_use]
 pub fn schema_for<T: JsonSchema>() -> serde_json::Value {
     let schema = schemars::schema_for!(T);
-    serde_json::to_value(schema).expect("derived schema is always valid JSON")
+    let mut value = serde_json::to_value(schema).expect("derived schema is always valid JSON");
+    // The draft marker is tooling metadata; Gemini's OpenAPI subset
+    // rejects it and no provider can use it.
+    if let Some(object) = value.as_object_mut() {
+        object.remove("$schema");
+    }
+    value
 }
 
 #[cfg(test)]
@@ -30,6 +36,20 @@ mod tests {
         path: String,
         start_line: Option<u32>,
         end_line: Option<u32>,
+    }
+
+    /// The draft key is pure tooling metadata and is stripped before
+    /// any provider sees the schema.
+    #[test]
+    fn schema_carries_no_draft_marker() {
+        #[derive(JsonSchema)]
+        #[expect(dead_code, reason = "the fields only feed the derived schema")]
+        struct Probe {
+            path: String,
+        }
+        let s = schema_for::<Probe>();
+        assert!(s.get("$schema").is_none(), "{s}");
+        assert_eq!(s["type"], "object");
     }
 
     #[test]

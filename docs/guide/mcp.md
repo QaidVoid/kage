@@ -360,8 +360,10 @@ restart.
 - A configured `Authorization` header wins. kage sends a stored token
   only when the server config has none.
 - A token that expires within a minute is refreshed before the request.
-  A `401` triggers one refresh and one retry. When the refresh fails,
-  the server shows as `needs login`.
+  A `401` triggers one refresh and one retry. Concurrent requests that
+  raced on the same stale token share the winner's refresh instead of
+  rotating once each, which matters with rotating refresh tokens. When
+  the refresh fails, the server shows as `needs login`.
 - Tokens, codes and verifiers never appear in notices, errors, session
   files or `Debug` output. HTTP redirects never carry the
   `Authorization` header.

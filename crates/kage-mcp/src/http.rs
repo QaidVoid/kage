@@ -361,9 +361,9 @@ fn post_and_forward(
     let url = &endpoint.url;
     let bearer = endpoint.bearer();
     let mut sent = send_post(endpoint, shared, bearer.as_deref(), body);
-    if bearer.is_some()
+    if let (Some(token), Some(source)) = (bearer.as_deref(), endpoint.tokens.as_ref())
         && matches!(sent, Err(ureq::Error::StatusCode(401)))
-        && let Some(fresh) = endpoint.tokens.as_ref().and_then(|t| t.rejected(url))
+        && let Some(fresh) = source.rejected(url, token)
     {
         sent = send_post(endpoint, shared, Some(&fresh), body);
     }

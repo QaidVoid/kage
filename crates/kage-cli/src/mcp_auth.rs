@@ -42,8 +42,10 @@ const REFRESH_SLACK: chrono::Duration = chrono::Duration::seconds(60);
 /// it waits.
 const POLL: Duration = Duration::from_millis(50);
 
-/// Serializes token refreshes in this process. Another kage process can
-/// still race, which the re-read before each refresh narrows.
+/// Serializes token refreshes in this process. A refresh only fires
+/// when the stored access token is still the one that was rejected, so
+/// a 401 storm and a second kage process collapse into one rotation
+/// instead of one per request.
 static REFRESH: Mutex<()> = Mutex::new(());
 
 /// The stored tokens of every logged-in MCP server.
@@ -170,9 +172,16 @@ impl TokenSource for McpTokens {
         })
     }
 
-    fn rejected(&self, url: &str) -> Option<String> {
+    fn rejected(&self, url: &str, token: &str) -> Option<String> {
         let _guard = lock(&REFRESH);
         let (key, entry) = self.entry(url)?;
+        // Single-flight: while the rejected token was in flight,
+        // another request or process may have rotated already. The
+        // stored token then differs from ours, and refreshing again
+        // would burn a rotation the server may read as token theft.
+        if entry.token.access_token != token {
+            return Some(entry.token.access_token);
+        }
         self.refresh(&key, &entry)
     }
 }
@@ -722,10 +731,46 @@ mod tests {
 
         assert_eq!(tokens.bearer(&key).as_deref(), Some("access-old"));
         assert!(server.tokens_issued().is_empty());
-        assert_eq!(tokens.rejected(&key).as_deref(), Some("access-1"));
+        assert_eq!(
+            tokens.rejected(&key, "access-old").as_deref(),
+            Some("access-1")
+        );
         assert_eq!(server.tokens_issued().len(), 1);
         assert_eq!(tokens.bearer(&key).as_deref(), Some("access-1"));
-        assert_eq!(tokens.rejected("https://unknown.example.com/mcp"), None);
+        assert_eq!(
+            tokens.rejected("https://unknown.example.com/mcp", "x"),
+            None
+        );
+    }
+
+    #[test]
+    fn parallel_rejections_of_one_stale_token_refresh_once() {
+        let server = FakeServer::start();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mcp-auth.json");
+        let key = format!("{}/mcp", server.base);
+        store_with(&path, &[(&key, entry(&server.base, 3600))]);
+        let tokens = McpTokens::new(path);
+
+        // Two workers sent `access-old` and both saw a 401. The first
+        // rejection rotates; the second must hand back the winner's
+        // token instead of rotating again.
+        assert_eq!(
+            tokens.rejected(&key, "access-old").as_deref(),
+            Some("access-1")
+        );
+        assert_eq!(
+            tokens.rejected(&key, "access-old").as_deref(),
+            Some("access-1")
+        );
+        assert_eq!(server.tokens_issued().len(), 1);
+
+        // A rejection of the current token is a real 401 and rotates.
+        assert_eq!(
+            tokens.rejected(&key, "access-1").as_deref(),
+            Some("access-2")
+        );
+        assert_eq!(server.tokens_issued().len(), 2);
     }
 
     #[cfg(unix)]

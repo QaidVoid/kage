@@ -62,9 +62,13 @@ const REDACTED: &str = "***";
 pub trait TokenSource: Send + Sync {
     /// Token to send to `url`, refreshed first when it expires soon.
     fn bearer(&self, url: &str) -> Option<String>;
-    /// `url` rejected the last token. Refresh now, or `None` when the
-    /// user has to log in again.
-    fn rejected(&self, url: &str) -> Option<String>;
+    /// `url` rejected `token`. Refresh and return the new token,
+    /// unless the stored token already differs from `token` - another
+    /// request or process refreshed while ours was in flight - in
+    /// which case return that one, so one rejection rotates once no
+    /// matter how many requests raced. `None` when the user has to
+    /// log in again.
+    fn rejected(&self, url: &str, token: &str) -> Option<String>;
 }
 
 /// A failed discovery, registration, redirect or token request. The

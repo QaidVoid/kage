@@ -260,7 +260,7 @@ impl TokenSource for StaticTokens {
         Some(self.bearer.lock().unwrap().clone()).filter(|token| !token.is_empty())
     }
 
-    fn rejected(&self, _url: &str) -> Option<String> {
+    fn rejected(&self, _url: &str, _token: &str) -> Option<String> {
         self.rejected.fetch_add(1, Ordering::SeqCst);
         let fresh = self.fresh.clone()?;
         fresh.clone_into(&mut self.bearer.lock().unwrap());

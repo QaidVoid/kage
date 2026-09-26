@@ -111,6 +111,13 @@ impl Tool for EditTool {
         let path = cx.resolve_path(Path::new(&input.path))?;
         let original = std::fs::read_to_string(&path).map_err(ToolError::io_at("read", &path))?;
 
+        // Edits are applied in normalized LF space and the file's own
+        // line ending is re-applied afterwards, so a multi-line
+        // `old_str` matches a CRLF file and a line-range splice never
+        // produces mixed endings.
+        let eol = Eol::detect(&original);
+        let normalized = eol.normalize(&original);
+
         let changes = match collect_changes(&input) {
             Ok(c) => c,
             Err(msg) => return Ok(error(&input.path, msg)),
@@ -124,7 +131,7 @@ impl Tool for EditTool {
 
         let mut splices = Vec::new();
         for change in &changes {
-            match resolve_change(change, &original, &input.path) {
+            match resolve_change(change, &normalized, &input.path) {
                 Ok(mut spans) => splices.append(&mut spans),
                 Err(msg) => return Ok(error(&input.path, msg)),
             }
@@ -138,7 +145,7 @@ impl Tool for EditTool {
             ));
         }
 
-        let new_content = apply_splices(&original, &splices);
+        let new_content = eol.restore(&apply_splices(&normalized, &splices));
         atomic_write(&path, new_content.as_bytes()).map_err(ToolError::io_at("write", &path))?;
 
         let diff = unified_diff(&original, &new_content, &input.path);
@@ -155,6 +162,49 @@ impl Tool for EditTool {
             terminate: false,
         })
     }
+}
+
+/// The line ending a file is written with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Eol {
+    /// Bare `\n` (also the answer for files with no line endings).
+    Lf,
+    /// `\r\n`, the dominant ending when it outnumbers bare `\n`.
+    Crlf,
+}
+
+impl Eol {
+    /// Detect `s`'s dominant convention: CRLF only when more lines
+    /// end `\r\n` than with a bare `\n`.
+    fn detect(s: &str) -> Self {
+        let crlf = s.matches("\r\n").count();
+        let bare = s.matches('\n').count() - crlf;
+        if crlf > bare { Self::Crlf } else { Self::Lf }
+    }
+
+    /// Fold every CRLF down to LF so matching and splicing work in
+    /// one canonical form.
+    fn normalize(self, s: &str) -> String {
+        match self {
+            Self::Lf => s.to_owned(),
+            Self::Crlf => fold_crlf(s),
+        }
+    }
+
+    /// Re-apply the file's ending to the edited text. Inputs were
+    /// normalized to LF first, so no `\r` doubles up.
+    fn restore(self, s: &str) -> String {
+        match self {
+            Self::Lf => s.to_owned(),
+            Self::Crlf => s.replace('\n', "\r\n"),
+        }
+    }
+}
+
+/// Fold every CRLF in `s` down to LF, the canonical form edits work
+/// in. Applied to the file and to every input string.
+fn fold_crlf(s: &str) -> String {
+    s.replace("\r\n", "\n")
 }
 
 /// Build a normalized list of [`EditChange`]s out of the input's two
@@ -234,7 +284,11 @@ fn resolve_substring(
     if old_str.is_empty() {
         return Err("old_str must not be empty".into());
     }
-    let positions: Vec<usize> = original.match_indices(old_str).map(|(i, _)| i).collect();
+    // CRLF inside the needle is folded so a Windows-copied `old_str`
+    // matches an LF file and vice versa; lengths below must use the
+    // normalized needle.
+    let old_str = fold_crlf(old_str);
+    let positions: Vec<usize> = original.match_indices(&old_str).map(|(i, _)| i).collect();
     if positions.is_empty() {
         return Err(format!("`old_str` not found in {path}"));
     }
@@ -250,7 +304,7 @@ fn resolve_substring(
         .map(|start| Splice {
             start,
             end: start + old_str.len(),
-            replacement: new_str.to_owned(),
+            replacement: fold_crlf(new_str),
         })
         .collect())
 }
@@ -300,7 +354,7 @@ fn resolve_line_range(
     Ok(Splice {
         start: start_byte,
         end: end_byte,
-        replacement: text.to_owned(),
+        replacement: fold_crlf(text),
     })
 }
 
@@ -382,6 +436,48 @@ mod tests {
         let diff = out.structured.unwrap()["diff"].as_str().unwrap().to_owned();
         assert!(diff.contains("-hello world"));
         assert!(diff.contains("+hello kage"));
+    }
+
+    /// The headline CRLF failure: a multi-line `old_str` written with
+    /// LF can never byte-match a CRLF file. The ending must be folded
+    /// for matching and re-applied on write.
+    #[test]
+    fn crlf_file_matches_multiline_old_str_and_stays_crlf() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("f.txt"), "first\r\nsecond\r\nthird\r\n").unwrap();
+        let out = run(
+            dir.path(),
+            serde_json::json!({
+                "path": "f.txt",
+                "old_str": "second\nthird",
+                "new_str": "two\nthree"
+            }),
+        )
+        .unwrap();
+        assert!(!out.is_error, "got {out:?}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "first\r\ntwo\r\nthree\r\n"
+        );
+    }
+
+    #[test]
+    fn line_range_splice_on_crlf_file_adopts_crlf() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("f.txt"), "a\r\nb\r\nc\r\n").unwrap();
+        let out = run(
+            dir.path(),
+            serde_json::json!({
+                "path": "f.txt",
+                "changes": [{"range": {"start": 2, "end": 2}, "text": "B\n"}]
+            }),
+        )
+        .unwrap();
+        assert!(!out.is_error, "got {out:?}");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "a\r\nB\r\nc\r\n"
+        );
     }
 
     #[test]

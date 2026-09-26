@@ -168,7 +168,7 @@ pub(crate) enum Command {
         non_interactive: bool,
     },
     /// Diagnose the kage install: parses config, lists available
-    /// providers, validates plugins, reports the active sandbox.
+    /// providers, validates plugins, probes each MCP server.
     /// Exit code is `0` when no check fails, `1` otherwise.
     Doctor,
     /// Render the `kage(1)` manpage from the clap CLI definition and

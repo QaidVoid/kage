@@ -27,8 +27,7 @@ pub mod trust;
 pub use agents::{AgentDef, AgentDefs, AgentError, AgentSource, load_agent_file, load_agents_dir};
 pub use cancel::{CancelFlag, CancelWatch};
 pub use config::{
-    AgentsConfig, Config, KeybindingsConfig, PluginsConfig, ProviderConfig, SandboxBackend,
-    SandboxConfig, UiConfig,
+    AgentsConfig, Config, KeybindingsConfig, PluginsConfig, ProviderConfig, UiConfig,
 };
 pub use error::{Error, Result};
 pub use event::{

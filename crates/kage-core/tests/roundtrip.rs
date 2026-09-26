@@ -2,8 +2,8 @@
 //! losslessly through JSON.
 
 use kage_core::{
-    Config, Content, ImageSource, LoopError, LoopEvent, Message, MessageId, Risk, Role,
-    SandboxBackend, StopReason, TokenUsage, ToolCallId, ToolOutput,
+    Config, Content, ImageSource, LoopError, LoopEvent, Message, MessageId, Risk, Role, StopReason,
+    TokenUsage, ToolCallId, ToolOutput,
 };
 
 fn roundtrip<T>(value: &T)
@@ -143,11 +143,6 @@ fn all_loop_errors_roundtrip() {
     for err in errors {
         roundtrip(&err);
     }
-}
-
-#[test]
-fn sandbox_backend_roundtrips() {
-    roundtrip(&SandboxBackend::Local);
 }
 
 #[test]

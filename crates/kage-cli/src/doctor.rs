@@ -2,7 +2,7 @@
 //!
 //! Lists the four directories kage resolves (config, data, state,
 //! cache), then walks a fixed checklist (config, credentials,
-//! providers, plugins, sandbox) and prints one row per item with
+//! providers, plugins, mcp) and prints one row per item with
 //! status + body. Exit code is `0` when every check is OK or WARN; `1`
 //! if any check FAILs.
 
@@ -111,7 +111,6 @@ fn collect_checks() -> Vec<Check> {
         check_auth(),
         check_providers(),
         check_plugins(&workdir),
-        check_sandbox(&workdir),
         check_mcp(&workdir),
     ]
 }
@@ -451,45 +450,11 @@ fn check_plugins(workdir: &Path) -> Check {
     }
 }
 
-fn check_sandbox(workdir: &Path) -> Check {
-    let cfg = match Config::load_layered(workdir) {
-        Ok(c) => c,
-        Err(err) => {
-            return Check {
-                name: "sandbox",
-                status: Status::Fail,
-                body: format!("config unreadable: {err}"),
-                hint: None,
-            };
-        }
-    };
-    let status = if cfg.sandbox.suppress_warning {
-        Status::Ok
-    } else {
-        Status::Warn
-    };
-    let hint = (status == Status::Warn).then_some(
-        "set `sandbox.suppress_warning = true` in config.toml to silence this once acknowledged"
-            .to_owned(),
-    );
-    Check {
-        name: "sandbox",
-        status,
-        body: "backend=local (no isolation: tools run as you)".to_owned(),
-        hint,
-    }
-}
-
 /// Tests-only access to a single check helper. Keeps the
 /// public-from-tests surface minimal.
 #[cfg(test)]
 fn run_check_config(workdir: &Path) -> Check {
     check_config(workdir)
-}
-
-#[cfg(test)]
-fn run_check_sandbox(workdir: &Path) -> Check {
-    check_sandbox(workdir)
 }
 
 /// Drop-on-floor [`HostLog`] used while `check_plugins` evaluates Lua
@@ -588,14 +553,6 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_check_warns_when_local_and_warning_not_suppressed() {
-        let dir = tempfile::tempdir().unwrap();
-        let check = run_check_sandbox(dir.path());
-        assert_eq!(check.status, Status::Warn);
-        assert!(check.body.contains("local"));
-    }
-
-    #[test]
     fn providers_check_counts_a_keyless_custom_provider() {
         let config: Config = toml::from_str(
             "[providers.custom.fake]\nbase_url = \"http://127.0.0.1:1/v1\"\napi_key_env = \"\"\n\
@@ -605,32 +562,5 @@ mod tests {
         let check = providers_check(&config, &AuthStore::empty());
         assert_eq!(check.status, Status::Ok, "{}", check.body);
         assert!(check.body.contains("fake"), "{}", check.body);
-    }
-
-    #[test]
-    fn sandbox_check_fails_on_an_unbuilt_backend() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join(".kage")).unwrap();
-        fs::write(
-            dir.path().join(".kage").join("config.toml"),
-            "[sandbox]\nbackend = \"bubblewrap\"\n",
-        )
-        .unwrap();
-        let check = run_check_sandbox(dir.path());
-        assert_eq!(check.status, Status::Fail);
-        assert!(check.body.contains("sandbox.backend"), "{}", check.body);
-    }
-
-    #[test]
-    fn sandbox_check_is_ok_when_warning_is_suppressed() {
-        let dir = tempfile::tempdir().unwrap();
-        fs::create_dir_all(dir.path().join(".kage")).unwrap();
-        fs::write(
-            dir.path().join(".kage").join("config.toml"),
-            "[sandbox]\nbackend = \"local\"\nsuppress_warning = true\n",
-        )
-        .unwrap();
-        let check = run_check_sandbox(dir.path());
-        assert_eq!(check.status, Status::Ok);
     }
 }

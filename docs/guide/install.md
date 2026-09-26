@@ -60,7 +60,7 @@ kage init
 `kage doctor` checks the install end to end. It prints the config,
 data, state and cache directories it resolved, then checks the config
 files, saved credentials, usable providers (custom ones included),
-plugins, the sandbox and each MCP server. It exits non-zero if any
+plugins and each MCP server. It exits non-zero if any
 check fails:
 
 ```bash

@@ -54,12 +54,6 @@ editor = "modeless"
 # to a named subset; an empty list loads everything in the dir.
 enabled = []
 
-[sandbox]
-# "local" is the only backend: tools run as you, without isolation.
-# `kage doctor` warns about that until suppress_warning is true.
-backend = "local"
-suppress_warning = false
-
 [keybindings]
 # `bindings` maps a key to a command line, or to `action:<Name>` for a
 # built-in action. See the keybindings guide.
@@ -328,11 +322,6 @@ mod tests {
         assert!(cfg.ui.mouse);
         assert_eq!(cfg.ui.editor, kage_core::config::EditorMode::Modeless);
         assert!(cfg.plugins.enabled.is_empty());
-        assert!(matches!(
-            cfg.sandbox.backend,
-            kage_core::config::SandboxBackend::Local
-        ));
-        assert!(!cfg.sandbox.suppress_warning);
         assert!(cfg.keybindings.bindings.is_empty());
     }
 

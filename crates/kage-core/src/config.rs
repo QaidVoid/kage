@@ -30,8 +30,6 @@ pub struct Config {
     pub ui: UiConfig,
     /// Plugin loader settings.
     pub plugins: PluginsConfig,
-    /// Sandbox settings (backend selection, warnings, network).
-    pub sandbox: SandboxConfig,
     /// Keybinding overrides.
     pub keybindings: KeybindingsConfig,
     /// Agent-loop tuning (`[loop]`): compaction threshold, etc.
@@ -608,51 +606,6 @@ pub struct PluginsConfig {
     pub config: BTreeMap<String, serde_json::Value>,
 }
 
-/// Sandbox backend selection. Only `local` exists today; the
-/// `bubblewrap` and `sandbox-exec` names are refused at load because
-/// nothing implements them, so accepting them would promise isolation
-/// that does not happen.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", try_from = "String")]
-pub enum SandboxBackend {
-    /// No isolation: tools run as the current user.
-    #[default]
-    Local,
-}
-
-impl TryFrom<String> for SandboxBackend {
-    type Error = String;
-
-    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
-        match value.as_str() {
-            "local" => Ok(Self::Local),
-            "bubblewrap" | "sandbox-exec" => Err(format!(
-                "sandbox.backend = \"{value}\" is not implemented and would give no isolation; \
-                 remove the sandbox.backend key (only \"local\" is supported)"
-            )),
-            _ => Err(format!(
-                "unknown sandbox.backend \"{value}\"; remove the key (only \"local\" is supported)"
-            )),
-        }
-    }
-}
-
-/// Sandbox configuration.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct SandboxConfig {
-    /// Which sandbox implementation to use.
-    pub backend: SandboxBackend,
-    /// Silence the "no isolation" warning `kage doctor` gives for the
-    /// `local` backend.
-    pub suppress_warning: bool,
-    /// Hosts allowed for outbound network access from sandboxed tools.
-    /// Not enforced: no tool consults this list today. Plugin `kage.http`
-    /// egress is governed by the `net` capability and SSRF filtering,
-    /// not by this field.
-    pub network_allowlist: Vec<String>,
-}
-
 /// The `[keybindings]` table: chord overrides plus the leader key and
 /// the sequence timeout.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1067,34 +1020,17 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_backend_accepts_local() {
+    fn leftover_sandbox_table_still_parses() {
         let _globals = process_globals();
         figment::Jail::expect_with(|jail| {
-            jail.create_file("config.toml", "[sandbox]\nbackend = \"local\"\n")?;
-            let cfg = Config::load(jail.directory().join("config.toml").as_path()).unwrap();
-            assert_eq!(cfg.sandbox.backend, SandboxBackend::Local);
+            jail.create_file(
+                "config.toml",
+                "[sandbox]\nbackend = \"local\"\nnetwork_allowlist = [\"example.com\"]\n",
+            )?;
+            Config::load(jail.directory().join("config.toml").as_path())
+                .expect("removed [sandbox] keys must stay tolerated in existing configs");
             Ok(())
         });
-    }
-
-    #[test]
-    fn sandbox_backend_refuses_unbuilt_backends() {
-        let _globals = process_globals();
-        for backend in ["bubblewrap", "sandbox-exec"] {
-            figment::Jail::expect_with(|jail| {
-                jail.create_file(
-                    "config.toml",
-                    &format!("[sandbox]\nbackend = \"{backend}\"\n"),
-                )?;
-                let err = Config::load(jail.directory().join("config.toml").as_path())
-                    .expect_err("unbuilt backend must be refused")
-                    .to_string();
-                assert!(err.contains("sandbox.backend"), "{err}");
-                assert!(err.contains("remove"), "{err}");
-                assert!(err.contains(backend), "{err}");
-                Ok(())
-            });
-        }
     }
 
     const HAND_WRITTEN: &str = r#"# my kage config

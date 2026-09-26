@@ -50,14 +50,6 @@ transcript_on_exit = "full"
 # if non-empty, only these plugin file stems load.
 enabled = []
 
-[sandbox]
-# "local" is the only backend: tools run as you, without isolation.
-# any other value, such as "bubblewrap" or "sandbox-exec", is a
-# config error that names this key. remove the key to fix it.
-backend = "local"
-# silence the "no isolation" warning that kage doctor gives.
-suppress_warning = false
-
 [keybindings]
 # the key <leader> expands to in bindings: one key, default a backslash.
 # leader = "<C-x>"

@@ -514,6 +514,13 @@ impl GeminiStream {
         if let Some(v) = usage.get("candidatesTokenCount").and_then(Value::as_u64) {
             self.usage.output = v;
         }
+        // Gemini 2.5+ reports thinking tokens separately and excludes
+        // them from `candidatesTokenCount`; every other provider counts
+        // them in the output total, so fold them in for consistent
+        // cost and context accounting.
+        if let Some(v) = usage.get("thoughtsTokenCount").and_then(Value::as_u64) {
+            self.usage.output = self.usage.output.saturating_add(v);
+        }
     }
 
     fn emit_message_end(&mut self) {
@@ -867,6 +874,20 @@ mod tests {
             assert_eq!(*stop_reason, StopReason::EndTurn);
             assert_eq!(usage.input, 5);
             assert_eq!(usage.output, 2);
+        } else {
+            panic!("expected MessageEnd");
+        }
+    }
+
+    #[test]
+    fn usage_folds_thinking_tokens_into_output() {
+        // Gemini 2.5+ excludes thinking from `candidatesTokenCount`;
+        // every other provider counts thinking in the output total.
+        let bytes: &[u8] = b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}],\"role\":\"model\"},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":2,\"thoughtsTokenCount\":4}}\n\n";
+        let events = collect_ok(stream_from_bytes(bytes));
+        if let Some(ProviderEvent::MessageEnd { usage, .. }) = events.last() {
+            assert_eq!(usage.input, 5);
+            assert_eq!(usage.output, 6);
         } else {
             panic!("expected MessageEnd");
         }

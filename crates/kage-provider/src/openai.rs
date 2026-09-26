@@ -699,6 +699,14 @@ impl OpenAiStream {
         if let Some(v) = usage.get("completion_tokens").and_then(Value::as_u64) {
             self.usage.output = v;
         }
+        // Same field the Responses provider maps; without it, cached
+        // turns are cost-accounted as full-price input.
+        if let Some(v) = usage
+            .pointer("/prompt_tokens_details/cached_tokens")
+            .and_then(Value::as_u64)
+        {
+            self.usage.cache_read = v;
+        }
     }
 }
 
@@ -941,6 +949,21 @@ mod tests {
     fn eof_before_any_output_invents_nothing() {
         let mut events = stream_from_bytes(b"");
         assert!(events.next().is_none());
+    }
+
+    /// Same field the Responses provider maps; cached turns must not
+    /// be cost-accounted as full-price input.
+    #[test]
+    fn usage_maps_cached_prompt_tokens_to_cache_read() {
+        let bytes: &[u8] = b"data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":6}}}\n\ndata: [DONE]\n\n";
+        let events = collect_ok(stream_from_bytes(bytes));
+        if let ProviderEvent::MessageEnd { usage, .. } = events.last().unwrap() {
+            assert_eq!(usage.input, 10);
+            assert_eq!(usage.output, 2);
+            assert_eq!(usage.cache_read, 6);
+        } else {
+            panic!("expected MessageEnd");
+        }
     }
 
     #[test]

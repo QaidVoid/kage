@@ -418,6 +418,10 @@ struct StreamState {
     blocks: HashMap<usize, BlockBuilder>,
     usage: TokenUsage,
     stop_reason: StopReason,
+    /// Set once `message_start` arrived, so an EOF before it is a dead
+    /// stream (nothing synthesized) and an EOF after it is a stream
+    /// whose `message_stop` never made it (turn completed at EOF).
+    started: bool,
 }
 
 enum BlockBuilder {
@@ -453,6 +457,7 @@ impl AnthropicStream {
         };
         match name {
             "message_start" => {
+                self.state.started = true;
                 self.pending.push_back(Ok(ProviderEvent::MessageStart));
                 if let Some(usage) = value.pointer("/message/usage") {
                     self.absorb_usage(usage);
@@ -655,6 +660,17 @@ impl crate::sse::SseStreamCore for AnthropicStream {
     }
     fn process(&mut self, name: &str, data: &str) {
         self.process_event(name, data);
+    }
+    fn on_eof(&mut self) {
+        // The protocol ends with `message_stop`; a compatible upstream
+        // that drops the connection first still gets its turn completed
+        // with whatever arrived, instead of a full re-request.
+        if self.state.started {
+            self.pending.push_back(Ok(ProviderEvent::MessageEnd {
+                stop_reason: self.state.stop_reason,
+                usage: self.state.usage,
+            }));
+        }
     }
 }
 

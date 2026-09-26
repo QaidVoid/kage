@@ -446,6 +446,44 @@ fn stream_from_bytes(bytes: &'static [u8]) -> AnthropicStream {
     AnthropicStream::new(Box::new(std::io::Cursor::new(bytes)), CancelFlag::new())
 }
 
+/// The protocol ends with `message_stop`; a stream cut before it must
+/// still complete the turn with the stop reason and usage it absorbed.
+#[test]
+fn eof_without_message_stop_completes_the_turn() {
+    let bytes: &[u8] = b"event: message_start\n\
+         data: {\"type\":\"message_start\"}\n\n\
+         event: content_block_start\n\
+         data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+         event: content_block_delta\n\
+         data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n\
+         event: content_block_stop\n\
+         data: {\"type\":\"content_block_stop\",\"index\":0}\n\n\
+         event: message_delta\n\
+         data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\n";
+    let mut events = stream_from_bytes(bytes);
+    let mut text = String::new();
+    loop {
+        match events.next() {
+            Some(Ok(ProviderEvent::TextDelta { delta })) => text.push_str(&delta),
+            Some(Ok(ProviderEvent::MessageEnd { usage, stop_reason })) => {
+                assert_eq!(text, "hello");
+                assert_eq!(stop_reason, StopReason::EndTurn);
+                assert_eq!(usage.output, 7);
+                break;
+            }
+            Some(Ok(_)) => {}
+            other => panic!("unexpected event {other:?}"),
+        }
+    }
+    assert!(events.next().is_none());
+}
+
+#[test]
+fn eof_before_message_start_invents_nothing() {
+    let mut events = stream_from_bytes(b"");
+    assert!(events.next().is_none());
+}
+
 #[test]
 fn sse_parser_extracts_event_and_data() {
     let bytes: &[u8] = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";

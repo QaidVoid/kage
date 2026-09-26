@@ -721,6 +721,21 @@ impl crate::sse::SseStreamCore for OpenAiStream {
     fn process(&mut self, _name: &str, data: &str) {
         self.process_chunk(data);
     }
+    fn on_eof(&mut self) {
+        // A compatible upstream can end without `[DONE]`. The turn must
+        // still complete with what arrived - final usage included -
+        // instead of being thrown away and retried from scratch. The
+        // `started` guard keeps a stream that died before any output
+        // from inventing a turn.
+        if self.started {
+            self.flush_details();
+            self.flush_pending_tool_calls();
+            self.pending.push_back(Ok(ProviderEvent::MessageEnd {
+                stop_reason: self.finish_reason,
+                usage: self.usage,
+            }));
+        }
+    }
 }
 
 impl Iterator for OpenAiStream {
@@ -894,6 +909,38 @@ mod tests {
 
     fn stream_from_bytes(bytes: &'static [u8]) -> OpenAiStream {
         OpenAiStream::new(Box::new(std::io::Cursor::new(bytes)), CancelFlag::new())
+    }
+
+    /// A compatible upstream that ends without `[DONE]` must complete
+    /// the turn at EOF, delivering the usage the final chunk carried,
+    /// instead of leaving the loop to discard and re-request it.
+    #[test]
+    fn eof_without_done_completes_the_turn() {
+        let bytes: &[u8] = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+             data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5,\"finish_reason\":\"stop\"}}\n\n";
+        let mut events = stream_from_bytes(bytes);
+        let mut saw_text = false;
+        let (usage, reason) = loop {
+            match events.next() {
+                Some(Ok(ProviderEvent::MessageStart)) => {}
+                Some(Ok(ProviderEvent::TextDelta { .. })) => saw_text = true,
+                Some(Ok(ProviderEvent::MessageEnd { usage, stop_reason })) => {
+                    assert!(saw_text, "terminal frame without output");
+                    break (usage, stop_reason);
+                }
+                other => panic!("unexpected event {other:?}"),
+            }
+        };
+        assert_eq!(usage.input, 3);
+        assert_eq!(usage.output, 5);
+        assert_eq!(reason, StopReason::Other);
+        assert!(events.next().is_none());
+    }
+
+    #[test]
+    fn eof_before_any_output_invents_nothing() {
+        let mut events = stream_from_bytes(b"");
+        assert!(events.next().is_none());
     }
 
     #[test]

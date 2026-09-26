@@ -80,6 +80,11 @@ impl SessionWriter {
             lock,
         };
         writer.append(&SessionEntry::Header(header))?;
+        // Entries are fsynced per append, but the file's own directory
+        // entry needs a dir fsync or a power cut can take the whole
+        // newly created session with it.
+        #[cfg(unix)]
+        kage_core::fsutil::sync_parent_entry(&writer.path);
         Ok(writer)
     }
 

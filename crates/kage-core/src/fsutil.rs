@@ -77,7 +77,27 @@ fn fill_and_replace(
             fs::set_permissions(temp, meta.permissions())?;
         }
     }
-    fs::rename(temp, target)
+    fs::rename(temp, target)?;
+    #[cfg(unix)]
+    sync_parent_entry(target);
+    Ok(())
+}
+
+/// Best-effort durability for a file's directory entry: `fsync`s the
+/// parent directory so a just-completed create or rename survives a
+/// power cut. The file's own bytes are already synced by the caller;
+/// without this the rename itself can still vanish. Unix only (there
+/// is no std directory fsync on Windows) and errors are swallowed:
+/// the file is on disk either way, and a failed dir-sync must not
+/// report the whole write as failed.
+#[cfg(unix)]
+pub fn sync_parent_entry(target: &Path) {
+    let Some(parent) = target.parent() else {
+        return;
+    };
+    if let Ok(dir) = fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
 }
 
 fn temp_sibling(target: &Path) -> PathBuf {
@@ -111,6 +131,18 @@ mod tests {
         assert_eq!(fs::read_to_string(&p).unwrap(), "hello");
         atomic_write(&p, b"replaced").unwrap();
         assert_eq!(fs::read_to_string(&p).unwrap(), "replaced");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parent_entry_sync_tolerates_missing_and_real_dirs() {
+        // A real directory: must not error or panic.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("a.txt");
+        atomic_write(&p, b"x").unwrap();
+        sync_parent_entry(&p);
+        // A target whose parent is gone: swallow, don't panic.
+        sync_parent_entry(&dir.path().join("gone").join("b.txt"));
     }
 
     #[test]

@@ -112,6 +112,7 @@ pub fn check(url: &url::Url) -> Result<(), ToolError> {
 pub fn is_unsafe(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
+            let o = v4.octets();
             v4.is_loopback()
                 || v4.is_private()
                 || v4.is_link_local()
@@ -119,6 +120,17 @@ pub fn is_unsafe(ip: &IpAddr) -> bool {
                 || v4.is_broadcast()
                 || v4.is_documentation()
                 || v4.is_multicast()
+                // This network 0.0.0.0/8: dialing 0.x commonly lands
+                // on loopback.
+                || o[0] == 0
+                // CGNAT 100.64.0.0/10 (Tailscale and friends).
+                || (o[0] == 100 && (64..=127).contains(&o[1]))
+                // IETF protocol assignments 192.0.0.0/24.
+                || o[0..3] == [192, 0, 0]
+                // Benchmarking 198.18.0.0/15.
+                || (o[0] == 198 && (18..=19).contains(&o[1]))
+                // Reserved 240.0.0.0/4.
+                || o[0] >= 240
         }
         IpAddr::V6(v6) => {
             if v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() {
@@ -133,19 +145,28 @@ pub fn is_unsafe(ip: &IpAddr) -> bool {
             if segs[0] & 0xffc0 == 0xfe80 {
                 return true;
             }
-            // IPv4-mapped ::ffff:0:0/96
-            if segs[0..6] == [0, 0, 0, 0, 0, 0xffff] {
-                let v4 = std::net::Ipv4Addr::new(
-                    (segs[6] >> 8) as u8,
-                    (segs[6] & 0xff) as u8,
-                    (segs[7] >> 8) as u8,
-                    (segs[7] & 0xff) as u8,
-                );
-                return is_unsafe(&IpAddr::V4(v4));
+            // IPv4-mapped ::ffff:0:0/96, NAT64 64:ff9b::/96, and the
+            // deprecated IPv4-compatible ::/96 all carry an IPv4
+            // address in their last 32 bits; vet it by the IPv4 rules.
+            let mapped = segs[0..6] == [0, 0, 0, 0, 0, 0xffff];
+            let nat64 = segs[0..6] == [0x64, 0xff9b, 0, 0, 0, 0];
+            let compatible = segs[0..6] == [0, 0, 0, 0, 0, 0];
+            if mapped || nat64 || compatible {
+                return is_unsafe(&IpAddr::V4(embedded_v4(segs)));
             }
             false
         }
     }
+}
+
+/// The IPv4 address embedded in the last 32 bits of `segs`.
+fn embedded_v4(segs: [u16; 8]) -> std::net::Ipv4Addr {
+    std::net::Ipv4Addr::new(
+        (segs[6] >> 8) as u8,
+        (segs[6] & 0xff) as u8,
+        (segs[7] >> 8) as u8,
+        (segs[7] & 0xff) as u8,
+    )
 }
 
 #[cfg(test)]
@@ -229,6 +250,49 @@ mod tests {
     fn unique_local_v6_is_unsafe() {
         assert!(is_unsafe(&IpAddr::V6(Ipv6Addr::new(
             0xfd00, 0, 0, 0, 0, 0, 0, 1
+        ))));
+    }
+
+    #[test]
+    fn shared_and_reserved_v4_ranges_are_unsafe() {
+        // CGNAT 100.64.0.0/10.
+        assert!(is_unsafe(&IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))));
+        assert!(is_unsafe(&IpAddr::V4(Ipv4Addr::new(100, 127, 255, 254))));
+        assert!(!is_unsafe(&IpAddr::V4(Ipv4Addr::new(100, 63, 255, 254))));
+        assert!(!is_unsafe(&IpAddr::V4(Ipv4Addr::new(100, 128, 0, 1))));
+        // Benchmarking 198.18.0.0/15.
+        assert!(is_unsafe(&IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1))));
+        assert!(is_unsafe(&IpAddr::V4(Ipv4Addr::new(198, 19, 255, 254))));
+        assert!(!is_unsafe(&IpAddr::V4(Ipv4Addr::new(198, 20, 0, 1))));
+        // IETF protocol assignments 192.0.0.0/24.
+        assert!(is_unsafe(&IpAddr::V4(Ipv4Addr::new(192, 0, 0, 9))));
+        assert!(!is_unsafe(&IpAddr::V4(Ipv4Addr::new(192, 0, 1, 1))));
+        // Reserved 240.0.0.0/4.
+        assert!(is_unsafe(&IpAddr::V4(Ipv4Addr::new(240, 0, 0, 1))));
+        assert!(is_unsafe(&IpAddr::V4(Ipv4Addr::new(254, 1, 2, 3))));
+        // This network 0.0.0.0/8.
+        assert!(is_unsafe(&IpAddr::V4(Ipv4Addr::new(0, 1, 2, 3))));
+    }
+
+    #[test]
+    fn ipv4_embedded_v6_forms_are_vetted_by_the_ipv4_rules() {
+        // NAT64 64:ff9b::/96.
+        assert!(is_unsafe(&IpAddr::V6(Ipv6Addr::new(
+            0x64, 0xff9b, 0, 0, 0, 0, 0x7f00, 1
+        ))));
+        assert!(is_unsafe(&IpAddr::V6(Ipv6Addr::new(
+            0x64, 0xff9b, 0, 0, 0, 0, 0x0a00, 1
+        ))));
+        assert!(!is_unsafe(&IpAddr::V6(Ipv6Addr::new(
+            0x64, 0xff9b, 0, 0, 0, 0, 0x0808, 0x0808
+        ))));
+        // Deprecated IPv4-compatible ::/96.
+        assert!(is_unsafe(&IpAddr::V6(Ipv6Addr::new(
+            0, 0, 0, 0, 0, 0, 0x0a00, 1
+        ))));
+        // A global address outside the embedded forms stays safe.
+        assert!(!is_unsafe(&IpAddr::V6(Ipv6Addr::new(
+            0x2606, 0x4700, 0, 0, 0, 0, 0x6810, 0x85e3
         ))));
     }
 }

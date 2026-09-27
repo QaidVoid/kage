@@ -1037,32 +1037,6 @@ fn a_long_single_line_paste_collapses() {
 }
 
 #[test]
-fn clear_draft_keeps_it_in_the_history_for_up() {
-    let mut state = InputState::new();
-    state.paste(&"p\n".repeat(10));
-    state.attach_image(img("a.png"));
-    state.handle_key(key(KeyCode::Char('!')));
-    assert!(state.has_draft());
-    state.clear_draft();
-    assert_eq!(state.text(), "");
-    assert!(!state.has_draft());
-    assert!(state.attached().is_empty());
-    assert_eq!(state.collapsed_paste_count(), 0);
-    state.handle_key(key(KeyCode::Up));
-    assert_eq!(state.text(), format!("{}!", "p\n".repeat(10)));
-}
-
-#[test]
-fn clear_draft_disarms_shell_mode() {
-    let mut state = InputState::new();
-    state.handle_key(key(KeyCode::Char('!')));
-    assert!(state.shell_armed() && state.has_draft());
-    state.clear_draft();
-    assert!(!state.shell_armed());
-    assert!(state.history().is_empty());
-}
-
-#[test]
 fn take_prompt_skips_empty_and_shell_drafts() {
     let mut state = InputState::new();
     assert_eq!(state.take_prompt(), None);

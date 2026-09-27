@@ -246,23 +246,6 @@ impl InputState {
         Some(text)
     }
 
-    /// Whether there is a draft to clear: text, or an armed shell mode.
-    #[must_use]
-    pub(crate) fn has_draft(&self) -> bool {
-        !self.text.is_empty() || self.shell
-    }
-
-    /// Throw the draft away, keeping its text in the history so Up
-    /// restores it. Collapsed pastes are kept expanded in that entry.
-    /// Attached images and shell mode are dropped.
-    pub(crate) fn clear_draft(&mut self) {
-        let text = self.take_draft();
-        self.attached.clear();
-        self.shell = false;
-        self.push_history(&text);
-        self.reset_history_navigation();
-    }
-
     /// Remove `text[start..end]` and clamp the cursor to the deletion
     /// point. Used by the Emacs-style edits in [`Self::handle_insert`].
     pub(crate) fn delete_range(&mut self, start: usize, end: usize) {

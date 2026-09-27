@@ -80,7 +80,6 @@ fn init_lua_can_reclaim_ctrl_c_in_one_mode() {
     assert_eq!(app.input.text(), "x", "the mapping kept the draft");
     lock(&usage).working = true;
     normal(&mut app, Pane::Input);
-    app.input.clear_draft();
     app.handle_key(ctrl('c'));
     assert_eq!(
         rx.try_recv(),
@@ -186,19 +185,17 @@ fn ctrl_c_in_normal_interrupts_a_run() {
 }
 
 #[test]
-fn ctrl_c_in_insert_clears_the_draft_instead_of_typing_c() {
+fn ctrl_c_in_insert_interrupts_and_keeps_the_draft() {
     let (mut app, rx, usage) = app_with_usage();
     lock(&usage).working = true;
     app.handle_key(key('x'));
     app.handle_key(ctrl('c'));
-    assert!(rx.try_recv().is_err(), "a draft is cleared, not the run");
-    assert_eq!(app.input().text(), "");
-    app.handle_key(code(KeyCode::Up));
-    assert_eq!(app.input().text(), "x");
+    assert_eq!(rx.try_recv(), Ok(RunRequest::Cancel { session: None }));
+    assert_eq!(app.input().text(), "x", "the draft survives the interrupt");
 }
 
 #[test]
-fn esc_with_a_draft_clears_it_and_up_restores_it() {
+fn esc_with_a_draft_interrupts_and_keeps_it() {
     let (mut app, rx, usage) = app_with_usage();
     app.set_editor_modeless(true);
     lock(&usage).working = true;
@@ -206,17 +203,21 @@ fn esc_with_a_draft_clears_it_and_up_restores_it() {
         app.handle_key(key(c));
     }
     app.handle_key(code(KeyCode::Esc));
-    assert_eq!(app.input().text(), "");
-    assert!(rx.try_recv().is_err(), "the run keeps going");
-    assert_eq!(app.footer_hint(), "draft cleared, up restores it");
-    app.handle_paste("x");
-    assert_ne!(app.footer_hint(), "draft cleared, up restores it");
-    app.handle_key(code(KeyCode::Esc));
-    app.handle_key(code(KeyCode::Up));
-    assert_eq!(app.input().text(), "x");
-    app.handle_key(code(KeyCode::Up));
+    assert_eq!(rx.try_recv(), Ok(RunRequest::Cancel { session: None }));
     assert_eq!(app.input().text(), "fix it");
-    assert_ne!(app.footer_hint(), "draft cleared, up restores it");
+}
+
+#[test]
+fn ctrl_c_with_a_draft_interrupts_and_keeps_it() {
+    let (mut app, rx, usage) = app_with_usage();
+    app.set_editor_modeless(true);
+    lock(&usage).working = true;
+    for c in "fix it".chars() {
+        app.handle_key(key(c));
+    }
+    assert_eq!(app.handle_key(ctrl('c')), None);
+    assert_eq!(rx.try_recv(), Ok(RunRequest::Cancel { session: None }));
+    assert_eq!(app.input().text(), "fix it");
 }
 
 #[test]

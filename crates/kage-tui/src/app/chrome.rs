@@ -29,15 +29,9 @@ impl App {
             return hint;
         }
         let now = Instant::now();
-        let note = self
-            .escalation
-            .filter(|(_, until)| *until > now && !self.input.has_draft());
-        match note {
-            Some((keys::Escalation::QuitArmed, _)) => return "ctrl+c again to quit".to_owned(),
-            Some((keys::Escalation::DraftCleared, _)) => {
-                return "draft cleared, up restores it".to_owned();
-            }
-            None => {}
+        let note = self.escalation.filter(|(_, until)| *until > now);
+        if note.is_some() {
+            return "ctrl+c again to quit".to_owned();
         }
         let working = self.is_run_in_flight();
         let draft = !self.input.text().is_empty();
@@ -55,7 +49,6 @@ impl App {
         let label =
             |app: &mut Self, action, what| app.key_label(action).map(|key| format!("{key} {what}"));
         let queue = label(self, "QueuePrompt", "to queue").filter(|_| working);
-        let queues = label(self, "QueuePrompt", "queues").filter(|_| working);
         let has_agents = working
             && self.active_session.is_some_and(|main| {
                 self.agents.under(main).iter().any(|(_, node)| {
@@ -67,7 +60,7 @@ impl App {
                 })
             });
         let agents = label(self, "OpenAgents", "for agents").filter(|_| has_agents);
-        let (queue, queues, agents) = (queue.as_deref(), queues.as_deref(), agents.as_deref());
+        let (queue, agents) = (queue.as_deref(), agents.as_deref());
         let mut parts: Vec<&str> = Vec::new();
         if self.input.is_modeless() {
             match (working, draft) {
@@ -76,8 +69,7 @@ impl App {
                 }
                 (true, true) => {
                     parts.push("enter steers");
-                    parts.extend(queues);
-                    parts.push("esc clears");
+                    parts.push("esc to interrupt");
                 }
                 (false, true) => parts.extend(["enter to send", "shift+enter for a newline"]),
                 (false, false) if self.search_pattern.is_some() => {
@@ -91,10 +83,8 @@ impl App {
         let commands = label(self, "BeginCommand", "for commands");
         match self.input.mode() {
             Mode::Normal => {
-                match (working, draft) {
-                    (_, true) => parts.push("ctrl+c to clear"),
-                    (true, false) => parts.push("ctrl+c to interrupt"),
-                    (false, false) => {}
+                if working {
+                    parts.push("ctrl+c to interrupt");
                 }
                 parts.push("i to type");
                 parts.extend(agents.filter(|_| !draft).or(help.as_deref()));
@@ -108,8 +98,7 @@ impl App {
                 }
                 (true, true) => {
                     parts.push("enter steers");
-                    parts.extend(queues);
-                    parts.push("ctrl+c clears");
+                    parts.push("ctrl+c to interrupt");
                 }
                 (false, true) => parts.extend(["enter to send", "esc for normal mode"]),
                 (false, false) => parts.push("esc for normal mode"),
@@ -178,11 +167,11 @@ impl App {
         let parts = match (self.input.is_modeless(), self.input.mode(), working) {
             (true, _, _) | (false, Mode::Normal, _) if read_only => vec!["esc to go back"],
             (false, Mode::Insert, _) if read_only => vec!["ctrl+c to go back"],
-            (true, _, true) => vec!["enter to steer", "esc to go back", stop],
+            (true, _, true) => vec!["enter steers", "esc back", "ctrl+c stops"],
             (true, _, false) => vec!["enter to send", "esc to go back"],
             (false, Mode::Insert, true) => vec!["enter to steer", stop],
             (false, Mode::Insert, false) => vec!["enter to send", "ctrl+c to go back"],
-            (false, Mode::Normal, true) => vec![stop, "esc to go back", "i to type"],
+            (false, Mode::Normal, true) => vec!["ctrl+c stops", "esc back", "i to type"],
             (false, Mode::Normal, false) => vec!["esc to go back", "i to type"],
             (false, Mode::Visual, _) => return None,
         };

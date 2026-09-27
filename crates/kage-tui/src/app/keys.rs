@@ -26,8 +26,6 @@ pub(crate) enum Trigger {
 /// What the last escalation step left for the next press.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Escalation {
-    /// The draft was cleared. Up restores it.
-    DraftCleared,
     /// Idle with an empty draft: one more `Ctrl+C` quits.
     QuitArmed,
 }
@@ -262,14 +260,14 @@ impl App {
         exit
     }
 
-    /// One step of the Esc and Ctrl+C escalation: clear the draft (Up
-    /// restores it), else interrupt the run in flight, else, for Esc,
-    /// clear the search highlight, else, for Ctrl+C, arm quit, which a
-    /// second press within
-    /// [`ESCALATION_WINDOW`] carries out. Over an open overlay Ctrl+C
-    /// only interrupts, since the draft is out of sight. In an agent
-    /// view Esc goes back one level and never interrupts, while Ctrl+C
-    /// stops the agent when it runs, else goes back.
+    /// One step of the Esc and Ctrl+C escalation: interrupt the run in
+    /// flight, else, for Esc, clear the search highlight, else, for
+    /// Ctrl+C, arm quit, which a second press within
+    /// [`ESCALATION_WINDOW`] carries out. Neither key touches the
+    /// draft, so interrupting a run never eats a queued prompt. Over
+    /// an open overlay Ctrl+C only interrupts. In an agent view Esc
+    /// goes back one level and never interrupts, while Ctrl+C stops
+    /// the agent when it runs, else goes back.
     pub(crate) fn escalate(&mut self, trigger: Trigger) -> Option<AppExit> {
         let now = Instant::now();
         let previous = self
@@ -281,11 +279,7 @@ impl App {
             self.trip_cancel();
             return None;
         }
-        if self.input.has_draft() {
-            self.input.clear_draft();
-            self.input_completion = None;
-            self.escalation = Some((Escalation::DraftCleared, now + ESCALATION_WINDOW));
-        } else if self.focus.is_some() {
+        if self.focus.is_some() {
             if trigger == Trigger::CtrlC && self.is_run_in_flight() {
                 self.trip_cancel();
             } else {
@@ -295,10 +289,9 @@ impl App {
             self.trip_cancel();
         } else if trigger == Trigger::Esc {
             self.search_pattern = None;
-        } else if trigger == Trigger::CtrlC {
-            if previous == Some(Escalation::QuitArmed) {
-                return Some(AppExit::Quit);
-            }
+        } else if previous == Some(Escalation::QuitArmed) {
+            return Some(AppExit::Quit);
+        } else {
             self.escalation = Some((Escalation::QuitArmed, now + ESCALATION_WINDOW));
         }
         None

@@ -59,11 +59,8 @@ const MODELESS_BUILTIN: &[(&str, &str)] = &[
     ("/ (empty prompt)", "command palette"),
     ("! (empty prompt)", "run a shell command"),
     ("? (empty prompt)", "this reference"),
-    ("esc", "clear the draft (up restores it), else interrupt"),
-    (
-        "ctrl+c",
-        "clear the draft, else interrupt, else twice to quit",
-    ),
+    ("esc", "interrupt the run, else clear the search highlight"),
+    ("ctrl+c", "interrupt, else twice to quit"),
     ("ctrl+q", "quit kage (cancels a running turn)"),
 ];
 
@@ -102,10 +99,7 @@ const VIM_BUILTIN: &[(&str, &str)] = &[
     ("ctrl+g", "edit the prompt in $VISUAL or $EDITOR"),
     ("/ (empty prompt)", "command palette (insert mode)"),
     ("! (empty prompt)", "run a shell command (insert mode)"),
-    (
-        "ctrl+c",
-        "clear the draft, else interrupt, else twice to quit",
-    ),
+    ("ctrl+c", "interrupt, else twice to quit"),
     ("ctrl+q", "quit kage"),
 ];
 
@@ -477,7 +471,7 @@ mod tests {
         }
         let modeless = HelpOverlay::new(&[], true).rows;
         assert!(modeless.iter().any(
-            |row| matches!(row, Row::Key(keys, desc) if keys == "esc" && desc.contains("clear the draft"))
+            |row| matches!(row, Row::Key(keys, desc) if keys == "esc" && desc.contains("interrupt"))
         ));
     }
 

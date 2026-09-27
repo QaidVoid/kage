@@ -208,28 +208,22 @@ fn the_footer_hint_follows_the_editor_state() {
         "enter to send \u{B7} shift+enter for a newline"
     );
     lock(&usage).working = true;
-    assert_eq!(
-        app.footer_hint(),
-        "enter steers \u{B7} tab queues \u{B7} esc clears"
-    );
+    assert_eq!(app.footer_hint(), "enter steers \u{B7} esc to interrupt");
     app.handle_key(code(KeyCode::Backspace));
     assert_eq!(app.footer_hint(), "tab to queue \u{B7} esc to interrupt");
     app.set_editor_modeless(false);
     assert_eq!(app.footer_hint(), "tab to queue \u{B7} ctrl+c to interrupt");
     app.handle_key(key('x'));
-    assert_eq!(
-        app.footer_hint(),
-        "enter steers \u{B7} tab queues \u{B7} ctrl+c clears"
-    );
+    assert_eq!(app.footer_hint(), "enter steers \u{B7} ctrl+c to interrupt");
     app.handle_key(code(KeyCode::Esc));
     assert_eq!(
         app.footer_hint(),
-        "ctrl+c to clear \u{B7} i to type \u{B7} ? for shortcuts"
+        "ctrl+c to interrupt \u{B7} i to type \u{B7} ? for shortcuts"
     );
     lock(&usage).working = false;
     app.handle_key(ctrl('c'));
-    app.handle_key(ctrl('c'));
     assert_eq!(app.footer_hint(), "ctrl+c again to quit");
+    assert_eq!(app.handle_key(ctrl('c')), Some(AppExit::Quit));
 }
 
 #[test]

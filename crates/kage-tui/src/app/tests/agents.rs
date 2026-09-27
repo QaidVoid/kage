@@ -571,16 +571,15 @@ fn enter_steers_the_focused_agent_and_tab_queues() {
 }
 
 #[test]
-fn esc_in_an_agent_view_clears_a_draft_then_goes_back_without_interrupting() {
-    let (mut app, rx, _events, _child) = focused_app();
+fn esc_in_an_agent_view_goes_back_without_interrupting_or_clearing() {
+    let (mut app, rx, _events, child) = focused_app();
     lock(app.session_usage.as_ref().unwrap()).working = true;
     type_text(&mut app, "draft");
     app.handle_key(code(KeyCode::Esc));
-    assert_eq!(app.input().text(), "");
-    assert!(app.focus.is_some(), "the draft goes first");
-    app.handle_key(code(KeyCode::Esc));
     assert_eq!(app.focus, None);
     assert!(rx.try_recv().is_err(), "nothing was interrupted");
+    app.focus_agent(child);
+    assert_eq!(app.input().text(), "draft", "esc never eats the draft");
 }
 
 #[test]
@@ -666,7 +665,7 @@ fn the_placeholder_steers_a_running_agent_and_messages_a_finished_one() {
     assert!(rows.iter().any(|r| r == " > Steer explore"), "{rows:#?}");
     assert_eq!(
         app.footer_hint(),
-        "enter to steer \u{b7} esc to go back \u{b7} ctrl+c to stop"
+        "enter steers \u{b7} esc back \u{b7} ctrl+c stops"
     );
     send_to(
         &mut app,
@@ -1023,13 +1022,11 @@ fn each_view_keeps_its_own_draft() {
     type_text(&mut app, "agent words");
     app.set_focus(None);
     assert_eq!(app.input.text(), "main words");
-    app.escalate(keys::Trigger::Esc);
-    assert_eq!(app.input.text(), "");
     app.focus_agent(child);
     assert_eq!(
         app.input.text(),
         "agent words",
-        "esc cleared only the main draft"
+        "clearing hit only the main draft"
     );
 }
 

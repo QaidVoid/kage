@@ -182,6 +182,126 @@ fn registry_with_echo() -> ToolRegistry {
         .with(Arc::new(EchoTool))
         .with(Arc::new(ErrTool))
         .with(Arc::new(ProgressTool))
+        .with(Arc::new(AloneTool))
+}
+
+/// Stands in for a tool that must own its message, like `swarm`.
+#[derive(Debug)]
+struct AloneTool;
+
+impl Tool for AloneTool {
+    fn name(&self) -> &'static str {
+        "swarm"
+    }
+    fn description(&self) -> &'static str {
+        "must run alone"
+    }
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    fn risk(&self) -> Risk {
+        Risk::Exec
+    }
+    fn runs_alone(&self) -> bool {
+        true
+    }
+    fn execute(
+        &self,
+        _input: serde_json::Value,
+        _cx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        Ok(ToolOutput {
+            is_error: false,
+            text: "ran".into(),
+            structured: None,
+            terminate: false,
+        })
+    }
+}
+
+#[test]
+fn a_tool_that_runs_alone_is_refused_beside_others() {
+    let tools = registry_with_echo();
+    let calls = vec![
+        pending("echo", serde_json::json!({"n": 1})),
+        pending("swarm", serde_json::json!({})),
+        pending("echo", serde_json::json!({"n": 2})),
+    ];
+    let outputs = |outcome: DispatchOutcome| -> Vec<(bool, String)> {
+        outcome
+            .results
+            .iter()
+            .filter_map(|m| match &m.content[0] {
+                Content::ToolResultBlock {
+                    output, is_error, ..
+                } => Some((*is_error, output.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+    let cancel = CancelFlag::new();
+    let workdir = std::path::Path::new("/tmp");
+
+    let sequential = dispatch_tool_calls(
+        calls.clone(),
+        &tools,
+        workdir,
+        &cancel,
+        false,
+        MessageId::new(),
+        &mut NoopHooks,
+        &mut |_| {},
+    );
+    assert!(matches!(&outputs(sequential)[..], [
+        (false, first),
+        (true, swarm),
+        (false, second)
+    ] if first.contains('1') && second.contains('2')
+        && swarm.contains("only tool call in the message")));
+
+    let parallel = dispatch_tool_calls_parallel(
+        calls,
+        &tools,
+        workdir,
+        &cancel,
+        false,
+        MessageId::new(),
+        &mut NoopHooks,
+        &mut |_| {},
+    );
+    assert!(matches!(&outputs(parallel)[..], [
+        (false, _),
+        (true, swarm),
+        (false, _)
+    ] if swarm.contains("only tool call in the message")));
+}
+
+#[test]
+fn a_tool_that_runs_alone_runs_by_itself() {
+    let tools = registry_with_echo();
+    let outcome = dispatch_tool_calls(
+        vec![pending("swarm", serde_json::json!({}))],
+        &tools,
+        std::path::Path::new("/tmp"),
+        &CancelFlag::new(),
+        false,
+        MessageId::new(),
+        &mut NoopHooks,
+        &mut |_| {},
+    );
+    assert_eq!(outcome.error, None);
+    assert_eq!(outputs_of(&outcome), ["ran".to_owned()]);
+}
+
+fn outputs_of(outcome: &DispatchOutcome) -> Vec<String> {
+    outcome
+        .results
+        .iter()
+        .filter_map(|m| match &m.content[0] {
+            Content::ToolResultBlock { output, .. } => Some(output.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 fn pending(name: &str, input: serde_json::Value) -> PendingToolCall {

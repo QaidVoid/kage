@@ -187,6 +187,28 @@ pub const OPTIONS: &[OptionDef] = &[
         doc: "How many agents run at once. Further agents wait until one finishes.",
         live: false,
     },
+    OptionDef {
+        name: "swarm_max_items",
+        toml: "agents.swarm_max_items",
+        kind: OptionKind::Int {
+            min: 2,
+            max: 128,
+            default: 32,
+        },
+        doc: "Most items one swarm call may run, one child agent per item.",
+        live: false,
+    },
+    OptionDef {
+        name: "swarm_timeout_ms",
+        toml: "agents.swarm_timeout_ms",
+        kind: OptionKind::Int {
+            min: 1000,
+            max: 86_400_000,
+            default: 7_200_000,
+        },
+        doc: "Overall deadline in milliseconds for one swarm call. On deadline its unfinished children are cancelled and the results so far are returned.",
+        live: false,
+    },
 ];
 
 /// Look up an option by name.
@@ -489,6 +511,10 @@ fn config_value(name: &str, config: &Config) -> Option<OptionValue> {
         "timeoutlen" => OptionValue::Int(i64::from(config.keybindings.timeoutlen)),
         "agent_max_depth" => OptionValue::Int(i64::from(config.agents.max_depth)),
         "agent_max_running" => OptionValue::Int(i64::from(config.agents.max_running)),
+        "swarm_max_items" => OptionValue::Int(i64::from(config.agents.swarm_max_items)),
+        "swarm_timeout_ms" => {
+            OptionValue::Int(i64::try_from(config.agents.swarm_timeout_ms).unwrap_or(i64::MAX))
+        }
         _ => return None,
     })
 }
@@ -600,6 +626,8 @@ mod tests {
             ("timeoutlen", "300", OptionValue::Int(300)),
             ("agent_max_depth", "0", OptionValue::Int(0)),
             ("agent_max_running", "8", OptionValue::Int(8)),
+            ("swarm_max_items", "64", OptionValue::Int(64)),
+            ("swarm_timeout_ms", "60000", OptionValue::Int(60_000)),
         ] {
             let def = find(name).unwrap();
             let (table, key) = def.toml.rsplit_once('.').unwrap();
@@ -728,7 +756,12 @@ mod tests {
     #[test]
     fn agent_limits_validate_their_ranges() {
         let mut store = OptionStore::default();
-        for (name, low, high) in [("agent_max_depth", 0, 3), ("agent_max_running", 1, 16)] {
+        for (name, low, high) in [
+            ("agent_max_depth", 0, 3),
+            ("agent_max_running", 1, 16),
+            ("swarm_max_items", 2, 128),
+            ("swarm_timeout_ms", 1_000, 86_400_000),
+        ] {
             for ok in [low, high] {
                 assert!(
                     store

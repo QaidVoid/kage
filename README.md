@@ -13,8 +13,9 @@ Status: pre-1.0. Things still move.
   printed when you quit. Modeless by default, with a vim mode if you
   want one.
 - **Agents.** The model can hand work to child agents that run in
-  parallel. Each one shows up as a live card, a pinned row above the
-  prompt, and a full view you can open, steer or stop.
+  parallel, or many at once with one `swarm` call. Each one shows up
+  as a live card, a pinned row above the prompt, and a full view you
+  can open, steer or stop.
 - **Configured in Lua.** `~/.config/kage/init.lua` sets options,
   keymaps, highlights, autocmds and the chrome around the prompt.
   Plugins add tools, commands, providers and custom blocks, each behind

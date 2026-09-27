@@ -267,7 +267,8 @@ impl Default for LoopSettings {
 }
 
 /// Subagent limits persisted under `[agents]`. The option registry
-/// validates the ranges (`agent_max_depth`, `agent_max_running`).
+/// validates the ranges (`agent_max_depth`, `agent_max_running`,
+/// `swarm_max_items`, `swarm_timeout_ms`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AgentsConfig {
@@ -277,6 +278,10 @@ pub struct AgentsConfig {
     /// How many agents run at once across the engine. Further agents
     /// wait until one finishes.
     pub max_running: u32,
+    /// Most items one `swarm` call may run, one child agent per item.
+    pub swarm_max_items: u32,
+    /// Overall deadline in milliseconds for one `swarm` call.
+    pub swarm_timeout_ms: u64,
 }
 
 impl Default for AgentsConfig {
@@ -284,6 +289,8 @@ impl Default for AgentsConfig {
         Self {
             max_depth: 1,
             max_running: 4,
+            swarm_max_items: 32,
+            swarm_timeout_ms: 7_200_000,
         }
     }
 }

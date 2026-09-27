@@ -186,6 +186,26 @@ fn synthesized_output(error: &LoopError) -> ToolOutput {
     }
 }
 
+/// Output for a call whose tool must own its message, refused because
+/// the batch holds other calls alongside it.
+fn alone_output(name: &str) -> ToolOutput {
+    ToolOutput {
+        is_error: true,
+        text: format!(
+            "a {name} call must be the only tool call in the message; \
+             move it to a message of its own"
+        ),
+        structured: None,
+        terminate: false,
+    }
+}
+
+/// Whether `call`'s tool refuses to share its message, and the batch
+/// actually holds something else.
+fn runs_alone_in_batch(tools: &ToolRegistry, call: &PendingToolCall, batch: usize) -> bool {
+    batch > 1 && tools.get(&call.name).is_some_and(|tool| tool.runs_alone())
+}
+
 /// Answer every call in `pending` without running it, so history never
 /// carries a dangling tool use when the run stops after a turn.
 pub(crate) fn unrun_results<F: FnMut(LoopEvent)>(
@@ -256,6 +276,7 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
     hooks: &mut dyn Hooks,
     emit: &mut F,
 ) -> DispatchOutcome {
+    let batch = pending.len();
     let mut results = Vec::with_capacity(pending.len());
     let mut all_terminate = !pending.is_empty();
     let mut error: Option<LoopError> = None;
@@ -264,6 +285,8 @@ pub(crate) fn dispatch_tool_calls<F: FnMut(LoopEvent)>(
             let pre = hooks.before_tool_call(&call.id, &call.name, &call.input);
             if let Some(out) = pre {
                 Some(out)
+            } else if runs_alone_in_batch(tools, &call, batch) {
+                Some(alone_output(&call.name))
             } else {
                 let mut result = None;
                 execute_live(
@@ -360,6 +383,7 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
     hooks: &mut dyn Hooks,
     emit: &mut F,
 ) -> DispatchOutcome {
+    let batch = pending.len();
     // Resolve hook short-circuits up front, single-threaded. Skipped
     // entirely when the batch is already cancelled: nothing will run.
     let entry_cancelled = cancel.is_cancelled();
@@ -368,6 +392,9 @@ pub(crate) fn dispatch_tool_calls_parallel<F: FnMut(LoopEvent)>(
         for call in &pending {
             match hooks.before_tool_call(&call.id, &call.name, &call.input) {
                 Some(out) => slots.push(Slot::Short(out)),
+                None if runs_alone_in_batch(tools, call, batch) => {
+                    slots.push(Slot::Short(alone_output(&call.name)));
+                }
                 None => slots.push(Slot::Run),
             }
         }

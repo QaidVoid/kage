@@ -1096,6 +1096,8 @@ fn agent_setup(max_depth: u8, max_running: usize) -> AgentSetup {
         defs: Arc::new(AgentDefs::builtin()),
         max_depth,
         max_running,
+        swarm_max_items: 32,
+        swarm_timeout_ms: 60_000,
     }
 }
 
@@ -1697,6 +1699,245 @@ fn cancel_during_a_child_ask_returns_the_cancelled_wrapper() {
         );
         assert_eq!(outcome_of(&events, parent), [RunOutcome::Cancelled]);
     }
+}
+
+fn swarm_setup(max_running: usize, timeout_ms: u64) -> AgentSetup {
+    AgentSetup {
+        defs: Arc::new(AgentDefs::builtin()),
+        max_depth: 1,
+        max_running,
+        swarm_max_items: 32,
+        swarm_timeout_ms: timeout_ms,
+    }
+}
+
+fn swarm_task(items: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "description": "a swarm",
+        "prompt_template": "handle {{item}}",
+        "items": items,
+    })
+}
+
+/// One assistant turn that calls `swarm` once per `(call id, input)`.
+fn swarm_turn(calls: &[(&str, serde_json::Value)]) -> Vec<Result<ProviderEvent, ProviderError>> {
+    let mut turn = vec![Ok(ProviderEvent::MessageStart)];
+    for (id, input) in calls {
+        let id = ToolCallId::new(*id);
+        turn.push(Ok(ProviderEvent::ToolCallStart {
+            id: id.clone(),
+            name: "swarm".into(),
+        }));
+        turn.push(Ok(ProviderEvent::ToolCallEnd {
+            id,
+            input: input.clone(),
+        }));
+    }
+    turn.push(Ok(ProviderEvent::MessageEnd {
+        stop_reason: StopReason::ToolUse,
+        usage: TokenUsage::default(),
+    }));
+    turn
+}
+
+#[test]
+fn a_swarm_aggregates_its_children_in_item_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::sequence(vec![
+        swarm_turn(&[("call_s", swarm_task(&["a", "b", "c"]))]),
+        text_turn("reply one"),
+        text_turn("reply two"),
+        text_turn("reply three"),
+        text_turn("parent done"),
+    ]));
+    let parent = SessionId::new();
+    let (recorder, _) = recorder_in(dir.path(), parent);
+    h.engine.open(SessionSpec {
+        recorder: Some(recorder),
+        agents: Some(swarm_setup(1, 60_000)),
+        ..h.spec(parent)
+    });
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 4);
+    h.engine.shutdown();
+
+    let children = spawned(&events);
+    assert_eq!(children.len(), 3);
+    assert!(children.iter().all(|(id, _)| events
+        .iter()
+        .any(|e| e.session == *id
+            && matches!(&e.event, Event::Host(HostEvent::AgentSpawned { parent: p, .. }) if *p == parent))));
+    let output = tool_output(&events, parent, "call_s");
+    assert!(!output.is_error);
+    assert!(
+        output
+            .text
+            .starts_with("completed: 3, failed: 0, cancelled: 0\n")
+    );
+    let at = |needle: &str| output.text.find(needle).unwrap();
+    assert!(at("item=\"a\"") < at("item=\"b\"") && at("item=\"b\"") < at("item=\"c\""));
+    assert!(
+        at("reply one") < at("reply two") && at("reply two") < at("reply three"),
+        "{}",
+        output.text
+    );
+
+    let mut batch_ids = Vec::new();
+    for (index, (child, _)) in children.iter().enumerate() {
+        let path = dir.path().join(format!("{child}.jsonl"));
+        let entries: Vec<kage_session::SessionEntry> = kage_session::SessionReader::iter(&path)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let kage_session::SessionEntry::Custom(marker) = &entries[1] else {
+            panic!("marker expected")
+        };
+        assert_eq!(marker.data["index"], index);
+        assert_eq!(marker.data["item"], ["a", "b", "c"][index]);
+        batch_ids.push(marker.data["batch_id"].clone());
+    }
+    assert!(batch_ids[0].as_str().unwrap().starts_with("swarm_"));
+    assert!(batch_ids.windows(2).all(|w| w[0] == w[1]), "one batch id");
+}
+
+#[test]
+fn a_swarm_timeout_cancels_stragglers_and_renders() {
+    let h = harness(MockProvider::sequence(vec![
+        swarm_turn(&[("call_s", swarm_task(&["quick", "slow"]))]),
+        text_turn("quick reply"),
+        tool_turn("gate"),
+        text_turn("parent done"),
+    ]));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(swarm_setup(1, 300)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 3);
+    h.engine.shutdown();
+
+    let output = tool_output(&events, parent, "call_s");
+    assert!(
+        output
+            .text
+            .starts_with("completed: 1, failed: 0, cancelled: 1\n")
+    );
+    assert!(output.text.contains("quick reply"), "{}", output.text);
+    assert!(output.text.contains("state=\"cancelled\""));
+    assert!(!output.is_error, "a cancelled child is not a failed one");
+}
+
+#[test]
+fn cancelling_the_parent_mid_swarm_renders_the_fleet_cancelled() {
+    let h = harness(MockProvider::sequence(vec![
+        swarm_turn(&[("call_s", swarm_task(&["a", "b", "c"]))]),
+        tool_turn("gate"),
+    ]));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(swarm_setup(1, 60_000)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    wait_for(&h.events, is_tool_start_outside(parent));
+    h.engine.send(Command::to(parent, CommandKind::Cancel));
+    let events = until_runs_end(&h.events, 4);
+    h.engine.shutdown();
+
+    assert_eq!(outcomes(&events), vec![RunOutcome::Cancelled; 4]);
+    let output = tool_output(&events, parent, "call_s");
+    assert!(
+        output
+            .text
+            .starts_with("completed: 0, failed: 0, cancelled: 3\n"),
+        "{}",
+        output.text
+    );
+}
+
+/// One assistant turn with a `swarm` call and a `gate` call together.
+fn mixed_turn() -> Vec<Result<ProviderEvent, ProviderError>> {
+    let mut turn = vec![Ok(ProviderEvent::MessageStart)];
+    for (name, call, input) in [
+        ("swarm", "call_s", swarm_task(&["a", "b"])),
+        ("gate", "call_g", serde_json::json!({})),
+    ] {
+        let id = ToolCallId::new(call);
+        turn.push(Ok(ProviderEvent::ToolCallStart {
+            id: id.clone(),
+            name: name.into(),
+        }));
+        turn.push(Ok(ProviderEvent::ToolCallEnd { id, input }));
+    }
+    turn.push(Ok(ProviderEvent::MessageEnd {
+        stop_reason: StopReason::ToolUse,
+        usage: TokenUsage::default(),
+    }));
+    turn
+}
+
+#[test]
+fn a_swarm_call_beside_another_call_errors_the_swarm_only() {
+    let h = harness(MockProvider::sequence(vec![
+        mixed_turn(),
+        text_turn("parent done"),
+    ]));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(swarm_setup(1, 60_000)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    wait_for(&h.events, is_tool_start);
+    h.release.send(()).unwrap();
+    let events = until_runs_end(&h.events, 1);
+    h.engine.shutdown();
+
+    assert!(spawned(&events).is_empty(), "no swarm children");
+    let swarm = tool_output(&events, parent, "call_s");
+    assert!(swarm.is_error);
+    assert!(
+        swarm.text.contains("only tool call in the message"),
+        "{}",
+        swarm.text
+    );
+    assert_eq!(tool_output(&events, parent, "call_g").text, "released");
+}
+
+#[test]
+fn a_swarm_and_an_agent_call_work_in_sequence() {
+    let h = harness(MockProvider::sequence(vec![
+        swarm_turn(&[("call_s", swarm_task(&["a", "b"]))]),
+        text_turn("swarm reply a"),
+        text_turn("swarm reply b"),
+        agent_turn(&[("call_a", task("one agent"))]),
+        text_turn("agent reply"),
+        text_turn("parent done"),
+    ]));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(swarm_setup(2, 60_000)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 4);
+    h.engine.shutdown();
+
+    let swarm = tool_output(&events, parent, "call_s");
+    assert!(
+        swarm
+            .text
+            .starts_with("completed: 2, failed: 0, cancelled: 0\n")
+    );
+    let agent = tool_output(&events, parent, "call_a");
+    assert_eq!(
+        agent.text,
+        format!(
+            "<agent name=\"general\" session=\"{}\" state=\"completed\">\nagent reply\n</agent>",
+            spawned(&events).last().unwrap().0
+        )
+    );
 }
 
 #[test]

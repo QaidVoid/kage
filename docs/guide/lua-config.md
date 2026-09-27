@@ -121,6 +121,8 @@ value)` is the same as assigning.
 | `timeoutlen` | `keybindings.timeoutlen` | integer milliseconds, 0 to 5000 | `1000` | immediately |
 | `agent_max_depth` | `agents.max_depth` | integer, 0 to 3 (0 turns the `agent` tool off) | `1` | at startup |
 | `agent_max_running` | `agents.max_running` | integer, 1 to 16 | `4` | at startup |
+| `swarm_max_items` | `agents.swarm_max_items` | integer, 2 to 128 | `32` | at startup |
+| `swarm_timeout_ms` | `agents.swarm_timeout_ms` | integer milliseconds, 1,000 to 86,400,000 | `7200000` | at startup |
 
 `transcript_on_exit` picks what kage prints to the terminal after you
 quit: the whole conversation as plain text, only the part from your
@@ -134,8 +136,11 @@ level the model accepts.
 
 `agent_max_depth` limits how deep [agents](/guide/agents) nest: `1`
 lets only the main session start agents. `agent_max_running` limits
-how many agents run at once, and further agents wait their turn. Both
-are read once when the TUI starts, after `init.lua` has run.
+how many agents run at once, and further agents wait their turn.
+`swarm_max_items` and `swarm_timeout_ms` bound one
+[`swarm`](/guide/agents#swarms) call: the most items it may run and
+its overall deadline. All are read once when the TUI starts, after
+`init.lua` has run.
 
 Every set fires the [`option_set`](#configuration-events) event. `/theme set`,
 `/mouse` and the `/settings` dialog set options too, with source

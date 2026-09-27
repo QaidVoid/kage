@@ -46,6 +46,54 @@ other tools runs its calls one after another. The tool description
 tells the model to use agents for independent work that needs many
 tool calls, and to run at most one agent that edits files at a time.
 
+## swarms
+
+The `swarm` tool starts the same agent once per item from one call.
+It takes a prompt template, a list of items, and the agent every
+child runs; each child's prompt is the template with every `{{item}}`
+replaced by its item:
+
+```json
+{"description": "fix clippy in each crate",
+ "agent": "general",
+ "prompt_template": "Fix every clippy warning in {{item}}. Run `cargo clippy -p {{item}}` to see them. Reply with the warnings you fixed.",
+ "items": ["kage-core", "kage-loop", "kage-tui"]}
+```
+
+The call blocks until every child settles, then returns one aggregate:
+a summary line, then each child's `<agent>` element wrapped in a
+`<swarm>` element that names its item:
+
+```text
+completed: 2, failed: 1, cancelled: 0
+<swarm description="fix clippy in each crate" item="kage-core">
+<agent name="general" session="01K62W8Q3T9V5M2C7X4B1N0R6S" state="completed">
+fixed 3 warnings: ...
+</agent>
+</swarm>
+<swarm description="fix clippy in each crate" item="kage-loop">
+...
+</swarm>
+```
+
+The children go through the same queue as `agent` calls, so
+`agent_max_running` throttles them, and each child shows up as a live
+card and an agent-tree entry. The call is an error only when every
+child failed. When the overall deadline `swarm_timeout_ms` passes,
+the children that are still running are cancelled and the results so
+far are returned; the same happens when you cancel the session. A
+swarm call must be the only tool call in its message.
+
+Use a swarm when one task shape repeats over many inputs, such as the
+same fix across many crates or a review of many files. For a few
+different tasks, make several `agent` calls in one message instead.
+Coordination rules the tool description repeats: explore the code
+yourself first and delegate only the repeated work; every child
+starts with zero context, so each expanded prompt must be
+self-contained; and give each child a distinct scope so no work is
+duplicated and no two children edit the same file, with at most one
+agent that edits files at a time.
+
 ## built-in agents
 
 | Agent | Tools | For |
@@ -157,6 +205,8 @@ covers every agent of the session.
 | --- | --- | --- | --- | --- |
 | `agent_max_depth` | `agents.max_depth` | 0 to 3 | `1` | How deep agents nest. `0` removes the `agent` tool, and `1` lets only the main session start agents. |
 | `agent_max_running` | `agents.max_running` | 1 to 16 | `4` | How many agents run at once. Further agents wait in a queue and start in order as others finish. |
+| `swarm_max_items` | `agents.swarm_max_items` | 2 to 128 | `32` | Most items one `swarm` call may run, one child agent per item. |
+| `swarm_timeout_ms` | `agents.swarm_timeout_ms` | 1,000 to 86,400,000 | `7,200,000` | Overall deadline in milliseconds for one `swarm` call. On deadline its unfinished children are cancelled and the results so far are returned. |
 
 Set them in `config.toml`:
 
@@ -175,8 +225,9 @@ kage.opt.agent_max_running = 8
 
 Both apply when kage starts. `init.lua` only applies to the TUI.
 Print mode and `kage rpc` read the `[agents]` table of your config
-files. With `agent_max_depth = 0` the model sees no `agent` tool at
-all.
+files. With `agent_max_depth = 0` the model sees neither the `agent`
+nor the `swarm` tool. The swarm limits in the table above apply the
+same way, and are described in [swarms](#swarms).
 
 An agent that waits for its own agents does not count against
 `agent_max_running`, so nested agents cannot stall the queue. A

@@ -13,7 +13,7 @@ use kage_core::{Content, Message, Risk, Role, SessionId, ToolCallId, ToolOutput}
 use kage_tools::{ExecMode, Tool, ToolContext, ToolError};
 use serde::Deserialize;
 
-use super::Input;
+use super::{Input, swarm_tool::SwarmInfo};
 
 /// Name the model calls the tool by.
 pub(super) const AGENT_TOOL: &str = "agent";
@@ -34,6 +34,9 @@ pub(super) struct Spawn {
     pub prompt: String,
     /// Receives the child's result once its first run finishes.
     pub reply: crossbeam_channel::Sender<ToolOutput>,
+    /// Set when a `swarm` call spawned this child. A plain `agent`
+    /// call leaves it `None`.
+    pub swarm: Option<SwarmInfo>,
 }
 
 #[derive(Deserialize)]
@@ -139,6 +142,7 @@ impl Tool for AgentTool {
             description: input.description,
             prompt: input.prompt,
             reply,
+            swarm: None,
         };
         if self.engine.send(Input::Spawn(Box::new(spawn))).is_err() {
             return Ok(engine_stopped());

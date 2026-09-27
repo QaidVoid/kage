@@ -183,6 +183,8 @@ fn test_agent(
                 defs: Arc::new(AgentDefs::builtin()),
                 max_depth: 1,
                 max_running: 4,
+                swarm_max_items: 32,
+                swarm_timeout_ms: 60_000,
             }),
         })
     });

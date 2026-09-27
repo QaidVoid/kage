@@ -192,6 +192,8 @@ where
             // Parallel dispatch when the loop is configured for it and no
             // tool in the batch overrides to Sequential (e.g. `shell`), or
             // when every tool in the batch declares itself Parallel.
+            // A tool that runs alone (`swarm`) is refused here rather than
+            // run beside others; see `dispatch::runs_alone_in_batch`.
             let mode_of = |name: &str| tools.get(name).and_then(|t| t.execution_mode());
             let any_sequential = pending
                 .iter()

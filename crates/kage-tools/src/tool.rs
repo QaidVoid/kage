@@ -71,6 +71,15 @@ pub trait Tool: Send + Sync + std::fmt::Debug {
         None
     }
 
+    /// Whether a call must be the only tool call in its message. The
+    /// loop errors such a call when the batch holds anything else
+    /// instead of running it beside other calls. Use this for a tool
+    /// that blocks until a whole fleet of children settles. Default
+    /// `false`.
+    fn runs_alone(&self) -> bool {
+        false
+    }
+
     /// Run the tool, returning either a structured output or a typed error.
     ///
     /// User-visible failures (file missing, command exited non-zero, etc.)

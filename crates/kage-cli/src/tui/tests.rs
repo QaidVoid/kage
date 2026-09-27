@@ -138,7 +138,8 @@ fn options_set_in_init_lua_seed_the_first_session() {
     std::fs::write(
         user.path().join("init.lua"),
         "kage.opt.thinking_level = 'high'\nkage.opt.compaction_threshold = 0.5\n\
-         kage.opt.agent_max_depth = 2\nkage.opt.agent_max_running = 8",
+         kage.opt.agent_max_depth = 2\nkage.opt.agent_max_running = 8\n\
+         kage.opt.swarm_max_items = 64\nkage.opt.swarm_timeout_ms = 60000",
     )
     .unwrap();
     let options = kage_plugin::SharedOptions::default();
@@ -149,8 +150,10 @@ fn options_set_in_init_lua_seed_the_first_session() {
         .unwrap();
     let report = kage_plugin::load_all(None, &rt).unwrap();
     assert_eq!(report.init, Some(Ok(())));
-    let (loop_cfg, thinking, max_depth, max_running) = startup_options(&options);
+    let (loop_cfg, thinking, max_depth, max_running, swarm_max_items, swarm_timeout_ms) =
+        startup_options(&options);
     assert_eq!(thinking, Some(kage_core::ThinkingLevel::High));
     assert_eq!((max_depth, max_running), (2, 8));
+    assert_eq!((swarm_max_items, swarm_timeout_ms), (64, 60_000));
     assert!((loop_cfg.compaction_threshold - 0.5).abs() < f32::EPSILON);
 }

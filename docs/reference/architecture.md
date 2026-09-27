@@ -101,6 +101,19 @@ never stored in the session's tools, so plugin reloads and MCP
 refreshes cannot drop or duplicate it. It is registered while the
 session's depth is below `agent_max_depth`.
 
+**Swarms.** The `swarm` tool fans one call out to one child per item
+and fans the results back in. It expands the prompt template per
+item, pre-assigns each child's session id, and hands every child a
+clone of one reply channel, so the tool receives exactly one result
+per child and renders one aggregate. Spawns go through the ordinary
+queue, so `agent_max_running` throttles them, and each child's
+session marker records the batch id, index and item it came from. A
+call blocks on the tool thread until every child settles or the
+`swarm_timeout_ms` deadline cancels the stragglers; cancelling the
+parent cancels the whole fleet through the cancel tree. The loop
+refuses a swarm call that shares its message with any other call, so
+a batch of children never races an unrelated tool.
+
 **The cancel tree.** `CancelFlag` is a node with an optional parent.
 An agent's flag is a child of its parent's, and `is_cancelled` walks up
 the chain. Cancelling a session stops every agent below it through the

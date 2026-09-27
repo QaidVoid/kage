@@ -18,12 +18,14 @@ mod recorder;
 mod runner;
 mod sessions;
 mod shell;
+mod swarm_tool;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+use std::time::Duration;
 
 use kage_core::agents::AgentDefs;
 use kage_core::config::Config;
@@ -54,6 +56,7 @@ use mcp::{McpDone, restart_failed};
 use plugin_tools::PluginTools;
 use runner::{Finished, McpLease, Run, Steering, Work};
 use shell::ShellDone;
+use swarm_tool::SwarmTool;
 
 use crate::permissions::{Asker, PermissionGate, PermissionPrompt};
 
@@ -83,7 +86,8 @@ pub(crate) struct SessionSpec {
     pub agents: Option<AgentSetup>,
 }
 
-/// What the `agent` tool may start, shared by a whole session tree.
+/// What the `agent` and `swarm` tools may start, shared by a whole
+/// session tree.
 #[derive(Clone)]
 pub(crate) struct AgentSetup {
     pub defs: Arc<AgentDefs>,
@@ -91,6 +95,10 @@ pub(crate) struct AgentSetup {
     pub max_depth: u8,
     /// How many agents run at once. Further agents wait their turn.
     pub max_running: usize,
+    /// Most items one `swarm` call may start.
+    pub swarm_max_items: usize,
+    /// Overall deadline for one `swarm` call, in milliseconds.
+    pub swarm_timeout_ms: u64,
 }
 
 impl AgentSetup {
@@ -103,6 +111,8 @@ impl AgentSetup {
             defs: Arc::new(defs),
             max_depth: u8::try_from(int("agent_max_depth")).unwrap_or(0),
             max_running: usize::try_from(int("agent_max_running")).unwrap_or(1),
+            swarm_max_items: usize::try_from(int("swarm_max_items")).unwrap_or(32),
+            swarm_timeout_ms: u64::try_from(int("swarm_timeout_ms")).unwrap_or(7_200_000),
         }
     }
 }
@@ -659,7 +669,7 @@ impl Dispatcher {
         if let Some(setup) = &session.agents
             && depth_of(session) < setup.max_depth
         {
-            tools.register(Arc::new(AgentTool::new(id, self.tx.clone(), &setup.defs)));
+            register_delegation_tools(&mut tools, id, &self.tx, setup);
         }
         let run = Run {
             session: id,
@@ -787,6 +797,24 @@ impl Dispatcher {
 
 /// Route a run's permission questions onto the bus. The answer arrives
 /// through [`CommandKind::ResolvePermission`].
+/// Register the delegation tools a session may call while its depth
+/// is under the limit: the single `agent` tool and the `swarm` tool.
+fn register_delegation_tools(
+    tools: &mut ToolRegistry,
+    id: SessionId,
+    tx: &mpsc::Sender<Input>,
+    setup: &AgentSetup,
+) {
+    tools.register(Arc::new(AgentTool::new(id, tx.clone(), &setup.defs)));
+    tools.register(Arc::new(SwarmTool::new(
+        id,
+        tx.clone(),
+        &setup.defs,
+        setup.swarm_max_items,
+        Duration::from_millis(setup.swarm_timeout_ms),
+    )));
+}
+
 fn asker(bus: &Arc<Bus>, asks: &Asks, next: &Arc<AtomicU64>, session: SessionId) -> Asker {
     let bus = Arc::clone(bus);
     let asks = Arc::clone(asks);

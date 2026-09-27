@@ -5,7 +5,7 @@ use std::path::Path;
 use kage_core::agents::AgentDef;
 use kage_core::protocol::{HostEvent, NoticeLevel, RunOutcome};
 use kage_core::sync::lock;
-use kage_core::{Content, Message, Role, SessionId, ToolOutput};
+use kage_core::{Content, Message, Role, SessionId, ToolCallId, ToolOutput};
 use kage_loop::AgentContext;
 use kage_tools::ToolRegistry;
 
@@ -19,6 +19,11 @@ pub(super) struct AgentLink {
     pub(super) agent: String,
     /// 1 for agents of the main session, 2 for theirs, and so on.
     pub(super) depth: u8,
+    /// The swarm call this child belongs to, when a `swarm` call
+    /// spawned it. Names the child in its session marker, so a later
+    /// phase can tell swarm children from plain agents.
+    #[expect(dead_code, reason = "read once resume and the mailbox land")]
+    pub(super) batch_id: Option<ToolCallId>,
     /// Delivers the result to the waiting `agent` call. Taken by the
     /// first run that finishes, so later runs a user starts in the
     /// agent never answer the parent twice.
@@ -36,6 +41,7 @@ impl super::Dispatcher {
             description,
             prompt,
             reply,
+            swarm,
         } = spawn;
         let fail = |text: String| {
             let _ = reply.send(agent_tool::error_output(text));
@@ -61,21 +67,33 @@ impl super::Dispatcher {
             ));
         };
 
-        let id = SessionId::new();
+        // A swarm call names its children up front so the tool can
+        // cancel the ones that never reported.
+        let (id, swarm) = match swarm {
+            Some(info) => (info.id, Some(info)),
+            None => (SessionId::new(), None),
+        };
         let (spec, missing) = agent_spec(from, parent, id, def, &setup);
         let cancel = from.cancel.child();
+        let batch_id = swarm.as_ref().map(|info| info.batch_id.clone());
         let link = AgentLink {
             parent,
             agent: agent.clone(),
             depth,
+            batch_id,
             reply: Some(reply),
         };
-        let marker = serde_json::json!({
+        let mut marker = serde_json::json!({
             "parent": parent,
             "tool_call_id": tool_call_id,
             "agent": agent,
             "description": description,
         });
+        if let Some(info) = &swarm {
+            marker["batch_id"] = serde_json::Value::String(info.batch_id.0.clone());
+            marker["index"] = serde_json::Value::from(info.index);
+            marker["item"] = serde_json::Value::String(info.item.clone());
+        }
 
         self.bus.publish(
             id,

@@ -2,8 +2,10 @@
 //!
 //! [`Theme`] is the single source of truth for every color choice the
 //! conversation buffer, status bar, and overlay rendering paths make.
-//! Bundled variants ([`Theme::tokyo_night`], [`Theme::catppuccin_mocha`])
-//! sit beside the default, and user themes load from TOML files.
+//! Two palettes are bundled, kage shadow ([`Theme::kage_shadow`]) and
+//! kage dawn ([`Theme::kage_dawn`]). The `default` theme follows the
+//! terminal: shadow on a dark background, dawn on a light one. User
+//! themes load from TOML files.
 //!
 //! The renderer reads the active theme via [`current`] (returns a
 //! cheap clone of the global). The host process picks one with
@@ -17,6 +19,8 @@
 
 mod depth;
 mod groups;
+mod kage;
+mod terminal;
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock, RwLock};
@@ -27,6 +31,7 @@ use ratatui::style::Color;
 
 pub use depth::ColorDepth;
 pub use groups::{ROLE_GROUPS, Slot, ThemeGroups, Themes, groups_for};
+pub use terminal::{detect_terminal_background, set_terminal_light, terminal_light};
 
 #[cfg(not(test))]
 static CURRENT: RwLock<Option<Arc<Theme>>> = RwLock::new(None);
@@ -75,7 +80,7 @@ pub(crate) fn reset_current_for_tests() {
 /// inside `view.rs`.
 #[derive(Clone, Debug)]
 pub struct Theme {
-    /// Display name (`"default"`, `"tokyo-night"`, etc.).
+    /// Display name (`"default"`, `"kage-dawn"`, a user theme, ...).
     pub name: String,
     /// When `true`, kage does not paint the whole-frame opaque base,
     /// letting a blurred/transparent terminal show through the entire
@@ -254,176 +259,29 @@ impl Default for Theme {
 }
 
 impl Theme {
-    /// Built-in default palette: a quiet slate dark with one soft
-    /// steel-blue accent. Deliberately no raw ANSI colors - the
-    /// terminal's Cyan/Magenta/Blue are far too saturated to live
-    /// in a full-screen UI. Errors stay red; everything else is
-    /// tuned to the background.
+    /// The dark palette of the `default` theme (kage shadow). Used as
+    /// the base wherever no terminal detection applies, such as user
+    /// theme files and tests.
     #[must_use]
     pub fn default_dark() -> Self {
         Self {
             name: "default".into(),
-            transparent: false,
-            bg: Color::Rgb(18, 20, 28),
-            user_bg: Color::Rgb(36, 42, 58),
-            assistant_rule: Color::Rgb(70, 80, 105),
-            user_rule: Color::Rgb(110, 160, 210),
-            tool_bg: Color::Rgb(30, 34, 44),
-            tool_error_bg: Color::Rgb(58, 22, 28),
-            tool_pending_bg: Color::Rgb(54, 42, 22),
-            tool_rule: Color::Rgb(206, 173, 116),
-            tool_error_rule: Color::Red,
-            tool_pending_rule: Color::Rgb(204, 153, 0),
-            assistant_fg: Color::Rgb(226, 230, 238),
-            thinking_fg: Color::Rgb(100, 108, 130),
-            tool_result_fg: Color::Rgb(168, 175, 190),
-            tool_error_fg: Color::Rgb(228, 108, 108),
-            custom_fg: Color::Rgb(140, 148, 165),
-            status_bg: Color::Rgb(18, 20, 28),
-            status_dim_fg: Color::Rgb(140, 148, 165),
-            muted_fg: Color::Rgb(140, 148, 165),
-            match_color: Color::Rgb(224, 175, 104),
-            selection_color: Color::Rgb(84, 70, 122),
-            focus_color: Color::Rgb(226, 230, 238),
-            input_border_normal: Color::Rgb(80, 92, 120),
-            input_border_insert: Color::Rgb(125, 161, 210),
-            input_border_visual: Color::Rgb(167, 142, 214),
-            input_pill_normal_bg: Color::Rgb(58, 66, 90),
-            input_pill_normal_fg: Color::Rgb(226, 230, 238),
-            input_pill_insert_bg: Color::Rgb(96, 136, 182),
-            input_pill_insert_fg: Color::Rgb(14, 16, 22),
-            input_pill_visual_bg: Color::Rgb(140, 116, 190),
-            input_pill_visual_fg: Color::Rgb(14, 16, 22),
-            input_glyph_fg: Color::Rgb(110, 150, 196),
-            input_placeholder_fg: Color::Rgb(104, 112, 134),
-            input_hint_fg: Color::Rgb(140, 148, 165),
-            modeline_bg: Color::Rgb(18, 20, 28),
-            modeline_fg: Color::Rgb(168, 175, 190),
-            overlay_fg: Color::Rgb(226, 230, 238),
-            overlay_border: Color::Rgb(88, 102, 138),
-            overlay_selected_bg: Color::Rgb(58, 72, 106),
-            overlay_selected_fg: Color::Rgb(226, 230, 238),
-            selection_fg: Color::Rgb(14, 16, 22),
-            warning_fg: Color::Rgb(224, 175, 104),
-            md_h1_fg: Color::Rgb(178, 148, 224),
-            md_h2_fg: Color::Rgb(120, 170, 216),
-            md_link_fg: Color::Rgb(120, 170, 216),
-            md_code_fg: Color::Rgb(214, 178, 120),
-            success_fg: Color::Rgb(140, 190, 130),
-            groups: Highlights::new(),
+            ..Self::kage_shadow()
         }
     }
 
-    /// Tokyo Night-inspired palette: cooler blue/purple bubbles,
-    /// warm cyan accents.
+    /// The `default` theme: kage dawn on a light terminal, kage shadow
+    /// on a dark one (see [`detect_terminal_background`]).
     #[must_use]
-    pub fn tokyo_night() -> Self {
+    pub fn default_for_terminal() -> Self {
+        let base = if terminal_light() {
+            Self::kage_dawn()
+        } else {
+            Self::kage_shadow()
+        };
         Self {
-            name: "tokyo-night".into(),
-            transparent: false,
-            bg: Color::Rgb(22, 23, 34),
-            user_bg: Color::Rgb(36, 40, 59),
-            assistant_rule: Color::Rgb(86, 95, 137),
-            user_rule: Color::Rgb(125, 207, 255),
-            tool_bg: Color::Rgb(26, 30, 46),
-            tool_error_bg: Color::Rgb(63, 22, 30),
-            tool_pending_bg: Color::Rgb(58, 50, 28),
-            tool_rule: Color::Rgb(224, 175, 104),
-            tool_error_rule: Color::Rgb(247, 118, 142),
-            tool_pending_rule: Color::Rgb(224, 175, 104),
-            assistant_fg: Color::Rgb(192, 202, 245),
-            thinking_fg: Color::Rgb(86, 95, 137),
-            tool_result_fg: Color::Rgb(169, 177, 214),
-            tool_error_fg: Color::Rgb(247, 118, 142),
-            custom_fg: Color::Rgb(187, 154, 247),
-            status_bg: Color::Rgb(22, 23, 34),
-            status_dim_fg: Color::Rgb(86, 95, 137),
-            muted_fg: Color::Rgb(130, 140, 180),
-            match_color: Color::Rgb(224, 175, 104),
-            selection_color: Color::Rgb(187, 154, 247),
-            focus_color: Color::Rgb(192, 202, 245),
-            input_border_normal: Color::Rgb(86, 95, 137),
-            input_border_insert: Color::Rgb(125, 207, 255),
-            input_border_visual: Color::Rgb(187, 154, 247),
-            input_pill_normal_bg: Color::Rgb(86, 95, 137),
-            input_pill_normal_fg: Color::Rgb(192, 202, 245),
-            input_pill_insert_bg: Color::Rgb(125, 207, 255),
-            input_pill_insert_fg: Color::Rgb(20, 22, 34),
-            input_pill_visual_bg: Color::Rgb(187, 154, 247),
-            input_pill_visual_fg: Color::Rgb(20, 22, 34),
-            input_glyph_fg: Color::Rgb(125, 207, 255),
-            input_placeholder_fg: Color::Rgb(86, 95, 137),
-            input_hint_fg: Color::Rgb(108, 119, 165),
-            modeline_bg: Color::Rgb(22, 23, 34),
-            modeline_fg: Color::Rgb(108, 119, 165),
-            overlay_fg: Color::Rgb(192, 202, 245),
-            overlay_border: Color::Rgb(86, 95, 137),
-            overlay_selected_bg: Color::Rgb(86, 95, 137),
-            overlay_selected_fg: Color::Rgb(192, 202, 245),
-            selection_fg: Color::Rgb(26, 27, 38),
-            warning_fg: Color::Rgb(224, 175, 104),
-            md_h1_fg: Color::Rgb(187, 154, 247),
-            md_h2_fg: Color::Rgb(125, 207, 255),
-            md_link_fg: Color::Rgb(125, 207, 255),
-            md_code_fg: Color::Rgb(224, 175, 104),
-            success_fg: Color::Rgb(158, 206, 106),
-            groups: Highlights::new(),
-        }
-    }
-
-    /// Catppuccin Mocha-inspired palette: warmer mauves and peaches.
-    #[must_use]
-    pub fn catppuccin_mocha() -> Self {
-        Self {
-            name: "catppuccin-mocha".into(),
-            transparent: false,
-            bg: Color::Rgb(24, 24, 37),
-            user_bg: Color::Rgb(49, 50, 68),
-            assistant_rule: Color::Rgb(88, 91, 112),
-            user_rule: Color::Rgb(137, 220, 235),
-            tool_bg: Color::Rgb(30, 30, 46),
-            tool_error_bg: Color::Rgb(69, 26, 36),
-            tool_pending_bg: Color::Rgb(58, 47, 28),
-            tool_rule: Color::Rgb(249, 226, 175),
-            tool_error_rule: Color::Rgb(243, 139, 168),
-            tool_pending_rule: Color::Rgb(249, 226, 175),
-            assistant_fg: Color::Rgb(205, 214, 244),
-            thinking_fg: Color::Rgb(108, 112, 134),
-            tool_result_fg: Color::Rgb(166, 173, 200),
-            tool_error_fg: Color::Rgb(243, 139, 168),
-            custom_fg: Color::Rgb(203, 166, 247),
-            status_bg: Color::Rgb(24, 24, 37),
-            status_dim_fg: Color::Rgb(108, 112, 134),
-            muted_fg: Color::Rgb(147, 153, 178),
-            match_color: Color::Rgb(249, 226, 175),
-            selection_color: Color::Rgb(203, 166, 247),
-            focus_color: Color::Rgb(205, 214, 244),
-            input_border_normal: Color::Rgb(108, 112, 134),
-            input_border_insert: Color::Rgb(137, 220, 235),
-            input_border_visual: Color::Rgb(203, 166, 247),
-            input_pill_normal_bg: Color::Rgb(108, 112, 134),
-            input_pill_normal_fg: Color::Rgb(205, 214, 244),
-            input_pill_insert_bg: Color::Rgb(137, 220, 235),
-            input_pill_insert_fg: Color::Rgb(24, 24, 37),
-            input_pill_visual_bg: Color::Rgb(203, 166, 247),
-            input_pill_visual_fg: Color::Rgb(24, 24, 37),
-            input_glyph_fg: Color::Rgb(137, 220, 235),
-            input_placeholder_fg: Color::Rgb(108, 112, 134),
-            input_hint_fg: Color::Rgb(127, 132, 156),
-            modeline_bg: Color::Rgb(24, 24, 37),
-            modeline_fg: Color::Rgb(127, 132, 156),
-            overlay_fg: Color::Rgb(205, 214, 244),
-            overlay_border: Color::Rgb(88, 91, 112),
-            overlay_selected_bg: Color::Rgb(88, 91, 112),
-            overlay_selected_fg: Color::Rgb(205, 214, 244),
-            selection_fg: Color::Rgb(30, 30, 46),
-            warning_fg: Color::Rgb(249, 226, 175),
-            md_h1_fg: Color::Rgb(203, 166, 247),
-            md_h2_fg: Color::Rgb(137, 220, 235),
-            md_link_fg: Color::Rgb(137, 220, 235),
-            md_code_fg: Color::Rgb(249, 226, 175),
-            success_fg: Color::Rgb(166, 227, 161),
-            groups: Highlights::new(),
+            name: "default".into(),
+            ..base
         }
     }
 
@@ -431,17 +289,17 @@ impl Theme {
     #[must_use]
     pub fn by_name(name: &str) -> Self {
         match name {
-            "tokyo-night" => Self::tokyo_night(),
-            "catppuccin-mocha" => Self::catppuccin_mocha(),
-            _ => Self::default_dark(),
+            "kage-shadow" => Self::kage_shadow(),
+            "kage-dawn" => Self::kage_dawn(),
+            _ => Self::default_for_terminal(),
         }
     }
 
     /// Names of every bundled theme; useful for tab-completion in
-    /// `:theme set`.
+    /// `:theme set`. `default` follows the terminal background.
     #[must_use]
     pub fn bundled_names() -> &'static [&'static str] {
-        &["default", "tokyo-night", "catppuccin-mocha"]
+        &["default", "kage-shadow", "kage-dawn"]
     }
 
     /// Every selectable theme name: the bundled set first, then the
@@ -627,16 +485,41 @@ mod tests {
     #[test]
     fn bundled_names_includes_known_themes() {
         let names = Theme::bundled_names();
-        assert!(names.contains(&"default"));
-        assert!(names.contains(&"tokyo-night"));
-        assert!(names.contains(&"catppuccin-mocha"));
+        for name in ["default", "kage-shadow", "kage-dawn"] {
+            assert!(names.contains(&name), "{name}");
+            assert_eq!(Theme::by_name(name).name, name);
+        }
+    }
+
+    #[test]
+    fn default_follows_the_terminal_background() {
+        set_terminal_light(false);
+        let dark = Theme::by_name("default");
+        assert_eq!(dark.name, "default");
+        assert_eq!(dark.bg, Theme::kage_shadow().bg);
+        assert!(!dark.bg_is_light());
+
+        set_terminal_light(true);
+        let light = Theme::by_name("default");
+        assert_eq!(light.name, "default");
+        assert_eq!(light.bg, Theme::kage_dawn().bg);
+        assert!(light.bg_is_light());
+        set_terminal_light(false);
+    }
+
+    #[test]
+    fn default_dark_is_kage_shadow() {
+        let t = Theme::default_dark();
+        assert_eq!(t.name, "default");
+        assert_eq!(t.bg, Color::Rgb(0x0f, 0x0e, 0x13));
+        assert_eq!(t.user_rule, Theme::kage_shadow().user_rule);
     }
 
     #[test]
     fn from_toml_overrides_color_on_chosen_base() {
         let t = Theme::from_toml(
             r##"
-            base = "tokyo-night"
+            base = "kage-dawn"
             [colors]
             bg = "#010203"
             focus_color = "cyan"
@@ -645,7 +528,7 @@ mod tests {
         .expect("valid theme");
         assert_eq!(t.bg, Color::Rgb(1, 2, 3));
         assert_eq!(t.focus_color, Color::Cyan);
-        assert_eq!(t.assistant_rule, Theme::tokyo_night().assistant_rule);
+        assert_eq!(t.assistant_rule, Theme::kage_dawn().assistant_rule);
     }
 
     #[test]
@@ -690,8 +573,8 @@ mod tests {
 
     #[test]
     fn resolve_bundled_name_skips_disk() {
-        let t = Theme::resolve("tokyo-night", None).expect("bundled");
-        assert_eq!(t.name, "tokyo-night");
+        let t = Theme::resolve("kage-dawn", None).expect("bundled");
+        assert_eq!(t.name, "kage-dawn");
     }
 
     #[test]
@@ -722,8 +605,9 @@ mod tests {
         std::fs::write(dir.join("default.toml"), "").expect("write");
         std::fs::write(dir.join("notes.txt"), "").expect("write");
         let names = Theme::available_names(Some(&dir));
-        assert_eq!(&names[..3], Theme::bundled_names());
-        assert_eq!(&names[3..], ["aurora", "zenburn"]);
+        let bundled = Theme::bundled_names().len();
+        assert_eq!(&names[..bundled], Theme::bundled_names());
+        assert_eq!(&names[bundled..], ["aurora", "zenburn"]);
         assert_eq!(names.iter().filter(|n| *n == "default").count(), 1);
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -736,8 +620,8 @@ mod tests {
     #[test]
     fn bg_is_light_classifies_representative_colors() {
         assert!(!Theme::default_dark().bg_is_light());
-        assert!(!Theme::tokyo_night().bg_is_light());
-        assert!(!Theme::catppuccin_mocha().bg_is_light());
+        assert!(!Theme::kage_shadow().bg_is_light());
+        assert!(Theme::kage_dawn().bg_is_light());
         let with = |bg| Theme {
             bg,
             ..Theme::default_dark()

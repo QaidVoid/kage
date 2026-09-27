@@ -431,7 +431,7 @@ string, a function, or `"<Nop>"`. `opts` takes `desc` (shown in the
 
 ```lua
 kage.keymap.set("n", "<leader>m", kage.action.OpenModelPicker, { desc = "pick a model" })
-kage.keymap.set("g", "<F6>", ":theme set tokyo-night")
+kage.keymap.set("g", "<F6>", ":theme set kage-dawn")
 kage.keymap.set("i", "<C-l>", function() kage.ui.notify("hi") end)
 ```
 

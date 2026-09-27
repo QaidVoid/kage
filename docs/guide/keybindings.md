@@ -433,7 +433,7 @@ leader = "<C-x>"
 # ms a mapping that is also the start of a longer one waits for
 # more keys (0 to 5000). Default 1000.
 timeoutlen = 600
-bindings = { "f6" = "theme set tokyo-night", "ctrl+l" = "action:OpenModelPicker", "<leader>s" = "settings", "<leader>q" = "quit" }
+bindings = { "f6" = "theme set kage-dawn", "ctrl+l" = "action:OpenModelPicker", "<leader>s" = "settings", "<leader>q" = "quit" }
 ```
 
 With this table, `ctrl+x` then `s` opens the settings dialog and

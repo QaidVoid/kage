@@ -89,7 +89,7 @@ result, such as `plugins reloaded (2 loaded, init.lua ok)`. A reload
 clears keymaps, autocmds, slots, timers and everything plugins
 registered, then runs the steps above again. It does not revert
 options or highlight overrides. If you delete
-`opt.theme = "tokyo-night"` from `init.lua`, the theme stays until you
+`opt.theme = "kage-dawn"` from `init.lua`, the theme stays until you
 restart kage.
 
 ## options
@@ -97,7 +97,7 @@ restart kage.
 `kage.opt.<name>` reads an option. Assigning to it sets the option:
 
 ```lua
-kage.opt.theme = "tokyo-night"
+kage.opt.theme = "kage-dawn"
 kage.opt.input_max_lines = 12
 kage.notify("editor is " .. kage.opt.editor)
 ```
@@ -231,7 +231,7 @@ local map, act = kage.keymap.set, kage.action
 
 kage.opt.leader = ","
 map("n", "<leader>m", act.OpenModelPicker, { desc = "pick a model", group = "mine" })
-map("g", "<F6>", ":theme set catppuccin-mocha", { desc = "warm theme", group = "mine" })
+map("g", "<F6>", ":theme set kage-shadow", { desc = "dark theme", group = "mine" })
 map("b", "<C-d>", act.scroll(20), { desc = "scroll a page", group = "mine" })
 map({ "i", "n" }, "<F5>", function()
   local ok = kage.ui.confirm("compact", "Compact the conversation now?")
@@ -639,7 +639,7 @@ local opt, map, act = kage.opt, kage.keymap.set, kage.action
 local api = kage.api
 
 -- Options. These win over config.toml.
-opt.theme = "tokyo-night"
+opt.theme = "kage-dawn"
 opt.editor = "vim"
 opt.input_max_lines = 12
 opt.leader = " " -- set the leader before any <leader> mapping
@@ -648,7 +648,7 @@ opt.transcript_on_exit = "last"
 
 -- Keymaps.
 map("n", "<leader>m", act.OpenModelPicker, { desc = "pick a model", group = "mine" })
-map("n", "<leader>t", ":theme set catppuccin-mocha", { desc = "warm theme", group = "mine" })
+map("n", "<leader>t", ":theme set kage-shadow", { desc = "dark theme", group = "mine" })
 map("n", "<leader>y", act.YankFocusedBlock, { desc = "yank the focused block", group = "mine" })
 map("b", "<C-d>", act.scroll(20), { desc = "scroll down a page", group = "mine" })
 map("i", "<C-l>", function()
@@ -746,7 +746,7 @@ The options above, written in `config.toml` instead:
 
 ```toml
 [ui]
-theme = "tokyo-night"
+theme = "kage-dawn"
 editor = "vim"
 input_max_lines = 12
 transcript_on_exit = "last"
@@ -754,7 +754,7 @@ transcript_on_exit = "last"
 [keybindings]
 leader = " "
 timeoutlen = 600
-bindings = { "f6" = "theme set catppuccin-mocha", "<F2>" = "action:OpenModelPicker" }
+bindings = { "f6" = "theme set kage-shadow", "<F2>" = "action:OpenModelPicker" }
 ```
 
 `[keybindings] bindings` always maps in mode `g`, so keep mappings that

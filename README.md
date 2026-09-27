@@ -68,7 +68,7 @@ from `kage auth login`. Inside the TUI, `/` opens the command palette,
 A taste of `init.lua`:
 
 ```lua
-kage.opt.theme = "tokyo-night"
+kage.opt.theme = "kage-dawn"
 
 kage.keymap.set("i", "<F2>", kage.action.OpenModelPicker, { desc = "switch model" })
 

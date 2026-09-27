@@ -93,7 +93,7 @@ fn keybindings_command_lists_the_table_per_mode_with_owners() {
     let (mut app, _rx, buffer) = app_with_config(
         "kage.keymap.set('b', '<PageDown>', kage.action.scroll(20))",
         &[
-            ("ctrl+t", "theme set tokyo-night"),
+            ("ctrl+t", "theme set kage-dawn"),
             ("ctrl+g", "action:BeginCommand"),
         ],
     );
@@ -102,7 +102,7 @@ fn keybindings_command_lists_the_table_per_mode_with_owners() {
     for wanted in [
         "g: any editing state",
         "ctrl+t",
-        ":theme set tokyo-night",
+        ":theme set kage-dawn",
         "action:BeginCommand",
         "config.toml",
         "b: vim normal mode, conversation pane",

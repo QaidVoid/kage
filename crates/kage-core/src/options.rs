@@ -78,7 +78,7 @@ pub const OPTIONS: &[OptionDef] = &[
         name: "theme",
         toml: "ui.theme",
         kind: OptionKind::Str { default: "default" },
-        doc: "Color theme, bundled or from the themes directory.",
+        doc: "Color theme, bundled or from the themes directory; `default` follows the terminal background.",
         live: true,
     },
     OptionDef {

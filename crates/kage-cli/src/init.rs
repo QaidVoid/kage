@@ -38,7 +38,8 @@ const STARTER_CONFIG: &str = r#"# kage configuration. See `kage doctor` for diag
 default_model = "anthropic:claude-sonnet-4-6"
 
 [ui]
-# Bundled themes: "default", "tokyo-night", "catppuccin-mocha".
+# Bundled themes: "default" (kage-shadow or kage-dawn, following the
+# terminal background), "kage-shadow", "kage-dawn".
 theme = "default"
 # Capture mouse events (drag-to-select, click-to-focus). Set to false
 # if you prefer your terminal's native selection.

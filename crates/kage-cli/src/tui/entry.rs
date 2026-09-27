@@ -33,6 +33,10 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
     let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     crate::trust::confirm_project_trust(&workdir);
+    // Ask the terminal for its background before raw mode and before
+    // any theme resolves, so the `default` theme picks kage shadow or
+    // kage dawn.
+    kage_tui::theme::detect_terminal_background();
     let app_config = match kage_core::config::Config::load_layered(&workdir) {
         Ok(c) => c,
         Err(e) => {

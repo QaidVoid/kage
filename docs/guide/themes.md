@@ -1,17 +1,27 @@
 # themes
 
-kage ships three bundled palettes and loads any additional ones you
-drop into `~/.config/kage/themes/`.
+kage ships two palettes, kage shadow and kage dawn, and loads any
+additional ones you drop into `~/.config/kage/themes/`.
 
-Bundled names: `default`, `tokyo-night`, `catppuccin-mocha`. All three
-are dark. No light theme is bundled, so for a light terminal write a
-custom theme (below).
+| Name | Palette |
+|---|---|
+| `default` | follows the terminal: `kage-shadow` on a dark background, `kage-dawn` on a light one |
+| `kage-shadow` | dark: ink surfaces with a violet undertone and one warm orange accent |
+| `kage-dawn` | light: the same roles on a violet-tinted paper |
+
+`default` asks the terminal for its background color once at startup
+(the OSC 11 query). When the terminal does not answer, kage reads
+`COLORFGBG`, and failing that picks `kage-shadow`. Set any other name
+to pin a palette.
+
+The kage palettes match the [kage-theme](https://github.com/QaidVoid/kage-theme)
+Neovim colorscheme and its terminal configs.
 
 ## switching themes
 
 ```text
 /theme list             list bundled and user themes (* marks the active one)
-/theme set tokyo-night  switch immediately for this session
+/theme set kage-dawn    switch immediately for this session
 /theme current          show the active theme
 ```
 
@@ -44,8 +54,9 @@ is an error:
 
 ```toml
 # Palette to start from. One of the bundled names. Defaults to
-# "default", so you only list what you want to change.
-base = "tokyo-night"
+# "default" (kage-shadow or kage-dawn, following the terminal), so you
+# only list what you want to change.
+base = "kage-dawn"
 
 # See "transparency" below. Defaults to false (fully opaque).
 transparent = false

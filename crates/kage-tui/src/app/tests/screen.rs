@@ -364,12 +364,12 @@ fn the_palette_follows_the_highlight_table_without_a_turn_boundary() {
     app.set_highlights(rt.highlights());
     assert_eq!(crate::theme::current().name, "default");
 
-    rt.eval("kage.theme.set('tokyo-night')").unwrap();
+    rt.eval("kage.theme.set('kage-dawn')").unwrap();
     assert!(app.refresh_highlights());
     assert!(!app.refresh_highlights());
-    let tokyo = crate::theme::Theme::tokyo_night();
-    assert_eq!(crate::theme::current().name, "tokyo-night");
-    assert_eq!(crate::theme::current().user_bg, tokyo.user_bg);
+    let dawn = crate::theme::Theme::kage_dawn();
+    assert_eq!(crate::theme::current().name, "kage-dawn");
+    assert_eq!(crate::theme::current().user_bg, dawn.user_bg);
 
     rt.eval("kage.api.hl_set('KageUserBubble', { bg = '#010203' })")
         .unwrap();
@@ -513,13 +513,13 @@ fn a_theme_switch_repaints_existing_notice_rows() {
     app.render_into(&mut terminal).unwrap();
     assert_eq!(notice_fg(&terminal), crate::theme::current().muted_fg);
 
-    rt.eval("kage.theme.set('tokyo-night')").unwrap();
+    rt.eval("kage.theme.set('kage-dawn')").unwrap();
     assert!(app.refresh_highlights());
     app.render_into(&mut terminal).unwrap();
-    let tokyo = crate::theme::current().muted_fg;
+    let dawn = crate::theme::current().muted_fg;
     crate::theme::reset_current_for_tests();
-    assert_ne!(tokyo, crate::theme::Theme::default().muted_fg);
-    assert_eq!(notice_fg(&terminal), tokyo);
+    assert_ne!(dawn, crate::theme::Theme::default().muted_fg);
+    assert_eq!(notice_fg(&terminal), dawn);
 }
 
 #[test]

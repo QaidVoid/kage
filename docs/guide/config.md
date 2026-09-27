@@ -83,7 +83,7 @@ scrub_env = []
 timeoutlen = 1000
 # key -> command line, or `action:<Name>` for a built-in action
 # (see the keybindings guide). Every binding maps in mode g.
-# bindings = { "f6" = "theme set tokyo-night", "<leader>s" = "settings" }
+# bindings = { "f6" = "theme set kage-dawn", "<leader>s" = "settings" }
 
 [loop]
 # compact older history once the prompt fills this fraction of the
@@ -142,7 +142,7 @@ Configuration is merged lowest-to-highest precedence:
 4. `KAGE_*` environment variables
 
 Env vars use `KAGE_` with `__` for nesting, e.g.
-`KAGE_UI__THEME=catppuccin-mocha` overrides the `[ui].theme` key.
+`KAGE_UI__THEME=kage-shadow` overrides the `[ui].theme` key.
 
 In the TUI, `init.lua` runs after all of these. An option it sets, such
 as `kage.opt.theme`, wins over every layer above.

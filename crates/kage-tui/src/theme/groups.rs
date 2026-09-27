@@ -431,7 +431,7 @@ mod tests {
         std::fs::write(
             dir.path().join("dusk.toml"),
             r##"
-            base = "tokyo-night"
+            base = "kage-dawn"
             transparent = true
             [colors]
             muted_fg = "bright-red"
@@ -451,7 +451,7 @@ mod tests {
         assert_eq!(groups.groups["MyPlugin"].fg.as_deref(), Some("cyan"));
 
         let t = Theme::from_groups(&groups.into_highlights("dusk"));
-        let base = Theme::tokyo_night();
+        let base = Theme::kage_dawn();
         assert_eq!(t.name, "dusk");
         assert!(t.transparent);
         assert_eq!(t.tool_error_bg, Color::Reset);

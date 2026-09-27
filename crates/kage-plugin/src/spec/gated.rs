@@ -599,6 +599,43 @@ pub(super) const GATED: &[GatedFunc] = &[
         },
     },
     GatedFunc {
+        cap: "provider",
+        func: Func {
+            doc: &[
+                "Raise a typed provider error, so the agent loop retries",
+                "the failures worth retrying. Never returns. A bare",
+                "`error(\"...\")` is a permanent decode",
+                "error; this is how a plugin says the failure was",
+                "the pipe's fault. Kind is one of transport,",
+                "rate_limited, http, auth, unknown_model, decode.",
+                "transport and rate_limited are retried; http is",
+                "retried on 5xx, 408 and 429; the rest are permanent.",
+                "Pass a status for the http kind. An unknown kind",
+                "raises, naming the known ones.",
+            ],
+            path: "kage.provider_error",
+            since: 2,
+            params: &[
+                Field {
+                    name: "kind",
+                    ty: "string",
+                    doc: "",
+                },
+                Field {
+                    name: "message",
+                    ty: "string",
+                    doc: "",
+                },
+                Field {
+                    name: "status",
+                    ty: "integer?",
+                    doc: "HTTP status, for the http kind.",
+                },
+            ],
+            ret: None,
+        },
+    },
+    GatedFunc {
         cap: "fs_write",
         func: Func {
             doc: &[

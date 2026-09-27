@@ -20,6 +20,43 @@
 //!
 //! The handler runs as one job on the runtime's Lua owner thread and
 //! occupies it for the whole stream; see [`crate::PluginRuntime`].
+//!
+//! # Raising a typed error
+//!
+//! A bare `error("...")` reaches the loop as [`ProviderError::Decode`],
+//! which [`ProviderError::is_transient`] treats as permanent, so a
+//! plugin that raises on a dropped connection or a 5xx gets no retry
+//! even though the agent loop has a retry-with-backoff path for
+//! exactly that case. A plugin in the business of talking to an HTTP
+//! endpoint therefore classifies its own failures and says which kind
+//! it hit:
+//!
+//! ```lua
+//! -- a connect timeout is the pipe's fault, so let the loop retry
+//! kage.provider_error("transport", "connect timed out")
+//! -- the model does not exist on this provider at all
+//! kage.provider_error("unknown_model", model)
+//! ```
+//!
+//! Kinds map onto [`ProviderError`] as follows. `transport` and
+//! `rate_limited` are the transient pair the loop retries; the rest are
+//! permanent and surface with their own wording instead of the
+//! catch-all "malformed response" a bare raise produces.
+//!
+//! | kind | [`ProviderError`] | retried |
+//! | --- | --- | --- |
+//! | `transport` | [`Transport`](ProviderError::Transport) | yes |
+//! | `rate_limited` | [`RateLimited`](ProviderError::RateLimited) | yes |
+//! | `http` | [`Http`](ProviderError::Http) | on 5xx / 408 / 429 |
+//! | `auth` | [`Auth`](ProviderError::Auth) | no |
+//! | `unknown_model` | [`UnknownModel`](ProviderError::UnknownModel) | no |
+//! | `decode` | [`Decode`](ProviderError::Decode) | no |
+//!
+//! The call never returns: it raises, and the raised value carries the
+//! kind rather than being a bare string, because mlua stringifies
+//! `error(<table>)` to `table: 0x...` and a table payload would be lost.
+//! An unknown kind raises rather than defaulting, so a typo in a kind
+//! name is visible instead of silently non-retried.
 
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
@@ -36,6 +73,133 @@ use crate::capabilities::{Capability, CapabilityRegistry};
 use crate::error::PluginError;
 use crate::host::{self, LuaHost, WeakHost};
 use crate::watchdog;
+
+/// Prefix marking a raised message as a typed provider error. The
+/// separator is a control character so it cannot collide with prose a
+/// plugin would write, and so a message that merely starts with a kind
+/// name is not mistaken for one.
+const ERROR_KIND_MARKER: &str = "\u{1}kage-provider-error:";
+
+/// Separator between the kind, the optional status, and the message
+/// inside a raised typed error.
+const ERROR_FIELD_SEP: char = '\u{1}';
+
+/// Where mlua's appended "stack traceback:" block begins in a message
+/// that came from a Lua raise.
+const TRACEBACK_MARKER: &str = "\nstack traceback:";
+
+/// Every kind `typed_error` accepts, named in the error a typo
+/// produces.
+const ERROR_KINDS: &str = "transport, rate_limited, http, auth, unknown_model, decode";
+
+/// The kind, detail and status a typed raise carries, recovered from
+/// the string mlua reduced the raised value to.
+struct TypedError {
+    /// One of the kinds in the table on this module.
+    kind: String,
+    /// Plugin-supplied detail.
+    message: String,
+    /// HTTP status, for the `http` kind.
+    status: Option<u16>,
+}
+
+/// Map a kind name onto a `ProviderError`, or `None` when the name is
+/// not one this module documents.
+fn typed_error(kind: &str, message: String, status: Option<u16>) -> Option<ProviderError> {
+    Some(match kind {
+        "transport" => ProviderError::Transport(message),
+        // RateLimited carries no detail field, so the plugin message
+        // is dropped rather than smuggled somewhere misleading. The
+        // retry, which is the point of the kind, still happens.
+        "rate_limited" => ProviderError::RateLimited { retry_after: None },
+        "http" => ProviderError::Http {
+            status: status.unwrap_or(0),
+            body: message,
+        },
+        "auth" => ProviderError::Auth(message),
+        "unknown_model" => ProviderError::UnknownModel(message),
+        "decode" => ProviderError::Decode(message),
+        _ => return None,
+    })
+}
+
+/// Recover a typed raise from a Lua error, or `None` when this is an
+/// ordinary `error("some text")` that keeps the catch-all `Decode`
+/// treatment.
+///
+/// mlua collapses every Lua error to a string, so the kind travels as a
+/// marker prefix. The `CallbackError` wrapper a typed raise picks up
+/// crossing a Rust callback is unwrapped first, since that is the
+/// shape it actually arrives in.
+fn recover_typed_error(err: &mlua::Error) -> Option<TypedError> {
+    let mut root: &mlua::Error = err;
+    while let mlua::Error::CallbackError { cause, .. } = root {
+        root = cause;
+    }
+    // A typed raise is produced by a Rust callback, so it surfaces as
+    // an `ExternalError` whose Display is exactly the marker plus the
+    // payload. A plugin that hand-rolled the same marker through
+    // `error(...)` would be a `RuntimeError`; both are read the same.
+    let text = match root {
+        mlua::Error::RuntimeError(text) => text.as_str(),
+        mlua::Error::ExternalError(inner) => return recover_from_text(&inner.to_string()),
+        mlua::Error::WithContext { cause, .. } => return recover_typed_error(cause),
+        _ => return None,
+    };
+    recover_from_text(text)
+}
+
+/// Parse the marker payload out of a rendered Lua error message.
+fn recover_from_text(text: &str) -> Option<TypedError> {
+    let rest = text.strip_prefix(ERROR_KIND_MARKER)?;
+    // mlua appends a newline and a "stack traceback:" block to every
+    // message it surfaces, so the plugin's own text ends where that
+    // begins. Cutting here keeps the traceback off the message, and
+    // also keeps it out of the user-facing wording.
+    let rest = match rest.find(TRACEBACK_MARKER) {
+        Some(at) => &rest[..at],
+        None => rest,
+    };
+    let (kind, rest) = rest.split_once(ERROR_FIELD_SEP)?;
+    let (status, message) = match rest.split_once(ERROR_FIELD_SEP) {
+        Some((status, message)) => match status.parse::<u16>() {
+            Ok(code) => (Some(code), message),
+            Err(_) => (None, rest),
+        },
+        None => (None, rest),
+    };
+    Some(TypedError {
+        kind: kind.to_owned(),
+        message: message.to_owned(),
+        status,
+    })
+}
+
+/// Classify a raised Lua error for the loop, honouring a typed raise
+/// from `kage.provider_error` and falling back to `Decode` for a bare
+/// `error("...")`.
+fn classify_raised(err: &mlua::Error) -> ProviderError {
+    if let Some(typed) = recover_typed_error(err) {
+        return match typed_error(&typed.kind, typed.message, typed.status) {
+            Some(mapped) => mapped,
+            None => ProviderError::Decode(format!(
+                "plugin provider: unknown error kind {:?} (known: {ERROR_KINDS})",
+                typed.kind,
+            )),
+        };
+    }
+    ProviderError::Decode(format!("plugin provider: {err}"))
+}
+
+/// Classify a `PluginError` from the handler job, unwrapping
+/// `PluginError::Lua` so a typed raise survives the trip through the
+/// error enum.
+fn classify_plugin_error(err: &PluginError) -> ProviderError {
+    match err {
+        PluginError::Lua(inner) => classify_raised(inner),
+        other => ProviderError::Decode(format!("plugin provider: {other}")),
+    }
+}
 
 /// `Provider` whose `stream` runs inside the plugin runtime's Lua state.
 pub struct LuaProvider {
@@ -82,8 +246,7 @@ impl Provider for LuaProvider {
                 if let Err(e) =
                     run_handler(lua, &handler_key, &sink, &req_value, &worker_cancel, tx)
                 {
-                    let _ =
-                        tx_err.send(Err(ProviderError::Decode(format!("plugin provider: {e}"))));
+                    let _ = tx_err.send(Err(classify_plugin_error(&e)));
                 }
             })
             .map_err(|e| ProviderError::Decode(format!("plugin provider: {e}")))?;
@@ -179,9 +342,7 @@ fn run_handler(
                 let next: Value = match f.call::<Value>(()) {
                     Ok(v) => v,
                     Err(err) => {
-                        let _ = tx.send(Err(ProviderError::Decode(format!(
-                            "plugin provider iterator raised: {err}"
-                        ))));
+                        let _ = tx.send(Err(classify_raised(&err)));
                         break;
                     }
                 };
@@ -317,6 +478,29 @@ pub(crate) fn register(
                         .map_err(|_| mlua::Error::external("plugin providers registry poisoned"))?
                         .push(Arc::new(provider));
                     Ok(())
+                })?,
+            )?;
+            // The typed-error raiser rides the same grant as
+            // register_provider: it only means something to a plugin
+            // that registered a provider.
+            pkage.set(
+                "provider_error",
+                lua.create_function(|_, (kind, message, status): (String, String, Option<u16>)| {
+                    if typed_error(&kind, String::new(), None).is_none() {
+                        return Err::<(), mlua::Error>(mlua::Error::external(format!(
+                            "kage.provider_error: unknown kind {kind:?} (known: {ERROR_KINDS})"
+                        )));
+                    }
+                    let status_field = match kind.as_str() {
+                        "http" => match status {
+                            Some(code) => code.to_string(),
+                            None => String::new(),
+                        },
+                        _ => String::new(),
+                    };
+                    Err(mlua::Error::external(format!(
+                        "{ERROR_KIND_MARKER}{kind}{ERROR_FIELD_SEP}{status_field}{ERROR_FIELD_SEP}{message}"
+                    )))
                 })?,
             )?;
             Ok(())
@@ -585,5 +769,131 @@ mod tests {
             .unwrap();
         let events: Vec<_> = stream.collect();
         assert!(events[0].is_err());
+    }
+
+    /// A typed raise must reach the loop as the matching
+    /// `ProviderError`, so its retry policy is the right one. A
+    /// transport failure is transient; a bare raise stays Decode and
+    /// is not, which is the default the plugin boundary has always had.
+    #[test]
+    fn typed_raise_maps_to_its_provider_error() {
+        for (kind, expect_transient) in [
+            ("transport", true),
+            ("rate_limited", true),
+            ("unknown_model", false),
+            ("auth", false),
+            ("decode", false),
+        ] {
+            let rt = granted_runtime();
+            eval_provider(
+                &rt,
+                &format!(
+                    r#"
+            kage.register_provider({{
+                id = "boom",
+                stream = function()
+                    kage.provider_error("{kind}", "boom happened")
+                end,
+            }})
+            "#
+                ),
+            )
+            .unwrap();
+            let provider = rt.registered_providers().pop().unwrap();
+            let events: Vec<_> = provider
+                .stream(
+                    kage_provider::StreamRequest::new("m", vec![]),
+                    &CancelFlag::new(),
+                )
+                .unwrap()
+                .collect();
+            let err = events
+                .into_iter()
+                .find_map(std::result::Result::err)
+                .unwrap_or_else(|| panic!("{kind} produced no error"));
+            // RateLimited has no detail field to carry the message,
+            // so only the kinds whose variant has one are checked for it.
+            if kind != "rate_limited" {
+                let text = err.to_string();
+                assert!(
+                    text.contains("boom happened"),
+                    "{kind} lost the message: {text}"
+                );
+            }
+            assert_eq!(
+                err.is_transient(),
+                expect_transient,
+                "{kind} transient={} but test wants {expect_transient}: {err:?}",
+                err.is_transient()
+            );
+        }
+    }
+
+    /// The fallback must survive the new binding: a bare
+    /// error("...") is still a permanent Decode, and a typo in a kind
+    /// name is reported rather than silently treated as permanent.
+    #[test]
+    fn bare_and_unknown_raises_stay_permanent() {
+        let rt = granted_runtime();
+        eval_provider(
+            &rt,
+            r#"
+            kage.register_provider({
+                id = "plain",
+                stream = function() error("just a string") end,
+            })
+            "#,
+        )
+        .unwrap();
+        let provider = rt.registered_providers().pop().unwrap();
+        let events: Vec<_> = provider
+            .stream(
+                kage_provider::StreamRequest::new("m", vec![]),
+                &CancelFlag::new(),
+            )
+            .unwrap()
+            .collect();
+        let err = events
+            .into_iter()
+            .find_map(std::result::Result::err)
+            .unwrap();
+        assert!(
+            matches!(err, kage_provider::ProviderError::Decode(_)),
+            "got {err:?}"
+        );
+        assert!(!err.is_transient(), "a bare raise must not be retried");
+        assert!(err.to_string().contains("just a string"));
+
+        // A typo raises when it is called, naming the known kinds. The
+        // raise happens inside stream(), so it reaches the stream as an
+        // error rather than at registration.
+        let rt = granted_runtime();
+        eval_provider(
+            &rt,
+            r#"
+            kage.register_provider({
+                id = "typo",
+                stream = function()
+                    kage.provider_error("transprot", "typo")
+                end,
+            })
+            "#,
+        )
+        .unwrap();
+        let provider = rt.registered_providers().pop().unwrap();
+        let events: Vec<_> = provider
+            .stream(
+                kage_provider::StreamRequest::new("m", vec![]),
+                &CancelFlag::new(),
+            )
+            .unwrap()
+            .collect();
+        let err = events
+            .into_iter()
+            .find_map(std::result::Result::err)
+            .unwrap();
+        let text = err.to_string();
+        assert!(text.contains("unknown kind"), "got {text}");
+        assert!(text.contains("transport"), "names the known kinds: {text}");
     }
 }

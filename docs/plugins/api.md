@@ -973,6 +973,44 @@ streaming provider makes outbound requests via `kage.http.post_stream`,
 so it also needs the `net` capability. See `plugins/types/kage.lua` for the
 full spec shape.
 
+### `kage.provider_error(kind, message[, status])
+
+Requires the `provider` capability. Raise a typed
+provider error so the agent loop applies the right retry policy. Never
+returns.
+
+A bare `error("...")` from a provider handler reaches the
+loop as a permanent decode error, so a plugin that fails on a dropped
+connection gets no retry even though the loop has a retry-with-backoff
+path for exactly that case. This is how a plugin says which kind of
+failure it hit.
+
+| kind | retried |
+| --- | --- |
+| `transport` | yes, a timeout or reset is the pipe's fault |
+| `rate_limited` | yes |
+| `http` | on 5xx, 408 and 429; pass the status |
+| `auth` | no |
+| `unknown_model` | no |
+| `decode` | no |
+
+An unknown kind raises rather than defaulting, naming the known ones,
+so a typo is visible instead of silently non-retried.
+
+```lua
+kage.register_provider({
+    id = "mine",
+    stream = function(req, emit)
+        local res = kage.http.post(url, opts)
+        if res.status == 429 then
+            kage.provider_error("http", "rate limited", res.status)
+        end
+        -- A connect timeout is transport, so the loop retries it.
+        kage.provider_error("transport", "connect timed out")
+    end,
+})
+```
+
 ## `kage.api` reference
 
 Every `kage.api` function is since API 2.

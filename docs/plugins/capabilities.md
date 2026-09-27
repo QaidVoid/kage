@@ -132,6 +132,12 @@ say. A streaming provider usually makes outbound requests via
 `kage.http.post_stream`, so grant `net` alongside it. See
 [providers](/plugins/api#providers).
 
+The same grant attaches `kage.provider_error`, which raises a
+typed error so the loop retries the failures worth retrying. A bare
+`error("...")` is a permanent decode error, so a provider that
+fails on a connect timeout would otherwise never be retried. See
+[`provider_error`](/plugins/api#kageprovider_errorkind-message-status).
+
 ### `env`
 
 ```lua

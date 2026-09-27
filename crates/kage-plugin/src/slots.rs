@@ -194,7 +194,7 @@ static DEFAULT_SPECS: LazyLock<[Arc<SlotSpec>; SLOTS]> = LazyLock::new(|| {
             ..SlotSpec::default()
         }),
         Arc::new(SlotSpec {
-            left: items(&["working", "mode"]),
+            left: items(&["mode"]),
             right: items(&["thinking"]),
             ..SlotSpec::default()
         }),

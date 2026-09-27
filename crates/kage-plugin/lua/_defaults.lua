@@ -6,7 +6,7 @@
 local dot = " \u{B7} "
 kage.ui.set_slot("header", { left = { "breadcrumb", "title" }, right = { "widgets", "search" } })
 kage.ui.set_slot("activity", { left = { "activity" } })
-kage.ui.set_slot("input_pill", { left = { "working", "mode" }, right = { "thinking" } })
+kage.ui.set_slot("input_pill", { left = { "mode" }, right = { "thinking" } })
 kage.ui.set_slot("footer", {
   left = { "hint" },
   right = { "model", "permission", "context", "tokens" },

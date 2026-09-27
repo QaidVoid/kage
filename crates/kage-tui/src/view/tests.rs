@@ -808,7 +808,8 @@ fn the_activity_row_sits_above_the_input_only_while_it_has_text() {
     buffer.push_user("hi");
     let rows = snapshot_frame(&mut buffer, &input, None, &status, None, area);
     assert_eq!(
-        rows[5], "  Running cargo test (3s, ctrl+c to interrupt)",
+        rows[5].replace(['\u{25cb}', '\u{25cf}'], "/"),
+        "  / Running cargo test (3s, ctrl+c to interrupt)",
         "{rows:#?}"
     );
     assert!(rows[6].starts_with(RULE), "{rows:#?}");
@@ -1537,7 +1538,7 @@ fn steady(rows: Vec<String>) -> Vec<String> {
         .map(|row| {
             row.chars()
                 .map(|c| {
-                    if ('\u{2800}'..='\u{28ff}').contains(&c) {
+                    if c == '\u{25cb}' || c == '\u{25cf}' {
                         '/'
                     } else {
                         c
@@ -1599,7 +1600,7 @@ fn three_pinned_agents_sit_between_the_working_row_and_the_input() {
     assert_eq!(
         rows[22..30],
         [
-            "  Waiting for 3 agents (41s, esc to interrupt)",
+            "  / Waiting for 3 agents (41s, esc to interrupt)",
             "  / explore  map exports under src/components            Searched \"export \" in src/components \u{b7} 41s",
             "  / explore  map exports under src/routes                            Read src/routes/index.ts \u{b7} 18s",
             "  / general  check the router tests                              Running cargo test -p router \u{b7} 12s",

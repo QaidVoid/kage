@@ -98,25 +98,28 @@ pub(crate) fn format_token_count(n: u64) -> String {
     s
 }
 
-/// Pick a braille spinner glyph keyed off wall-clock time so the
-/// modeline ticks while the agent is working without us having to
-/// thread a frame counter through `App::draw`. Cycle period ~= 1
-/// second (10 frames at 100 ms each).
-const SPINNER_FRAMES: &[&str] = &[
-    "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}", "\u{2834}", "\u{2826}", "\u{2827}",
-    "\u{2807}", "\u{280F}",
-];
+/// Pick a spinner glyph keyed off wall-clock time so the modeline
+/// ticks while the agent is working without us having to thread a
+/// frame counter through `App::draw`. A pulsing dot from the Geometric
+/// Shapes block, one of the few symbol ranges terminal fonts ship
+/// reliably; rarer ranges paint as a blank or hollow box.
+const SPINNER_FRAMES: &[&str] = &["\u{25cb}", "\u{25cf}"];
+
+/// How long one spinner frame holds before the next. A two-frame dot
+/// pulse only reads as calm well above a blink; 400ms per state keeps
+/// it noticeable without flicker.
+const SPINNER_FRAME_MS: u128 = 400;
 
 /// Index into the spinner frame table for the current wall-clock
-/// instant. The frame advances on a 100ms cadence. The event loop
-/// reads this to repaint only when the glyph actually moves instead of
-/// once per wake, so a static buffer during a long tool call does not
-/// cost a full redraw every poll interval.
+/// instant. The frame advances on a 400ms cadence, an 800ms cycle. The
+/// event loop reads this to repaint only when the glyph actually moves
+/// instead of once per wake, so a static buffer during a long tool
+/// call does not cost a full redraw every poll interval.
 pub(crate) fn spinner_frame_index() -> usize {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis());
-    ((now / 100) as usize) % SPINNER_FRAMES.len()
+    ((now / SPINNER_FRAME_MS) as usize) % SPINNER_FRAMES.len()
 }
 
 pub(crate) fn spinner_frame() -> &'static str {

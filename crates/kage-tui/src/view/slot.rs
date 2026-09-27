@@ -651,7 +651,11 @@ pub(super) fn push_builtin(
         }
         "activity" => {
             if let Some(text) = status.activity.filter(|t| !t.is_empty()) {
-                out.push(Span::styled(format!("  {text}"), styles.text));
+                out.push(Span::styled(
+                    format!("  {} ", spinner_frame()),
+                    styles.strong,
+                ));
+                out.push(Span::styled(text.to_owned(), styles.text));
             }
         }
         "working" | "context" | "tokens" | "thinking" | "permission" => {

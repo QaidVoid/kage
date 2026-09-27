@@ -343,9 +343,10 @@ fn the_activity_row_shows_while_working_with_elapsed_seconds() {
     run_event(1, kage_core::protocol::HostEvent::RunStarted);
     app.drain_engine_events();
     let rows = snapshot_rows(&render_app(&mut app));
-    let row = rows
-        .iter()
-        .position(|r| r.starts_with("  Working (0s, ctrl+c to interrupt)"));
+    let row = rows.iter().position(|r| {
+        r.replace(['\u{25cb}', '\u{25cf}'], "/")
+            .starts_with("  / Working (0s, ctrl+c to interrupt)")
+    });
     let row = row.unwrap_or_else(|| panic!("{rows:?}"));
     assert!(rows[row + 1].starts_with('\u{2500}'), "{rows:?}");
     app.run_started = Instant::now().checked_sub(Duration::from_secs(14));
@@ -357,8 +358,10 @@ fn the_activity_row_shows_while_working_with_elapsed_seconds() {
     lock(&buffer).set_tool_phase("c1", crate::view::tool_view::ToolPhase::Running);
     let rows = snapshot_rows(&render_app(&mut app));
     assert!(
-        rows.iter()
-            .any(|r| r == "  Running cargo test (14s, ctrl+c to interrupt)"),
+        rows.iter().any(|r| {
+            r.replace(['\u{25cb}', '\u{25cf}'], "/")
+                == "  / Running cargo test (14s, ctrl+c to interrupt)"
+        }),
         "{rows:?}"
     );
     run_event(2, ended());

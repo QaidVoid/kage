@@ -36,6 +36,16 @@ pub fn registered_tools() -> RegisteredTools {
     Arc::new(Mutex::new(Vec::new()))
 }
 
+/// Real name to advertised name pairs registered by plugins via
+/// `kage.rename_tool`. Collected during `dofile` like tools.
+pub type RegisteredRenames = Arc<Mutex<Vec<(String, String)>>>;
+
+/// Construct an empty registered-renames collection.
+#[must_use]
+pub fn registered_renames() -> RegisteredRenames {
+    Arc::new(Mutex::new(Vec::new()))
+}
+
 /// A `Tool` whose `execute` runs inside the plugin runtime's Lua state.
 pub struct LuaTool {
     name: String,
@@ -255,6 +265,35 @@ fn install_tool_fn(
                 .lock()
                 .map_err(|_| mlua::Error::external("plugin tools registry poisoned"))?
                 .push(Arc::new(tool) as Arc<dyn Tool>);
+            Ok(())
+        })?,
+    )?;
+    Ok(())
+}
+
+/// Install `kage.rename_tool` on the running Lua state. Plugins call
+/// it with `{ from = "shell", to = "run_command" }` so the model sees
+/// only `to`; execution keeps running the `from` tool.
+pub(crate) fn install_rename_tool(
+    lua: &Lua,
+    bucket: &RegisteredRenames,
+) -> Result<(), PluginError> {
+    let bucket = Arc::downgrade(bucket);
+    let kage: Table = lua.globals().get("kage")?;
+    kage.set(
+        "rename_tool",
+        lua.create_function(move |_lua, spec: Table| {
+            let from: String = spec.get("from")?;
+            let to: String = spec.get("to")?;
+            if from.is_empty() || to.is_empty() {
+                return Err(mlua::Error::runtime(
+                    "rename_tool needs non-empty `from` and `to`",
+                ));
+            }
+            host::upgrade(&bucket)?
+                .lock()
+                .map_err(|_| mlua::Error::external("plugin renames registry poisoned"))?
+                .push((from, to));
             Ok(())
         })?,
     )?;
@@ -496,5 +535,34 @@ mod tests {
         .unwrap();
         assert_eq!(rt.registered_tools().len(), 1);
         assert_eq!(rt.registered_tool_overrides().len(), 1);
+    }
+
+    #[test]
+    fn rename_tool_collects_real_to_advertised_pairs() {
+        let rt = PluginRuntime::new().unwrap();
+        rt.eval(
+            r"
+            kage.rename_tool({ from = 'shell', to = 'run_command' })
+            kage.rename_tool({ from = 'web_fetch', to = 'browse' })
+            ",
+        )
+        .unwrap();
+        assert_eq!(
+            rt.registered_renames(),
+            vec![
+                ("shell".to_owned(), "run_command".to_owned()),
+                ("web_fetch".to_owned(), "browse".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn rename_tool_rejects_empty_names() {
+        let rt = PluginRuntime::new().unwrap();
+        let err = rt
+            .eval("kage.rename_tool({ from = '', to = 'x' })")
+            .unwrap_err();
+        assert!(err.to_string().contains("non-empty"), "{err}");
+        assert!(rt.registered_renames().is_empty());
     }
 }

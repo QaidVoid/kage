@@ -204,9 +204,7 @@ impl Tool for TodoListTool {
                         Some(list) => Some(list.clone()),
                         // An empty map carries no list at all, which
                         // can only mean "clear it".
-                        None if nested.is_empty() => {
-                            Some(serde_json::Value::Array(Vec::new()))
-                        }
+                        None if nested.is_empty() => Some(serde_json::Value::Array(Vec::new())),
                         None => Some(serde_json::Value::Object(nested.clone())),
                     }
                 }
@@ -318,7 +316,10 @@ mod tests {
         run(todos.clone(), serde_json::json!([item("a", "pending")])).unwrap();
         let out = run(todos.clone(), serde_json::json!({"todos": {"todos": []}})).unwrap();
         assert_eq!(out.text, "Todo list cleared.");
-        assert_eq!(run(todos, serde_json::json!({})).unwrap().text, "Todo list is empty.");
+        assert_eq!(
+            run(todos, serde_json::json!({})).unwrap().text,
+            "Todo list is empty."
+        );
     }
 
     #[test]

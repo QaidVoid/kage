@@ -588,6 +588,14 @@ function kage.register_tool(spec) end
 ---@param spec kage.ToolSpec
 function kage.override_tool(spec) end
 
+--- Advertise the tool `from` under the name `to`: the model sees
+--- only `to`, while execution and permission rules keep using the
+--- real tool. Re-applied on plugin reload; a rename whose `from`
+--- has no tool sits unused.
+--- Since API 2.
+---@param spec { from: string, to: string }
+function kage.rename_tool(spec) end
+
 --- Register a slash / colon command.
 --- Since API 1.
 ---@param spec kage.CommandSpec

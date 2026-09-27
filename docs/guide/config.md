@@ -65,6 +65,15 @@ enabled = []
 # scrub_env = ["*_TOKEN", "*_SECRET", "*_KEY", "*_PASSWORD"]
 scrub_env = []
 
+[tools.rename]
+# advertise a tool under another name: the model sees only the new
+# name, while execution and permission rules keep working under the
+# real one. keys are real tool names, values are advertised names.
+# unknown tools are ignored, and plugin tools can rename themselves
+# with `kage.rename_tool({ from = "shell", to = "run_command" })`.
+# shell = "run_command"
+# web_fetch = "browse"
+
 [keybindings]
 # the key <leader> expands to in bindings: one key, default a backslash.
 # leader = "<C-x>"

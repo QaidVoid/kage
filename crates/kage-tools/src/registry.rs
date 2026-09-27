@@ -22,6 +22,10 @@ pub struct ToolRegistry {
     /// hosts under another (`shell`). Aliases never appear in
     /// listings.
     aliases: BTreeMap<String, String>,
+    /// Real name to advertised name for tools a host renamed: the
+    /// model sees only the advertised name, while lookups under either
+    /// name run the same tool.
+    renamed: BTreeMap<String, String>,
 }
 
 impl ToolRegistry {
@@ -63,6 +67,52 @@ impl ToolRegistry {
     pub fn alias(mut self, from: &str, to: &str) -> Self {
         self.aliases.insert(from.to_owned(), to.to_owned());
         self
+    }
+
+    /// Advertise the tool registered under `from` as `to`: listings
+    /// show only `to`, and lookups under either name run the same
+    /// tool. Renaming a name that no tool carries is harmless: the
+    /// entry sits unused until something registers `from`.
+    ///
+    /// Returns `self` for chaining.
+    #[must_use]
+    pub fn rename(mut self, from: &str, to: &str) -> Self {
+        self.rename_in_place(from, to);
+        self
+    }
+
+    /// In-place variant of [`Self::rename`] for hosts holding the
+    /// registry behind a `&mut`.
+    pub fn rename_in_place(&mut self, from: &str, to: &str) {
+        if from.is_empty() || to.is_empty() || from == to {
+            return;
+        }
+        self.aliases.insert(to.to_owned(), from.to_owned());
+        self.renamed.insert(from.to_owned(), to.to_owned());
+    }
+
+    /// Undo a [`Self::rename`]: the tool is advertised under its real
+    /// name again. Removing an unknown rename does nothing.
+    pub fn remove_rename(&mut self, from: &str) {
+        if let Some(to) = self.renamed.remove(from) {
+            self.aliases.remove(&to);
+        }
+    }
+
+    /// Apply `[tools.rename]` entries: advertise the key under the
+    /// value.
+    #[must_use]
+    pub fn with_renames(mut self, renames: &BTreeMap<String, String>) -> Self {
+        for (from, to) in renames {
+            self = self.rename(from, to);
+        }
+        self
+    }
+
+    /// The real name to advertised name map the host applied.
+    #[must_use]
+    pub fn renames(&self) -> &BTreeMap<String, String> {
+        &self.renamed
     }
 
     /// Look up a tool by name, following alias chains. A missing
@@ -145,6 +195,12 @@ impl ToolRegistry {
             .filter(|(_, target)| out.tools.contains_key(*target))
             .map(|(from, to)| (from.clone(), to.clone()))
             .collect();
+        out.renamed = self
+            .renamed
+            .iter()
+            .filter(|(real, _)| out.tools.contains_key(*real))
+            .map(|(real, to)| (real.clone(), to.clone()))
+            .collect();
         (out, missing)
     }
 
@@ -165,15 +221,23 @@ impl ToolRegistry {
         self.tools.keys().map(String::as_str)
     }
 
-    /// Snapshot of all registered tools as [`ToolSpec`]s for the provider.
+    /// Snapshot of all registered tools as [`ToolSpec`]s for the
+    /// provider. A renamed tool is listed only under its advertised
+    /// name.
     #[must_use]
     pub fn list_for_provider(&self) -> Vec<ToolSpec> {
         self.tools
             .values()
-            .map(|t| ToolSpec {
-                name: t.name().to_owned(),
-                description: t.description().to_owned(),
-                schema: t.schema(),
+            .map(|t| {
+                let name = self
+                    .renamed
+                    .get(t.name())
+                    .map_or_else(|| t.name(), String::as_str);
+                ToolSpec {
+                    name: name.to_owned(),
+                    description: t.description().to_owned(),
+                    schema: t.schema(),
+                }
             })
             .collect()
     }
@@ -266,9 +330,7 @@ mod tests {
 
     #[test]
     fn alias_resolves_to_the_target_tool() {
-        let r = ToolRegistry::new()
-            .with(echo("shell"))
-            .alias("sh", "shell");
+        let r = ToolRegistry::new().with(echo("shell")).alias("sh", "shell");
         assert_eq!(r.get("sh").unwrap().name(), "shell");
         assert!(r.get("nope").is_none());
         // Aliases are invisible to listings.
@@ -292,9 +354,7 @@ mod tests {
     #[test]
     fn alias_survives_a_renamed_target() {
         // A plugin override under the real name keeps the alias working.
-        let mut r = ToolRegistry::new()
-            .with(echo("shell"))
-            .alias("sh", "shell");
+        let mut r = ToolRegistry::new().with(echo("shell")).alias("sh", "shell");
         r.register(echo("shell2"));
         r.register(echo("shell"));
         assert_eq!(r.get("sh").unwrap().name(), "shell");
@@ -342,7 +402,7 @@ mod tests {
         let (narrow, missing) =
             parent.retain_named(&["read".to_owned(), "ghost".to_owned(), "sh".to_owned()]);
         assert_eq!(missing, vec!["ghost".to_owned()]);
-        // `bash` resolved through its alias even though the target
+        // `sh` resolved through its alias even though the target
         // was requested under its alternate name.
         assert_eq!(narrow.get("sh").unwrap().name(), "shell");
         assert!(narrow.get("read").is_some());
@@ -352,9 +412,7 @@ mod tests {
     /// is reported as missing rather than silently dropped.
     #[test]
     fn retain_named_reports_an_alias_with_no_registered_target() {
-        let parent = ToolRegistry::new()
-            .with(echo("read"))
-            .alias("sh", "shell");
+        let parent = ToolRegistry::new().with(echo("read")).alias("sh", "shell");
         let (narrow, missing) = parent.retain_named(&["read".to_owned(), "sh".to_owned()]);
         assert_eq!(missing, vec!["sh".to_owned()]);
         assert!(narrow.get("sh").is_none());
@@ -394,13 +452,99 @@ mod tests {
         assert_eq!(r.canonical_name("p"), "p");
     }
 
+    /// A rename advertises only the new name, while lookups under
+    /// either name run the same tool and gate under the real one.
+    #[test]
+    fn a_rename_advertises_only_the_new_name() {
+        let r = ToolRegistry::new()
+            .with(echo("shell"))
+            .rename("shell", "run_command");
+        let names: Vec<String> = r.list_for_provider().into_iter().map(|s| s.name).collect();
+        assert_eq!(names, ["run_command".to_owned()]);
+        assert!(r.get("run_command").is_some(), "alias lookup broken");
+        assert_eq!(r.get("run_command").unwrap().name(), "shell");
+        assert!(r.get("shell").is_some(), "real lookup broken");
+        // The gate keys rules on the real name.
+        assert_eq!(r.canonical_name("run_command"), "shell");
+        // `names` stays the registered truth.
+        assert_eq!(r.names().collect::<Vec<_>>(), vec!["shell"]);
+    }
+
+    #[test]
+    fn a_rename_of_an_unknown_tool_sits_unused() {
+        let r = ToolRegistry::new()
+            .with(echo("read"))
+            .rename("ghost", "renamed");
+        let names: Vec<String> = r.list_for_provider().into_iter().map(|s| s.name).collect();
+        assert_eq!(names, ["read".to_owned()]);
+        assert!(r.get("renamed").is_none());
+    }
+
+    #[test]
+    fn empty_and_identity_renames_are_ignored() {
+        let r = ToolRegistry::new()
+            .with(echo("shell"))
+            .rename("shell", "")
+            .rename("", "run_command")
+            .rename("shell", "shell");
+        let names: Vec<String> = r.list_for_provider().into_iter().map(|s| s.name).collect();
+        assert_eq!(names, ["shell".to_owned()]);
+        assert!(r.renames().is_empty());
+    }
+
+    /// Renames travel with the tool through narrowing: kept tools stay
+    /// renamed, dropped tools lose their rename.
+    #[test]
+    fn retain_named_keeps_a_rename_whose_tool_survives() {
+        let parent = ToolRegistry::new()
+            .with(echo("shell"))
+            .with(echo("read"))
+            .rename("shell", "run_command");
+        let (narrow, _) = parent.retain_named(&["shell".to_owned()]);
+        let names: Vec<String> = narrow
+            .list_for_provider()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, ["run_command".to_owned()]);
+
+        let (narrow, _) = parent.retain_named(&["read".to_owned()]);
+        let names: Vec<String> = narrow
+            .list_for_provider()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(names, ["read".to_owned()]);
+    }
+
+    #[test]
+    fn remove_rename_readvertises_the_real_name() {
+        let mut r = ToolRegistry::new()
+            .with(echo("shell"))
+            .rename("shell", "run_command");
+        r.remove_rename("shell");
+        let names: Vec<String> = r.list_for_provider().into_iter().map(|s| s.name).collect();
+        assert_eq!(names, ["shell".to_owned()]);
+        assert!(r.get("run_command").is_none());
+        // Removing an unknown rename does nothing.
+        r.remove_rename("ghost");
+    }
+
+    #[test]
+    fn with_renames_applies_the_config_map() {
+        let renames = BTreeMap::from([("shell".to_owned(), "run_command".to_owned())]);
+        let r = ToolRegistry::new()
+            .with(echo("shell"))
+            .with_renames(&renames);
+        let names: Vec<String> = r.list_for_provider().into_iter().map(|s| s.name).collect();
+        assert_eq!(names, ["run_command".to_owned()]);
+    }
+
     /// A dangling alias resolves to itself: the name is not a tool, so
     /// no rules should silently apply to a different one.
     #[test]
     fn canonical_name_leaves_a_dangling_alias_alone() {
-        let r = ToolRegistry::new()
-            .with(echo("read"))
-            .alias("sh", "shell");
+        let r = ToolRegistry::new().with(echo("read")).alias("sh", "shell");
         assert_eq!(r.canonical_name("sh"), "sh");
     }
 

@@ -287,6 +287,15 @@ impl PluginRuntime {
         lock(&self.tool_overrides).clone()
     }
 
+    /// Snapshot the real-to-advertised name pairs registered by
+    /// plugins via `kage.rename_tool`, in registration order. The host
+    /// applies these after tools and overrides; a rename whose real
+    /// name has no tool sits unused until one registers.
+    #[must_use]
+    pub fn registered_renames(&self) -> Vec<(String, String)> {
+        lock(&self.renames).clone()
+    }
+
     /// Snapshot the slash commands registered by plugins so far.
     #[must_use]
     pub fn registered_commands(&self) -> Vec<Arc<LuaCommand>> {

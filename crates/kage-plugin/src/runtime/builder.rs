@@ -163,6 +163,7 @@ impl PluginRuntimeBuilder {
         let weak_host = host.downgrade();
         let tool_registry = registered_tools();
         let tool_override_registry = registered_tools();
+        let rename_registry = registered_renames();
         let command_registry = registered_commands();
         let command_override_registry = registered_commands();
         let provider_registry = registered_providers();
@@ -259,6 +260,7 @@ impl PluginRuntimeBuilder {
             self.sink.clone(),
             &tool_override_registry,
         )?;
+        tools::install_rename_tool(&lua, &rename_registry)?;
         commands::install_register_command(
             &lua,
             weak_host.clone(),
@@ -334,6 +336,7 @@ impl PluginRuntimeBuilder {
             sink: self.sink,
             tools: tool_registry,
             tool_overrides: tool_override_registry,
+            renames: rename_registry,
             commands: command_registry,
             command_overrides: command_override_registry,
             providers: provider_registry,

@@ -49,7 +49,7 @@ pub(crate) fn run_serve(tools: &[String]) -> ExitCode {
         eprintln!("kage: mcp serve: {e}");
         return ExitCode::from(1);
     }
-    let registry = match serve_registry(tools, &shell) {
+    let registry = match serve_registry(tools, &shell, &config.tools.rename) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("kage: mcp serve: {e}");
@@ -78,8 +78,14 @@ pub(crate) fn run_serve(tools: &[String]) -> ExitCode {
 /// # Errors
 ///
 /// A message naming the first unknown tool and the known ones.
-fn serve_registry(tools: &[String], shell: &ShellConfig) -> Result<ToolRegistry, String> {
-    let mut registry = kage_tools::builtin_registry().with_shell_config(shell);
+fn serve_registry(
+    tools: &[String],
+    shell: &ShellConfig,
+    renames: &BTreeMap<String, String>,
+) -> Result<ToolRegistry, String> {
+    let mut registry = kage_tools::builtin_registry()
+        .with_shell_config(shell)
+        .with_renames(renames);
     let wanted: Vec<&str> = tools.iter().map(|t| t.trim()).collect();
     if let Some(unknown) = wanted.iter().find(|t| registry.get(t).is_none()) {
         let mut known: Vec<&str> = registry.names().collect();
@@ -296,6 +302,7 @@ impl SamplingHandler {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::Arc;
 
     use kage_mcp::ServerRequestHandler;
@@ -346,7 +353,12 @@ mod tests {
 
     #[test]
     fn serve_registry_keeps_only_listed_tools() {
-        let reg = serve_registry(&names(&["read", "ls"]), &ShellConfig::default()).unwrap();
+        let reg = serve_registry(
+            &names(&["read", "ls"]),
+            &ShellConfig::default(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
         let mut listed: Vec<&str> = reg.names().collect();
         listed.sort_unstable();
         assert_eq!(listed, vec!["ls", "read"]);
@@ -354,8 +366,25 @@ mod tests {
     }
 
     #[test]
+    fn serve_registry_applies_renames_to_the_advertised_names() {
+        let renames = BTreeMap::from([("shell".to_owned(), "run_command".to_owned())]);
+        let reg = serve_registry(&names(&["shell"]), &ShellConfig::default(), &renames).unwrap();
+        let listed: Vec<String> = reg
+            .list_for_provider()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(listed, vec!["run_command".to_owned()]);
+    }
+
+    #[test]
     fn serve_registry_rejects_unknown_tools() {
-        let err = serve_registry(&names(&["read", "nope"]), &ShellConfig::default()).unwrap_err();
+        let err = serve_registry(
+            &names(&["read", "nope"]),
+            &ShellConfig::default(),
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
         assert!(err.contains("`nope`"), "{err}");
     }
 

@@ -52,6 +52,29 @@ pub struct Config {
     /// Shell tool policy (`[shell]`).
     #[serde(default, skip_serializing_if = "ShellConfig::is_default")]
     pub shell: ShellConfig,
+    /// Tool naming overrides (`[tools.rename]`).
+    #[serde(default, skip_serializing_if = "ToolsConfig::is_default")]
+    pub tools: ToolsConfig,
+}
+
+/// Tool naming overrides.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ToolsConfig {
+    /// Advertise a tool under another name (`[tools.rename]`,
+    /// `shell = "run_command"`): the model sees only the new name,
+    /// while execution and permission rules keep working under the
+    /// real one. Renames of unknown tools are ignored.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub rename: BTreeMap<String, String>,
+}
+
+impl ToolsConfig {
+    /// Whether no renames are configured.
+    #[must_use]
+    pub fn is_default(&self) -> bool {
+        self.rename.is_empty()
+    }
 }
 
 impl Config {
@@ -1800,5 +1823,28 @@ default = "ask"   # keep asking
         std::fs::write(&path, body).unwrap();
         let loaded = Config::load(&path).unwrap();
         assert_eq!(loaded, cfg);
+    }
+
+    #[test]
+    fn tools_rename_parses_from_the_toml_table() {
+        let _globals = process_globals();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[tools.rename]\nshell = \"run_command\"\nweb_fetch = \"browse\"\n",
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(
+            cfg.tools.rename.get("shell").map(String::as_str),
+            Some("run_command")
+        );
+        assert_eq!(
+            cfg.tools.rename.get("web_fetch").map(String::as_str),
+            Some("browse")
+        );
+        // The default config carries no renames.
+        assert!(Config::default().tools.is_default());
     }
 }

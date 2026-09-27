@@ -290,7 +290,10 @@ fn session_spec(
         &skills,
         config.shell.program.as_deref(),
     );
-    let mut tools = builtin_registry().with_shell_config(&config.shell);
+    let mut tools = builtin_registry()
+        .with_shell_config(&config.shell)
+        .with_renames(&config.tools.rename);
+    let aliases = tools.alias_map();
     let editor: Vec<String> = servers.keys().cloned().collect();
     let (mcp, mcp_errors) =
         crate::mcp::spawn_and_register_with(&mut tools, &workdir, plugins.as_deref(), servers);
@@ -325,6 +328,7 @@ fn session_spec(
         tools,
         gate: PermissionGate::new(config.permissions)
             .with_fallback(PermissionAction::Ask)
+            .with_aliases(aliases)
             .with_mcp_servers(mcp.server_names().map(str::to_owned).collect()),
         loop_cfg: LoopConfig {
             compaction_threshold: config.loop_settings.compaction_threshold,

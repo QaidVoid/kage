@@ -92,7 +92,9 @@ pub(crate) use crate::stdlib;
 pub(crate) use crate::store;
 pub(crate) use crate::terminal_input::{self, RegisteredTerminalHooks, registered_terminal_hooks};
 pub(crate) use crate::theme;
-pub(crate) use crate::tools::{self, RegisteredTools, registered_tools};
+pub(crate) use crate::tools::{
+    self, RegisteredRenames, RegisteredTools, registered_renames, registered_tools,
+};
 pub(crate) use crate::ui;
 pub(crate) use crate::watchdog;
 pub(crate) use crate::widgets::{self, LuaWidget, RegisteredWidgets, registered_widgets};
@@ -115,6 +117,7 @@ pub struct PluginRuntime {
     sink: SharedHostLog,
     tools: RegisteredTools,
     tool_overrides: RegisteredTools,
+    renames: RegisteredRenames,
     commands: RegisteredCommands,
     command_overrides: RegisteredCommands,
     providers: RegisteredProviders,

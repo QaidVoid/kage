@@ -686,7 +686,8 @@ fn run_print_mode(cli: Cli) -> ExitCode {
     let system_prompt =
         runtime_env::build_system_prompt(&cli.system, &workdir, &model, &skills, shell.as_deref());
 
-    let mut tools = builtin_registry();
+    let layered = kage_core::config::Config::load_layered(&workdir).unwrap_or_default();
+    let mut tools = builtin_registry().with_renames(&layered.tools.rename);
     let (mcp_manager, mcp_errors) =
         mcp::spawn_and_register(&mut tools, &workdir, plugin_runtime.as_deref());
     for (server, err) in mcp_errors {

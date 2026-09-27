@@ -353,6 +353,7 @@ impl App {
         let render_width = terminal.size().map_or(80, |r| r.width);
         self.refresh_plugin_widget_texts_if_due(render_width);
         let (mut buffer, buffer_version) = self.take_draw_snapshot();
+        let todos = view::todo::from_blocks(buffer.blocks());
         let mut session_usage = self.session_usage_snapshot();
         if self.focus.is_some()
             && let Some(usage) = session_usage.as_mut()
@@ -373,6 +374,12 @@ impl App {
             let rows = self.agents_overlay_rows();
             if let Some(overlay) = self.agents_overlay.as_mut() {
                 overlay.set_rows(rows);
+            }
+        }
+        if self.todo_list_overlay.is_some() {
+            let strip = crate::view::todo::from_blocks(buffer.blocks());
+            if let Some(overlay) = self.todo_list_overlay.as_mut() {
+                overlay.set_strip(&strip);
             }
         }
         let cwd = self
@@ -425,6 +432,7 @@ impl App {
             && self.settings_overlay.is_none()
             && self.session_tree.is_none()
             && self.agents_overlay.is_none()
+            && self.todo_list_overlay.is_none()
             && self.approval_panel.is_none()
             && self.help_overlay.is_none()
             && self.plugin_overlay.is_none();
@@ -433,6 +441,7 @@ impl App {
         let session_tree = self.session_tree.as_mut();
         let help_overlay = self.help_overlay.as_mut();
         let agents_overlay = self.agents_overlay.as_mut();
+        let todo_list_overlay = self.todo_list_overlay.as_mut();
         let plugin_overlay = self.plugin_overlay.as_mut();
         let approval = self
             .approval_panel
@@ -454,8 +463,13 @@ impl App {
         terminal
             .draw(|frame| {
                 let area = frame.area();
-                let mut heights =
-                    view::chrome_heights(&status, session_usage.as_ref(), input, area.width);
+                let mut heights = view::chrome_heights(
+                    &status,
+                    session_usage.as_ref(),
+                    input,
+                    area.width,
+                    &todos,
+                );
                 if let Some((panel, _)) = approval {
                     heights.input = panel.height(area.width).min(area.height * 3 / 5);
                 }
@@ -504,6 +518,16 @@ impl App {
                 }
                 if let Some(agents) = agents_overlay {
                     agents.render(frame, above_input);
+                }
+                if let Some(todos) = todo_list_overlay {
+                    let modal = crate::overlay::OverlayWidget::measure(todos, above_input);
+                    frame.render_widget(crate::opaque::OpaqueClear, modal);
+                    let theme = crate::theme::current();
+                    let ctx = crate::overlay::OverlayCtx {
+                        theme: &theme,
+                        viewport: above_input,
+                    };
+                    crate::overlay::OverlayWidget::render(todos, modal, frame.buffer_mut(), &ctx);
                 }
                 if let Some(help) = help_overlay {
                     let modal = crate::overlay::OverlayWidget::measure(help, above_input);

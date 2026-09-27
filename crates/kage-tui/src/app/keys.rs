@@ -189,6 +189,12 @@ impl App {
             return None;
         }
 
+        // The todo-list viewer is also a scroll-only modal sibling.
+        if self.todo_list_overlay.is_some() {
+            self.dispatch_todo_list_key(key);
+            return None;
+        }
+
         // The slash palette is its own modal layer, taking precedence
         // over the cmdline and search line.
         if self.slash_palette.is_some() {

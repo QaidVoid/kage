@@ -2,6 +2,8 @@
 
 use super::*;
 
+use ratatui::widgets::{Block, BorderType, Borders};
+
 /// Width in cells of the prompt column: a space, the glyph and a
 /// space. The glyph is painted on the first logical line only, so it
 /// scrolls away with it; every other row stays blank here.
@@ -30,6 +32,23 @@ const RULE_LEAD: usize = 2;
 const PENDING_MAX_ROWS: usize = 3;
 /// Lead of a pending row, lined up with the working row.
 const PENDING_LEAD: &str = "  > ";
+
+/// Lead of a pinned todo row, lined up with the working row.
+const TODO_LEAD: &str = "  ";
+/// Glyph of the todo heading on the box's border. Decorative, so it
+/// cannot read as a task row.
+const MARK_HEADING: &str = "\u{273b}";
+/// Marker of a finished task row: a check in the success tier.
+const MARK_DONE: &str = "\u{2713}";
+/// Markers of a pinned todo task row, one per status.
+const MARK_RUNNING: &str = super::todo::MARK_RUNNING;
+const MARK_PENDING: &str = super::todo::MARK_PENDING;
+/// Longest heading bar, in cells. Longer lists cap the bar instead of
+/// growing it.
+const TODO_BAR_MAX: usize = 10;
+/// Filled and hollow cells of the heading bar.
+const BAR_FULL: &str = "\u{25b0}";
+const BAR_EMPTY: &str = "\u{25b1}";
 
 /// Live agents pinned above the pending prompts before the rest fold
 /// into a `+N more` row.
@@ -199,7 +218,8 @@ pub(super) fn render_input(
 
 /// Split the input region into the pinned rows of `agents`, the rows
 /// of `pending` prompts and the input box, top to bottom. A short
-/// region keeps the box's two rules first, then the agents.
+/// region keeps the box's two rules first, then the agents. The todo
+/// box pins under the working row, outside this region.
 pub(crate) fn split_input(input: Rect, agents: usize, pending: usize) -> (Rect, Rect, Rect) {
     let room = input
         .height
@@ -211,7 +231,7 @@ pub(crate) fn split_input(input: Rect, agents: usize, pending: usize) -> (Rect, 
         ..input
     };
     let pending = Rect {
-        y: input.y + agent_rows,
+        y: agents.bottom(),
         height: pending_rows,
         ..input
     };
@@ -221,6 +241,132 @@ pub(crate) fn split_input(input: Rect, agents: usize, pending: usize) -> (Rect, 
         ..input
     };
     (agents, pending, rest)
+}
+
+/// Paint the todo box pinned above the input, under the working row:
+/// a rounded frame
+/// whose top border carries the progress title and, when there is
+/// room, a bar, with the tasks inside. The heading lifts onto the
+/// border, so the frame costs no extra row for it. An unfinished list
+/// takes the working accent; a finished one checks out in the success
+/// tier. The running task is the one accented row, with a bright
+/// title; pending tasks recede to the muted tier. Painting every row
+/// in one tier made a list with nothing in progress a single flat
+/// block.
+pub(crate) fn render_todo_box(frame: &mut Frame, area: Rect, strip: &super::todo::TodoStrip) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let theme = crate::theme::current();
+    let inner_width = usize::from(area.width).saturating_sub(2);
+    let painted = super::todo::rows(strip, inner_width);
+    let title = match painted.first() {
+        Some((text, super::todo::RowKind::Heading)) => Some(text.as_str()),
+        _ => None,
+    };
+    let lines: Vec<Line<'static>> = painted
+        .iter()
+        .skip(1)
+        .map(|(text, kind)| task_line(text, *kind, &theme))
+        .collect();
+    let block = todo_block(title, strip, area.width, &theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// One task row inside the box. The running task is the one accented
+/// row, with a bright title; pending tasks recede to the body tier;
+/// finished tasks check out in the success tier, struck through.
+fn task_line(text: &str, kind: super::todo::RowKind, theme: &crate::theme::Theme) -> Line<'static> {
+    let (glyph, glyph_fg, text_fg, strike) = match kind {
+        super::todo::RowKind::Running => (
+            MARK_RUNNING,
+            theme.tool_pending_rule,
+            theme.assistant_fg,
+            false,
+        ),
+        super::todo::RowKind::Pending => {
+            (MARK_PENDING, theme.muted_fg, theme.tool_result_fg, false)
+        }
+        super::todo::RowKind::Done => (MARK_DONE, theme.success_fg, theme.muted_fg, true),
+        super::todo::RowKind::Heading => (MARK_HEADING, theme.muted_fg, theme.muted_fg, false),
+    };
+    let mut text_style = Style::default().fg(text_fg);
+    if strike {
+        text_style = text_style.add_modifier(Modifier::CROSSED_OUT);
+    }
+    Line::from(vec![
+        Span::raw(TODO_LEAD),
+        Span::styled(
+            glyph,
+            Style::default().fg(glyph_fg).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(text.to_owned(), text_style),
+    ])
+}
+
+/// The todo box frame: rounded, muted, with the progress title on the
+/// left of its top border and the bar on the right, both in the
+/// working accent. Only a list with outstanding work paints, so the
+/// frame never needs a finished state.
+fn todo_block(
+    title: Option<&str>,
+    strip: &super::todo::TodoStrip,
+    width: u16,
+    theme: &crate::theme::Theme,
+) -> Block<'static> {
+    let (done, total) = strip.progress().unwrap_or((0, 0));
+    let muted = Style::default().fg(theme.muted_fg);
+    let (count, label) = title
+        .and_then(|text| text.split_once(' '))
+        .unwrap_or((title.unwrap_or(""), ""));
+    let title_spans = vec![
+        Span::styled(" ", muted),
+        Span::styled(
+            MARK_HEADING,
+            Style::default()
+                .fg(theme.tool_pending_rule)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            count.to_owned(),
+            Style::default()
+                .fg(theme.tool_result_fg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!(" {label} "), muted),
+    ];
+    let title_width: usize = title_spans.iter().map(Span::width).sum();
+    let mut block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(muted)
+        .title(Line::from(title_spans));
+    let bar_len = total.min(TODO_BAR_MAX);
+    let bar_width = bar_len + 2;
+    // The bar rides the right end of the border when the title leaves
+    // room for it beside the corners.
+    if total > 0 && title_width + bar_width + 2 <= usize::from(width) {
+        let filled = (done * bar_len + total / 2) / total;
+        let bar = Line::from(vec![
+            Span::styled(" ", muted),
+            Span::styled(
+                BAR_FULL.repeat(filled),
+                Style::default().fg(theme.tool_pending_rule),
+            ),
+            Span::styled(
+                BAR_EMPTY.repeat(bar_len - filled),
+                Style::default().fg(theme.muted_fg),
+            ),
+            Span::styled(" ", muted),
+        ])
+        .right_aligned();
+        block = block.title(bar);
+    }
+    block
 }
 
 /// Paint the pinned agents in tree order, with names in one column

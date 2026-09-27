@@ -219,6 +219,7 @@ impl App {
             || self.cmdline.is_some()
             || self.search_line.is_some()
             || self.help_overlay.is_some()
+            || self.todo_list_overlay.is_some()
             || self.approval_panel.is_some()
     }
 

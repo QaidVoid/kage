@@ -6,6 +6,7 @@ pub mod grep;
 pub mod ls;
 pub mod read;
 pub mod shell;
+pub mod todo;
 pub mod web_fetch;
 pub mod write;
 
@@ -17,6 +18,7 @@ pub use grep::GrepTool;
 pub use ls::LsTool;
 pub use read::ReadTool;
 pub use shell::ShellTool;
+pub use todo::{TodoList, TodoListTool};
 pub use web_fetch::WebFetchTool;
 pub use write::WriteTool;
 
@@ -37,7 +39,9 @@ where
 
 /// Construct a [`ToolRegistry`] with all built-in tools registered.
 ///
-/// Includes: `read`, `write`, `edit`, `shell`, `grep`, `find`, `ls`, `web_fetch`.
+/// Includes: `read`, `write`, `edit`, `shell`, `grep`, `find`, `ls`,
+/// `web_fetch`, `todo_list`. A caller that carries the todo list
+/// across a session registers its own with [`ToolRegistry::with_todo_list`].
 #[must_use]
 pub fn builtin_registry() -> ToolRegistry {
     ToolRegistry::new()
@@ -53,9 +57,17 @@ pub fn builtin_registry() -> ToolRegistry {
         .with(Arc::new(FindTool))
         .with(Arc::new(LsTool))
         .with(Arc::new(WebFetchTool))
+        .with_todo_list(TodoList::new())
 }
 
 impl ToolRegistry {
+    /// Register `todo_list` over `todos`, the session's task list.
+    #[must_use]
+    pub fn with_todo_list(mut self, todos: TodoList) -> Self {
+        self.register(Arc::new(TodoListTool::new(todos)));
+        self
+    }
+
     /// Replace the registered `shell` tool with one running commands via
     /// `cfg.shell` (default `bash`, see [`ShellTool::with_shell`]) and
     /// stripping environment variables matched by `cfg.scrub_env` (see
@@ -78,9 +90,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registers_all_eight_tools() {
+    fn registers_all_nine_tools() {
         let r = builtin_registry();
-        assert_eq!(r.len(), 8);
+        assert_eq!(r.len(), 9);
         let mut names: Vec<&str> = r.names().collect();
         names.sort_unstable();
         assert_eq!(
@@ -92,10 +104,33 @@ mod tests {
                 "ls",
                 "read",
                 "shell",
+                "todo_list",
                 "web_fetch",
                 "write"
             ],
         );
+    }
+
+    /// A write has to be visible to the next read, since one tool does
+    /// both. Two separate lists would read as the model losing its plan.
+    #[test]
+    fn a_todo_write_is_visible_to_the_next_read() {
+        let r = builtin_registry();
+        let cancel = kage_core::CancelFlag::new();
+        let cx = crate::ToolContext::new(std::path::Path::new("."), &cancel);
+        r.get("todo_list")
+            .expect("todo_list")
+            .execute(
+                serde_json::json!({"todos": [{"title": "shared", "status": "done"}]}),
+                &cx,
+            )
+            .unwrap();
+        let out = r
+            .get("todo_list")
+            .expect("todo_list")
+            .execute(serde_json::json!({}), &cx)
+            .unwrap();
+        assert!(out.text.contains("[x] shared"), "{}", out.text);
     }
 
     #[test]

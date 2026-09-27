@@ -83,6 +83,7 @@ impl super::App {
     pub(crate) fn keyboard_modal_open(&self) -> bool {
         self.modal_open()
             || self.help_overlay.is_some()
+            || self.todo_list_overlay.is_some()
             || self.approval_panel.is_some()
             || self.context_menu.is_some()
     }

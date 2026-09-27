@@ -209,6 +209,10 @@ impl App {
                 self.open_agents();
                 None
             }
+            "todo_list" => {
+                self.open_todo_list();
+                None
+            }
             "usage" => {
                 self.push_usage();
                 None

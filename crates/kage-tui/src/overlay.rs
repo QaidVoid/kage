@@ -27,6 +27,7 @@ pub mod picker;
 pub mod session_tree;
 pub mod settings;
 pub mod slash;
+pub mod todo_list;
 pub mod widget;
 
 pub use agents::{AgentsOverlay, AgentsRow, AgentsRowState};
@@ -41,4 +42,5 @@ pub use picker::OverlayPicker;
 pub use session_tree::{SessionNode, SessionTreeOverlay, SessionTreeSource};
 pub use settings::SettingsOverlay;
 pub use slash::{SlashContext, SlashPalette};
+pub use todo_list::TodoListOverlay;
 pub use widget::{OverlayAction, OverlayCtx, OverlayWidget};

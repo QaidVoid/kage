@@ -143,6 +143,8 @@ impl App {
             Some(t)
         } else if let Some(h) = &self.help_overlay {
             Some(h)
+        } else if let Some(t) = &self.todo_list_overlay {
+            Some(t)
         } else if let Some(p) = &self.slash_palette {
             Some(p)
         } else {

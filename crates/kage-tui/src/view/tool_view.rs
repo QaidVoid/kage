@@ -276,6 +276,8 @@ pub fn describe(name: &str, input: &Value) -> ToolLabel {
             field(input, "url").to_owned(),
             String::new(),
         ),
+        "todo_list" => label(["Todo", "Todo", "Todo"], todo_summary(input), String::new())
+            .body(ToolBody::Hidden),
         "agent" => {
             let description = field(input, "description").trim();
             let with_agent = |description: String| {
@@ -634,6 +636,23 @@ fn search_target(input: &Value) -> String {
         "" | "." => pattern,
         path => format!("{pattern} in {path}"),
     }
+}
+
+/// What a `todo_list` call shows in the transcript: how many tasks and
+/// how many are done, the same shape the pinned strip heads with. A
+/// call with no `todos` is a read, which has nothing to summarize.
+fn todo_summary(input: &Value) -> String {
+    let Some(items) = input.get("todos").and_then(Value::as_array) else {
+        return String::new();
+    };
+    if items.is_empty() {
+        return "empty".to_owned();
+    }
+    let done = items
+        .iter()
+        .filter(|t| field(t, "status") == "done")
+        .count();
+    format!("{done}/{}", items.len())
 }
 
 fn display_name(name: &str) -> String {
@@ -1110,6 +1129,35 @@ mod tests {
             "2 files, 2 directories, 2 searches"
         );
         assert_eq!(group_summary(&[]), "");
+    }
+
+    #[test]
+    fn todo_calls_show_progress() {
+        let read = describe("todo_list", &json!({}));
+        assert_eq!((read.verb_live, read.verb_done), ("Todo", "Todo"));
+        // A read carries no list, so there is nothing to summarize.
+        assert_eq!(read.target, "");
+
+        let one = describe(
+            "todo_list",
+            &json!({"todos": [{"title": "a", "status": "pending"}]}),
+        );
+        assert_eq!(one.target, "0/1");
+
+        let three = describe(
+            "todo_list",
+            &json!({"todos": [
+                {"title": "a", "status": "done"},
+                {"title": "b", "status": "in_progress"},
+                {"title": "c", "status": "pending"},
+            ]}),
+        );
+        assert_eq!(three.target, "1/3");
+        assert_eq!(describe("todo_list", &json!({"todos": []})).target, "empty");
+        // A partial stream can carry the array before the first item's
+        // fields land, so an item with no status counts as not done.
+        let partial = describe("todo_list", &json!({"todos": [{"title": "reading"}]}));
+        assert_eq!(partial.target, "0/1");
     }
 
     #[test]

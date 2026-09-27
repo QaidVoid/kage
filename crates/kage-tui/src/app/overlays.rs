@@ -655,6 +655,32 @@ impl App {
         self.agents_overlay = Some(crate::overlay::AgentsOverlay::new(rows, self.focus));
     }
 
+    /// Open the todo-list viewer over the transcript's latest
+    /// `todo_list` write. A session that never tracked a plan only
+    /// says so.
+    pub(crate) fn open_todo_list(&mut self) {
+        let strip = crate::view::todo::from_blocks(lock(&self.buffer).blocks());
+        if !strip.tracked {
+            self.push_info("no todo list in this session yet");
+            return;
+        }
+        self.todo_list_overlay = Some(crate::overlay::TodoListOverlay::new(&strip));
+    }
+
+    /// Drive the todo-list viewer. A read-only surface: any key it
+    /// does not scroll with closes it.
+    pub(crate) fn dispatch_todo_list_key(&mut self, key: ratatui::crossterm::event::KeyEvent) {
+        let Some(overlay) = self.todo_list_overlay.as_mut() else {
+            return;
+        };
+        match crate::overlay::OverlayWidget::handle_key(overlay, key) {
+            crate::overlay::OverlayAction::Close | crate::overlay::OverlayAction::Resolve(_) => {
+                self.todo_list_overlay = None;
+            }
+            crate::overlay::OverlayAction::Stay | crate::overlay::OverlayAction::PropagateKey => {}
+        }
+    }
+
     /// Drive the agents overlay. Enter closes it on the selected
     /// session's view, `x` stops the selected agent and keeps it open.
     /// Keys it does not use reach an approval panel under it.

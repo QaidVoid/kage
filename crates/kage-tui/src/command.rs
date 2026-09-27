@@ -349,6 +349,14 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         subcommands: &[],
     },
     CommandSpec {
+        name: "todo_list",
+        aliases: &["todos"],
+        description: "show every task of the session's todo list",
+        category: CommandCategory::Both,
+        args: &[],
+        subcommands: &[],
+    },
+    CommandSpec {
         name: "permission",
         aliases: &["perm"],
         description: "show or set the session permission mode",
@@ -704,7 +712,7 @@ mod tests {
 
     #[test]
     fn builtin_registry_has_expected_command_count() {
-        assert_eq!(BUILTIN_COMMANDS.len(), 25);
+        assert_eq!(BUILTIN_COMMANDS.len(), 26);
     }
 
     #[test]

@@ -192,7 +192,15 @@ fn snapshot_frame(
     usage: Option<&SessionUsage>,
     area: Rect,
 ) -> Vec<String> {
-    let buf = paint_frame(buffer, input, cmdline, status, usage, area);
+    let buf = paint_frame(
+        buffer,
+        input,
+        cmdline,
+        status,
+        usage,
+        area,
+        &todo::TodoStrip::default(),
+    );
     let mut out = Vec::new();
     for y in 0..buf.area.height {
         let mut row = String::new();
@@ -211,6 +219,7 @@ fn paint_frame(
     status: &StatusCtx<'_>,
     usage: Option<&SessionUsage>,
     area: Rect,
+    todos: &todo::TodoStrip,
 ) -> ratatui::buffer::Buffer {
     let backend = TestBackend::new(area.width, area.height);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -218,7 +227,7 @@ fn paint_frame(
         std::collections::BTreeMap::new();
     terminal
         .draw(|frame| {
-            let heights = chrome_heights(status, usage, input, frame.area().width);
+            let heights = chrome_heights(status, usage, input, frame.area().width, todos);
             let regions = crate::layout::split(frame.area(), heights);
             render(
                 frame,
@@ -912,7 +921,13 @@ fn cell_bg_at(cmdline: &CommandLine, area: Rect, x: u16, y: u16) -> Color {
     let status = StatusCtx::default();
     terminal
         .draw(|frame| {
-            let heights = chrome_heights(&status, None, &input, frame.area().width);
+            let heights = chrome_heights(
+                &status,
+                None,
+                &input,
+                frame.area().width,
+                &todo::TodoStrip::default(),
+            );
             let regions = crate::layout::split(frame.area(), heights);
             render(
                 frame,
@@ -1357,6 +1372,7 @@ fn notices_paint_in_the_warning_style() {
         &card_status(&info),
         None,
         area,
+        &todo::TodoStrip::default(),
     );
     let y = (0..area.height)
         .find(|&y| buf[(3, y)].symbol() == "!")
@@ -1737,6 +1753,104 @@ fn a_narrow_row_cuts_the_description_before_the_activity() {
     );
 }
 
+/// A `todo_list` call in a transcript, built the way the buffer builds
+/// one.
+/// A buffer whose transcript holds one `todo_list` write, the way a
+/// session that tracked a plan looks.
+fn todo_buffer(input: serde_json::Value) -> Buffer {
+    let mut buffer = Buffer::new();
+    buffer.push_tool_call("call_1", "todo_list", input);
+    buffer
+}
+
+/// A todo write in the transcript pins its box under the working row,
+/// so the plan stays visible while the conversation scrolls. The box
+/// shows the running task first, then the queue, capped at five rows.
+#[test]
+fn a_todo_write_pins_rows_above_the_input() {
+    let input_json = serde_json::json!({"todos": [
+        {"title": "read the code", "status": "in_progress"},
+        {"title": "write the fix", "status": "pending"},
+        {"title": "run the tests", "status": "pending"},
+        {"title": "write the docs", "status": "pending"},
+        {"title": "ship it", "status": "pending"},
+        {"title": "celebrate", "status": "pending"},
+    ]});
+    let mut buffer = todo_buffer(input_json.clone());
+    let strip = todo::from_blocks(buffer.blocks());
+    assert!(strip.tracked);
+
+    let input = InputState::new();
+    let area = Rect::new(0, 0, 60, 20);
+    let buf = paint_frame(
+        &mut buffer,
+        &input,
+        None,
+        &card_status(&start_info(0)),
+        None,
+        area,
+        &strip,
+    );
+    let text: String = (0..area.height)
+        .map(|y| {
+            (0..area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("0/6 todos"), "no progress row in:\n{text}");
+    assert!(
+        text.contains("read the code"),
+        "no current task in:\n{text}"
+    );
+    assert!(text.contains("ship it"), "no last fitting task in:\n{text}");
+    // The sixth item is beyond the cap and stays in the transcript.
+    assert!(!text.contains("celebrate"), "the cap did not hold:\n{text}");
+}
+
+/// Without a todo write in the transcript the region collapses, so the
+/// input keeps its rows.
+#[test]
+fn no_todos_leaves_the_input_region_alone() {
+    let input = InputState::new();
+    let area = Rect::new(0, 0, 60, 20);
+    let mut buffer = Buffer::new();
+    let bare = paint_frame(
+        &mut buffer,
+        &input,
+        None,
+        &card_status(&start_info(0)),
+        None,
+        area,
+        &todo::TodoStrip::default(),
+    );
+    let mut tracked = todo_buffer(serde_json::json!({"todos": [
+        {"title": "a", "status": "pending"},
+    ]}));
+    let todos = todo::from_blocks(tracked.blocks());
+    let with = paint_frame(
+        &mut tracked,
+        &input,
+        None,
+        &card_status(&start_info(0)),
+        None,
+        area,
+        &todos,
+    );
+    let rows = |b: &ratatui::buffer::Buffer| {
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| b[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_ne!(rows(&bare), rows(&with), "the strip painted nothing");
+}
+
 #[test]
 fn input_height_counts_the_pinned_agents() {
     let input = InputState::new();
@@ -1980,4 +2094,332 @@ fn scroll_math_follows_the_tool_row_gaps() {
     );
     assert!(lines[0].ends_with("Ran cargo build"), "{lines:#?}");
     assert!(lines[3].ends_with("exit: 0"), "{lines:#?}");
+}
+
+// --- Pinned todo strip ---
+
+/// The pinned todo rows as painted: each row's visible text and the
+/// distinct foregrounds its cells carry.
+fn todo_rows_painted(todos: &serde_json::Value) -> Vec<(String, Vec<ratatui::style::Color>)> {
+    todo_rows_painted_at(todos, 40)
+}
+
+/// [`todo_rows_painted`] at a chosen strip width.
+fn todo_rows_painted_at(
+    todos: &serde_json::Value,
+    width: u16,
+) -> Vec<(String, Vec<ratatui::style::Color>)> {
+    // `render` re-derives the strip from the buffer's blocks, so the
+    // call has to go through the buffer rather than being handed a
+    // strip directly.
+    let mut buffer = Buffer::new();
+    buffer.push_tool_call("c", "todo_list", json!({ "todos": todos.clone() }));
+    // The layout must reserve the same rows the painter fills, so the
+    // strip handed to the layout is the one the buffer derives.
+    let strip = todo::from_blocks(buffer.blocks());
+    let painted = paint_frame(
+        &mut buffer,
+        &InputState::new(),
+        None,
+        &StatusCtx::default(),
+        None,
+        Rect::new(0, 0, width, 14),
+        &strip,
+    );
+    painted
+        .content()
+        .chunks(usize::from(width))
+        .map(|row| {
+            let text: String = row.iter().map(ratatui::buffer::Cell::symbol).collect();
+            let text = text.trim_end().to_owned();
+            let mut colors: Vec<ratatui::style::Color> = Vec::new();
+            for cell in row {
+                if cell.symbol().trim().is_empty() || colors.contains(&cell.fg) {
+                    continue;
+                }
+                colors.push(cell.fg);
+            }
+            (text, colors)
+        })
+        // Keep only the pinned strip: the heading, then rows led by a
+        // task marker. The modeline and the input rules share the
+        // frame and are not part of it.
+        .filter(|(text, _)| {
+            // Inner rows lead with the box's side border, then the
+            // task marker.
+            let body = text.trim_start_matches([' ', '\u{2502}']);
+            text.contains(" todo")
+                || text.contains(" todos")
+                || body.starts_with(todo::MARK_RUNNING)
+                || body.starts_with(todo::MARK_PENDING)
+        })
+        .collect()
+}
+
+#[test]
+fn the_unfinished_heading_takes_no_task_marker() {
+    // The heading's glyph is decorative and must never read as a task
+    // marker: a check would claim "everything is done" on a list with
+    // nothing done, a dot would read as a task row.
+    let theme = crate::theme::current();
+    let rows = todo_rows_painted(&json!([{ "title": "reading", "status": "in_progress" }]));
+    let (text, colors) = &rows[0];
+    assert!(text.contains("0/1 todo"), "{text:?}");
+    assert!(
+        !text.contains('\u{2713}') && !text.contains('\u{25cf}'),
+        "heading painted a task marker: {text:?}"
+    );
+    assert!(
+        colors.contains(&theme.tool_pending_rule),
+        "unfinished heading misses the working accent: {colors:?}"
+    );
+}
+
+#[test]
+fn the_todo_box_is_rounded_and_muted() {
+    let mut buffer =
+        todo_buffer(json!({ "todos": [{ "title": "reading", "status": "in_progress" }] }));
+    let strip = todo::from_blocks(buffer.blocks());
+    let buf = paint_frame(
+        &mut buffer,
+        &InputState::new(),
+        None,
+        &card_status(&start_info(0)),
+        None,
+        Rect::new(0, 0, 40, 14),
+        &strip,
+    );
+    let row = |y: u16| (0..40).map(|x| buf[(x, y)].symbol()).collect::<String>();
+    let rows: Vec<String> = (0..14).map(row).collect();
+    let top = rows
+        .iter()
+        .position(|r| r.starts_with('\u{256d}'))
+        .expect("top border");
+    let bottom = rows
+        .iter()
+        .position(|r| r.starts_with('\u{2570}'))
+        .expect("bottom border");
+    assert!(rows[top].contains("0/1 todo"), "{:?}", rows[top]);
+    assert!(rows[top].ends_with('\u{256e}'), "{:?}", rows[top]);
+    // The heading rides the top border, so the inner rows are the
+    // painted rows minus it.
+    assert_eq!(
+        u16::try_from(bottom - top).unwrap(),
+        todo::box_height(&strip) - 1
+    );
+    let theme = crate::theme::current();
+    let all_muted = (0..40).all(|x| buf[(x, u16::try_from(bottom).unwrap())].fg == theme.muted_fg);
+    assert!(all_muted, "bottom border is not one muted row");
+}
+
+#[test]
+fn the_todo_box_hugs_its_last_task() {
+    // The heading rides the top border, so the interior holds only
+    // task rows; a spare blank row read as a bottom margin.
+    let mut buffer = todo_buffer(json!({ "todos": [
+        { "title": "one", "status": "pending" },
+        { "title": "two", "status": "pending" },
+    ] }));
+    let strip = todo::from_blocks(buffer.blocks());
+    let buf = paint_frame(
+        &mut buffer,
+        &InputState::new(),
+        None,
+        &card_status(&start_info(0)),
+        None,
+        Rect::new(0, 0, 40, 14),
+        &strip,
+    );
+    let rows: Vec<String> = (0..14)
+        .map(|y| (0..40).map(|x| buf[(x, y)].symbol()).collect::<String>())
+        .collect();
+    let bottom = rows
+        .iter()
+        .position(|r| r.starts_with('\u{2570}'))
+        .expect("bottom border");
+    let above = &rows[bottom - 1];
+    assert!(
+        above.contains('\u{25cb}') && above.contains("two"),
+        "the row above the border is not the last task: {above:?}"
+    );
+}
+
+#[test]
+fn a_todo_list_with_nothing_running_is_not_monochrome() {
+    // Every row in one tier flattened the strip into a single block of
+    // grey; the accented heading must stand off the pending rows.
+    let theme = crate::theme::current();
+    let rows = todo_rows_painted(&json!([
+        { "title": "one", "status": "pending" },
+        { "title": "two", "status": "pending" },
+    ]));
+    let (heading_text, heading_colors) = &rows[0];
+    let (_, task_colors) = &rows[1];
+    assert!(heading_text.contains("todos"), "{heading_text:?}");
+    assert_ne!(
+        heading_colors, task_colors,
+        "heading and task share a palette, so the strip reads flat"
+    );
+    assert!(
+        task_colors.contains(&theme.muted_fg),
+        "pending row misses the muted tier: {task_colors:?}"
+    );
+}
+
+#[test]
+fn the_running_todo_is_the_only_accented_row() {
+    let theme = crate::theme::current();
+    let rows = todo_rows_painted(&json!([
+        { "title": "now", "status": "in_progress" },
+        { "title": "later", "status": "pending" },
+    ]));
+    assert!(
+        rows[1].1.contains(&theme.tool_pending_rule) && rows[1].1.contains(&theme.assistant_fg),
+        "running row: accented marker, bright title: {:?}",
+        rows[1].1
+    );
+    assert!(
+        !rows[2].1.contains(&theme.tool_pending_rule),
+        "pending row takes the working accent: {:?}",
+        rows[2].1
+    );
+}
+
+#[test]
+fn the_heading_carries_a_progress_bar() {
+    let theme = crate::theme::current();
+    let rows = todo_rows_painted(&json!([
+        { "title": "a", "status": "done" },
+        { "title": "b", "status": "in_progress" },
+        { "title": "c", "status": "pending" },
+    ]));
+    let (text, colors) = &rows[0];
+    assert!(text.contains("1/3 todos"), "{text:?}");
+    let bar: String = text
+        .chars()
+        .filter(|c| *c == '\u{25b0}' || *c == '\u{25b1}')
+        .collect();
+    assert_eq!(bar, "\u{25b0}\u{25b1}\u{25b1}", "{text:?}");
+    assert!(
+        colors.contains(&theme.tool_pending_rule),
+        "bar misses the working accent: {colors:?}"
+    );
+}
+
+#[test]
+fn a_narrow_heading_drops_the_bar() {
+    let rows = todo_rows_painted_at(&json!([{ "title": "a", "status": "pending" }]), 15);
+    let (text, _) = &rows[0];
+    assert!(text.contains("0/1 todo"), "{text:?}");
+    assert!(
+        !text.contains('\u{25b0}') && !text.contains('\u{25b1}'),
+        "bar survived a narrow strip: {text:?}"
+    );
+}
+
+#[test]
+fn a_finished_list_unpins_the_box() {
+    // A plan with nothing outstanding paints nothing: the transcript
+    // carries the completion.
+    let rows = todo_rows_painted(&json!([
+        { "title": "a", "status": "done" },
+        { "title": "b", "status": "done" },
+    ]));
+    assert!(rows.is_empty(), "a finished list still painted: {rows:?}");
+}
+
+#[test]
+fn a_done_task_strikes_through() {
+    let mut buffer = todo_buffer(json!({ "todos": [
+        { "title": "finished deed", "status": "done" },
+        { "title": "open task", "status": "in_progress" },
+    ]}));
+    let strip = todo::from_blocks(buffer.blocks());
+    let buf = paint_frame(
+        &mut buffer,
+        &InputState::new(),
+        None,
+        &card_status(&start_info(0)),
+        None,
+        Rect::new(0, 0, 40, 14),
+        &strip,
+    );
+    let row_text = |y: u16| (0..40).map(|x| buf[(x, y)].symbol()).collect::<String>();
+    let mut struck = false;
+    let mut checked = false;
+    let theme = crate::theme::current();
+    for y in 0..14 {
+        if !row_text(y).contains("finished deed") {
+            continue;
+        }
+        for x in 0..40 {
+            let cell = &buf[(x, y)];
+            if cell.symbol().trim().is_empty() {
+                continue;
+            }
+            if cell
+                .style()
+                .add_modifier
+                .contains(ratatui::style::Modifier::CROSSED_OUT)
+            {
+                struck = true;
+            }
+            if cell.fg == theme.success_fg {
+                checked = true;
+            }
+        }
+    }
+    assert!(struck, "done task is not struck through");
+    assert!(checked, "done task misses the success tier");
+}
+
+#[test]
+fn the_todo_box_sits_below_the_working_row() {
+    let mut buffer =
+        todo_buffer(json!({ "todos": [{ "title": "reading", "status": "in_progress" }] }));
+    let strip = todo::from_blocks(buffer.blocks());
+    let info = start_info(0);
+    let status = StatusCtx {
+        activity: Some("  Working (2s, esc to interrupt)"),
+        ..card_status(&info)
+    };
+    let buf = paint_frame(
+        &mut buffer,
+        &InputState::new(),
+        None,
+        &status,
+        None,
+        Rect::new(0, 0, 40, 14),
+        &strip,
+    );
+    let row = |y: u16| (0..40).map(|x| buf[(x, y)].symbol()).collect::<String>();
+    let rows: Vec<String> = (0..14).map(row).collect();
+    let box_row = rows
+        .iter()
+        .position(|r| r.contains("0/1 todo"))
+        .expect("todo box painted");
+    let working = rows
+        .iter()
+        .position(|r| r.contains("Working (2s"))
+        .expect("working row painted");
+    assert!(
+        working < box_row,
+        "box did not sit under the working row:\n{}",
+        rows.join("\n")
+    );
+    assert_eq!(
+        u16::try_from(box_row - working).unwrap(),
+        1,
+        "the box must hug the working row"
+    );
+    // The box's bottom border sits on the input's top rule.
+    let bottom = rows
+        .iter()
+        .position(|r| r.starts_with('\u{2570}'))
+        .expect("bottom border");
+    assert!(
+        rows[bottom + 1].contains("INSERT"),
+        "the border does not touch the input rule:\n{}",
+        rows.join("\n")
+    );
 }

@@ -22,6 +22,7 @@ impl App {
             session_tree: None,
             help_overlay: None,
             agents_overlay: None,
+            todo_list_overlay: None,
             session_tree_source: None,
             session_lister: None,
             cmdline: None,

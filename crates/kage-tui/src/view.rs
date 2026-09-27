@@ -16,6 +16,7 @@ pub mod plugin_block;
 pub mod registry;
 pub mod thinking;
 pub mod toast;
+pub mod todo;
 pub mod tool_call_alone;
 pub mod tool_pair;
 pub mod tool_result_alone;
@@ -259,6 +260,7 @@ pub fn render(
             full,
         );
     }
+    let todos = todo::from_blocks(buffer.blocks());
     let sources = slot::Sources::new(status, session_usage, input, frame.area().width);
     let toast_rows = toast::toast_rows(toasts.len(), regions.buffer);
     let mut regions = regions;
@@ -279,7 +281,20 @@ pub fn render(
     if let Some(area) = start_area(buffer, regions.buffer).filter(|_| status.breadcrumb.is_none()) {
         slot::render_start(frame, area, &sources);
     }
-    slot::render_activity(frame, regions.activity, &sources);
+    // The working row and the todo box share the activity region: the
+    // row takes the top, the box sits under it against the input.
+    let box_rows = todo::box_height(&todos).min(regions.activity.height);
+    let activity_area = Rect {
+        height: regions.activity.height - box_rows,
+        ..regions.activity
+    };
+    let todo_area = Rect {
+        y: regions.activity.bottom() - box_rows,
+        height: box_rows,
+        ..regions.activity
+    };
+    slot::render_activity(frame, activity_area, &sources);
+    render_todo_box(frame, todo_area, &todos);
     render_input(frame, regions, input, &sources);
     render_toasts(frame, toast_area, toasts, &theme);
     if let Some(cl) = cmdline {
@@ -315,14 +330,15 @@ fn start_area(buffer: &Buffer, area: Rect) -> Option<Rect> {
 }
 
 /// Row heights of the chrome for one frame: the header and activity
-/// rows collapse while their slots paint nothing, and the input fits
-/// its draft.
+/// rows collapse while their slots paint nothing, the todo box rides
+/// the activity region's bottom, and the input fits its draft.
 #[must_use]
 pub fn chrome_heights(
     status: &StatusCtx<'_>,
     session_usage: Option<&SessionUsage>,
     input: &InputState,
     width: u16,
+    todos: &todo::TodoStrip,
 ) -> crate::layout::Heights {
     let sources = slot::Sources::new(status, session_usage, input, width);
     crate::layout::Heights {
@@ -330,18 +346,20 @@ pub fn chrome_heights(
             kage_plugin::SlotName::Header,
             &sources,
         )),
-        activity: u16::from(slot::row_has_content(
-            kage_plugin::SlotName::Activity,
-            &sources,
-        )),
+        activity: todo::box_height(todos)
+            + u16::from(slot::row_has_content(
+                kage_plugin::SlotName::Activity,
+                &sources,
+            )),
         input: input_height(input, status.agents.len(), status.pending.len(), width),
         footer: 1,
     }
 }
 
 /// Input region height for `input`'s draft at terminal `width`: the
-/// rows of pinned `agents` and `pending` prompts, then the wrapped
-/// content rows, clamped to the configured bounds, plus the two rules.
+/// rows of pinned agents and pending prompts, then the wrapped content
+/// rows, clamped to the configured bounds, plus the two rules. The
+/// todo box pins under the working row, not inside this region.
 #[must_use]
 pub fn input_height(input: &InputState, agents: usize, pending: usize, width: u16) -> u16 {
     let rows = input_visual_row_count(input.text(), input_body_width(width));
@@ -446,7 +464,7 @@ use cmdline::{
     place_cmdline_cursor, render_cmdline_error, render_cmdline_line, render_cmdline_popup,
     render_search_line,
 };
-use input::render_input;
+use input::{render_input, render_todo_box};
 
 // Helpers shared across the split submodules, re-routed through the
 // parent so each submodule's `use super::*` keeps resolving them.

@@ -599,6 +599,10 @@ pub struct App {
     /// the picker. Its rows are rebuilt from [`Self::agents`] every
     /// frame.
     agents_overlay: Option<crate::overlay::AgentsOverlay>,
+    /// Open todo-list viewer (`/todo_list`), a scroll-only modal
+    /// sibling of the help reference. Its rows are rebuilt from the
+    /// transcript's latest `todo_list` write every frame.
+    todo_list_overlay: Option<crate::overlay::TodoListOverlay>,
     /// Open right-click context menu, if any. A light modal layer:
     /// while present it owns the keyboard and intercepts mouse clicks
     /// (a click on a row runs its action, a click off it dismisses).

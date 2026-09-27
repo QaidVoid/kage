@@ -186,7 +186,14 @@ fn test_agent(
             }),
         })
     });
-    CliAcpAgent::new(registry, "mock:m".into(), sessions, spec, peer)
+    CliAcpAgent::new(
+        registry,
+        "mock:m".into(),
+        sessions,
+        spec,
+        peer,
+        BTreeMap::new(),
+    )
 }
 
 /// An in-process MCP server with the prompt `p(a, b?)`, which answers

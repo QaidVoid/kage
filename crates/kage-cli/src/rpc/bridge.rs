@@ -1,6 +1,6 @@
 //! Engine events as ACP traffic.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -13,7 +13,7 @@ use kage_acp::acp::{
 use kage_acp::agent::{PermissionDecision, send_update};
 use kage_core::protocol::{
     AgentNode, AgentTree, Command, CommandKind, Envelope, Event, HostEvent,
-    PermissionDecision as Decision, RequestId, RunOutcome, Usage,
+    PermissionDecision as Decision, RequestId, RunOutcome, Usage, with_canonical_tool_names,
 };
 use kage_core::sync::lock;
 use kage_core::{CancelFlag, LoopEvent, SessionId, StopReason as CoreStopReason, ToolCallId};
@@ -33,6 +33,10 @@ pub(super) struct Bridge {
     pub(super) waiters: Waiters,
     pub(super) models: Arc<[SessionConfigSelectOption]>,
     pub(super) shown: ShownBySession,
+    /// Advertised name to real name for tools the host renamed, so a
+    /// call the model makes under its advertised name still renders
+    /// with the real tool's title, kind, and read-only grouping.
+    pub(super) aliases: BTreeMap<String, String>,
     pub(super) seen: HashMap<SessionId, HashMap<String, serde_json::Value>>,
     pub(super) stops: HashMap<SessionId, CoreStopReason>,
     pub(super) asks: HashMap<SessionId, Vec<Ask>>,
@@ -59,6 +63,7 @@ pub(super) struct Ask {
 
 impl Bridge {
     pub(super) fn handle(&mut self, envelope: &Envelope) {
+        let envelope = &with_canonical_tool_names(envelope.clone(), &self.aliases);
         let session = envelope.session;
         let is_agent = self.tree.apply(envelope);
         let client_id = lock(&self.ids).by_engine.get(&session).cloned();

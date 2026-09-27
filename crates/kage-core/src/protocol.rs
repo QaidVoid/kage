@@ -17,6 +17,7 @@ pub use mcp::{
     McpPrompt, McpPromptArgument, McpResource, McpResourceTemplate, McpServerInfo, McpServerStatus,
 };
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -97,6 +98,34 @@ impl From<HostEvent> for Event {
     fn from(event: HostEvent) -> Self {
         Self::Host(event)
     }
+}
+
+/// Rewrite advertised tool names to the real names they point at.
+///
+/// A host that renames tools advertises only the new names, so the
+/// model calls a tool the registry hosts under another name. Hosts
+/// that render tool cards (the TUI transcript, the ACP bridge) apply
+/// this to incoming envelopes so a renamed tool keeps its real card,
+/// kind hint, and read-only grouping. Names the map does not know pass
+/// through unchanged.
+#[must_use]
+pub fn with_canonical_tool_names(
+    mut envelope: Envelope,
+    canonical: &BTreeMap<String, String>,
+) -> Envelope {
+    let resolve = |name: &mut String| {
+        if let Some(real) = canonical.get(name.as_str()) {
+            *name = real.clone();
+        }
+    };
+    match &mut envelope.event {
+        Event::Loop(
+            LoopEvent::ToolCallStart { name, .. } | LoopEvent::ToolCallArgsDelta { name, .. },
+        ) => resolve(name),
+        Event::Host(HostEvent::PermissionRequested { tool, .. }) => resolve(tool),
+        _ => {}
+    }
+    envelope
 }
 
 /// Events the engine emits around agent runs.
@@ -628,5 +657,60 @@ mod tests {
         assert!(value.get("session").is_none());
         let back: Command = serde_json::from_value(value).unwrap();
         assert_eq!(back, cmd);
+    }
+
+    #[test]
+    fn canonical_names_resolve_renamed_tool_calls() {
+        let canonical = BTreeMap::from([("run_command".to_owned(), "shell".to_owned())]);
+        let env = with_canonical_tool_names(
+            envelope(LoopEvent::ToolCallStart {
+                id: ToolCallId::new("call-1"),
+                name: "run_command".into(),
+                input_partial: serde_json::json!({ "command": "ls" }),
+            }),
+            &canonical,
+        );
+        match env.event {
+            Event::Loop(LoopEvent::ToolCallStart { name, .. }) => assert_eq!(name, "shell"),
+            other => panic!("expected a tool call start, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn canonical_names_resolve_permission_requests() {
+        let canonical = BTreeMap::from([("run_command".to_owned(), "shell".to_owned())]);
+        let env = with_canonical_tool_names(
+            envelope(HostEvent::PermissionRequested {
+                request_id: RequestId(1),
+                tool_call_id: None,
+                tool: "run_command".into(),
+                subject: "ls".into(),
+                input: serde_json::json!({ "command": "ls" }),
+            }),
+            &canonical,
+        );
+        match env.event {
+            Event::Host(HostEvent::PermissionRequested { tool, .. }) => {
+                assert_eq!(tool, "shell");
+            }
+            other => panic!("expected a permission request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn canonical_names_leave_unknown_names_alone() {
+        let canonical = BTreeMap::from([("run_command".to_owned(), "shell".to_owned())]);
+        let env = with_canonical_tool_names(
+            envelope(LoopEvent::ToolCallStart {
+                id: ToolCallId::new("call-1"),
+                name: "grep".into(),
+                input_partial: serde_json::json!({}),
+            }),
+            &canonical,
+        );
+        match env.event {
+            Event::Loop(LoopEvent::ToolCallStart { name, .. }) => assert_eq!(name, "grep"),
+            other => panic!("expected a tool call start, got {other:?}"),
+        }
     }
 }

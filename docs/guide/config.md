@@ -71,6 +71,8 @@ scrub_env = []
 # real one. keys are real tool names, values are advertised names.
 # unknown tools are ignored, and plugin tools can rename themselves
 # with `kage.rename_tool({ from = "shell", to = "run_command" })`.
+# tool cards in the transcript, the ACP kind hints, and read-only
+# grouping keep using the real name.
 # shell = "run_command"
 # web_fetch = "browse"
 

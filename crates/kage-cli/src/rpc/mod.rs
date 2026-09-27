@@ -92,6 +92,17 @@ pub(crate) fn run(model_override: Option<&str>, system_role: &str) -> ExitCode {
         }
     };
     let registry = Arc::new(registry);
+    // Tool names the model sees renamed, for the bridge's card titles
+    // and kind hints. Loaded once at startup, like the TUI does.
+    let aliases = {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let renames = kage_core::config::Config::load_layered(&cwd)
+            .map(|config| config.tools.rename)
+            .unwrap_or_default();
+        kage_tools::ToolRegistry::new()
+            .with_renames(&renames)
+            .alias_map()
+    };
     let spec = {
         let registry = Arc::clone(&registry);
         let system_role = system_role.to_owned();
@@ -101,7 +112,7 @@ pub(crate) fn run(model_override: Option<&str>, system_role: &str) -> ExitCode {
     };
     let reader = BufReader::new(std::io::stdin());
     let result = serve_agent(reader, std::io::stdout(), |peer| {
-        CliAcpAgent::new(registry, default_model, sessions, spec, peer)
+        CliAcpAgent::new(registry, default_model, sessions, spec, peer, aliases)
     });
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -176,6 +187,7 @@ impl CliAcpAgent {
         sessions: PathBuf,
         spec: SpecBuilder,
         peer: Peer,
+        aliases: BTreeMap<String, String>,
     ) -> Self {
         let engine = Engine::start(Arc::clone(&registry));
         let ids = Arc::new(Mutex::new(Ids::default()));
@@ -195,6 +207,7 @@ impl CliAcpAgent {
             waiters: Arc::clone(&waiters),
             models: Arc::clone(&models),
             shown: Arc::clone(&shown),
+            aliases,
             seen: HashMap::new(),
             stops: HashMap::new(),
             asks: HashMap::new(),

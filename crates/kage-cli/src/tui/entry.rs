@@ -204,7 +204,8 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
     let (dialog_tx, dialog_rx) = mpsc::channel::<PluginDialog>();
     let (plugin_refresh_tx, plugin_refresh_rx) = mpsc::channel::<PluginRefresh>();
     let gate = crate::permissions::PermissionGate::new(app_config.permissions.clone())
-        .with_mcp_servers(mcp_manager.server_names().map(str::to_owned).collect());
+        .with_mcp_servers(mcp_manager.server_names().map(str::to_owned).collect())
+        .with_aliases(tools.alias_map());
     if yolo {
         gate.set_mode(Some(kage_core::permissions::PermissionAction::Allow));
     }

@@ -1603,3 +1603,12 @@ fn built_in_tools_get_kind_hints() {
     assert_eq!(tool_kind("grep"), ToolKind::Search);
     assert_eq!(tool_kind("github__create_issue"), ToolKind::Other);
 }
+
+/// The `bash` alias runs the shell tool, so its card must be classified
+/// as an execution. Without this the client renders an unknown-tool
+/// card for a command the model actually ran.
+#[test]
+fn an_aliased_call_keeps_the_kind_of_the_tool_it_runs() {
+    assert_eq!(tool_kind("bash"), tool_kind("shell"));
+    assert_eq!(tool_kind("bash"), ToolKind::Execute);
+}

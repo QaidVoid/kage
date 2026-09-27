@@ -84,8 +84,9 @@ pub(crate) fn execute_print_run(
         .unwrap_or_default();
     let engine = crate::engine::Engine::start(registry);
     engine.subscribe(printer);
-    let gate =
-        crate::permissions::PermissionGate::new(layered.permissions).with_mcp_servers(mcp_servers);
+    let gate = crate::permissions::PermissionGate::new(layered.permissions)
+        .with_mcp_servers(mcp_servers)
+        .with_aliases(tools.alias_map());
     // A yolo run parks the gate in allow mode: no asks, but a
     // configured deny still denies.
     if yolo {

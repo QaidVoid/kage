@@ -83,6 +83,41 @@ impl ToolRegistry {
         None
     }
 
+    /// The registered name `name` resolves to, following aliases.
+    ///
+    /// This is the name a call should be judged under: permission
+    /// rules, session approvals, and the transcript are all keyed by
+    /// the tool's real name, so a call that arrived as `bash` must be
+    /// evaluated as `shell` or the rules for `shell` never apply.
+    ///
+    /// Returns `name` unchanged when it is not an alias.
+    #[must_use]
+    pub fn canonical_name<'a>(&'a self, name: &'a str) -> &'a str {
+        let mut current = name;
+        // Bounded like `get`: a hand-written cycle must not hang.
+        for _ in 0..8 {
+            match self.tools.get(current) {
+                Some(tool) => return tool.name(),
+                None => match self.aliases.get(current) {
+                    Some(target) => current = target,
+                    None => return name,
+                },
+            }
+        }
+        name
+    }
+
+    /// Every alias as a plain `from -> to` map, for hosts that must
+    /// resolve a name without holding the registry.
+    ///
+    /// The permission gate keeps its own copy so a call that arrived
+    /// under an alias is judged under the tool's real name; see
+    /// [`Self::canonical_name`] for what that prevents.
+    #[must_use]
+    pub fn alias_map(&self) -> BTreeMap<String, String> {
+        self.aliases.clone()
+    }
+
     /// Narrow to the tools named in `keep`, preserving aliases.
     ///
     /// Each name is resolved through [`Self::get`], so an alias listed
@@ -323,6 +358,59 @@ mod tests {
         let (narrow, missing) = parent.retain_named(&["read".to_owned(), "bash".to_owned()]);
         assert_eq!(missing, vec!["bash".to_owned()]);
         assert!(narrow.get("bash").is_none());
+    }
+
+    /// An alias resolves to the same canonical name as its target, which
+    /// is what a permission rule keyed on that name must be checked
+    /// against.
+    #[test]
+    fn canonical_name_follows_aliases() {
+        let r = ToolRegistry::new()
+            .with(echo("shell"))
+            .with(echo("read"))
+            .alias("bash", "shell");
+        assert_eq!(r.canonical_name("bash"), "shell");
+        assert_eq!(r.canonical_name("shell"), "shell");
+        // A real name is untouched.
+        assert_eq!(r.canonical_name("read"), "read");
+        // An unknown name is returned as given, not resolved to nothing.
+        assert_eq!(r.canonical_name("ghost"), "ghost");
+    }
+
+    /// A chain resolves all the way to the registered tool.
+    #[test]
+    fn canonical_name_resolves_chains_and_survives_cycles() {
+        let r = ToolRegistry::new()
+            .with(echo("c"))
+            .alias("a", "b")
+            .alias("b", "c");
+        assert_eq!(r.canonical_name("a"), "c");
+
+        // A cycle must terminate rather than hang.
+        let r = ToolRegistry::new()
+            .with(echo("x"))
+            .alias("p", "q")
+            .alias("q", "p");
+        assert_eq!(r.canonical_name("p"), "p");
+    }
+
+    /// A dangling alias resolves to itself: the name is not a tool, so
+    /// no rules should silently apply to a different one.
+    #[test]
+    fn canonical_name_leaves_a_dangling_alias_alone() {
+        let r = ToolRegistry::new()
+            .with(echo("read"))
+            .alias("bash", "shell");
+        assert_eq!(r.canonical_name("bash"), "bash");
+    }
+
+    /// The wiring the permission fix depends on: the real registry
+    /// must actually carry the alias, or the gate canonicalizes nothing
+    /// and the bypass returns.
+    #[test]
+    fn the_builtin_registry_carries_the_bash_alias_for_the_gate() {
+        let aliases = crate::builtin::builtin_registry().alias_map();
+        assert_eq!(aliases.get("bash").map(String::as_str), Some("shell"));
     }
 
     #[test]

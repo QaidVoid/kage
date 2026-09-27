@@ -11,7 +11,7 @@
 //! pointing at the config. A session mode short-circuits the rules, but
 //! a configured deny still denies. Tools approved for the session skip the
 //! ask, but never a deny mode or a configured deny.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -51,6 +51,11 @@ pub(crate) struct PermissionGate {
     /// Action for tools with no `[permissions.tools.<name>]` entry
     /// that do not belong to a known MCP server.
     fallback: PermissionAction,
+    /// Alias name to canonical name, copied from the tool registry at
+    /// startup. A call the model made as `bash` is judged as `shell`,
+    /// so the rules and session approvals for `shell` apply to it. See
+    /// [`Self::with_aliases`].
+    aliases: Arc<BTreeMap<String, String>>,
     /// Names of the MCP servers whose tools are registered, used to
     /// recognize `<server>__<tool>` names.
     mcp_servers: Arc<[String]>,
@@ -84,6 +89,7 @@ impl PermissionGate {
             rules: Arc::new(Mutex::new(rules)),
             ask: None,
             fallback: PermissionAction::Allow,
+            aliases: Arc::new(BTreeMap::new()),
             mcp_servers: Arc::from([]),
             cancel: CancelFlag::new(),
             mode: Arc::new(Mutex::new(None)),
@@ -135,6 +141,38 @@ impl PermissionGate {
     pub(crate) fn with_mcp_servers(mut self, servers: Vec<String>) -> Self {
         self.mcp_servers = servers.into();
         self
+    }
+
+    /// Judge aliased calls under the tool's real name.
+    ///
+    /// Without this, a call the model made as `bash` misses the
+    /// `[permissions.tools.shell]` entry entirely and falls through to
+    /// the allow-by-default fallback, so a `deny` rule the user wrote
+    /// would not apply. Supply the registry's alias map (see
+    /// `ToolRegistry::canonical_name`); an empty map, the default, just
+    /// means no aliases are known.
+    #[must_use]
+    pub(crate) fn with_aliases(mut self, aliases: BTreeMap<String, String>) -> Self {
+        self.aliases = Arc::new(aliases);
+        self
+    }
+
+    /// The name a call should be judged under: the tool's real name if
+    /// `name` is an alias, otherwise `name` itself. A name that is
+    /// neither a tool nor an alias is returned unchanged, so an MCP
+    /// name still reaches the MCP branch.
+    fn canonical(&self, name: &str) -> String {
+        let mut current = name.to_owned();
+        for _ in 0..8 {
+            let Some(target) = self.aliases.get(&current) else {
+                return current;
+            };
+            if *target == current {
+                return current;
+            }
+            current.clone_from(target);
+        }
+        name.to_owned()
     }
 
     /// The known MCP server `tool` belongs to. Matching by prefix
@@ -320,6 +358,8 @@ impl Hooks for PermissionGate {
         name: &str,
         input: &serde_json::Value,
     ) -> Option<ToolOutput> {
+        let name = self.canonical(name);
+        let name = name.as_ref();
         let mode = self.mode();
         let subject = PermissionsConfig::subject_for(input);
         let configured = self.configured_action(name, &subject);
@@ -874,6 +914,146 @@ mod tests {
 
     fn github_gate(rules: PermissionsConfig) -> PermissionGate {
         PermissionGate::new(rules).with_mcp_servers(vec!["github".to_owned()])
+    }
+
+    fn bash_gate(rules: PermissionsConfig) -> PermissionGate {
+        PermissionGate::new(rules)
+            .with_aliases(BTreeMap::from([("bash".to_owned(), "shell".to_owned())]))
+    }
+
+    /// The bypass this guards: a call arriving as `bash` used to miss
+    /// the `shell` rules and fall through to the allow-by-default
+    /// fallback, so a user's `deny` never applied.
+    #[test]
+    fn an_aliased_call_is_judged_under_the_real_tool_name() {
+        let mut rules = PermissionsConfig::default();
+        rules.tools.insert(
+            "shell".to_owned(),
+            ToolPermissionRules {
+                default: PermissionAction::Allow,
+                allow: Vec::new(),
+                deny: vec!["rm *".to_owned()],
+            },
+        );
+        let mut gate = bash_gate(rules);
+        let id = kage_core::ToolCallId::new("call");
+        let subject = serde_json::json!({"command": "rm -rf target"});
+
+        let canonical = gate
+            .before_tool_call(&id, "shell", &subject)
+            .expect("shell must be denied");
+        let aliased = gate
+            .before_tool_call(&id, "bash", &subject)
+            .expect("bash must be denied like shell");
+        assert_eq!(canonical.text, aliased.text);
+        assert_eq!(
+            aliased.text,
+            "`shell`: permission denied by [permissions.tools.shell]"
+        );
+    }
+
+    /// A rule that allows must not turn into an ask for the alias
+    /// either: the alias is the same tool.
+    #[test]
+    fn an_aliased_call_follows_a_session_approval_of_the_real_name() {
+        let mut rules = PermissionsConfig::default();
+        rules.tools.insert(
+            "shell".to_owned(),
+            ToolPermissionRules {
+                default: PermissionAction::Ask,
+                allow: Vec::new(),
+                deny: Vec::new(),
+            },
+        );
+        let gate = bash_gate(rules);
+        assert!(answer_ask(&gate, PermissionDecision::AllowSession));
+        let mut gate = gate.with_asker(panicking_asker());
+        assert!(
+            gate.before_tool_call(&kage_core::ToolCallId::new("call"), "bash", &shell_input())
+                .is_none(),
+            "the alias must inherit the session approval"
+        );
+    }
+
+    /// An "always allow" answers under the real name, so the file the
+    /// user ends up with is keyed correctly.
+    #[test]
+    fn an_aliased_ask_persists_the_real_tool_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut rules = PermissionsConfig::default();
+        rules.tools.insert(
+            "shell".to_owned(),
+            ToolPermissionRules {
+                default: PermissionAction::Ask,
+                allow: Vec::new(),
+                deny: Vec::new(),
+            },
+        );
+        let (ask_tx, ask_rx) = channel_asker();
+        let gate = bash_gate(rules)
+            .with_asker(ask_tx)
+            .with_persist_path(path.clone());
+        let (done_tx, done_rx) = mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let mut gate = gate;
+            let _ = done_tx.send(gate.before_tool_call(
+                &kage_core::ToolCallId::new("call"),
+                "bash",
+                &shell_input(),
+            ));
+        });
+        let ask = ask_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(ask.tool, "shell", "the prompt must name the real tool");
+        ask.reply.send(PermissionDecision::AllowAlways).unwrap();
+        assert!(
+            done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .is_none(),
+            "allow always must let the call through"
+        );
+        handle.join().unwrap();
+        let saved = Config::load(&path).unwrap();
+        assert!(
+            saved.permissions.tools.contains_key("shell"),
+            "saved under the wrong key: {:?}",
+            saved.permissions.tools.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// A name that is neither a tool nor an alias must reach the MCP
+    /// branch untouched, and a self-referential or cyclic alias must
+    /// terminate rather than hang.
+    #[test]
+    fn canonical_leaves_unknown_names_and_survives_cycles() {
+        let gate =
+            PermissionGate::new(PermissionsConfig::default()).with_aliases(BTreeMap::from([
+                ("loop_a".to_owned(), "loop_b".to_owned()),
+                ("loop_b".to_owned(), "loop_a".to_owned()),
+                ("self".to_owned(), "self".to_owned()),
+            ]));
+        assert_eq!(
+            gate.canonical("github__create_issue"),
+            "github__create_issue"
+        );
+        assert_eq!(gate.canonical("self"), "self");
+        assert_eq!(gate.canonical("loop_a"), "loop_a");
+        assert_eq!(gate.canonical("bash"), "bash");
+    }
+
+    /// An MCP name is never rewritten by an alias map, so a server
+    /// tool that happens to share a name with an alias still resolves
+    /// as an MCP tool.
+    #[test]
+    fn canonical_keeps_mcp_names_reaching_the_mcp_branch() {
+        let mut rules = PermissionsConfig::default();
+        rules
+            .mcp
+            .insert("github".to_owned(), PermissionAction::Deny);
+        let mut gate = bash_gate(rules).with_mcp_servers(vec!["github".to_owned()]);
+        let out = call(&mut gate, "github__create_issue").expect("denied");
+        assert!(out.text.contains("[permissions.mcp]"), "{}", out.text);
     }
 
     #[test]

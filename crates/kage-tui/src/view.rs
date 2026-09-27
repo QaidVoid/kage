@@ -298,17 +298,32 @@ pub fn render(
     render_input(frame, regions, input, &sources);
     render_toasts(frame, toast_area, toasts, &theme);
     if let Some(cl) = cmdline {
-        render_cmdline_line(frame, regions.footer, cl);
+        render_cmdline_line(frame, first_footer_row(regions.footer), cl);
         render_cmdline_error(frame, regions, cl);
         render_cmdline_popup(frame, regions, cl);
         place_cmdline_cursor(frame, regions, cl);
+        slot::render_footer_below(frame, regions.footer, &sources, 1);
     } else if let Some(sl) = status.search_line {
-        render_search_line(frame, regions.footer, sl, status.search_match_count);
+        render_search_line(
+            frame,
+            first_footer_row(regions.footer),
+            sl,
+            status.search_match_count,
+        );
         place_cmdline_cursor(frame, regions, sl);
+        slot::render_footer_below(frame, regions.footer, &sources, 1);
     } else {
         slot::render_footer(frame, regions.footer, &sources);
     }
     capture_and_overlay(frame, regions, buffer, screen_selection, captured_rows);
+}
+
+/// The footer region's top row, where the open `:` or `/` line paints.
+fn first_footer_row(footer: Rect) -> Rect {
+    Rect {
+        height: 1.min(footer.height),
+        ..footer
+    }
 }
 
 /// Where the start card may paint: the buffer rows below the last
@@ -352,7 +367,7 @@ pub fn chrome_heights(
                 &sources,
             )),
         input: input_height(input, status.agents.len(), status.pending.len(), width),
-        footer: 1,
+        footer: slot::footer_height(&sources),
     }
 }
 

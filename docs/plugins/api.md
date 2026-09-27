@@ -226,7 +226,11 @@ the previous output stays on screen.
 (the working row above the input), `input_pill` (the input's top
 rule), `footer` or `start` (the start card). A row slot takes
 `{ left = items, right = items, sep = string? }` and `start` takes
-`{ lines = items }`. An item is a built-in component name (`brand`,
+`{ lines = items }`. The `footer` instead takes
+`{ rows = { row_spec, ... } }` to stack several status rows, each a
+`{ left, right, sep }` table: the region grows to the rows that paint
+something, one row minimum and four at most, and the open `:` or `/`
+line keeps the top row. An item is a built-in component name (`brand`,
 `breadcrumb`, `title`, `model`, `widgets`, `search`, `session`, `working`,
 `activity`, `context`, `tokens`, `thinking`, `permission`, `mode`,
 `hint`, `cwd`, `version`, and in `start` also `sessions` and

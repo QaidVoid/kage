@@ -17,7 +17,7 @@
 //! | input content (1..max rows) |  input
 //! | bottom rule                 |
 //! +-----------------------------+
-//! | footer (1 row)              |  `:` and `/` lines paint here
+//! | footer (1..4 rows)          |  `:` and `/` lines take the top row
 //! +-----------------------------+
 //! ```
 //!

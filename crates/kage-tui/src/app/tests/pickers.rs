@@ -17,7 +17,7 @@ fn the_help_overlay_never_overlaps_the_input_rows() {
         blank[input_top..footer],
         "{rows:?}"
     );
-    assert_eq!(rows[footer], "  up/down to scroll \u{B7} esc to close");
+    assert_eq!(rows[footer], blank[footer]);
     assert_ne!(rows[..input_top], blank[..input_top], "{rows:?}");
 }
 
@@ -421,10 +421,6 @@ fn idle_ctrl_c_closes_each_overlay_and_the_footer_names_its_keys() {
         open(&mut app);
         assert!(app.keyboard_modal_open(), "{hint}");
         assert_eq!(app.footer_hint(), hint);
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        app.render_into(&mut terminal).unwrap();
-        let footer = snapshot_rows(&terminal).pop().unwrap();
-        assert!(footer.starts_with(&format!("  {hint}")), "{footer:?}");
         app.handle_key(ctrl('c'));
         assert!(!app.keyboard_modal_open(), "ctrl+c closes: {hint}");
     }

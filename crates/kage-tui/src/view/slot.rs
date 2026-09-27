@@ -80,7 +80,11 @@ impl<'a> Sources<'a> {
 /// Whether `slot`'s row paints anything this frame. Runs the same item
 /// painters as the row itself, without a frame.
 pub(super) fn row_has_content(slot: SlotName, src: &Sources<'_>) -> bool {
-    let spec = src.status.slots.get(slot);
+    spec_has_content(&src.status.slots.get(slot), src)
+}
+
+/// Whether `spec`'s row items paint anything this frame.
+fn spec_has_content(spec: &SlotSpec, src: &Sources<'_>) -> bool {
     let styles = Styles::uniform(Style::default());
     let mut piece = Vec::new();
     spec.left.iter().chain(&spec.right).any(|item| {
@@ -88,6 +92,23 @@ pub(super) fn row_has_content(slot: SlotName, src: &Sources<'_>) -> bool {
         push_item(item, src, &styles, &mut piece);
         piece.iter().any(|span| !span.content.is_empty())
     })
+}
+
+/// How many rows the footer paints: its spec's rows that paint
+/// something, at least one (the blank strip also carries the open `:`
+/// line), at most four so a wide spec cannot eat the conversation. A
+/// spec without `rows` is the single row it always was.
+pub(super) fn footer_height(src: &Sources<'_>) -> u16 {
+    let spec = src.status.slots.get(SlotName::Footer);
+    if spec.rows.is_empty() {
+        return 1;
+    }
+    let rows = spec
+        .rows
+        .iter()
+        .filter(|row| spec_has_content(row, src))
+        .count();
+    u16::try_from(rows.clamp(1, 4)).unwrap_or(1)
 }
 
 /// Paint the header slot into `area`.
@@ -118,8 +139,15 @@ pub(super) fn render_activity(frame: &mut Frame, area: Rect, src: &Sources<'_>) 
     paint_row(frame, area, &spec, src, &styles);
 }
 
-/// Paint the footer slot into `area`.
+/// Paint the footer slot into `area`, its spec's rows top to bottom.
 pub(super) fn render_footer(frame: &mut Frame, area: Rect, src: &Sources<'_>) {
+    render_footer_below(frame, area, src, 0);
+}
+
+/// Paint the footer slot's rows below `skip` of them, so the open `:`
+/// or `/` line can hold the top row and the status rows stay visible
+/// under it. A spec without `rows` paints the one row it always did.
+pub(super) fn render_footer_below(frame: &mut Frame, area: Rect, src: &Sources<'_>, skip: usize) {
     let theme = crate::theme::current();
     let text = Style::default().fg(theme.muted_fg);
     let styles = Styles {
@@ -131,7 +159,29 @@ pub(super) fn render_footer(frame: &mut Frame, area: Rect, src: &Sources<'_>) {
         hint: Style::default().fg(theme.input_hint_fg),
     };
     let spec = src.status.slots.get(SlotName::Footer);
-    paint_row(frame, area, &spec, src, &styles);
+    if spec.rows.is_empty() {
+        if skip == 0 {
+            paint_row(frame, area, &spec, src, &styles);
+        }
+        return;
+    }
+    let room = usize::from(
+        area.height
+            .saturating_sub(u16::try_from(skip).unwrap_or(u16::MAX)),
+    );
+    for (i, row) in spec.rows.iter().enumerate().skip(skip).take(room) {
+        paint_row(
+            frame,
+            Rect {
+                y: area.y + u16::try_from(i).unwrap_or(u16::MAX),
+                height: 1,
+                ..area
+            },
+            row,
+            src,
+            &styles,
+        );
+    }
 }
 
 /// The input pill as the spans of the top rule's left and right
@@ -748,7 +798,14 @@ fn push_usage(name: &str, u: &SessionUsage, styles: &Styles, out: &mut Vec<Span<
                 #[expect(clippy::cast_precision_loss, reason = "a rounded percentage")]
                 let pct =
                     (u.current_context as f64 / u.context_window as f64 * 100.0).clamp(0.0, 999.9);
-                out.push(Span::styled(format!("{pct:.0}% ctx"), styles.text));
+                out.push(Span::styled(
+                    format!(
+                        "{pct:.0}% ctx ({}/{})",
+                        format_token_count(u.current_context),
+                        format_token_count(u.context_window)
+                    ),
+                    styles.text,
+                ));
             } else if u.current_context > 0 {
                 out.push(Span::styled(
                     format!("{} ctx", format_token_count(u.current_context)),
@@ -757,15 +814,32 @@ fn push_usage(name: &str, u: &SessionUsage, styles: &Styles, out: &mut Vec<Span<
             }
         }
         "tokens" => {
-            let total = u.total_tokens();
-            if total > 0 {
+            let cached = u.cache_read_tokens + u.cache_write_tokens;
+            let shown = u.total_tokens() > 0 || cached > 0;
+            if shown {
                 out.push(Span::styled(
-                    format!("{} tok", format_token_count(total)),
+                    format!(
+                        "in {} out {}",
+                        format_token_count(u.input_tokens),
+                        format_token_count(u.output_tokens),
+                    ),
                     styles.text,
                 ));
+                if cached > 0 {
+                    #[expect(clippy::cast_precision_loss, reason = "a rounded percentage")]
+                    let hit =
+                        (u.cache_read_tokens as f64 / cached as f64 * 100.0).clamp(0.0, 100.0);
+                    out.push(Span::styled(
+                        format!(
+                            " cached {} ({hit:.0}%)",
+                            format_token_count(u.cache_read_tokens)
+                        ),
+                        styles.text,
+                    ));
+                }
             }
             if u.total_cost > 0.0 {
-                let lead = if total > 0 { " " } else { "" };
+                let lead = if shown { " " } else { "" };
                 out.push(Span::styled(
                     format!("{lead}${:.2}", u.total_cost),
                     styles.text,
@@ -779,12 +853,20 @@ fn push_usage(name: &str, u: &SessionUsage, styles: &Styles, out: &mut Vec<Span<
             ));
         }
         "permission" => {
-            if let Some(mode) = u.permission_mode {
-                out.push(Span::styled(
-                    format!("{} mode", mode_label(mode)),
-                    styles.text,
-                ));
-            }
+            let theme = crate::theme::current();
+            let color = match u.permission_mode {
+                Some(kage_core::permissions::PermissionAction::Allow) => theme.success_fg,
+                Some(kage_core::permissions::PermissionAction::Deny) => theme.tool_error_fg,
+                _ => theme.warning_fg,
+            };
+            let text = match u.permission_mode {
+                Some(mode) => format!("{} mode", mode_label(mode)),
+                None => "ask when needed".to_owned(),
+            };
+            out.push(Span::styled(
+                format!(" {text}"),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ));
         }
         _ => {}
     }
@@ -866,10 +948,10 @@ mod tests {
             ..SessionUsage::default()
         };
         let input = InputState::new();
-        assert_eq!(painted("context", &usage, &input), "12% ctx");
-        assert_eq!(painted("tokens", &usage, &input), "14k tok $0.02");
+        assert_eq!(painted("context", &usage, &input), "12% ctx (24k/200k)");
+        assert_eq!(painted("tokens", &usage, &input), "in 12k out 2k $0.02");
         assert_eq!(painted("thinking", &usage, &input), "thinking high");
-        assert_eq!(painted("permission", &usage, &input), "ask mode");
+        assert_eq!(painted("permission", &usage, &input), " ask mode");
         assert_eq!(painted("model", &usage, &input), "fake:m");
         let quiet = SessionUsage {
             model: "fake:m".into(),
@@ -878,7 +960,27 @@ mod tests {
         };
         assert_eq!(painted("thinking", &quiet, &input), "");
         assert_eq!(painted("tokens", &quiet, &input), "");
-        assert_eq!(painted("permission", &quiet, &input), "");
+        assert_eq!(painted("permission", &quiet, &input), " ask when needed");
+    }
+
+    #[test]
+    fn tokens_break_out_cache_hits_and_context_shows_the_window() {
+        let usage = SessionUsage {
+            model: "fake:m".into(),
+            input_tokens: 10_000,
+            output_tokens: 2_000,
+            cache_read_tokens: 80_000,
+            cache_write_tokens: 8_000,
+            current_context: 24_000,
+            context_window: 1_000_000,
+            ..SessionUsage::default()
+        };
+        let input = InputState::new();
+        assert_eq!(
+            painted("tokens", &usage, &input),
+            "in 10k out 2k cached 80k (91%)"
+        );
+        assert_eq!(painted("context", &usage, &input), "2% ctx (24k/1M)");
     }
 
     #[test]

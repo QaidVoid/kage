@@ -179,22 +179,6 @@ fn a_start_spec_paints_on_an_empty_buffer_only() {
 }
 
 #[test]
-fn the_footer_hint_shows_a_pending_key_sequence_first() {
-    let buffer = shared_buffer();
-    let (tx, _rx) = mpsc::channel();
-    let mut app = app_with_defaults(buffer, tx);
-    app.handle_key(code(KeyCode::Esc));
-    let rows = snapshot_rows(&render_app(&mut app));
-    assert_eq!(
-        rows.last().unwrap(),
-        "  i to type \u{B7} ? for shortcuts \u{B7} : for commands"
-    );
-    app.handle_key(key('g'));
-    let rows = snapshot_rows(&render_app(&mut app));
-    assert_eq!(rows.last().unwrap(), "  g ...");
-}
-
-#[test]
 fn the_footer_hint_follows_the_editor_state() {
     let (tx, _rx) = mpsc::channel();
     let mut app = app_with_defaults(shared_buffer(), tx);
@@ -441,8 +425,8 @@ fn the_footer_hint_names_the_keys_of_the_open_overlay() {
 }
 
 #[test]
-fn common_footer_hints_fit_at_80_columns_beside_the_session_facts() {
-    let (mut app, _rx, events) = app_with_events();
+fn the_footer_opens_with_the_mode_and_holds_the_facts_at_60_columns() {
+    let (mut app, _rx, _events) = app_with_events();
     app.set_editor_modeless(true);
     app.set_model_choices(vec![PickItem::simple("fake:m").with_label("Fake")]);
     {
@@ -452,68 +436,15 @@ fn common_footer_hints_fit_at_80_columns_beside_the_session_facts() {
         usage.current_context = 24_000;
         usage.context_window = 200_000;
         usage.permission_mode = Some(kage_core::permissions::PermissionAction::Ask);
-        usage.working = true;
     }
-    let facts = "  Fake \u{B7} ask mode \u{B7} 12% ctx \u{B7} 14k tok";
-    let check = |app: &mut App| {
-        let hint = app.footer_hint();
-        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-        app.render_into(&mut terminal).unwrap();
-        let footer = snapshot_rows(&terminal).pop().unwrap();
-        assert!(footer.starts_with(&format!("  {hint}")), "{footer:?}");
-        assert!(footer.ends_with(facts), "{footer:?}");
-    };
-    check(&mut app);
-    type_str(&mut app, "check the snapshot tests too");
-    check(&mut app);
-    feed(&mut app, &events, vec![permission_request("c1", 1)]);
-    assert!(app.approval_panel.is_some());
-    check(&mut app);
-    app.answer_permission(PermissionDecision::AllowOnce);
-    app.handle_key(code(KeyCode::Esc));
-    let child = spawn_agent(&mut app, &events, "a1", "explore");
-    send_to(
-        &mut app,
-        &events,
-        child,
-        vec![kage_core::protocol::HostEvent::RunStarted.into()],
+    let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+    app.render_into(&mut terminal).unwrap();
+    let footer = snapshot_rows(&terminal).pop().unwrap();
+    assert!(footer.starts_with(" ask mode"), "{footer:?}");
+    assert!(
+        footer.ends_with("Fake \u{B7} in 14k out 0 \u{B7} 12% ctx (24k/200k)"),
+        "{footer:?}"
     );
-    app.focus_agent(child);
-    check(&mut app);
-    send_to(
-        &mut app,
-        &events,
-        child,
-        vec![run_ended(kage_core::protocol::RunOutcome::Completed)],
-    );
-    check(&mut app);
-}
-
-#[test]
-fn at_60_columns_the_session_facts_give_way_to_the_hint() {
-    let (mut app, _rx, events) = app_with_events();
-    app.set_editor_modeless(true);
-    app.set_model_choices(vec![PickItem::simple("fake:m").with_label("Fake")]);
-    {
-        let mut usage = lock(app.session_usage.as_ref().unwrap());
-        usage.model = "fake:m".into();
-        usage.input_tokens = 57;
-        usage.context_window = 200_000;
-        usage.permission_mode = Some(kage_core::permissions::PermissionAction::Ask);
-    }
-    let check = |app: &mut App| {
-        let hint = app.footer_hint();
-        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
-        app.render_into(&mut terminal).unwrap();
-        let footer = snapshot_rows(&terminal).pop().unwrap();
-        assert!(footer.starts_with(&format!("  {hint}")), "{footer:?}");
-        assert!(footer.ends_with("0% ctx \u{B7} 57 tok"), "{footer:?}");
-    };
-    check(&mut app);
-    type_str(&mut app, "check the snapshot tests too");
-    check(&mut app);
-    feed(&mut app, &events, vec![permission_request("c1", 1)]);
-    check(&mut app);
 }
 
 #[test]

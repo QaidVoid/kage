@@ -121,7 +121,7 @@ end)
 kage.ui.set_slot("footer", {
   left = { "hint" },
   right = {
-    "model", "permission", "context", "tokens",
+    "model", "tokens", "context", "permission",
     { events = { "message_end" }, hl = "TpsReadout", render = function() return last end },
   },
   sep = " \u{B7} ",

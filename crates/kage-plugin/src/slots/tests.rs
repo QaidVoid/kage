@@ -204,6 +204,26 @@ fn invalid_specs_raise_and_change_nothing() {
             "kage.ui.set_slot('header', { left = { 42 } })",
             "an item is",
         ),
+        (
+            "kage.ui.set_slot('footer', { rows = {}, left = { 'model' } })",
+            "with `rows` takes only `rows`",
+        ),
+        (
+            "kage.ui.set_slot('header', { rows = { {} } })",
+            "only `footer` takes `rows`",
+        ),
+        (
+            "kage.ui.set_slot('footer', { rows = { 42 } })",
+            "each `rows` entry must be a row spec table",
+        ),
+        (
+            "kage.ui.set_slot('footer', { rows = { { lines = { 'x' } } } })",
+            "a footer row takes `left`, `right` and `sep`",
+        ),
+        (
+            "kage.ui.set_slot('footer', { rows = 'nope' })",
+            "`rows` must be a list",
+        ),
     ] {
         let err = rt.eval(source).unwrap_err().to_string();
         assert!(err.contains(needle), "{source}: {err}");
@@ -213,6 +233,28 @@ fn invalid_specs_raise_and_change_nothing() {
             .iter()
             .all(|slot| rt.slots().spec(*slot).is_none())
     );
+}
+
+#[test]
+fn footer_rows_stack_row_specs_and_nil_restores() {
+    let rt = PluginRuntime::new().unwrap();
+    crate::load_all(None, &rt).unwrap();
+    let default = rt.slots().spec(SlotName::Footer).unwrap();
+    rt.eval(
+        "kage.ui.set_slot('footer', { rows = {
+             { left = { 'permission' } },
+             { left = { 'cwd' }, right = { 'model' }, sep = ' | ' },
+         } })",
+    )
+    .unwrap();
+    let spec = rt.slots().spec(SlotName::Footer).expect("footer set");
+    assert_eq!(spec.rows.len(), 2);
+    assert!(spec.left.is_empty() && spec.right.is_empty());
+    assert_eq!(spec.rows[0].left, [SlotItem::Builtin("permission")]);
+    assert_eq!(spec.rows[1].sep, " | ");
+    assert_eq!(spec.rows[1].right, [SlotItem::Builtin("model")]);
+    rt.eval("kage.ui.set_slot('footer', nil)").unwrap();
+    assert_eq!(rt.slots().spec(SlotName::Footer), Some(default));
 }
 
 #[test]

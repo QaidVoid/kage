@@ -818,7 +818,7 @@ fn the_activity_row_sits_above_the_input_only_while_it_has_text() {
 }
 
 #[test]
-fn the_footer_row_holds_the_hint_and_the_session_facts() {
+fn the_footer_row_opens_with_the_mode_and_holds_the_facts() {
     let usage = SessionUsage {
         model: "fake:m".into(),
         input_tokens: 14_000,
@@ -828,7 +828,6 @@ fn the_footer_row_holds_the_hint_and_the_session_facts() {
     };
     let status = StatusCtx {
         model: Some("Fake"),
-        hint: Some("? for shortcuts"),
         ..StatusCtx::default()
     };
     let rows = snapshot_frame(
@@ -837,38 +836,124 @@ fn the_footer_row_holds_the_hint_and_the_session_facts() {
         None,
         &status,
         Some(&usage),
-        Rect::new(0, 0, 60, 6),
+        Rect::new(0, 0, 100, 6),
     );
     let footer = rows.last().unwrap();
-    assert!(footer.starts_with("  ? for shortcuts"), "{footer:?}");
+    assert!(footer.starts_with(" ask when needed"), "{footer:?}");
     assert!(
-        footer.ends_with("Fake \u{B7} 12% ctx \u{B7} 14k tok"),
+        footer.ends_with("Fake \u{B7} in 14k out 0 \u{B7} 12% ctx (24k/200k)"),
         "{footer:?}"
     );
 }
 
+fn footer_with_rows(rows: Vec<kage_plugin::SlotSpec>) -> kage_plugin::SlotSpecs {
+    let mut slots = kage_plugin::SlotSpecs::default();
+    slots.set_spec(
+        kage_plugin::SlotName::Footer,
+        Some(std::sync::Arc::new(kage_plugin::SlotSpec {
+            rows,
+            ..kage_plugin::SlotSpec::default()
+        })),
+    );
+    slots
+}
+
 #[test]
-fn a_long_hint_is_clipped_before_the_session_facts() {
+fn the_footer_stacks_its_spec_rows_and_heights_follow() {
+    let usage = SessionUsage {
+        model: "fake:m".into(),
+        input_tokens: 14_000,
+        current_context: 24_000,
+        context_window: 200_000,
+        ..SessionUsage::default()
+    };
+    let status = StatusCtx {
+        model: Some("Fake"),
+        slots: footer_with_rows(vec![
+            kage_plugin::SlotSpec {
+                left: vec![kage_plugin::SlotItem::Builtin("permission")],
+                ..kage_plugin::SlotSpec::default()
+            },
+            kage_plugin::SlotSpec {
+                right: vec![
+                    kage_plugin::SlotItem::Builtin("model"),
+                    kage_plugin::SlotItem::Builtin("context"),
+                ],
+                sep: " | ".into(),
+                ..kage_plugin::SlotSpec::default()
+            },
+        ]),
+        ..StatusCtx::default()
+    };
+    let rows = snapshot_frame(
+        &mut Buffer::new(),
+        &InputState::new(),
+        None,
+        &status,
+        Some(&usage),
+        Rect::new(0, 0, 100, 8),
+    );
+    assert_eq!(rows[rows.len() - 2], " ask when needed");
+    assert!(
+        rows[rows.len() - 1].ends_with("Fake | 12% ctx (24k/200k)"),
+        "{:?}",
+        rows[rows.len() - 1]
+    );
+}
+
+#[test]
+fn an_empty_footer_row_collapses_but_one_row_always_stays() {
+    let sources = |slots: kage_plugin::SlotSpecs| {
+        let status = StatusCtx {
+            slots,
+            ..StatusCtx::default()
+        };
+        let src = slot::Sources::new(&status, None, &InputState::new(), 80);
+        slot::footer_height(&src)
+    };
+    assert_eq!(sources(kage_plugin::SlotSpecs::default()), 1);
+    assert_eq!(sources(footer_with_rows(vec![])), 1);
+    assert_eq!(
+        sources(footer_with_rows(vec![kage_plugin::SlotSpec {
+            left: vec![kage_plugin::SlotItem::Builtin("version")],
+            ..kage_plugin::SlotSpec::default()
+        }])),
+        1,
+        "rows that paint nothing collapse to the one blank strip"
+    );
+}
+
+#[test]
+fn the_colon_line_holds_the_top_footer_row_and_the_rows_stay_below() {
     let usage = SessionUsage {
         model: "fake:m".into(),
         ..SessionUsage::default()
     };
     let status = StatusCtx {
-        model: Some("Fake"),
-        hint: Some("1-5 or y s a n t \u{B7} up/down \u{B7} enter to confirm \u{B7} esc for no"),
+        slots: footer_with_rows(vec![
+            kage_plugin::SlotSpec {
+                left: vec![kage_plugin::SlotItem::Builtin("version")],
+                ..kage_plugin::SlotSpec::default()
+            },
+            kage_plugin::SlotSpec {
+                left: vec![kage_plugin::SlotItem::Builtin("permission")],
+                ..kage_plugin::SlotSpec::default()
+            },
+        ]),
         ..StatusCtx::default()
     };
+    let empty = crate::cmdparse::Completions::default();
+    let cl = CommandLine::for_test("quit", empty, true, None);
     let rows = snapshot_frame(
         &mut Buffer::new(),
         &InputState::new(),
-        None,
+        Some(&cl),
         &status,
         Some(&usage),
-        Rect::new(0, 0, 40, 6),
+        Rect::new(0, 0, 60, 8),
     );
-    let footer = rows.last().unwrap();
-    assert!(footer.ends_with("...  Fake"), "{footer:?}");
-    assert_eq!(footer.width(), 40, "{footer:?}");
+    assert_eq!(rows[rows.len() - 2], ":quit");
+    assert_eq!(rows[rows.len() - 1], " ask when needed");
 }
 
 #[test]

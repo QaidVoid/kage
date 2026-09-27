@@ -3,10 +3,14 @@
 //! Five slots exist: `header` (the top row, collapsed while empty),
 //! `activity` (the working row above the input, collapsed while
 //! empty), `input_pill` (the input's top rule), `footer` (the bottom
-//! row) and `start` (the start card above the input while the
-//! conversation is empty). `kage.api.slot_set(name, spec)` sets one,
-//! and `nil` restores the spec `_defaults.lua` set. A row slot takes `{ left = items, right = items, sep = string? }`, and
-//! `start` takes `{ lines = items }`, one line per item. An item is:
+//! row, stackable into several rows via `rows`) and `start` (the start
+//! card above the input while the conversation is empty).
+//! `kage.api.slot_set(name, spec)` sets one, and `nil` restores the
+//! spec `_defaults.lua` set. A row slot takes
+//! `{ left = items, right = items, sep = string? }`, `start` takes
+//! `{ lines = items }`, one line per item, and `footer` takes either
+//! the single-row form or `{ rows = { row_spec, ... } }`, one
+//! `{ left, right, sep }` table per row. An item is:
 //!
 //! * a built-in component name (see [`BUILTIN_COMPONENTS`]), which the
 //!   host paints from its own state on every frame;
@@ -50,7 +54,7 @@ const DEFAULT_WIDTH: u16 = 80;
 pub enum SlotName {
     /// The top row, collapsed while it paints nothing.
     Header,
-    /// The bottom row.
+    /// The bottom row, stackable into several rows via `rows`.
     Footer,
     /// The input's top rule.
     InputPill,
@@ -145,7 +149,8 @@ impl PartialEq for SlotItem {
 }
 
 /// The layout of one slot. Row slots use `left`, `right` and `sep`;
-/// `start` uses `lines`.
+/// `start` uses `lines`; `footer` may set `rows` to stack several
+/// row specs.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SlotSpec {
     /// Items painted from the left edge.
@@ -156,11 +161,20 @@ pub struct SlotSpec {
     pub sep: String,
     /// One line per item, for `start`.
     pub lines: Vec<SlotItem>,
+    /// The footer's rows, top to bottom. Setting `rows` replaces the
+    /// whole footer: each entry is a row spec carrying only `left`,
+    /// `right` and `sep`, and the region grows to the rows that paint
+    /// something (one row minimum, four at most). Absent, the footer is
+    /// the single row `left`/`right`/`sep` describe.
+    pub rows: Vec<SlotSpec>,
 }
 
 impl SlotSpec {
-    fn components(&self) -> impl Iterator<Item = &Arc<LuaComponent>> {
-        self.left
+    /// Every Lua component in the spec, the rows' included, in paint
+    /// order. Callers walk this to schedule recomputes.
+    fn components(&self) -> Vec<&Arc<LuaComponent>> {
+        let mut out: Vec<&Arc<LuaComponent>> = self
+            .left
             .iter()
             .chain(&self.right)
             .chain(&self.lines)
@@ -168,6 +182,11 @@ impl SlotSpec {
                 SlotItem::Lua(component) => Some(component),
                 _ => None,
             })
+            .collect();
+        for row in &self.rows {
+            out.extend(row.components());
+        }
+        out
     }
 }
 
@@ -188,8 +207,10 @@ static DEFAULT_SPECS: LazyLock<[Arc<SlotSpec>; SLOTS]> = LazyLock::new(|| {
             ..SlotSpec::default()
         }),
         Arc::new(SlotSpec {
-            left: items(&["hint"]),
-            right: items(&["model", "permission", "context", "tokens"]),
+            left: items(&["permission"]),
+            // Drop order for a tight row: the model name yields
+            // first, the context share survives longest.
+            right: items(&["model", "tokens", "context"]),
             sep: " \u{B7} ".to_owned(),
             ..SlotSpec::default()
         }),
@@ -249,6 +270,13 @@ impl SlotSpecs {
         self.0[slot.index()]
             .clone()
             .unwrap_or_else(|| default_spec(slot))
+    }
+
+    /// Replace the spec for `slot`, or `None` to restore
+    /// [`default_spec`]. Rust-side hosts assemble chrome through this;
+    /// plugins go through `slot_set`.
+    pub fn set_spec(&mut self, slot: SlotName, spec: Option<Arc<SlotSpec>>) {
+        self.0[slot.index()] = spec;
     }
 }
 
@@ -516,7 +544,7 @@ fn parse_spec(
     table: &Table,
     origin: &Arc<str>,
 ) -> Result<SlotSpec, String> {
-    let items = |key: &str| -> Result<Vec<SlotItem>, String> {
+    let items = |table: &Table, key: &str| -> Result<Vec<SlotItem>, String> {
         match table.get::<Value>(key).map_err(|e| e.to_string())? {
             Value::Nil => Ok(Vec::new()),
             Value::Table(list) => list
@@ -532,7 +560,7 @@ fn parse_spec(
             return Err("`start` takes `lines`, not `left`, `right` or `sep`".to_owned());
         }
         return Ok(SlotSpec {
-            lines: items("lines")?,
+            lines: items(table, "lines")?,
             ..SlotSpec::default()
         });
     }
@@ -542,17 +570,56 @@ fn parse_spec(
             slot.name()
         ));
     }
-    let sep = match table.get::<Value>("sep").map_err(|e| e.to_string())? {
-        Value::Nil => String::new(),
-        Value::String(s) => s.to_str().map_err(|e| e.to_string())?.to_owned(),
-        _ => return Err("`sep` must be a string".to_owned()),
-    };
+    if has("rows") {
+        if slot != SlotName::Footer {
+            return Err("only `footer` takes `rows`".to_owned());
+        }
+        if has("left") || has("right") || has("sep") {
+            return Err("`footer` with `rows` takes only `rows`".to_owned());
+        }
+        let entries = table.get::<Value>("rows").map_err(|e| e.to_string())?;
+        let Value::Table(list) = entries else {
+            return Err("`rows` must be a list of row specs".to_owned());
+        };
+        let rows = list
+            .sequence_values::<Value>()
+            .map(|entry| {
+                let entry = entry.map_err(|e| e.to_string())?;
+                let Value::Table(row) = entry else {
+                    return Err("each `rows` entry must be a row spec table".to_owned());
+                };
+                if row.contains_key("lines").unwrap_or(false)
+                    || row.contains_key("rows").unwrap_or(false)
+                {
+                    return Err("a footer row takes `left`, `right` and `sep`".to_owned());
+                }
+                Ok(SlotSpec {
+                    left: items(&row, "left")?,
+                    right: items(&row, "right")?,
+                    sep: parse_sep(&row)?,
+                    ..SlotSpec::default()
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        return Ok(SlotSpec {
+            rows,
+            ..SlotSpec::default()
+        });
+    }
     Ok(SlotSpec {
-        left: items("left")?,
-        right: items("right")?,
-        sep,
-        lines: Vec::new(),
+        left: items(table, "left")?,
+        right: items(table, "right")?,
+        sep: parse_sep(table)?,
+        ..SlotSpec::default()
     })
+}
+
+fn parse_sep(table: &Table) -> Result<String, String> {
+    match table.get::<Value>("sep").map_err(|e| e.to_string())? {
+        Value::Nil => Ok(String::new()),
+        Value::String(s) => Ok(s.to_str().map_err(|e| e.to_string())?.to_owned()),
+        _ => Err("`sep` must be a string".to_owned()),
+    }
 }
 
 fn parse_item(lua: &Lua, item: &Value, origin: &Arc<str>) -> Result<SlotItem, String> {

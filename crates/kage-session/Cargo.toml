@@ -3,8 +3,8 @@ name = "kage-session"
 description = "Append-only JSONL session writer, replay, fork, and search for kage."
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 rust-version.workspace = true
+license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
@@ -26,5 +26,5 @@ ulid.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 
-[target.'cfg(unix)'.dependencies]
+[target."cfg(unix)".dependencies]
 nix.workspace = true

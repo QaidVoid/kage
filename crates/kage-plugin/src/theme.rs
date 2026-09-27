@@ -109,7 +109,7 @@ mod tests {
             )
             .unwrap()
             .as_string()
-            .map(mlua::String::to_string_lossy)
+            .map(mlua::LuaString::to_string_lossy)
             .unwrap_or_default();
         assert_eq!(fg, "#000002");
         assert_eq!(

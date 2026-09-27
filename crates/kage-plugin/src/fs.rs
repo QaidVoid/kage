@@ -69,7 +69,7 @@ pub(crate) fn register(registry: &CapabilityRegistry, workdir: PathBuf) {
             let write_root = workdir.clone();
             pfs.set(
                 "write",
-                lua.create_function(move |_, (path, content): (String, mlua::String)| {
+                lua.create_function(move |_, (path, content): (String, mlua::LuaString)| {
                     let resolved = resolve(&write_root, &path)?;
                     write_confined(&write_root, &resolved, content.as_bytes().as_ref())
                         .map_err(|err| mlua::Error::external(format!("write {path}: {err}")))?;

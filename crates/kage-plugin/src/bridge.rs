@@ -26,7 +26,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use mlua::{Lua, MultiValue, Thread, ThreadStatus, Value};
+use mlua::thread::ThreadStatus;
+use mlua::{Lua, MultiValue, Thread, Value};
 
 use crate::api::{json_to_lua, lua_to_json};
 use crate::error::PluginError;
@@ -131,6 +132,12 @@ pub(crate) fn step(
             *slot = None;
             let first = yielded.into_vec().into_iter().next().unwrap_or(Value::Nil);
             Ok(BridgeStep::Done(lua_to_json(first)?))
+        }
+        ThreadStatus::Normal => {
+            *slot = None;
+            Err(PluginError::BridgeProtocol(
+                "coroutine reported active-but-not-running after resume".to_owned(),
+            ))
         }
         ThreadStatus::Running => {
             *slot = None;

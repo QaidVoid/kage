@@ -46,18 +46,18 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
 
   msrv:
-    name: msrv (1.88)
+    name: msrv (1.89)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The workspace pins its toolchain via rust-toolchain.toml; the
       # MSRV gate checks the declared floor against the committed
-      # Cargo.lock, so install 1.88 and never touch the pinned one.
-      - run: rustup toolchain install 1.88.0 --profile minimal --no-self-update
+      # Cargo.lock, so install 1.89 and never touch the pinned one.
+      - run: rustup toolchain install 1.89.0 --profile minimal --no-self-update
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: msrv-1.88
-      - run: cargo +1.88.0 check --workspace --all-targets --locked
+          key: msrv-1.89
+      - run: cargo +1.89.0 check --workspace --all-targets --locked
 
   test:
     name: test (${{ matrix.os }})

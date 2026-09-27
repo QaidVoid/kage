@@ -100,7 +100,7 @@ pub fn sync_parent_entry(target: &Path) {
 
 fn temp_sibling(target: &Path) -> PathBuf {
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
-    let suffix = ulid::Ulid::new().to_string();
+    let suffix = ulid::Ulid::generate().to_string();
     let name = match target.file_name() {
         Some(n) => format!(".{}.{suffix}.tmp", n.to_string_lossy()),
         None => format!(".kage-{suffix}.tmp"),

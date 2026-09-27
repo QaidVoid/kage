@@ -3,8 +3,8 @@ name = "kage-cli"
 description = "kage: a minimal, extensible coding agent in your terminal."
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 rust-version.workspace = true
+license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
@@ -25,11 +25,11 @@ clap.workspace = true
 clap_complete.workspace = true
 clap_mangen.workspace = true
 dirs.workspace = true
-kage-acp = { version = "0.1.0", path = "../kage-acp" }
+kage-acp.workspace = true
 kage-core.workspace = true
 kage-jsonrpc.workspace = true
 kage-loop.workspace = true
-kage-mcp = { version = "0.1.0", path = "../kage-mcp" }
+kage-mcp.workspace = true
 kage-plugin.workspace = true
 kage-provider.workspace = true
 kage-session.workspace = true
@@ -44,8 +44,6 @@ ulid.workspace = true
 
 [dev-dependencies]
 figment = { workspace = true, features = ["test"] }
-kage-core.workspace = true
-kage-mcp = { path = "../kage-mcp" }
 kage-provider = { workspace = true, features = ["testing"] }
 kage-tools.workspace = true
 serde_json.workspace = true

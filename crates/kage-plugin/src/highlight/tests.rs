@@ -18,7 +18,7 @@ fn eval_str(rt: &PluginRuntime, source: &str) -> String {
     rt.eval(source)
         .unwrap()
         .as_string()
-        .map(mlua::String::to_string_lossy)
+        .map(mlua::LuaString::to_string_lossy)
         .unwrap_or_default()
 }
 

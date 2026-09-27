@@ -3,8 +3,8 @@ name = "kage-tools"
 description = "Tool trait and built-in tools (read/write/edit/bash/...) for kage."
 version.workspace = true
 edition.workspace = true
-license.workspace = true
 rust-version.workspace = true
+license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme.workspace = true
@@ -32,5 +32,5 @@ url.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 
-[target.'cfg(unix)'.dependencies]
+[target."cfg(unix)".dependencies]
 nix.workspace = true

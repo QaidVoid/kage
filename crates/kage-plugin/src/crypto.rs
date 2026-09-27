@@ -83,7 +83,7 @@ fn add_hashes(lua: &Lua, crypto: &Table) -> mlua::Result<()> {
 
     crypto.set(
         "sha256",
-        lua.create_function(|lua, data: mlua::String| {
+        lua.create_function(|lua, data: mlua::LuaString| {
             use sha2::Digest as _;
             let data: Vec<u8> = data.as_bytes().to_vec();
             let digest = sha2::Sha256::digest(&data);
@@ -93,7 +93,7 @@ fn add_hashes(lua: &Lua, crypto: &Table) -> mlua::Result<()> {
 
     crypto.set(
         "sha512",
-        lua.create_function(|lua, data: mlua::String| {
+        lua.create_function(|lua, data: mlua::LuaString| {
             use sha2::Digest as _;
             let data: Vec<u8> = data.as_bytes().to_vec();
             let digest = sha2::Sha512::digest(&data);
@@ -107,8 +107,8 @@ fn add_hashes(lua: &Lua, crypto: &Table) -> mlua::Result<()> {
 fn add_kdf(lua: &Lua, crypto: &Table) -> mlua::Result<()> {
     crypto.set(
         "hmac_sha256",
-        lua.create_function(|lua, (key, data): (mlua::String, mlua::String)| {
-            use hmac::Mac as _;
+        lua.create_function(|lua, (key, data): (mlua::LuaString, mlua::LuaString)| {
+            use hmac::{KeyInit as _, Mac as _};
             let key: Vec<u8> = key.as_bytes().to_vec();
             let data: Vec<u8> = data.as_bytes().to_vec();
             let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&key)
@@ -122,7 +122,13 @@ fn add_kdf(lua: &Lua, crypto: &Table) -> mlua::Result<()> {
     crypto.set(
         "hkdf_sha256",
         lua.create_function(
-            |lua, (ikm, salt, info, length): (mlua::String, mlua::String, mlua::String, i64)| {
+            |lua,
+             (ikm, salt, info, length): (
+                mlua::LuaString,
+                mlua::LuaString,
+                mlua::LuaString,
+                i64,
+            )| {
                 let length = positive_usize(length, "hkdf_sha256", MAX_HKDF_BYTES)?;
                 let ikm: Vec<u8> = ikm.as_bytes().to_vec();
                 let salt: Vec<u8> = salt.as_bytes().to_vec();
@@ -150,11 +156,11 @@ fn add_aead_sign(lua: &Lua, crypto: &Table) -> mlua::Result<()> {
         lua.create_function(
             |lua,
              (key, iv, aad, ciphertext, tag): (
-                mlua::String,
-                mlua::String,
-                mlua::String,
-                mlua::String,
-                mlua::String,
+                mlua::LuaString,
+                mlua::LuaString,
+                mlua::LuaString,
+                mlua::LuaString,
+                mlua::LuaString,
             )| {
                 use aes_gcm::aead::{Aead as _, KeyInit as _, Payload};
                 let key: Vec<u8> = key.as_bytes().to_vec();
@@ -172,13 +178,15 @@ fn add_aead_sign(lua: &Lua, crypto: &Table) -> mlua::Result<()> {
                         "crypto.aes256gcm_decrypt: iv must be 12 bytes",
                     ));
                 }
-                let cipher =
-                    aes_gcm::Aes256Gcm::new(aes_gcm::Key::<aes_gcm::Aes256Gcm>::from_slice(&key));
+                let cipher = aes_gcm::Aes256Gcm::new(
+                    &aes_gcm::Key::<aes_gcm::Aes256Gcm>::try_from(key.as_slice())
+                        .expect("key length checked above"),
+                );
                 let mut sealed = ciphertext;
                 sealed.extend_from_slice(&tag);
                 let plain = cipher
                     .decrypt(
-                        aes_gcm::Nonce::from_slice(&iv),
+                        &aes_gcm::Nonce::try_from(iv.as_slice()).expect("iv length checked above"),
                         Payload {
                             msg: &sealed,
                             aad: &aad,
@@ -193,7 +201,7 @@ fn add_aead_sign(lua: &Lua, crypto: &Table) -> mlua::Result<()> {
     crypto.set(
         "ed25519_sign",
         lua.create_function(
-            |lua, (private_key_pkcs8, message): (mlua::String, mlua::String)| {
+            |lua, (private_key_pkcs8, message): (mlua::LuaString, mlua::LuaString)| {
                 use ed25519_dalek::Signer as _;
                 let private_key_pkcs8: Vec<u8> = private_key_pkcs8.as_bytes().to_vec();
                 let message: Vec<u8> = message.as_bytes().to_vec();
@@ -211,7 +219,7 @@ fn add_aead_sign(lua: &Lua, crypto: &Table) -> mlua::Result<()> {
 fn add_codecs(lua: &Lua, crypto: &Table) -> mlua::Result<()> {
     crypto.set(
         "to_base64",
-        lua.create_function(|lua, data: mlua::String| {
+        lua.create_function(|lua, data: mlua::LuaString| {
             use base64::Engine as _;
             let data: Vec<u8> = data.as_bytes().to_vec();
             lua.create_string(
@@ -224,7 +232,7 @@ fn add_codecs(lua: &Lua, crypto: &Table) -> mlua::Result<()> {
 
     crypto.set(
         "from_base64",
-        lua.create_function(|lua, text: mlua::String| {
+        lua.create_function(|lua, text: mlua::LuaString| {
             use base64::Engine as _;
             let text: Vec<u8> = text.as_bytes().to_vec();
             let bytes = base64::engine::general_purpose::STANDARD
@@ -236,7 +244,7 @@ fn add_codecs(lua: &Lua, crypto: &Table) -> mlua::Result<()> {
 
     crypto.set(
         "to_hex",
-        lua.create_function(|lua, data: mlua::String| {
+        lua.create_function(|lua, data: mlua::LuaString| {
             let data: Vec<u8> = data.as_bytes().to_vec();
             lua.create_string(hex::encode(&data).as_bytes())
         })?,
@@ -244,7 +252,7 @@ fn add_codecs(lua: &Lua, crypto: &Table) -> mlua::Result<()> {
 
     crypto.set(
         "from_hex",
-        lua.create_function(|lua, text: mlua::String| {
+        lua.create_function(|lua, text: mlua::LuaString| {
             let text: Vec<u8> = text.as_bytes().to_vec();
             let bytes = hex::decode(&text)
                 .map_err(|_| mlua::Error::external("crypto.from_hex: invalid hex"))?;

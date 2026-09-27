@@ -1,7 +1,6 @@
 //! Agent sessions an `agent` call starts.
 
 use std::path::Path;
-use std::sync::Arc;
 
 use kage_core::agents::AgentDef;
 use kage_core::protocol::{HostEvent, NoticeLevel, RunOutcome};
@@ -308,18 +307,15 @@ pub(super) fn depth_of(session: &Session) -> u8 {
 
 /// The tools an agent gets: `parent`'s, narrowed to `only` when the
 /// definition lists tools. Also returns listed names that match nothing.
+///
+/// Narrowing goes through [`ToolRegistry::retain_named`] so aliases
+/// survive; a sub-agent whose model calls `bash` needs the alias as
+/// much as the main session does.
 fn agent_tools(parent: &ToolRegistry, only: Option<&[String]>) -> (ToolRegistry, Vec<String>) {
     let Some(only) = only else {
         return (parent.clone(), Vec::new());
     };
-    let mut tools = ToolRegistry::new();
-    let mut missing = Vec::new();
-    for name in only {
-        match parent.get(name) {
-            Some(tool) => tools.register(Arc::clone(tool)),
-            None if name == AGENT_TOOL => {}
-            None => missing.push(name.clone()),
-        }
-    }
+    let (tools, mut missing) = parent.retain_named(only);
+    missing.retain(|name| name != AGENT_TOOL);
     (tools, missing)
 }

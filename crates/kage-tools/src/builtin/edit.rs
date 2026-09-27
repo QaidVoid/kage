@@ -25,6 +25,7 @@ use crate::{Tool, ToolContext, ToolError, schema_for};
 #[derive(Debug, Deserialize, JsonSchema)]
 struct EditInput {
     /// Path to edit, relative to the workdir.
+    #[serde(alias = "filePath")]
     path: String,
     /// Substring to replace (shorthand single-change form). Required when
     /// `changes` is absent.
@@ -749,5 +750,27 @@ mod tests {
         assert!(diff.contains("+ONE"));
         assert!(diff.contains("-three"));
         assert!(diff.contains("+THREE"));
+    }
+
+    #[test]
+    fn filepath_is_accepted_as_an_alias_for_path() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "old").unwrap();
+        run(
+            dir.path(),
+            serde_json::json!({"filePath":"a.txt","old_str":"old","new_str":"new"}),
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(dir.path().join("a.txt")).unwrap(), "new");
+        // The canonical key still works: the alias is additive.
+        run(
+            dir.path(),
+            serde_json::json!({"path":"a.txt","old_str":"new","new_str":"newer"}),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "newer"
+        );
     }
 }

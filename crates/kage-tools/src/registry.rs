@@ -83,6 +83,36 @@ impl ToolRegistry {
         None
     }
 
+    /// Narrow to the tools named in `keep`, preserving aliases.
+    ///
+    /// Each name is resolved through [`Self::get`], so an alias listed
+    /// by its alternate name (`bash`) keeps the tool it points at. An
+    /// alias survives only if its target is still present, so the result
+    /// never carries a dangling alias. Names that match no tool, alias
+    /// included, are returned so the caller can report them.
+    ///
+    /// Narrowing by rebuilding a registry by hand would silently drop
+    /// every alias, which is how a sub-agent ended up unable to run the
+    /// `bash` calls its model asked for.
+    #[must_use]
+    pub fn retain_named(&self, keep: &[String]) -> (Self, Vec<String>) {
+        let mut out = Self::new();
+        let mut missing = Vec::new();
+        for name in keep {
+            match self.get(name) {
+                Some(tool) => out.register(Arc::clone(tool)),
+                None => missing.push(name.clone()),
+            }
+        }
+        out.aliases = self
+            .aliases
+            .iter()
+            .filter(|(_, target)| out.tools.contains_key(*target))
+            .map(|(from, to)| (from.clone(), to.clone()))
+            .collect();
+        (out, missing)
+    }
+
     /// Number of registered tools.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -233,6 +263,66 @@ mod tests {
         r.register(echo("shell2"));
         r.register(echo("shell"));
         assert_eq!(r.get("bash").unwrap().name(), "shell");
+    }
+
+    #[test]
+    fn retain_named_keeps_aliases_whose_target_survives() {
+        let parent = ToolRegistry::new()
+            .with(echo("shell"))
+            .with(echo("read"))
+            .alias("bash", "shell");
+
+        // Narrowing to the target keeps the alias working.
+        let (narrow, missing) = parent.retain_named(&["shell".to_owned()]);
+        assert!(missing.is_empty());
+        assert_eq!(narrow.get("bash").unwrap().name(), "shell");
+        assert!(narrow.get("read").is_none());
+
+        // Narrowing by the alias name keeps the tool, and the alias with it.
+        let (by_alias, missing) = parent.retain_named(&["bash".to_owned()]);
+        assert!(missing.is_empty());
+        assert_eq!(by_alias.get("shell").unwrap().name(), "shell");
+        assert_eq!(by_alias.get("bash").unwrap().name(), "shell");
+    }
+
+    #[test]
+    fn retain_named_drops_aliases_whose_target_is_gone() {
+        // A kept tool with no alias gains none: the result is exactly
+        // what was asked for.
+        let parent = ToolRegistry::new()
+            .with(echo("shell"))
+            .with(echo("read"))
+            .alias("bash", "shell");
+        let (narrow, _) = parent.retain_named(&["read".to_owned()]);
+        assert_eq!(narrow.names().collect::<Vec<_>>(), vec!["read"]);
+        assert!(narrow.get("bash").is_none(), "dangling alias kept");
+    }
+
+    #[test]
+    fn retain_named_reports_names_that_match_nothing() {
+        let parent = ToolRegistry::new()
+            .with(echo("read"))
+            .with(echo("shell"))
+            .alias("bash", "shell");
+        let (narrow, missing) =
+            parent.retain_named(&["read".to_owned(), "ghost".to_owned(), "bash".to_owned()]);
+        assert_eq!(missing, vec!["ghost".to_owned()]);
+        // `bash` resolved through its alias even though the target
+        // was requested under its alternate name.
+        assert_eq!(narrow.get("bash").unwrap().name(), "shell");
+        assert!(narrow.get("read").is_some());
+    }
+
+    /// An alias pointing at an unregistered tool cannot resolve, so it
+    /// is reported as missing rather than silently dropped.
+    #[test]
+    fn retain_named_reports_an_alias_with_no_registered_target() {
+        let parent = ToolRegistry::new()
+            .with(echo("read"))
+            .alias("bash", "shell");
+        let (narrow, missing) = parent.retain_named(&["read".to_owned(), "bash".to_owned()]);
+        assert_eq!(missing, vec!["bash".to_owned()]);
+        assert!(narrow.get("bash").is_none());
     }
 
     #[test]

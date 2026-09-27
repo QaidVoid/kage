@@ -18,7 +18,7 @@ const MAX_ENTRIES: usize = 5_000;
 #[derive(Debug, Deserialize, JsonSchema)]
 struct LsInput {
     /// Optional subdirectory under workdir. Defaults to workdir.
-    #[serde(default, deserialize_with = "super::optional_path")]
+    #[serde(default, alias = "filePath", deserialize_with = "super::optional_path")]
     path: Option<String>,
     /// Recurse into subdirectories. Honors `.gitignore` and `.kageignore`.
     #[serde(default)]
@@ -235,5 +235,17 @@ mod tests {
         fs::write(dir.path().join("marker.txt"), "x").unwrap();
         let out = run(dir.path(), serde_json::json!({"path":"null"})).unwrap();
         assert!(out.text.contains("marker.txt"), "{}", out.text);
+    }
+
+    #[test]
+    fn filepath_is_accepted_as_an_alias_for_path() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub").join("a.txt"), "x").unwrap();
+        let out = run(dir.path(), serde_json::json!({"filePath":"sub"})).unwrap();
+        assert!(out.text.contains("a.txt"), "got {}", out.text);
+        // The canonical key still works: the alias is additive.
+        let out = run(dir.path(), serde_json::json!({"path":"sub"})).unwrap();
+        assert!(out.text.contains("a.txt"), "got {}", out.text);
     }
 }

@@ -17,6 +17,7 @@ const MAX_BYTES: usize = 2_000_000;
 #[derive(Debug, Deserialize, JsonSchema)]
 struct ReadInput {
     /// Path to read, relative to the workdir.
+    #[serde(alias = "filePath")]
     path: String,
     /// Optional 1-indexed start line (inclusive).
     #[serde(default)]
@@ -229,5 +230,21 @@ mod tests {
         let work = root.path().join("work");
         fs::create_dir(&work).unwrap();
         (root, work)
+    }
+
+    #[test]
+    fn filepath_is_accepted_as_an_alias_for_path() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "hello").unwrap();
+        let out = run(
+            &ReadTool,
+            dir.path(),
+            serde_json::json!({"filePath":"a.txt"}),
+        )
+        .unwrap();
+        assert_eq!(out.text, "hello");
+        // The canonical key still works: the alias is additive.
+        let out = run(&ReadTool, dir.path(), serde_json::json!({"path":"a.txt"})).unwrap();
+        assert_eq!(out.text, "hello");
     }
 }

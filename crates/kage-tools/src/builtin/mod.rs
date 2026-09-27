@@ -114,4 +114,41 @@ mod tests {
             );
         }
     }
+
+    /// `path` takes `filePath` as a deserialization alias only. The
+    /// schema the model reads must keep a single canonical key, or it
+    /// learns to send both and every call is rejected as a duplicate.
+    #[test]
+    fn filepath_alias_is_absent_from_the_advertised_schema() {
+        let r = builtin_registry();
+        for spec in r.list_for_provider() {
+            let props = &spec.schema["properties"];
+            assert!(
+                !props
+                    .as_object()
+                    .is_some_and(|p| p.contains_key("filePath")),
+                "{} advertises the filePath alias: {props}",
+                spec.name
+            );
+        }
+    }
+
+    /// Every tool that reads a path must still name it `path` in the
+    /// schema, since that is the key the alias falls back to.
+    #[test]
+    fn path_taking_tools_advertise_the_canonical_path_key() {
+        let r = builtin_registry();
+        for name in ["read", "write", "edit", "ls", "find", "grep"] {
+            let spec = r
+                .list_for_provider()
+                .into_iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("{name} is registered"));
+            assert!(
+                spec.schema["properties"]["path"].is_object(),
+                "{name} has no path property: {}",
+                spec.schema
+            );
+        }
+    }
 }

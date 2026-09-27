@@ -18,6 +18,7 @@ use crate::{Tool, ToolContext, ToolError, schema_for};
 #[derive(Debug, Deserialize, JsonSchema)]
 struct WriteInput {
     /// Path to write, relative to the workdir.
+    #[serde(alias = "filePath")]
     path: String,
     /// File contents (UTF-8).
     content: String,
@@ -235,5 +236,32 @@ mod tests {
         let work = root.path().join("work");
         fs::create_dir(&work).unwrap();
         (root, work)
+    }
+
+    #[test]
+    fn filepath_is_accepted_as_an_alias_for_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = run(
+            &WriteTool,
+            dir.path(),
+            serde_json::json!({"filePath":"out.txt","content":"hi"}),
+        )
+        .unwrap();
+        assert!(!out.is_error);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("out.txt")).unwrap(),
+            "hi"
+        );
+        // The canonical key still works: the alias is additive.
+        run(
+            &WriteTool,
+            dir.path(),
+            serde_json::json!({"path":"out2.txt","content":"hi"}),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("out2.txt")).unwrap(),
+            "hi"
+        );
     }
 }

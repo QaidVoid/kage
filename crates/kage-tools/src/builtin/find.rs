@@ -21,7 +21,7 @@ struct FindInput {
     /// Glob pattern, e.g. `**/*.rs` or `src/**/*.toml`.
     pattern: String,
     /// Optional subdirectory under workdir. Defaults to workdir.
-    #[serde(default, deserialize_with = "super::optional_path")]
+    #[serde(default, alias = "filePath", deserialize_with = "super::optional_path")]
     path: Option<String>,
     /// Filter by entry kind: `"f"` for files, `"d"` for directories. None = both.
     #[serde(default, rename = "type")]
@@ -218,5 +218,25 @@ mod tests {
         assert_eq!(structured["truncated"], true);
         assert_eq!(structured["matches"], MAX_ENTRIES);
         assert_eq!(structured["paths"].as_array().unwrap().len(), MAX_ENTRIES);
+    }
+
+    #[test]
+    fn filepath_is_accepted_as_an_alias_for_path() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub").join("a.txt"), "x").unwrap();
+        let out = run(
+            dir.path(),
+            serde_json::json!({"filePath":"sub","pattern":"**/*.txt"}),
+        )
+        .unwrap();
+        assert!(out.text.contains("a.txt"), "got {}", out.text);
+        // The canonical key still works: the alias is additive.
+        let out = run(
+            dir.path(),
+            serde_json::json!({"path":"sub","pattern":"**/*.txt"}),
+        )
+        .unwrap();
+        assert!(out.text.contains("a.txt"), "got {}", out.text);
     }
 }

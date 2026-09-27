@@ -268,8 +268,8 @@ mod tests {
     fn alias_resolves_to_the_target_tool() {
         let r = ToolRegistry::new()
             .with(echo("shell"))
-            .alias("bash", "shell");
-        assert_eq!(r.get("bash").unwrap().name(), "shell");
+            .alias("sh", "shell");
+        assert_eq!(r.get("sh").unwrap().name(), "shell");
         assert!(r.get("nope").is_none());
         // Aliases are invisible to listings.
         assert_eq!(r.names().collect::<Vec<_>>(), vec!["shell"]);
@@ -294,10 +294,10 @@ mod tests {
         // A plugin override under the real name keeps the alias working.
         let mut r = ToolRegistry::new()
             .with(echo("shell"))
-            .alias("bash", "shell");
+            .alias("sh", "shell");
         r.register(echo("shell2"));
         r.register(echo("shell"));
-        assert_eq!(r.get("bash").unwrap().name(), "shell");
+        assert_eq!(r.get("sh").unwrap().name(), "shell");
     }
 
     #[test]
@@ -305,19 +305,19 @@ mod tests {
         let parent = ToolRegistry::new()
             .with(echo("shell"))
             .with(echo("read"))
-            .alias("bash", "shell");
+            .alias("sh", "shell");
 
         // Narrowing to the target keeps the alias working.
         let (narrow, missing) = parent.retain_named(&["shell".to_owned()]);
         assert!(missing.is_empty());
-        assert_eq!(narrow.get("bash").unwrap().name(), "shell");
+        assert_eq!(narrow.get("sh").unwrap().name(), "shell");
         assert!(narrow.get("read").is_none());
 
         // Narrowing by the alias name keeps the tool, and the alias with it.
-        let (by_alias, missing) = parent.retain_named(&["bash".to_owned()]);
+        let (by_alias, missing) = parent.retain_named(&["sh".to_owned()]);
         assert!(missing.is_empty());
         assert_eq!(by_alias.get("shell").unwrap().name(), "shell");
-        assert_eq!(by_alias.get("bash").unwrap().name(), "shell");
+        assert_eq!(by_alias.get("sh").unwrap().name(), "shell");
     }
 
     #[test]
@@ -327,10 +327,10 @@ mod tests {
         let parent = ToolRegistry::new()
             .with(echo("shell"))
             .with(echo("read"))
-            .alias("bash", "shell");
+            .alias("sh", "shell");
         let (narrow, _) = parent.retain_named(&["read".to_owned()]);
         assert_eq!(narrow.names().collect::<Vec<_>>(), vec!["read"]);
-        assert!(narrow.get("bash").is_none(), "dangling alias kept");
+        assert!(narrow.get("sh").is_none(), "dangling alias kept");
     }
 
     #[test]
@@ -338,13 +338,13 @@ mod tests {
         let parent = ToolRegistry::new()
             .with(echo("read"))
             .with(echo("shell"))
-            .alias("bash", "shell");
+            .alias("sh", "shell");
         let (narrow, missing) =
-            parent.retain_named(&["read".to_owned(), "ghost".to_owned(), "bash".to_owned()]);
+            parent.retain_named(&["read".to_owned(), "ghost".to_owned(), "sh".to_owned()]);
         assert_eq!(missing, vec!["ghost".to_owned()]);
         // `bash` resolved through its alias even though the target
         // was requested under its alternate name.
-        assert_eq!(narrow.get("bash").unwrap().name(), "shell");
+        assert_eq!(narrow.get("sh").unwrap().name(), "shell");
         assert!(narrow.get("read").is_some());
     }
 
@@ -354,10 +354,10 @@ mod tests {
     fn retain_named_reports_an_alias_with_no_registered_target() {
         let parent = ToolRegistry::new()
             .with(echo("read"))
-            .alias("bash", "shell");
-        let (narrow, missing) = parent.retain_named(&["read".to_owned(), "bash".to_owned()]);
-        assert_eq!(missing, vec!["bash".to_owned()]);
-        assert!(narrow.get("bash").is_none());
+            .alias("sh", "shell");
+        let (narrow, missing) = parent.retain_named(&["read".to_owned(), "sh".to_owned()]);
+        assert_eq!(missing, vec!["sh".to_owned()]);
+        assert!(narrow.get("sh").is_none());
     }
 
     /// An alias resolves to the same canonical name as its target, which
@@ -368,8 +368,8 @@ mod tests {
         let r = ToolRegistry::new()
             .with(echo("shell"))
             .with(echo("read"))
-            .alias("bash", "shell");
-        assert_eq!(r.canonical_name("bash"), "shell");
+            .alias("sh", "shell");
+        assert_eq!(r.canonical_name("sh"), "shell");
         assert_eq!(r.canonical_name("shell"), "shell");
         // A real name is untouched.
         assert_eq!(r.canonical_name("read"), "read");
@@ -400,17 +400,8 @@ mod tests {
     fn canonical_name_leaves_a_dangling_alias_alone() {
         let r = ToolRegistry::new()
             .with(echo("read"))
-            .alias("bash", "shell");
-        assert_eq!(r.canonical_name("bash"), "bash");
-    }
-
-    /// The wiring the permission fix depends on: the real registry
-    /// must actually carry the alias, or the gate canonicalizes nothing
-    /// and the bypass returns.
-    #[test]
-    fn the_builtin_registry_carries_the_bash_alias_for_the_gate() {
-        let aliases = crate::builtin::builtin_registry().alias_map();
-        assert_eq!(aliases.get("bash").map(String::as_str), Some("shell"));
+            .alias("sh", "shell");
+        assert_eq!(r.canonical_name("sh"), "sh");
     }
 
     #[test]

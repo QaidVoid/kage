@@ -522,15 +522,13 @@ fn tool_title(name: &str) -> String {
     }
 }
 
-/// ACP kind hint for a built-in tool name. `bash` is listed beside
-/// `shell` because it is the registry's alias for it, and a call the
-/// model made under the alias must be classified like the tool it runs.
+/// ACP kind hint for a built-in tool name.
 pub(super) fn tool_kind(name: &str) -> ToolKind {
     match name {
         "read" | "ls" => ToolKind::Read,
         "grep" | "find" => ToolKind::Search,
         "write" | "edit" => ToolKind::Edit,
-        "shell" | "bash" => ToolKind::Execute,
+        "shell" => ToolKind::Execute,
         "web_fetch" => ToolKind::Fetch,
         _ => ToolKind::Other,
     }

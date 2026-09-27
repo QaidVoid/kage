@@ -1013,6 +1013,38 @@ fn pinned_agents_follow_their_cards_and_finished_ones_leave_the_queue_hint() {
 }
 
 #[test]
+fn finished_agents_leave_a_summary_row_whose_click_opens_the_list() {
+    let (mut app, _rx, events) = app_with_events();
+    app.set_editor_modeless(true);
+    let child = spawn_agent(&mut app, &events, "a1", "explore");
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![
+            kage_core::protocol::HostEvent::RunStarted.into(),
+            run_ended(kage_core::protocol::RunOutcome::Completed),
+        ],
+    );
+    assert!(app.agent_rows().is_empty(), "no agent is live");
+    let rows = rendered(&mut app, 80, 24);
+    let summary = rows
+        .iter()
+        .position(|r| r.contains("1 agent \u{b7} ctrl+t for agents"))
+        .expect("summary row missing");
+    app.mouse_down(u16::try_from(summary).unwrap(), 10);
+    assert!(app.agents_overlay.is_some(), "the click opens the list");
+}
+
+#[test]
+fn live_pinned_rows_leave_no_summary_row() {
+    let (mut app, _rx, _events, _) = agents_app();
+    assert!(!app.agent_rows().is_empty());
+    let rows = rendered(&mut app, 80, 24);
+    assert!(rows.iter().all(|r| !r.contains(" for agents")), "{rows:#?}");
+}
+
+#[test]
 fn each_view_keeps_its_own_draft() {
     let (mut app, _rx, _events, child) = focused_app();
     app.set_focus(None);

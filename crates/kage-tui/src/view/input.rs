@@ -111,6 +111,17 @@ pub(crate) fn agents_height(count: usize) -> u16 {
     list_height(count, AGENT_MAX_ROWS)
 }
 
+/// How many rows the pinned area paints: the live agents' rows, or,
+/// while none is live but the session still has finished ones, the
+/// single summary row that names them and the key that lists them.
+pub(crate) fn pinned_area_rows(agents: &[AgentRow], total: usize) -> usize {
+    if agents.is_empty() {
+        usize::from(total > 0)
+    } else {
+        agents.len()
+    }
+}
+
 /// Rows of a list of `count` entries that shows at most `max`, then a
 /// `+N more` row.
 fn list_height(count: usize, max: usize) -> u16 {
@@ -125,12 +136,19 @@ pub(super) fn render_input(
     sources: &super::slot::Sources<'_>,
 ) {
     let status = sources.status;
+    let summary = pinned_area_rows(status.agents, status.agents_total);
     let (agents_area, pending_area, area) =
-        split_input(regions.input, status.agents.len(), status.pending.len());
+        split_input(regions.input, summary, status.pending.len());
     if area.height < crate::layout::INPUT_CHROME_LINES || area.width == 0 {
         return;
     }
-    paint_agents(frame, agents_area, status.agents, status.agents_key);
+    paint_agents(
+        frame,
+        agents_area,
+        status.agents,
+        status.agents_total,
+        status.agents_key,
+    );
     paint_pending(frame, pending_area, status.pending);
     let theme = crate::theme::current();
     let mode = input.mode();
@@ -371,8 +389,16 @@ fn todo_block(
 
 /// Paint the pinned agents in tree order, with names in one column
 /// and what each does right-aligned. The `+N more` row names `key`,
-/// the key that lists them all.
-fn paint_agents(frame: &mut Frame, area: Rect, agents: &[AgentRow], key: Option<&str>) {
+/// the key that lists them all. While `agents` is empty but the
+/// session still holds `total` finished ones, one summary row takes
+/// their place and names the same key.
+fn paint_agents(
+    frame: &mut Frame,
+    area: Rect,
+    agents: &[AgentRow],
+    total: usize,
+    key: Option<&str>,
+) {
     if area.height == 0 {
         return;
     }
@@ -387,13 +413,20 @@ fn paint_agents(frame: &mut Frame, area: Rect, agents: &[AgentRow], key: Option<
         .iter()
         .map(|row| agent_line(row, name_column, width))
         .collect();
+    let muted = Style::default().fg(crate::theme::current().muted_fg);
     if let Some(more) = agents.len().checked_sub(AGENT_MAX_ROWS).filter(|n| *n > 0) {
-        let muted = Style::default().fg(crate::theme::current().muted_fg);
         let more = match key {
             Some(key) => format!("  +{more} more \u{b7} {key} for agents"),
             None => format!("  +{more} more"),
         };
         lines.push(Line::from(Span::styled(more, muted)));
+    } else if agents.is_empty() && total > 0 {
+        let noun = if total == 1 { "agent" } else { "agents" };
+        let row = match key {
+            Some(key) => format!("  {total} {noun} \u{b7} {key} for agents"),
+            None => format!("  {total} {noun}"),
+        };
+        lines.push(Line::from(Span::styled(row, muted)));
     }
     frame.render_widget(Paragraph::new(lines), area);
 }

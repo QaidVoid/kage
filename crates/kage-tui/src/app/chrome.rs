@@ -335,6 +335,14 @@ impl App {
             .collect()
     }
 
+    /// How many agents sit under the session on screen, live or
+    /// finished. The pinned list's summary row names them while none
+    /// is live, so finished ones stay reachable through their list.
+    pub(crate) fn agents_under_view(&self) -> usize {
+        self.view_root()
+            .map_or(0, |root| self.agents.under(root).len())
+    }
+
     /// The agents overlay's rows: the main session, then every agent
     /// under it in tree order, live or finished.
     pub(crate) fn agents_overlay_rows(&self) -> Vec<crate::overlay::AgentsRow> {

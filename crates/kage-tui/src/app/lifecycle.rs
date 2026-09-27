@@ -396,6 +396,7 @@ impl App {
             .collect();
         let breadcrumb = self.breadcrumb();
         let placeholder = self.agent_placeholder();
+        let agents_total = self.agents_under_view();
         let status = view::StatusCtx {
             model: model_label.as_deref(),
             session_id: self.status_session_id.as_deref(),
@@ -415,6 +416,7 @@ impl App {
             start_keys,
             pending: &pending,
             agents: &agent_rows,
+            agents_total,
             agents_key: agents_key.as_deref(),
             breadcrumb: breadcrumb.as_ref(),
             placeholder: placeholder.as_deref(),
@@ -447,6 +449,7 @@ impl App {
             .approval_panel
             .as_ref()
             .map(|panel| (panel, self.permission_queue.len()));
+        let has_approval = approval.is_some();
         let slash_palette = self
             .slash_palette
             .as_ref()
@@ -481,8 +484,9 @@ impl App {
                 if approval.is_some() {
                     view_regions.input.height = 0;
                 } else {
+                    let pinned_rows = view::pinned_area_rows(&agent_rows, agents_total);
                     let (agents, _, input_box) =
-                        view::split_input(regions.input, agent_rows.len(), status.pending.len());
+                        view::split_input(regions.input, pinned_rows, status.pending.len());
                     pinned_area = agents;
                     box_regions.input = input_box;
                 }
@@ -574,6 +578,11 @@ impl App {
             .zip(agent_rows.iter().take(view::AGENT_MAX_ROWS))
             .map(|(row, agent)| (row, agent.session))
             .collect();
+        // The summary row is the pinned area's last one, and a click on
+        // it opens the agents overlay.
+        self.pinned_summary_hit = (!has_approval && agent_rows.is_empty() && agents_total > 0)
+            .then(|| pinned_area.bottom().saturating_sub(1))
+            .filter(|_| pinned_area.height > 0);
         Ok(())
     }
 

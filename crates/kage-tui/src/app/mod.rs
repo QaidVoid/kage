@@ -908,6 +908,10 @@ pub struct App {
     /// The screen row of each pinned agent row painted last frame, with
     /// its session, so a click on one focuses that agent.
     pinned_hits: Vec<(u16, kage_core::SessionId)>,
+    /// The screen row of the pinned list's summary row, painted while
+    /// no agent is live but finished ones remain, so a click on it
+    /// opens the agents overlay.
+    pinned_summary_hit: Option<u16>,
     /// What the last Esc or Ctrl+C left for the next press, and when
     /// it lapses.
     escalation: Option<(keys::Escalation, Instant)>,

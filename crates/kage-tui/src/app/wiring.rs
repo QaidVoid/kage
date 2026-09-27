@@ -103,6 +103,7 @@ impl App {
             start_info: None,
             pending: Vec::new(),
             pinned_hits: Vec::new(),
+            pinned_summary_hit: None,
             escalation: None,
         }
     }

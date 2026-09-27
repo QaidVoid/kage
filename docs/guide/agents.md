@@ -238,7 +238,9 @@ approval panel is open.
 
 While agents are queued or running and the prompt is empty, the
 footer names the key that opens the agents overlay, `ctrl+t for
-agents` by default, in place of `tab to queue`.
+agents` by default, in place of `tab to queue`. When every agent has
+finished, the pinned list gives way to one summary row, such as
+`2 agents · ctrl+t for agents`, and a click on it opens the list.
 
 ### opening an agent
 

@@ -107,6 +107,10 @@ pub struct StatusCtx<'a> {
     /// Live agents under the session on screen, pinned above the
     /// pending prompts.
     pub agents: &'a [AgentRow],
+    /// Every agent under the session on screen, finished ones
+    /// included. While none is live, the pinned list's summary row
+    /// names them and the key that lists them.
+    pub agents_total: usize,
     /// Key that opens the agents overlay, named in the pinned list's
     /// `+N more` row.
     pub agents_key: Option<&'a str>,
@@ -366,7 +370,12 @@ pub fn chrome_heights(
                 kage_plugin::SlotName::Activity,
                 &sources,
             )),
-        input: input_height(input, status.agents.len(), status.pending.len(), width),
+        input: input_height(
+            input,
+            pinned_area_rows(status.agents, status.agents_total),
+            status.pending.len(),
+            width,
+        ),
         footer: slot::footer_height(&sources),
     }
 }
@@ -510,7 +519,7 @@ pub(crate) use bubble::{
 pub use buffer::CapturedCell;
 pub(crate) use buffer::build_block_lines;
 pub(crate) use input::{
-    AGENT_MAX_ROWS, INPUT_GLYPH_WIDTH, agents_height, pending_height, split_input,
+    AGENT_MAX_ROWS, INPUT_GLYPH_WIDTH, agents_height, pending_height, pinned_area_rows, split_input,
 };
 pub use input::{AgentRow, AgentRowState, PendingPrompt};
 pub use modeline::input_visual_row_count;

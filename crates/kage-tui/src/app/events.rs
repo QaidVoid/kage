@@ -273,6 +273,10 @@ impl App {
             self.focus_agent(session);
             return;
         }
+        if self.pinned_summary_hit == Some(row) {
+            self.open_agents();
+            return;
+        }
         self.captured_rows.clear();
         let mut buf = lock(&self.buffer);
         let area_y = buf.last_area_y();

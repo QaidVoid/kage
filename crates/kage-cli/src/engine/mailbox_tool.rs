@@ -1,0 +1,193 @@
+//! The `send_message` tool: drop a message into another agent
+//! session's mailbox. Delivery is fire-and-forget: the target runs the
+//! message as its next prompt, and the caller keeps going.
+
+use std::sync::mpsc;
+use std::time::Duration;
+
+use kage_core::protocol::Delivery;
+use kage_core::{Content, Risk, SessionId, ToolOutput};
+use kage_tools::{Tool, ToolContext, ToolError};
+use serde::Deserialize;
+use ulid::Ulid;
+
+use super::Input;
+
+/// Name the model calls the tool by.
+pub(super) const MAILBOX_TOOL: &str = "send_message";
+
+/// How long the tool waits for the engine's delivery ack. The engine
+/// answers on its own thread, so this only guards against a stopped
+/// or wedged engine.
+const ACK_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Deserialize)]
+struct MailInput {
+    /// `parent` or the session id of a live agent session.
+    to: String,
+    message: String,
+}
+
+/// Sends mailbox messages for one session's run. The dispatcher
+/// registers it into the run's tools next to the `agent` tool.
+#[derive(Debug)]
+pub(super) struct MailboxTool {
+    from: SessionId,
+    engine: mpsc::Sender<Input>,
+    description: String,
+    schema: serde_json::Value,
+}
+
+impl MailboxTool {
+    pub(super) fn new(from: SessionId, engine: mpsc::Sender<Input>) -> Self {
+        let description = format!(
+            "Send a message to another agent session's mailbox and continue without \
+             waiting. The message becomes the target's next prompt: it runs at once \
+             when the target is idle, else after its current run ends. The target's \
+             reply never comes back to you; it lands in the target's own transcript, \
+             so ask it to report back another way, such as a follow-up `swarm` resume \
+             or a message of its own.\n\n\
+             `to` is `parent` (the session that started you) or a session id, for \
+             example one of the sibling ids a swarm result named. Your own id is \
+             {from}.\n\n\
+             Use it to hand findings to a sibling, ask the parent a question mid-task \
+             or answer the parent without being asked. For work you must wait on, \
+             make an `agent` call instead."
+        );
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "to": {
+                    "type": "string",
+                    "description": "`parent` or the session id of a live agent session."
+                },
+                "message": {
+                    "type": "string",
+                    "description": "What to send. Self-contained: the target reads it without your context."
+                }
+            },
+            "required": ["to", "message"]
+        });
+        Self {
+            from,
+            engine,
+            description,
+            schema,
+        }
+    }
+}
+
+impl Tool for MailboxTool {
+    fn name(&self) -> &str {
+        MAILBOX_TOOL
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        self.schema.clone()
+    }
+
+    fn risk(&self) -> Risk {
+        Risk::Exec
+    }
+
+    fn execute(
+        &self,
+        input: serde_json::Value,
+        _cx: &ToolContext<'_>,
+    ) -> Result<ToolOutput, ToolError> {
+        let input: MailInput = serde_json::from_value(input)?;
+        if input.message.trim().is_empty() {
+            return Ok(super::agent_tool::error_output(
+                "the message is empty".to_owned(),
+            ));
+        }
+        let to = if input.to.trim() == "parent" {
+            None
+        } else {
+            match Ulid::from_string(input.to.trim()) {
+                Ok(id) => Some(SessionId(id)),
+                Err(_) => {
+                    return Ok(super::agent_tool::error_output(format!(
+                        "`to` must be `parent` or a session id, got `{}`",
+                        input.to
+                    )));
+                }
+            }
+        };
+        let (reply, ack) = crossbeam_channel::bounded(1);
+        if self
+            .engine
+            .send(Input::Deliver {
+                from: self.from,
+                to,
+                message: input.message,
+                reply,
+            })
+            .is_err()
+        {
+            return Ok(super::agent_tool::error_output(
+                "the engine stopped".to_owned(),
+            ));
+        }
+        match ack.recv_timeout(ACK_TIMEOUT) {
+            Ok(Ok(text)) => Ok(ToolOutput {
+                text,
+                ..ToolOutput::default()
+            }),
+            Ok(Err(text)) => Ok(super::agent_tool::error_output(text)),
+            Err(_) => Ok(super::agent_tool::error_output(
+                "the engine did not answer the delivery".to_owned(),
+            )),
+        }
+    }
+}
+
+impl super::Dispatcher {
+    /// Resolve and queue one mailbox message. `None` targets address
+    /// the sender's parent. The message is wrapped so the target knows
+    /// who sent it and where to answer, then prompted with
+    /// [`Delivery::Queue`]: an idle target starts a run at once, a
+    /// busy one after its current run ends.
+    pub(super) fn deliver_message(
+        &mut self,
+        from: SessionId,
+        to: Option<SessionId>,
+        message: &str,
+    ) -> Result<String, String> {
+        let to = match to {
+            Some(to) => to,
+            None => self
+                .parent_of(from)
+                .ok_or_else(|| "this session has no parent to message".to_owned())?,
+        };
+        if to == from {
+            return Err("cannot send a message to yourself".to_owned());
+        }
+        let label = self
+            .sessions
+            .get(&from)
+            .and_then(|s| s.link.as_ref())
+            .map_or_else(
+                || "the main session".to_owned(),
+                |l| format!("the {} agent", l.agent),
+            );
+        let Some(target) = self.sessions.get_mut(&to) else {
+            return Err(format!(
+                "no live session {to}. Only sessions hosted right now take messages; \
+                 resume the session that owns it first"
+            ));
+        };
+        let idle = target.idle.is_some();
+        let text = format!("[message from {label} session {from}]\n\n{message}");
+        self.prompt(to, vec![Content::Text { text }], Delivery::Queue);
+        Ok(if idle {
+            format!("message delivered to session {to}; it runs now")
+        } else {
+            format!("message queued for session {to}; it runs when the current run ends")
+        })
+    }
+}

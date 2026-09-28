@@ -12,6 +12,7 @@
 mod agent_tool;
 mod agents;
 mod bus;
+mod mailbox_tool;
 mod mcp;
 mod plugin_tools;
 mod recorder;
@@ -53,6 +54,7 @@ pub(crate) use sessions::render_session_markdown;
 use agent_tool::{AgentTool, Spawn};
 use agents::{AgentLink, depth_of};
 use bus::Bus;
+use mailbox_tool::MailboxTool;
 use mcp::{McpDone, restart_failed};
 use plugin_tools::PluginTools;
 use runner::{Finished, McpLease, Run, Steering, Work};
@@ -164,6 +166,17 @@ enum Input {
         reply: crossbeam_channel::Sender<Result<Vec<ResumeChild>, String>>,
     },
     Attach(Box<Attach>),
+    /// Drop a message into a live session's mailbox. The engine
+    /// resolves the target, wraps the message so the target knows the
+    /// sender, and prompts it with [`Delivery::Queue`]. Replies with
+    /// an ack or the reason the delivery was refused.
+    Deliver {
+        from: SessionId,
+        /// `None` addresses the sender's parent.
+        to: Option<SessionId>,
+        message: String,
+        reply: crossbeam_channel::Sender<Result<String, String>>,
+    },
     Finished(Box<Finished>),
     McpDone(Box<McpDone>),
     ShellDone(Box<ShellDone>),
@@ -348,6 +361,14 @@ impl Dispatcher {
                     let _ = reply.send(self.verify_resume(parent, &ids));
                 }
                 Input::Attach(attach) => self.attach(*attach),
+                Input::Deliver {
+                    from,
+                    to,
+                    message,
+                    reply,
+                } => {
+                    let _ = reply.send(self.deliver_message(from, to, &message));
+                }
                 Input::Finished(finished) => self.finish(*finished),
                 Input::McpDone(done) => self.mcp_done(*done),
                 Input::ShellDone(done) => self.shell_done(*done),
@@ -739,10 +760,13 @@ impl Dispatcher {
             Work::Compact => Work::Compact,
         };
         let mut tools = session.tools.clone();
-        if let Some(setup) = &session.agents
-            && depth_of(session) < setup.max_depth
-        {
-            register_delegation_tools(&mut tools, id, &self.tx, setup);
+        if let Some(setup) = &session.agents {
+            if depth_of(session) < setup.max_depth {
+                register_delegation_tools(&mut tools, id, &self.tx, setup);
+            }
+            // Mailboxing does not nest, so every agent-enabled session
+            // gets it whatever its depth.
+            tools.register(Arc::new(MailboxTool::new(id, self.tx.clone())));
         }
         let run = Run {
             session: id,

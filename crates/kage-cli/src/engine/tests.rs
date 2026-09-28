@@ -1275,7 +1275,19 @@ fn agent_tool_follows_the_depth_limit() {
     until_runs_end(&h.events, 2);
     let requests = mock.requests();
     assert!(tool_names(&requests[0]).contains(&"agent".to_owned()));
-    assert_eq!(tool_names(&requests[1]), ["gate"]);
+    let child_tools = tool_names(&requests[1]);
+    assert!(
+        !child_tools.contains(&"agent".to_owned()),
+        "{child_tools:?}"
+    );
+    assert!(
+        !child_tools.contains(&"swarm".to_owned()),
+        "{child_tools:?}"
+    );
+    assert!(
+        child_tools.contains(&"send_message".to_owned()),
+        "{child_tools:?}"
+    );
 
     let mock = MockProvider::replaying(text_turn("ok"));
     let h = harness(mock.clone());
@@ -1286,7 +1298,12 @@ fn agent_tool_follows_the_depth_limit() {
     );
     prompt(&h.engine, parent, "go", Delivery::Steer);
     until_runs_end(&h.events, 1);
-    assert_eq!(tool_names(&mock.requests()[0]), ["gate"]);
+    let main_tools = tool_names(&mock.requests()[0]);
+    assert!(!main_tools.contains(&"agent".to_owned()), "{main_tools:?}");
+    assert!(
+        main_tools.contains(&"send_message".to_owned()),
+        "{main_tools:?}"
+    );
 }
 
 #[test]
@@ -2195,6 +2212,104 @@ fn swarm_mode_injects_its_block_once_at_the_next_run() {
             .count(),
         0,
         "the exit note only lands after the turn off"
+    );
+}
+
+/// One assistant turn that calls `send_message` once.
+fn send_message_turn(
+    id: &str,
+    to: &str,
+    message: &str,
+) -> Vec<Result<ProviderEvent, ProviderError>> {
+    vec![
+        Ok(ProviderEvent::MessageStart),
+        Ok(ProviderEvent::ToolCallStart {
+            id: ToolCallId::new(id),
+            name: "send_message".into(),
+        }),
+        Ok(ProviderEvent::ToolCallEnd {
+            id: ToolCallId::new(id),
+            input: serde_json::json!({"to": to, "message": message}),
+        }),
+        Ok(ProviderEvent::MessageEnd {
+            stop_reason: StopReason::ToolUse,
+            usage: TokenUsage::default(),
+        }),
+    ]
+}
+
+#[test]
+fn a_child_messages_its_parent_and_the_parent_runs_it() {
+    let mock = MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("watch the build"))]),
+        send_message_turn("call_m", "parent", "found the bug"),
+        text_turn("child done"),
+        text_turn("parent done"),
+        text_turn("handled the message"),
+    ]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(1, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 3);
+    h.engine.shutdown();
+
+    let child = spawned(&events).first().unwrap().0;
+    let ack = tool_output(&events, child, "call_m");
+    assert!(!ack.is_error, "{}", ack.text);
+    assert!(ack.text.contains("queued"), "{}", ack.text);
+
+    let requests = mock.requests();
+    let last = requests.last().unwrap().messages.clone();
+    let texts: Vec<String> = last
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|c| match c {
+            Content::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        texts
+            .iter()
+            .any(|t| t
+                == &format!("[message from the general agent session {child}]\n\nfound the bug")),
+        "{texts:?}"
+    );
+    assert_eq!(
+        outcome_of(&events, parent).last(),
+        Some(&RunOutcome::Completed)
+    );
+}
+
+#[test]
+fn a_message_to_a_missing_target_or_parent_is_refused() {
+    let h = harness(MockProvider::sequence(vec![
+        send_message_turn("call_m1", "parent", "anyone there?"),
+        send_message_turn("call_m2", &SessionId::new().to_string(), "hello?"),
+        text_turn("done"),
+    ]));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(1, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 1);
+    h.engine.shutdown();
+
+    let orphan = tool_output(&events, parent, "call_m1");
+    assert!(orphan.is_error);
+    assert!(orphan.text.contains("has no parent"), "{}", orphan.text);
+    let stranger = tool_output(&events, parent, "call_m2");
+    assert!(stranger.is_error);
+    assert!(
+        stranger.text.contains("no live session"),
+        "{}",
+        stranger.text
     );
 }
 

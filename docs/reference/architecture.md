@@ -122,6 +122,15 @@ file with its history, model and definition intact. Swarm mode
 history on the way up and an exit note on the way down, once per
 switch.
 
+**The mailbox.** Every agent-enabled session also gets a
+`send_message` tool, whatever its depth, because sending does not
+nest. It delivers fire-and-forget: the engine resolves `parent` or a
+session id to a hosted session, wraps the text with a sender header
+naming the agent and its session id, and prompts the target with
+`Delivery::Queue`, which starts an idle target at once and queues
+behind a busy one. The ack tells the sender when the message will
+run; the target's reply lands only in the target's own transcript.
+
 **The cancel tree.** `CancelFlag` is a node with an optional parent.
 An agent's flag is a child of its parent's, and `is_cancelled` walks up
 the chain. Cancelling a session stops every agent below it through the

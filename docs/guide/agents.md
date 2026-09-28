@@ -126,6 +126,32 @@ the mode on, submits the task as a prompt, and turns the mode off
 when that run ends. It refuses to run while a run is already in
 flight.
 
+## the send_message mailbox
+
+Every agent-enabled session, the parent and its children alike, gets
+a `send_message` tool. It drops a message into another live session's
+mailbox and returns at once, so a child can report a finding or ask
+the parent a question without blocking on an answer:
+
+```json
+{"to": "parent", "message": "Found a failing test in kage-loop; fixing it before the summary."}
+```
+
+`to` is `parent` or the session id of another agent, for example a
+sibling id a swarm result named. The message becomes the target's
+next prompt: it runs at once when the target is idle, else right
+after its current run ends, through the same queue as a queued
+prompt. The target sees a header naming the sender and its session
+id, so it can answer with a `send_message` call of its own.
+
+Delivery is fire-and-forget: the caller learns when the message was
+queued, never what the target replied. The reply lands in the
+target's own transcript and card. When you need the answer in hand
+before continuing, make an `agent` call or a `swarm` resume instead,
+both of which block on the result. Only sessions hosted right now
+take messages; a child that only exists on disk after a resume is
+reachable again once a `swarm` resume reopens it.
+
 ## built-in agents
 
 | Agent | Tools | For |

@@ -42,7 +42,13 @@ pub fn terminal_light() -> bool {
 }
 
 fn query() -> Option<bool> {
-    let mode = terminal_colorsaurus::theme_mode(QueryOptions::default()).ok()?;
+    // A short timeout: terminals that answer do so in milliseconds,
+    // and one that never answers (some multiplexers) must not hold
+    // the launch for the library default of a full second. COLORFGBG
+    // covers the non-answering case.
+    let mut options = QueryOptions::default();
+    options.timeout = std::time::Duration::from_millis(120);
+    let mode = terminal_colorsaurus::theme_mode(options).ok()?;
     Some(matches!(mode, ThemeMode::Light))
 }
 

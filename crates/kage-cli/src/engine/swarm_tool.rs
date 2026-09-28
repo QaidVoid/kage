@@ -159,7 +159,7 @@ impl SwarmTool {
                     "type": "object",
                     "additionalProperties": { "type": "string" },
                     "description":
-                        "Map of child session id to a follow-up prompt, to continue children of an earlier swarm call of this session instead of spawning new ones. Mixes with items."
+                        "Map of child session id to a follow-up prompt, to continue children of an earlier swarm call of this session instead of spawning new ones. Mixes with items. Items and resume entries together count toward the swarm cap."
                 },
                 "fork": {
                     "type": "boolean",
@@ -390,6 +390,15 @@ fn expand(input: &SwarmInput, defs: &AgentDefs, max_items: usize) -> Result<Call
                 .to_owned(),
         );
     }
+    let total = input.items.len() + input.resume.len();
+    if total > max_items {
+        return Err(format!(
+            "a swarm is capped at {max_items} items (swarm_max_items), the call lists {total} \
+             ({} items + {} resume entries)",
+            input.items.len(),
+            input.resume.len()
+        ));
+    }
     let mut items = Vec::new();
     if !input.items.is_empty() {
         if defs.get(&input.agent).is_none() {
@@ -406,13 +415,6 @@ fn expand(input: &SwarmInput, defs: &AgentDefs, max_items: usize) -> Result<Call
         if input.items.len() < 2 {
             return Err(format!(
                 "a swarm needs at least 2 items (got {})",
-                input.items.len()
-            ));
-        }
-        if input.items.len() > max_items {
-            return Err(format!(
-                "a swarm is capped at {max_items} items (swarm_max_items), \
-                 the call lists {}",
                 input.items.len()
             ));
         }
@@ -717,6 +719,27 @@ mod tests {
         call.agent = "nope".into();
         let err = expand(&call, &defs, 32).unwrap_err();
         assert!(err.contains("explore, general"), "{err}");
+    }
+
+    #[test]
+    fn expand_caps_items_and_resume_together() {
+        let defs = AgentDefs::builtin();
+        let mut call = input(&["a", "b"]);
+        call.resume
+            .insert(SessionId::new().to_string(), "go on".into());
+        let err = expand(&call, &defs, 2).unwrap_err();
+        assert!(err.contains("capped at 2 items"), "{err}");
+        assert!(err.contains("lists 3"), "{err}");
+        assert!(err.contains("2 items + 1 resume"), "{err}");
+
+        // A resume map alone is capped too.
+        let mut call = input(&[]);
+        for i in 0..3 {
+            call.resume
+                .insert(SessionId::new().to_string(), format!("go on {i}"));
+        }
+        let err = expand(&call, &defs, 2).unwrap_err();
+        assert!(err.contains("lists 3"), "{err}");
     }
 
     #[test]

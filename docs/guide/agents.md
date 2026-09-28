@@ -134,13 +134,16 @@ without them being restated:
 The snapshot is the parent's session file forked into the child's
 own file up to the latest complete message, so the child's
 transcript is self-contained from the first entry and keeps
-appending there. Its model, system prompt and tools still come from
-the agent definition; only the conversation carries over. The copy
-also counts against the child's token budget, and forked children
-resume like any other child. `fork` cannot be combined with
-`resume`, since resume continues children that already exist. Prefer
-zero-context children when the task is self-contained: a fork per
-item multiplies the prompt cost by the item count.
+appending there. A notice after the copied history tells the child
+that the conversation is inherited reference material, not its own
+past, and that the next message carries its task. Its model, system
+prompt and tools still come from the agent definition; only the
+conversation carries over. The copy also counts against the child's
+token budget, and forked children resume like any other child.
+`fork` cannot be combined with `resume`, since resume continues
+children that already exist. Prefer zero-context children when the
+task is self-contained: a fork per item multiplies the prompt cost
+by the item count.
 
 ### the /swarm command
 
@@ -289,7 +292,7 @@ covers every agent of the session.
 | --- | --- | --- | --- | --- |
 | `agent_max_depth` | `agents.max_depth` | 0 to 3 | `1` | How deep agents nest. `0` removes the `agent` tool, and `1` lets only the main session start agents. |
 | `agent_max_running` | `agents.max_running` | 1 to 16 | `4` | How many agents run at once. Further agents wait in a queue and start in order as others finish. |
-| `swarm_max_items` | `agents.swarm_max_items` | 2 to 128 | `32` | Most items one `swarm` call may run, one child agent per item. |
+| `swarm_max_items` | `agents.swarm_max_items` | 2 to 128 | `32` | Most members one `swarm` call may run: items plus resumed children together. |
 | `swarm_timeout_ms` | `agents.swarm_timeout_ms` | 1,000 to 86,400,000 | `7,200,000` | Overall deadline in milliseconds for one `swarm` call. On deadline its unfinished children are cancelled and the results so far are returned. |
 
 Set them in `config.toml`:

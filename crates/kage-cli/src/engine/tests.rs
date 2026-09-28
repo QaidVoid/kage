@@ -2353,7 +2353,10 @@ fn a_forked_swarm_child_starts_from_the_parent_snapshot() {
     );
     let children = spawned(&events);
     assert_eq!(children.len(), 2);
-    for ((child, _call), reply) in children.iter().zip(["child a one", "child b one"]) {
+    for ((child, _call), (item, reply)) in children
+        .iter()
+        .zip([("a", "child a one"), ("b", "child b one")])
+    {
         let path = dir.path().join(format!("{child}.jsonl"));
         let replay = kage_session::replay(&path).unwrap();
         assert_eq!(replay.header.parent_session, Some(parent));
@@ -2367,6 +2370,13 @@ fn a_forked_swarm_child_starts_from_the_parent_snapshot() {
             })
             .collect();
         assert_eq!(texts.first().map(String::as_str), Some("go"), "{texts:?}");
+        let notice = texts
+            .iter()
+            .position(|t| t.contains("snapshot inherited from the session that forked you"));
+        let task = texts.iter().position(|t| t == &format!("handle {item}"));
+        assert!(notice.is_some(), "{texts:?}");
+        assert!(task.is_some(), "{texts:?}");
+        assert!(notice.unwrap() < task.unwrap(), "{texts:?}");
         assert!(texts.contains(&reply.to_owned()), "{texts:?}");
         let entries: Vec<kage_session::SessionEntry> = kage_session::SessionReader::iter(&path)
             .unwrap()

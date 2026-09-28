@@ -14,6 +14,14 @@ use super::agent_tool::{self, AGENT_TOOL, Spawn};
 use super::runner::Work;
 use super::{AgentSetup, Attach, Recorder, ResumeChild, Session, SessionSpec, notice};
 
+/// Tells a forked child that the conversation it starts with is
+/// inherited reference material, not its own past. Ported from
+/// kimi-code's `FORK_CONTEXT_NOTICE`.
+const FORK_CONTEXT_NOTICE: &str = "The conversation above is not your own history. It is a \
+snapshot inherited from the session that forked you, so treat it as reference material only. \
+You are an independent agent, not a continuation of that agent. Do the task in the next message \
+yourself, then report the result.";
+
 /// How an agent session hangs off the session that started it.
 pub(super) struct AgentLink {
     pub(super) parent: SessionId,
@@ -485,12 +493,13 @@ pub(super) fn depth_of(session: &Session) -> u8 {
     session.link.as_ref().map_or(0, |l| l.depth)
 }
 
-/// The entry a forked child copies up to: the parent's latest entry
-/// the copy may end on. An assistant message carrying tool calls is
-/// skipped, so the copied history never ends on a tool call that was
-/// never answered. The header id when no message qualifies, which
-/// forks an empty conversation.
-fn fork_point(path: &Path) -> Option<kage_session::EntryId> {
+/// The entry a forked child copies up to, and whether any conversation
+/// was copied at all: the parent's latest entry the copy may end on.
+/// An assistant message carrying tool calls is skipped, so the copied
+/// history never ends on a tool call that was never answered. The
+/// header id when no message qualifies, which forks an empty
+/// conversation.
+fn fork_point(path: &Path) -> Option<(kage_session::EntryId, bool)> {
     let reader = kage_session::SessionReader::iter(path).ok()?;
     let mut header_id = None;
     let mut at = None;
@@ -512,7 +521,10 @@ fn fork_point(path: &Path) -> Option<kage_session::EntryId> {
             _ => {}
         }
     }
-    at.or(header_id)
+    match at {
+        Some(at) => Some((at, true)),
+        None => header_id.map(|id| (id, false)),
+    }
 }
 
 /// The session spec for a child spawned from a snapshot of `from`'s
@@ -539,7 +551,7 @@ fn forked_spec(
     let dir = src
         .parent()
         .ok_or_else(|| "cannot fork: the session file has no directory".to_owned())?;
-    let at = fork_point(src)
+    let (at, copied) = fork_point(src)
         .ok_or_else(|| "cannot fork: the session file could not be read".to_owned())?;
     let model = def
         .model
@@ -566,10 +578,27 @@ fn forked_spec(
     };
     kage_session::fork_as(src, &child_path, header, at)
         .map_err(|err| format!("cannot fork into session {id}: {err}"))?;
+    let mut writer = kage_session::SessionWriter::open(&child_path)
+        .map_err(|err| format!("cannot append to session {id}: {err}"))?;
+    if copied {
+        let notice = kage_session::SessionEntry::Message(kage_session::MessageEntry {
+            id: kage_session::EntryId::new(),
+            ts: chrono::Utc::now(),
+            message: Message::new(
+                Role::User,
+                vec![Content::Text {
+                    text: FORK_CONTEXT_NOTICE.to_owned(),
+                }],
+                None,
+            ),
+            usage: None,
+        });
+        writer
+            .append(&notice)
+            .map_err(|err| format!("cannot write the fork notice into session {id}: {err}"))?;
+    }
     let replay = kage_session::replay(&child_path)
         .map_err(|err| format!("cannot read the forked session {id}: {err}"))?;
-    let writer = kage_session::SessionWriter::open(&child_path)
-        .map_err(|err| format!("cannot append to session {id}: {err}"))?;
     let mut cx = AgentContext::new(model.clone(), system_prompt).with_workdir(from.workdir.clone());
     cx.history = replay.history;
     cx.confine_paths = from.confine_paths;

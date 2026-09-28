@@ -137,10 +137,11 @@ parent's session file is forked into the child's own file (up to the
 latest entry that is not an unanswered tool call) and the child's
 context history and token budget are replayed from that copy, so
 its transcript is self-contained and later resumes see the same
-conversation. Model, system prompt and tools still come from the
-definition, and the `kage:agent` marker is appended after the
-copied history, so marker lookups scan the file rather than its
-first entries.
+conversation. A user-entry notice after the copied history tells
+the child the conversation is inherited reference material. Model,
+system prompt and tools still come from the definition, and the
+`kage:agent` marker is appended after the copied history, so marker
+lookups scan the file rather than its first entries.
 
 **The cancel tree.** `CancelFlag` is a node with an optional parent.
 An agent's flag is a child of its parent's, and `is_cancelled` walks up

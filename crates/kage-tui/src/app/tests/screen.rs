@@ -590,7 +590,7 @@ fn a_frame_with_a_toast_carries_no_blink() {
 }
 
 #[test]
-fn a_toast_never_covers_the_conversation() {
+fn a_toast_overlays_the_conversation_without_shifting_it() {
     let buffer = shared_buffer();
     lock(&buffer).push_custom(
         "kage:error",
@@ -610,11 +610,18 @@ fn a_toast_never_covers_the_conversation() {
     let plain = render(&mut app);
     crate::toast::push_toast(&toasts, Toast::info("switched to fake:m"));
     let rows = render(&mut app);
-    let notice = plain.iter().take_while(|r| !r.is_empty()).count();
-    assert!(notice >= 2, "{plain:#?}");
-    assert_eq!(rows[..notice], plain[..notice], "{rows:#?}");
     assert!(
         rows.iter().any(|r| r.contains("switched to fake:m")),
         "{rows:#?}"
     );
+    // Exactly the toast's own row differs: the card paints over the
+    // conversation instead of taking a row and shifting the text.
+    let changed: Vec<usize> = rows
+        .iter()
+        .zip(&plain)
+        .enumerate()
+        .filter_map(|(y, (r, p))| (r != p).then_some(y))
+        .collect();
+    assert_eq!(changed.len(), 1, "{rows:#?}");
+    assert!(rows[changed[0]].contains("switched to fake:m"), "{rows:#?}");
 }

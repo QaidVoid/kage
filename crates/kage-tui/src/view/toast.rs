@@ -1,10 +1,9 @@
-//! Render the toast strip below the conversation buffer.
+//! Render toasts as a floating strip over the conversation buffer.
 //!
-//! Toasts take rows of their own at the bottom of the conversation
-//! area, one per toast with the newest at the bottom, so they never
-//! cover conversation text, the start card or a notice. Each toast is
-//! a one-row card against the right edge: a colored accent bar, a
-//! kind icon and the message, cut to fit.
+//! Toasts overlay the bottom of the conversation area, one per toast
+//! with the newest at the bottom, so text never shifts while one is
+//! up. Each toast is a one-row card against the right edge: a colored
+//! accent bar, a kind icon and the message, cut to fit.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -33,9 +32,10 @@ const LEFT_CHROME: u16 = 4;
 /// Cells of chrome to the right of the message text (right pad).
 const RIGHT_CHROME: u16 = 1;
 
-/// Rows the toast strip takes from a conversation area `height` rows
-/// tall: one per toast, leaving at least half the area to the
-/// conversation. Zero when the area is too narrow to paint a toast.
+/// Rows of overlay the toast strip paints over the bottom of a
+/// conversation area `height` rows tall: one per toast, never more
+/// than half the area. Zero when the area is too narrow to paint a
+/// toast.
 #[must_use]
 pub fn toast_rows(toasts: usize, area: Rect) -> u16 {
     if area.width.saturating_sub(RIGHT_MARGIN * 2) < MIN_TOAST_WIDTH {

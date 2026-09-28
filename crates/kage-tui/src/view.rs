@@ -266,11 +266,11 @@ pub fn render(
     }
     let todos = todo::from_blocks(buffer.blocks());
     let sources = slot::Sources::new(status, session_usage, input, frame.area().width);
+    // Toasts float over the bottom of the conversation and take no
+    // rows of their own, so text never shifts while one is up.
     let toast_rows = toast::toast_rows(toasts.len(), regions.buffer);
-    let mut regions = regions;
-    regions.buffer.height -= toast_rows;
     let toast_area = Rect {
-        y: regions.buffer.bottom(),
+        y: regions.buffer.bottom() - toast_rows,
         height: toast_rows,
         ..regions.buffer
     };

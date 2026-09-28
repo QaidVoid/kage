@@ -768,7 +768,7 @@ impl Dispatcher {
                         outcome: outcome.clone(),
                     },
                 );
-                self.deliver(id, &outcome, &[]);
+                self.deliver(id, &outcome, &[], Usage::default());
                 return;
             }
         };
@@ -944,7 +944,7 @@ impl Dispatcher {
         let reply = if requeued {
             None
         } else {
-            self.take_reply(id, &outcome, &cx.history)
+            self.take_reply(id, &outcome, &cx.history, usage_of(&cx))
         };
         // Children may not have seen the cancel yet, and this session's
         // own flag resets below, so they get their own.

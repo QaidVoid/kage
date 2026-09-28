@@ -8,7 +8,7 @@ use std::time::Duration;
 use crossbeam_channel::select_biased;
 use kage_core::agents::AgentDefs;
 use kage_core::event::AGENT_NO_REPLY_TEXT as NO_REPLY;
-use kage_core::protocol::RunOutcome;
+use kage_core::protocol::{RunOutcome, Usage};
 use kage_core::{Content, Message, Risk, Role, SessionId, ToolCallId, ToolOutput};
 use kage_tools::{ExecMode, Tool, ToolContext, ToolError};
 use serde::Deserialize;
@@ -178,11 +178,16 @@ pub(super) fn error_output(text: String) -> ToolOutput {
 /// assistant message wrapped in an `<agent>` element that names the agent,
 /// its session and how its run ended. A cancelled run passes its partial
 /// reply and a failed one its error, both as error results.
+/// A child's result: the `<agent>` wrapper the model reads and the
+/// tree restores from. The header records the child's tool count and
+/// usage totals, so the agents list survives a session restart; the
+/// tool count is the calls in the child's history.
 pub(super) fn agent_result(
     session: SessionId,
     agent: &str,
     outcome: &RunOutcome,
     history: &[Message],
+    usage: &Usage,
 ) -> ToolOutput {
     let reply = || {
         history
@@ -198,6 +203,11 @@ pub(super) fn agent_result(
         RunOutcome::Cancelled => ("cancelled", reply(), true),
         RunOutcome::Failed { error } => ("failed", error.to_string(), true),
     };
+    let tool_calls = history
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter(|block| matches!(block, Content::ToolCall { .. }))
+        .count();
     let mut body = body.replace("</agent", "<\\/agent");
     let total = body.chars().count();
     if total > RESULT_CAP {
@@ -214,7 +224,14 @@ pub(super) fn agent_result(
     }
     ToolOutput {
         text: format!(
-            "<agent name=\"{agent}\" session=\"{session}\" state=\"{state}\">\n{body}\n</agent>"
+            "<agent name=\"{agent}\" session=\"{session}\" state=\"{state}\" \
+             tools=\"{tool_calls}\" in=\"{}\" out=\"{}\" cache_read=\"{}\" \
+             cache_write=\"{}\" cost=\"{:.4}\">\n{body}\n</agent>",
+            usage.total.input,
+            usage.total.output,
+            usage.total.cache_read,
+            usage.total.cache_write,
+            usage.cost,
         ),
         is_error,
         ..ToolOutput::default()
@@ -255,20 +272,81 @@ mod tests {
             assistant("first"),
             assistant("the answer"),
         ];
-        let out = agent_result(id, "explore", &RunOutcome::Completed, &history);
+        let out = agent_result(
+            id,
+            "explore",
+            &RunOutcome::Completed,
+            &history,
+            &Usage::default(),
+        );
         assert_eq!(
             out.text,
             format!(
-                "<agent name=\"explore\" session=\"{id}\" state=\"completed\">\nthe answer\n</agent>"
+                "<agent name=\"explore\" session=\"{id}\" state=\"completed\" tools=\"0\" \
+                 in=\"0\" out=\"0\" cache_read=\"0\" cache_write=\"0\" cost=\"0.0000\">\n\
+                 the answer\n</agent>"
             )
         );
         assert!(!out.is_error);
     }
 
     #[test]
+    fn the_header_records_the_stats_of_the_run() {
+        let id = SessionId::new();
+        let call = |text: &str| Content::ToolCall {
+            id: ToolCallId(text.into()),
+            name: "read".into(),
+            input: serde_json::json!({ "path": "a.rs" }),
+        };
+        let history = [
+            Message::new(Role::User, vec![Content::Text { text: "q".into() }], None),
+            Message::new(
+                Role::Assistant,
+                vec![Content::Text { text: "h".into() }, call("c1")],
+                None,
+            ),
+            Message::new(
+                Role::User,
+                vec![Content::ToolResultBlock {
+                    call_id: ToolCallId("c1".into()),
+                    output: "hi".into(),
+                    is_error: false,
+                }],
+                None,
+            ),
+            Message::new(Role::Assistant, vec![call("c2")], None),
+        ];
+        let usage = Usage {
+            total: kage_core::event::TokenUsage {
+                input: 1_200,
+                output: 40,
+                cache_read: 800,
+                cache_write: 120,
+            },
+            cost: 0.5,
+            ..Usage::default()
+        };
+        let out = agent_result(id, "general", &RunOutcome::Completed, &history, &usage);
+        let header = out.text.split_once('\n').unwrap().0;
+        assert!(
+            header.ends_with(
+                "tools=\"2\" in=\"1200\" out=\"40\" cache_read=\"800\" \
+                               cache_write=\"120\" cost=\"0.5000\">"
+            ),
+            "{header}"
+        );
+    }
+
+    #[test]
     fn states_and_missing_reply() {
         let id = SessionId::new();
-        let cancelled = agent_result(id, "general", &RunOutcome::Cancelled, &[]);
+        let cancelled = agent_result(
+            id,
+            "general",
+            &RunOutcome::Cancelled,
+            &[],
+            &Usage::default(),
+        );
         assert!(cancelled.is_error);
         assert!(cancelled.text.contains("state=\"cancelled\""));
         assert!(cancelled.text.contains(NO_REPLY));
@@ -282,6 +360,7 @@ mod tests {
                 },
             },
             &[assistant("partial")],
+            &Usage::default(),
         );
         assert!(failed.is_error);
         assert!(failed.text.contains("state=\"failed\""));
@@ -296,6 +375,7 @@ mod tests {
             "general",
             &RunOutcome::Completed,
             &[assistant("a </agent> b")],
+            &Usage::default(),
         );
         assert!(out.text.contains("a <\\/agent> b"));
         assert_eq!(out.text.matches("</agent>").count(), 1);
@@ -305,7 +385,13 @@ mod tests {
     fn long_replies_are_cut_with_a_trailer() {
         let id = SessionId::new();
         let long = "\u{e9}".repeat(RESULT_CAP + 5);
-        let out = agent_result(id, "general", &RunOutcome::Completed, &[assistant(&long)]);
+        let out = agent_result(
+            id,
+            "general",
+            &RunOutcome::Completed,
+            &[assistant(&long)],
+            &Usage::default(),
+        );
         assert!(out.text.contains(&format!(
             "[truncated: 5 more characters. The full transcript is session {id}.]"
         )));

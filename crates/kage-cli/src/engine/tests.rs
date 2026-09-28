@@ -1250,7 +1250,8 @@ fn agent_call_returns_the_child_reply_and_records_the_child() {
     assert_eq!(
         output.text,
         format!(
-            "<agent name=\"general\" session=\"{child}\" state=\"completed\">\nchild reply\n</agent>"
+            "<agent name=\"general\" session=\"{child}\" state=\"completed\" tools=\"0\" \
+             in=\"10\" out=\"2\" cache_read=\"0\" cache_write=\"0\" cost=\"0.0000\">\nchild reply\n</agent>"
         )
     );
     assert!(!output.is_error);
@@ -1740,7 +1741,7 @@ fn cancel_during_a_child_ask_returns_the_cancelled_wrapper() {
         assert!(output.is_error);
         assert!(
             output.text.starts_with(&format!(
-                "<agent name=\"general\" session=\"{child}\" state=\"cancelled\">"
+                "<agent name=\"general\" session=\"{child}\" state=\"cancelled\" "
             )),
             "{}",
             output.text
@@ -2144,7 +2145,8 @@ fn a_swarm_and_an_agent_call_work_in_sequence() {
     assert_eq!(
         agent.text,
         format!(
-            "<agent name=\"general\" session=\"{}\" state=\"completed\">\nagent reply\n</agent>",
+            "<agent name=\"general\" session=\"{}\" state=\"completed\" tools=\"0\" \
+             in=\"10\" out=\"2\" cache_read=\"0\" cache_write=\"0\" cost=\"0.0000\">\nagent reply\n</agent>",
             spawned(&events).last().unwrap().0
         )
     );

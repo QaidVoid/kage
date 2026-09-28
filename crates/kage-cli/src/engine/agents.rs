@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use kage_core::agents::AgentDef;
-use kage_core::protocol::{HostEvent, NoticeLevel, RunOutcome, SwarmMember};
+use kage_core::protocol::{HostEvent, NoticeLevel, RunOutcome, SwarmMember, Usage};
 use kage_core::sync::lock;
 use kage_core::{Content, Message, Role, SessionId, ToolCallId, ToolOutput};
 use kage_loop::{AgentContext, TokenBudget};
@@ -346,9 +346,16 @@ impl super::Dispatcher {
 
     /// Send an agent's result to its `agent` call, once. Callers publish
     /// the agent's `RunEnded` first, so clients see the agent end before
-    /// the parent continues.
-    pub(super) fn deliver(&mut self, id: SessionId, outcome: &RunOutcome, history: &[Message]) {
-        if let Some((reply, output)) = self.take_reply(id, outcome, history) {
+    /// the parent continues. `usage` is the agent's final usage; a call
+    /// that never ran a turn passes the default.
+    pub(super) fn deliver(
+        &mut self,
+        id: SessionId,
+        outcome: &RunOutcome,
+        history: &[Message],
+        usage: Usage,
+    ) {
+        if let Some((reply, output)) = self.take_reply(id, outcome, history, usage) {
             let _ = reply.send(output);
         }
     }
@@ -360,13 +367,14 @@ impl super::Dispatcher {
         id: SessionId,
         outcome: &RunOutcome,
         history: &[Message],
+        usage: Usage,
     ) -> Option<(crossbeam_channel::Sender<ToolOutput>, ToolOutput)> {
         let link = self.sessions.get_mut(&id)?.link.as_mut()?;
         let reply = link.reply.take()?;
         self.swarm_requeues.remove(&id);
         Some((
             reply,
-            agent_tool::agent_result(id, &link.agent, outcome, history),
+            agent_tool::agent_result(id, &link.agent, outcome, history, &usage),
         ))
     }
 
@@ -424,7 +432,7 @@ impl super::Dispatcher {
                 outcome: RunOutcome::Cancelled,
             },
         );
-        self.deliver(id, &RunOutcome::Cancelled, &[]);
+        self.deliver(id, &RunOutcome::Cancelled, &[], Usage::default());
     }
 
     pub(super) fn parent_of(&self, id: SessionId) -> Option<SessionId> {

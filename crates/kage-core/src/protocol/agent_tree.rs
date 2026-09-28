@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use super::{Envelope, Event, HostEvent, RunOutcome, SessionId, SwarmMember, Usage};
+use super::{Envelope, Event, HostEvent, RunOutcome, SessionId, SwarmMember, TokenUsage, Usage};
 use crate::{Content, LoopEvent, Message, ToolCallId};
 
 /// What a client knows about agent sessions, built from envelopes.
@@ -156,47 +156,64 @@ impl AgentTree {
 
     /// Add the agents that `parent`'s stored conversation started, as
     /// finished nodes. Each comes from an `agent` call whose result
-    /// carries the `<agent name=.. session=.. state=..>` wrapper, and
-    /// its time is the gap between the call and its result. Sessions
-    /// already known are skipped.
+    /// carries the `<agent name=.. session=.. state=..>` wrapper, or
+    /// from a `swarm` call whose aggregate wraps one child per
+    /// `<swarm>` element. Usage and tool counts come from the
+    /// wrapper's recorded stats; the time of an `agent` call is the
+    /// gap between the call and its result. Sessions already known
+    /// are skipped.
     pub fn restore(&mut self, parent: SessionId, messages: &[Message]) {
+        // Recorded calls: the task text, the call time and whether the
+        // call was a `swarm` batch.
         let mut calls = HashMap::new();
         for message in messages {
             for block in &message.content {
                 match block {
-                    Content::ToolCall { id, name, input } if name == "agent" => {
+                    Content::ToolCall { id, name, input } if name == "agent" || name == "swarm" => {
                         let description = input.get("description").and_then(|d| d.as_str());
                         calls.insert(
                             id.clone(),
-                            (description.unwrap_or("").to_owned(), message.ts),
+                            (
+                                description.unwrap_or("").to_owned(),
+                                message.ts,
+                                name == "swarm",
+                            ),
                         );
                     }
                     Content::ToolResultBlock {
                         call_id, output, ..
                     } => {
-                        let Some((description, called)) = calls.remove(call_id) else {
+                        let Some((description, called, swarm)) = calls.remove(call_id) else {
                             continue;
                         };
-                        let Some((agent, session, state)) = agent_wrapper(output) else {
-                            continue;
-                        };
-                        self.insert(AgentNode {
-                            session,
-                            parent,
-                            tool_call_id: call_id.clone(),
-                            agent,
-                            description,
-                            swarm: None,
-                            state,
-                            model: String::new(),
-                            usage: Usage::default(),
-                            tool_calls: 0,
-                            last_tool: None,
-                            waiting: 0,
-                            started: None,
-                            took: (message.ts - called).to_std().ok(),
-                            restored: true,
-                        });
+                        let wrapped = wrapped_agents(output);
+                        let total = wrapped.len();
+                        for (index, (agent, item)) in wrapped.into_iter().enumerate() {
+                            let index = u32::try_from(index).unwrap_or(u32::MAX);
+                            self.insert(AgentNode {
+                                session: agent.session,
+                                parent,
+                                tool_call_id: call_id.clone(),
+                                agent: agent.agent,
+                                description: description.clone(),
+                                swarm: swarm.then_some(SwarmMember {
+                                    item,
+                                    index,
+                                    total: u32::try_from(total).unwrap_or(u32::MAX),
+                                }),
+                                state: agent.state,
+                                model: String::new(),
+                                usage: agent.usage,
+                                tool_calls: agent.tool_calls,
+                                last_tool: None,
+                                waiting: 0,
+                                started: None,
+                                took: (!swarm)
+                                    .then(|| (message.ts - called).to_std().ok())
+                                    .flatten(),
+                                restored: true,
+                            });
+                        }
                     }
                     _ => {}
                 }
@@ -260,14 +277,29 @@ impl AgentTree {
     }
 }
 
-/// The name, session and end state an `agent` result's wrapper
-/// carries.
-fn agent_wrapper(output: &str) -> Option<(String, SessionId, AgentState)> {
-    let attrs = output.strip_prefix("<agent ")?.split_once('>')?.0;
-    let attr = |key: &str| {
-        let value = attrs.split_once(&format!("{key}=\""))?.1;
-        value.split_once('"').map(|(value, _)| value)
-    };
+/// The value of `key="..."` in a wrapper's attribute list.
+fn attr_value<'a>(attrs: &'a str, key: &str) -> Option<&'a str> {
+    let value = attrs.split_once(&format!("{key}=\""))?.1;
+    value.split_once('"').map(|(value, _)| value)
+}
+
+/// One `<agent ...>` header of a stored result: who ran, how it
+/// ended, and the stats the engine recorded on the header.
+struct RestoredAgent {
+    agent: String,
+    session: SessionId,
+    state: AgentState,
+    usage: Usage,
+    tool_calls: u32,
+}
+
+/// The `<agent ...>` header of a stored result, parsed. The stats
+/// attrs are written by the engine and may be missing on older
+/// transcripts; they default to zero.
+fn agent_header(line: &str) -> Option<RestoredAgent> {
+    let attrs = line.strip_prefix("<agent ")?.split_once('>')?.0;
+    let attr = |key: &str| attr_value(attrs, key);
+    let num = |key: &str| -> u64 { attr(key).and_then(|value| value.parse().ok()).unwrap_or(0) };
     let session = ulid::Ulid::from_string(attr("session")?).ok()?;
     let state = match attr("state")? {
         "completed" => AgentState::Done,
@@ -275,7 +307,53 @@ fn agent_wrapper(output: &str) -> Option<(String, SessionId, AgentState)> {
         "failed" => AgentState::Failed,
         _ => return None,
     };
-    Some((attr("name")?.to_owned(), SessionId(session), state))
+    Some(RestoredAgent {
+        agent: attr("name")?.to_owned(),
+        session: SessionId(session),
+        state,
+        tool_calls: u32::try_from(num("tools")).unwrap_or(u32::MAX),
+        usage: Usage {
+            total: TokenUsage {
+                input: num("in"),
+                output: num("out"),
+                cache_read: num("cache_read"),
+                cache_write: num("cache_write"),
+            },
+            cost: attr("cost")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0.0),
+            ..Usage::default()
+        },
+    })
+}
+
+/// The agents a stored result wraps, with each one's batch item: one
+/// for an `agent` call's wrapper, one per `<swarm>` element of a
+/// `swarm` call's aggregate. Bodies may be truncated or missing; the
+/// headers survive.
+fn wrapped_agents(output: &str) -> Vec<(RestoredAgent, String)> {
+    let mut found = Vec::new();
+    let mut rest = output;
+    while let Some(at) = rest.find("<swarm ") {
+        rest = &rest[at..];
+        let Some((attrs, after)) = rest.split_once(">\n") else {
+            break;
+        };
+        let item = attr_value(attrs, "item").unwrap_or_default().to_owned();
+        let Some((line, remainder)) = after.split_once('\n') else {
+            break;
+        };
+        if let Some(agent) = agent_header(line) {
+            found.push((agent, item));
+        }
+        rest = remainder;
+    }
+    if found.is_empty()
+        && let Some(agent) = agent_header(output)
+    {
+        found.push((agent, String::new()));
+    }
+    found
 }
 
 #[cfg(test)]
@@ -536,6 +614,107 @@ mod tests {
         assert_eq!(node.agent, "explore");
         assert_eq!(node.tool_call_id, ToolCallId("a1".into()));
         assert_eq!(node.elapsed(), Some(Duration::from_millis(8_800)));
+    }
+
+    #[test]
+    fn restore_reads_the_stats_recorded_on_a_wrapper() {
+        let parent = SessionId::new();
+        let child = SessionId::new();
+        let asked = Message::new(
+            crate::Role::Assistant,
+            vec![Content::ToolCall {
+                id: ToolCallId("a1".into()),
+                name: "agent".into(),
+                input: serde_json::json!({ "agent": "explore", "description": "map src" }),
+            }],
+            None,
+        );
+        let answered = Message::new(
+            crate::Role::ToolResult,
+            vec![Content::ToolResultBlock {
+                call_id: ToolCallId("a1".into()),
+                output: format!(
+                    "<agent name=\"explore\" session=\"{child}\" state=\"completed\" \
+                     tools=\"9\" in=\"120000\" out=\"40000\" cache_read=\"80000\" \
+                     cache_write=\"8000\" cost=\"1.25\">\nreply\n</agent>"
+                ),
+                is_error: false,
+            }],
+            None,
+        );
+        let mut tree = AgentTree::default();
+        tree.restore(parent, &[asked, answered]);
+        let node = tree.get(child).unwrap();
+        assert_eq!(node.tool_calls, 9);
+        assert_eq!(node.usage.total.input, 120_000);
+        assert_eq!(node.usage.total.output, 40_000);
+        assert_eq!(node.usage.total.cache_read, 80_000);
+        assert_eq!(node.usage.total.cache_write, 8_000);
+        assert_eq!(node.usage.cost, 1.25);
+    }
+
+    #[test]
+    fn restore_rebuilds_a_swarm_batch_from_its_aggregate() {
+        let parent = SessionId::new();
+        let first = SessionId::new();
+        let second = SessionId::new();
+        let asked = Message::new(
+            crate::Role::Assistant,
+            vec![Content::ToolCall {
+                id: ToolCallId("s1".into()),
+                name: "swarm".into(),
+                input: serde_json::json!({
+                    "description": "review crates",
+                    "items": ["kage-core", "kage-tui"],
+                }),
+            }],
+            None,
+        );
+        let aggregate = format!(
+            "completed: 2, failed: 0, cancelled: 0\n<swarm description=\"review crates\" \
+             item=\"kage-core\">\n<agent name=\"explore\" session=\"{first}\" state=\"completed\" \
+             tools=\"3\" in=\"100\" out=\"10\" cache_read=\"0\" cache_write=\"0\" \
+             cost=\"0.01\">\ndid core\n</agent>\n</swarm>\n<swarm description=\"review crates\" \
+             item=\"kage-tui\">\n<agent name=\"explore\" session=\"{second}\" \
+             state=\"completed\" tools=\"4\" in=\"200\" out=\"20\" cache_read=\"0\" \
+             cache_write=\"0\" cost=\"0.02\">\ndid tui\n</agent>\n</swarm>"
+        );
+        let answered = Message::new(
+            crate::Role::ToolResult,
+            vec![Content::ToolResultBlock {
+                call_id: ToolCallId("s1".into()),
+                output: aggregate,
+                is_error: false,
+            }],
+            None,
+        );
+        let mut tree = AgentTree::default();
+        tree.restore(parent, &[asked, answered]);
+        let members: Vec<(SessionId, u32, u32, String)> = tree
+            .under(parent)
+            .into_iter()
+            .map(|(_, node)| {
+                let member = node.swarm.as_ref().unwrap();
+                (
+                    node.session,
+                    member.index,
+                    member.total,
+                    member.item.clone(),
+                )
+            })
+            .collect();
+        assert_eq!(members.len(), 2);
+        let core = &members[0];
+        let tui = &members[1];
+        assert_eq!((core.1, core.2), (0, 2));
+        assert_eq!((tui.1, tui.2), (1, 2));
+        assert_eq!(core.3, "kage-core");
+        assert_eq!(tui.3, "kage-tui");
+        let node = tree.get(first).unwrap();
+        assert_eq!(node.tool_calls, 3);
+        assert_eq!(node.usage.total.input, 100);
+        assert_eq!(node.usage.cost, 0.01);
+        assert_eq!(node.elapsed(), None, "a batch child has no own time");
     }
 
     #[test]

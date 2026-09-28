@@ -32,7 +32,9 @@ pub struct State {
     pub last_seen_version: Option<String>,
     /// Detail of the last authentication failure per provider id.
     /// Cleared by a completed run on that provider or a successful
-    /// `:login <provider>`.
+    /// `:login <provider>`. Startup notices quote an entry only while
+    /// the provider still has credentials, so an entry for a provider
+    /// since logged out stays dormant.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub auth_failures: BTreeMap<String, String>,
 }

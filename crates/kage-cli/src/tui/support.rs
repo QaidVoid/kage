@@ -533,7 +533,7 @@ pub(crate) fn start_notices(
     }
     let auth = AuthStore::load().unwrap_or_else(|_| AuthStore::empty());
     notices.extend(
-        credential_notices(&State::load(), &auth, now)
+        credential_notices(&State::load(), &auth, registry, now)
             .into_iter()
             .map(|text| (NoticeLevel::Warning, text)),
     );
@@ -585,7 +585,16 @@ fn default_model_notice(
 
 /// Warnings for OAuth credentials in `auth` expiring within
 /// [`OAUTH_EXPIRY_WARNING`] and for the auth failures `state` recorded.
-fn credential_notices(state: &State, auth: &AuthStore, now: DateTime<Utc>) -> Vec<String> {
+/// A recorded failure is shown only while `registry` still has the
+/// provider (it holds exactly the providers a credential resolves
+/// for); once the provider is logged out or its key is gone the
+/// record is stale and would otherwise nag on every launch.
+fn credential_notices(
+    state: &State,
+    auth: &AuthStore,
+    registry: &ProviderRegistry,
+    now: DateTime<Utc>,
+) -> Vec<String> {
     let expiring = auth
         .oauth_expiring(OAUTH_EXPIRY_WARNING, now)
         .map(|(provider, at)| {
@@ -597,12 +606,16 @@ fn credential_notices(state: &State, auth: &AuthStore, now: DateTime<Utc>) -> Ve
             };
             format!("the {provider} login {when}. Run /login {provider}.")
         });
-    let failed = state.auth_failures.iter().map(|(provider, detail)| {
-        format!(
-            "{provider} rejected the credentials on the last run ({}). Run /login {provider}.",
-            detail.trim_end_matches('.')
-        )
-    });
+    let failed = state
+        .auth_failures
+        .iter()
+        .filter(|(provider, _)| registry.get(provider).is_some())
+        .map(|(provider, detail)| {
+            format!(
+                "{provider} rejected the credentials on the last run ({}). Run /login {provider}.",
+                detail.trim_end_matches('.')
+            )
+        });
     expiring.chain(failed).collect()
 }
 
@@ -631,24 +644,42 @@ mod tests {
         }
     }
 
+    /// Registry holding the `mock` provider, standing in for a provider
+    /// that still resolves a credential.
+    fn registry_with_mock() -> ProviderRegistry {
+        ProviderRegistry::new().with(Arc::new(MockProvider::replaying(Vec::new())))
+    }
+
     #[test]
     fn recorded_auth_failure_names_the_login_fix() {
         let mut state = State::empty();
         state.note_run(
-            "zai-coding-plan:glm-4.6",
+            "mock:glm-4.6",
             &RunOutcome::Failed {
                 error: LoopError::Auth {
                     message: "status 401".into(),
                 },
             },
         );
-        let notices = credential_notices(&state, &AuthStore::empty(), now());
+        let notices = credential_notices(&state, &AuthStore::empty(), &registry_with_mock(), now());
         assert_eq!(notices.len(), 1);
         assert!(notices[0].contains("status 401"), "{notices:?}");
-        assert!(
-            notices[0].contains("Run /login zai-coding-plan."),
-            "{notices:?}"
-        );
+        assert!(notices[0].contains("Run /login mock."), "{notices:?}");
+    }
+
+    #[test]
+    fn failure_for_a_provider_without_credentials_is_stale_and_hidden() {
+        let mut state = State::empty();
+        let failed = |message: &str| RunOutcome::Failed {
+            error: LoopError::Auth {
+                message: message.into(),
+            },
+        };
+        state.note_run("mock:m", &failed("status 401"));
+        state.note_run("zai-coding-plan:m", &failed("token expired"));
+        let notices = credential_notices(&state, &AuthStore::empty(), &registry_with_mock(), now());
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(notices[0].starts_with("mock "), "{notices:?}");
     }
 
     #[test]
@@ -659,9 +690,12 @@ mod tests {
                 message: "bad key".into(),
             },
         };
-        state.note_run("zai:glm-4.6", &failed);
-        state.note_run("zai:glm-4.6", &RunOutcome::Completed);
-        assert!(credential_notices(&state, &AuthStore::empty(), now()).is_empty());
+        state.note_run("mock:glm-4.6", &failed);
+        state.note_run("mock:glm-4.6", &RunOutcome::Completed);
+        assert!(
+            credential_notices(&state, &AuthStore::empty(), &registry_with_mock(), now())
+                .is_empty()
+        );
     }
 
     #[test]
@@ -669,7 +703,7 @@ mod tests {
         let mut auth = AuthStore::empty();
         auth.set_oauth("anthropic", oauth_expiring_in(1));
         auth.set_oauth("openai", oauth_expiring_in(10));
-        let notices = credential_notices(&State::empty(), &auth, now());
+        let notices = credential_notices(&State::empty(), &auth, &registry_with_mock(), now());
         assert_eq!(
             notices,
             ["the anthropic login expires in 1 day. Run /login anthropic."]
@@ -681,7 +715,7 @@ mod tests {
         let mut auth = AuthStore::empty();
         auth.set_oauth("anthropic", oauth_expiring_in(-1));
         auth.set_api_key("zai", "fake-key");
-        let notices = credential_notices(&State::empty(), &auth, now());
+        let notices = credential_notices(&State::empty(), &auth, &registry_with_mock(), now());
         assert_eq!(
             notices,
             ["the anthropic login has expired. Run /login anthropic."]

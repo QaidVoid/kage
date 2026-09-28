@@ -208,10 +208,13 @@ pub(crate) fn split_frontmatter_pub(
 /// Supported frontmatter:
 /// * `key: value` (single-line)
 /// * `key: "quoted value"` (double-quoted, no escapes besides standard)
+/// * `key: >` / `key: |` block scalars: the indented lines below fold
+///   into one value, `>` joining with spaces and `|` keeping line
+///   breaks. The trailing newline is trimmed whatever the chomp marker
+///   says.
+/// * `key:` with no value opens a nested map or list; its indented
+///   lines are skipped, since only flat keys are kept.
 /// * Lines starting with `#` are comments and are ignored.
-///
-/// Multi-line scalars (`|`, `>`) are not supported. Skills that need
-/// long descriptions can put detail in the body.
 fn split_frontmatter(
     input: &str,
 ) -> Result<(std::collections::HashMap<String, String>, &str), String> {
@@ -246,26 +249,91 @@ fn split_frontmatter(
     let header = &remaining[..end];
     let body = after_end.unwrap_or("");
 
+    let lines: Vec<&str> = header.lines().collect();
     let mut map = std::collections::HashMap::new();
-    for (lineno, raw_line) in header.lines().enumerate() {
-        let line = raw_line.trim_end();
-        if line.trim().is_empty() {
-            continue;
-        }
-        if line.trim_start().starts_with('#') {
+    let mut at = 0;
+    while at < lines.len() {
+        let line = lines[at].trim_end();
+        let lineno = at + 1;
+        at += 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
         let Some((key, value)) = line.split_once(':') else {
-            return Err(format!("line {} is not `key: value`", lineno + 1));
+            return Err(format!("line {lineno} is not `key: value`"));
         };
         let key = key.trim();
         if key.is_empty() {
-            return Err(format!("line {} has empty key", lineno + 1));
+            return Err(format!("line {lineno} has empty key"));
         }
-        let value = unquote(value.trim());
-        map.insert(key.to_owned(), value);
+        let value = value.trim();
+        // A block scalar (`>` folded, `|` literal, either with an
+        // optional chomp marker) continues on the indented lines
+        // below.
+        let opened = value.strip_suffix(['-', '+']).unwrap_or(value);
+        if matches!(opened, ">" | "|") {
+            let (text, taken) = block_scalar(&lines[at..], opened == "|");
+            at += taken;
+            map.insert(key.to_owned(), text);
+            continue;
+        }
+        if value.is_empty() {
+            // A key with no value opens a nested map or list; its
+            // indented lines are skipped, since only flat keys are
+            // kept.
+            while at < lines.len() {
+                let next = lines[at];
+                if next.trim().is_empty() || next.starts_with([' ', '\t']) {
+                    at += 1;
+                } else {
+                    break;
+                }
+            }
+            map.insert(key.to_owned(), String::new());
+            continue;
+        }
+        map.insert(key.to_owned(), unquote(value));
     }
     Ok((map, body))
+}
+
+/// The indented lines below a `key: >` or `key: |` opener, folded to
+/// one value: `>` joins them with spaces, `|` keeps the line breaks.
+/// Indentation follows the first body line, blank lines separate, and
+/// the trailing blank lines are trimmed whatever the chomp marker
+/// says. Returns the text and how many lines were consumed.
+fn block_scalar(lines: &[&str], literal: bool) -> (String, usize) {
+    let mut taken = 0;
+    let mut indent = None;
+    let mut body: Vec<&str> = Vec::new();
+    for line in lines {
+        if line.trim().is_empty() {
+            body.push("");
+            taken += 1;
+            continue;
+        }
+        let depth = line.len() - line.trim_start().len();
+        if depth == 0 {
+            break;
+        }
+        let base = *indent.get_or_insert(depth);
+        body.push(line[base.min(depth)..].trim_end());
+        taken += 1;
+    }
+    while body.last().is_some_and(|line| line.is_empty()) {
+        body.pop();
+    }
+    let text = if literal {
+        body.join("\n")
+    } else {
+        body.iter()
+            .filter(|line| !line.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    (text, taken)
 }
 
 fn unquote(value: &str) -> String {
@@ -311,6 +379,46 @@ mod tests {
         let (map, body) = split_frontmatter(input).unwrap();
         assert!(map.is_empty());
         assert_eq!(body, input);
+    }
+
+    #[test]
+    fn folded_block_scalar_joins_indented_lines() {
+        let input = "---\nname: foo\ndescription: >\n  one two\n  three four\n---\nbody\n";
+        let (map, body) = split_frontmatter(input).unwrap();
+        assert_eq!(
+            map.get("description").map(String::as_str),
+            Some("one two three four")
+        );
+        assert_eq!(map.get("name").map(String::as_str), Some("foo"));
+        assert_eq!(body, "body\n");
+    }
+
+    #[test]
+    fn literal_block_scalar_keeps_line_breaks_and_chomp_markers() {
+        let input = "---\nsteps: |-\n  a\n  b\nname: foo\n---\nbody\n";
+        let (map, _) = split_frontmatter(input).unwrap();
+        assert_eq!(map.get("steps").map(String::as_str), Some("a\nb"));
+        assert_eq!(map.get("name").map(String::as_str), Some("foo"));
+    }
+
+    #[test]
+    fn nested_maps_and_block_scalars_parse_like_a_real_skill() {
+        let input = "---\nname: dms\ndescription: >\n  Develop plugins for DMS, a QML\n  desktop shell.\ncompatibility: Claude Code\nmetadata:\n  author: DMS\n  version: \"1.2\"\n  languages: qml, javascript\nallowed-tools: Bash Read Write Edit\n---\nbody\n";
+        let (map, body) = split_frontmatter(input).unwrap();
+        assert_eq!(
+            map.get("description").map(String::as_str),
+            Some("Develop plugins for DMS, a QML desktop shell.")
+        );
+        assert_eq!(
+            map.get("compatibility").map(String::as_str),
+            Some("Claude Code")
+        );
+        assert_eq!(map.get("metadata").map(String::as_str), Some(""));
+        assert_eq!(
+            map.get("allowed-tools").map(String::as_str),
+            Some("Bash Read Write Edit")
+        );
+        assert_eq!(body, "body\n");
     }
 
     #[test]

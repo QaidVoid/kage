@@ -179,15 +179,16 @@ pub(super) fn error_output(text: String) -> ToolOutput {
 /// its session and how its run ended. A cancelled run passes its partial
 /// reply and a failed one its error, both as error results.
 /// A child's result: the `<agent>` wrapper the model reads and the
-/// tree restores from. The header records the child's tool count and
-/// usage totals, so the agents list survives a session restart; the
-/// tool count is the calls in the child's history.
+/// tree restores from. The header records the child's tool count,
+/// usage totals and run time, so the agents list survives a session
+/// restart; the tool count is the calls in the child's history.
 pub(super) fn agent_result(
     session: SessionId,
     agent: &str,
     outcome: &RunOutcome,
     history: &[Message],
     usage: &Usage,
+    run_time: Duration,
 ) -> ToolOutput {
     let reply = || {
         history
@@ -222,16 +223,20 @@ pub(super) fn agent_result(
             total - RESULT_CAP
         );
     }
+    let run_ms = u64::try_from(run_time.as_millis()).unwrap_or(u64::MAX);
     ToolOutput {
         text: format!(
             "<agent name=\"{agent}\" session=\"{session}\" state=\"{state}\" \
              tools=\"{tool_calls}\" in=\"{}\" out=\"{}\" cache_read=\"{}\" \
-             cache_write=\"{}\" cost=\"{:.4}\">\n{body}\n</agent>",
+             cache_write=\"{}\" cost=\"{:.4}\" ctx=\"{}\" win=\"{}\" run_ms=\"{run_ms}\">\n\
+             {body}\n</agent>",
             usage.total.input,
             usage.total.output,
             usage.total.cache_read,
             usage.total.cache_write,
             usage.cost,
+            usage.context_used,
+            usage.context_window,
         ),
         is_error,
         ..ToolOutput::default()
@@ -278,12 +283,14 @@ mod tests {
             &RunOutcome::Completed,
             &history,
             &Usage::default(),
+            Duration::ZERO,
         );
         assert_eq!(
             out.text,
             format!(
                 "<agent name=\"explore\" session=\"{id}\" state=\"completed\" tools=\"0\" \
-                 in=\"0\" out=\"0\" cache_read=\"0\" cache_write=\"0\" cost=\"0.0000\">\n\
+                 in=\"0\" out=\"0\" cache_read=\"0\" cache_write=\"0\" cost=\"0.0000\" \
+                 ctx=\"0\" win=\"0\" run_ms=\"0\">\n\
                  the answer\n</agent>"
             )
         );
@@ -324,14 +331,23 @@ mod tests {
                 cache_write: 120,
             },
             cost: 0.5,
-            ..Usage::default()
+            context_used: 2_160,
+            context_window: 200_000,
         };
-        let out = agent_result(id, "general", &RunOutcome::Completed, &history, &usage);
+        let out = agent_result(
+            id,
+            "general",
+            &RunOutcome::Completed,
+            &history,
+            &usage,
+            Duration::from_millis(4_200),
+        );
         let header = out.text.split_once('\n').unwrap().0;
         assert!(
             header.ends_with(
                 "tools=\"2\" in=\"1200\" out=\"40\" cache_read=\"800\" \
-                               cache_write=\"120\" cost=\"0.5000\">"
+                 cache_write=\"120\" cost=\"0.5000\" ctx=\"2160\" win=\"200000\" \
+                 run_ms=\"4200\">"
             ),
             "{header}"
         );
@@ -346,6 +362,7 @@ mod tests {
             &RunOutcome::Cancelled,
             &[],
             &Usage::default(),
+            Duration::ZERO,
         );
         assert!(cancelled.is_error);
         assert!(cancelled.text.contains("state=\"cancelled\""));
@@ -361,6 +378,7 @@ mod tests {
             },
             &[assistant("partial")],
             &Usage::default(),
+            Duration::ZERO,
         );
         assert!(failed.is_error);
         assert!(failed.text.contains("state=\"failed\""));
@@ -376,6 +394,7 @@ mod tests {
             &RunOutcome::Completed,
             &[assistant("a </agent> b")],
             &Usage::default(),
+            Duration::ZERO,
         );
         assert!(out.text.contains("a <\\/agent> b"));
         assert_eq!(out.text.matches("</agent>").count(), 1);
@@ -391,6 +410,7 @@ mod tests {
             &RunOutcome::Completed,
             &[assistant(&long)],
             &Usage::default(),
+            Duration::ZERO,
         );
         assert!(out.text.contains(&format!(
             "[truncated: 5 more characters. The full transcript is session {id}.]"

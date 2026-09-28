@@ -37,6 +37,13 @@ come back as error results, so the model knows the task did not
 finish. A reply over 20,000 characters is cut, and a trailer names the
 agent's session, which holds the full transcript.
 
+The header also records the child's tool count, token usage and run
+time (`tools`, `in`, `out`, `cache_read`, `cache_write`, `cost`,
+`ctx`, `win`, `run_ms`). When a session with finished agents reopens,
+the agents list reads these back, so tokens, cost and times survive a
+restart. The same attrs ride along on the `<agent>` headers inside a
+swarm aggregate.
+
 The agent sees nothing of the conversation that started it. The
 prompt is everything it knows, and nobody answers its questions.
 

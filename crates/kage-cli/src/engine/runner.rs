@@ -3,6 +3,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use kage_core::protocol::{HostEvent, McpServerInfo, NoticeLevel, RunOutcome, Usage};
 use kage_core::sync::lock;
@@ -101,6 +102,9 @@ pub(super) struct Finished {
     pub recorder: Option<Recorder>,
     pub usage: Usage,
     pub outcome: RunOutcome,
+    /// Wall-clock time the run was in flight, matching the run span
+    /// the clients see between `RunStarted` and `RunEnded`.
+    pub run_time: Duration,
 }
 
 impl Run {
@@ -133,6 +137,7 @@ impl Run {
             .map(|lease| lease.refresh(session, &bus, &mut tools, done))
             .unwrap_or_default();
         bus.publish(session, HostEvent::RunStarted);
+        let started_at = Instant::now();
         let price = kage_provider::model_cost(provider.as_ref(), &cx.model);
         let mut tool_names = HashMap::new();
         let mut emit = |event: LoopEvent| {
@@ -212,6 +217,7 @@ impl Run {
             recorder,
             usage,
             outcome,
+            run_time: started_at.elapsed(),
         }
     }
 }

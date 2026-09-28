@@ -768,7 +768,7 @@ impl Dispatcher {
                         outcome: outcome.clone(),
                     },
                 );
-                self.deliver(id, &outcome, &[], Usage::default());
+                self.deliver(id, &outcome, &[], Usage::default(), Duration::ZERO);
                 return;
             }
         };
@@ -915,6 +915,7 @@ impl Dispatcher {
             mut recorder,
             usage,
             outcome,
+            run_time,
         } = finished;
         if let Some(armed) = self.watchdogs.remove(&id) {
             armed.store(false, Ordering::Relaxed);
@@ -944,7 +945,9 @@ impl Dispatcher {
         let reply = if requeued {
             None
         } else {
-            self.take_reply(id, &outcome, &cx.history, usage_of(&cx))
+            // The runner's totals carry the price-adjusted cost and
+            // the context fill, unlike the budget's raw counters.
+            self.take_reply(id, &outcome, &cx.history, usage, run_time)
         };
         // Children may not have seen the cancel yet, and this session's
         // own flag resets below, so they get their own.

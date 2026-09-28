@@ -158,10 +158,10 @@ impl AgentTree {
     /// finished nodes. Each comes from an `agent` call whose result
     /// carries the `<agent name=.. session=.. state=..>` wrapper, or
     /// from a `swarm` call whose aggregate wraps one child per
-    /// `<swarm>` element. Usage and tool counts come from the
-    /// wrapper's recorded stats; the time of an `agent` call is the
-    /// gap between the call and its result. Sessions already known
-    /// are skipped.
+    /// `<swarm>` element. Usage, tool counts and run time come from
+    /// the wrapper's recorded stats; without a recorded time, an
+    /// `agent` call falls back to the gap between the call and its
+    /// result. Sessions already known are skipped.
     pub fn restore(&mut self, parent: SessionId, messages: &[Message]) {
         // Recorded calls: the task text, the call time and whether the
         // call was a `swarm` batch.
@@ -190,6 +190,15 @@ impl AgentTree {
                         let total = wrapped.len();
                         for (index, (agent, item)) in wrapped.into_iter().enumerate() {
                             let index = u32::try_from(index).unwrap_or(u32::MAX);
+                            // A recorded run time is the truth; the gap
+                            // between call and result is the fallback
+                            // for older transcripts, and a batch child
+                            // of one has no own time at all.
+                            let took = match agent.run_ms {
+                                Some(ms) => Some(Duration::from_millis(ms)),
+                                None if !swarm => (message.ts - called).to_std().ok(),
+                                None => None,
+                            };
                             self.insert(AgentNode {
                                 session: agent.session,
                                 parent,
@@ -208,9 +217,7 @@ impl AgentTree {
                                 last_tool: None,
                                 waiting: 0,
                                 started: None,
-                                took: (!swarm)
-                                    .then(|| (message.ts - called).to_std().ok())
-                                    .flatten(),
+                                took,
                                 restored: true,
                             });
                         }
@@ -291,6 +298,8 @@ struct RestoredAgent {
     state: AgentState,
     usage: Usage,
     tool_calls: u32,
+    /// Recorded run time in milliseconds, when the header carries it.
+    run_ms: Option<u64>,
 }
 
 /// The `<agent ...>` header of a stored result, parsed. The stats
@@ -319,11 +328,13 @@ fn agent_header(line: &str) -> Option<RestoredAgent> {
                 cache_read: num("cache_read"),
                 cache_write: num("cache_write"),
             },
+            context_used: num("ctx"),
+            context_window: num("win"),
             cost: attr("cost")
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0.0),
-            ..Usage::default()
         },
+        run_ms: attr("run_ms").and_then(|value| value.parse().ok()),
     })
 }
 
@@ -636,7 +647,8 @@ mod tests {
                 output: format!(
                     "<agent name=\"explore\" session=\"{child}\" state=\"completed\" \
                      tools=\"9\" in=\"120000\" out=\"40000\" cache_read=\"80000\" \
-                     cache_write=\"8000\" cost=\"1.25\">\nreply\n</agent>"
+                     cache_write=\"8000\" cost=\"1.25\" ctx=\"248000\" win=\"1000000\" \
+                     run_ms=\"4200\">\nreply\n</agent>"
                 ),
                 is_error: false,
             }],
@@ -651,6 +663,9 @@ mod tests {
         assert_eq!(node.usage.total.cache_read, 80_000);
         assert_eq!(node.usage.total.cache_write, 8_000);
         assert_eq!(node.usage.cost, 1.25);
+        assert_eq!(node.usage.context_used, 248_000);
+        assert_eq!(node.usage.context_window, 1_000_000);
+        assert_eq!(node.took, Some(Duration::from_millis(4_200)));
     }
 
     #[test]
@@ -674,10 +689,12 @@ mod tests {
             "completed: 2, failed: 0, cancelled: 0\n<swarm description=\"review crates\" \
              item=\"kage-core\">\n<agent name=\"explore\" session=\"{first}\" state=\"completed\" \
              tools=\"3\" in=\"100\" out=\"10\" cache_read=\"0\" cache_write=\"0\" \
-             cost=\"0.01\">\ndid core\n</agent>\n</swarm>\n<swarm description=\"review crates\" \
+             cost=\"0.01\" ctx=\"110\" win=\"200000\" run_ms=\"15000\">\ndid core\n</agent>\
+             \n</swarm>\n<swarm description=\"review crates\" \
              item=\"kage-tui\">\n<agent name=\"explore\" session=\"{second}\" \
              state=\"completed\" tools=\"4\" in=\"200\" out=\"20\" cache_read=\"0\" \
-             cache_write=\"0\" cost=\"0.02\">\ndid tui\n</agent>\n</swarm>"
+             cache_write=\"0\" cost=\"0.02\" ctx=\"220\" win=\"200000\" run_ms=\"9000\">\
+             \ndid tui\n</agent>\n</swarm>"
         );
         let answered = Message::new(
             crate::Role::ToolResult,
@@ -714,7 +731,10 @@ mod tests {
         assert_eq!(node.tool_calls, 3);
         assert_eq!(node.usage.total.input, 100);
         assert_eq!(node.usage.cost, 0.01);
-        assert_eq!(node.elapsed(), None, "a batch child has no own time");
+        assert_eq!(node.usage.context_window, 200_000);
+        assert_eq!(node.took, Some(Duration::from_millis(15_000)));
+        let node = tree.get(second).unwrap();
+        assert_eq!(node.took, Some(Duration::from_millis(9_000)));
     }
 
     #[test]

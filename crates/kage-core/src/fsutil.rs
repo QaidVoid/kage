@@ -1,4 +1,5 @@
-//! Crash-safe file writes shared by tools, stores, and credential files.
+//! Filesystem helpers shared by tools, stores, the TUI, and
+//! credential files: crash-safe writes and tilde expansion.
 
 use std::fs;
 use std::io::{self, Write as _};
@@ -106,6 +107,25 @@ fn temp_sibling(target: &Path) -> PathBuf {
         None => format!(".kage-{suffix}.tmp"),
     };
     parent.join(name)
+}
+
+/// Expand a leading `~` the way a shell does for an unquoted word:
+/// `~` is the home directory itself and `~/...` is home joined with
+/// the rest. `~user` and any other tilde use are left alone, and so
+/// is the candidate when the home directory cannot be determined.
+#[must_use]
+pub fn expand_tilde(candidate: &Path) -> PathBuf {
+    let Ok(rest) = candidate.strip_prefix("~") else {
+        return candidate.to_owned();
+    };
+    let Some(home) = dirs::home_dir() else {
+        return candidate.to_owned();
+    };
+    if rest.as_os_str().is_empty() {
+        home
+    } else {
+        home.join(rest)
+    }
 }
 
 #[cfg(test)]
@@ -221,5 +241,17 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(fs::read(&target).unwrap(), b"old");
         assert_eq!(entries(&locked), ["auth.json"]);
+    }
+
+    #[test]
+    fn tilde_expands_to_home_and_tilde_user_stays() {
+        let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
+            return;
+        };
+        let home = PathBuf::from(home);
+        assert_eq!(expand_tilde(Path::new("~")), home);
+        assert_eq!(expand_tilde(Path::new("~/a/b")), home.join("a/b"));
+        assert_eq!(expand_tilde(Path::new("~foo")), PathBuf::from("~foo"));
+        assert_eq!(expand_tilde(Path::new("/tmp/x")), PathBuf::from("/tmp/x"));
     }
 }

@@ -211,7 +211,8 @@ impl App {
             self.request_clipboard_attach();
             return;
         }
-        match crate::image::load_path(std::path::Path::new(path)) {
+        match crate::image::load_path(&kage_core::fsutil::expand_tilde(std::path::Path::new(path)))
+        {
             Ok(att) => self.attach(att),
             Err(e) => self.push_error(format!("attach: {e}")),
         }

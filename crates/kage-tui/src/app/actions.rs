@@ -243,7 +243,9 @@ impl App {
             }
             "export" => {
                 let dest = match args.get("file") {
-                    Some(ArgValue::Path(path)) => Some(std::path::PathBuf::from(path)),
+                    Some(ArgValue::Path(path)) => {
+                        Some(kage_core::fsutil::expand_tilde(std::path::Path::new(path)))
+                    }
                     _ => None,
                 };
                 let _ = self.send_request(RunRequest::ExportSession(dest));

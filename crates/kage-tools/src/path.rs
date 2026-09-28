@@ -6,7 +6,8 @@
 //!   canonicalizes it (resolving symlinks; preserving any non-existent
 //!   tail). `.` and `..` are resolved lexically before any filesystem
 //!   interaction, and a traversal that leaves the workdir is returned
-//!   as-is. Built-in tools call this - the user already chose the
+//!   as-is. A leading `~` expands to the home directory. Built-in
+//!   tools call this - the user already chose the
 //!   workdir, and `bash` can reach anywhere on the filesystem anyway,
 //!   so a tool-side sandbox is friction without security.
 //! - [`resolve_under`] wraps [`resolve`] with a `starts_with(workdir)`
@@ -23,6 +24,11 @@ use crate::ToolError;
 /// Resolve `candidate` against `workdir` without an escape check.
 ///
 /// Behavior:
+/// - A leading `~` expands to the home directory before the
+///   relative/absolute decision: `~` is home itself and `~/...` is
+///   home joined with the rest, like a shell's unquoted word. `~user`
+///   is left untouched, as are environment variables; the `bash`
+///   tool's shell handles those.
 /// - Relative `candidate` is joined onto `workdir`.
 /// - Absolute `candidate` is taken as-is.
 /// - `.` and `..` components are resolved lexically (the way the kernel
@@ -47,8 +53,9 @@ pub fn resolve(workdir: &Path, candidate: &Path) -> Result<PathBuf, ToolError> {
         reason: format!("canonicalize workdir: {e}"),
     })?;
 
+    let candidate = kage_core::fsutil::expand_tilde(candidate);
     let absolute = if candidate.is_absolute() {
-        candidate.to_owned()
+        candidate
     } else {
         canonical_root.join(candidate)
     };
@@ -216,6 +223,51 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ToolError::Path { .. }));
+    }
+
+    #[test]
+    fn resolve_expands_leading_tilde_to_home() {
+        let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
+            return;
+        };
+        let dir = workdir();
+        let resolved = resolve(dir.path(), Path::new("~/new.txt")).unwrap();
+        assert_eq!(
+            resolved,
+            Path::new(&home).canonicalize().unwrap().join("new.txt")
+        );
+    }
+
+    #[test]
+    fn resolve_expands_bare_tilde_to_home() {
+        let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
+            return;
+        };
+        let dir = workdir();
+        let resolved = resolve(dir.path(), Path::new("~")).unwrap();
+        assert_eq!(resolved, Path::new(&home).canonicalize().unwrap());
+    }
+
+    #[test]
+    fn resolve_leaves_tilde_prefixed_names_alone() {
+        let dir = workdir();
+        let resolved = resolve(dir.path(), Path::new("~foo")).unwrap();
+        assert_eq!(resolved, dir.path().canonicalize().unwrap().join("~foo"));
+    }
+
+    #[test]
+    fn resolve_under_expanded_tilde_outside_workdir_is_rejected() {
+        let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
+            return;
+        };
+        if Path::new(&home).starts_with(std::env::temp_dir()) {
+            return;
+        }
+        let dir = workdir();
+        let err = resolve_under(dir.path(), Path::new("~/x")).unwrap_err();
+        assert!(
+            matches!(err, ToolError::Path { ref reason, .. } if reason.contains("escapes workdir"))
+        );
     }
 
     #[test]

@@ -140,7 +140,7 @@ pub fn path_if_image(text: &str) -> Option<std::path::PathBuf> {
         .strip_prefix("file://")
         .unwrap_or_else(|| t.trim_matches(['"', '\'']));
     let cleaned = unquoted.replace("\\ ", " ");
-    let path = std::path::PathBuf::from(&cleaned);
+    let path = kage_core::fsutil::expand_tilde(std::path::Path::new(&cleaned));
     let is_image_ext = path
         .extension()
         .and_then(|e| e.to_str())

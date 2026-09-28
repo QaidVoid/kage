@@ -2,10 +2,14 @@
 //! command lines.
 //!
 //! The tokenizer is shell-lexer style: whitespace separates tokens,
-//! `"double"` and `'single'` quoted strings preserve internal
-//! whitespace, and inside double-quoted strings `\"` and `\\` escape
-//! the quote and backslash respectively. Single-quoted strings have
-//! no escape handling. Unterminated quotes return [`ParseError::UnterminatedQuote`].
+//! and a leading `"double"` or `'single'` quote makes the whole token
+//! one word, preserving internal whitespace; inside double-quoted
+//! tokens `\"` and `\\` escape the quote and backslash respectively.
+//! Single-quoted tokens have no escape handling. A quote that starts
+//! a token must be closed before end-of-input, which returns
+//! [`ParseError::UnterminatedQuote`]. A quote inside a word is an
+//! ordinary character, so prose apostrophes (`it's`, `plans'`) never
+//! open a quote.
 //!
 //! The parser walks the [`CommandSpec::args`] list, consuming one
 //! token per non-`Rest` arg and validating membership for [`ArgSpec::Choice`]
@@ -79,10 +83,12 @@ enum QuoteState {
     Single,
 }
 
-/// Split `raw` into shell-style tokens. Whitespace separates tokens
-/// outside quotes; double and single quotes preserve internal
-/// whitespace. Returns [`ParseError::UnterminatedQuote`] if a quoted
-/// region is not closed before end-of-input.
+/// Split `raw` into shell-style tokens. Whitespace separates tokens;
+/// a leading double or single quote makes the whole token one word,
+/// preserving internal whitespace. A quote opens only at the very
+/// start of a token, so an apostrophe inside a word (`it's`) is an
+/// ordinary character. Returns [`ParseError::UnterminatedQuote`] if a
+/// quoted region is not closed before end-of-input.
 fn tokenize(raw: &str) -> Result<Vec<Token>, ParseError> {
     tokenize_inner(raw, false)
 }
@@ -112,12 +118,12 @@ fn tokenize_inner(raw: &str, lenient: bool) -> Result<Vec<Token>, ParseError> {
             let clen = c.len_utf8();
             match (state, c) {
                 (QuoteState::None, ch) if ch.is_whitespace() => break,
-                (QuoteState::None, '"') => {
+                (QuoteState::None, '"') if idx == start => {
                     quoted = true;
                     state = QuoteState::Double;
                     idx += 1;
                 }
-                (QuoteState::None, '\'') => {
+                (QuoteState::None, '\'') if idx == start => {
                     quoted = true;
                     state = QuoteState::Single;
                     idx += 1;

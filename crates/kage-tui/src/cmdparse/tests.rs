@@ -245,6 +245,36 @@ fn tokenize_unterminated_single_quote_errors() {
 }
 
 #[test]
+fn tokenize_apostrophe_inside_a_word_stays_literal() {
+    // Prose contractions and possessives never open a quote.
+    let toks = tokenize("fix it's issues.. and plans' layout").unwrap();
+    let values: Vec<&str> = toks.iter().map(|t| t.value.as_str()).collect();
+    assert_eq!(
+        values,
+        vec!["fix", "it's", "issues..", "and", "plans'", "layout"]
+    );
+    assert!(toks.iter().all(|t| !t.quoted));
+}
+
+#[test]
+fn tokenize_quote_opening_mid_word_stays_literal() {
+    let toks = tokenize(r#"a"b c"#).unwrap();
+    let values: Vec<&str> = toks.iter().map(|t| t.value.as_str()).collect();
+    assert_eq!(values, vec![r#"a"b"#, "c"]);
+}
+
+#[test]
+fn parse_rest_takes_prose_with_apostrophes() {
+    let parsed = parse_input(&ONE_REST, "read the prototype.. fix it's issues").unwrap();
+    assert_eq!(
+        parsed.get("prompt"),
+        Some(&ArgValue::Text(
+            "read the prototype.. fix it's issues".into()
+        ))
+    );
+}
+
+#[test]
 fn tokenize_unicode_token_span_uses_byte_offsets() {
     let toks = tokenize("\u{1f600} done").unwrap();
     assert_eq!(toks.len(), 2);

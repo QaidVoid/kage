@@ -49,6 +49,27 @@ impl App {
         }
     }
 
+    /// Resolve an `InputAction::RecallPrompt`: take the newest pending
+    /// prompt of the focused session back out of the engine queue. The
+    /// row leaves when the engine confirms what it popped.
+    fn recall_prompt(&mut self) {
+        let session = self.focus;
+        let Some(at) = self.pending.iter().rposition(|(s, _)| *s == session) else {
+            return;
+        };
+        let delivery = if self.pending[at].1.queued {
+            kage_core::protocol::Delivery::Queue
+        } else {
+            kage_core::protocol::Delivery::Steer
+        };
+        if self
+            .send_request(RunRequest::RecallPrompt { session, delivery })
+            .is_err()
+        {
+            self.push_error("recall failed: agent worker has stopped");
+        }
+    }
+
     /// Send a prompt to the engine and follow the conversation to its
     /// end. The user block appears when the engine delivers it. During
     /// a run that happens later, so until then it shows as a pending
@@ -110,6 +131,7 @@ impl App {
         match action {
             InputAction::Submit(text) => self.handle_submit(text, false),
             InputAction::QueuePrompt => self.queue_prompt(),
+            InputAction::RecallPrompt => self.recall_prompt(),
             InputAction::Escape => return self.escalate(keys::Trigger::Esc),
             InputAction::RunShell(text) => self.handle_shell(text),
             InputAction::DroppedStaleAttach => {

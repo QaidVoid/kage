@@ -1,6 +1,7 @@
 use std::sync::mpsc::{Receiver, channel};
 use std::time::Duration;
 
+use kage_core::Content;
 use kage_core::agents::AgentDefs;
 use kage_core::permissions::{PermissionAction, PermissionsConfig};
 use kage_core::protocol::{Envelope, Event, RunOutcome};
@@ -352,6 +353,68 @@ fn queued_prompt_starts_a_new_run() {
         .position(|e| matches!(e.event, Event::Host(HostEvent::RunEnded { .. })))
         .unwrap();
     assert!(appended_texts(&events[run_ends..]).contains(&"two".to_owned()));
+}
+
+#[test]
+fn withdraw_prompt_pops_the_newest_of_its_queue() {
+    let h = harness(MockProvider::sequence(vec![
+        tool_turn("gate"),
+        text_turn("done"),
+    ]));
+    let id = SessionId::new();
+    h.open(id, None);
+    prompt(&h.engine, id, "start", Delivery::Steer);
+    wait_for(&h.events, is_tool_start);
+    prompt(&h.engine, id, "first", Delivery::Steer);
+    prompt(&h.engine, id, "second", Delivery::Steer);
+    prompt(&h.engine, id, "queued", Delivery::Queue);
+    std::thread::sleep(Duration::from_millis(50));
+
+    h.engine.send(Command::to(
+        id,
+        CommandKind::WithdrawPrompt {
+            delivery: Delivery::Steer,
+        },
+    ));
+    h.engine.send(Command::to(
+        id,
+        CommandKind::WithdrawPrompt {
+            delivery: Delivery::Queue,
+        },
+    ));
+    h.engine.send(Command::to(
+        id,
+        CommandKind::WithdrawPrompt {
+            delivery: Delivery::Queue,
+        },
+    ));
+    h.release.send(()).unwrap();
+    let events = until_runs_end(&h.events, 1);
+
+    let withdrawn: Vec<Option<Vec<Content>>> = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            Event::Host(HostEvent::PromptWithdrawn { content, .. }) => Some(content.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        withdrawn,
+        [
+            Some(vec![Content::Text {
+                text: "second".into()
+            }]),
+            Some(vec![Content::Text {
+                text: "queued".into()
+            }]),
+            None,
+        ],
+        "newest first, and an empty queue answers None"
+    );
+    let texts = appended_texts(&events);
+    assert!(texts.contains(&"first".to_owned()), "{texts:?}");
+    assert!(!texts.contains(&"second".to_owned()), "{texts:?}");
+    assert!(!texts.contains(&"queued".to_owned()), "{texts:?}");
 }
 
 #[test]

@@ -574,6 +574,7 @@ impl Dispatcher {
         }
         match command.kind {
             CommandKind::Prompt { content, delivery } => self.prompt(id, content, delivery),
+            CommandKind::WithdrawPrompt { delivery } => self.withdraw_prompt(id, delivery),
             CommandKind::Cancel if self.waiting.contains(&id) => self.end_waiting(id),
             CommandKind::Cancel => self.sessions[&id].cancel.cancel(),
             CommandKind::Compact => {
@@ -756,6 +757,21 @@ impl Dispatcher {
             (Delivery::Steer, Some(text)) => lock(&session.steering).push_back(text),
             _ => session.queued.push_back(content),
         }
+    }
+
+    /// Take the newest pending prompt for `delivery` back out of `id`'s
+    /// queues and report it, so the sender can edit and resubmit it.
+    /// `content` is `None` when that queue held nothing.
+    fn withdraw_prompt(&mut self, id: SessionId, delivery: Delivery) {
+        let session = self.sessions.get_mut(&id).expect("session checked");
+        let content = match delivery {
+            Delivery::Steer => lock(&session.steering)
+                .pop_back()
+                .map(|text| vec![Content::Text { text }]),
+            Delivery::Queue => session.queued.pop_back(),
+        };
+        self.bus
+            .publish(id, HostEvent::PromptWithdrawn { delivery, content });
     }
 
     fn start_run(&mut self, id: SessionId, work: Work) {

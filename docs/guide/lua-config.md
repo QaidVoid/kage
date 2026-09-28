@@ -217,7 +217,8 @@ mapping in `i` or `g` would catch it while you type.
 `SearchNext`, `SearchPrev`, `YankFocusedBlock`,
 `CycleThinkingLevel`, `CyclePane`, `FocusPrev`, `FocusNext`,
 `OpenHelp`, `OpenJumpPicker`, `AttachClipboardImage`, `EnterVisual`,
-`QueuePrompt`, `OpenAgents`, and the function `scroll(n)`.
+`QueuePrompt`, `RecallPrompt`, `OpenAgents`, and the function
+`scroll(n)`.
 
 `OpenAgents` opens the [agents overlay](/guide/agents#the-agents-overlay).
 `_defaults.lua` maps it to `<C-t>` in mode `g`.
@@ -226,6 +227,11 @@ mapping in `i` or `g` would catch it while you type.
 kage is idle it does nothing, so the default `<Tab>` mapping never
 sends a prompt by accident. The completion popup sees `Tab` before any
 mapping.
+
+`RecallPrompt` takes the newest prompt waiting above the input back
+out of the engine queue and puts it in the editor to edit, images
+included. While nothing is pending it does nothing. The default
+`<M-Up>` mapping never fires while idle.
 
 `opts` takes `desc` and `group`. The `?` reference lists every mapping
 that has a `desc`, under its `group` (`other` when unset). Mappings

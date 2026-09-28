@@ -4,8 +4,10 @@
 
 use super::*;
 
-use kage_core::protocol::{AgentState, Envelope, Event, HostEvent, NoticeLevel, RequestId};
-use kage_core::{LoopEvent, Role, SessionId, ToolCallId};
+use kage_core::protocol::{
+    AgentState, Delivery, Envelope, Event, HostEvent, NoticeLevel, RequestId,
+};
+use kage_core::{Content, ImageSource, LoopEvent, Role, SessionId, ToolCallId};
 
 use crate::view::tool_view::{
     BodyLine, EditDiff, EditSide, LineKind, ToolPhase, agent_stats, describe, file_edit_diff,
@@ -50,6 +52,10 @@ impl App {
     }
 
     fn apply_envelope(&mut self, envelope: Envelope) {
+        if let Event::Host(HostEvent::PromptWithdrawn { delivery, content }) = &envelope.event {
+            self.pending_withdrawn(envelope.session, *delivery, content.clone());
+            return;
+        }
         if let Event::Host(
             HostEvent::SessionChanged { .. }
             | HostEvent::TitleChanged { .. }
@@ -106,6 +112,69 @@ impl App {
             .map(|(at, _)| at);
         if let Some(at) = at {
             self.pending.remove(at);
+        }
+    }
+
+    /// Apply a withdrawn pending prompt: drop the recalled row of
+    /// `session` and put its text and images back into the editor,
+    /// above any draft. A `None` content means the engine's queue was
+    /// already empty; the row stays until its delivery lands.
+    fn pending_withdrawn(
+        &mut self,
+        session: SessionId,
+        delivery: Delivery,
+        content: Option<Vec<Content>>,
+    ) {
+        // Rows of the main session are keyed `None`.
+        let main = self.active_session.is_none_or(|active| active == session);
+        let key = if main { None } else { Some(session) };
+        let queued = delivery == Delivery::Queue;
+        let Some(at) = self
+            .pending
+            .iter()
+            .rposition(|(s, p)| *s == key && p.queued == queued)
+        else {
+            return;
+        };
+        let Some(content) = content else {
+            self.toast(
+                NoticeLevel::Warning,
+                "that prompt was already delivered".into(),
+            );
+            return;
+        };
+        self.pending.remove(at);
+        let mut text = String::new();
+        for item in content {
+            match item {
+                Content::Text { text: part } => {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(&part);
+                }
+                Content::Image { source, mime } => {
+                    let bytes = match &source {
+                        ImageSource::Base64 { data } => data.len() * 3 / 4,
+                        ImageSource::Url { .. } => 0,
+                    };
+                    self.input.attach_image(crate::image::AttachedImage {
+                        source,
+                        mime,
+                        label: "recall".to_owned(),
+                        bytes,
+                    });
+                }
+                _ => {}
+            }
+        }
+        if !text.is_empty() {
+            let above = if self.input.text().is_empty() {
+                text
+            } else {
+                format!("{text}\n\n")
+            };
+            self.input.splice(0, 0, &above);
         }
     }
 
@@ -203,7 +272,10 @@ impl App {
                 self.end_swarm_oneshot();
             }
             HostEvent::McpServers { servers } => self.set_mcp_servers(servers),
-            HostEvent::TitleChanged { .. } | HostEvent::AgentSpawned { .. } => {}
+            // Handled before this dispatch, in `apply_envelope`.
+            HostEvent::PromptWithdrawn { .. }
+            | HostEvent::TitleChanged { .. }
+            | HostEvent::AgentSpawned { .. } => {}
         }
     }
 
@@ -323,7 +395,9 @@ impl App {
                 true
             }
             HostEvent::UsageUpdated { .. } => true,
-            HostEvent::StateChanged { .. }
+            // Handled before this dispatch, in `apply_envelope`.
+            HostEvent::PromptWithdrawn { .. }
+            | HostEvent::StateChanged { .. }
             | HostEvent::TitleChanged { .. }
             | HostEvent::SessionChanged { .. }
             | HostEvent::McpServers { .. } => false,

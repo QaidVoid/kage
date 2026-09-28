@@ -131,8 +131,11 @@ what you type:
 Prompts that were sent but not delivered yet show above the input,
 each with `after the current tool call` or `when this run ends`. Up to
 three rows show, then `+N more`. A row disappears when kage delivers
-its prompt. A prompt with an attached image always waits for the run
-to end. So does a prompt that mentions an MCP resource
+its prompt. `alt+up` (`RecallPrompt`) takes the newest row back out of
+the queue and puts its text and images into the editor, so a typo in a
+sent prompt is fixable before it lands; the footer names the key while
+something is pending. A prompt with an attached image always waits for
+the run to end. So does a prompt that mentions an MCP resource
 (`@server:uri`) or starts with an MCP prompt command
 (`/server:prompt`), because kage expands those only when a run starts
 (see [mcp](/guide/mcp#resources-and-mentions)).
@@ -489,6 +492,7 @@ These action names work after `action:`:
 | misc       | `AttachClipboardImage` | attach an image from the clipboard |
 | misc       | `CycleThinkingLevel`   | step the thinking level           |
 | misc       | `QueuePrompt`          | queue the prompt until the run ends (does nothing while idle) |
+| misc       | `RecallPrompt`         | pull the newest pending prompt back into the editor to edit (does nothing while idle) |
 
 Scrolling by a line count needs an argument, so it is only available
 from Lua as `kage.action.scroll(n)`.

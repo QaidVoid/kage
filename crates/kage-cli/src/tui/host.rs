@@ -191,6 +191,13 @@ impl Host {
                     .send(Command::to(session, CommandKind::Cancel)),
                 None => self.send(CommandKind::Cancel),
             },
+            RunRequest::RecallPrompt { session, delivery } => match session {
+                Some(session) => self.commander.send(Command::to(
+                    session,
+                    CommandKind::WithdrawPrompt { delivery },
+                )),
+                None => self.send(CommandKind::WithdrawPrompt { delivery }),
+            },
             RunRequest::ResolvePermission {
                 request_id,
                 decision,

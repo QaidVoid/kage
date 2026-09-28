@@ -140,6 +140,17 @@ pub enum RunRequest {
         /// stops the main session and every agent under it.
         session: Option<kage_core::SessionId>,
     },
+    /// Take the newest pending prompt of `session` for `delivery` back
+    /// out of the engine queue, to edit and resubmit it. The engine's
+    /// [`kage_core::protocol::HostEvent::PromptWithdrawn`] names what
+    /// actually came out.
+    RecallPrompt {
+        /// The agent session the prompt waits for, `None` for the main
+        /// session.
+        session: Option<kage_core::SessionId>,
+        /// Which queue the prompt waits in.
+        delivery: kage_core::protocol::Delivery,
+    },
     /// Switch to a different `provider:model` for subsequent turns.
     SwitchModel(String),
     /// Replay the session at the given path into the conversation

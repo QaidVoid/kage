@@ -250,6 +250,106 @@ fn pending_rows_fold_past_three_and_clear_on_session_change() {
 }
 
 #[test]
+fn recall_pulls_the_newest_pending_prompt_back_into_the_editor() {
+    let (mut app, rx, events) = app_with_events();
+    lock(app.session_usage.as_ref().unwrap()).working = true;
+    app.handle_submit("first steer".into(), false);
+    app.handle_submit("queued one".into(), true);
+    while rx.try_recv().is_ok() {}
+
+    // Recall unwinds the submissions in reverse order.
+    app.apply(InputAction::RecallPrompt);
+    assert_eq!(
+        rx.recv_timeout(Duration::from_millis(100)).unwrap(),
+        RunRequest::RecallPrompt {
+            session: None,
+            delivery: kage_core::protocol::Delivery::Queue,
+        }
+    );
+    feed(
+        &mut app,
+        &events,
+        vec![
+            kage_core::protocol::HostEvent::PromptWithdrawn {
+                delivery: kage_core::protocol::Delivery::Queue,
+                content: Some(vec![
+                    kage_core::Content::Text {
+                        text: "queued one".into(),
+                    },
+                    kage_core::Content::Image {
+                        source: kage_core::ImageSource::Base64 {
+                            data: "AAAA".into(),
+                        },
+                        mime: "image/png".into(),
+                    },
+                ]),
+            }
+            .into(),
+        ],
+    );
+    assert_eq!(
+        app.input().text(),
+        "queued one\n\n[image #1 recall image/png 3 B] "
+    );
+    assert_eq!(app.input().attached().len(), 1);
+    assert_eq!(pending_rows(&mut app).len(), 1, "the steer row stays");
+
+    app.apply(InputAction::RecallPrompt);
+    assert_eq!(
+        rx.recv_timeout(Duration::from_millis(100)).unwrap(),
+        RunRequest::RecallPrompt {
+            session: None,
+            delivery: kage_core::protocol::Delivery::Steer,
+        }
+    );
+    feed(
+        &mut app,
+        &events,
+        vec![
+            kage_core::protocol::HostEvent::PromptWithdrawn {
+                delivery: kage_core::protocol::Delivery::Steer,
+                content: Some(vec![kage_core::Content::Text {
+                    text: "first steer".into(),
+                }]),
+            }
+            .into(),
+        ],
+    );
+    assert!(pending_rows(&mut app).is_empty());
+    assert_eq!(
+        app.input().text(),
+        "first steer\n\nqueued one\n\n[image #1 recall image/png 3 B] "
+    );
+}
+
+#[test]
+fn recall_when_the_engine_queue_was_empty_keeps_the_row() {
+    let (mut app, _rx, events) = app_with_events();
+    lock(app.session_usage.as_ref().unwrap()).working = true;
+    app.handle_submit("still queued".into(), true);
+    feed(
+        &mut app,
+        &events,
+        vec![
+            kage_core::protocol::HostEvent::PromptWithdrawn {
+                delivery: kage_core::protocol::Delivery::Queue,
+                content: None,
+            }
+            .into(),
+        ],
+    );
+    assert_eq!(pending_rows(&mut app).len(), 1);
+    assert!(app.input().text().is_empty());
+}
+
+#[test]
+fn recall_with_nothing_pending_sends_nothing() {
+    let (mut app, rx, _events) = app_with_events();
+    app.apply(InputAction::RecallPrompt);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
 fn pasting_an_image_path_attaches_instead_of_inserting_text() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();

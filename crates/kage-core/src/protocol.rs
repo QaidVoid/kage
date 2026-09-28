@@ -245,6 +245,16 @@ pub enum HostEvent {
         /// Every configured server, in registration order.
         servers: Vec<McpServerInfo>,
     },
+    /// A [`CommandKind::WithdrawPrompt`] was answered: `content` is the
+    /// prompt taken back out of the `delivery` queue, or `None` when
+    /// that queue was empty. Never recorded. Live.
+    PromptWithdrawn {
+        /// Which queue the prompt came from.
+        delivery: Delivery,
+        /// The withdrawn prompt, or `None` when nothing was pending.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<Vec<Content>>,
+    },
 }
 
 /// One member of a [`HostEvent::AgentSpawned`] swarm batch: what its
@@ -414,6 +424,13 @@ pub enum CommandKind {
         content: Vec<Content>,
         /// Delivery while a run is in flight.
         #[serde(default)]
+        delivery: Delivery,
+    },
+    /// Take the newest pending prompt for `delivery` back out of the
+    /// queue, answering with [`HostEvent::PromptWithdrawn`]. A client
+    /// recalls a prompt this way to edit it before it is delivered.
+    WithdrawPrompt {
+        /// Which queue to pop from.
         delivery: Delivery,
     },
     /// Cancel the in-flight run.

@@ -57,12 +57,15 @@ in the project directory. The same applies to a project's
 `[mcp] allow_sampling`, its `oauth` tables and `[permissions.mcp]`. See
 [project config and trust](/guide/config#project-config-and-trust).
 
-Each enabled server is connected at startup, handshaked, and its
-tools, resources and prompts are listed. A stdio server's `stderr` is
-inherited so its diagnostics reach your terminal. A server that fails
-to start or to list its tools is reported (inline in the TUI, on
-stderr in `-p` and `kage rpc`) and the rest still load. kage never
-swallows the failure.
+Each enabled server is connected, handshaked, and its tools,
+resources and prompts are listed. In the TUI this happens after the
+UI is up, off the launch path: `/mcp` lists a server as `starting`
+until it turns `connected` or `failed`. A stdio server's `stderr` is
+captured, never drawn over your terminal; a server that crashes
+quotes its last lines in the crash notice. A server that fails to
+start or to list its tools is reported (inline in the TUI, on stderr
+in `-p` and `kage rpc`) and the rest still load. kage never swallows
+the failure.
 
 kage advertises the working directory to every server as its single
 filesystem root (`roots/list`).
@@ -114,10 +117,14 @@ never cancelled, because MCP forbids it.
 kage keeps every configured server, even one that failed to start, so
 it can show the failure and restart the server later:
 
+- In the TUI the servers start after the UI is up, so a server that has
+  not connected yet is listed as `starting` until it turns `connected`
+  or `failed`.
 - A server that fails to start is listed as `failed` with its error.
 - A server whose process exits or whose connection drops is noticed
   before the next run: its tools are removed, a notice says
-  ``server `name` crashed: ...``, and it is listed as `failed`.
+  ``server `name` crashed: ...`` with the server's last stderr lines
+  quoted, and it is listed as `failed`.
 - An HTTP server that refuses kage's token, or has none, is listed as
   `needs login`. Its error names the fix:
   ``server `linear` needs authorization: run kage mcp login linear, or /mcp in the TUI``.
@@ -259,6 +266,7 @@ its status and a detail.
 ```text
 everything   connected     11 tools, 3 prompts, 100 resources, 2 templates
 linear       needs login   enter to log in
+booting      starting      waiting for the server
 broken       failed        spawn `nope`: No such file or directory
 ```
 

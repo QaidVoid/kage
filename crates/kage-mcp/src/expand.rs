@@ -275,6 +275,7 @@ fn not_live(status: &McpServerStatus) -> String {
     match status {
         McpServerStatus::Failed { error } => format!("failed: {error}"),
         McpServerStatus::NeedsAuth => "needs login".to_owned(),
+        McpServerStatus::Starting => "still starting".to_owned(),
         McpServerStatus::Connected => "not connected".to_owned(),
     }
 }

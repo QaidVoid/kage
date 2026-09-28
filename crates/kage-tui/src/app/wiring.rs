@@ -107,6 +107,7 @@ impl App {
             swarm_oneshot: None,
             key_labels: chrome::KeyLabels::default(),
             start_info: None,
+            start_sessions: None,
             pending: Vec::new(),
             pinned_hits: Vec::new(),
             pinned_summary_hit: None,
@@ -461,6 +462,16 @@ impl App {
         self.start_info = Some(info);
     }
 
+    /// Take delivery of the startup session scan, running on a host
+    /// thread. The start card opens with no recent sessions and fills
+    /// in when the scan lands, so the first paint never waits on it.
+    pub fn set_start_sessions(
+        &mut self,
+        rx: std::sync::mpsc::Receiver<Vec<crate::picker::PickItem>>,
+    ) {
+        self.start_sessions = Some(rx);
+    }
+
     /// Run on a session change: drop the old conversation's search
     /// and list the start card's recent sessions again.
     pub(crate) fn on_session_changed(&mut self) {
@@ -470,6 +481,31 @@ impl App {
         };
         info.sessions = lister(false);
         info.sessions.truncate(view::START_SESSIONS);
+    }
+
+    /// Apply the startup session scan's result, if it has landed.
+    /// One delivery only; later changes list through the session
+    /// lister. Returns `true` when the start card changed.
+    pub(crate) fn drain_start_sessions(&mut self) -> bool {
+        let Some(rx) = self.start_sessions.as_ref() else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok(sessions) => {
+                self.start_sessions = None;
+                let Some(info) = self.start_info.as_mut() else {
+                    return false;
+                };
+                info.sessions = sessions;
+                info.sessions.truncate(view::START_SESSIONS);
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.start_sessions = None;
+                false
+            }
+        }
     }
 
     /// Register the closure that produces the `:tree` session forest

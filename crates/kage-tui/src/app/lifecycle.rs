@@ -41,6 +41,9 @@ impl App {
             if self.drain_plugin_refresh() {
                 needs_redraw = true;
             }
+            if self.drain_start_sessions() {
+                needs_redraw = true;
+            }
             // Dialog + theme drains can mutate the visible screen
             // (overlay open, theme swap). Without this, the worker
             // pushes a `kage.ui.select` request from a /command, we

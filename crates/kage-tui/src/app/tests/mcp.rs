@@ -58,6 +58,7 @@ fn mcp_catalog() -> Vec<kage_core::protocol::McpServerInfo> {
             ..server("everything", McpServerStatus::Connected)
         },
         server("linear", McpServerStatus::NeedsAuth),
+        server("booting", McpServerStatus::Starting),
         server(
             "broken",
             McpServerStatus::Failed {
@@ -317,6 +318,7 @@ fn the_mcp_picker_lists_every_status_and_enter_restarts() {
         for want in [
             "everything  connected    11 tools \u{B7} 2 prompts \u{B7} 2 resources \u{B7} 1 template",
             "linear      needs login  enter to log in",
+            "booting     starting     waiting for the server",
             "broken      failed       spawn `nope`: No such file or directory",
         ] {
             assert!(rows.iter().any(|r| r.contains(want)), "{want}\n{rows:#?}");

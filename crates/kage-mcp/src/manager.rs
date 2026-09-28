@@ -60,6 +60,9 @@ use crate::tools::tools_from_connection;
 struct Managed {
     spec: McpServer,
     handle: Option<McpServerHandle>,
+    /// Waiting for its first spawn. Only [`McpManager::unstarted`] sets
+    /// this; the host brings such a server up with a `restart`.
+    starting: bool,
     error: Option<String>,
     needs_auth: bool,
     signed_in: bool,
@@ -74,6 +77,7 @@ impl Managed {
         Self {
             spec,
             handle,
+            starting: false,
             error: None,
             needs_auth: false,
             signed_in: false,
@@ -82,6 +86,13 @@ impl Managed {
             templates: Vec::new(),
             prompts: Vec::new(),
         }
+    }
+
+    /// A server configured but not yet spawned for the first time.
+    fn unstarted(spec: McpServer) -> Self {
+        let mut managed = Self::new(spec, None);
+        managed.starting = true;
+        managed
     }
 
     fn connection(&self) -> Option<Arc<McpConnection>> {
@@ -183,6 +194,8 @@ impl Managed {
     fn info(&self, name: &str) -> McpServerInfo {
         let status = if self.handle.is_some() {
             McpServerStatus::Connected
+        } else if self.starting {
+            McpServerStatus::Starting
         } else if self.needs_auth {
             McpServerStatus::NeedsAuth
         } else {
@@ -288,6 +301,48 @@ impl McpManager {
             },
             errors,
         )
+    }
+
+    /// Every enabled server in `cfg`, configured but not spawned: no
+    /// process runs and no tool registers until each server is brought
+    /// up with [`Self::restart`]. For hosts that show a UI first and
+    /// connect MCP afterwards: the servers report
+    /// [`McpServerStatus::Starting`] and [`Self::server_names`] still
+    /// lists them for the permission gate. `roots`, `handler` and
+    /// `tokens` are kept for those restarts, exactly as in
+    /// [`Self::spawn_all_with`].
+    #[must_use]
+    pub fn unstarted(
+        cfg: &McpConfig,
+        roots: Vec<std::path::PathBuf>,
+        handler: Option<Arc<dyn crate::ServerRequestHandler>>,
+        tokens: Option<Arc<dyn TokenSource>>,
+    ) -> Self {
+        let servers = cfg
+            .servers
+            .iter()
+            .filter(|(_, spec)| !spec.disabled)
+            .map(|(name, spec)| {
+                let mut managed = Managed::unstarted(spec.clone());
+                managed.signed_in = managed.has_token(tokens.as_ref());
+                (name.clone(), managed)
+            })
+            .collect();
+        Self {
+            servers,
+            roots,
+            handler,
+            tokens,
+            resource_tool: false,
+        }
+    }
+
+    /// Names of the servers still waiting for their first spawn.
+    pub fn starting_names(&self) -> impl Iterator<Item = &str> {
+        self.servers
+            .iter()
+            .filter(|(_, m)| m.starting)
+            .map(|(n, _)| n.as_str())
     }
 
     /// Whether no server is live (failed and evicted ones do not count).
@@ -472,6 +527,7 @@ impl McpManager {
             .find(|(n, _)| n == name)
             .map(|(_, m)| m)
             .ok_or_else(|| McpError::Unknown(name.to_owned()))?;
+        managed.starting = false;
         let spawned =
             McpServerHandle::spawn_with(name.to_owned(), &managed.spec, &roots, handler, tokens);
         let fresh = match spawned {
@@ -687,6 +743,69 @@ mod tests {
             matches!(&err, crate::server::McpError::Unknown(n) if n == "ghost"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn unstarted_servers_report_starting_and_start_on_their_first_restart() {
+        let ready = Arc::new(AtomicBool::new(true));
+        let server = guarded_server(Arc::clone(&ready), None);
+        let mut cfg = remote_config(format!("{}/mcp", server.base));
+        cfg.servers.insert(
+            "broken".to_owned(),
+            McpServer {
+                command: Some("definitely-not-a-real-binary-xyz".to_owned()),
+                args: vec![],
+                env: std::collections::BTreeMap::new(),
+                url: None,
+                headers: std::collections::BTreeMap::new(),
+                disabled: false,
+                oauth: None,
+            },
+        );
+        cfg.servers.insert(
+            "off".to_owned(),
+            McpServer {
+                disabled: true,
+                ..cfg.servers["broken"].clone()
+            },
+        );
+        let tokens = StaticTokens::new("good", None);
+        let mut mgr = McpManager::unstarted(
+            &cfg,
+            vec![],
+            None,
+            Some(Arc::clone(&tokens) as Arc<dyn TokenSource>),
+        );
+        assert_eq!(mgr.len(), 0);
+        assert_eq!(mgr.server_names().collect::<Vec<_>>(), ["broken", "remote"]);
+        assert_eq!(
+            mgr.starting_names().collect::<Vec<_>>(),
+            ["broken", "remote"]
+        );
+        assert!(
+            mgr.catalog()
+                .iter()
+                .all(|s| s.status == McpServerStatus::Starting),
+            "{:?}",
+            mgr.catalog()
+        );
+
+        let mut reg = ToolRegistry::new();
+        mgr.restart("remote", &mut reg).unwrap();
+        let mut catalog = mgr.catalog();
+        let remote = catalog.iter_mut().find(|s| s.name == "remote").unwrap();
+        assert_eq!(remote.status, McpServerStatus::Connected);
+        assert!(reg.get("remote__t").is_some());
+
+        let err = mgr.restart("broken", &mut reg).unwrap_err();
+        assert!(
+            matches!(&err, McpError::Spawn { command, .. } if command == "definitely-not-a-real-binary-xyz"),
+            "{err}"
+        );
+        let mut catalog = mgr.catalog();
+        let broken = catalog.iter_mut().find(|s| s.name == "broken").unwrap();
+        assert!(matches!(&broken.status, McpServerStatus::Failed { .. }));
+        assert_eq!(mgr.starting_names().collect::<Vec<_>>(), Vec::<&str>::new());
     }
 
     /// A server that advertises `capabilities`, answers `initialize`,

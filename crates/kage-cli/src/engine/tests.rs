@@ -2998,6 +2998,53 @@ fn a_prompt_during_an_idle_restart_runs_after_it() {
     assert_eq!(mock.last_request().unwrap().messages[0].content.len(), 2);
 }
 
+/// A manager whose servers are configured but not started, as the TUI
+/// hands them over so its UI is up before MCP connects.
+fn deferred_mcp_manager() -> McpManager {
+    let cfg: kage_core::config::McpConfig = serde_json::from_value(serde_json::json!({
+        "servers": { "broken": { "command": BROKEN_COMMAND } },
+    }))
+    .unwrap();
+    McpManager::unstarted(&cfg, Vec::new(), None, None)
+}
+
+#[test]
+fn deferred_mcp_servers_start_after_open() {
+    use kage_core::protocol::McpServerStatus;
+
+    let h = harness(MockProvider::replaying(text_turn("ok")));
+    let id = SessionId::new();
+    h.engine.open(SessionSpec {
+        tools: h.tools.clone(),
+        mcp: Some(deferred_mcp_manager()),
+        ..h.spec(id)
+    });
+
+    // Opening publishes the catalog with the server still starting.
+    let events = wait_for(&h.events, |e| e.session == id && is_mcp_servers(e));
+    let servers = mcp_snapshots(&events).remove(0);
+    assert_eq!(servers[0].name, "broken");
+    assert_eq!(servers[0].status, McpServerStatus::Starting);
+    assert_eq!(servers[0].tools, 0);
+
+    // The worker starts it off the dispatcher, fails, and the catalog
+    // flips to failed.
+    let events = wait_for(&h.events, |e| {
+        e.session == id
+            && matches!(
+                &e.event,
+                Event::Host(HostEvent::McpServers { servers })
+                    if matches!(servers[0].status, McpServerStatus::Failed { .. })
+            )
+    });
+    assert_eq!(restart_notices(&events).len(), 1);
+
+    // The session came back idle, so a prompt runs.
+    prompt(&h.engine, id, "hi", Delivery::Steer);
+    let events = until_runs_end(&h.events, 1);
+    assert_eq!(outcomes(&events), [RunOutcome::Completed]);
+}
+
 #[test]
 fn restart_while_running_waits_for_the_next_run() {
     let h = harness(MockProvider::sequence(vec![

@@ -310,7 +310,8 @@ struct Session {
     plugins: Option<Arc<PluginRuntime>>,
     gate: PermissionGate,
     loop_cfg: LoopConfig,
-    /// `None` while a run start or an idle restart holds it.
+    /// `None` while a run start, an idle restart or the first bring-up
+    /// of unstarted servers holds it.
     mcp: Option<McpManager>,
     /// `RestartMcp` names that wait for the next run start.
     mcp_restarts: Vec<String>,
@@ -473,6 +474,9 @@ impl Dispatcher {
         let workdir = cx.workdir.clone();
         let confine_paths = cx.confine_paths;
         let title_pending = title && !has_reply(&cx);
+        let starting_mcp = mcp
+            .as_ref()
+            .is_some_and(|m| m.starting_names().next().is_some());
         self.sessions.insert(
             id,
             Session {
@@ -509,6 +513,9 @@ impl Dispatcher {
         );
         self.active.get_or_insert(id);
         self.apply_plugin_tools(id);
+        if starting_mcp {
+            self.start_mcp(id);
+        }
     }
 
     /// Register the session's plugin tools, replacing earlier ones.

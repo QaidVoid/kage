@@ -543,6 +543,50 @@ fn route_progress(routes: &ProgressRoutes, params: serde_json::Value) {
 pub struct McpServerHandle {
     conn: Arc<McpConnection>,
     child: Option<Child>,
+    /// The child's captured stderr, so it never reaches the terminal
+    /// and a crash can quote what the server said last.
+    stderr: Option<StderrTail>,
+}
+
+/// The last lines a stdio server wrote to stderr, capped so a noisy or
+/// wedged server cannot grow memory. A drain thread keeps the pipe
+/// empty (a blocked child would stall its JSON-RPC loop) and only a
+/// crash reads the tail back.
+#[derive(Clone, Default)]
+struct StderrTail(Arc<Mutex<Vec<String>>>);
+
+impl StderrTail {
+    /// How many lines are kept.
+    const LINES: usize = 8;
+    /// How long one kept line may be.
+    const LINE_CHARS: usize = 160;
+
+    /// Drain `reader` on a background thread into the tail.
+    fn capture(reader: impl std::io::Read + Send + 'static) -> Self {
+        let tail = Self::default();
+        let shared = Arc::clone(&tail.0);
+        std::thread::spawn(move || {
+            let reader = std::io::BufReader::new(reader);
+            for line in std::io::BufRead::lines(reader) {
+                let Ok(line) = line else { return };
+                let line: String = line.chars().take(Self::LINE_CHARS).collect();
+                let Ok(mut lines) = shared.lock() else { return };
+                if lines.len() == Self::LINES {
+                    lines.remove(0);
+                }
+                lines.push(line);
+            }
+        });
+        tail
+    }
+
+    /// The kept lines as one short string, or an empty one.
+    fn snippet(&self) -> String {
+        let Ok(lines) = self.0.lock() else {
+            return String::new();
+        };
+        lines.join(" | ")
+    }
 }
 
 impl McpServerHandle {
@@ -612,7 +656,10 @@ impl McpServerHandle {
             .envs(&cfg.env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            // Captured, never inherited: the server's stderr must not
+            // draw over the host's terminal, and a crash quotes its
+            // last lines.
+            .stderr(Stdio::piped());
         #[cfg(unix)]
         {
             use std::os::unix::process::CommandExt;
@@ -632,6 +679,7 @@ impl McpServerHandle {
             .stdout
             .take()
             .ok_or_else(|| McpError::NoStdio(name.clone()))?;
+        let stderr = child.stderr.take().map(StderrTail::capture);
         let (peer, inbound, _reader) =
             connect_with(BufReader::new(stdout), stdin, Some(cancel_notice()));
         let conn = Arc::new(McpConnection::initialize(
@@ -640,6 +688,7 @@ impl McpServerHandle {
         Ok(Self {
             conn,
             child: Some(child),
+            stderr,
         })
     }
 
@@ -661,7 +710,11 @@ impl McpServerHandle {
         let conn = Arc::new(McpConnection::initialize(
             name, peer, inbound, roots, handler,
         )?);
-        Ok(Self { conn, child: None })
+        Ok(Self {
+            conn,
+            child: None,
+            stderr: None,
+        })
     }
 
     /// The live connection, shareable into tool adapters that must
@@ -673,21 +726,38 @@ impl McpServerHandle {
 
     /// The child's exit status once it has terminated, or `None`
     /// while it is still running and for a transport without a child
-    /// process. Used to detail a server evicted as dead.
+    /// process. The server's last stderr lines are quoted after the
+    /// status, since a crashing server usually says why. Used to
+    /// detail a server evicted as dead.
     #[must_use]
     pub fn exit_status(&mut self) -> Option<String> {
-        self.child
+        let status = self
+            .child
             .as_mut()?
             .try_wait()
             .ok()
             .flatten()
-            .map(|status| status.to_string())
+            .map(|status| status.to_string())?;
+        let stderr = self
+            .stderr
+            .as_ref()
+            .map(StderrTail::snippet)
+            .unwrap_or_default();
+        Some(if stderr.is_empty() {
+            status
+        } else {
+            format!("{status}; stderr: {stderr}")
+        })
     }
 
     /// Wrap an already initialized connection as a childless handle, so
     /// the manager can adopt an in-process transport.
     pub(crate) fn from_connection(conn: Arc<McpConnection>) -> Self {
-        Self { conn, child: None }
+        Self {
+            conn,
+            child: None,
+            stderr: None,
+        }
     }
 }
 
@@ -717,6 +787,7 @@ fn kill_process_group(child: &mut Child) {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
     use std::sync::Mutex;
     use std::thread;
 
@@ -1084,5 +1155,35 @@ mod tests {
             matches!(&seen[0], Inbound::Request { method, .. } if method == "initialize"),
             "{seen:?}"
         );
+    }
+
+    #[test]
+    fn stderr_tail_keeps_the_last_capped_lines() {
+        let mut input = String::new();
+        for n in 1..=20 {
+            let _ = writeln!(input, "noise {n}");
+        }
+        input.push_str("fatal: no space\r");
+        let tail = StderrTail::capture(std::io::Cursor::new(input));
+        assert!(
+            wait_until(|| tail.snippet().contains("noise 20")),
+            "got {:?}",
+            tail.snippet()
+        );
+        let snippet = tail.snippet();
+        assert!(
+            !snippet.contains("noise 12"),
+            "early lines dropped: {snippet}"
+        );
+        assert_eq!(snippet.matches(" | ").count() + 1, StderrTail::LINES);
+
+        let long = "x".repeat(500);
+        let tail = StderrTail::capture(std::io::Cursor::new(long));
+        assert!(
+            wait_until(|| !tail.snippet().is_empty()),
+            "got {:?}",
+            tail.snippet()
+        );
+        assert_eq!(tail.snippet().chars().count(), StderrTail::LINE_CHARS);
     }
 }

@@ -301,6 +301,31 @@ fn start_sessions_are_listed_on_session_changes_only() {
 }
 
 #[test]
+fn the_startup_session_scan_fills_the_start_card_when_it_lands() {
+    let (mut app, _rx, _events) = app_with_events();
+    let (tx, rx) = mpsc::channel();
+    app.set_start_info(view::StartInfo::default());
+    app.set_start_sessions(rx);
+    assert!(!app.drain_start_sessions(), "nothing delivered yet");
+    assert!(app.start_info.as_ref().unwrap().sessions.is_empty());
+
+    tx.send(vec![PickItem::simple("late"), PickItem::simple("newer")])
+        .unwrap();
+    assert!(app.drain_start_sessions(), "the delivery forces a repaint");
+    let values: Vec<_> = app
+        .start_info
+        .as_ref()
+        .unwrap()
+        .sessions
+        .iter()
+        .map(|s| s.value.clone())
+        .collect();
+    assert_eq!(values, ["late", "newer"]);
+    assert!(!app.drain_start_sessions(), "one delivery only");
+    assert!(app.start_sessions.is_none());
+}
+
+#[test]
 fn the_activity_row_shows_while_working_with_elapsed_seconds() {
     let buffer = shared_buffer();
     lock(&buffer).push_user("hello");

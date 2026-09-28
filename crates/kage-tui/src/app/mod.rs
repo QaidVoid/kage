@@ -622,6 +622,10 @@ pub struct App {
     /// Provider of resumable sessions for the session picker. None
     /// disables the picker (Ctrl+S is a no-op).
     session_lister: Option<SessionLister>,
+    /// The host's startup session scan, still running on its own
+    /// thread while the first frames paint. One delivery fills the
+    /// start card's recent sessions.
+    start_sessions: Option<std::sync::mpsc::Receiver<Vec<crate::picker::PickItem>>>,
     /// Open `:` command line, if any. While present it owns key input
     /// and paints over the footer row.
     cmdline: Option<CommandLine>,

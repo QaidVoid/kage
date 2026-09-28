@@ -385,6 +385,7 @@ impl App {
             .map(|server| {
                 let (status, detail) = match &server.status {
                     McpServerStatus::Connected => ("connected", mcp_offer(server)),
+                    McpServerStatus::Starting => ("starting", "waiting for the server".to_owned()),
                     McpServerStatus::NeedsAuth => ("needs login", "enter to log in".to_owned()),
                     McpServerStatus::Failed { error } => {
                         ("failed", error.lines().next().unwrap_or("").to_owned())

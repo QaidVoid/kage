@@ -193,11 +193,14 @@ once. The TUI sends it from `/mcp restart`, from the picker and after
 a login. `kage.mcp.restart` from Lua joins the same list at run start.
 
 **MCP work off the dispatcher.** The dispatcher never waits on an MCP
-server. At run start it lends the manager to the run thread, which
-applies the pending restarts and the list reloads that servers
-announced, then hands the manager back with the resulting tool changes
-before the loop starts. An idle restart does the same on a worker
-thread and keeps the session busy until the manager comes back.
+server. The TUI hands the session a manager whose servers are not
+spawned yet (`McpManager::unstarted`), so opening the session is
+instant; the dispatcher then brings every not-yet-started server up on
+a worker thread and keeps the session busy until the manager comes
+back, exactly like an idle restart. At run start it lends the manager
+to the run thread, which applies the pending restarts and the list
+reloads that servers announced, then hands the manager back with the
+resulting tool changes before the loop starts.
 
 **Expansion on the run thread.** After those reloads, the run expands
 the prompt with `kage_mcp::expand` before it enters history: an MCP

@@ -33,6 +33,10 @@ pub struct McpServerInfo {
 pub enum McpServerStatus {
     /// The server is live.
     Connected,
+    /// The server is configured but has not been spawned yet. A host
+    /// that opens its UI first resolves this to `connected` or
+    /// `failed` once it starts MCP.
+    Starting,
     /// The server failed to start or its transport died.
     Failed {
         /// The spawn, handshake or crash error.

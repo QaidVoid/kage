@@ -71,6 +71,47 @@ impl super::Dispatcher {
         }
     }
 
+    /// Bring the session's not-yet-started MCP servers up on a worker
+    /// thread. The host opened its UI first and handed the engine a
+    /// [`McpManager::unstarted`]; the session stays busy until
+    /// [`Self::mcp_done`] gives it back, so a prompt submitted while
+    /// servers connect runs once they are up.
+    pub(super) fn start_mcp(&mut self, id: SessionId) {
+        let session = self.sessions.get_mut(&id).expect("session checked");
+        let Some(mut manager) = session.mcp.take() else {
+            return;
+        };
+        let names: Vec<String> = manager.starting_names().map(str::to_owned).collect();
+        if names.is_empty() {
+            session.mcp = Some(manager);
+            return;
+        }
+        let idle = session.idle.take();
+        let before = session.tools.clone();
+        let bus = Arc::clone(&self.bus);
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let mut tools = before.clone();
+            for name in &names {
+                if let Err(err) = manager.restart(name, &mut tools) {
+                    restart_failed(&bus, id, name, &err);
+                }
+            }
+            bus.publish(
+                id,
+                HostEvent::McpServers {
+                    servers: manager.catalog(),
+                },
+            );
+            let _ = tx.send(Input::McpDone(Box::new(McpDone {
+                session: id,
+                manager,
+                tools: ToolDelta::between(&before, &tools),
+                idle,
+            })));
+        });
+    }
+
     /// Apply the idle session's pending restarts on a worker thread. The
     /// session stays busy until [`Self::mcp_done`] gives it back.
     fn restart_now(&mut self, id: SessionId) {

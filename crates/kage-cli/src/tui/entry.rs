@@ -177,7 +177,7 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
     );
     let system = system_prompt.as_str();
 
-    let mut tools = kage_tools::builtin_registry()
+    let tools = kage_tools::builtin_registry()
         .with_shell_config(&app_config.shell)
         .with_renames(&app_config.tools.rename);
     let mut plugin_command_listing: Vec<kage_tui::command::PluginCommand> = Vec::new();
@@ -185,12 +185,10 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
         plugin_command_listing = support::snapshot_plugin_commands(rt);
         support::register_block_renderers(rt);
     }
-    let (mcp_manager, mcp_errors) =
-        crate::mcp::spawn_and_register(&mut tools, &workdir, plugin_runtime.as_deref());
-    for (server, err) in mcp_errors {
-        let mut buf = lock(&buffer);
-        buf.push_custom("kage:error", format!("mcp `{server}`: {err}"), false);
-    }
+    // No MCP server spawns here: the TUI opens first and the engine
+    // starts them off-thread once the session is open, so launch never
+    // waits on `npx` or a slow handshake.
+    let mcp_manager = crate::mcp::deferred_manager(&workdir, plugin_runtime.as_deref());
     let mut cx = AgentContext::new(bare_model, system).with_workdir(&workdir);
     if app_config.permissions.confine_paths {
         cx = cx.with_confine_paths();
@@ -230,7 +228,6 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
         swarm_max_items,
         swarm_timeout_ms,
     };
-
     let model_choices = available_model_items(&registry, &qualified_model);
     if let Err(err) = crate::state::record_last_model(&qualified_model) {
         let mut buf = lock(&buffer);
@@ -403,14 +400,28 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
     } else {
         "configured rules"
     };
-    let mut start = kage_tui::StartInfo {
+    let start = kage_tui::StartInfo {
         sessions: Vec::new(),
         notices,
         permissions: permissions.to_owned(),
     };
     if let Ok(dir) = crate::sessions_dir() {
         let sessions_cache = Arc::new(Mutex::new(kage_session::SessionCache::default()));
-        start.sessions = list_session_choices(&dir, &workdir, false, &mut lock(&sessions_cache));
+        // The first paint must not wait on the scan: the start card's
+        // recent sessions arrive on this channel once the thread is
+        // done, and the warmed cache makes the first Ctrl+S quick.
+        let (sessions_tx, sessions_rx) = mpsc::channel();
+        let scan_dir = dir.clone();
+        let scan_workdir = workdir.clone();
+        let scan_cache = Arc::clone(&sessions_cache);
+        thread::spawn(move || {
+            let _ = sessions_tx.send(list_session_choices(
+                &scan_dir,
+                &scan_workdir,
+                false,
+                &mut lock(&scan_cache),
+            ));
+        });
         let tree_dir = dir.clone();
         let tree_mirror = Arc::clone(&mirror);
         let lister_workdir = workdir.clone();
@@ -420,6 +431,7 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
         app.set_session_tree_source(Box::new(move || {
             list_session_nodes(&tree_dir, lock(&tree_mirror).path())
         }));
+        app.set_start_sessions(sessions_rx);
     }
     app.set_start_info(start);
     let loader_mirror = Arc::clone(&mirror);

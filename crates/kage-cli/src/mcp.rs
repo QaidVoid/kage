@@ -8,6 +8,9 @@
 //!   plugin declared via `kage.mcp.add_server`) and registers their
 //!   tools into the loop's [`ToolRegistry`], keeping the returned
 //!   [`McpManager`] alive for the session.
+//! - [`deferred_manager`] is the TUI variant: no server spawns until
+//!   the engine starts them after the session opens, so the UI is up
+//!   before MCP connects.
 //! - [`spawn_and_register_with`] also takes the servers an editor passes
 //!   over ACP, which count as the user's own configuration.
 //! - `kage mcp login` and `logout` live in [`crate::mcp_auth`].
@@ -181,6 +184,22 @@ pub(crate) fn spawn_and_register_with(
     );
     errors.extend(manager.register_into(tools));
     (manager, errors)
+}
+
+/// Build the manager without spawning any server, for the TUI: it
+/// opens first and the engine brings each enabled server up on a
+/// worker thread once the session is open ([`McpManager::unstarted`]).
+/// Server names still gate permissions, and a server that fails to
+/// start surfaces as an error notice instead of a startup error.
+pub(crate) fn deferred_manager(workdir: &Path, runtime: Option<&PluginRuntime>) -> McpManager {
+    let cfg = merged_config(workdir, runtime);
+    let handler = sampling_handler(&cfg);
+    McpManager::unstarted(
+        &cfg,
+        vec![workdir.to_path_buf()],
+        handler,
+        crate::mcp_auth::token_source(),
+    )
 }
 
 /// Adds `extra` to `cfg`. An entry replaces the server of the same name,

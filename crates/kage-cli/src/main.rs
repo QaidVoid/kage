@@ -886,7 +886,6 @@ mod tests {
             parent_session: None,
             last_user_prompt: prompt.map(str::to_owned),
             title: title.map(str::to_owned),
-            entry_count: 1,
             agent: None,
         }
     }

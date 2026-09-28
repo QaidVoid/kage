@@ -9,9 +9,11 @@
 //! boundaries and entry tags without decoding, and only those few lines
 //! are decoded, found by walking back from the end.
 
-use std::fs::File;
+use std::collections::HashMap;
+use std::fs::{File, metadata};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 
@@ -49,16 +51,21 @@ pub struct SessionSummary {
     pub parent_session: Option<SessionId>,
     /// Text of the most recent user message, if any.
     pub last_user_prompt: Option<String>,
-    /// Generated session title (latest `Title` entry), if one was
-    /// written. `None` for pre-title sessions; callers fall back to
-    /// [`Self::last_user_prompt`] for a label.
+    /// Generated session title, from a `Title` entry in the probed head
+    /// or tail of the file. `None` for pre-title sessions; callers fall
+    /// back to [`Self::last_user_prompt`] for a label.
     pub title: Option<String>,
-    /// Total number of valid entries (including the header).
-    pub entry_count: usize,
     /// Agent definition name when an `agent` call started this session,
     /// read from the [`AGENT_ENTRY_KIND`] entry right after the header.
     pub agent: Option<String>,
 }
+
+/// Bytes scanned after the header for an early title: titles are
+/// appended when generated, usually right after the first exchange.
+const HEAD_PROBE: u64 = 64 * 1024;
+/// Bytes read from the end of a file for the tail summary. Bounds the
+/// decode work for sessions whose tail is a wall of tool output.
+const TAIL_LIMIT: u64 = 512 * 1024;
 
 /// Scan `dir` for `*.jsonl` session files and summarize each.
 ///
@@ -67,131 +74,135 @@ pub struct SessionSummary {
 /// directory without aborting on the first malformed one. Files with a
 /// torn trailing line are summarized using everything that did parse.
 pub fn list(dir: &Path) -> Result<Vec<SessionSummary>, SessionError> {
-    let read_dir = match std::fs::read_dir(dir) {
-        Ok(d) => d,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => {
-            return Err(SessionError::Io {
-                path: dir.to_path_buf(),
-                source: err,
-            });
-        }
-    };
-
-    let mut summaries = Vec::new();
-    for entry in read_dir {
-        let entry = entry.map_err(|err| SessionError::Io {
-            path: dir.to_path_buf(),
-            source: err,
-        })?;
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-            continue;
-        }
-        if let Some(summary) = summarize_one(&path) {
-            summaries.push(summary);
-        }
-    }
-    summaries.sort_by_key(|s| std::cmp::Reverse(s.created_at));
-    Ok(summaries)
+    SessionCache::default().list(dir)
 }
 
-/// What a line's leading `"type"` tag says it holds. `Untagged` lines do
-/// not start with the tag, so only decoding tells what they are.
-#[derive(Clone, Copy, PartialEq)]
-enum Kind {
-    Message,
-    Title,
-    Other,
-    Untagged,
+/// Memo of per-file summaries keyed by the file's size and mtime at
+/// read time. [`SessionCache::list`] re-reads only the files that
+/// changed since the previous call, so repeated listings of a mostly
+/// static directory cost one stat per file.
+#[derive(Default)]
+pub struct SessionCache {
+    by_path: HashMap<PathBuf, (u64, Option<SystemTime>, SessionSummary)>,
+}
+
+impl SessionCache {
+    /// Scan `dir` for `*.jsonl` session files and summarize each, like
+    /// [`list`], reusing cached summaries for files whose length and
+    /// mtime are unchanged.
+    pub fn list(&mut self, dir: &Path) -> Result<Vec<SessionSummary>, SessionError> {
+        let read_dir = match std::fs::read_dir(dir) {
+            Ok(d) => d,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => {
+                return Err(SessionError::Io {
+                    path: dir.to_path_buf(),
+                    source: err,
+                });
+            }
+        };
+
+        let mut summaries = Vec::new();
+        for entry in read_dir {
+            let entry = entry.map_err(|err| SessionError::Io {
+                path: dir.to_path_buf(),
+                source: err,
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if let Some(summary) = self.summarize(&path) {
+                summaries.push(summary);
+            }
+        }
+        summaries.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+        Ok(summaries)
+    }
+
+    fn summarize(&mut self, path: &Path) -> Option<SessionSummary> {
+        let meta = metadata(path).ok()?;
+        let size = meta.len();
+        let modified = meta.modified().ok();
+        if let Some((cached_size, cached_modified, summary)) = self.by_path.get(path)
+            && *cached_size == size
+            && *cached_modified == modified
+        {
+            return Some(summary.clone());
+        }
+        let summary = summarize_one(path)?;
+        self.by_path
+            .insert(path.to_owned(), (size, modified, summary.clone()));
+        Some(summary)
+    }
 }
 
 fn summarize_one(path: &Path) -> Option<SessionSummary> {
-    let mut file = BufReader::new(File::open(path).ok()?);
+    let mut file = BufReader::with_capacity(128 * 1024, File::open(path).ok()?);
+    file.seek(SeekFrom::Start(0)).ok()?;
     let mut buf = Vec::new();
-    let mut offset = 0;
-    let mut lines: Vec<(u64, Kind)> = Vec::new();
+    let mut consumed = 0u64;
+
+    // Head pass: the header, the agent marker and an early title.
+    // Titles are appended when generated, so for a long session the
+    // only one usually sits right after the first exchange.
     let mut header = None;
-    while let Ok(n) = file.read_until(b'\n', &mut buf) {
+    let mut agent = None;
+    let mut head_title = None;
+    let mut agent_pending = true;
+    while consumed < HEAD_PROBE {
+        buf.clear();
+        let Ok(n) = file.read_until(b'\n', &mut buf) else {
+            break;
+        };
         if n == 0 {
             break;
         }
+        consumed += n as u64;
         let line = buf.trim_ascii_end();
-        if !line.is_empty() {
-            if header.is_none() {
-                let Ok(SessionEntry::Header(h)) = serde_json::from_slice(line) else {
-                    return None;
-                };
-                header = Some(h);
-            } else {
-                lines.push((offset, kind_of(line)));
+        if line.is_empty() {
+            continue;
+        }
+        if header.is_none() {
+            match serde_json::from_slice::<SessionEntry>(line) {
+                Ok(SessionEntry::Header(h)) => header = Some(h),
+                _ => return None,
+            }
+            continue;
+        }
+        if agent_pending && let Ok(entry) = serde_json::from_slice::<SessionEntry>(line) {
+            agent_pending = false;
+            if let SessionEntry::Custom(c) = entry
+                && c.kind == AGENT_ENTRY_KIND
+            {
+                agent = Some(
+                    c.data
+                        .get("agent")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                );
             }
         }
-        offset += n as u64;
-        buf.clear();
+        if leading_tag(line) == Some(b"title")
+            && let Ok(SessionEntry::Title(t)) = serde_json::from_slice(line)
+        {
+            head_title = Some(t.title);
+        }
     }
     let header = header?;
 
-    let agent = lines
-        .iter()
-        .find_map(|&(at, _)| decode_at(&mut file, at, &mut buf))
-        .and_then(|entry| match entry {
-            SessionEntry::Custom(c) if c.kind == AGENT_ENTRY_KIND => {
-                let name = c.data.get("agent").and_then(serde_json::Value::as_str);
-                Some(name.unwrap_or_default().to_owned())
-            }
-            _ => None,
-        });
-
-    let mut updated_at = None;
-    let mut last_user_prompt = None;
-    let mut title = None;
-    let mut invalid = 0;
-    for &(at, kind) in lines.iter().rev() {
-        let wanted = updated_at.is_none()
-            || kind == Kind::Untagged
-            || (kind == Kind::Message && last_user_prompt.is_none())
-            || (kind == Kind::Title && title.is_none());
-        if !wanted {
-            continue;
-        }
-        let Some(entry) = decode_at(&mut file, at, &mut buf) else {
-            invalid += 1;
-            continue;
-        };
-        updated_at.get_or_insert(entry.ts());
-        match entry {
-            SessionEntry::Message(m)
-                if m.message.role == kage_core::Role::User && last_user_prompt.is_none() =>
-            {
-                last_user_prompt = Some(first_text(&m.message));
-            }
-            SessionEntry::Title(t) if title.is_none() => title = Some(t.title),
-            _ => {}
-        }
-        if updated_at.is_some() && last_user_prompt.is_some() && title.is_some() {
-            break;
-        }
-    }
+    let (updated_at, last_user_prompt, tail_title) = scan_tail(&mut file, &mut buf);
     let updated_at = updated_at.unwrap_or(header.ts);
+
     Some(summary_from_header(
         header,
         path.to_path_buf(),
         updated_at,
-        last_user_prompt.flatten(),
-        title,
-        1 + lines.len() - invalid,
+        last_user_prompt,
+        tail_title.or(head_title),
         agent,
     ))
-}
-
-fn kind_of(line: &[u8]) -> Kind {
-    match leading_tag(line) {
-        Some(b"message") => Kind::Message,
-        Some(b"title") => Kind::Title,
-        Some(_) => Kind::Other,
-        None => Kind::Untagged,
-    }
 }
 
 /// The `"type"` tag when it is the first key of `line`, the way the
@@ -208,13 +219,67 @@ fn leading_tag(line: &[u8]) -> Option<&[u8]> {
     Some(&rest[..end])
 }
 
-/// Decode the entry on the line starting at byte `at`, or `None` when it
-/// does not parse.
-fn decode_at(file: &mut BufReader<File>, at: u64, buf: &mut Vec<u8>) -> Option<SessionEntry> {
-    buf.clear();
-    file.seek(SeekFrom::Start(at)).ok()?;
-    file.read_until(b'\n', buf).ok()?;
-    serde_json::from_slice(buf).ok()
+/// Walk the file's tail back recording the latest timestamp, the
+/// latest user prompt and the latest title, decoding only the lines
+/// those need. Bounds the decode work for sessions whose tail is a
+/// wall of tool output.
+fn scan_tail(
+    file: &mut BufReader<File>,
+    buf: &mut Vec<u8>,
+) -> (Option<DateTime<Utc>>, Option<String>, Option<String>) {
+    let Ok(len) = file.seek(SeekFrom::End(0)) else {
+        return (None, None, None);
+    };
+    if file
+        .seek(SeekFrom::Start(len.saturating_sub(TAIL_LIMIT)))
+        .is_err()
+    {
+        return (None, None, None);
+    }
+    let mut updated_at = None;
+    let mut last_user_prompt = None;
+    let mut title = None;
+    let mut tail: Vec<Vec<u8>> = Vec::new();
+    loop {
+        buf.clear();
+        let Ok(n) = file.read_until(b'\n', buf) else {
+            break;
+        };
+        if n == 0 {
+            break;
+        }
+        let line = buf.trim_ascii_end().to_owned();
+        if !line.is_empty() {
+            tail.push(line);
+        }
+    }
+    for line in tail.iter().rev() {
+        let tag = leading_tag(line);
+        let wanted = updated_at.is_none()
+            || tag.is_none()
+            || (tag == Some(b"message") && last_user_prompt.is_none())
+            || tag == Some(b"title");
+        if !wanted {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_slice::<SessionEntry>(line) else {
+            continue;
+        };
+        updated_at.get_or_insert_with(|| entry.ts());
+        match entry {
+            SessionEntry::Message(m)
+                if m.message.role == kage_core::Role::User && last_user_prompt.is_none() =>
+            {
+                last_user_prompt = Some(first_text(&m.message));
+            }
+            SessionEntry::Title(t) if title.is_none() => title = Some(t.title),
+            _ => {}
+        }
+        if updated_at.is_some() && last_user_prompt.is_some() && title.is_some() {
+            break;
+        }
+    }
+    (updated_at, last_user_prompt.flatten(), title)
 }
 
 fn first_text(message: &kage_core::Message) -> Option<String> {
@@ -232,7 +297,6 @@ fn summary_from_header(
     updated_at: DateTime<Utc>,
     last_user_prompt: Option<String>,
     title: Option<String>,
-    entry_count: usize,
     agent: Option<String>,
 ) -> SessionSummary {
     SessionSummary {
@@ -245,7 +309,6 @@ fn summary_from_header(
         parent_session: header.parent_session,
         last_user_prompt,
         title,
-        entry_count,
         agent,
     }
 }
@@ -338,7 +401,6 @@ mod tests {
                 .any(|s| s.last_user_prompt.as_deref() == Some("ask two"))
         );
         for s in &summaries {
-            assert_eq!(s.entry_count, 3);
             assert!(s.updated_at >= s.created_at);
         }
     }
@@ -493,12 +555,12 @@ mod tests {
         };
         let mut updated_at = header.ts;
         let (mut last_user_prompt, mut title, mut agent) = (None, None, None);
-        let mut entry_count = 1;
+        let mut index = 1;
         for entry in entries {
-            entry_count += 1;
+            index += 1;
             updated_at = entry.ts();
             match entry {
-                SessionEntry::Custom(c) if entry_count == 2 && c.kind == AGENT_ENTRY_KIND => {
+                SessionEntry::Custom(c) if index == 2 && c.kind == AGENT_ENTRY_KIND => {
                     agent = Some(c.data["agent"].as_str().unwrap_or_default().to_owned());
                 }
                 SessionEntry::Message(m) if m.message.role == Role::User => {
@@ -514,7 +576,6 @@ mod tests {
             updated_at,
             last_user_prompt,
             title,
-            entry_count,
             agent,
         )
     }
@@ -573,7 +634,6 @@ mod tests {
         assert_eq!(summary.title.as_deref(), Some("early title"));
         assert_eq!(summary.last_user_prompt.as_deref(), Some("second ask"));
         assert_eq!(summary.agent.as_deref(), Some("explore"));
-        assert_eq!(summary.entry_count, 106);
     }
 
     #[test]
@@ -603,7 +663,6 @@ mod tests {
 
         let summary = summarize_one(&path).unwrap();
         assert_eq!(summary, full_decode(&path));
-        assert_eq!(summary.entry_count, 3);
         assert_eq!(summary.title, None);
     }
 
@@ -624,6 +683,5 @@ mod tests {
         let summary = summarize_one(&path).unwrap();
         assert_eq!(summary, full_decode(&path));
         assert_eq!(summary.title.as_deref(), Some("untagged"));
-        assert_eq!(summary.entry_count, 5);
     }
 }

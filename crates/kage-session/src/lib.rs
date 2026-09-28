@@ -23,7 +23,7 @@ pub use entry::{
 };
 pub use error::SessionError;
 pub use fork::{fork, fork_as, resolve_entry_prefix};
-pub use list::{SessionSummary, list};
+pub use list::{SessionCache, SessionSummary, list};
 pub use reader::SessionReader;
 pub use resume::{ReplayResult, ReplayUsage, find_by_prefix, find_last, replay};
 pub use search::{SearchHit, search};

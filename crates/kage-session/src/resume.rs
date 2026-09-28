@@ -54,6 +54,12 @@ pub struct ReplayResult {
     /// Text of the most recent [`SessionEntry::Title`], or `None` if the
     /// session never recorded one.
     pub title: Option<String>,
+    /// Latest swarm mode recorded by a
+    /// `kage:swarm_mode` custom entry, or `None` if the session never
+    /// toggled it. The host seeds its swarm mode flag from this so a
+    /// resumed session keeps the mode without injecting the block
+    /// again.
+    pub swarm_mode: Option<bool>,
     /// Counts of the last [`SessionEntry::Compaction`], whose summary
     /// opens `history`, or `None` if the session never compacted.
     pub compaction: Option<CompactionCounts>,
@@ -100,6 +106,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
     let mut model = header.model.clone();
     let mut thinking_level: Option<String> = None;
     let mut title: Option<String> = None;
+    let mut swarm_mode: Option<bool> = None;
     let mut history: Vec<Message> = Vec::new();
     // `call_starts` tracks the wall-clock time each ToolCall was
     // appended; on a matching ToolResult we compute the elapsed
@@ -162,7 +169,12 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
             SessionEntry::ModelChange(mc) => model = mc.model,
             SessionEntry::ThinkingLevelChange(t) => thinking_level = Some(t.level),
             SessionEntry::Title(t) => title = Some(t.title),
-            SessionEntry::Label(_) | SessionEntry::Custom(_) => {}
+            SessionEntry::Custom(c) => {
+                if c.kind == crate::list::SWARM_MODE_ENTRY_KIND {
+                    swarm_mode = c.data.get("on").and_then(serde_json::Value::as_bool);
+                }
+            }
+            SessionEntry::Label(_) => {}
         }
     }
     Ok(ReplayResult {
@@ -173,6 +185,7 @@ pub fn replay(path: &Path) -> Result<ReplayResult, SessionError> {
         usage_total,
         thinking_level,
         title,
+        swarm_mode,
         compaction,
     })
 }
@@ -257,8 +270,8 @@ mod tests {
 
     use super::*;
     use crate::entry::{
-        Compaction, EntryId, FORMAT_VERSION, Header, MessageEntry, ModelChange, SessionEntry,
-        SessionId,
+        Compaction, Custom, EntryId, FORMAT_VERSION, Header, MessageEntry, ModelChange,
+        SessionEntry, SessionId,
     };
     use crate::writer::SessionWriter;
 
@@ -529,6 +542,43 @@ mod tests {
         let err = replay(&path).unwrap_err();
         assert!(matches!(err, SessionError::SecondHeader { .. }), "{err:?}");
         assert!(err.to_string().contains("second header in file"));
+    }
+
+    #[test]
+    fn replay_reads_the_latest_swarm_mode_entry() {
+        let dir = tempdir().unwrap();
+        let custom = |on: bool| {
+            SessionEntry::Custom(Custom {
+                id: EntryId::new(),
+                ts: Utc::now(),
+                kind: crate::list::SWARM_MODE_ENTRY_KIND.to_owned(),
+                data: serde_json::json!({ "on": on }),
+            })
+        };
+        let path = dir.path().join("off.jsonl");
+        write(
+            &path,
+            fresh_header(),
+            &[
+                message_entry(Role::User, "hello"),
+                custom(true),
+                message_entry(Role::Assistant, "hi"),
+                custom(false),
+            ],
+        );
+        assert_eq!(replay(&path).unwrap().swarm_mode, Some(false));
+
+        let path = dir.path().join("on.jsonl");
+        write(
+            &path,
+            fresh_header(),
+            &[message_entry(Role::User, "hello"), custom(true)],
+        );
+        assert_eq!(replay(&path).unwrap().swarm_mode, Some(true));
+
+        let path = dir.path().join("never.jsonl");
+        write(&path, fresh_header(), &[message_entry(Role::User, "hello")]);
+        assert_eq!(replay(&path).unwrap().swarm_mode, None);
     }
 
     #[test]

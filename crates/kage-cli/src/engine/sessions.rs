@@ -270,6 +270,7 @@ impl super::Dispatcher {
             ));
         }
         cx.history = replay.history;
+        session.swarm_mode = replay.swarm_mode.unwrap_or(false);
         cx.budget = kage_loop::TokenBudget {
             used_input: replay.usage_total.input,
             used_output: replay.usage_total.output,

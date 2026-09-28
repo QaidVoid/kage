@@ -160,6 +160,10 @@ the mode on, submits the task as a prompt, and turns the mode off
 when that run ends. It refuses to run while a run is already in
 flight.
 
+The mode survives restarts: every toggle is recorded in the session
+file, so resuming the session restores it without injecting the block
+a second time.
+
 ## the send_message mailbox
 
 Every agent-enabled session, the parent and its children alike, gets

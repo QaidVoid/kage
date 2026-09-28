@@ -22,6 +22,10 @@ use crate::error::SessionError;
 /// `agent` call started. Written as the first entry after the header.
 pub const AGENT_ENTRY_KIND: &str = "kage:agent";
 
+/// Kind of the [`SessionEntry::Custom`] entry that records a swarm
+/// mode toggle. Its payload is `{"on": bool}`; the latest entry wins.
+pub const SWARM_MODE_ENTRY_KIND: &str = "kage:swarm_mode";
+
 /// One row in `kage list`. Reflects the persisted state of a session file
 /// at the moment of listing; subsequent appends will not be visible until
 /// [`list`] is called again.

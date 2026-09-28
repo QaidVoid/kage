@@ -316,6 +316,9 @@ struct Session {
     /// Messages to add to history once the session is idle, such as
     /// shell output that arrived while a run was in flight.
     pending_history: Vec<Message>,
+    /// Custom entries to append once the recorder is back, so a swarm
+    /// mode toggle during a run is still persisted.
+    pending_entries: Vec<kage_session::Custom>,
     /// User shell commands still running.
     shells: usize,
     /// Program shell commands run with (`[shell] program`).
@@ -478,6 +481,7 @@ impl Dispatcher {
                 path,
                 workdir,
                 pending_history: Vec::new(),
+                pending_entries: Vec::new(),
                 shells: 0,
                 title,
                 title_pending,
@@ -617,7 +621,8 @@ impl Dispatcher {
 
     /// Turn the session's swarm mode on or off. Only a change injects
     /// the workflow block or the exit note, as a user message that
-    /// lands in the history like shell output does.
+    /// lands in the history like shell output does, plus a custom
+    /// entry that persists the state across restarts.
     fn set_swarm_mode(&mut self, id: SessionId, on: bool) {
         let session = self.sessions.get_mut(&id).expect("session checked");
         if session.swarm_mode == on {
@@ -632,6 +637,30 @@ impl Dispatcher {
         session
             .pending_history
             .push(Message::new(Role::User, vec![Content::Text { text }], None));
+        let entry = kage_session::Custom {
+            id: kage_session::EntryId::new(),
+            ts: chrono::Utc::now(),
+            kind: kage_session::list::SWARM_MODE_ENTRY_KIND.to_owned(),
+            data: serde_json::json!({ "on": on }),
+        };
+        match session
+            .idle
+            .as_mut()
+            .and_then(|idle| idle.recorder.as_mut())
+        {
+            Some(recorder) => {
+                let append = recorder.append(&kage_session::SessionEntry::Custom(entry));
+                if let Err(err) = append {
+                    notice(
+                        &self.bus,
+                        id,
+                        NoticeLevel::Error,
+                        format!("session write failed: {err}"),
+                    );
+                }
+            }
+            None => session.pending_entries.push(entry),
+        }
         notice(
             &self.bus,
             id,
@@ -882,6 +911,12 @@ impl Dispatcher {
             &mut cx,
             recorder.as_mut(),
             session.pending_history.drain(..),
+        );
+        flush_entries(
+            &self.bus,
+            id,
+            recorder.as_mut(),
+            session.pending_entries.drain(..),
         );
         if outcome == RunOutcome::Completed && session.title_pending {
             session.title_pending = false;
@@ -1206,6 +1241,30 @@ fn append_history(
     }
 }
 
+/// Append the swarm mode markers that queued while the session was
+/// busy. Callers hold the recorder.
+fn flush_entries(
+    bus: &Bus,
+    id: SessionId,
+    recorder: Option<&mut Recorder>,
+    entries: impl IntoIterator<Item = kage_session::Custom>,
+) {
+    let Some(recorder) = recorder else {
+        return;
+    };
+    for entry in entries {
+        let append = recorder.append(&kage_session::SessionEntry::Custom(entry));
+        if let Err(err) = append {
+            notice(
+                bus,
+                id,
+                NoticeLevel::Error,
+                format!("session write failed: {err}"),
+            );
+        }
+    }
+}
+
 /// Move the messages that arrived while `session` was busy into its
 /// history, once it is idle.
 fn flush_pending(bus: &Bus, id: SessionId, session: &mut Session) {
@@ -1216,6 +1275,12 @@ fn flush_pending(bus: &Bus, id: SessionId, session: &mut Session) {
             cx,
             recorder.as_mut(),
             session.pending_history.drain(..),
+        );
+        flush_entries(
+            bus,
+            id,
+            recorder.as_mut(),
+            session.pending_entries.drain(..),
         );
     }
 }

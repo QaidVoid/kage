@@ -2377,6 +2377,70 @@ fn swarm_mode_injects_its_block_once_at_the_next_run() {
     );
 }
 
+#[test]
+fn swarm_mode_survives_a_restart_without_reinjecting_the_block() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = SessionId::new();
+    let (recorder, path) = recorder_in(dir.path(), id);
+    let mock = MockProvider::sequence(vec![text_turn("done")]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    h.open(id, Some(recorder));
+    h.engine
+        .send(Command::to(id, CommandKind::SwarmMode { on: true }));
+    prompt(&h.engine, id, "go", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+    h.engine.shutdown();
+
+    // A fresh engine loads the recorded session and finds the mode on.
+    let mock = MockProvider::sequence(vec![text_turn("done again"), text_turn("done more")]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let fresh = SessionId::new();
+    h.open(fresh, None);
+    h.engine
+        .send(Command::to(fresh, CommandKind::LoadSession { path }));
+    let seen = wait_for(&h.events, is_session_changed);
+    let loaded = seen.last().unwrap().session;
+
+    // Toggling on again must not inject a second block.
+    h.engine
+        .send(Command::to(loaded, CommandKind::SwarmMode { on: true }));
+    prompt(&h.engine, loaded, "more", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+    let count_on = |req: &kage_provider::StreamRequest| {
+        req.messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|c| match c {
+                Content::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .filter(|t| t.starts_with("[swarm mode on]"))
+            .count()
+    };
+    let requests = mock.requests();
+    assert_eq!(count_on(requests.last().unwrap()), 1);
+
+    // The restored flag is on, so turning it off does inject the note.
+    h.engine
+        .send(Command::to(loaded, CommandKind::SwarmMode { on: false }));
+    prompt(&h.engine, loaded, "even more", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+    let requests = mock.requests();
+    let off = requests
+        .last()
+        .unwrap()
+        .messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|c| match c {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .filter(|t| t.starts_with("[swarm mode off]"))
+        .count();
+    assert_eq!(off, 1, "the restored mode must be on, so off injects");
+}
+
 /// One assistant turn that calls `send_message` once.
 fn send_message_turn(
     id: &str,

@@ -206,7 +206,7 @@ pub const OPTIONS: &[OptionDef] = &[
             max: 86_400_000,
             default: 7_200_000,
         },
-        doc: "Overall deadline in milliseconds for one swarm call. On deadline its unfinished children are cancelled and the results so far are returned.",
+        doc: "Milliseconds one swarm child may run, measured from its run start (not while queued). On deadline the child is cancelled and renders as cancelled in the aggregate.",
         live: false,
     },
 ];

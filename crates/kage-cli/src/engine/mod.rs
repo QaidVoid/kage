@@ -23,7 +23,7 @@ mod swarm_tool;
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Duration;
@@ -229,6 +229,8 @@ impl Engine {
             next_request: Arc::default(),
             waiting: VecDeque::new(),
             shutting_down: false,
+            engine_shutdown: Arc::new(AtomicBool::new(false)),
+            watchdogs: HashMap::new(),
         };
         let thread = thread::spawn(move || dispatcher.run(&rx));
         Self {
@@ -348,6 +350,13 @@ struct Dispatcher {
     /// Agents over the running limit, in spawn order.
     waiting: VecDeque<SessionId>,
     shutting_down: bool,
+    /// Shared with the swarm timeout watchdogs so they stop polling
+    /// once the engine is shutting down.
+    engine_shutdown: Arc<AtomicBool>,
+    /// Per running swarm member, the flag its watchdog polls. Set
+    /// false when the run ends, so a late fire cannot cancel the
+    /// member's next run.
+    watchdogs: HashMap<SessionId, Arc<AtomicBool>>,
 }
 
 impl Dispatcher {
@@ -497,6 +506,7 @@ impl Dispatcher {
         match command.kind {
             CommandKind::Shutdown => {
                 self.shutting_down = true;
+                self.engine_shutdown.store(true, Ordering::Relaxed);
                 for session in self.sessions.values() {
                     session.cancel.cancel();
                 }
@@ -786,7 +796,57 @@ impl Dispatcher {
         };
         let state = session.state.clone();
         self.bus.publish(id, HostEvent::StateChanged { state });
+        self.arm_swarm_watchdog(id);
         run.spawn(self.tx.clone());
+    }
+
+    /// Cancel a running swarm member when its per-run deadline of
+    /// `swarm_timeout_ms` passes. Armed at run start and disarmed at
+    /// run end, so children queued behind the running limit burn none
+    /// of their budget and a late fire cannot cancel the member's next
+    /// run. Deadline and user cancellation both surface as
+    /// `Cancelled`.
+    fn arm_swarm_watchdog(&mut self, id: SessionId) {
+        let Some(session) = self.sessions.get(&id) else {
+            return;
+        };
+        let is_swarm_member = session
+            .link
+            .as_ref()
+            .is_some_and(|link| link.batch_id.is_some());
+        let timeout = if is_swarm_member {
+            session
+                .agents
+                .as_ref()
+                .map(|setup| Duration::from_millis(setup.swarm_timeout_ms))
+        } else {
+            None
+        };
+        let Some(timeout) = timeout else {
+            return;
+        };
+        let armed = Arc::new(AtomicBool::new(true));
+        if let Some(previous) = self.watchdogs.insert(id, Arc::clone(&armed)) {
+            previous.store(false, Ordering::Relaxed);
+        }
+        let cancel = session.cancel.clone();
+        let shutdown = Arc::clone(&self.engine_shutdown);
+        thread::spawn(move || {
+            let mut elapsed = Duration::ZERO;
+            while elapsed < timeout {
+                if shutdown.load(Ordering::Relaxed) || !armed.load(Ordering::Relaxed) {
+                    return;
+                }
+                let step = timeout
+                    .checked_sub(elapsed)
+                    .map_or(WATCHDOG_SLICE, |rest| WATCHDOG_SLICE.min(rest));
+                thread::sleep(step);
+                elapsed += step;
+            }
+            if armed.load(Ordering::Relaxed) && !shutdown.load(Ordering::Relaxed) {
+                cancel.cancel();
+            }
+        });
     }
 
     fn finish(&mut self, finished: Finished) {
@@ -797,6 +857,9 @@ impl Dispatcher {
             usage,
             outcome,
         } = finished;
+        if let Some(armed) = self.watchdogs.remove(&id) {
+            armed.store(false, Ordering::Relaxed);
+        }
         let Some(session) = self.sessions.get_mut(&id) else {
             return;
         };
@@ -1056,6 +1119,10 @@ fn thinking_entry(level: Option<ThinkingLevel>) -> kage_session::SessionEntry {
 
 /// How the automatic thinking level is named in session entries, the
 /// ACP thinking option and the TUI.
+/// How often a swarm timeout watchdog rechecks its run-end flag, so a
+/// disarmed or shutdown watchdog stops within this slice.
+const WATCHDOG_SLICE: Duration = Duration::from_millis(250);
+
 pub(crate) const AUTO_THINKING: &str = "default";
 
 /// Set what `cx` takes from `model` (`provider:model`): its prompt

@@ -79,10 +79,12 @@ fixed 3 warnings: ...
 The children go through the same queue as `agent` calls, so
 `agent_max_running` throttles them, and each child shows up as a live
 card and an agent-tree entry. The call is an error only when every
-child failed. When the overall deadline `swarm_timeout_ms` passes,
-the children that are still running are cancelled and the results so
-far are returned; the same happens when you cancel the session. A
-swarm call must be the only tool call in its message.
+child failed. Each child gets its own budget: it may run for
+`swarm_timeout_ms` from the moment its run starts, and a child still
+running at its deadline is cancelled and renders as cancelled in the
+aggregate. A child waiting in the queue does not burn its budget. The
+same happens to all children when you cancel the session. A swarm
+call must be the only tool call in its message.
 
 Use a swarm when one task shape repeats over many inputs, such as the
 same fix across many crates or a review of many files. For a few
@@ -293,7 +295,7 @@ covers every agent of the session.
 | `agent_max_depth` | `agents.max_depth` | 0 to 3 | `1` | How deep agents nest. `0` removes the `agent` tool, and `1` lets only the main session start agents. |
 | `agent_max_running` | `agents.max_running` | 1 to 16 | `4` | How many agents run at once. Further agents wait in a queue and start in order as others finish. |
 | `swarm_max_items` | `agents.swarm_max_items` | 2 to 128 | `32` | Most members one `swarm` call may run: items plus resumed children together. |
-| `swarm_timeout_ms` | `agents.swarm_timeout_ms` | 1,000 to 86,400,000 | `7,200,000` | Overall deadline in milliseconds for one `swarm` call. On deadline its unfinished children are cancelled and the results so far are returned. |
+| `swarm_timeout_ms` | `agents.swarm_timeout_ms` | 1,000 to 86,400,000 | `7,200,000` | Milliseconds one swarm child may run, measured from its run start (not while queued). On deadline the child is cancelled and renders as cancelled in the aggregate. |
 
 Set them in `config.toml`:
 

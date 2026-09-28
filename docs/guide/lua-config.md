@@ -137,9 +137,9 @@ level the model accepts.
 `agent_max_depth` limits how deep [agents](/guide/agents) nest: `1`
 lets only the main session start agents. `agent_max_running` limits
 how many agents run at once, and further agents wait their turn.
-`swarm_max_items` and `swarm_timeout_ms` bound one
+`swarm_max_items` and `swarm_timeout_ms` bound a
 [`swarm`](/guide/agents#swarms) call: the most items it may run and
-its overall deadline. All are read once when the TUI starts, after
+the time one child may run from its start. All are read once when the TUI starts, after
 `init.lua` has run.
 
 Every set fires the [`option_set`](#configuration-events) event. `/theme set`,

@@ -104,6 +104,7 @@ pub(super) struct SwarmTool {
     description: String,
     schema: serde_json::Value,
     max_items: usize,
+    /// Per-child run budget in milliseconds, from its run start.
     timeout: Duration,
 }
 
@@ -281,26 +282,32 @@ impl Tool for SwarmTool {
             return Ok(agent_tool::error_output("the engine stopped".to_owned()));
         }
         let ids: Vec<SessionId> = members.iter().map(|member| member.id).collect();
-        let arrived = collect(total, &ids, self.timeout, &results, &self.engine, cx);
+        let backstop = self
+            .timeout
+            .saturating_mul(u32::try_from(total).unwrap_or(u32::MAX).saturating_add(1));
+        let arrived = collect(total, &ids, backstop, &results, &self.engine, cx);
         Ok(render(RESULT_CAP, &input.description, &members, &arrived))
     }
 }
 
-/// Wait for every child, with an overall deadline. On deadline the
-/// children that never reported are cancelled and the results that
-/// still land within a short grace are kept. When the parent is
-/// cancelled, whatever arrived is kept and the rest renders as
-/// cancelled.
+/// Wait for every child to deliver. Each child carries its own
+/// deadline (the engine's watchdog cancels it at `swarm_timeout_ms`
+/// from its run start), so a batch of many children is not cut off by
+/// one whole-call timer; `backstop` is only a last resort for a
+/// wedged engine. When the parent is cancelled, whatever arrived is
+/// kept and the rest renders as cancelled. On backstop or engine
+/// shutdown, the children that never reported are cancelled and the
+/// results that still land within a short grace are kept.
 fn collect(
     total: usize,
     children: &[SessionId],
-    timeout: Duration,
+    backstop: Duration,
     results: &crossbeam_channel::Receiver<ToolOutput>,
     engine: &mpsc::Sender<Input>,
     cx: &ToolContext<'_>,
 ) -> Vec<ToolOutput> {
     let watch = cx.cancel_flag().watch();
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now() + backstop;
     let mut arrived: Vec<ToolOutput> = Vec::with_capacity(total);
     let cancelled = loop {
         let Some(left) = deadline.checked_duration_since(Instant::now()) else {

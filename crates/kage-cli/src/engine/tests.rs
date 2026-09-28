@@ -1846,6 +1846,38 @@ fn a_swarm_timeout_cancels_stragglers_and_renders() {
 }
 
 #[test]
+fn a_queued_child_keeps_its_own_timeout_budget() {
+    // The stalled child is cancelled at its deadline; the queued child
+    // then runs and completes even though the batch by then has
+    // outlived `swarm_timeout_ms` many times over.
+    let h = harness(MockProvider::sequence(vec![
+        swarm_turn(&[("call_s", swarm_task(&["held", "late"]))]),
+        tool_turn("gate"),
+        text_turn("late reply"),
+        text_turn("parent done"),
+    ]));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(swarm_setup(1, 300)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 3);
+    h.engine.shutdown();
+
+    let output = tool_output(&events, parent, "call_s");
+    assert!(
+        output
+            .text
+            .starts_with("completed: 1, failed: 0, cancelled: 1\n"),
+        "{}",
+        output.text
+    );
+    assert!(output.text.contains("late reply"), "{}", output.text);
+    assert!(!output.is_error, "{}", output.text);
+}
+
+#[test]
 fn cancelling_the_parent_mid_swarm_renders_the_fleet_cancelled() {
     let h = harness(MockProvider::sequence(vec![
         swarm_turn(&[("call_s", swarm_task(&["a", "b", "c"]))]),

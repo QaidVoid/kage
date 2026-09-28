@@ -280,7 +280,7 @@ pub struct AgentsConfig {
     pub max_running: u32,
     /// Most items one `swarm` call may run, one child agent per item.
     pub swarm_max_items: u32,
-    /// Overall deadline in milliseconds for one `swarm` call.
+    /// Milliseconds one swarm child may run, from its run start.
     pub swarm_timeout_ms: u64,
 }
 

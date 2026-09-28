@@ -112,7 +112,15 @@ call blocks on the tool thread until every child settles or the
 `swarm_timeout_ms` deadline cancels the stragglers; cancelling the
 parent cancels the whole fleet through the cancel tree. The loop
 refuses a swarm call that shares its message with any other call, so
-a batch of children never races an unrelated tool.
+a batch of children never races an unrelated tool. The same call can
+also re-prompt earlier children: a `resume` map of child session id
+to prompt is verified against the session markers first, then
+attached. A hosted child gets its reply channel re-armed and the
+prompt queued; a child no longer hosted is reopened from its session
+file with its history, model and definition intact. Swarm mode
+(`/swarm`) injects a workflow block into the session's pending
+history on the way up and an exit note on the way down, once per
+switch.
 
 **The cancel tree.** `CancelFlag` is a node with an optional parent.
 An agent's flag is a child of its parent's, and `is_cancelled` walks up

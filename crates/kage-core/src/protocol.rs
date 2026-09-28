@@ -468,6 +468,14 @@ pub enum CommandKind {
         /// Configured server name.
         server: String,
     },
+    /// Turn the session's swarm mode on or off. Turning it on injects
+    /// the swarm workflow block into the context once; turning it off
+    /// injects a short exit note. A set that changes nothing injects
+    /// nothing.
+    SwarmMode {
+        /// Whether the session delegates repeated work through `swarm`.
+        on: bool,
+    },
     /// Cancel every run and stop the engine.
     Shutdown,
 }

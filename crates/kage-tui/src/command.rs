@@ -349,6 +349,18 @@ pub(crate) static BUILTIN_COMMANDS: &[CommandSpec] = &[
         subcommands: &[],
     },
     CommandSpec {
+        name: "swarm",
+        aliases: &[],
+        description: "turn swarm mode on or off, or hand one task to a swarm now",
+        category: CommandCategory::Both,
+        args: &[ArgSpec::Rest {
+            name: "state",
+            optional: true,
+            hint: "[on|off|<task>]",
+        }],
+        subcommands: &[],
+    },
+    CommandSpec {
         name: "todo_list",
         aliases: &["todos"],
         description: "show every task of the session's todo list",
@@ -712,7 +724,7 @@ mod tests {
 
     #[test]
     fn builtin_registry_has_expected_command_count() {
-        assert_eq!(BUILTIN_COMMANDS.len(), 26);
+        assert_eq!(BUILTIN_COMMANDS.len(), 27);
     }
 
     #[test]

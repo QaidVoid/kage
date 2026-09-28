@@ -79,6 +79,14 @@ impl MockProvider {
     pub fn last_request(&self) -> Option<StreamRequest> {
         lock(&self.requests).last().cloned()
     }
+
+    /// Append one script to the sequence queue, for scripts that need
+    /// runtime values such as session ids from an earlier turn.
+    pub fn push_script(&self, script: Vec<Result<ProviderEvent, ProviderError>>) {
+        if let ReplayMode::Sequence(scripts) = &mut *lock(&self.mode) {
+            scripts.push(script);
+        }
+    }
 }
 
 impl Provider for MockProvider {

@@ -6,12 +6,13 @@ use kage_core::agents::AgentDef;
 use kage_core::protocol::{HostEvent, NoticeLevel, RunOutcome};
 use kage_core::sync::lock;
 use kage_core::{Content, Message, Role, SessionId, ToolCallId, ToolOutput};
-use kage_loop::AgentContext;
+use kage_loop::{AgentContext, TokenBudget};
+use kage_provider::ProviderRegistry;
 use kage_tools::ToolRegistry;
 
 use super::agent_tool::{self, AGENT_TOOL, Spawn};
 use super::runner::Work;
-use super::{AgentSetup, Recorder, Session, SessionSpec, notice};
+use super::{AgentSetup, Attach, Recorder, ResumeChild, Session, SessionSpec, notice};
 
 /// How an agent session hangs off the session that started it.
 pub(super) struct AgentLink {
@@ -22,7 +23,6 @@ pub(super) struct AgentLink {
     /// The swarm call this child belongs to, when a `swarm` call
     /// spawned it. Names the child in its session marker, so a later
     /// phase can tell swarm children from plain agents.
-    #[expect(dead_code, reason = "read once resume and the mailbox land")]
     pub(super) batch_id: Option<ToolCallId>,
     /// Delivers the result to the waiting `agent` call. Taken by the
     /// first run that finishes, so later runs a user starts in the
@@ -95,15 +95,8 @@ impl super::Dispatcher {
             marker["item"] = serde_json::Value::String(info.item.clone());
         }
 
-        self.bus.publish(
-            id,
-            HostEvent::AgentSpawned {
-                parent,
-                tool_call_id,
-                agent,
-                description: description.clone(),
-            },
-        );
+        let max = setup.max_running;
+        self.publish_agent_opened(id, parent, tool_call_id, agent, description.clone());
         self.open(spec, cancel, Some(link));
         self.record_agent_entries(id, marker, description);
         for name in missing {
@@ -115,13 +108,174 @@ impl super::Dispatcher {
             );
         }
         let content = vec![Content::Text { text: prompt }];
-        if self.running_agents() < setup.max_running {
+        self.launch_agent(id, max, content);
+    }
+
+    /// Publish the `AgentSpawned` event that opens a child's card.
+    fn publish_agent_opened(
+        &self,
+        id: SessionId,
+        parent: SessionId,
+        tool_call_id: ToolCallId,
+        agent: String,
+        description: String,
+    ) {
+        self.bus.publish(
+            id,
+            HostEvent::AgentSpawned {
+                parent,
+                tool_call_id,
+                agent,
+                description,
+            },
+        );
+    }
+
+    /// Start `content` as the first run of the agent session `id`, or
+    /// queue it past the running limit.
+    fn launch_agent(&mut self, id: SessionId, max: usize, content: Vec<Content>) {
+        if self.running_agents() < max {
             self.start_run(id, Work::Prompt(Message::new(Role::User, content, None)));
         } else {
             let session = self.sessions.get_mut(&id).expect("session opened");
             session.queued.push_back(content);
             self.waiting.push_back(id);
         }
+    }
+
+    /// Check that every id names a swarm child of `parent` before the
+    /// caller attaches to any of them. Each child's session file must
+    /// carry a `kage:agent` marker that names this parent and a batch.
+    /// Returns the marker facts in the order asked, or the reason the
+    /// whole call is refused.
+    pub(super) fn verify_resume(
+        &self,
+        parent: SessionId,
+        ids: &[SessionId],
+    ) -> Result<Vec<ResumeChild>, String> {
+        let dir = self
+            .sessions
+            .get(&parent)
+            .and_then(|s| s.path.as_deref())
+            .and_then(Path::parent)
+            .ok_or_else(|| {
+                "this session is not recorded, so it has no swarm children to resume".to_owned()
+            })?;
+        let mut children = Vec::with_capacity(ids.len());
+        for id in ids {
+            let marker = agent_marker(&dir.join(format!("{id}.jsonl")))
+                .ok_or_else(|| format!("session {id} is not a swarm child of this session"))?;
+            let text = |key: &str| {
+                marker
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            if text("parent") != parent.to_string() || text("batch_id").is_empty() {
+                return Err(format!("session {id} is not a swarm child of this session"));
+            }
+            children.push(ResumeChild {
+                id: *id,
+                item: text("item"),
+                agent: text("agent"),
+                description: text("description"),
+            });
+        }
+        Ok(children)
+    }
+
+    /// Re-prompt an existing swarm child with a follow-up. A hosted
+    /// child gets its reply channel re-armed and the prompt queued or
+    /// started. A child no longer hosted (the parent's session was
+    /// resumed or the engine restarted) is opened from its session
+    /// file first, keeping its original agent definition and history.
+    pub(super) fn attach(&mut self, attach: Attach) {
+        let Attach {
+            parent,
+            id,
+            agent,
+            description,
+            batch_id,
+            prompt,
+            reply,
+        } = attach;
+        let fail = |text: String| {
+            let _ = reply.send(agent_tool::error_output(text));
+        };
+        let Some(setup) = self.sessions.get(&parent).and_then(|s| s.agents.clone()) else {
+            return fail("agents are turned off".to_owned());
+        };
+        let content = vec![Content::Text { text: prompt }];
+        if let Some(session) = self.sessions.get_mut(&id) {
+            let Some(link) = session.link.as_mut() else {
+                return fail(format!("session {id} is not a swarm child of this session"));
+            };
+            if link.parent != parent || link.batch_id.is_none() {
+                return fail(format!("session {id} is not a swarm child of this session"));
+            }
+            link.reply = Some(reply);
+            let max = setup.max_running;
+            self.launch_agent(id, max, content);
+            return;
+        }
+        // Not hosted: open the child from its session file.
+        let Some(dir) = self
+            .sessions
+            .get(&parent)
+            .and_then(|s| s.path.as_deref())
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+        else {
+            return fail(format!("session {id} is not a swarm child of this session"));
+        };
+        let path = dir.join(format!("{id}.jsonl"));
+        let replay = match kage_session::replay(&path) {
+            Ok(replay) => replay,
+            Err(err) => return fail(format!("cannot read session {id}: {err}")),
+        };
+        if replay.header.session != id {
+            return fail(format!("session {id} is not a swarm child of this session"));
+        }
+        let writer = match kage_session::SessionWriter::open(&path) {
+            Ok(writer) => writer,
+            Err(err) => return fail(format!("cannot append to session {id}: {err}")),
+        };
+        let opened = {
+            let from = self.sessions.get(&parent).expect("checked above");
+            let Some(def) = setup.defs.get(&agent) else {
+                return fail(format!(
+                    "agent definition `{agent}` is gone; cannot resume session {id}"
+                ));
+            };
+            let (spec, missing, note) =
+                resumed_spec(from, id, &replay, def, &setup, writer, &self.registry);
+            let cancel = from.cancel.child();
+            let link = AgentLink {
+                parent,
+                agent: agent.clone(),
+                depth: depth_of(from) + 1,
+                batch_id: Some(batch_id.clone()),
+                reply: Some(reply),
+            };
+            (spec, missing, note, cancel, link)
+        };
+        let (spec, missing, note, cancel, link) = opened;
+        self.publish_agent_opened(id, parent, batch_id, agent, description);
+        self.open(spec, cancel, Some(link));
+        if let Some(note) = note {
+            notice(&self.bus, id, NoticeLevel::Warning, note);
+        }
+        for name in missing {
+            notice(
+                &self.bus,
+                id,
+                NoticeLevel::Warning,
+                format!("agent tools: no tool named `{name}`"),
+            );
+        }
+        let max = setup.max_running;
+        self.launch_agent(id, max, content);
     }
 
     /// Write the `kage:agent` marker and the title right after the header.
@@ -321,6 +475,81 @@ fn agent_spec(
 /// 0 for a main session, 1 for its agents, and so on.
 pub(super) fn depth_of(session: &Session) -> u8 {
     session.link.as_ref().map_or(0, |l| l.depth)
+}
+
+/// The `kage:agent` marker data of the session file at `path`, read
+/// from the entries right after the header. `None` when those entries
+/// hold no marker, which includes a missing file.
+fn agent_marker(path: &Path) -> Option<serde_json::Value> {
+    let reader = kage_session::SessionReader::iter(path).ok()?;
+    for entry in reader.take(3) {
+        let Ok(kage_session::SessionEntry::Custom(custom)) = entry else {
+            continue;
+        };
+        if custom.kind == kage_session::list::AGENT_ENTRY_KIND {
+            return Some(custom.data);
+        }
+    }
+    None
+}
+
+/// The session spec that re-opens a swarm child from its session
+/// file: the recorded model, or the parent's when the recorded one is
+/// unavailable (with the note to show), the recorded system prompt,
+/// thinking level, history and usage, and the definition's tools over
+/// the parent's current tools. The child keeps appending to its own
+/// session file.
+fn resumed_spec(
+    from: &Session,
+    id: SessionId,
+    replay: &kage_session::ReplayResult,
+    def: &AgentDef,
+    setup: &AgentSetup,
+    writer: kage_session::SessionWriter,
+    registry: &ProviderRegistry,
+) -> (SessionSpec, Vec<String>, Option<String>) {
+    let (model, note) = if registry.resolve(&replay.model).is_ok() {
+        (replay.model.clone(), None)
+    } else {
+        (
+            from.state.model.clone(),
+            Some(format!(
+                "session model {} unavailable; using {} instead",
+                replay.model, from.state.model
+            )),
+        )
+    };
+    let mut cx = AgentContext::new(model.clone(), replay.header.system_prompt.clone())
+        .with_workdir(from.workdir.clone());
+    cx.confine_paths = from.confine_paths;
+    cx.thinking_level = replay
+        .thinking_level
+        .as_deref()
+        .and_then(kage_core::ThinkingLevel::parse);
+    cx.budget = TokenBudget {
+        used_input: replay.usage_total.input,
+        used_output: replay.usage_total.output,
+        used_cache_read: replay.usage_total.cache_read,
+        used_cache_write: replay.usage_total.cache_write,
+        current_context: replay.usage_total.last_context,
+    };
+    let (tools, missing) = agent_tools(&from.tools, def.tools.as_deref());
+    let spec = SessionSpec {
+        id,
+        model,
+        cx,
+        recorder: Some(Recorder::new(writer, None)),
+        tools,
+        plugins: None,
+        gate: from.gate.clone(),
+        loop_cfg: from.loop_cfg,
+        mcp: None,
+        interactive: from.interactive,
+        title: false,
+        agents: Some(setup.clone()),
+        shell: from.shell.clone(),
+    };
+    (spec, missing, note)
 }
 
 /// The tools an agent gets: `parent`'s, narrowed to `only` when the

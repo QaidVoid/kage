@@ -209,6 +209,10 @@ impl App {
                 self.open_agents();
                 None
             }
+            "swarm" => {
+                self.run_swarm_command(rest);
+                None
+            }
             "todo_list" => {
                 self.open_todo_list();
                 None
@@ -356,6 +360,43 @@ impl App {
             return;
         };
         let _ = self.send_request(RunRequest::SetPermissionMode(mode));
+    }
+
+    /// Handle `/swarm [on|off|task]`: flip the session's swarm mode,
+    /// or run one task as a one-shot swarm that turns itself off when
+    /// the run ends.
+    pub(crate) fn run_swarm_command(&mut self, rest: &str) {
+        let arg = rest.trim();
+        match arg {
+            "" => {
+                self.push_error("swarm: usage `/swarm on`, `/swarm off` or `/swarm <task>`");
+            }
+            "on" | "off" => {
+                self.swarm_oneshot = None;
+                let _ = self.send_request(RunRequest::SwarmMode { on: arg == "on" });
+            }
+            task => {
+                if self.session_running(None) {
+                    self.push_error("swarm: stop the current run first");
+                    return;
+                }
+                self.swarm_oneshot = Some(task.to_owned());
+                let _ = self.send_request(RunRequest::SwarmMode { on: true });
+                let _ = self.send_request(RunRequest::Submit {
+                    text: task.to_owned(),
+                    images: Vec::new(),
+                    queue: false,
+                    session: None,
+                });
+            }
+        }
+    }
+
+    /// Turn swarm mode back off after a one-shot `/swarm <task>` run.
+    pub(crate) fn end_swarm_oneshot(&mut self) {
+        if self.swarm_oneshot.take().is_some() {
+            let _ = self.send_request(RunRequest::SwarmMode { on: false });
+        }
     }
 
     pub(crate) fn push_error(&mut self, msg: impl Into<String>) {

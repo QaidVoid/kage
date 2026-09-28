@@ -37,6 +37,7 @@ use kage_core::protocol::{
 use kage_core::sync::lock;
 use kage_core::{
     CancelFlag, Content, LoopError, Message, Role, SessionId, ThinkingLevel, TokenUsage,
+    ToolCallId, ToolOutput,
 };
 use kage_loop::{AgentContext, LoopConfig};
 use kage_mcp::{McpError, McpManager};
@@ -154,13 +155,51 @@ enum Input {
     Command(Command),
     Open(Box<SessionSpec>),
     Spawn(Box<Spawn>),
+    /// Check that every id names a swarm child of `parent` before the
+    /// caller attaches to any of them. Replies with each child's
+    /// marker facts, or the reason the whole call is refused.
+    VerifyResume {
+        parent: SessionId,
+        ids: Vec<SessionId>,
+        reply: crossbeam_channel::Sender<Result<Vec<ResumeChild>, String>>,
+    },
+    Attach(Box<Attach>),
     Finished(Box<Finished>),
     McpDone(Box<McpDone>),
     ShellDone(Box<ShellDone>),
-    Title { session: SessionId, title: String },
+    Title {
+        session: SessionId,
+        title: String,
+    },
     Publish(HostEvent),
     SetRegistry(Arc<ProviderRegistry>),
     ReloadPluginTools,
+}
+
+/// One verified resume target, from its session marker.
+pub(super) struct ResumeChild {
+    pub id: SessionId,
+    /// The item the child was first spawned for.
+    pub item: String,
+    /// The agent definition the child runs.
+    pub agent: String,
+    /// The description its first spawn showed.
+    pub description: String,
+}
+
+/// A request from a `swarm` call to re-prompt an existing child
+/// session with a follow-up.
+pub(super) struct Attach {
+    pub parent: SessionId,
+    pub id: SessionId,
+    /// The agent definition the child originally ran.
+    pub agent: String,
+    /// The description its first spawn showed.
+    pub description: String,
+    /// The resume call's batch, stamped on the link.
+    pub batch_id: ToolCallId,
+    pub prompt: String,
+    pub reply: crossbeam_channel::Sender<ToolOutput>,
 }
 
 impl Engine {
@@ -270,6 +309,9 @@ struct Session {
     link: Option<AgentLink>,
     /// Read at spawn, while the context is out with a run.
     confine_paths: bool,
+    /// Whether the session delegates repeated work through `swarm`.
+    /// Drives the workflow block injected once per state change.
+    swarm_mode: bool,
 }
 
 /// What a session holds while no run owns it.
@@ -302,6 +344,10 @@ impl Dispatcher {
                 Input::Command(command) => self.command(command),
                 Input::Open(spec) => self.open(*spec, CancelFlag::new(), None),
                 Input::Spawn(spawn) => self.spawn(*spawn),
+                Input::VerifyResume { parent, ids, reply } => {
+                    let _ = reply.send(self.verify_resume(parent, &ids));
+                }
+                Input::Attach(attach) => self.attach(*attach),
                 Input::Finished(finished) => self.finish(*finished),
                 Input::McpDone(done) => self.mcp_done(*done),
                 Input::ShellDone(done) => self.shell_done(*done),
@@ -399,6 +445,7 @@ impl Dispatcher {
                 agents,
                 link,
                 confine_paths,
+                swarm_mode: false,
             },
         );
         self.active.get_or_insert(id);
@@ -482,6 +529,7 @@ impl Dispatcher {
                 s.state.permission_mode = mode;
             }),
             CommandKind::RestartMcp { server } => self.restart_mcp(id, server),
+            CommandKind::SwarmMode { on } => self.set_swarm_mode(id, on),
             CommandKind::Shutdown | CommandKind::ResolvePermission { .. } => {}
         }
     }
@@ -523,6 +571,31 @@ impl Dispatcher {
         }
         let state = session.state.clone();
         self.bus.publish(id, HostEvent::StateChanged { state });
+    }
+
+    /// Turn the session's swarm mode on or off. Only a change injects
+    /// the workflow block or the exit note, as a user message that
+    /// lands in the history like shell output does.
+    fn set_swarm_mode(&mut self, id: SessionId, on: bool) {
+        let session = self.sessions.get_mut(&id).expect("session checked");
+        if session.swarm_mode == on {
+            return;
+        }
+        session.swarm_mode = on;
+        let text = if on {
+            swarm_tool::SWARM_MODE_ON.to_owned()
+        } else {
+            swarm_tool::SWARM_MODE_OFF.to_owned()
+        };
+        session
+            .pending_history
+            .push(Message::new(Role::User, vec![Content::Text { text }], None));
+        notice(
+            &self.bus,
+            id,
+            NoticeLevel::Info,
+            format!("swarm mode {}", if on { "on" } else { "off" }),
+        );
     }
 
     fn record_title(&mut self, id: SessionId, title: String) {

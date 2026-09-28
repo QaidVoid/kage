@@ -94,6 +94,38 @@ self-contained; and give each child a distinct scope so no work is
 duplicated and no two children edit the same file, with at most one
 agent that edits files at a time.
 
+### resuming a swarm
+
+Every child keeps its own session file, and the aggregate names each
+child's session id. When children did not complete, the aggregate
+ends with a hint, and a later `swarm` call can continue them: pass
+`resume`, a map from child session id to a follow-up prompt, instead
+of or mixed with `items`:
+
+```json
+{"description": "finish the clippy fixes",
+ "resume": {"01K62W8Q3T9V5M2C7X4B1N0R6S": "The build is fixed now; rerun clippy and fix what is left."}}
+```
+
+The engine checks every id before anything runs, and refuses the
+whole call when one id is wrong: it must name a swarm child of this
+session, so a plain `agent` child, a stranger's session or a typo is
+rejected up front. A child still hosted gets the follow-up as its
+next run. A child that only exists on disk anymore (the session was
+resumed, or kage restarted) is reopened from its file with its
+history, model and agent definition intact, and keeps appending to
+the same file.
+
+### the /swarm command
+
+`/swarm on` turns swarm mode on: the next run opens with a block that
+steers the model toward one `swarm` call per repeated task, and
+`/swarm off` turns it off again. Both notes land in the history once,
+so the model sees the switch. `/swarm <task>` is a one-shot: it turns
+the mode on, submits the task as a prompt, and turns the mode off
+when that run ends. It refuses to run while a run is already in
+flight.
+
 ## built-in agents
 
 | Agent | Tools | For |

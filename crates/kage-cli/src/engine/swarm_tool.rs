@@ -2,6 +2,7 @@
 //! template and waits for every child, then returns one aggregated
 //! result.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -14,8 +15,8 @@ use kage_tools::{ExecMode, Tool, ToolContext, ToolError};
 use serde::Deserialize;
 use ulid::Ulid;
 
-use super::Input;
 use super::agent_tool::{self, Spawn};
+use super::{Attach, Input, ResumeChild};
 
 /// Name the model calls the tool by.
 pub(super) const SWARM_TOOL: &str = "swarm";
@@ -34,6 +35,28 @@ const RESULT_CAP: usize = 100_000;
 
 /// Marks a body the result cap cut.
 const BODY_CUT: &str = "\n[body truncated to fit the result cap]";
+
+/// How long the tool waits for the engine's answer to a resume
+/// check. The engine answers on its own thread, so this only guards
+/// against a stopped or wedged engine.
+const VERIFY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Appended when any child did not complete, so the model knows the
+/// fleet can be continued.
+const RESUME_HINT: &str = "[hint: some children did not complete. Call swarm again with \
+resume, mapping their session ids above to a follow-up prompt.]";
+
+/// Context block injected once when a session's swarm mode turns on.
+pub(crate) const SWARM_MODE_ON: &str = "[swarm mode on] Explore the task yourself first: \
+read, grep and find before you delegate. Then hand the repeated work to one `swarm` call: \
+one child agent per item, each expanded prompt self-contained because children start with \
+zero context, a distinct scope per child so no work is duplicated and no two children edit \
+the same file, and at most one child that edits files at a time. When the tasks differ, \
+make several `agent` calls instead. Turn swarm mode off with `/swarm off`.";
+
+/// Context block injected once when a session's swarm mode turns off.
+pub(crate) const SWARM_MODE_OFF: &str = "[swarm mode off] Back to the normal workflow: do the \
+work yourself or use `agent` calls for separate tasks.";
 
 /// Identifies one child of a `swarm` call, recorded in the child's
 /// session marker.
@@ -55,11 +78,14 @@ struct SwarmInput {
     description: String,
     #[serde(default = "default_agent")]
     agent: String,
-    prompt_template: String,
+    #[serde(default)]
+    prompt_template: Option<String>,
+    #[serde(default)]
     items: Vec<String>,
+    #[serde(default)]
+    resume: BTreeMap<String, String>,
     /// Reserved for a later phase; rejected.
-    resume: Option<serde_json::Value>,
-    /// Reserved for a later phase; rejected.
+    #[serde(default)]
     fork: Option<serde_json::Value>,
 }
 
@@ -119,25 +145,27 @@ impl SwarmTool {
                 "prompt_template": {
                     "type": "string",
                     "description":
-                        format!("Task template; every {PLACEHOLDER} is replaced with the item.")
+                        format!("Task template for the items; every {PLACEHOLDER} is replaced with the item. Required with items.")
                 },
                 "items": {
                     "type": "array",
                     "items": { "type": "string" },
                     "minItems": 2,
                     "maxItems": max_items,
-                    "description": "One child per entry, substituted into the template."
+                    "description": "One new child per entry, substituted into the template. Required without resume."
                 },
                 "resume": {
                     "type": "object",
-                    "description": "Reserved. Not supported yet."
+                    "additionalProperties": { "type": "string" },
+                    "description":
+                        "Map of child session id to a follow-up prompt, to continue children of an earlier swarm call of this session instead of spawning new ones. Mixes with items."
                 },
                 "fork": {
                     "type": "boolean",
                     "description": "Reserved. Not supported yet."
                 }
             },
-            "required": ["description", "prompt_template", "items"]
+            "required": ["description"]
         });
         Self {
             parent,
@@ -182,21 +210,46 @@ impl Tool for SwarmTool {
         cx: &ToolContext<'_>,
     ) -> Result<ToolOutput, ToolError> {
         let input: SwarmInput = serde_json::from_value(input)?;
-        let prompts = match expand(&input, &self.defs, self.max_items) {
-            Ok(prompts) => prompts,
+        let call = match expand(&input, &self.defs, self.max_items) {
+            Ok(call) => call,
             Err(text) => return Ok(agent_tool::error_output(text)),
         };
         let call_id = cx
             .call_id()
             .cloned()
             .ok_or_else(|| ToolError::InvalidInput("the swarm tool needs a call id".into()))?;
-        let total = prompts.len();
+        let total = call.items.len() + call.resume.len();
         let batch_id = ToolCallId::new(format!("swarm_{}", Ulid::generate()));
         // One channel for the whole batch: every child delivers its
         // result once, so the tool receives exactly `total` results.
         let (reply, results) = crossbeam_channel::bounded(total);
-        let mut children = Vec::with_capacity(total);
-        for (index, (item, prompt)) in input.items.iter().zip(prompts).enumerate() {
+        let mut members: Vec<Member> = Vec::with_capacity(total);
+        if !call.resume.is_empty() {
+            let children = match self.verify_resume(&call.resume) {
+                Ok(children) => children,
+                Err(text) => return Ok(agent_tool::error_output(text)),
+            };
+            for (child, (_, prompt)) in children.into_iter().zip(&call.resume) {
+                let attach = Attach {
+                    parent: self.parent,
+                    id: child.id,
+                    agent: child.agent.clone(),
+                    description: child.description,
+                    batch_id: batch_id.clone(),
+                    prompt: prompt.clone(),
+                    reply: reply.clone(),
+                };
+                if self.engine.send(Input::Attach(Box::new(attach))).is_err() {
+                    break;
+                }
+                members.push(Member {
+                    id: child.id,
+                    item: child.item.clone(),
+                    agent: child.agent.clone(),
+                });
+            }
+        }
+        for (index, (item, prompt)) in call.items.into_iter().enumerate() {
             let id = SessionId::new();
             let spawn = Spawn {
                 parent: self.parent,
@@ -215,21 +268,19 @@ impl Tool for SwarmTool {
             if self.engine.send(Input::Spawn(Box::new(spawn))).is_err() {
                 break;
             }
-            children.push(id);
+            members.push(Member {
+                id,
+                item,
+                agent: input.agent.clone(),
+            });
         }
         drop(reply);
-        if children.is_empty() {
+        if members.is_empty() {
             return Ok(agent_tool::error_output("the engine stopped".to_owned()));
         }
-        let arrived = collect(total, &children, self.timeout, &results, &self.engine, cx);
-        Ok(render(
-            RESULT_CAP,
-            &input.description,
-            &input.agent,
-            &input.items,
-            &children,
-            &arrived,
-        ))
+        let ids: Vec<SessionId> = members.iter().map(|member| member.id).collect();
+        let arrived = collect(total, &ids, self.timeout, &results, &self.engine, cx);
+        Ok(render(RESULT_CAP, &input.description, &members, &arrived))
     }
 }
 
@@ -286,63 +337,122 @@ fn collect(
     arrived
 }
 
-/// Expand the call into one prompt per item, or the reason it is
-/// invalid. The rules are whole-call: nothing spawns unless every
-/// check passes.
-fn expand(input: &SwarmInput, defs: &AgentDefs, max_items: usize) -> Result<Vec<String>, String> {
-    if input.resume.is_some() {
-        return Err("resume is not supported yet".into());
+impl SwarmTool {
+    /// Ask the engine to check every resume id before anything is
+    /// attached. Blocks until the engine answers.
+    fn verify_resume(&self, resume: &[(SessionId, String)]) -> Result<Vec<ResumeChild>, String> {
+        let (reply, verified) = crossbeam_channel::bounded(1);
+        let ids: Vec<SessionId> = resume.iter().map(|(id, _)| *id).collect();
+        if self
+            .engine
+            .send(Input::VerifyResume {
+                parent: self.parent,
+                ids,
+                reply,
+            })
+            .is_err()
+        {
+            return Err("the engine stopped".to_owned());
+        }
+        verified
+            .recv_timeout(VERIFY_TIMEOUT)
+            .map_err(|_| "the engine did not answer the resume check".to_owned())?
     }
+}
+
+/// What one call runs: one new child per item, plus the earlier
+/// children the resume map re-prompts.
+#[derive(Debug)]
+struct Call {
+    /// (item, prompt) per new child.
+    items: Vec<(String, String)>,
+    /// Session id and prompt per resumed child, in map order.
+    resume: Vec<(SessionId, String)>,
+}
+
+/// Expand the call into one prompt per item plus the resume entries,
+/// or the reason it is invalid. The rules are whole-call: nothing
+/// spawns or attaches unless every check passes.
+fn expand(input: &SwarmInput, defs: &AgentDefs, max_items: usize) -> Result<Call, String> {
     if input.fork.is_some() {
         return Err("fork is not supported yet".into());
     }
-    if defs.get(&input.agent).is_none() {
-        let names: Vec<&str> = defs.iter().map(|def| def.name.as_str()).collect();
-        return Err(format!(
-            "unknown agent `{}`. Available agents: {}",
-            input.agent,
-            names.join(", ")
-        ));
+    if input.items.is_empty() && input.resume.is_empty() {
+        return Err(
+            "a swarm needs at least 2 items, or a resume map naming the children to continue"
+                .to_owned(),
+        );
     }
-    if input.items.len() < 2 {
-        return Err(format!(
-            "a swarm needs at least 2 items (got {})",
-            input.items.len()
-        ));
-    }
-    if input.items.len() > max_items {
-        return Err(format!(
-            "a swarm is capped at {max_items} items (swarm_max_items), \
-             the call lists {}",
-            input.items.len()
-        ));
-    }
-    if !input.prompt_template.contains(PLACEHOLDER) {
-        return Err(format!(
-            "prompt_template must contain {PLACEHOLDER}, so every item has \
-             its place in the prompt"
-        ));
-    }
-    let mut prompts = Vec::with_capacity(input.items.len());
-    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for (index, item) in input.items.iter().enumerate() {
-        if item.trim().is_empty() {
-            return Err(format!("items[{}] is empty", index + 1));
-        }
-        let prompt = input.prompt_template.replace(PLACEHOLDER, item);
-        if let Some(first) = seen.get(&prompt) {
+    let mut items = Vec::new();
+    if !input.items.is_empty() {
+        if defs.get(&input.agent).is_none() {
+            let names: Vec<&str> = defs.iter().map(|def| def.name.as_str()).collect();
             return Err(format!(
-                "items {} and {} expand to the same prompt (\"{}\"); \
-                 drop one or make them differ",
-                first + 1,
-                index + 1,
-                item
+                "unknown agent `{}`. Available agents: {}",
+                input.agent,
+                names.join(", ")
             ));
         }
-        seen.insert(prompt.clone(), index);
-        prompts.push(prompt);
+        let Some(template) = &input.prompt_template else {
+            return Err("items need a prompt_template".to_owned());
+        };
+        if input.items.len() < 2 {
+            return Err(format!(
+                "a swarm needs at least 2 items (got {})",
+                input.items.len()
+            ));
+        }
+        if input.items.len() > max_items {
+            return Err(format!(
+                "a swarm is capped at {max_items} items (swarm_max_items), \
+                 the call lists {}",
+                input.items.len()
+            ));
+        }
+        if !template.contains(PLACEHOLDER) {
+            return Err(format!(
+                "prompt_template must contain {PLACEHOLDER}, so every item has \
+                 its place in the prompt"
+            ));
+        }
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for (index, item) in input.items.iter().enumerate() {
+            if item.trim().is_empty() {
+                return Err(format!("items[{}] is empty", index + 1));
+            }
+            let prompt = template.replace(PLACEHOLDER, item);
+            if let Some(first) = seen.get(&prompt) {
+                return Err(format!(
+                    "items {} and {} expand to the same prompt (\"{}\"); \
+                     drop one or make them differ",
+                    first + 1,
+                    index + 1,
+                    item
+                ));
+            }
+            seen.insert(prompt.clone(), index);
+            items.push((item.clone(), prompt));
+        }
     }
-    Ok(prompts)
+    let mut resume = Vec::with_capacity(input.resume.len());
+    for (key, prompt) in &input.resume {
+        let id = Ulid::from_string(key)
+            .map(SessionId)
+            .map_err(|_| format!("resume: `{key}` is not a session id"))?;
+        if prompt.trim().is_empty() {
+            return Err(format!("resume: the prompt for {key} is empty"));
+        }
+        resume.push((id, prompt.clone()));
+    }
+    Ok(Call { items, resume })
+}
+
+/// One slot in the swarm: a child session, the item it runs, and the
+/// agent definition it uses.
+struct Member {
+    id: SessionId,
+    item: String,
+    agent: String,
 }
 
 /// One child's slot in the aggregate result: the lines around its
@@ -366,23 +476,18 @@ impl Block {
 }
 
 /// The aggregate result: a summary line, then one `<swarm>` element
-/// per item wrapping the child's `<agent>` element. Children that
-/// never reported render as cancelled, session id included. The call
-/// is an error only when every child failed.
-fn render(
-    cap: usize,
-    description: &str,
-    agent: &str,
-    items: &[String],
-    children: &[SessionId],
-    results: &[ToolOutput],
-) -> ToolOutput {
+/// per member wrapping the child's `<agent>` element. Children that
+/// never reported render as cancelled, session id included, and a
+/// hint names the resume path. The call is an error only when every
+/// child failed.
+fn render(cap: usize, description: &str, members: &[Member], results: &[ToolOutput]) -> ToolOutput {
     // Place each result on the child it names; a result naming no
     // known child lands on the first free slot, in arrival order.
-    let mut slots: Vec<Option<&ToolOutput>> = vec![None; children.len()];
+    let mut slots: Vec<Option<&ToolOutput>> = vec![None; members.len()];
     let mut spare = 0;
     for result in results {
-        let at = session_in(result).and_then(|id| children.iter().position(|child| *child == id));
+        let at =
+            session_in(result).and_then(|id| members.iter().position(|member| member.id == id));
         if let Some(at) = at {
             slots[at] = Some(result);
         } else {
@@ -398,13 +503,12 @@ fn render(
     let mut completed = 0;
     let mut failed = 0;
     let mut cancelled = 0;
-    let mut blocks = Vec::with_capacity(children.len());
-    for (index, child) in children.iter().enumerate() {
-        let item = items.get(index).map_or("<unknown>", String::as_str);
+    let mut blocks = Vec::with_capacity(members.len());
+    for (index, member) in members.iter().enumerate() {
         let swarm_open = format!(
             "<swarm description=\"{}\" item=\"{}\">",
             escape(description),
-            escape(item)
+            escape(&member.item)
         );
         let (open, body) = match slots[index] {
             Some(result) if is_agent(result) => {
@@ -416,14 +520,17 @@ fn render(
             }
             Some(result) => (
                 format!(
-                    "{swarm_open}\n<agent name=\"{agent}\" session=\"{child}\" state=\"failed\">"
+                    "{swarm_open}\n<agent name=\"{}\" session=\"{}\" state=\"failed\">",
+                    escape(&member.agent),
+                    member.id
                 ),
                 result.text.clone(),
             ),
             None => (
                 format!(
-                    "{swarm_open}\n<agent name=\"{agent}\" session=\"{child}\" \
-                     state=\"cancelled\">"
+                    "{swarm_open}\n<agent name=\"{}\" session=\"{}\" state=\"cancelled\">",
+                    escape(&member.agent),
+                    member.id
                 ),
                 "no result arrived".to_owned(),
             ),
@@ -440,8 +547,11 @@ fn render(
         });
     }
     let summary = format!("completed: {completed}, failed: {failed}, cancelled: {cancelled}");
+    let hint = (failed + cancelled > 0).then_some(RESUME_HINT);
     let mut out = summary.clone();
-    let mut budget = cap.saturating_sub(summary.chars().count());
+    let mut budget = cap
+        .saturating_sub(summary.chars().count())
+        .saturating_sub(hint.map_or(0, |hint| hint.chars().count()));
     for block in &blocks {
         budget = budget.saturating_sub(block.overhead());
     }
@@ -461,9 +571,12 @@ fn render(
         let _ = write!(out, "\n{}", block.render(&body));
         left -= 1;
     }
+    if let Some(hint) = hint {
+        let _ = write!(out, "\n{hint}");
+    }
     ToolOutput {
         text: out,
-        is_error: !children.is_empty() && failed == children.len(),
+        is_error: !members.is_empty() && failed == members.len(),
         ..ToolOutput::default()
     }
 }
@@ -524,9 +637,9 @@ mod tests {
         SwarmInput {
             description: "a swarm".into(),
             agent: "general".into(),
-            prompt_template: "handle {{item}}".into(),
+            prompt_template: Some("handle {{item}}".into()),
             items: items.iter().map(|item| (*item).to_owned()).collect(),
-            resume: None,
+            resume: BTreeMap::new(),
             fork: None,
         }
     }
@@ -534,21 +647,31 @@ mod tests {
     #[test]
     fn expand_replaces_every_placeholder() {
         let mut call = input(&["a", "b"]);
-        call.prompt_template = "{{item}} then {{item}} again".into();
-        assert_eq!(
-            expand(&call, &AgentDefs::builtin(), 32).unwrap(),
-            ["a then a again", "b then b again"]
-        );
+        call.prompt_template = Some("{{item}} then {{item}} again".into());
+        let call = expand(&call, &AgentDefs::builtin(), 32).unwrap();
+        let prompts: Vec<&str> = call
+            .items
+            .iter()
+            .map(|(_, prompt)| prompt.as_str())
+            .collect();
+        assert_eq!(prompts, ["a then a again", "b then b again"]);
     }
 
     #[test]
     fn expand_rejects_a_bad_call() {
         let defs = AgentDefs::builtin();
-        let mut call = input(&["a"]);
+        let mut call = input(&[]);
+        assert!(
+            expand(&call, &defs, 32)
+                .unwrap_err()
+                .contains("needs at least 2 items, or a resume map")
+        );
+
+        call = input(&["a"]);
         assert!(expand(&call, &defs, 32).unwrap_err().contains("at least 2"));
 
         call = input(&["a", "b"]);
-        call.prompt_template = "no placeholder".into();
+        call.prompt_template = Some("no placeholder".into());
         assert!(
             expand(&call, &defs, 32)
                 .unwrap_err()
@@ -575,16 +698,35 @@ mod tests {
     }
 
     #[test]
-    fn expand_rejects_the_reserved_fields() {
+    fn expand_parses_the_resume_map() {
+        let defs = AgentDefs::builtin();
+        let mut call = input(&[]);
+        call.resume
+            .insert("not-a-session-id".into(), "go on".into());
+        let err = expand(&call, &defs, 32).unwrap_err();
+        assert!(err.contains("is not a session id"), "{err}");
+
+        let id = SessionId::new();
+        call.resume.clear();
+        call.resume.insert(id.to_string(), "   ".into());
+        let err = expand(&call, &defs, 32).unwrap_err();
+        assert!(err.contains("the prompt for"), "{err}");
+
+        call.resume.insert(id.to_string(), "go on".into());
+        let expanded = expand(&call, &defs, 32).unwrap();
+        assert_eq!(expanded.resume, [(id, "go on".to_owned())]);
+
+        let mut mixed = input(&["a", "b"]);
+        mixed.resume.insert(id.to_string(), "go on".into());
+        let expanded = expand(&mixed, &defs, 32).unwrap();
+        assert_eq!(expanded.items.len(), 2);
+        assert_eq!(expanded.resume.len(), 1);
+    }
+
+    #[test]
+    fn expand_rejects_fork() {
         let defs = AgentDefs::builtin();
         let mut call = input(&["a", "b"]);
-        call.resume = Some(serde_json::json!({}));
-        assert!(
-            expand(&call, &defs, 32)
-                .unwrap_err()
-                .contains("resume is not supported yet")
-        );
-        call.resume = None;
         call.fork = Some(serde_json::json!(true));
         assert!(
             expand(&call, &defs, 32)
@@ -612,28 +754,29 @@ mod tests {
         }
     }
 
-    fn two_children() -> (Vec<SessionId>, Vec<String>) {
-        (
-            vec![SessionId::new(), SessionId::new()],
-            vec!["a".into(), "b".into()],
-        )
+    fn two_members() -> (Vec<Member>, Vec<SessionId>) {
+        let children = vec![SessionId::new(), SessionId::new()];
+        let items = ["a".to_owned(), "b".to_owned()];
+        let members: Vec<Member> = children
+            .iter()
+            .zip(items)
+            .map(|(id, item)| Member {
+                id: *id,
+                item,
+                agent: "general".into(),
+            })
+            .collect();
+        (members, children)
     }
 
     #[test]
     fn render_counts_and_wraps_each_child() {
-        let (children, items) = two_children();
+        let (members, children) = two_members();
         let results = vec![
             agent_block(children[0], "completed", "did a"),
             agent_block(children[1], "failed", "boom"),
         ];
-        let out = render(
-            RESULT_CAP,
-            "fix things",
-            "general",
-            &items,
-            &children,
-            &results,
-        );
+        let out = render(RESULT_CAP, "fix things", &members, &results);
         assert!(
             out.text
                 .starts_with("completed: 1, failed: 1, cancelled: 0\n"),
@@ -651,41 +794,42 @@ mod tests {
 
     #[test]
     fn render_marks_missing_children_cancelled() {
-        let (children, items) = two_children();
-        let out = render(RESULT_CAP, "d", "general", &items, &children, &[]);
+        let (members, children) = two_members();
+        let out = render(RESULT_CAP, "d", &members, &[]);
         assert!(out.text.contains("completed: 0, failed: 0, cancelled: 2"));
         assert!(out.text.contains(&format!(
             "<agent name=\"general\" session=\"{}\" state=\"cancelled\">",
             children[1]
         )));
         assert!(out.text.contains("no result arrived"));
+        assert!(out.text.contains("resume"));
         assert!(!out.is_error);
     }
 
     #[test]
     fn render_is_error_only_when_every_child_failed() {
-        let (children, items) = two_children();
+        let (members, children) = two_members();
         let all_failed = vec![
             agent_block(children[0], "failed", "x"),
             agent_block(children[1], "failed", "y"),
         ];
-        assert!(render(RESULT_CAP, "d", "general", &items, &children, &all_failed).is_error);
+        assert!(render(RESULT_CAP, "d", &members, &all_failed).is_error);
         let mixed = vec![
             agent_block(children[0], "completed", "x"),
             agent_block(children[1], "failed", "y"),
         ];
-        assert!(!render(RESULT_CAP, "d", "general", &items, &children, &mixed).is_error);
+        assert!(!render(RESULT_CAP, "d", &members, &mixed).is_error);
     }
 
     #[test]
     fn truncation_keeps_every_status_line_and_cuts_bodies() {
-        let (children, items) = two_children();
+        let (members, children) = two_members();
         let body = "x".repeat(500);
         let results = vec![
             agent_block(children[0], "completed", &body),
             agent_block(children[1], "completed", &body),
         ];
-        let out = render(600, "d", "general", &items, &children, &results);
+        let out = render(600, "d", &members, &results);
         let count = |needle: &str| out.text.matches(needle).count();
         assert_eq!(count("item=\"a\""), 1, "{}", out.text);
         assert_eq!(count("item=\"b\""), 1);
@@ -696,13 +840,13 @@ mod tests {
 
     #[test]
     fn a_result_without_an_agent_header_still_renders() {
-        let (children, items) = two_children();
+        let (members, _children) = two_members();
         let odd = ToolOutput {
             text: "the engine stopped".into(),
             is_error: true,
             ..ToolOutput::default()
         };
-        let out = render(RESULT_CAP, "d", "general", &items, &children, &[odd]);
+        let out = render(RESULT_CAP, "d", &members, &[odd]);
         assert!(out.text.contains("state=\"failed\""));
         assert!(out.text.contains("the engine stopped"));
     }

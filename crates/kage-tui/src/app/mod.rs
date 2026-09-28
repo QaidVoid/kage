@@ -267,6 +267,14 @@ pub enum RunRequest {
     /// Restart the named MCP server of the main session, from `/mcp
     /// restart` or the `/mcp` picker.
     RestartMcp(String),
+    /// Turn the main session's swarm mode on or off, from `/swarm on`
+    /// or `/swarm off`. While on, the engine injects a workflow block
+    /// into the next run that steers the model toward one `swarm` call
+    /// per repeated task instead of many `agent` calls.
+    SwarmMode {
+        /// The mode to switch to.
+        on: bool,
+    },
 }
 
 /// Outcome of [`App::run`].
@@ -896,6 +904,10 @@ pub struct App {
     /// When the run in flight started, from the working flag's
     /// transition. `None` while idle.
     run_started: Option<Instant>,
+    /// The task `/swarm <task>` submitted as a one-shot swarm: the
+    /// mode turns itself off when that run ends. Cleared by an
+    /// explicit `on`/`off` or a session switch.
+    swarm_oneshot: Option<String>,
     /// Cached hint labels for [`Self::key_label`].
     key_labels: chrome::KeyLabels,
     /// What the start card lists. `None` until the host sets it.

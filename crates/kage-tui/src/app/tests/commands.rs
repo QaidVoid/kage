@@ -4,6 +4,87 @@
 use super::*;
 
 #[test]
+fn swarm_command_flips_the_mode_and_runs_one_shot_tasks() {
+    let (mut app, rx, events) = app_with_events();
+
+    app.dispatch_builtin("swarm", "", &crate::command::ParsedArgs::new());
+    assert!(rx.try_recv().is_err(), "no argument is a usage error");
+
+    app.dispatch_builtin("swarm", "on", &crate::command::ParsedArgs::new());
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(RunRequest::SwarmMode { on: true })
+    ));
+    app.dispatch_builtin("swarm", "off", &crate::command::ParsedArgs::new());
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(RunRequest::SwarmMode { on: false })
+    ));
+
+    app.dispatch_builtin(
+        "swarm",
+        "fix all the crates",
+        &crate::command::ParsedArgs::new(),
+    );
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(RunRequest::SwarmMode { on: true })
+    ));
+    match rx.try_recv() {
+        Ok(RunRequest::Submit {
+            text,
+            session: None,
+            queue: false,
+            ..
+        }) => assert_eq!(text, "fix all the crates"),
+        other => panic!("expected the task prompt, got {other:?}"),
+    }
+    assert!(app.swarm_oneshot.is_some());
+
+    feed(
+        &mut app,
+        &events,
+        vec![run_ended(kage_core::protocol::RunOutcome::Completed)],
+    );
+    assert!(
+        matches!(rx.try_recv(), Ok(RunRequest::SwarmMode { on: false })),
+        "the one-shot swarm turns itself off"
+    );
+    assert!(app.swarm_oneshot.is_none());
+}
+
+#[test]
+fn a_session_switch_clears_a_pending_oneshot_swarm() {
+    let (mut app, rx, events) = app_with_events();
+    app.dispatch_builtin("swarm", "fix it", &crate::command::ParsedArgs::new());
+    let _ = rx.try_recv();
+    let _ = rx.try_recv();
+
+    feed(
+        &mut app,
+        &events,
+        vec![kage_core::protocol::Event::Host(
+            kage_core::protocol::HostEvent::SessionChanged {
+                path: std::path::PathBuf::from("x.jsonl"),
+                title: None,
+                messages: Vec::new(),
+                compaction: None,
+            },
+        )],
+    );
+    assert!(app.swarm_oneshot.is_none());
+    feed(
+        &mut app,
+        &events,
+        vec![run_ended(kage_core::protocol::RunOutcome::Completed)],
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "the cleared one-shot sends no exit note"
+    );
+}
+
+#[test]
 fn events_command_lists_known_hooks_by_kind() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();

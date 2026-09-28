@@ -154,6 +154,7 @@ impl App {
                 self.pending.clear();
                 self.agents.clear();
                 self.agent_buffers.clear();
+                self.swarm_oneshot = None;
                 self.agents
                     .restore(self.active_session.unwrap_or_default(), &messages);
                 let durations = crate::events::tool_durations(&messages);
@@ -197,6 +198,7 @@ impl App {
             HostEvent::RunEnded { .. } => {
                 self.run_started = None;
                 self.end_run(self.active_session.unwrap_or_default());
+                self.end_swarm_oneshot();
             }
             HostEvent::McpServers { servers } => self.set_mcp_servers(servers),
             HostEvent::TitleChanged { .. } | HostEvent::AgentSpawned { .. } => {}

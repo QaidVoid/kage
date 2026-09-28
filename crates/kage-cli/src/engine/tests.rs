@@ -1941,6 +1941,264 @@ fn a_swarm_and_an_agent_call_work_in_sequence() {
 }
 
 #[test]
+fn a_swarm_resume_reprompts_the_hosted_children() {
+    let dir = tempfile::tempdir().unwrap();
+    let mock = MockProvider::sequence(vec![
+        swarm_turn(&[("call_s1", swarm_task(&["a", "b"]))]),
+        text_turn("child a one"),
+        text_turn("child b one"),
+        text_turn("parent done"),
+    ]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let parent = SessionId::new();
+    let (recorder, _) = recorder_in(dir.path(), parent);
+    h.engine.open(SessionSpec {
+        recorder: Some(recorder),
+        agents: Some(swarm_setup(1, 60_000)),
+        ..h.spec(parent)
+    });
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let first = until_runs_end(&h.events, 3);
+    let children = spawned(&first);
+    assert_eq!(children.len(), 2);
+
+    let resume = serde_json::json!({
+        "description": "a swarm",
+        "resume": {
+            (children[0].0.to_string()): "continue a",
+            (children[1].0.to_string()): "continue b",
+        },
+    });
+    mock.push_script(swarm_turn(&[("call_s2", resume)]));
+    mock.push_script(text_turn("child a two"));
+    mock.push_script(text_turn("child b two"));
+    mock.push_script(text_turn("parent done again"));
+    prompt(&h.engine, parent, "again", Delivery::Steer);
+    let second = until_runs_end(&h.events, 3);
+    h.engine.shutdown();
+
+    let output = tool_output(&second, parent, "call_s2");
+    assert!(
+        output
+            .text
+            .starts_with("completed: 2, failed: 0, cancelled: 0\n"),
+        "{}",
+        output.text
+    );
+    assert!(output.text.contains("child a two"), "{}", output.text);
+    assert!(output.text.contains("child b two"), "{}", output.text);
+    assert!(
+        output
+            .text
+            .contains(&format!("session=\"{}\"", children[0].0))
+    );
+    assert!(
+        output
+            .text
+            .contains(&format!("session=\"{}\"", children[1].0))
+    );
+    assert!(output.text.contains("item=\"a\""));
+    assert!(output.text.contains("item=\"b\""));
+    assert!(!output.is_error);
+    assert!(
+        spawned(&second).is_empty(),
+        "hosted children keep their ids"
+    );
+}
+
+#[test]
+fn a_swarm_resume_refuses_ids_that_are_not_swarm_children() {
+    let dir = tempfile::tempdir().unwrap();
+    let mock = MockProvider::sequence(vec![
+        agent_turn(&[("call_a", task("look around"))]),
+        text_turn("agent reply"),
+        text_turn("parent done"),
+    ]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let parent = SessionId::new();
+    let (recorder, _) = recorder_in(dir.path(), parent);
+    h.engine.open(SessionSpec {
+        recorder: Some(recorder),
+        agents: Some(swarm_setup(1, 60_000)),
+        ..h.spec(parent)
+    });
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let first = until_runs_end(&h.events, 2);
+    let (plain, _) = spawned(&first).remove(0);
+    let resume = serde_json::json!({
+        "description": "a swarm",
+        "resume": {
+            (plain.to_string()): "go on",
+            (SessionId::new().to_string()): "go on too",
+        },
+    });
+    mock.push_script(swarm_turn(&[("call_s", resume)]));
+    mock.push_script(text_turn("done"));
+    prompt(&h.engine, parent, "again", Delivery::Steer);
+    let second = until_runs_end(&h.events, 1);
+    h.engine.shutdown();
+
+    let output = tool_output(&second, parent, "call_s");
+    assert!(output.is_error);
+    assert!(
+        output.text.contains("is not a swarm child of this session"),
+        "{}",
+        output.text
+    );
+    assert!(spawned(&second).is_empty(), "nothing attached");
+}
+
+#[test]
+fn a_resumed_parent_restores_its_swarm_children_from_their_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let mock = MockProvider::sequence(vec![
+        swarm_turn(&[("call_s1", swarm_task(&["a", "b"]))]),
+        text_turn("child a one"),
+        text_turn("child b one"),
+        text_turn("parent done"),
+    ]);
+    let parent = SessionId::new();
+    let (recorder, path) = recorder_in(dir.path(), parent);
+    let children = {
+        let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+        h.engine.open(SessionSpec {
+            recorder: Some(recorder),
+            agents: Some(swarm_setup(1, 60_000)),
+            ..h.spec(parent)
+        });
+        prompt(&h.engine, parent, "go", Delivery::Steer);
+        let first = until_runs_end(&h.events, 3);
+        let children = spawned(&first);
+        assert_eq!(children.len(), 2);
+        h.engine.shutdown();
+        children
+    };
+
+    // A new engine loads the parent's file: no child is hosted, so a
+    // resume has to open them from disk.
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let fresh = SessionId::new();
+    h.engine.open(SessionSpec {
+        agents: Some(swarm_setup(1, 60_000)),
+        ..h.spec(fresh)
+    });
+    h.engine.send(Command::to(
+        fresh,
+        CommandKind::LoadSession { path: path.clone() },
+    ));
+    let seen = wait_for(&h.events, is_session_changed);
+    assert_eq!(seen.last().unwrap().session, parent);
+
+    let resume = serde_json::json!({
+        "description": "a swarm",
+        "resume": {
+            (children[0].0.to_string()): "continue a",
+            (children[1].0.to_string()): "continue b",
+        },
+    });
+    mock.push_script(swarm_turn(&[("call_s2", resume)]));
+    mock.push_script(text_turn("resumed"));
+    mock.push_script(text_turn("resumed"));
+    mock.push_script(text_turn("parent done again"));
+    prompt(&h.engine, parent, "again", Delivery::Steer);
+    let second = until_runs_end(&h.events, 3);
+    h.engine.shutdown();
+
+    let resumed = spawned(&second);
+    assert_eq!(resumed.len(), 2, "both children re-opened");
+    assert!(resumed.iter().any(|(id, _)| *id == children[0].0));
+    assert!(resumed.iter().any(|(id, _)| *id == children[1].0));
+    let output = tool_output(&second, parent, "call_s2");
+    assert!(
+        output
+            .text
+            .starts_with("completed: 2, failed: 0, cancelled: 0\n"),
+        "{}",
+        output.text
+    );
+    assert_eq!(output.text.matches("resumed").count(), 2, "{}", output.text);
+
+    let replay =
+        kage_session::replay(&dir.path().join(format!("{}.jsonl", children[0].0))).unwrap();
+    let texts: Vec<String> = replay
+        .history
+        .iter()
+        .flat_map(|m| m.content.iter())
+        .filter_map(|c| match c {
+            Content::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(texts.iter().any(|t| t == "continue a"), "{texts:?}");
+    assert!(texts.iter().any(|t| t == "resumed"), "{texts:?}");
+}
+
+#[test]
+fn swarm_mode_injects_its_block_once_at_the_next_run() {
+    let mock = MockProvider::sequence(vec![text_turn("ok"), text_turn("done")]);
+    let h = harness_on(ProviderRegistry::new().with(Arc::new(mock.clone())));
+    let parent = SessionId::new();
+    h.open(parent, None);
+
+    h.engine
+        .send(Command::to(parent, CommandKind::SwarmMode { on: true }));
+    h.engine
+        .send(Command::to(parent, CommandKind::SwarmMode { on: true }));
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+
+    let requests = mock.requests();
+    let history = &requests.last().unwrap().messages;
+    let on = history
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|c| match c {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .filter(|t| t.starts_with("[swarm mode on]"))
+        .count();
+    assert_eq!(on, 1, "injected once despite the repeated command");
+
+    h.engine
+        .send(Command::to(parent, CommandKind::SwarmMode { on: false }));
+    prompt(&h.engine, parent, "more", Delivery::Steer);
+    until_runs_end(&h.events, 1);
+
+    let requests = mock.requests();
+    let history = &requests.last().unwrap().messages;
+    let texts: Vec<&str> = history
+        .iter()
+        .flat_map(|m| &m.content)
+        .filter_map(|c| match c {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|t| t.starts_with("[swarm mode off]"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        requests[0]
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|c| match c {
+                Content::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .filter(|t| t.starts_with("[swarm mode off]"))
+            .count(),
+        0,
+        "the exit note only lands after the turn off"
+    );
+}
+
+#[test]
 fn print_mode_text_names_agents_and_how_they_ended() {
     let h = harness(MockProvider::sequence(vec![
         agent_turn(&[

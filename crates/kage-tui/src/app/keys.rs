@@ -193,12 +193,6 @@ impl App {
             return None;
         }
 
-        // The slash palette is its own modal layer, taking precedence
-        // over the cmdline and search line.
-        if self.slash_palette.is_some() {
-            return self.dispatch_slash_palette_key(key);
-        }
-
         // The `:` command line is the next-most-modal layer.
         if self.cmdline.is_some() {
             return self.dispatch_cmdline_key(key);
@@ -437,19 +431,51 @@ impl App {
     /// popup) unless plugins registered providers and the user is
     /// actively typing in the input pane.
     pub(crate) fn refresh_input_completion(&mut self) {
-        let has_sources = !self.autocomplete_providers.is_empty()
-            || self.completion_workdir.is_some()
-            || !self.mcp_servers.is_empty();
-        if !has_sources
-            || self.input.focused_pane() != Pane::Input
-            || self.input.mode() != Mode::Insert
-        {
+        if self.input.focused_pane() != Pane::Input || self.input.mode() != Mode::Insert {
             self.input_completion = None;
             return;
         }
+        // A draft starting with `/` is a command: the popup offers the
+        // same candidates the `:` line gets, so command names carry
+        // their argument hints and argument positions complete
+        // against models, themes and plugin commands.
         let text = self.input.text();
         let cursor = self.input.cursor();
+        if text.starts_with('/') {
+            let raw = &text[1..cursor];
+            let resolver = self.input_resolver();
+            let completions =
+                crate::cmdparse::complete(&self.command_registry(), raw, raw.len(), &resolver);
+            let mut items = completions
+                .items
+                .into_iter()
+                .map(|c| kage_plugin::AutocompleteItem {
+                    label: c.value.clone(),
+                    detail: match (&c.hint, &c.description) {
+                        (Some(hint), Some(desc)) => Some(format!("{hint} \u{b7} {desc}")),
+                        (Some(hint), None) => Some(hint.clone()),
+                        (None, desc) => desc.clone(),
+                    },
+                    value: c.value,
+                    range: Some((c.replace_range.start + 1, c.replace_range.end + 1)),
+                })
+                .collect::<Vec<_>>();
+            if let [only] = items.as_slice()
+                && self.completion_is_noop(only)
+            {
+                items.clear();
+            }
+            self.input_completion = InputCompletion::new(items);
+            return;
+        }
         let prefix = prefix_before_cursor(text, cursor);
+        let has_sources = !self.autocomplete_providers.is_empty()
+            || self.completion_workdir.is_some()
+            || !self.mcp_servers.is_empty();
+        if !has_sources {
+            self.input_completion = None;
+            return;
+        }
         let mut items = Vec::new();
         for provider in self.autocomplete_providers.iter().rev() {
             let got = provider.complete(prefix, text, cursor);
@@ -506,6 +532,17 @@ impl App {
     fn completion_is_noop(&self, item: &kage_plugin::AutocompleteItem) -> bool {
         let (start, end) = self.completion_span(item);
         self.input.text().get(start..end) == Some(item.value.as_str())
+    }
+
+    /// The resolver the in-prompt command completion asks for dynamic
+    /// argument values. Sessions stay out on purpose: resolving them
+    /// hits the disk, and this runs on every keystroke.
+    fn input_resolver(&self) -> InputResolver {
+        InputResolver {
+            models: self.model_choices.iter().map(|p| p.value.clone()).collect(),
+            themes: crate::theme::Theme::available_names(self.themes_dir.as_deref()),
+            plugin_commands: self.plugin_commands.clone(),
+        }
     }
 
     /// Byte offset of the first `{...}` placeholder in `value` when it
@@ -674,43 +711,6 @@ impl App {
             }
         }
     }
-
-    pub(crate) fn dispatch_slash_palette_key(
-        &mut self,
-        key: ratatui::crossterm::event::KeyEvent,
-    ) -> Option<AppExit> {
-        let action = self
-            .slash_palette
-            .as_mut()
-            .map(|sp| crate::overlay::OverlayWidget::handle_key(sp, key))?;
-        match action {
-            OverlayAction::Stay | OverlayAction::PropagateKey => None,
-            OverlayAction::Close => {
-                self.slash_palette = None;
-                None
-            }
-            OverlayAction::Resolve(value) => {
-                let serde_json::Value::String(text) = value else {
-                    self.slash_palette = None;
-                    return None;
-                };
-                let registry = self.command_registry();
-                let result = self.run_command_validated(&text, &registry);
-                match result {
-                    CommandResult::Done(exit) => {
-                        self.slash_palette = None;
-                        exit
-                    }
-                    CommandResult::ValidationError(msg) => {
-                        if let Some(sp) = self.slash_palette.as_mut() {
-                            sp.set_error(msg);
-                        }
-                        None
-                    }
-                }
-            }
-        }
-    }
 }
 
 fn restore_view(buf: &mut crate::Buffer, focus: Option<usize>, scroll: Option<usize>) {
@@ -718,5 +718,28 @@ fn restore_view(buf: &mut crate::Buffer, focus: Option<usize>, scroll: Option<us
     match scroll {
         Some(scroll) => buf.set_scroll(scroll),
         None => buf.follow(),
+    }
+}
+
+/// The [`crate::cmdparse::Resolver`] behind the in-prompt command
+/// completion: cheap, in-memory sources only.
+struct InputResolver {
+    models: Vec<String>,
+    themes: Vec<String>,
+    plugin_commands: Vec<(String, String)>,
+}
+
+impl crate::cmdparse::Resolver for InputResolver {
+    fn dynamic_choice(&self, source: &crate::command::ArgSource) -> Vec<String> {
+        match source {
+            crate::command::ArgSource::Models => self.models.clone(),
+            crate::command::ArgSource::Themes => self.themes.clone(),
+            crate::command::ArgSource::PluginCommands => self
+                .plugin_commands
+                .iter()
+                .map(|(n, _)| n.clone())
+                .collect(),
+            crate::command::ArgSource::Sessions => Vec::new(),
+        }
     }
 }

@@ -318,7 +318,7 @@ fn the_usage_snapshot_follows_the_focused_agent() {
     assert_eq!(snapshot.cache_read_tokens, 800);
     assert_eq!(snapshot.current_context, 2_000);
     assert_eq!(snapshot.context_window, 100_000);
-    assert_eq!(snapshot.total_cost, 0.05);
+    assert!((snapshot.total_cost - 0.05).abs() < 1e-9);
     app.set_focus(None);
     let snapshot = app.session_usage_snapshot().unwrap();
     assert_eq!(snapshot.model, "");

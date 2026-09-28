@@ -461,7 +461,6 @@ pub const ACTIONS: &[ActionDef] = &[
     action("ClearSelection", "Drop the active selection."),
     action("OpenModelPicker", "Open the model picker."),
     action("OpenSessionPicker", "Open the session picker."),
-    action("OpenCommandPalette", "Open the slash command palette."),
     action("SearchNext", "Focus the next search match."),
     action("SearchPrev", "Focus the previous search match."),
     action("YankFocusedBlock", "Copy the focused block."),
@@ -944,7 +943,7 @@ mod tests {
 
     #[test]
     fn actions_hold_the_rebindable_names() {
-        assert_eq!(ACTIONS.len(), 27);
+        assert_eq!(ACTIONS.len(), 26);
         for (i, a) in ACTIONS.iter().enumerate() {
             assert!(
                 ACTIONS[..i].iter().all(|b| b.name != a.name),

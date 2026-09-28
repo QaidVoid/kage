@@ -117,9 +117,6 @@ pub enum InputAction {
     FocusPrev,
     /// Move focus to the next (newer) foldable block.
     FocusNext,
-    /// Open the slash command palette overlay (leading `/` typed in
-    /// Insert mode against an empty prompt).
-    OpenCommandPalette,
     /// Jump focus to the next block matching the active search.
     SearchNext,
     /// Jump focus to the previous block matching the active search.

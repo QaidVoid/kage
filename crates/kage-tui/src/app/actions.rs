@@ -86,6 +86,18 @@ impl App {
             return CommandResult::Done(None);
         }
 
+        // A skill expands to its body as the prompt, with the rest of
+        // the line appended so the skill knows what to act on.
+        if let Some(skill) = self.skills.iter().find(|skill| skill.name == head) {
+            let mut prompt = skill.body.clone();
+            if !rest.is_empty() {
+                prompt.push_str("\n\n");
+                prompt.push_str(rest);
+            }
+            self.send_prompt(prompt, Vec::new(), false, self.focus);
+            return CommandResult::Done(None);
+        }
+
         let mut msg = format!("unknown command: {head}");
         if let Some(suggestion) = crate::cmdparse::suggest_command(registry, head) {
             msg = format!("{msg} (did you mean {prefix}{suggestion}?)");

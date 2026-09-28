@@ -14,7 +14,7 @@ hero:
 features:
   - tag: 01
     title: keyboard TUI
-    text: a modeless editor with an optional vim mode, sticky search, and a slash command palette with argument completion.
+    text: a modeless editor with an optional vim mode, sticky search, and slash commands with argument completion.
   - tag: 02
     title: lua plugins
     text: tools, commands, keybindings, blocking dialogs, status widgets, and ~25 event hooks defined in sandboxed Lua. Hot reload on file change.

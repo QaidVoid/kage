@@ -74,13 +74,13 @@ the buffer navigation keys above work without any mode switching.
 | `ctrl+w` | Kill the previous word |
 | `ctrl+g` | Edit the prompt draft in `$VISUAL`/`$EDITOR` |
 | `shift+tab` | Cycle the thinking level |
-| `/`   | Open the command palette (empty prompt only) |
 | `!`   | Switch to shell mode (empty prompt only) |
 | `?`   | Open the keyboard reference (empty prompt only) |
 | `ctrl+q` | Quit |
 
-The `?` (keys), `/` (command palette), and `!` (shell escape)
-prefixes all key off an empty prompt, so every surface stays one
+A draft starting with `/` runs as a command on `enter` instead of
+sending a prompt. The `?` (keys) and `!` (shell escape)
+prefixes key off an empty prompt, so every surface stays one
 keystroke away without a mode switch. With text in the prompt they
 are typed as literal characters. In shell mode the placeholder reads
 `Run a shell command (backspace leaves shell mode)`. `enter` runs the
@@ -110,7 +110,7 @@ In an agent view (see [agents](#agents)), the last two steps change:
 stops the agent while it runs, else goes back. Quit is only armed
 from the main view.
 
-An open popup, such as the completion popup or the command palette,
+An open popup, such as the completion popup,
 takes `esc` first. In vim mode `esc` keeps its vim meaning. While an
 overlay is open (a picker, a dialog, the `:` line, the search line or
 the approval panel) and kage works, `ctrl+c` only interrupts the run
@@ -246,20 +246,21 @@ the pointer. `/mouse off` hands selection back to the terminal.
 
 ## command pathways
 
-`/` on an empty prompt opens the command palette inline above the
-input box. It lists matching commands as you type, most used first,
-with the first row selected, so `/` then `enter` opens the model
-picker. This works in modeless mode and in vim Insert mode.
+A draft starting with `/` is a command. While you type it, a popup
+above the input box lists matching commands with their argument
+hints, and argument positions offer their values. `enter` or `tab`
+accepts the highlighted completion; with the popup closed, `enter`
+runs the command. This works in modeless mode and in vim Insert mode.
 
 In vim mode there is also the `:` ex line on the bottom row, opened
-from Normal mode. It shares the palette's command registry, parser,
+from Normal mode. It shares the prompt's command registry, parser,
 completion, and dispatch, so `:model anthropic:claude-sonnet-4-6` and
 `/model anthropic:claude-sonnet-4-6` have identical effect. `/model`
 without an id opens the model picker, like `ctrl+p`.
 
 | Key   | From                       | Effect                          |
 | ----- | -------------------------- | ------------------------------- |
-| `/`   | empty prompt               | Open the slash command palette  |
+| `/name enter` | prompt            | Run the command                 |
 | `:`   | vim Normal                 | Open the colon command line     |
 | `/`   | vim Normal                 | Begin a buffer search           |
 
@@ -282,14 +283,15 @@ without an id opens the model picker, like `ctrl+p`.
 Completions are recomputed on every edit. In the `:` line the popup
 appears only after the first `tab` step that does more than insert the
 longest common prefix, so a single match completes and closes in one
-keystroke. The `/` palette always shows its list with a row
-highlighted, `up` and `down` move without a `tab` first, and a
-command it inserts gets a trailing space for the argument.
+keystroke. On the prompt, a `/` draft shows its list at once,
+`up` and `down` move without a `tab` first, and `enter` accepts the
+highlighted row before it sends.
 
 ## validation
 
-Submitting an invalid command keeps the line open and shows an inline
-error next to it. Examples:
+The `:` line keeps the line open on an invalid command and shows an
+inline error next to it. A `/` draft on the prompt restores the draft
+and shows the reason as a toast. Examples:
 
 - `/mouse maybe` shows ``argument `state` must be one of: on, off, toggle (got `maybe`)``
 - `/theme set` shows ``missing required argument `name` ``, adds a
@@ -453,7 +455,7 @@ a leader that is a letter or punctuation, catches that key while you
 type in the prompt.
 
 The value is a command line, run through the same executor as the
-command palette, so anything `/` can do is bindable, including `quit`
+`:` line, so anything `/` can do is bindable, including `quit`
 and plugin commands. A value starting with `action:` names a built-in
 action instead and is never run as a command. A key or action that
 does not parse is reported inline at startup, never silently dropped.
@@ -469,7 +471,6 @@ These action names work after `action:`:
 | navigation | `CyclePane`            | cycle pane focus (input / buffer) |
 | overlays   | `OpenModelPicker`      | open the model picker             |
 | overlays   | `OpenSessionPicker`    | open the session picker           |
-| overlays   | `OpenCommandPalette`   | open the slash command palette    |
 | overlays   | `OpenJumpPicker`       | open the message jump picker      |
 | overlays   | `OpenHelp`             | open the keyboard reference       |
 | overlays   | `OpenAgents`           | open the agents overlay           |

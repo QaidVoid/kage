@@ -49,10 +49,7 @@ pub use layout::{
     Heights, INPUT_CHROME_LINES, INPUT_CONTENT_MAX_LINES, INPUT_CONTENT_MIN_LINES, INPUT_MAX_LINES,
     INPUT_MIN_LINES, Regions, input_height_for, split,
 };
-pub use overlay::{
-    OverlayAction, OverlayCtx, OverlayPicker, OverlayWidget, SessionNode, SlashContext,
-    SlashPalette,
-};
+pub use overlay::{OverlayAction, OverlayCtx, OverlayPicker, OverlayWidget, SessionNode};
 pub use picker::{PickItem, pick};
 pub use terminal::Tui;
 pub use theme::{Theme, current as current_theme, set_current as set_current_theme};

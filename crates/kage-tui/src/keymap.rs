@@ -110,7 +110,6 @@ pub fn action(name: &str, arg: Option<i64>) -> Option<InputAction> {
         "ClearSelection" => InputAction::ClearSelection,
         "OpenModelPicker" => InputAction::OpenModelPicker,
         "OpenSessionPicker" => InputAction::OpenSessionPicker,
-        "OpenCommandPalette" => InputAction::OpenCommandPalette,
         "SearchNext" => InputAction::SearchNext,
         "SearchPrev" => InputAction::SearchPrev,
         "YankFocusedBlock" => InputAction::YankFocusedBlock,
@@ -324,6 +323,10 @@ pub fn key_label(key: &Key) -> String {
     match inner {
         "CR" => out.push_str("enter"),
         "BS" => out.push_str("backspace"),
+        // An F-key keeps its conventional capital (`F4`, not `f4`).
+        name if name.starts_with('F') && name[1..].chars().all(|c| c.is_ascii_digit()) => {
+            out.push_str(name);
+        }
         name => out.push_str(&name.to_lowercase()),
     }
     out

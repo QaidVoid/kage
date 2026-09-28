@@ -1,6 +1,6 @@
 //! `OverlayWidget` trait, render context, and action enum.
 //!
-//! Every overlay surface (model picker, slash palette, settings
+//! Every overlay surface (model picker, settings
 //! dialog, session tree, login, confirmation, single-line input,
 //! multi-line editor, custom plugin overlay) is a type that
 //! implements [`OverlayWidget`].

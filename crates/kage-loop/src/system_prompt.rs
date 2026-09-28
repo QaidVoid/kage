@@ -65,7 +65,7 @@ pub fn compose(role: &str, env: &EnvContext<'_>) -> String {
 /// Append a `<skills>` block describing each loaded [`Skill`] so the
 /// model can invoke them by name. Skills with
 /// `disable_model_invocation: true` are still surfaced in the block (the
-/// flag only hides them from the slash palette).
+/// flag only hides them from completion).
 ///
 /// Returns `system` unchanged when `skills` is empty.
 #[must_use]

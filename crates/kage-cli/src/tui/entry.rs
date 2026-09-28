@@ -355,6 +355,7 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
     app.set_status_model(Arc::new(Mutex::new(qualified_model.clone())));
     app.set_engine_events(events_rx);
     app.set_plugin_commands(plugin_command_listing);
+    app.set_skills(skills);
     // `:login` runs the interactive credential flow in the real
     // terminal (the App suspends itself around the call) and then
     // refreshes providers through the worker.

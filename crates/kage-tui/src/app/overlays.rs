@@ -140,8 +140,8 @@ impl App {
     /// an existing image (a drag-drop, or a copied file), attach it
     /// instead of inserting the raw path as prompt text; otherwise
     /// route the text to the active surface: a plugin overlay's
-    /// `handle_paste`, the slash palette, the `:` cmdline, or the
-    /// `/` search line. A modal that does not accept text swallows
+    /// `handle_paste`, the `:` cmdline, or the `/` search line. A
+    /// modal that does not accept text swallows
     /// the paste so it cannot land in the hidden main input and
     /// silently vanish. With no overlay open the main input receives
     /// it verbatim. A path that looks like an image but fails to load
@@ -177,10 +177,6 @@ impl App {
             || self.session_tree.is_some()
             || self.agents_overlay.is_some()
         {
-            return;
-        }
-        if let Some(palette) = self.slash_palette.as_mut() {
-            palette.paste(text);
             return;
         }
         let registry = self.command_registry();

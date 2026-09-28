@@ -1,10 +1,10 @@
 //! In-TUI overlay surfaces.
 //!
 //! Overlays are interactive modals painted over the conversation
-//! buffer: model picker, session picker, slash command palette,
-//! settings dialog, login dialog, agents overlay. Every one of them
-//! implements [`OverlayWidget`], the shared render/input contract the
-//! App drives directly.
+//! buffer: model picker, session picker, settings dialog, login
+//! dialog, agents overlay. Every one of them implements
+//! [`OverlayWidget`], the shared render/input contract the App drives
+//! directly.
 //!
 //! Unlike the standalone [`crate::picker::pick`] (which owns the
 //! terminal in raw mode for one-shot prompts like `kage auth login`),
@@ -26,7 +26,6 @@ pub mod input;
 pub mod picker;
 pub mod session_tree;
 pub mod settings;
-pub mod slash;
 pub mod todo_list;
 pub mod widget;
 
@@ -41,6 +40,5 @@ pub use input::InputOverlay;
 pub use picker::OverlayPicker;
 pub use session_tree::{SessionNode, SessionTreeOverlay, SessionTreeSource};
 pub use settings::SettingsOverlay;
-pub use slash::{SlashContext, SlashPalette};
 pub use todo_list::TodoListOverlay;
 pub use widget::{OverlayAction, OverlayCtx, OverlayWidget};

@@ -107,7 +107,7 @@ pub(super) const CLASSES: &[Class] = &[
             Field {
                 name: "description",
                 ty: "string",
-                doc: "Shown in the palette and :help.",
+                doc: "Shown in completion and :help.",
             },
             Field {
                 name: "args?",

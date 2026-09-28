@@ -341,6 +341,17 @@ fn submit_pushes_text_into_history_skipping_dupes() {
 }
 
 #[test]
+fn slash_submissions_reach_the_history() {
+    let mut state = InputState::new();
+    for c in "/swarm on".chars() {
+        state.handle_key(key(KeyCode::Char(c)));
+    }
+    let acts = state.handle_key(key(KeyCode::Enter));
+    assert_eq!(acts, vec![InputAction::Submit("/swarm on".into())]);
+    assert_eq!(state.history(), &["/swarm on".to_owned()]);
+}
+
+#[test]
 fn up_in_insert_walks_back_through_history() {
     let mut state = InputState::new();
     state.set_history(vec!["alpha".into(), "beta".into(), "gamma".into()]);
@@ -1131,13 +1142,14 @@ fn modeless_esc_goes_to_the_host_and_stays_insert() {
 }
 
 #[test]
-fn modeless_slash_on_empty_opens_command_palette() {
+fn modeless_slash_types_like_any_character() {
     let mut state = InputState::new();
     state.set_modeless(true);
     assert_eq!(
         state.handle_key(key(KeyCode::Char('/'))),
-        vec![InputAction::OpenCommandPalette]
+        Vec::<InputAction>::new()
     );
+    assert_eq!(state.text(), "/");
 }
 
 #[test]

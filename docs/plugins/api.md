@@ -387,10 +387,10 @@ table `{ text, is_error? }`.
 
 Argument `kind` values: `"text"`, `"choice"`, `"path"`, `"session"`,
 `"flag"`. For `"choice"`, also supply `choices = { "...", ... }`. A
-`"text"` argument may set `hint`, the placeholder shown in the palette.
+`"text"` argument may set `hint`, the placeholder shown in completion.
 
 `aliases` are alternate names that resolve to the same command, so
-`:br` runs `:branch`. They appear in the palette and `:help`. A
+`:br` runs `:branch`. They appear in completion and `:help`. A
 command is rejected whole if its name *or* any alias collides with a
 built-in. Use `kage.override_command` to shadow a built-in on
 purpose.

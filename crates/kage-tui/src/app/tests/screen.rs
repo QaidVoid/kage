@@ -407,13 +407,13 @@ fn draw_snapshot_is_reused_while_the_buffer_is_unchanged() {
 fn the_footer_hint_names_the_keys_of_the_open_overlay() {
     let mut app = defaults_app();
     app.set_editor_modeless(true);
-    app.handle_key(key('/'));
+    app.apply(InputAction::BeginCommand);
     assert_eq!(
         app.footer_hint(),
         "tab to complete \u{B7} enter to run \u{B7} esc to close"
     );
     app.handle_key(code(KeyCode::Esc));
-    assert!(app.slash_palette.is_none());
+    assert!(app.cmdline.is_none());
     app.handle_key(key('?'));
     assert_eq!(app.footer_hint(), "up/down to scroll \u{B7} esc to close");
     app.handle_key(code(KeyCode::Esc));

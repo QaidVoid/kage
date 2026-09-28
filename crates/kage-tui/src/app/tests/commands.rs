@@ -1,5 +1,5 @@
-//! Commands: validation, the `:` line and the `/` palette, and the built-
-//! in commands.
+//! Commands: validation, the `:` line and `/`-prompt dispatch, and the
+//! built-in commands.
 
 use super::*;
 
@@ -408,8 +408,8 @@ fn validated_optional_arg_missing_is_ok() {
 }
 
 // These tests drive the modal state machine with raw `KeyEvent`s
-// and confirm that `:` and `/` both reach `run_command_validated`
-// through `dispatch_key`.
+// and confirm that `:` reaches `run_command_validated` through
+// `dispatch_key` and that a `/` draft reaches it through submit.
 
 #[test]
 fn colon_keystrokes_dispatch_quit_handler() {
@@ -425,28 +425,6 @@ fn colon_keystrokes_dispatch_quit_handler() {
     let exit = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(exit, Some(AppExit::Quit));
     assert!(app.cmdline.is_none(), "successful submit closes cmdline");
-}
-
-#[test]
-fn slash_keystrokes_dispatch_quit_handler() {
-    let buffer = shared_buffer();
-    let (tx, _rx) = mpsc::channel();
-    let mut app = app_with_defaults(buffer, tx);
-    // Default mode is Insert. `/` only opens the palette when the
-    // input buffer is empty; that is the case for a fresh App.
-    let exit = app.handle_key(key('/'));
-    assert!(exit.is_none());
-    assert!(
-        app.slash_palette.is_some(),
-        "'/' should open the slash palette"
-    );
-    type_str(&mut app, "quit");
-    let exit = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert_eq!(exit, Some(AppExit::Quit));
-    assert!(
-        app.slash_palette.is_none(),
-        "successful submit closes the palette"
-    );
 }
 
 /// Two plugin commands whose names share the prefix `zz-`, so the tab
@@ -479,40 +457,16 @@ fn colon_tab_completes_to_lcp_and_opens_popup() {
 }
 
 #[test]
-fn slash_tab_completes_to_lcp_and_opens_popup() {
+fn slash_draft_completes_commands_on_the_prompt() {
     let buffer = shared_buffer();
     let (tx, _rx) = mpsc::channel();
     let mut app = app_with_defaults(buffer, tx);
     lcp_commands(&mut app);
-    app.handle_key(key('/'));
-    app.handle_key(key('z'));
+    type_str(&mut app, "/z");
+    let completion = app.input_completion.as_ref().expect("popup open");
+    assert!(completion.items().iter().any(|i| i.value == "zz-one"));
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    let sp = app.slash_palette.as_ref().expect("palette open");
-    let cl = sp.cmdline();
-    assert_eq!(cl.text(), "zz-", "tab should extend to the LCP");
-    assert_eq!(palette_selected(&app).as_deref(), Some("zz-one"));
-    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    let cl = app.slash_palette.as_ref().expect("palette open").cmdline();
-    assert_eq!(
-        cl.text(),
-        "zz-one ",
-        "the next tab inserts the highlighted row"
-    );
-    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    let cl = app.slash_palette.as_ref().expect("palette open").cmdline();
-    assert_eq!(cl.text(), "zz-two ", "then tab cycles");
-}
-
-#[test]
-fn palette_tab_completes_a_typed_alias_to_its_command() {
-    let mut app = defaults_app();
-    app.handle_key(key('/'));
-    type_str(&mut app, "perm");
-    assert_eq!(palette_values(&app), ["permission"]);
-    assert_eq!(palette_selected(&app).as_deref(), Some("permission"));
-    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-    let cl = app.slash_palette.as_ref().expect("palette open").cmdline();
-    assert_eq!(cl.text(), "permission ");
+    assert_eq!(app.input().text(), "/zz-one");
 }
 
 #[test]
@@ -530,83 +484,10 @@ fn colon_bad_arg_keeps_cmdline_open_with_error() {
 }
 
 #[test]
-fn slash_bad_arg_keeps_palette_open_with_error() {
-    let buffer = shared_buffer();
-    let (tx, _rx) = mpsc::channel();
-    let mut app = app_with_defaults(buffer, tx);
-    app.handle_key(key('/'));
-    type_str(&mut app, "mouse mayb");
-    let exit = app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(exit.is_none());
-    let sp = app
-        .slash_palette
-        .as_ref()
-        .expect("palette stays open on bad arg");
-    assert!(
-        sp.cmdline().error().is_some(),
-        "validation error should be set on the palette"
-    );
-}
-
-fn palette_values(app: &App) -> Vec<String> {
-    let sp = app.slash_palette.as_ref().expect("palette open");
-    let items = &sp.cmdline().completions().items;
-    items.iter().map(|c| c.value.clone()).collect()
-}
-
-fn palette_selected(app: &App) -> Option<String> {
-    let cl = app.slash_palette.as_ref().expect("palette open").cmdline();
-    cl.selected()
-        .map(|i| cl.completions().items[i].value.clone())
-}
-
-#[test]
-fn palette_opens_with_model_selected_on_top() {
-    let mut app = defaults_app();
-    app.handle_key(key('/'));
-    assert_eq!(palette_values(&app)[0], "model");
-    assert_eq!(palette_selected(&app).as_deref(), Some("model"));
-}
-
-#[test]
-fn palette_shows_an_alias_only_without_its_command() {
-    let mut app = defaults_app();
-    app.handle_key(key('/'));
-    assert!(!palette_values(&app).iter().any(|v| v == "q"));
-    app.handle_key(key('q'));
-    assert!(!palette_values(&app).iter().any(|v| v == "q"));
-    assert_eq!(palette_selected(&app).as_deref(), Some("quit"));
-    app.handle_key(code(KeyCode::Backspace));
-    app.handle_key(key('/'));
-    type_str(&mut app, "img");
-    assert_eq!(palette_values(&app), ["img"]);
-}
-
-#[test]
-fn palette_first_down_selects_the_second_row() {
-    let mut app = defaults_app();
-    app.handle_key(key('/'));
-    app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-    assert_eq!(palette_selected(&app), palette_values(&app).get(1).cloned());
-}
-
-#[test]
-fn palette_enter_on_open_runs_the_model_picker() {
-    let mut app = defaults_app();
-    app.set_model_choices(vec![PickItem::simple("fake:m")]);
-    app.handle_key(key('/'));
-    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-    assert!(app.slash_palette.is_none());
-    assert!(app.picker.is_some(), "bare /model opens the picker");
-    assert_eq!(app.picker_kind, Some(PickerKind::Model));
-}
-
-#[test]
 fn slash_reload_sends_reload_plugins() {
     let (tx, rx) = mpsc::channel();
     let mut app = app_with_defaults(shared_buffer(), tx);
-    app.handle_key(key('/'));
-    type_str(&mut app, "reload");
+    type_str(&mut app, "/reload");
     app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
     assert_eq!(rx.try_recv(), Ok(RunRequest::ReloadPlugins));
 }
@@ -665,55 +546,33 @@ fn export_uses_the_unquoted_parsed_path() {
 }
 
 #[test]
-fn enter_on_a_command_missing_its_argument_names_it() {
+fn slash_missing_argument_restores_the_draft_with_the_reason() {
     let mut app = defaults_app();
-    app.set_editor_modeless(true);
-    app.handle_key(key('/'));
-    type_str(&mut app, "theme set");
+    app.set_toasts(crate::toast::shared_toasts());
+    type_str(&mut app, "/theme set");
     app.handle_key(code(KeyCode::Enter));
-    let palette = app.slash_palette.as_ref().expect("the palette stays open");
-    assert_eq!(palette.cmdline().text(), "theme set ");
-    assert_eq!(
-        palette.cmdline().error(),
-        Some("missing required argument `name`")
-    );
-    let rows = rendered(&mut app, 80, 24);
+    assert_eq!(app.input().text(), "/theme set", "the draft is restored");
+    let toasts = app.live_toasts();
     assert!(
-        rows.iter()
-            .any(|r| r.contains("! missing required argument `name`")),
-        "{rows:#?}"
-    );
-    type_str(&mut app, "d");
-    assert!(
-        app.slash_palette
-            .as_ref()
-            .unwrap()
-            .cmdline()
-            .error()
-            .is_none()
+        toasts
+            .iter()
+            .any(|t| t.text.contains("missing required argument `name`")),
+        "{toasts:?}"
     );
 }
 
 #[test]
-fn palette_descriptions_line_up_after_the_argument_hints() {
+fn slash_descriptions_line_up_after_the_argument_hints() {
     let mut app = defaults_app();
-    app.set_editor_modeless(true);
-    app.handle_key(key('/'));
-    type_str(&mut app, "m");
-    let rows = rendered(&mut app, 100, 30);
-    let row = |name: &str| {
-        rows.iter()
-            .find(|r| r.trim_start().starts_with(name))
-            .unwrap_or_else(|| panic!("{name}: {rows:#?}"))
-            .clone()
+    type_str(&mut app, "/m");
+    let completion = app.input_completion.as_ref().expect("popup open");
+    let detail = |value: &str| match completion.items().iter().find(|i| i.value == value) {
+        Some(i) => i.detail.clone().unwrap_or_default(),
+        None => panic!("{value}: {completion:?}"),
     };
-    let model = row("model [id]");
-    let mouse = row("mouse [on|off|toggle]");
-    let mcp = row("mcp [restart|login]");
-    let column = |r: &str, desc: &str| r.find(desc).unwrap_or_else(|| panic!("{r}"));
-    let at = column(&model, "switch to provider:model");
-    assert_eq!(column(&mouse, "toggle mouse capture"), at, "{rows:#?}");
-    assert_eq!(column(&mcp, "list MCP servers"), at, "{rows:#?}");
+    assert!(detail("model").starts_with("[id] \u{b7} switch to provider:model"));
+    assert!(detail("mouse").starts_with("[on|off|toggle] \u{b7} toggle mouse capture"));
+    assert!(detail("mcp").starts_with("[restart|login] \u{b7} list MCP servers"));
 }
 
 #[test]
@@ -731,4 +590,83 @@ fn answers_to_commands_land_in_the_conversation() {
         let text = last_block_text(&app.buffer);
         assert!(text.contains(want), "{line}: {text}");
     }
+}
+
+#[test]
+fn a_slash_submission_runs_the_command() {
+    let (mut app, rx, _events) = app_with_events();
+    app.handle_submit("/swarm whatever".into(), false);
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(RunRequest::SwarmMode { on: true })
+    ));
+    match rx.try_recv() {
+        Ok(RunRequest::Submit {
+            text,
+            session: None,
+            queue: false,
+            ..
+        }) => assert_eq!(text, "whatever"),
+        other => panic!("expected the task prompt, got {other:?}"),
+    }
+    assert!(rx.try_recv().is_err(), "the literal text must not submit");
+}
+
+#[test]
+fn a_bare_slash_submission_does_nothing() {
+    let (mut app, rx, _events) = app_with_events();
+    app.handle_submit("/".into(), false);
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn an_unknown_slash_submission_returns_to_the_draft() {
+    let (mut app, rx, _events) = app_with_events();
+    app.handle_submit("/nope args".into(), false);
+    assert!(rx.try_recv().is_err(), "unknown commands send nothing");
+    assert_eq!(app.input.text(), "/nope args");
+}
+
+#[test]
+fn a_skill_submission_sends_its_body_and_args() {
+    use kage_core::skills::Skill;
+    let (mut app, rx, _events) = app_with_events();
+    app.set_skills(vec![Skill {
+        name: "review".into(),
+        description: "review things".into(),
+        body: "Review carefully.".into(),
+        disable_model_invocation: false,
+        path: std::path::PathBuf::from("/skills/review"),
+    }]);
+    assert!(
+        app.command_registry()
+            .iter()
+            .any(|spec| spec.name == "review")
+    );
+
+    app.handle_submit("/review the input box".into(), false);
+    match rx.try_recv() {
+        Ok(RunRequest::Submit { text, session, .. }) => {
+            assert_eq!(text, "Review carefully.\n\nthe input box");
+            assert_eq!(session, None);
+        }
+        other => panic!("expected the skill prompt, got {other:?}"),
+    }
+    assert!(rx.try_recv().is_err(), "the literal text must not submit");
+}
+
+#[test]
+fn a_disabled_skill_takes_no_command() {
+    use kage_core::skills::Skill;
+    let (mut app, rx, _events) = app_with_events();
+    app.set_skills(vec![Skill {
+        name: "review".into(),
+        description: "review things".into(),
+        body: "Review carefully.".into(),
+        disable_model_invocation: true,
+        path: std::path::PathBuf::from("/skills/review"),
+    }]);
+    app.handle_submit("/review".into(), false);
+    assert!(rx.try_recv().is_err());
+    assert_eq!(app.input.text(), "/review");
 }

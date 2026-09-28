@@ -127,7 +127,7 @@ second column.
 | `focus_color` | `KageFocus` bg | focused block accent |
 | `status_bg` | `KageStatus` bg | header row fill |
 | `status_dim_fg` | `KageStatus` fg | header row text |
-| `modeline_bg` | `KageModeline` bg | command palette, completion popup and toast fill |
+| `modeline_bg` | `KageModeline` bg | completion popup and toast fill |
 | `modeline_fg` | `KageModeline` fg | not painted by the built-in chrome |
 | `input_border_normal` | `KageInputBorderNormal` fg | input rules, normal mode |
 | `input_border_insert` | `KageInputBorderInsert` fg | input rules, insert mode and modeless |

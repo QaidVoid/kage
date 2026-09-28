@@ -126,19 +126,16 @@ fn accepting_a_template_puts_the_cursor_on_its_placeholder() {
 }
 
 #[test]
-fn the_palette_lists_mcp_prompts_with_their_hint_and_tag() {
+fn slash_draft_lists_mcp_prompts_with_their_hint_and_tag() {
     let (mut app, _rx, _events) = mcp_app();
-    app.apply(InputAction::OpenCommandPalette);
-    let palette = app.slash_palette.as_mut().unwrap();
-    for c in "everything:".chars() {
-        crate::overlay::OverlayWidget::handle_key(palette, key(c));
+    for c in "/everything:".chars() {
+        app.handle_key(key(c));
     }
-    let rows: Vec<(String, String)> = palette
-        .cmdline()
-        .completions()
-        .items
+    let completion = app.input_completion.as_ref().expect("popup open");
+    let rows: Vec<(String, String)> = completion
+        .items()
         .iter()
-        .map(|c| (c.label(), c.description.clone().unwrap_or_default()))
+        .map(|i| (i.value.clone(), i.detail.clone().unwrap_or_default()))
         .collect();
     assert_eq!(
         rows,
@@ -148,63 +145,37 @@ fn the_palette_lists_mcp_prompts_with_their_hint_and_tag() {
                 "A prompt without arguments  [mcp]".to_owned()
             ),
             (
-                "everything:complex_prompt <temperature> [style]".to_owned(),
-                "A prompt with arguments  [mcp]".to_owned()
+                "everything:complex_prompt".to_owned(),
+                "<temperature> [style] \u{b7} A prompt with arguments  [mcp]".to_owned()
             ),
         ]
     );
 }
 
 #[test]
-fn palette_tab_adds_a_space_so_arguments_do_not_merge() {
+fn slash_tab_inserts_the_prompt_name() {
     let (mut app, _rx, _events) = mcp_app();
-    for (typed, after_tab) in [
-        ("everything:co", "everything:complex_prompt "),
-        ("hel", "help "),
-    ] {
-        app.apply(InputAction::OpenCommandPalette);
-        let palette = app.slash_palette.as_mut().unwrap();
-        for c in typed.chars() {
-            crate::overlay::OverlayWidget::handle_key(palette, key(c));
-        }
-        crate::overlay::OverlayWidget::handle_key(palette, code(KeyCode::Tab));
-        assert_eq!(palette.cmdline().text(), after_tab);
-        for c in "0.7".chars() {
-            crate::overlay::OverlayWidget::handle_key(palette, key(c));
-        }
-        assert_eq!(palette.cmdline().text(), format!("{after_tab}0.7"));
-        app.slash_palette = None;
+    for c in "/everything:co".chars() {
+        app.handle_key(key(c));
     }
+    app.handle_key(code(KeyCode::Tab));
+    assert_eq!(app.input.text(), "/everything:complex_prompt");
+    for c in " 0.7".chars() {
+        app.handle_key(key(c));
+    }
+    assert_eq!(app.input.text(), "/everything:complex_prompt 0.7");
 }
 
 #[test]
-fn enter_on_a_prompt_with_required_arguments_waits_for_them() {
+fn enter_on_a_prompt_first_completes_then_sends() {
     let (mut app, rx, _events) = mcp_app();
-    app.apply(InputAction::OpenCommandPalette);
-    for c in "everything:co".chars() {
-        let palette = app.slash_palette.as_mut().unwrap();
-        crate::overlay::OverlayWidget::handle_key(palette, key(c));
-    }
-    app.handle_key(code(KeyCode::Enter));
-    let palette = app.slash_palette.as_ref().expect("palette stays open");
-    assert_eq!(palette.cmdline().text(), "everything:complex_prompt ");
-    assert!(rx.try_recv().is_err(), "nothing runs");
-    for c in "0.7".chars() {
+    for c in "/everything:si".chars() {
         app.handle_key(key(c));
     }
     app.handle_key(code(KeyCode::Enter));
-    assert!(app.slash_palette.is_none());
-    assert!(matches!(
-        rx.try_recv(),
-        Ok(RunRequest::Submit { text, .. }) if text == "/everything:complex_prompt 0.7"
-    ));
-
-    app.apply(InputAction::OpenCommandPalette);
-    for c in "everything:si".chars() {
-        app.handle_key(key(c));
-    }
+    assert_eq!(app.input.text(), "/everything:simple_prompt");
+    assert!(rx.try_recv().is_err(), "nothing runs yet");
     app.handle_key(code(KeyCode::Enter));
-    assert!(app.slash_palette.is_none());
     assert!(matches!(
         rx.try_recv(),
         Ok(RunRequest::Submit { text, .. }) if text == "/everything:simple_prompt"
@@ -247,13 +218,14 @@ fn builtin_and_plugin_names_win_over_mcp_prompts() {
 fn running_an_mcp_prompt_during_a_run_sends_a_queued_prompt() {
     let (mut app, rx, _events) = mcp_app();
     lock(app.session_usage.as_ref().unwrap()).working = true;
-    app.apply(InputAction::OpenCommandPalette);
-    let palette = app.slash_palette.as_mut().unwrap();
-    for c in "everything:complex_prompt 0.7 terse".chars() {
-        crate::overlay::OverlayWidget::handle_key(palette, key(c));
+    for c in "/everything:complex_prompt 0.7 terse".chars() {
+        app.handle_key(key(c));
     }
+    assert!(
+        app.input_completion.is_none(),
+        "no candidates, so enter submits"
+    );
     app.handle_key(code(KeyCode::Enter));
-    assert!(app.slash_palette.is_none());
     assert_eq!(
         rx.try_recv(),
         Ok(RunRequest::Submit {
@@ -280,8 +252,12 @@ fn drafts_the_engine_expands_are_queued_never_steered() {
     assert!(queued(&mut app, "  /everything:simple_prompt"));
     assert!(queued(&mut app, "is @broken:x up"));
     assert!(!queued(&mut app, "plain text about everything:x"));
-    assert!(!queued(&mut app, "/linear:prompt is not live"));
     assert!(!queued(&mut app, "@unknown:x and @everything: alone"));
+    // An unknown `/command` is a command error now, not a prompt: the
+    // text goes back to the draft and nothing submits.
+    app.handle_submit("/linear:prompt is not live".into(), false);
+    assert!(rx.try_recv().is_err());
+    assert_eq!(app.input.text(), "/linear:prompt is not live");
 }
 
 #[test]
@@ -409,27 +385,24 @@ fn a_finished_mcp_login_restarts_the_server() {
 }
 
 #[test]
-fn the_palette_lists_mcp() {
+fn slash_draft_lists_mcp() {
     let mut app = defaults_app();
-    app.apply(InputAction::OpenCommandPalette);
-    let palette = app.slash_palette.as_mut().unwrap();
-    for c in "mc".chars() {
-        crate::overlay::OverlayWidget::handle_key(palette, key(c));
+    for c in "/mc".chars() {
+        app.handle_key(key(c));
     }
-    let values: Vec<&str> = palette
-        .cmdline()
-        .completions()
-        .items
+    let completion = app.input_completion.as_ref().expect("popup open");
+    let values: Vec<&str> = completion
+        .items()
         .iter()
-        .map(|c| c.value.as_str())
+        .map(|i| i.value.as_str())
         .collect();
     assert_eq!(values, ["mcp"]);
-    let item = &palette.cmdline().completions().items[0];
-    assert_eq!(item.label(), "mcp [restart|login]");
+    let item = &completion.items()[0];
+    assert_eq!(item.label, "mcp");
     assert!(
-        item.description
+        item.detail
             .as_deref()
-            .is_some_and(|d| d.starts_with("list MCP servers")),
+            .is_some_and(|d| d.starts_with("[restart|login] \u{b7} list MCP servers")),
         "{item:?}"
     );
 }

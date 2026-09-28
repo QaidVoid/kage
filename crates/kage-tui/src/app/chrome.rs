@@ -125,7 +125,7 @@ impl App {
     /// The footer hint of the layer above the editor that takes the
     /// keys, in the order [`Self::dispatch_key`] offers them: a plugin
     /// dialog, the agents overlay, the approval panel, the context
-    /// menu, a picker or dialog, the palette, the `:` and search lines,
+    /// menu, a picker or dialog, the `:` and search lines,
     /// then the completion popup.
     fn layer_hint(&self) -> Option<String> {
         use crate::overlay::OverlayWidget;
@@ -148,8 +148,6 @@ impl App {
             Some(h)
         } else if let Some(t) = &self.todo_list_overlay {
             Some(t)
-        } else if let Some(p) = &self.slash_palette {
-            Some(p)
         } else {
             None
         };

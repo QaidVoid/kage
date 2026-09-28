@@ -199,9 +199,6 @@ impl InputState {
                 self.forward_delete();
                 Vec::new()
             }
-            KeyCode::Char('/') if self.text.is_empty() => {
-                vec![InputAction::OpenCommandPalette]
-            }
             KeyCode::Char('!') if self.text.is_empty() && self.cursor == 0 => {
                 self.shell = true;
                 Vec::new()

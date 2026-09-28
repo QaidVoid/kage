@@ -36,7 +36,7 @@ pub(crate) use crate::layout::split;
 pub(crate) use crate::overlay::{
     ApprovalOutcome, CompletionAction, ContextAction, ContextMenu, ContextMenuOutcome,
     InputCompletion, OverlayAction, OverlayPicker, SessionTreeOverlay, SessionTreeSource,
-    SettingsOverlay, SlashContext, SlashPalette, file_completions, prefix_before_cursor,
+    SettingsOverlay, file_completions, prefix_before_cursor,
 };
 pub(crate) use crate::picker::PickItem;
 pub(crate) use crate::terminal::Tui;
@@ -479,6 +479,7 @@ impl App {
         let mut out: Vec<&'static CommandSpec> = BUILTIN_COMMANDS.iter().collect();
         out.extend(self.plugin_command_specs.iter().copied());
         out.extend(self.mcp_command_specs.iter().copied());
+        out.extend(self.skill_specs.iter().copied());
         out
     }
 }
@@ -624,10 +625,6 @@ pub struct App {
     /// Open `:` command line, if any. While present it owns key input
     /// and paints over the footer row.
     cmdline: Option<CommandLine>,
-    /// Open `/` slash palette overlay, if any. Wraps a [`CommandLine`]
-    /// and renders as a centered modal; shares the parser, completer,
-    /// and arg-editing flow with the `:` cmdline.
-    slash_palette: Option<SlashPalette>,
     /// Open `/` search line, if any. Reuses the [`CommandLine`]
     /// widget; painted with a `/` prefix instead of `:`.
     search_line: Option<CommandLine>,
@@ -664,8 +661,8 @@ pub struct App {
     /// switches mid-session).
     status_model: Option<Arc<Mutex<String>>>,
     status_session_id: Option<String>,
-    /// Plugin-registered command names + descriptions for palette
-    /// display. Builtin names take precedence on collision.
+    /// Plugin-registered command names + descriptions for completion
+    /// on the `:` line. Builtin names take precedence on collision.
     plugin_commands: Vec<(String, String)>,
     /// `(alias, canonical name)` for plugin commands. The cmdline
     /// resolves an alias to its canonical name before dispatch so the
@@ -694,6 +691,12 @@ pub struct App {
     /// no builtin or plugin command takes, rebuilt with
     /// [`Self::mcp_servers`] and on every `set_plugin_commands`.
     mcp_command_specs: Vec<&'static CommandSpec>,
+    /// Loaded skills invocable as `/name args`: the body becomes the
+    /// prompt. Skills flagged `disable_model_invocation` are left out.
+    skills: Vec<kage_core::skills::Skill>,
+    /// Synthetic `CommandSpec` entries for [`Self::skills`], leaked
+    /// like the plugin ones so completion mixes them with builtins.
+    skill_specs: Vec<&'static CommandSpec>,
     /// Keymap table shared with the plugin runtime, which fills it
     /// from `_defaults.lua`, plugins, `config.toml` and `init.lua`.
     /// Keys resolve against it after the modal layers and before the

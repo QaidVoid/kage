@@ -175,7 +175,7 @@ A key is looked up in these modes, first match wins:
 | visual | `v`, `g` |
 
 Mappings never apply while an overlay (a picker, a dialog, the `:`
-line, the `/` search line, the slash palette, the approval panel) is
+line, the `/` search line, the approval panel) is
 open. While the
 autocomplete popup is open it sees its own keys first.
 
@@ -214,7 +214,7 @@ mapping in `i` or `g` would catch it while you type.
 `kage.action` holds: `Cancel`, `BeginCommand`, `BeginSearch`,
 `ScrollToTop`, `ScrollToBottom`, `ToggleFold`, `UnfoldAll`, `FoldAll`,
 `Yank`, `ClearSelection`, `OpenModelPicker`, `OpenSessionPicker`,
-`OpenCommandPalette`, `SearchNext`, `SearchPrev`, `YankFocusedBlock`,
+`SearchNext`, `SearchPrev`, `YankFocusedBlock`,
 `CycleThinkingLevel`, `CyclePane`, `FocusPrev`, `FocusNext`,
 `OpenHelp`, `OpenJumpPicker`, `AttachClipboardImage`, `EnterVisual`,
 `QueuePrompt`, `OpenAgents`, and the function `scroll(n)`.
@@ -544,7 +544,7 @@ An item is one of:
 | `thinking` | the thinking level the next run sends, such as `thinking high (auto)` (`auto` when you have not chosen one), hidden when off |
 | `permission` | a session permission override, such as `ask mode`, hidden when there is none |
 | `mode` | `NORMAL`, `INSERT` or `VISUAL` in vim mode, `shell` while `!` shell mode is armed, nothing otherwise |
-| `hint` | what the next keys do: the pending keys of a mapping sequence, the keys of the open picker, dialog, approval panel, palette, `:` line or search line, `ctrl+c again to quit` or `draft cleared, up restores it`, else a hint for the current state such as `? for shortcuts`, `tab to queue`, `ctrl+t for agents`, or `enter to steer`, `esc to go back` and `ctrl+c to stop` in an agent view |
+| `hint` | what the next keys do: the pending keys of a mapping sequence, the keys of the open picker, dialog, approval panel, `:` line or search line, `ctrl+c again to quit` or `draft cleared, up restores it`, else a hint for the current state such as `? for shortcuts`, `tab to queue`, `ctrl+t for agents`, or `enter to steer`, `esc to go back` and `ctrl+c to stop` in an agent view |
 | `cwd` | the working directory |
 | `version` | the kage version |
 | `sessions` | `start` only: the three most recent sessions with their titles and times |

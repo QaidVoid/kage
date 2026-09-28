@@ -484,9 +484,9 @@ fn render_manpage(cmd: &clap::Command) -> io::Result<String> {
         bold("-p"),
         roman(", kage opens its interactive TUI in the current directory. Type a prompt and press enter to send it. On an empty prompt, "),
         bold("?"),
-        roman(" shows the keys and "),
+        roman(" shows the keys and a prompt starting with "),
         bold("/"),
-        roman(" opens the command palette. "),
+        roman(" runs a command. "),
         bold("ctrl+q"),
         roman(" quits."),
     ]);

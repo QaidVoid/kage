@@ -662,7 +662,7 @@ mod tests {
         assert_eq!(node.usage.total.output, 40_000);
         assert_eq!(node.usage.total.cache_read, 80_000);
         assert_eq!(node.usage.total.cache_write, 8_000);
-        assert_eq!(node.usage.cost, 1.25);
+        assert!((node.usage.cost - 1.25).abs() < 1e-9);
         assert_eq!(node.usage.context_used, 248_000);
         assert_eq!(node.usage.context_window, 1_000_000);
         assert_eq!(node.took, Some(Duration::from_millis(4_200)));
@@ -730,11 +730,11 @@ mod tests {
         let node = tree.get(first).unwrap();
         assert_eq!(node.tool_calls, 3);
         assert_eq!(node.usage.total.input, 100);
-        assert_eq!(node.usage.cost, 0.01);
+        assert!((node.usage.cost - 0.01).abs() < 1e-9);
         assert_eq!(node.usage.context_window, 200_000);
-        assert_eq!(node.took, Some(Duration::from_millis(15_000)));
+        assert_eq!(node.took, Some(Duration::from_secs(15)));
         let node = tree.get(second).unwrap();
-        assert_eq!(node.took, Some(Duration::from_millis(9_000)));
+        assert_eq!(node.took, Some(Duration::from_secs(9)));
     }
 
     #[test]

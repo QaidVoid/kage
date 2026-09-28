@@ -255,7 +255,12 @@ contributes via the `resources_discover` event.
 
 A skill is a directory with a `SKILL.md` (YAML frontmatter `name`,
 `description`, optional `disable_model_invocation`) whose body is
-injected into the system prompt so the agent always sees it.
+injected into the system prompt so the agent always sees it. Each
+skill is also a slash command: `/name arguments` sends the body as
+your prompt with the arguments appended, so invoking one is a normal
+message the model answers with the skill applied. Pass
+`disable_model_invocation: true` to keep the `/name` command out;
+the body still reaches the system prompt.
 
 A prompt template is a single `.md` file (frontmatter `name`,
 `description`, `argument-hint`) whose body becomes a user message

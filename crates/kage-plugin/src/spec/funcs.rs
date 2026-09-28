@@ -391,6 +391,22 @@ pub(super) const FUNCS: &[Func] = &[
         ret: None,
     },
     Func {
+        doc: &[
+            "Advertise the tool `from` under the name `to`: the model",
+            "sees only `to`, while execution and permission rules keep",
+            "using the real tool. Re-applied on plugin reload; a rename",
+            "whose `from` has no tool sits unused.",
+        ],
+        path: "kage.rename_tool",
+        since: 2,
+        params: &[Field {
+            name: "spec",
+            ty: "{ from: string, to: string }",
+            doc: "",
+        }],
+        ret: None,
+    },
+    Func {
         doc: &["Register a slash / colon command."],
         path: "kage.register_command",
         since: 1,

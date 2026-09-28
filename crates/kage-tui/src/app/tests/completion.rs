@@ -109,3 +109,109 @@ fn enter_accepts_the_highlighted_completion_before_sending() {
     app.handle_key(code(KeyCode::Enter));
     assert!(rx.try_recv().is_ok(), "a completed path sends");
 }
+
+#[test]
+fn slash_completes_command_names_in_the_prompt() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer, tx);
+    for c in "/sw".chars() {
+        app.handle_key(key(c));
+    }
+    let sp = app.input_completion.as_ref().expect("slash completion");
+    let values: Vec<&str> = sp.items().iter().map(|i| i.value.as_str()).collect();
+    assert!(values.contains(&"swarm"), "{values:?}");
+}
+
+#[test]
+fn slash_rows_carry_the_argument_hint_beside_the_description() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer, tx);
+    for c in "/sw".chars() {
+        app.handle_key(key(c));
+    }
+    let sp = app.input_completion.as_ref().expect("slash completion");
+    let swarm = sp
+        .items()
+        .iter()
+        .find(|i| i.value == "swarm")
+        .expect("swarm offered");
+    let detail = swarm.detail.as_deref().expect("swarm detail");
+    assert!(detail.starts_with("[on|off|<task>]"), "{detail}");
+    assert!(detail.contains("turn swarm mode on or off"), "{detail}");
+}
+
+#[test]
+fn slash_completion_with_no_args_offers_everything_then_names_filter() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer, tx);
+    app.handle_key(key('/'));
+    let all = app
+        .input_completion
+        .as_ref()
+        .expect("bare slash completes")
+        .items()
+        .len();
+    assert!(all > 3, "{all}");
+    for c in "mod".chars() {
+        app.handle_key(key(c));
+    }
+    let first = app
+        .input_completion
+        .as_ref()
+        .expect("slash completion")
+        .items()
+        .first()
+        .cloned()
+        .unwrap();
+    assert_eq!(first.value, "model");
+    assert_eq!(first.label, "model");
+    assert!(first.detail.as_deref().is_some_and(|d| !d.is_empty()));
+}
+
+#[test]
+fn slash_argument_positions_complete_against_the_spec() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer, tx);
+    for c in "/mouse ".chars() {
+        app.handle_key(key(c));
+    }
+    let sp = app.input_completion.as_ref().expect("mouse arg completion");
+    let values: Vec<&str> = sp.items().iter().map(|i| i.value.as_str()).collect();
+    assert!(
+        values.iter().all(|v| ["on", "off", "toggle"].contains(v)),
+        "{values:?}"
+    );
+}
+
+#[test]
+fn enter_accepts_a_slash_completion_then_the_next_enter_sends() {
+    let buffer = shared_buffer();
+    let (tx, rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer, tx);
+    app.set_model_choices(vec![PickItem::simple("fake:m")]);
+    for c in "/mod".chars() {
+        app.handle_key(key(c));
+    }
+    assert!(app.input_completion.is_some());
+    app.handle_key(code(KeyCode::Enter));
+    assert_eq!(app.input().text(), "/model");
+    assert!(rx.try_recv().is_err(), "the bare command was sent");
+
+    app.handle_key(code(KeyCode::Enter));
+    assert!(app.picker.is_some(), "/model opens the model picker");
+}
+
+#[test]
+fn slash_completion_stops_once_arguments_begin() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer, tx);
+    for c in "/swarm on".chars() {
+        app.handle_key(key(c));
+    }
+    assert!(app.input_completion.is_none());
+}

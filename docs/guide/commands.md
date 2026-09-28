@@ -1,30 +1,21 @@
 # commands
 
-Commands are typed into the prompt with a leading `/`. The palette
-lists every available command with its description and argument hint,
-autocompletes arguments, and runs the handler on `enter`.
+Commands are typed into the prompt with a leading `/` and run when
+you press `enter`, in place of sending a prompt. `/swarm review the
+crates` runs the `swarm` command; text with no leading `/` goes to
+the model as usual.
 
-## opening the command palette
+## command completion
 
-Press `/` on an empty prompt to open the palette inline above the
-input box. It lists the most used commands first, and as you type the
-list filters to matching commands. The first row is always selected,
-so `/` then `enter` opens the model picker. Aliases such as `q` stay
-out of the list until what you type matches one.
+While you type a command, a popup above the input lists the matching
+names with their argument hints and descriptions. `up` / `down` move
+the selection, `tab` or `enter` accepts the highlighted one, and with
+the popup closed `enter` runs the line. A submitted command is kept
+in the prompt history, so `up` recalls it like any other draft.
 
-- `down` / `up` move the selection at once.
-- `tab` extends to the longest common prefix. Press `tab` again to
-  cycle.
-- `enter` runs the selected command.
-- `esc` dismisses the popup first, then the palette. `ctrl+c` closes
-  the palette at once.
-
-Invalid input keeps the palette open with an inline error. Editing
-clears the error. For example, `/quut` shows
-`unknown command: quut (did you mean /quit?)`. A command whose first
-argument is required does not run without it: `/theme set` then
-`enter` adds a space for the argument and shows
-``missing required argument `name` ``.
+Invalid input on submit restores the draft and shows the reason as a
+toast. For example, `/quut` shows `unknown command: quut (did you
+mean /quit?)`.
 
 Commands that answer with text, such as `/theme list`,
 `/permission` without a mode, `/keybindings` and `/events`, write it
@@ -34,14 +25,14 @@ show there too.
 ::: tip vim mode
 With `editor = "vim"`, the same commands are also available from the
 ex line: press `:` in Normal mode to open it on the bottom row. The
-`:` line and the `/` palette share one parser, one autocomplete and
+`:` line and the `/` prompt share one parser, one autocomplete and
 one set of handlers, so `:model <id>` and `/model <id>` do the same
 thing.
 :::
 
 ## built-in commands
 
-The table follows the palette's order.
+The table lists every built-in command.
 
 | Command                   | What it does                                    |
 | ------------------------- | ----------------------------------------------- |
@@ -99,7 +90,7 @@ does not write `default_model` either. Set that under `[provider]` in
 ## mcp prompt commands
 
 Each prompt of a connected MCP server is a command named
-`/<server>:<prompt>`, such as `/everything:complex_prompt`. The palette
+`/<server>:<prompt>`, such as `/everything:complex_prompt`. Completion
 tags it `[mcp]` and shows its arguments as the hint, `<name>` for a
 required one and `[name]` for an optional one. Arguments are
 whitespace separated in declared order, and the last one takes the
@@ -110,6 +101,6 @@ whose name a built-in or plugin command takes is not listed. See
 ## plugin commands
 
 Plugins register their own commands via `kage.register_command`. They
-appear in the slash palette tagged `[plugin]` and accept the same
+appear in command completion tagged `[plugin]` and accept the same
 argument grammar as built-ins. See
 [plugins / lua api](/plugins/api#commands).

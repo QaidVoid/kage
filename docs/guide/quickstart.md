@@ -49,15 +49,17 @@ on an idle, empty prompt.
 
 The empty prompt shows `Ask kage anything`. The left side of the
 footer below it always says what the next keys do, such as
-`? for shortcuts` and `/ for commands` on an idle, empty prompt. While
-a picker, dialog or popup is open, it shows that layer's keys instead.
-The right side shows the model, the permission mode when you changed
-it for the session, the context use, the tokens and the cost. These
-prefixes work on an empty prompt:
+`? for shortcuts` and `/ for commands` on an idle, empty prompt.
+While a picker, dialog or popup is open, it shows that layer's
+keys instead. The right side shows the model, the permission mode when
+you changed it for the session, the context use, the tokens and the
+cost. These prefixes work on an empty prompt:
 
-- `/` opens the command palette, with the most used commands first.
-  `/settings` lists every option. Edits apply live, `enter` saves
-  them to `config.toml`, and `esc` undoes them.
+- `/` runs a command instead of sending a prompt: `/swarm on`,
+  `/theme set <name>`, and so on. Typing `/` also completes: a popup
+  lists every command with its argument hint, filtered as you type,
+  argument positions offer their values, and `enter` accepts the
+  highlighted one. Submitted commands land in the prompt history.
 - `!` switches to shell mode (see below).
 - `?` opens the keyboard reference overlay. `/help` opens it too.
 
@@ -220,6 +222,6 @@ kage -p "summarize this Cargo.toml" --model anthropic:claude-sonnet-4-6
 ## next steps
 
 - [Keybindings](/guide/keybindings): the full key map
-- [Commands](/guide/commands): everything the `/` palette accepts
+- [Commands](/guide/commands): everything the `/` prompt accepts
 - [Agents](/guide/agents): delegate tasks to agents and write your own
 - [Plugins](/plugins/): extend kage in Lua

@@ -427,7 +427,6 @@ impl App {
         // The autocomplete popup yields to every modal layer; it only
         // paints during plain input editing.
         let show_completion = self.input_completion.is_some()
-            && self.slash_palette.is_none()
             && self.cmdline.is_none()
             && self.search_line.is_none()
             && self.picker.is_none()
@@ -450,10 +449,6 @@ impl App {
             .as_ref()
             .map(|panel| (panel, self.permission_queue.len()));
         let has_approval = approval.is_some();
-        let slash_palette = self
-            .slash_palette
-            .as_ref()
-            .filter(|_| self.approval_panel.is_none());
         let input_completion = if show_completion {
             self.input_completion.as_ref()
         } else {
@@ -478,7 +473,7 @@ impl App {
                 }
                 let regions = split(area, heights);
                 let mut view_regions = regions;
-                // The palette and the completion popup anchor to the
+                // The completion popup anchors to the
                 // input box, below the pinned agents and pending rows.
                 let mut box_regions = regions;
                 if approval.is_some() {
@@ -542,10 +537,6 @@ impl App {
                         viewport: above_input,
                     };
                     crate::overlay::OverlayWidget::render(help, modal, frame.buffer_mut(), &ctx);
-                }
-                if let Some(palette) = slash_palette {
-                    palette.render(frame, box_regions);
-                    palette.place_cursor(frame, box_regions);
                 }
                 if let Some(completion) = input_completion {
                     completion.render(frame, box_regions);

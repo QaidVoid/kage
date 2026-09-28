@@ -5,6 +5,10 @@ use super::*;
 impl App {
     /// Construct an app that pushes prompts into `requests`. The
     /// receiver side is owned by the host's worker driver.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one field of the app's initial state per line"
+    )]
     #[must_use]
     pub fn new(buffer: SharedBuffer, requests: Sender<RunRequest>) -> Self {
         let (attach_tx, attach_rx) = std::sync::mpsc::channel();
@@ -26,7 +30,6 @@ impl App {
             session_tree_source: None,
             session_lister: None,
             cmdline: None,
-            slash_palette: None,
             status_model: None,
             status_session_id: None,
             plugin_commands: Vec::new(),
@@ -36,6 +39,8 @@ impl App {
             plugin_commands_leaked: Vec::new(),
             mcp_servers: Vec::new(),
             mcp_command_specs: Vec::new(),
+            skills: Vec::new(),
+            skill_specs: Vec::new(),
             keymap: kage_plugin::SharedKeymap::default(),
             sequencer: Sequencer::new(Duration::from_secs(1)),
             plugin_widgets: Vec::new(),
@@ -225,8 +230,8 @@ impl App {
         Some(usage)
     }
 
-    /// Register the plugin commands the host wants exposed in the
-    /// palette and on the `:` line. Names that collide with built-in
+    /// Register the plugin commands the host wants exposed on the
+    /// `:` line. Names that collide with built-in
     /// specs are dropped; the host should log a warning at
     /// registration time.
     ///
@@ -272,6 +277,43 @@ impl App {
             .map(|c| (c.name, c.description))
             .collect();
         self.set_mcp_prompts();
+    }
+
+    /// Register the skills invocable as slash commands. Skills flagged
+    /// `disable_model_invocation` stay out: their body still reaches
+    /// the model through the system prompt, but no `/name` exists.
+    /// Rebuilds the synthetic specs, so names freed by an update stop
+    /// completing.
+    pub fn set_skills(&mut self, skills: Vec<kage_core::skills::Skill>) {
+        self.skills = skills
+            .into_iter()
+            .filter(|skill| !skill.disable_model_invocation)
+            .collect();
+        self.skill_specs = self
+            .skills
+            .iter()
+            .map(|skill| {
+                let name: &'static str = Box::leak(skill.name.clone().into_boxed_str());
+                let description: &'static str =
+                    Box::leak(skill.description.clone().into_boxed_str());
+                let args: &'static [ArgSpec] = Box::leak(
+                    vec![ArgSpec::Rest {
+                        name: "args",
+                        optional: true,
+                        hint: "words for the skill to act on",
+                    }]
+                    .into_boxed_slice(),
+                );
+                &*Box::leak(Box::new(CommandSpec {
+                    name,
+                    aliases: &[],
+                    description,
+                    category: CommandCategory::Both,
+                    args,
+                    subcommands: &[],
+                }))
+            })
+            .collect();
     }
 
     /// Return the previously-leaked spec for `cmd` when an equal
@@ -323,7 +365,7 @@ impl App {
     /// prompt's arguments and whose description ends in `[mcp]`. The
     /// argument is required when the prompt has a required one.
     /// Names a builtin or plugin command takes are skipped, so the
-    /// palette shows only the command that runs.
+    /// `:` line shows only the command that runs.
     fn set_mcp_prompts(&mut self) {
         let mut commands = Vec::new();
         for server in &self.mcp_servers {

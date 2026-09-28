@@ -1,9 +1,9 @@
 //! Prompt-input autocomplete popup.
 //!
 //! A light, non-modal suggestion list floated just above the input
-//! card (like the slash palette), driven by the plugin autocomplete
-//! provider stack (`kage.add_autocomplete_provider`). Unlike the slash
-//! palette it never takes full keyboard ownership: only Up / Down /
+//! card, driven by the plugin autocomplete
+//! provider stack (`kage.add_autocomplete_provider`). It never takes
+//! full keyboard ownership: only Up / Down /
 //! Ctrl-p / Ctrl-n (navigate), Tab or Enter (accept), and Esc
 //! (dismiss) are consumed. Every other key passes through to normal text editing,
 //! after which the host re-queries the provider stack and rebuilds the

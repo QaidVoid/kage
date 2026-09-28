@@ -243,10 +243,6 @@ fn modal_open_reflects_every_modal_field() {
     assert!(app.modal_open());
     app.settings_overlay = None;
 
-    app.slash_palette = Some(SlashPalette::new(Vec::new(), SlashContext::default()));
-    assert!(app.modal_open());
-    app.slash_palette = None;
-
     app.plugin_overlay = Some(Box::new(crate::overlay::widget::EmptyOverlayWidget));
     assert!(app.modal_open());
     app.plugin_overlay = None;

@@ -3,12 +3,12 @@
 //! Templates are markdown files with YAML-subset frontmatter living at
 //! `~/.config/kage/templates/<name>.md` or `./.kage/templates/<name>.md`.
 //! Unlike skills they are NOT injected into the system prompt; they are
-//! summoned from the slash palette as `/<name>` and their rendered body
+//! summoned as `/<name>` and their rendered body
 //! becomes the next user message.
 //!
 //! Frontmatter keys:
 //! * `name` (optional) - canonical name, must match the filename stem
-//! * `description` (optional) - shown in the palette
+//! * `description` (optional) - shown in completion
 //! * `argument-hint` (optional) - free text shown next to the name
 //!
 //! Body placeholders:
@@ -29,9 +29,9 @@ use serde::{Deserialize, Serialize};
 pub struct Template {
     /// Canonical name. Equal to the file stem.
     pub name: String,
-    /// Description shown in the slash palette.
+    /// Description shown in completion.
     pub description: String,
-    /// Free-form hint shown next to the name in the palette
+    /// Free-form hint shown next to the name in completion
     /// (e.g. `"<path>"` or `"<bug-id> [reproducer]"`).
     pub argument_hint: String,
     /// Raw template body with placeholders intact.

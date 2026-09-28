@@ -70,6 +70,8 @@
 ---| "tokens"
 ---| "thinking"
 ---| "permission"
+---| "swarm"
+---| "tasks"
 ---| "mode"
 ---| "hint"
 ---| "cwd"
@@ -143,7 +145,7 @@
 ---@class kage.CommandSpec
 ---@field name string No leading / or :.
 ---@field aliases? string[] Alternate names that resolve to this command.
----@field description string Shown in the palette and :help.
+---@field description string Shown in completion and :help.
 ---@field args? kage.CommandArg[]
 ---@field handler fun(raw: string, ctx: table, args: table): string|kage.CommandResult|nil raw text, host ctx, parsed args by name.
 
@@ -340,7 +342,7 @@
 
 --- Every option `kage.opt` reads and writes.
 ---@class kage.Options
----@field theme string Color theme, bundled or from the themes directory.
+---@field theme string Color theme, bundled or from the themes directory; `default` follows the terminal background.
 ---@field mouse boolean Capture mouse events.
 ---@field editor "vim"|"modeless" Prompt editing style.
 ---@field input_min_lines integer Minimum content rows of the input box.
@@ -352,6 +354,8 @@
 ---@field timeoutlen integer Milliseconds a mapping that is also a prefix waits for more keys.
 ---@field agent_max_depth integer How deep agents may nest. 0 turns the agent tool off, and 1 lets only the main session start agents.
 ---@field agent_max_running integer How many agents run at once. Further agents wait until one finishes.
+---@field swarm_max_items integer Most items one swarm call may run, one child agent per item.
+---@field swarm_timeout_ms integer Milliseconds one swarm child may run, measured from its run start (not while queued). On deadline the child is cancelled and renders as cancelled in the aggregate.
 
 --- Every action `kage.action` holds.
 ---@class kage.Actions
@@ -367,7 +371,6 @@
 ---@field ClearSelection kage.Action Drop the active selection.
 ---@field OpenModelPicker kage.Action Open the model picker.
 ---@field OpenSessionPicker kage.Action Open the session picker.
----@field OpenCommandPalette kage.Action Open the slash command palette.
 ---@field SearchNext kage.Action Focus the next search match.
 ---@field SearchPrev kage.Action Focus the previous search match.
 ---@field YankFocusedBlock kage.Action Copy the focused block.
@@ -588,10 +591,10 @@ function kage.register_tool(spec) end
 ---@param spec kage.ToolSpec
 function kage.override_tool(spec) end
 
---- Advertise the tool `from` under the name `to`: the model sees
---- only `to`, while execution and permission rules keep using the
---- real tool. Re-applied on plugin reload; a rename whose `from`
---- has no tool sits unused.
+--- Advertise the tool `from` under the name `to`: the model
+--- sees only `to`, while execution and permission rules keep
+--- using the real tool. Re-applied on plugin reload; a rename
+--- whose `from` has no tool sits unused.
 --- Since API 2.
 ---@param spec { from: string, to: string }
 function kage.rename_tool(spec) end

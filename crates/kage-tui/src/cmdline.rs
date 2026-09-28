@@ -47,7 +47,6 @@ pub struct CommandLine {
     /// Set by the host after a failed submit; cleared on the next
     /// keystroke that changes the text.
     error: Option<String>,
-    palette: bool,
 }
 
 impl CommandLine {
@@ -55,18 +54,6 @@ impl CommandLine {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Construct a command line for the `/` palette. Every refilter
-    /// hides aliases until the typed name reaches one whose command is
-    /// not listed, and highlights a row through [`Self::select_first`],
-    /// so Enter, Down and Up act without a Tab first.
-    #[must_use]
-    pub fn for_palette() -> Self {
-        Self {
-            palette: true,
-            ..Self::default()
-        }
     }
 
     /// Current command text (without the leading `:`).
@@ -129,25 +116,6 @@ impl CommandLine {
         self.selected = None;
     }
 
-    /// Highlight the candidate equal to the typed token, or the first
-    /// one, without inserting it. Enter accepts the highlighted row.
-    pub fn select_first(&mut self) {
-        let typed = self
-            .text
-            .get(self.completions.anchor..self.cursor)
-            .unwrap_or("");
-        let exact = self.completions.items.iter().position(|c| c.value == typed);
-        self.selected = exact.or((!self.completions.items.is_empty()).then_some(0));
-    }
-
-    /// Recompute completions against `registry` and `resolver` using
-    /// the current text. Callers use this when they need to populate
-    /// the popup without driving through a keystroke, e.g. the slash
-    /// palette wants the full list visible on open.
-    pub fn refresh_completions(&mut self, registry: &[&CommandSpec], resolver: &dyn Resolver) {
-        self.refresh(registry, resolver);
-    }
-
     /// Drive the widget by one key press. `registry` and `resolver`
     /// are consulted on every edit to refresh completions and on Tab
     /// to apply them.
@@ -190,11 +158,11 @@ impl CommandLine {
                 self.tab(false, registry, resolver);
                 CommandLineEvent::Pending
             }
-            KeyCode::Down if self.popup_open || self.palette => {
+            KeyCode::Down if self.popup_open => {
                 self.cycle(true);
                 CommandLineEvent::Pending
             }
-            KeyCode::Up if self.popup_open || self.palette => {
+            KeyCode::Up if self.popup_open => {
                 self.cycle(false);
                 CommandLineEvent::Pending
             }
@@ -238,10 +206,6 @@ impl CommandLine {
                 self.refresh(registry, resolver);
                 CommandLineEvent::Pending
             }
-            KeyCode::Char('/') if self.palette && self.cursor == 0 => {
-                self.error = None;
-                CommandLineEvent::Pending
-            }
             KeyCode::Char(c) => {
                 self.error = None;
                 self.insert_char(c);
@@ -261,13 +225,6 @@ impl CommandLine {
     ///   selected. The user sees the candidate list and can browse
     ///   before committing to one.
     /// - Popup already open: cycle selection forward or backward.
-    ///
-    /// The palette always shows its list and keeps a row highlighted,
-    /// so there the prefix step keeps the highlight, and a Tab that
-    /// has no prefix to add inserts the highlighted row and starts
-    /// cycling. A row the palette inserts gets a trailing space so an
-    /// argument can follow, and a single match then lists what comes
-    /// next.
     pub fn tab(&mut self, forward: bool, registry: &[&CommandSpec], resolver: &dyn Resolver) {
         if self.completions.items.is_empty() {
             return;
@@ -276,9 +233,6 @@ impl CommandLine {
             let value = self.completions.items[0].value.clone();
             self.insert_candidate(&value);
             self.dismiss_completions();
-            if self.palette {
-                self.refresh(registry, resolver);
-            }
             return;
         }
         if self.popup_open {
@@ -292,44 +246,21 @@ impl CommandLine {
         if extends {
             self.replace_at_anchor(&lcp);
         }
-        if self.palette {
-            if extends {
-                self.select_first();
-            } else if let Some(value) = self
-                .selected
-                .and_then(|i| self.completions.items.get(i))
-                .map(|c| c.value.clone())
-            {
-                self.insert_candidate(&value);
-                self.popup_open = true;
-            }
-            return;
-        }
         self.popup_open = true;
         self.selected = None;
-        let _ = forward;
+        let _ = (registry, resolver);
     }
 
-    /// Put a chosen candidate in place of the token being completed,
-    /// followed in the palette by a space unless it is a directory.
+    /// Put a chosen candidate in place of the token being completed.
     fn insert_candidate(&mut self, value: &str) {
-        if self.palette && !value.ends_with('/') {
-            self.replace_at_anchor(&format!("{value} "));
-        } else {
-            self.replace_at_anchor(value);
-        }
+        self.replace_at_anchor(value);
     }
 
     /// Insert bracketed-paste text at the cursor and refresh the
     /// completion set, as if one `Char` keystroke had been sent per
     /// character. Control characters (tab, newline, CR) are skipped:
-    /// this is a single-line field. The palette drops a leading `/`
-    /// pasted at the start, since its glyph already shows one.
+    /// this is a single-line field.
     pub fn paste_str(&mut self, text: &str, registry: &[&CommandSpec], resolver: &dyn Resolver) {
-        let text = match text.strip_prefix('/') {
-            Some(rest) if self.palette && self.cursor == 0 => rest,
-            _ => text,
-        };
         let clean: String = text.chars().filter(|c| !c.is_control()).collect();
         if clean.is_empty() {
             return;
@@ -390,31 +321,6 @@ impl CommandLine {
         self.popup_open = false;
         self.selected = None;
         self.completions = complete(registry, &self.text, self.cursor, resolver);
-        if !self.palette {
-            return;
-        }
-        let at_name = self
-            .text
-            .get(..self.completions.anchor)
-            .is_some_and(|head| head.trim().is_empty());
-        if at_name {
-            let typed = self.cursor > self.completions.anchor;
-            let listed: Vec<String> = self
-                .completions
-                .items
-                .iter()
-                .map(|c| c.value.clone())
-                .collect();
-            self.completions.items.retain(|c| {
-                registry.iter().all(|spec| {
-                    !spec.aliases.contains(&c.value.as_str())
-                        || (typed && !listed.iter().any(|v| v == spec.name))
-                })
-            });
-        }
-        if at_name || self.cursor > self.completions.anchor {
-            self.select_first();
-        }
     }
 
     fn replace_at_anchor(&mut self, value: &str) {
@@ -500,7 +406,6 @@ impl CommandLine {
             popup_open,
             selected,
             error: None,
-            palette: false,
         }
     }
 
@@ -514,7 +419,6 @@ impl CommandLine {
             popup_open: false,
             selected: None,
             error: Some(error.to_owned()),
-            palette: false,
         }
     }
 }
@@ -1007,27 +911,6 @@ mod tests {
         assert_eq!(send(&mut cl, ctrl('u')), CommandLineEvent::Pending);
         assert_eq!(cl.text(), "rk");
         assert_eq!(cl.cursor(), 0);
-    }
-
-    #[test]
-    fn the_palette_never_doubles_its_slash() {
-        let mut cl = CommandLine::for_palette();
-        for c in "mo".chars() {
-            send(&mut cl, key(KeyCode::Char(c)));
-        }
-        assert_eq!(send(&mut cl, ctrl('u')), CommandLineEvent::Pending);
-        assert_eq!(cl.text(), "");
-        for c in "/mcp".chars() {
-            send(&mut cl, key(KeyCode::Char(c)));
-        }
-        assert_eq!(cl.text(), "mcp");
-        send(&mut cl, ctrl('u'));
-        cl.paste_str("/quit", &empty_registry(), &EmptyResolver);
-        assert_eq!(cl.text(), "quit");
-        let mut plain = typed("/x");
-        assert_eq!(plain.text(), "/x");
-        plain.paste_str("/y", &empty_registry(), &EmptyResolver);
-        assert_eq!(plain.text(), "/x/y");
     }
 
     #[test]

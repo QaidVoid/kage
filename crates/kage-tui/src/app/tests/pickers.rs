@@ -294,12 +294,6 @@ fn paste_routes_to_the_active_overlay() {
     assert_eq!(app.cmdline.as_ref().unwrap().text(), "theme ");
     app.cmdline = None;
 
-    // Slash palette open: the paste lands in the palette.
-    app.slash_palette = Some(SlashPalette::new(Vec::new(), SlashContext::default()));
-    app.handle_paste("the");
-    assert_eq!(app.slash_palette.as_ref().unwrap().cmdline().text(), "the");
-    app.slash_palette = None;
-
     // A modal without a text field swallows the paste instead of
     // letting it fall through to the hidden main input.
     app.picker = Some(OverlayPicker::new("pick", Vec::new()));
@@ -391,7 +385,7 @@ fn idle_ctrl_c_closes_each_overlay_and_the_footer_names_its_keys() {
             ..Default::default()
         }]
     }));
-    let open: [(OpenOverlay, &str); 6] = [
+    let open: [(OpenOverlay, &str); 5] = [
         (
             |app| {
                 app.handle_key(ctrl('p'));
@@ -410,12 +404,6 @@ fn idle_ctrl_c_closes_each_overlay_and_the_footer_names_its_keys() {
             "enter to resume \u{b7} f to fork \u{b7} esc to close",
         ),
         (App::open_help, "up/down to scroll \u{b7} esc to close"),
-        (
-            |app| {
-                app.handle_key(key('/'));
-            },
-            "tab to complete \u{b7} enter to run \u{b7} esc to close",
-        ),
     ];
     for (open, hint) in open {
         open(&mut app);

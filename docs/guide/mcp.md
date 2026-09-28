@@ -217,7 +217,7 @@ the MCP ask default. See [permissions](/guide/permissions#mcp-tools).
 
 ## prompts as commands
 
-A server's prompts show up in the TUI command palette as
+A server's prompts show up in the TUI as slash commands,
 `/<server>:<prompt>`. The argument hint lists required arguments as
 `<name>` and optional ones as `[name]`, and the description ends in
 `[mcp]`:

@@ -7,8 +7,25 @@ impl App {
     /// session on screen, steered into the run in flight or, with
     /// `queue`, held until it ends. A prompt the engine expands through
     /// MCP is always queued. An agent of a resumed session takes no
-    /// prompts, so the text goes back into the draft.
+    /// prompts, so the text goes back into the draft. A draft starting
+    /// with `/` is a command instead, run through the command
+    /// executor; an unknown one goes back into the draft with the
+    /// reason shown.
     pub(crate) fn handle_submit(&mut self, text: String, queue: bool) {
+        if let Some(line) = text.strip_prefix('/') {
+            if line.is_empty() {
+                return;
+            }
+            let registry = self.command_registry();
+            match self.run_command_validated(line, &registry) {
+                CommandResult::Done(_) => return,
+                CommandResult::ValidationError(msg) => {
+                    self.input.splice(0, 0, &text);
+                    self.notify(msg);
+                    return;
+                }
+            }
+        }
         if self.focused_read_only() {
             self.input.splice(0, 0, &text);
             let agent = self.focused_agent().unwrap_or("the agent");
@@ -118,22 +135,6 @@ impl App {
                     self.picker_kind = Some(PickerKind::Model);
                 }
             }
-            InputAction::OpenCommandPalette => {
-                let registry = self.command_registry();
-                let ctx = SlashContext {
-                    models: self.model_choices.iter().map(|p| p.value.clone()).collect(),
-                    plugin_commands: self.plugin_commands.clone(),
-                    sessions: self
-                        .session_lister
-                        .as_ref()
-                        .map(|f| f(true))
-                        .unwrap_or_default(),
-                    themes: crate::theme::Theme::available_names(self.themes_dir.as_deref()),
-                };
-                let mut palette = SlashPalette::new(registry, ctx);
-                palette.refresh();
-                self.slash_palette = Some(palette);
-            }
             InputAction::FocusPrev => {
                 let mut buf = lock(&self.buffer);
                 buf.focus_prev_any();
@@ -215,7 +216,6 @@ impl App {
             || self.settings_overlay.is_some()
             || self.session_tree.is_some()
             || self.agents_overlay.is_some()
-            || self.slash_palette.is_some()
             || self.cmdline.is_some()
             || self.search_line.is_some()
             || self.help_overlay.is_some()

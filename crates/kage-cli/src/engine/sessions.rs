@@ -439,6 +439,7 @@ impl super::Dispatcher {
             cx,
             recorder: Some(recorder),
         });
+        session.sync_state();
         let state = session.state.clone();
         let usage = session.usage;
         let servers = session

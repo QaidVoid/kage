@@ -298,6 +298,7 @@ fn spawn_agent(
         tool_call_id: kage_core::ToolCallId::new(call),
         agent: agent.into(),
         description: format!("{agent} task"),
+        swarm: None,
     };
     send_to(app, events, child, vec![spawned.into()]);
     child

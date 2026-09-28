@@ -46,6 +46,8 @@ use kage_plugin::PluginRuntime;
 use kage_provider::ProviderRegistry;
 use kage_tools::ToolRegistry;
 
+use self::swarm_tool::SwarmInfo;
+
 pub(crate) use bus::Subscriber;
 pub(crate) use recorder::Recorder;
 #[cfg(test)]
@@ -219,6 +221,9 @@ pub(super) struct Attach {
     pub batch_id: ToolCallId,
     pub prompt: String,
     pub reply: crossbeam_channel::Sender<ToolOutput>,
+    /// Batch membership for the resumed child, so its card keeps its
+    /// place in the new batch.
+    pub swarm: Option<SwarmInfo>,
 }
 
 impl Engine {
@@ -337,6 +342,15 @@ struct Session {
     /// Whether the session delegates repeated work through `swarm`.
     /// Drives the workflow block injected once per state change.
     swarm_mode: bool,
+}
+
+impl Session {
+    /// Copy the swarm mode and background shell count into the state
+    /// snapshot clients see, right before one is published.
+    fn sync_state(&mut self) {
+        self.state.swarm = self.swarm_mode;
+        self.state.shells = u32::try_from(self.shells).unwrap_or(u32::MAX);
+    }
 }
 
 /// What a session holds while no run owns it.
@@ -629,6 +643,9 @@ impl Dispatcher {
             return;
         }
         session.swarm_mode = on;
+        session.sync_state();
+        let state = session.state.clone();
+        self.bus.publish(id, HostEvent::StateChanged { state });
         let text = if on {
             swarm_tool::SWARM_MODE_ON.to_owned()
         } else {
@@ -952,6 +969,7 @@ impl Dispatcher {
         for text in leftover.into_iter().rev() {
             session.queued.push_front(vec![Content::Text { text }]);
         }
+        session.sync_state();
         let state = session.state.clone();
         let next = if self.shutting_down {
             None
@@ -1289,11 +1307,10 @@ fn flush_pending(bus: &Bus, id: SessionId, session: &mut Session) {
 /// any more, and publish the change.
 fn settle_working(bus: &Bus, id: SessionId, session: &mut Session) {
     let working = session.idle.is_none() || session.shells > 0;
-    if session.state.working != working {
-        session.state.working = working;
-        let state = session.state.clone();
-        bus.publish(id, HostEvent::StateChanged { state });
-    }
+    session.state.working = working;
+    session.sync_state();
+    let state = session.state.clone();
+    bus.publish(id, HostEvent::StateChanged { state });
 }
 
 /// Session entry recording `level`, written as [`AUTO_THINKING`] when

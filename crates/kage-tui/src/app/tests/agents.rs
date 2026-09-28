@@ -308,6 +308,82 @@ fn the_working_row_counts_live_agents() {
 }
 
 #[test]
+fn the_working_row_reports_swarm_batch_progress() {
+    use kage_core::protocol::{HostEvent, SessionId, SwarmMember};
+    let (mut app, _rx, events) = app_with_events();
+    app.set_editor_modeless(true);
+    app.run_started = Instant::now().checked_sub(Duration::from_secs(41));
+    let input = serde_json::json!({
+        "description": "review the crates",
+        "prompt_template": "review {{item}}",
+        "items": ["a", "b", "c"],
+    });
+    feed(
+        &mut app,
+        &events,
+        vec![
+            kage_core::LoopEvent::ToolCallStart {
+                id: kage_core::ToolCallId::new("s1"),
+                name: "swarm".into(),
+                input_partial: input,
+            }
+            .into(),
+            kage_core::LoopEvent::ToolExecutionStart {
+                id: kage_core::ToolCallId::new("s1"),
+            }
+            .into(),
+        ],
+    );
+    let parent = app.active_session.unwrap();
+    let spawned = |_session: SessionId, item: &str, index: u32| HostEvent::AgentSpawned {
+        parent,
+        tool_call_id: kage_core::ToolCallId::new("s1"),
+        agent: "explore".into(),
+        description: "review the crates".into(),
+        swarm: Some(SwarmMember {
+            item: item.to_owned(),
+            index,
+            total: 3,
+        }),
+    };
+    let children = [SessionId::new(), SessionId::new(), SessionId::new()];
+    for (index, (child, item)) in children
+        .iter()
+        .zip(["kage-core", "kage-tui", "kage-mcp"])
+        .enumerate()
+    {
+        let index = u32::try_from(index).unwrap_or(u32::MAX);
+        send_to(
+            &mut app,
+            &events,
+            *child,
+            vec![spawned(*child, item, index).into()],
+        );
+    }
+    // One child running, one done, one still queued.
+    send_to(
+        &mut app,
+        &events,
+        children[0],
+        vec![HostEvent::RunStarted.into()],
+    );
+    send_to(
+        &mut app,
+        &events,
+        children[1],
+        vec![
+            HostEvent::RunStarted.into(),
+            run_ended(kage_core::protocol::RunOutcome::Completed),
+        ],
+    );
+    let label = app.activity_label(&lock(&app.buffer), 200).unwrap();
+    assert!(
+        label.starts_with("Swarm: review the crates (1/3 done, 1 running)"),
+        "{label}"
+    );
+}
+
+#[test]
 fn the_main_session_change_forgets_its_agents() {
     let (mut app, _rx, events) = app_with_events();
     let child = spawn_agent(&mut app, &events, "a1", "explore");
@@ -404,6 +480,7 @@ fn a_nested_agent_is_pinned_under_its_parent() {
         tool_call_id: kage_core::ToolCallId::new("n1"),
         agent: "test".into(),
         description: "run the provider tests".into(),
+        swarm: None,
     };
     send_to(&mut app, &events, nested, vec![spawned.into()]);
     for session in [parent, sibling, nested] {
@@ -783,6 +860,7 @@ fn agents_app() -> (
         tool_call_id: kage_core::ToolCallId::new("n1"),
         agent: "test".into(),
         description: "run the provider tests".into(),
+        swarm: None,
     };
     send_to(&mut app, &events, test, vec![spawned.into()]);
     for session in [general, test] {
@@ -991,6 +1069,7 @@ fn pinned_agents_follow_their_cards_and_finished_ones_leave_the_queue_hint() {
             tool_call_id: kage_core::ToolCallId::new(id),
             agent: agent.into(),
             description: format!("{agent} task"),
+            swarm: None,
         };
         send_to(&mut app, &events, child, vec![spawned.into()]);
         children.push(child);
@@ -1095,10 +1174,12 @@ fn a_queued_agent_card_has_no_timer_and_times_its_run_once_started() {
     use crate::view::tool_view::ToolPhase;
     let (mut app, _rx, events) = app_with_events();
     let child = spawn_agent(&mut app, &events, "a1", "explore");
-    assert_eq!(tool_phase(&app, "a1"), ToolPhase::Queued);
+    // The spawn must not drag the running call back to queued; the
+    // child itself still shows as queued on its card.
+    assert_eq!(tool_phase(&app, "a1"), ToolPhase::Running);
     let rows = rendered(&mut app, 100, 24);
     let card = rows.iter().find(|r| r.contains("Agent explore")).unwrap();
-    assert!(card.trim_end().ends_with("explore task"), "{rows:#?}");
+    assert!(card.contains("explore task"), "{rows:#?}");
     assert!(rows.iter().any(|r| r.contains("queued")), "{rows:#?}");
 
     send_to(
@@ -1124,7 +1205,7 @@ fn a_queued_agent_card_has_no_timer_and_times_its_run_once_started() {
 }
 
 #[test]
-fn an_agent_stopped_while_queued_shows_no_time_anywhere() {
+fn an_agent_stopped_while_queued_times_no_card() {
     let (mut app, _rx, events) = app_with_events();
     let child = spawn_agent(&mut app, &events, "a1", "explore");
     feed(&mut app, &events, vec![agent_call_end("a1")]);
@@ -1134,7 +1215,8 @@ fn an_agent_stopped_while_queued_shows_no_time_anywhere() {
         child,
         vec![run_ended(kage_core::protocol::RunOutcome::Cancelled)],
     );
-    assert_eq!(result_duration(&app.buffer, "a1"), None);
+    // The call row times the tool call itself; the child that never
+    // ran contributes no time to any card.
     let row = app
         .agents_overlay_rows()
         .into_iter()

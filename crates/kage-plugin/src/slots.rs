@@ -118,6 +118,8 @@ pub const BUILTIN_COMPONENTS: &[&str] = &[
     "tokens",
     "thinking",
     "permission",
+    "swarm",
+    "tasks",
     "mode",
     "hint",
     "cwd",
@@ -207,7 +209,7 @@ static DEFAULT_SPECS: LazyLock<[Arc<SlotSpec>; SLOTS]> = LazyLock::new(|| {
             ..SlotSpec::default()
         }),
         Arc::new(SlotSpec {
-            left: items(&["permission"]),
+            left: items(&["permission", "swarm", "tasks"]),
             // Drop order for a tight row: the model name yields
             // first, the context share survives longest.
             right: items(&["model", "tokens", "context"]),

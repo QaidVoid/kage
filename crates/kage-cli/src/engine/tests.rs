@@ -778,6 +778,37 @@ fn fork_export_and_delete_report_through_notices() {
 }
 
 #[test]
+fn swarm_mode_and_shell_count_reach_the_state_snapshot() {
+    let mock = MockProvider::replaying(text_turn("ok"));
+    let h = harness(mock.clone());
+    let id = SessionId::new();
+    h.open(id, None);
+    h.engine
+        .send(Command::to(id, CommandKind::SwarmMode { on: true }));
+    let on = wait_for(&h.events, |e| state_of(e).is_some_and(|s| s.swarm));
+    assert!(
+        state_of(on.last().unwrap()).is_some_and(|s| s.swarm),
+        "the /swarm toggle publishes its state"
+    );
+
+    h.engine.send(Command::to(
+        id,
+        CommandKind::Shell {
+            command: "echo from-shell".into(),
+        },
+    ));
+    let started = wait_for(&h.events, |e| state_of(e).is_some_and(|s| s.shells == 1));
+    assert!(state_of(started.last().unwrap()).is_some_and(|s| s.shells == 1));
+    let seen = wait_for(&h.events, |e| {
+        matches!(e.event, Event::Host(HostEvent::ShellFinished { .. }))
+    });
+    let finished = wait_for(&h.events, |e| state_of(e).is_some_and(|s| s.shells == 0));
+    assert!(state_of(finished.last().unwrap()).is_some_and(|s| s.shells == 0));
+    drop(seen);
+    h.engine.shutdown();
+}
+
+#[test]
 fn shell_output_reaches_the_next_request() {
     let mock = MockProvider::replaying(text_turn("ok"));
     let h = harness(mock.clone());

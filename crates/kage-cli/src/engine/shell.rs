@@ -61,6 +61,7 @@ impl super::Dispatcher {
         }
         session.shells += 1;
         session.state.working = true;
+        session.sync_state();
         let state = session.state.clone();
         self.bus.publish(id, HostEvent::StateChanged { state });
         let cancel = session.cancel.child();
@@ -115,6 +116,7 @@ impl super::Dispatcher {
             return;
         };
         session.shells -= 1;
+        session.sync_state();
         let text = ShellRun {
             command: command.clone(),
             exit_code,

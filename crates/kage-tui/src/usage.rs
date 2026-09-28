@@ -63,6 +63,10 @@ pub struct SessionUsage {
     /// configured `[permissions]` rules decide); the renderer draws
     /// `perm:ask` / `perm:deny` for the matching override.
     pub permission_mode: Option<kage_core::permissions::PermissionAction>,
+    /// Whether the session's swarm mode is on.
+    pub swarm: bool,
+    /// Background shell commands still running.
+    pub shells: u32,
 }
 
 impl SessionUsage {

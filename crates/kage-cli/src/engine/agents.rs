@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use kage_core::agents::AgentDef;
-use kage_core::protocol::{HostEvent, NoticeLevel, RunOutcome};
+use kage_core::protocol::{HostEvent, NoticeLevel, RunOutcome, SwarmMember};
 use kage_core::sync::lock;
 use kage_core::{Content, Message, Role, SessionId, ToolCallId, ToolOutput};
 use kage_loop::{AgentContext, TokenBudget};
@@ -112,7 +112,12 @@ impl super::Dispatcher {
         }
 
         let max = setup.max_running;
-        self.publish_agent_opened(id, parent, tool_call_id, agent, description.clone());
+        let member = swarm.as_ref().map(|info| SwarmMember {
+            item: info.item.clone(),
+            index: u32::try_from(info.index).unwrap_or(u32::MAX),
+            total: u32::try_from(info.total).unwrap_or(u32::MAX),
+        });
+        self.publish_agent_opened(id, parent, tool_call_id, agent, description.clone(), member);
         self.open(spec, cancel, Some(link));
         self.record_agent_entries(id, marker, description);
         for name in missing {
@@ -135,6 +140,7 @@ impl super::Dispatcher {
         tool_call_id: ToolCallId,
         agent: String,
         description: String,
+        swarm: Option<SwarmMember>,
     ) {
         self.bus.publish(
             id,
@@ -143,6 +149,7 @@ impl super::Dispatcher {
                 tool_call_id,
                 agent,
                 description,
+                swarm,
             },
         );
     }
@@ -215,6 +222,7 @@ impl super::Dispatcher {
             batch_id,
             prompt,
             reply,
+            swarm,
         } = attach;
         let fail = |text: String| {
             let _ = reply.send(agent_tool::error_output(text));
@@ -277,7 +285,12 @@ impl super::Dispatcher {
             (spec, missing, note, cancel, link)
         };
         let (spec, missing, note, cancel, link) = opened;
-        self.publish_agent_opened(id, parent, batch_id, agent, description);
+        let member = swarm.as_ref().map(|info| SwarmMember {
+            item: info.item.clone(),
+            index: u32::try_from(info.index).unwrap_or(u32::MAX),
+            total: u32::try_from(info.total).unwrap_or(u32::MAX),
+        });
+        self.publish_agent_opened(id, parent, batch_id, agent, description, member);
         self.open(spec, cancel, Some(link));
         if let Some(note) = note {
             notice(&self.bus, id, NoticeLevel::Warning, note);

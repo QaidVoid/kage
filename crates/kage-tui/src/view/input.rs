@@ -83,6 +83,9 @@ pub struct AgentRow {
     pub agent: String,
     /// The task description the model wrote.
     pub description: String,
+    /// The item a `swarm` call gave this agent. Empty for a plain
+    /// `agent` call, whose description is unique anyway.
+    pub item: String,
     /// Where the agent is.
     pub state: AgentRowState,
     /// What a running agent does now, described like a tool row.
@@ -463,12 +466,19 @@ fn agent_line(row: &AgentRow, name_column: usize, width: usize) -> Line<'static>
         .unwrap_or_default();
     let name = pad_to_width(&row.agent, name_column - agent_name_offset(row) + 2);
     let room = width.saturating_sub(AGENT_LEAD.len() + name_column + 2 + 1);
+    // A swarm child names its item instead of the batch description
+    // every sibling repeats.
+    let label = if row.item.is_empty() {
+        row.description.as_str()
+    } else {
+        row.item.as_str()
+    };
     let right_width = doing.width() + time.width();
-    let description = row.description.width();
+    let description = label.width();
     let description_room = description
         .min(room.saturating_sub(right_width + 2))
         .max(description.min(room / 3));
-    let description = truncate_to_width(&row.description, description_room, "...");
+    let description = truncate_to_width(label, description_room, "...");
     let doing_room = room.saturating_sub(description.width() + 2 + time.width());
     let doing = if doing.width() <= doing_room {
         doing.to_owned()

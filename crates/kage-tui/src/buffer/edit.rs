@@ -167,6 +167,16 @@ impl Buffer {
         self.bump_version();
     }
 
+    /// The phase of the open tool call `call_id`, if it is still
+    /// shown.
+    #[must_use]
+    pub fn tool_phase(&self, call_id: &str) -> Option<ToolPhase> {
+        match self.open_tool_call(call_id) {
+            Some(Block::ToolCall { phase, .. }) => Some(*phase),
+            _ => None,
+        }
+    }
+
     /// Show `diff` as the change of the open call `call_id`, such as an
     /// edit waiting for approval whose file lacks the text to replace.
     /// No-op for an unknown id.
@@ -283,6 +293,18 @@ impl Buffer {
             _ => false,
         })?;
         let block = &mut self.blocks[idx];
+        matches!(block, Block::ToolCall { .. }).then_some(block)
+    }
+
+    /// The open tool call `call_id`, if it is still shown.
+    fn open_tool_call(&self, call_id: &str) -> Option<&Block> {
+        let idx = self.blocks.iter().rposition(|b| match b {
+            Block::ToolCall { call_id: cid, .. } | Block::ToolResult { call_id: cid, .. } => {
+                cid == call_id
+            }
+            _ => false,
+        })?;
+        let block = &self.blocks[idx];
         matches!(block, Block::ToolCall { .. }).then_some(block)
     }
 

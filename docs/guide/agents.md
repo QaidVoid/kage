@@ -78,8 +78,11 @@ fixed 3 warnings: ...
 
 The children go through the same queue as `agent` calls, so
 `agent_max_running` throttles them, and each child shows up as a live
-card and an agent-tree entry. The call is an error only when every
-child failed. Each child gets its own budget: it may run for
+card and an agent-tree entry. Cards of one batch name the item their
+child works on instead of repeating the batch description, and while
+the batch runs, the working row shows its progress: `Swarm: review
+the crates (3/12 done, 4 running)`. The call is an error only when
+every child failed. Each child gets its own budget: it may run for
 `swarm_timeout_ms` from the moment its run starts, and a child still
 running at its deadline is cancelled and renders as cancelled in the
 aggregate. A child waiting in the queue does not burn its budget. A
@@ -162,7 +165,9 @@ flight.
 
 The mode survives restarts: every toggle is recorded in the session
 file, so resuming the session restores it without injecting the block
-a second time.
+a second time. While it is on, the statusline shows a `swarm`
+segment next to the permission mode; while background shell commands
+run, an `N bg` segment names their count.
 
 ## the send_message mailbox
 

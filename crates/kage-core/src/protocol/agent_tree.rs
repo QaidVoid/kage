@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use super::{Envelope, Event, HostEvent, RunOutcome, SessionId, Usage};
+use super::{Envelope, Event, HostEvent, RunOutcome, SessionId, SwarmMember, Usage};
 use crate::{Content, LoopEvent, Message, ToolCallId};
 
 /// What a client knows about agent sessions, built from envelopes.
@@ -32,6 +32,9 @@ pub struct AgentNode {
     pub agent: String,
     /// Short task description the model wrote for the user.
     pub description: String,
+    /// Swarm batch membership, when a `swarm` call started this
+    /// agent. `None` for a plain `agent` call.
+    pub swarm: Option<SwarmMember>,
     /// Where the agent is.
     pub state: AgentState,
     /// Provider-qualified model from the latest state snapshot.
@@ -91,6 +94,7 @@ impl AgentTree {
             tool_call_id,
             agent,
             description,
+            swarm,
         }) = &envelope.event
         {
             return self.insert(AgentNode {
@@ -99,6 +103,7 @@ impl AgentTree {
                 tool_call_id: tool_call_id.clone(),
                 agent: agent.clone(),
                 description: description.clone(),
+                swarm: swarm.clone(),
                 state: AgentState::Queued,
                 model: String::new(),
                 usage: Usage::default(),
@@ -181,6 +186,7 @@ impl AgentTree {
                             tool_call_id: call_id.clone(),
                             agent,
                             description,
+                            swarm: None,
                             state,
                             model: String::new(),
                             usage: Usage::default(),
@@ -293,6 +299,7 @@ mod tests {
             tool_call_id: ToolCallId(format!("call_{agent}")),
             agent: agent.into(),
             description: format!("{agent} task"),
+            swarm: None,
         };
         assert!(tree.apply(&envelope(session, spawned)));
         session
@@ -436,6 +443,7 @@ mod tests {
             tool_call_id: ToolCallId("call_x".into()),
             agent: "explore".into(),
             description: "loop".into(),
+            swarm: None,
         };
         assert!(!tree.apply(&envelope(root, spawned)));
         assert_eq!(tree.root_of(child), root);

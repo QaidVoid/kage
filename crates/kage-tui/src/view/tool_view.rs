@@ -294,6 +294,15 @@ pub fn describe(name: &str, input: &Value) -> ToolLabel {
             )
             .full(with_agent(description.to_owned()))
         }
+        "swarm" => {
+            let description = field(input, "description").trim();
+            label(
+                ["Swarm", "Swarm", "Swarmed"],
+                one_line(description),
+                String::new(),
+            )
+            .full(description.to_owned())
+        }
         _ => label(
             ["Call", "Calling", "Called"],
             display_name(name),

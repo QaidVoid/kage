@@ -708,7 +708,7 @@ pub(super) fn push_builtin(
                 out.push(Span::styled(text.to_owned(), styles.text));
             }
         }
-        "working" | "context" | "tokens" | "thinking" | "permission" => {
+        "working" | "context" | "tokens" | "thinking" | "permission" | "swarm" | "tasks" => {
             if let Some(u) = src.usage {
                 push_usage(name, u, styles, out);
             }
@@ -868,6 +868,22 @@ fn push_usage(name: &str, u: &SessionUsage, styles: &Styles, out: &mut Vec<Span<
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             ));
         }
+        "swarm" if u.swarm => {
+            out.push(Span::styled(
+                "swarm".to_owned(),
+                Style::default()
+                    .fg(crate::theme::current().success_fg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        "tasks" if u.shells > 0 => {
+            out.push(Span::styled(
+                format!("{} bg", u.shells),
+                Style::default()
+                    .fg(crate::theme::current().muted_fg)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
         _ => {}
     }
 }
@@ -885,6 +901,8 @@ mod tests {
             context_window: 10,
             thinking_level: Some(kage_core::ThinkingLevel::High),
             permission_mode: Some(kage_core::permissions::PermissionAction::Ask),
+            swarm: true,
+            shells: 1,
             ..SessionUsage::default()
         };
         let widgets = ["w".to_owned()];

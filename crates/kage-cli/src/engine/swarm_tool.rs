@@ -61,7 +61,9 @@ work yourself or use `agent` calls for separate tasks.";
 /// Identifies one child of a `swarm` call, recorded in the child's
 /// session marker.
 #[derive(Clone, Debug)]
-pub(super) struct SwarmInfo {
+/// What one call runs: the batch facts a child carries so cards and
+/// the working row can show batch progress.
+pub(crate) struct SwarmInfo {
     /// The child's session id, assigned by the tool so the swarm can
     /// cancel children that never reported.
     pub id: SessionId,
@@ -71,6 +73,8 @@ pub(super) struct SwarmInfo {
     pub index: usize,
     /// The item this child was spawned for.
     pub item: String,
+    /// How many children the whole batch has.
+    pub total: usize,
 }
 
 #[derive(Deserialize)]
@@ -231,7 +235,9 @@ impl Tool for SwarmTool {
                 Ok(children) => children,
                 Err(text) => return Ok(agent_tool::error_output(text)),
             };
-            for (child, (_, prompt)) in children.into_iter().zip(&call.resume) {
+            for (position, (child, (_, prompt))) in
+                children.into_iter().zip(&call.resume).enumerate()
+            {
                 let attach = Attach {
                     parent: self.parent,
                     id: child.id,
@@ -240,6 +246,13 @@ impl Tool for SwarmTool {
                     batch_id: batch_id.clone(),
                     prompt: prompt.clone(),
                     reply: reply.clone(),
+                    swarm: Some(SwarmInfo {
+                        id: child.id,
+                        batch_id: batch_id.clone(),
+                        index: call.items.len() + position,
+                        item: child.item.clone(),
+                        total,
+                    }),
                 };
                 if self.engine.send(Input::Attach(Box::new(attach))).is_err() {
                     break;
@@ -266,6 +279,7 @@ impl Tool for SwarmTool {
                     batch_id: batch_id.clone(),
                     index,
                     item: item.clone(),
+                    total,
                 }),
             };
             if self.engine.send(Input::Spawn(Box::new(spawn))).is_err() {

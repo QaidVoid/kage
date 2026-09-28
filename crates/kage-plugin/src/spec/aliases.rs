@@ -81,6 +81,8 @@ pub(super) const ALIASES: &[Alias] = &[
             "tokens",
             "thinking",
             "permission",
+            "swarm",
+            "tasks",
             "mode",
             "hint",
             "cwd",

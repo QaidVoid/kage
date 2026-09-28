@@ -540,6 +540,7 @@ mod tests {
             tool_call_id: kage_core::ToolCallId::new("call_1"),
             agent: "explore".into(),
             description: "map".into(),
+            swarm: None,
         });
         apply(&envelope(child, 1, spawned));
         apply(&envelope(child, 2, state("agent:m")));

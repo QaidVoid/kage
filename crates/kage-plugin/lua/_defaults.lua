@@ -8,7 +8,7 @@ kage.ui.set_slot("header", { left = { "breadcrumb", "title" }, right = { "widget
 kage.ui.set_slot("activity", { left = { "activity" } })
 kage.ui.set_slot("input_pill", { left = { "mode" }, right = { "thinking" } })
 kage.ui.set_slot("footer", {
-  left = { "permission" },
+  left = { "permission", "swarm", "tasks" },
   -- Drop order for a tight row: the model name yields first, the
   -- context share survives longest.
   right = { "model", "tokens", "context" },

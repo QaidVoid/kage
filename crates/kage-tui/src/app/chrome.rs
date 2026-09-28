@@ -230,7 +230,7 @@ impl App {
         let doing = if approving {
             "Waiting for your approval".to_owned()
         } else {
-            current_work(buffer, self.live_agents())
+            self.current_work(buffer)
         };
         let elapsed = started.elapsed();
         let elapsed = if elapsed.as_secs() < 60 {
@@ -265,6 +265,100 @@ impl App {
                     *depth == 1 && matches!(node.state, AgentState::Queued | AgentState::Running)
                 })
                 .count()
+        })
+    }
+
+    /// What the current run is doing, from the newest blocks back to
+    /// the prompt that started it: running a tool, thinking, waiting
+    /// for its live agents, or just working. A running `swarm` call
+    /// reports batch progress instead of a plain tool label.
+    fn current_work(&self, buffer: &crate::Buffer) -> String {
+        use crate::view::tool_view::{ToolPhase, describe};
+        for block in buffer.blocks().iter().rev() {
+            match block {
+                crate::Block::User { .. } => break,
+                crate::Block::ToolCall {
+                    name,
+                    phase: ToolPhase::Running,
+                    ..
+                } if name == "agent" => {}
+                crate::Block::ToolCall {
+                    call_id,
+                    name,
+                    input,
+                    phase: ToolPhase::Running,
+                    ..
+                } if name == "swarm" => {
+                    return self.swarm_work(call_id, input).unwrap_or_else(|| {
+                        let label = describe(name, input);
+                        format!("{} {}", label.verb_live, label.target)
+                            .trim_end()
+                            .to_owned()
+                    });
+                }
+                crate::Block::ToolCall {
+                    name,
+                    input,
+                    phase: ToolPhase::Running,
+                    ..
+                } => {
+                    let label = describe(name, input);
+                    return format!("{} {}", label.verb_live, label.target)
+                        .trim_end()
+                        .to_owned();
+                }
+                crate::Block::Thinking { live: true, .. } if self.live_agents() == 0 => {
+                    return "Thinking".to_owned();
+                }
+                _ => {}
+            }
+        }
+        match self.live_agents() {
+            0 => "Working".to_owned(),
+            1 => "Waiting for 1 agent".to_owned(),
+            n => format!("Waiting for {n} agents"),
+        }
+    }
+
+    /// Batch progress for the running `swarm` call `call_id`, from
+    /// its children in the agent tree. `None` while no child is known
+    /// yet, so the plain tool label shows instead.
+    fn swarm_work(&self, call_id: &str, input: &serde_json::Value) -> Option<String> {
+        use kage_core::protocol::AgentState;
+        let root = self.view_root()?;
+        let children: Vec<_> = self
+            .agents
+            .under(root)
+            .into_iter()
+            .filter(|(depth, n)| *depth == 1 && n.tool_call_id.0 == call_id)
+            .map(|(_, n)| n)
+            .collect();
+        if children.is_empty() {
+            return None;
+        }
+        let total = children
+            .iter()
+            .find_map(|n| n.swarm.as_ref().map(|s| s.total as usize))
+            .filter(|total| *total > 0)
+            .unwrap_or(children.len());
+        let done = children
+            .iter()
+            .filter(|n| n.state == AgentState::Done)
+            .count();
+        let running = children
+            .iter()
+            .filter(|n| n.state == AgentState::Running)
+            .count();
+        let description = input
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim();
+        let progress = format!("{done}/{total} done, {running} running");
+        Some(if description.is_empty() {
+            format!("Swarm: {progress}")
+        } else {
+            format!("Swarm: {description} ({progress})")
         })
     }
 
@@ -325,6 +419,11 @@ impl App {
                     depth,
                     agent: node.agent.clone(),
                     description: node.description.clone(),
+                    item: node
+                        .swarm
+                        .as_ref()
+                        .map(|s| s.item.clone())
+                        .unwrap_or_default(),
                     state,
                     activity,
                     elapsed_ms: node
@@ -365,6 +464,7 @@ impl App {
             depth: 0,
             name: "kage".to_owned(),
             title,
+            item: String::new(),
             state: if running {
                 AgentsRowState::Running
             } else {
@@ -398,6 +498,11 @@ impl App {
                 depth,
                 name: node.agent.clone(),
                 title: node.description.clone(),
+                item: node
+                    .swarm
+                    .as_ref()
+                    .map(|s| s.item.clone())
+                    .unwrap_or_default(),
                 state,
                 activity,
                 elapsed_ms: node.elapsed().map(ms),
@@ -520,41 +625,4 @@ fn first_prompt(buffer: &crate::Buffer) -> Option<String> {
             .map(str::to_owned),
         _ => None,
     })
-}
-
-/// What the current run is doing, from the newest blocks back to the
-/// prompt that started it: running a tool, thinking, waiting for its
-/// `agents` live agents, or just working.
-fn current_work(buffer: &crate::Buffer, agents: usize) -> String {
-    use crate::view::tool_view::{ToolPhase, describe};
-    for block in buffer.blocks().iter().rev() {
-        match block {
-            crate::Block::User { .. } => break,
-            crate::Block::ToolCall {
-                name,
-                phase: ToolPhase::Running,
-                ..
-            } if name == "agent" => {}
-            crate::Block::ToolCall {
-                name,
-                input,
-                phase: ToolPhase::Running,
-                ..
-            } => {
-                let label = describe(name, input);
-                return format!("{} {}", label.verb_live, label.target)
-                    .trim_end()
-                    .to_owned();
-            }
-            crate::Block::Thinking { live: true, .. } if agents == 0 => {
-                return "Thinking".to_owned();
-            }
-            _ => {}
-        }
-    }
-    match agents {
-        0 => "Working".to_owned(),
-        1 => "Waiting for 1 agent".to_owned(),
-        n => format!("Waiting for {n} agents"),
-    }
 }

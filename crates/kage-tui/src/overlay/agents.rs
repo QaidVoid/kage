@@ -68,6 +68,8 @@ pub struct AgentsRow {
     pub name: String,
     /// The task description, or the main session's title.
     pub title: String,
+    /// The item a `swarm` call gave this agent. Empty otherwise.
+    pub item: String,
     /// Where the session is.
     pub state: AgentsRowState,
     /// What a running agent does now, described like a tool row.
@@ -263,6 +265,13 @@ fn row_line(
         muted
     };
     let fit = |s: &str, w: usize| pad_to_width(&truncate_to_width(s, w, "..."), w);
+    // A swarm child names its item instead of the batch description
+    // every sibling repeats.
+    let title = if row.item.is_empty() {
+        row.title.as_str()
+    } else {
+        row.item.as_str()
+    };
     let name_room = cols.name_end - name_offset(row) + GAP;
     let time = time_label(row);
     let tokens = tokens_label(row.tokens);
@@ -271,7 +280,7 @@ fn row_line(
         Span::raw(INDENT.repeat(row.depth.saturating_sub(1))),
         Span::styled(glyph, glyph_style.add_modifier(Modifier::BOLD)),
         Span::styled(fit(&row.name, name_room), text.add_modifier(Modifier::BOLD)),
-        Span::styled(fit(&row.title, cols.title), text),
+        Span::styled(fit(title, cols.title), text),
         Span::raw(" ".repeat(GAP)),
         Span::styled(fit(doing(row), cols.doing), doing_style),
         Span::raw(" ".repeat(GAP)),
@@ -416,6 +425,7 @@ mod tests {
             depth,
             name: name.to_owned(),
             title: format!("{name} task"),
+            item: String::new(),
             state,
             activity: String::new(),
             elapsed_ms: Some(41_000),

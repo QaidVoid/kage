@@ -859,6 +859,56 @@ fn footer_with_rows(rows: Vec<kage_plugin::SlotSpec>) -> kage_plugin::SlotSpecs 
 }
 
 #[test]
+fn the_footer_shows_swarm_and_background_task_segments() {
+    let usage = SessionUsage {
+        model: "fake:m".into(),
+        swarm: true,
+        shells: 2,
+        ..SessionUsage::default()
+    };
+    let status = StatusCtx {
+        slots: footer_with_rows(vec![kage_plugin::SlotSpec {
+            left: vec![
+                kage_plugin::SlotItem::Builtin("permission"),
+                kage_plugin::SlotItem::Builtin("swarm"),
+                kage_plugin::SlotItem::Builtin("tasks"),
+            ],
+            sep: " \u{b7} ".into(),
+            ..kage_plugin::SlotSpec::default()
+        }]),
+        ..StatusCtx::default()
+    };
+    let rows = snapshot_frame(
+        &mut Buffer::new(),
+        &InputState::new(),
+        None,
+        &status,
+        Some(&usage),
+        Rect::new(0, 0, 100, 8),
+    );
+    let footer = rows.last().unwrap();
+    assert!(
+        footer.starts_with(" ask when needed \u{b7} swarm \u{b7} 2 bg"),
+        "{footer:?}"
+    );
+
+    // Off and none: the segments vanish instead of leaving gaps.
+    let usage = SessionUsage {
+        model: "fake:m".into(),
+        ..SessionUsage::default()
+    };
+    let rows = snapshot_frame(
+        &mut Buffer::new(),
+        &InputState::new(),
+        None,
+        &status,
+        Some(&usage),
+        Rect::new(0, 0, 100, 8),
+    );
+    assert_eq!(rows.last().unwrap(), " ask when needed");
+}
+
+#[test]
 fn the_footer_stacks_its_spec_rows_and_heights_follow() {
     let usage = SessionUsage {
         model: "fake:m".into(),
@@ -1610,6 +1660,7 @@ fn agent_row(depth: usize, agent: &str, description: &str, activity: &str, secs:
         depth,
         agent: agent.to_owned(),
         description: description.to_owned(),
+        item: String::new(),
         state: AgentRowState::Running,
         activity: activity.to_owned(),
         elapsed_ms: Some(secs * 1000),

@@ -123,6 +123,8 @@ impl App {
                     usage.thinking_levels = state.thinking_levels;
                     usage.input = state.input;
                     usage.permission_mode = state.permission_mode;
+                    usage.swarm = state.swarm;
+                    usage.shells = state.shells;
                     usage.working = state.working;
                 }
             }
@@ -434,9 +436,31 @@ impl App {
     /// card's timer counts the agent's own run like its other views. A
     /// card whose result is in stays as it is.
     fn set_card_phase(&self, session: SessionId, phase: ToolPhase) {
-        if let Some(node) = self.agents.get(session) {
-            lock(&self.buffer_of(node.parent)).set_tool_phase(&node.tool_call_id.0, phase);
+        let Some(node) = self.agents.get(session) else {
+            return;
+        };
+        // A batch shares one call row; the row belongs to the `swarm`
+        // call itself, so the children never rewrite its phase or time.
+        let batch = self
+            .agents
+            .under(node.parent)
+            .into_iter()
+            .filter(|(depth, n)| *depth == 1 && n.tool_call_id == node.tool_call_id)
+            .count()
+            > 1;
+        if batch {
+            return;
         }
+        // A spawn while the call already runs must not drag a running
+        // row back to queued.
+        if phase == ToolPhase::Queued
+            && lock(&self.buffer_of(node.parent))
+                .tool_phase(&node.tool_call_id.0)
+                .is_some_and(|current| current == ToolPhase::Running)
+        {
+            return;
+        }
+        lock(&self.buffer_of(node.parent)).set_tool_phase(&node.tool_call_id.0, phase);
     }
 
     /// The result of `parent`'s call `id` arrived. When it started an
@@ -462,6 +486,17 @@ impl App {
         let Some(node) = self.agents.get(session) else {
             return;
         };
+        // A batch shares one call row; child times belong on the
+        // cards, and the row times the whole call.
+        let siblings = self
+            .agents
+            .under(node.parent)
+            .into_iter()
+            .filter(|(depth, n)| *depth == 1 && n.tool_call_id == node.tool_call_id)
+            .count();
+        if siblings > 1 {
+            return;
+        }
         let owner = self
             .agents
             .under(node.parent)

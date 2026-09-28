@@ -233,6 +233,10 @@ pub enum HostEvent {
         agent: String,
         /// Short task description the model wrote for the user.
         description: String,
+        /// Swarm batch membership, when a `swarm` call started this
+        /// agent. `None` for a plain `agent` call.
+        #[serde(default)]
+        swarm: Option<SwarmMember>,
     },
     /// The session's MCP servers and what they offer. Published when a
     /// session opens, after a restart, and when a server's catalog
@@ -241,6 +245,19 @@ pub enum HostEvent {
         /// Every configured server, in registration order.
         servers: Vec<McpServerInfo>,
     },
+}
+
+/// One member of a [`HostEvent::AgentSpawned`] swarm batch: what its
+/// `swarm` call asked it to do and where it sits in the batch, so a
+/// client can show batch progress instead of one card per call.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SwarmMember {
+    /// The item this child was spawned for.
+    pub item: String,
+    /// Position of this child in the batch, 0-based.
+    pub index: u32,
+    /// How many children the batch has.
+    pub total: u32,
 }
 
 /// How a run ended.
@@ -284,6 +301,13 @@ pub struct SessionState {
     pub permission_mode: Option<PermissionAction>,
     /// `true` while a run is in flight.
     pub working: bool,
+    /// Whether the session's swarm mode is on. The statusline shows a
+    /// `swarm` segment while it is.
+    #[serde(default)]
+    pub swarm: bool,
+    /// Background shell commands still running.
+    #[serde(default)]
+    pub shells: u32,
 }
 
 /// Message counts of one history compaction.
@@ -514,6 +538,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one linear pass asserting every event's roundtrip"
+    )]
     fn events_roundtrip_and_tags_stay_disjoint() {
         let message = Message::new(Role::User, vec![Content::Text { text: "q".into() }], None);
         let events: Vec<Event> = vec![
@@ -594,6 +622,7 @@ mod tests {
                 tool_call_id: ToolCallId("call_2".into()),
                 agent: "explore".into(),
                 description: "map the exports".into(),
+                swarm: None,
             }
             .into(),
             HostEvent::McpServers {
@@ -625,6 +654,7 @@ mod tests {
             tool_call_id: ToolCallId("call_1".into()),
             agent: "explore".into(),
             description: "map the exports".into(),
+            swarm: None,
         }));
         assert_eq!(value["type"], "agent_spawned");
         assert_eq!(value["parent"], parent.to_string());

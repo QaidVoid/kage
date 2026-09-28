@@ -852,7 +852,7 @@ fn push_usage(name: &str, u: &SessionUsage, styles: &Styles, out: &mut Vec<Span<
                     let hit = cached_hit(u).unwrap_or_default();
                     out.push(Span::styled(
                         format!(
-                            " cached {} ({hit:.0}%)",
+                            " cached {} ({hit:.2}%)",
                             format_token_count(u.cache_read_tokens)
                         ),
                         styles.text,
@@ -1017,7 +1017,7 @@ mod tests {
         let input = InputState::new();
         assert_eq!(
             painted("tokens", &usage, &input),
-            "in 10k out 2k cached 80k (91%)"
+            "in 10k out 2k cached 80k (90.91%)"
         );
         assert_eq!(painted("context", &usage, &input), "2% ctx (24k/1M)");
     }
@@ -1038,7 +1038,7 @@ mod tests {
         let input = InputState::new();
         assert_eq!(
             painted("tokens", &usage, &input),
-            "in 160k out 2k cached 80k (50%)"
+            "in 160k out 2k cached 80k (50.00%)"
         );
     }
 

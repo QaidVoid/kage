@@ -51,7 +51,8 @@ When every tool call in one assistant message is an `agent` call, the
 agents run at the same time. A message that mixes `agent` calls with
 other tools runs its calls one after another. The tool description
 tells the model to use agents for independent work that needs many
-tool calls, and to run at most one agent that edits files at a time.
+tool calls, and to let agents edit in parallel only while each
+touches its own files, leaving shared files to one of them.
 
 ## swarms
 
@@ -99,15 +100,15 @@ budget, instead of failing at once. The
 same happens to all children when you cancel the session. A swarm
 call must be the only tool call in its message.
 
-Use a swarm when one task shape repeats over many inputs, such as the
-same fix across many crates or a review of many files. For a few
-different tasks, make several `agent` calls in one message instead.
-Coordination rules the tool description repeats: explore the code
-yourself first and delegate only the repeated work; every child
-starts with zero context, so each expanded prompt must be
-self-contained; and give each child a distinct scope so no work is
-duplicated and no two children edit the same file, with at most one
-agent that edits files at a time.
+Use a swarm when many children can run the same kind of task over
+different inputs, such as the same fix across many crates or a review
+of many files, and prefer more, smaller, independent items over one
+big one. For a few different tasks, make several `agent` calls in one
+message instead. Coordination rules the tool description repeats:
+every child starts with zero context, so each expanded prompt must be
+self-contained; and keep scopes disjoint, so no work is duplicated
+and children may edit in parallel while each touches its own files,
+with files several children need left to one of them.
 
 ### resuming a swarm
 
@@ -163,9 +164,9 @@ by the item count.
 ### the /swarm command
 
 `/swarm on` turns swarm mode on: the next run opens with a block that
-steers the model toward one `swarm` call per repeated task, and
-`/swarm off` turns it off again. Both notes land in the history once,
-so the model sees the switch. `/swarm <task>` is a one-shot: it turns
+steers the model to split the work early and delegate it through
+`swarm` calls, and `/swarm off` turns it off again. Both notes land
+in the history once, so the model sees the switch. `/swarm <task>` is a one-shot: it turns
 the mode on, submits the task as a prompt, and turns the mode off
 when that run ends. It refuses to run while a run is already in
 flight.

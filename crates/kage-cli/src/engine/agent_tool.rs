@@ -74,7 +74,8 @@ impl AgentTool {
              a large codebase or running and fixing a test suite. Do not use one for anything \
              one or two tool calls can do. Several agent calls in one message run at the same \
              time. The agent sees nothing of this conversation, so the prompt must hold \
-             everything it needs. Run at most one agent that edits files at a time.\n\n\
+             everything it needs. Agents may edit in parallel while each touches its own \
+             files; files several agents need belong to one of them.\n\n\
              Agents:\n{}",
             defs.tool_listing()
         );

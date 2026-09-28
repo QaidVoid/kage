@@ -47,12 +47,13 @@ const RESUME_HINT: &str = "[hint: some children did not complete. Call swarm aga
 resume, mapping their session ids above to a follow-up prompt.]";
 
 /// Context block injected once when a session's swarm mode turns on.
-pub(crate) const SWARM_MODE_ON: &str = "[swarm mode on] Explore the task yourself first: \
-read, grep and find before you delegate. Then hand the repeated work to one `swarm` call: \
-one child agent per item, each expanded prompt self-contained because children start with \
-zero context, a distinct scope per child so no work is duplicated and no two children edit \
-the same file, and at most one child that edits files at a time. When the tasks differ, \
-make several `agent` calls instead. Turn swarm mode off with `/swarm off`.";
+pub(crate) const SWARM_MODE_ON: &str = "[swarm mode on] Split the work early and delegate: \
+prefer many small, independent `swarm` items over one big task. Every child starts with zero \
+context, so each expanded prompt must be self-contained, holding the paths and details the \
+child needs. Keep scopes disjoint: children may edit in parallel while each touches its own \
+files, and files several children need belong to one of them. The swarm's aggregate is the \
+tracking, so don't mirror its items into the todo list. When the tasks differ, make several \
+`agent` calls instead. Turn swarm mode off with `/swarm off`.";
 
 /// Context block injected once when a session's swarm mode turns off.
 pub(crate) const SWARM_MODE_OFF: &str = "[swarm mode off] Back to the normal workflow: do the \
@@ -125,14 +126,16 @@ impl SwarmTool {
             "Start a swarm: one call spawns the same agent once per item and waits for \
              every child. Its final reply is one aggregated result with a summary line \
              and each child's session id, state and reply.\n\n\
-             Use a swarm when one task shape repeats over many inputs, such as the same \
-             fix across many crates or a review of many files. For a few different \
-             tasks, make several `agent` calls in one message instead.\n\n\
-             Coordination rules: explore the code yourself first and delegate only the \
-             repeated work. Every child starts with zero context, so each expanded \
-             prompt must be self-contained, holding the paths and details the child \
-             needs. Give each child a distinct scope: no duplicated work, no \
-             conflicting edits, at most one agent that edits files at a time.\n\n\
+             Use a swarm when many children can run the same kind of task over different \
+             inputs, such as the same fix across many crates or a review of many files, \
+             and prefer more, smaller, independent items over one big one. For a few \
+             differently-shaped tasks, make several `agent` calls in one message \
+             instead.\n\n\
+             Every child starts with zero context, so each expanded prompt must be \
+             self-contained, holding the paths and details the child needs. Split the \
+             work so scopes are disjoint: no duplicated work, and children may edit in \
+             parallel while each touches its own files; files several children need \
+             belong to one of them.\n\n\
              Agents:\n{}",
             defs.tool_listing()
         );

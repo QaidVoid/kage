@@ -269,8 +269,8 @@ pub enum RunRequest {
     RestartMcp(String),
     /// Turn the main session's swarm mode on or off, from `/swarm on`
     /// or `/swarm off`. While on, the engine injects a workflow block
-    /// into the next run that steers the model toward one `swarm` call
-    /// per repeated task instead of many `agent` calls.
+    /// into the next run that steers the model to split the work early
+    /// and delegate it through `swarm` calls.
     SwarmMode {
         /// The mode to switch to.
         on: bool,

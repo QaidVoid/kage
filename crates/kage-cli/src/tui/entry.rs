@@ -409,12 +409,13 @@ pub fn run_tui(model: Option<&str>, system: &str, resume: Option<PathBuf>, yolo:
         permissions: permissions.to_owned(),
     };
     if let Ok(dir) = crate::sessions_dir() {
-        start.sessions = list_session_choices(&dir, &workdir, false);
+        let sessions_cache = Arc::new(Mutex::new(kage_session::SessionCache::default()));
+        start.sessions = list_session_choices(&dir, &workdir, false, &mut lock(&sessions_cache));
         let tree_dir = dir.clone();
         let tree_mirror = Arc::clone(&mirror);
         let lister_workdir = workdir.clone();
         app.set_session_lister(Box::new(move |all| {
-            list_session_choices(&dir, &lister_workdir, all)
+            list_session_choices(&dir, &lister_workdir, all, &mut lock(&sessions_cache))
         }));
         app.set_session_tree_source(Box::new(move || {
             list_session_nodes(&tree_dir, lock(&tree_mirror).path())

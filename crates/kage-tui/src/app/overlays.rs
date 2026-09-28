@@ -306,8 +306,18 @@ impl App {
         let Some(lister) = self.session_lister.as_ref() else {
             return;
         };
+        let items = lister(self.session_scope_all);
+        self.show_session_picker(items, allow_empty);
+    }
+
+    /// Paint the session picker on `items`, with the session on screen
+    /// marked `*`. `allow_empty` keeps the modal open with no rows
+    /// (used by the toggle so the user can flip back); the initial
+    /// open passes `false` so `Ctrl+S` with nothing to resume is a
+    /// no-op rather than an empty dialog.
+    pub(crate) fn show_session_picker(&mut self, items: Vec<PickItem>, allow_empty: bool) {
         let current = self.active_session.map(|id| id.to_string());
-        let items: Vec<_> = lister(self.session_scope_all)
+        let items: Vec<_> = items
             .into_iter()
             .map(|item| {
                 let stem = std::path::Path::new(&item.value)

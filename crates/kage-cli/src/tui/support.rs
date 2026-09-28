@@ -184,8 +184,9 @@ pub(crate) fn list_session_choices(
     dir: &std::path::Path,
     workdir: &std::path::Path,
     all: bool,
+    cache: &mut kage_session::SessionCache,
 ) -> Vec<PickItem> {
-    let Ok(mut summaries) = kage_session::list(dir) else {
+    let Ok(mut summaries) = cache.list(dir) else {
         return Vec::new();
     };
     summaries.retain(|s| s.agent.is_none() && (all || s.cwd == workdir));
@@ -733,10 +734,15 @@ mod tests {
         write_session(dir.path(), "map exports", Some(main));
 
         for all in [false, true] {
-            let labels: Vec<String> = list_session_choices(dir.path(), dir.path(), all)
-                .into_iter()
-                .map(|item| item.label)
-                .collect();
+            let labels: Vec<String> = list_session_choices(
+                dir.path(),
+                dir.path(),
+                all,
+                &mut kage_session::SessionCache::default(),
+            )
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
             assert_eq!(labels, ["main work"]);
         }
         let mut nodes: Vec<(String, Option<String>)> = list_session_nodes(dir.path(), None)

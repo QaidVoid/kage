@@ -147,14 +147,17 @@ impl App {
                 // Default to this directory's sessions. If there are
                 // none here but some elsewhere, open in all-dirs
                 // scope so Ctrl+S is never a dead key in a fresh dir.
-                self.session_scope_all = false;
-                if let Some(lister) = self.session_lister.as_ref()
-                    && lister(false).is_empty()
-                    && !lister(true).is_empty()
-                {
-                    self.session_scope_all = true;
+                if let Some(lister) = self.session_lister.as_ref() {
+                    let items = lister(false);
+                    let (scope, items) = if items.is_empty() {
+                        let all = lister(true);
+                        (!all.is_empty(), all)
+                    } else {
+                        (false, items)
+                    };
+                    self.session_scope_all = scope;
+                    self.show_session_picker(items, false);
                 }
-                self.open_session_picker(false);
             }
             InputAction::BeginCommand => {
                 self.cmdline = Some(CommandLine::new());

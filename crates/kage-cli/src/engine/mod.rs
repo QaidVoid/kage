@@ -26,7 +26,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use kage_core::agents::AgentDefs;
 use kage_core::config::Config;
@@ -177,6 +177,12 @@ enum Input {
         message: String,
         reply: crossbeam_channel::Sender<Result<String, String>>,
     },
+    /// Re-prompt a swarm child that was rate limited and is waiting
+    /// out its backoff. Sent by the backoff timer the engine armed
+    /// when the child's run failed.
+    RequeueChild {
+        id: SessionId,
+    },
     Finished(Box<Finished>),
     McpDone(Box<McpDone>),
     ShellDone(Box<ShellDone>),
@@ -231,6 +237,7 @@ impl Engine {
             shutting_down: false,
             engine_shutdown: Arc::new(AtomicBool::new(false)),
             watchdogs: HashMap::new(),
+            swarm_requeues: HashMap::new(),
         };
         let thread = thread::spawn(move || dispatcher.run(&rx));
         Self {
@@ -357,6 +364,9 @@ struct Dispatcher {
     /// false when the run ends, so a late fire cannot cancel the
     /// member's next run.
     watchdogs: HashMap<SessionId, Arc<AtomicBool>>,
+    /// Swarm children requeued after a rate limit: attempts so far
+    /// and when their shared timeout budget started.
+    swarm_requeues: HashMap<SessionId, RequeueState>,
 }
 
 impl Dispatcher {
@@ -379,6 +389,7 @@ impl Dispatcher {
                     let _ = reply.send(self.deliver_message(from, to, &message));
                 }
                 Input::Finished(finished) => self.finish(*finished),
+                Input::RequeueChild { id } => self.requeue_child(id),
                 Input::McpDone(done) => self.mcp_done(*done),
                 Input::ShellDone(done) => self.shell_done(*done),
                 Input::Title { session, title } => self.record_title(session, title),
@@ -815,10 +826,12 @@ impl Dispatcher {
             .as_ref()
             .is_some_and(|link| link.batch_id.is_some());
         let timeout = if is_swarm_member {
-            session
-                .agents
-                .as_ref()
-                .map(|setup| Duration::from_millis(setup.swarm_timeout_ms))
+            session.agents.as_ref().map(|setup| {
+                let budget = Duration::from_millis(setup.swarm_timeout_ms);
+                self.swarm_requeues
+                    .get(&id)
+                    .map_or(budget, |state| budget.saturating_sub(state.since.elapsed()))
+            })
         } else {
             None
         };
@@ -875,7 +888,12 @@ impl Dispatcher {
             let model = session.state.model.clone();
             self.generate_title(id, &cx, &model);
         }
-        let reply = self.take_reply(id, &outcome, &cx.history);
+        let requeued = self.requeue_rate_limited(id, &outcome);
+        let reply = if requeued {
+            None
+        } else {
+            self.take_reply(id, &outcome, &cx.history)
+        };
         // Children may not have seen the cancel yet, and this session's
         // own flag resets below, so they get their own.
         if outcome == RunOutcome::Cancelled {
@@ -923,6 +941,114 @@ impl Dispatcher {
             self.end_waiting(orphan);
         }
         self.start_waiting();
+    }
+
+    /// Re-prompt a swarm child whose run failed on a rate limit, or
+    /// report why not. The child's reply stays pending, so the swarm
+    /// call keeps waiting; a timer re-prompts it after a backoff.
+    /// Returns false when the child is out of requeues or out of
+    /// budget, leaving `finish` to deliver the failure.
+    fn requeue_rate_limited(&mut self, id: SessionId, outcome: &RunOutcome) -> bool {
+        let RunOutcome::Failed {
+            error: LoopError::RateLimited {
+                retry_after_secs, ..
+            },
+        } = outcome
+        else {
+            return false;
+        };
+        if self.shutting_down {
+            return false;
+        }
+        let Some(session) = self.sessions.get(&id) else {
+            return false;
+        };
+        let is_pending_swarm_child = session
+            .link
+            .as_ref()
+            .is_some_and(|link| link.batch_id.is_some() && link.reply.is_some());
+        if !is_pending_swarm_child {
+            return false;
+        }
+        let budget = session.agents.as_ref().map_or(Duration::ZERO, |setup| {
+            Duration::from_millis(setup.swarm_timeout_ms)
+        });
+        let attempts = self
+            .swarm_requeues
+            .get(&id)
+            .map_or(0, |state| state.attempts);
+        let since = self
+            .swarm_requeues
+            .get(&id)
+            .map_or(Instant::now(), |state| state.since);
+        let Some(backoff) = requeue_backoff(attempts, since.elapsed(), budget, *retry_after_secs)
+        else {
+            return false;
+        };
+        self.swarm_requeues.insert(
+            id,
+            RequeueState {
+                attempts: attempts + 1,
+                since,
+            },
+        );
+        notice(
+            &self.bus,
+            id,
+            NoticeLevel::Warning,
+            format!(
+                "rate limited; retrying in {}s (attempt {} of {MAX_REQUEUES})",
+                backoff.as_secs().max(1),
+                attempts + 1
+            ),
+        );
+        let engine = self.tx.clone();
+        let shutdown = Arc::clone(&self.engine_shutdown);
+        thread::spawn(move || {
+            let mut left = backoff;
+            while !left.is_zero() {
+                if shutdown.load(Ordering::Relaxed) {
+                    return;
+                }
+                let step = WATCHDOG_SLICE.min(left);
+                thread::sleep(step);
+                left = left.saturating_sub(step);
+            }
+            let _ = engine.send(Input::RequeueChild { id });
+        });
+        true
+    }
+
+    /// Answer a requeue timer: prompt the child to continue its task.
+    /// If the child is busy or has queued work, the prompt waits in
+    /// line like any other.
+    fn requeue_child(&mut self, id: SessionId) {
+        if self.shutting_down {
+            return;
+        }
+        let pending = self
+            .sessions
+            .get(&id)
+            .and_then(|s| s.link.as_ref())
+            .is_some_and(|link| link.batch_id.is_some() && link.reply.is_some());
+        if !pending {
+            self.swarm_requeues.remove(&id);
+            return;
+        }
+        let Some(session) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        let idle = session.idle.is_some()
+            && session.queued.is_empty()
+            && lock(&session.steering).is_empty();
+        let content = vec![Content::Text {
+            text: CONTINUE_PROMPT.to_owned(),
+        }];
+        if idle {
+            self.start_run(id, Work::Prompt(Message::new(Role::User, content, None)));
+        } else {
+            session.queued.push_back(content);
+        }
     }
 
     /// Ask the model for a short title for the session's first exchange,
@@ -1122,6 +1248,50 @@ fn thinking_entry(level: Option<ThinkingLevel>) -> kage_session::SessionEntry {
 /// How often a swarm timeout watchdog rechecks its run-end flag, so a
 /// disarmed or shutdown watchdog stops within this slice.
 const WATCHDOG_SLICE: Duration = Duration::from_millis(250);
+
+/// Most times a swarm child may be requeued after a rate limit
+/// before its next failure is delivered to the swarm call.
+const MAX_REQUEUES: u32 = 5;
+
+/// Base of the requeue backoff: 3s doubled per attempt, capped below.
+const REQUEUE_BASE: Duration = Duration::from_secs(3);
+
+/// Longest the requeue backoff ever waits, provider hint included.
+const REQUEUE_CAP: Duration = Duration::from_secs(60);
+
+/// What a requeued swarm child is prompted with: the failed run left
+/// its task in the child's history, so this is enough to go on.
+const CONTINUE_PROMPT: &str = "continue";
+
+/// Requeue bookkeeping for a rate-limited swarm child.
+struct RequeueState {
+    attempts: u32,
+    /// When the child's shared timeout budget started counting.
+    since: Instant,
+}
+
+/// How long a rate-limited swarm child waits before its next try, or
+/// `None` when it gets none: it has used [`MAX_REQUEUES`] already or
+/// burned its share of the timeout budget. The wait is the provider's
+/// hint or the doubled base, whichever is longer, capped by
+/// [`REQUEUE_CAP`] and by what is left of the budget.
+fn requeue_backoff(
+    attempts: u32,
+    elapsed: Duration,
+    budget: Duration,
+    retry_after_secs: Option<u64>,
+) -> Option<Duration> {
+    if attempts >= MAX_REQUEUES {
+        return None;
+    }
+    // Zero or negative budget is spent: nothing left to wait within.
+    let left = budget.checked_sub(elapsed).filter(|left| !left.is_zero())?;
+    let hinted = retry_after_secs.map_or(REQUEUE_BASE, |secs| {
+        Duration::from_secs(secs).max(REQUEUE_BASE)
+    });
+    let doubled = REQUEUE_BASE * (1 << attempts);
+    Some(hinted.max(doubled).min(REQUEUE_CAP).min(left))
+}
 
 pub(crate) const AUTO_THINKING: &str = "default";
 

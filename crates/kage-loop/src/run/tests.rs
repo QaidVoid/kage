@@ -1664,7 +1664,13 @@ fn retries_are_bounded_then_surface_the_error() {
         &cancel,
         |e| log.record(e),
     );
-    assert!(matches!(res, Err(LoopError::Provider { .. })));
+    assert!(matches!(
+        res,
+        Err(LoopError::RateLimited {
+            retry_after_secs: Some(0),
+            ..
+        })
+    ));
     assert_eq!(mock.call_count(), 2, "initial attempt + one bounded retry");
     assert_eq!(log.notices(), 1);
 }

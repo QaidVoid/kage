@@ -421,6 +421,7 @@ impl super::Dispatcher {
     ) {
         let path = recorder.path().to_path_buf();
         let mut session = self.sessions.remove(&old).expect("session checked");
+        self.swarm_requeues.remove(&old);
         let messages = cx.history.clone();
         session.usage = super::usage_of(&cx);
         session.state.thinking = cx.thinking_level;
@@ -452,6 +453,7 @@ impl super::Dispatcher {
             .collect();
         for agent in agents {
             self.sessions.remove(&agent);
+            self.swarm_requeues.remove(&agent);
         }
         self.sessions.insert(new, session);
         if self.active == Some(old) {

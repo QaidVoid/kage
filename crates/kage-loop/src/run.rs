@@ -136,6 +136,20 @@ where
                             if exhausted || !e.is_transient() {
                                 let kind = match e {
                                     ProviderError::Auth(message) => LoopError::Auth { message },
+                                    ProviderError::RateLimited { retry_after } => {
+                                        LoopError::RateLimited {
+                                            message: "too many requests".to_owned(),
+                                            retry_after_secs: retry_after.map(|d| d.as_secs()),
+                                        }
+                                    }
+                                    ProviderError::Http { status: 429, body } => {
+                                        LoopError::RateLimited {
+                                            message: format!(
+                                                "provider returned status 429: {body}"
+                                            ),
+                                            retry_after_secs: None,
+                                        }
+                                    }
                                     other => LoopError::Provider {
                                         message: other.to_string(),
                                     },

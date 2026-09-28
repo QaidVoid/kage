@@ -1877,6 +1877,136 @@ fn a_queued_child_keeps_its_own_timeout_budget() {
     assert!(!output.is_error, "{}", output.text);
 }
 
+/// One provider call that fails with a rate limit carrying a tiny
+/// retry hint, so the loop's own retries stay fast in tests.
+fn rate_limited() -> Vec<Result<ProviderEvent, ProviderError>> {
+    vec![Err(ProviderError::RateLimited {
+        retry_after: Some(Duration::from_millis(5)),
+    })]
+}
+
+#[test]
+fn requeue_backoff_doubles_then_refuses() {
+    let budget = Duration::from_secs(600);
+    let waits: Vec<_> = (0..MAX_REQUEUES)
+        .map(|attempts| requeue_backoff(attempts, Duration::ZERO, budget, None).unwrap())
+        .collect();
+    assert_eq!(waits, [3, 6, 12, 24, 48].map(Duration::from_secs));
+    assert_eq!(
+        requeue_backoff(MAX_REQUEUES, Duration::ZERO, budget, None),
+        None
+    );
+    assert_eq!(requeue_backoff(0, budget, budget, None), None);
+    assert_eq!(
+        requeue_backoff(0, Duration::ZERO, budget, Some(120)),
+        Some(Duration::from_secs(60)),
+        "a provider hint raises the wait, capped"
+    );
+    assert_eq!(
+        requeue_backoff(3, Duration::from_secs(590), budget, None),
+        Some(Duration::from_secs(10)),
+        "the budget clamps the wait"
+    );
+}
+
+#[test]
+fn a_rate_limited_swarm_child_is_requeued_and_completes() {
+    let mut scripts = vec![swarm_turn(&[("call_s", swarm_task(&["a", "b"]))])];
+    // The child's first run burns the loop's own retries, then the
+    // engine requeues it once and the retry succeeds.
+    for _ in 0..5 {
+        scripts.push(rate_limited());
+    }
+    scripts.push(text_turn("b done"));
+    scripts.push(text_turn("a retry done"));
+    scripts.push(text_turn("parent done"));
+    let mock = MockProvider::sequence(scripts);
+    let h = harness(mock.clone());
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(swarm_setup(1, 60_000)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 4);
+    h.engine.shutdown();
+
+    let ended = outcomes(&events);
+    assert!(
+        matches!(
+            &ended[0],
+            RunOutcome::Failed {
+                error: LoopError::RateLimited {
+                    retry_after_secs: Some(_),
+                    ..
+                }
+            }
+        ),
+        "{ended:?}"
+    );
+    assert_eq!(
+        &ended[1..],
+        [
+            RunOutcome::Completed,
+            RunOutcome::Completed,
+            RunOutcome::Completed
+        ]
+    );
+    let output = tool_output(&events, parent, "call_s");
+    assert!(
+        output
+            .text
+            .starts_with("completed: 2, failed: 0, cancelled: 0\n"),
+        "{}",
+        output.text
+    );
+    assert!(output.text.contains("a retry done"), "{}", output.text);
+    assert!(!output.is_error);
+    // Parent turn, five failed attempts, b once, a's retry, parent
+    // turn.
+    assert_eq!(mock.call_count(), 9);
+}
+
+#[test]
+fn a_rate_limited_plain_agent_is_not_requeued() {
+    let mut scripts = vec![agent_turn(&[("call_a", task("do it"))])];
+    for _ in 0..5 {
+        scripts.push(rate_limited());
+    }
+    scripts.push(text_turn("parent done"));
+    let mock = MockProvider::sequence(scripts);
+    let h = harness(mock.clone());
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(agent_setup(1, 1)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 2);
+    h.engine.shutdown();
+
+    let [(child, call)] = &spawned(&events)[..] else {
+        panic!("one child expected");
+    };
+    assert_eq!(call.0, "call_a");
+    let child = *child;
+    let child_outcome = &outcome_of(&events, child)[0];
+    assert!(
+        matches!(
+            child_outcome,
+            RunOutcome::Failed {
+                error: LoopError::RateLimited { .. }
+            }
+        ),
+        "{child_outcome:?}"
+    );
+    assert_eq!(outcome_of(&events, parent), [RunOutcome::Completed]);
+    let output = tool_output(&events, parent, "call_a");
+    assert!(output.is_error);
+    assert!(output.text.contains("state=\"failed\""), "{}", output.text);
+    assert_eq!(mock.call_count(), 7);
+}
+
 #[test]
 fn cancelling_the_parent_mid_swarm_renders_the_fleet_cancelled() {
     let h = harness(MockProvider::sequence(vec![

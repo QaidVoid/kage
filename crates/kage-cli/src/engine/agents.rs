@@ -350,6 +350,7 @@ impl super::Dispatcher {
     ) -> Option<(crossbeam_channel::Sender<ToolOutput>, ToolOutput)> {
         let link = self.sessions.get_mut(&id)?.link.as_mut()?;
         let reply = link.reply.take()?;
+        self.swarm_requeues.remove(&id);
         Some((
             reply,
             agent_tool::agent_result(id, &link.agent, outcome, history),

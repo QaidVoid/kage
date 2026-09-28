@@ -82,7 +82,10 @@ card and an agent-tree entry. The call is an error only when every
 child failed. Each child gets its own budget: it may run for
 `swarm_timeout_ms` from the moment its run starts, and a child still
 running at its deadline is cancelled and renders as cancelled in the
-aggregate. A child waiting in the queue does not burn its budget. The
+aggregate. A child waiting in the queue does not burn its budget. A
+child the provider rate limits past the loop's own retries is
+requeued with a growing backoff, at most five times within its
+budget, instead of failing at once. The
 same happens to all children when you cancel the session. A swarm
 call must be the only tool call in its message.
 

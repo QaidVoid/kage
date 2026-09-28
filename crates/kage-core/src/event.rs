@@ -191,6 +191,16 @@ pub enum LoopError {
         /// Human-readable detail.
         message: String,
     },
+    /// The provider rate limited the request and the loop's own
+    /// retries were exhausted. Carries the provider's backoff hint so
+    /// a host may retry later with it.
+    #[error("rate limited: {message}")]
+    RateLimited {
+        /// Human-readable detail.
+        message: String,
+        /// Provider-supplied hint in seconds, when one was sent.
+        retry_after_secs: Option<u64>,
+    },
     /// The provider rejected the credentials (missing, expired, or
     /// revoked). Re-authenticating is the remedy; retrying is not.
     #[error("authentication failed: {message}")]

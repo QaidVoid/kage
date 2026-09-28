@@ -41,6 +41,7 @@ impl super::Dispatcher {
             description,
             prompt,
             reply,
+            fork,
             swarm,
         } = spawn;
         let fail = |text: String| {
@@ -73,7 +74,14 @@ impl super::Dispatcher {
             Some(info) => (info.id, Some(info)),
             None => (SessionId::new(), None),
         };
-        let (spec, missing) = agent_spec(from, parent, id, def, &setup);
+        let (spec, missing) = if fork {
+            match forked_spec(from, parent, id, def, &setup) {
+                Ok((spec, missing)) => (spec, missing),
+                Err(text) => return fail(text),
+            }
+        } else {
+            agent_spec(from, parent, id, def, &setup)
+        };
         let cancel = from.cancel.child();
         let batch_id = swarm.as_ref().map(|info| info.batch_id.clone());
         let link = AgentLink {
@@ -477,12 +485,129 @@ pub(super) fn depth_of(session: &Session) -> u8 {
     session.link.as_ref().map_or(0, |l| l.depth)
 }
 
-/// The `kage:agent` marker data of the session file at `path`, read
-/// from the entries right after the header. `None` when those entries
-/// hold no marker, which includes a missing file.
+/// The entry a forked child copies up to: the parent's latest entry
+/// the copy may end on. An assistant message carrying tool calls is
+/// skipped, so the copied history never ends on a tool call that was
+/// never answered. The header id when no message qualifies, which
+/// forks an empty conversation.
+fn fork_point(path: &Path) -> Option<kage_session::EntryId> {
+    let reader = kage_session::SessionReader::iter(path).ok()?;
+    let mut header_id = None;
+    let mut at = None;
+    for entry in reader {
+        let entry = entry.ok()?;
+        match &entry {
+            kage_session::SessionEntry::Header(header) => header_id = Some(header.id),
+            kage_session::SessionEntry::Message(message) => {
+                let calls_tools = message.message.role == Role::Assistant
+                    && message
+                        .message
+                        .content
+                        .iter()
+                        .any(|c| matches!(c, Content::ToolCall { .. }));
+                if !calls_tools {
+                    at = Some(entry.id());
+                }
+            }
+            _ => {}
+        }
+    }
+    at.or(header_id)
+}
+
+/// The session spec for a child spawned from a snapshot of `from`'s
+/// conversation instead of zero context: `from`'s session file is
+/// forked into the child's own file up to [`fork_point`], and the
+/// child's context history and token budget come from that copy, so
+/// its transcript is self-contained from the first entry. Model,
+/// system prompt, thinking level and tools still follow the
+/// definition. Errors when `from` does not record, or the fork fails.
+fn forked_spec(
+    from: &Session,
+    parent: SessionId,
+    id: SessionId,
+    def: &AgentDef,
+    setup: &AgentSetup,
+) -> Result<(SessionSpec, Vec<String>), String> {
+    let Some(src) = from.path.as_deref() else {
+        return Err(
+            "cannot fork: this session is not recorded, so there is no conversation \
+             to snapshot"
+                .to_owned(),
+        );
+    };
+    let dir = src
+        .parent()
+        .ok_or_else(|| "cannot fork: the session file has no directory".to_owned())?;
+    let at = fork_point(src)
+        .ok_or_else(|| "cannot fork: the session file could not be read".to_owned())?;
+    let model = def
+        .model
+        .clone()
+        .unwrap_or_else(|| from.state.model.clone());
+    let system_prompt = crate::runtime_env::build_system_prompt(
+        &def.body,
+        &from.workdir,
+        &model,
+        &[],
+        from.shell.as_deref(),
+    );
+    let child_path = crate::build_session_path(dir, id);
+    let header = kage_session::Header {
+        version: kage_session::FORMAT_VERSION,
+        session: id,
+        id: kage_session::EntryId::new(),
+        ts: chrono::Utc::now(),
+        cwd: from.workdir.clone(),
+        model: model.clone(),
+        system_prompt: system_prompt.clone(),
+        parent_session: Some(parent),
+        parent_entry: Some(at),
+    };
+    kage_session::fork_as(src, &child_path, header, at)
+        .map_err(|err| format!("cannot fork into session {id}: {err}"))?;
+    let replay = kage_session::replay(&child_path)
+        .map_err(|err| format!("cannot read the forked session {id}: {err}"))?;
+    let writer = kage_session::SessionWriter::open(&child_path)
+        .map_err(|err| format!("cannot append to session {id}: {err}"))?;
+    let mut cx = AgentContext::new(model.clone(), system_prompt).with_workdir(from.workdir.clone());
+    cx.history = replay.history;
+    cx.confine_paths = from.confine_paths;
+    cx.thinking_level = def.thinking.or(from.state.thinking);
+    cx.budget = TokenBudget {
+        used_input: replay.usage_total.input,
+        used_output: replay.usage_total.output,
+        used_cache_read: replay.usage_total.cache_read,
+        used_cache_write: replay.usage_total.cache_write,
+        current_context: replay.usage_total.last_context,
+    };
+    let (tools, missing) = agent_tools(&from.tools, def.tools.as_deref());
+    let spec = SessionSpec {
+        id,
+        model,
+        cx,
+        recorder: Some(Recorder::new(writer, None)),
+        tools,
+        plugins: None,
+        gate: from.gate.clone(),
+        loop_cfg: from.loop_cfg,
+        mcp: None,
+        interactive: from.interactive,
+        title: false,
+        agents: Some(setup.clone()),
+        shell: from.shell.clone(),
+    };
+    Ok((spec, missing))
+}
+
+/// The `kage:agent` marker data of the session file at `path`, from
+/// the first marker entry in the file. `None` when the file carries no
+/// marker, which includes a missing file. The marker sits right after
+/// the header for an ordinary child, but after the copied history for
+/// a forked one, so the file is scanned to the end.
 fn agent_marker(path: &Path) -> Option<serde_json::Value> {
     let reader = kage_session::SessionReader::iter(path).ok()?;
-    for entry in reader.take(3) {
+    for entry in reader {
         let Ok(kage_session::SessionEntry::Custom(custom)) = entry else {
             continue;
         };

@@ -84,9 +84,10 @@ struct SwarmInput {
     items: Vec<String>,
     #[serde(default)]
     resume: BTreeMap<String, String>,
-    /// Reserved for a later phase; rejected.
+    /// Spawn every new child from a snapshot of this conversation
+    /// instead of zero context.
     #[serde(default)]
-    fork: Option<serde_json::Value>,
+    fork: bool,
 }
 
 fn default_agent() -> String {
@@ -162,7 +163,7 @@ impl SwarmTool {
                 },
                 "fork": {
                     "type": "boolean",
-                    "description": "Reserved. Not supported yet."
+                    "description": "Spawn every new child from a snapshot of this conversation instead of zero context. Default false. Cannot be combined with resume."
                 }
             },
             "required": ["description"]
@@ -258,6 +259,7 @@ impl Tool for SwarmTool {
                 description: input.description.clone(),
                 prompt,
                 reply: reply.clone(),
+                fork: call.fork,
                 swarm: Some(SwarmInfo {
                     id,
                     batch_id: batch_id.clone(),
@@ -368,14 +370,19 @@ struct Call {
     items: Vec<(String, String)>,
     /// Session id and prompt per resumed child, in map order.
     resume: Vec<(SessionId, String)>,
+    /// New children start from a snapshot of the parent's
+    /// conversation instead of zero context.
+    fork: bool,
 }
 
 /// Expand the call into one prompt per item plus the resume entries,
 /// or the reason it is invalid. The rules are whole-call: nothing
 /// spawns or attaches unless every check passes.
 fn expand(input: &SwarmInput, defs: &AgentDefs, max_items: usize) -> Result<Call, String> {
-    if input.fork.is_some() {
-        return Err("fork is not supported yet".into());
+    if input.fork && !input.resume.is_empty() {
+        return Err(
+            "fork applies to new children; drop resume to spawn forked children instead".to_owned(),
+        );
     }
     if input.items.is_empty() && input.resume.is_empty() {
         return Err(
@@ -444,7 +451,11 @@ fn expand(input: &SwarmInput, defs: &AgentDefs, max_items: usize) -> Result<Call
         }
         resume.push((id, prompt.clone()));
     }
-    Ok(Call { items, resume })
+    Ok(Call {
+        items,
+        resume,
+        fork: input.fork,
+    })
 }
 
 /// One slot in the swarm: a child session, the item it runs, and the
@@ -480,6 +491,10 @@ impl Block {
 /// never reported render as cancelled, session id included, and a
 /// hint names the resume path. The call is an error only when every
 /// child failed.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one linear pass over the members: slot results, blocks, cap"
+)]
 fn render(cap: usize, description: &str, members: &[Member], results: &[ToolOutput]) -> ToolOutput {
     // Place each result on the child it names; a result naming no
     // known child lands on the first free slot, in arrival order.
@@ -535,9 +550,16 @@ fn render(cap: usize, description: &str, members: &[Member], results: &[ToolOutp
                 "no result arrived".to_owned(),
             ),
         };
-        match slots[index].and_then(state_in) {
-            Some("completed") => completed += 1,
-            Some("failed") => failed += 1,
+        let state = match slots[index] {
+            Some(result) if is_agent(result) => state_in(result).unwrap_or("failed"),
+            // A result without an agent header is the engine refusing
+            // the spawn, which is a failure of this child.
+            Some(_) => "failed",
+            None => "cancelled",
+        };
+        match state {
+            "completed" => completed += 1,
+            "failed" => failed += 1,
             _ => cancelled += 1,
         }
         blocks.push(Block {
@@ -640,7 +662,7 @@ mod tests {
             prompt_template: Some("handle {{item}}".into()),
             items: items.iter().map(|item| (*item).to_owned()).collect(),
             resume: BTreeMap::new(),
-            fork: None,
+            fork: false,
         }
     }
 
@@ -724,15 +746,23 @@ mod tests {
     }
 
     #[test]
-    fn expand_rejects_fork() {
+    fn expand_rejects_fork_with_resume_and_passes_fork_through() {
         let defs = AgentDefs::builtin();
+        let id = SessionId::new();
         let mut call = input(&["a", "b"]);
-        call.fork = Some(serde_json::json!(true));
-        assert!(
-            expand(&call, &defs, 32)
-                .unwrap_err()
-                .contains("fork is not supported yet")
-        );
+        call.fork = true;
+        call.resume.insert(id.to_string(), "go on".into());
+        let err = expand(&call, &defs, 32).unwrap_err();
+        assert!(err.contains("fork applies to new children"), "{err}");
+
+        call.resume.clear();
+        let call = expand(&call, &defs, 32).unwrap();
+        assert!(call.fork);
+        assert!(call.resume.is_empty());
+        assert_eq!(call.items.len(), 2);
+
+        let plain = expand(&input(&["a", "b"]), &defs, 32).unwrap();
+        assert!(!plain.fork);
     }
 
     #[test]
@@ -849,5 +879,23 @@ mod tests {
         let out = render(RESULT_CAP, "d", &members, &[odd]);
         assert!(out.text.contains("state=\"failed\""));
         assert!(out.text.contains("the engine stopped"));
+    }
+
+    #[test]
+    fn engine_refusals_count_as_failed_and_can_error_the_call() {
+        let (members, _children) = two_members();
+        let refusal = ToolOutput {
+            text: "cannot fork: this session is not recorded".into(),
+            is_error: true,
+            ..ToolOutput::default()
+        };
+        let out = render(RESULT_CAP, "d", &members, &[refusal.clone(), refusal]);
+        assert!(
+            out.text
+                .starts_with("completed: 0, failed: 2, cancelled: 0\n"),
+            "{}",
+            out.text
+        );
+        assert!(out.is_error);
     }
 }

@@ -2313,6 +2313,95 @@ fn a_message_to_a_missing_target_or_parent_is_refused() {
     );
 }
 
+/// A swarm task whose children start from the parent's snapshot.
+fn forked_swarm_task(items: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "description": "a swarm",
+        "prompt_template": "handle {{item}}",
+        "items": items,
+        "fork": true,
+    })
+}
+
+#[test]
+fn a_forked_swarm_child_starts_from_the_parent_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::sequence(vec![
+        swarm_turn(&[("call_s", forked_swarm_task(&["a", "b"]))]),
+        text_turn("child a one"),
+        text_turn("child b one"),
+        text_turn("parent done"),
+    ]));
+    let parent = SessionId::new();
+    let (recorder, _) = recorder_in(dir.path(), parent);
+    h.engine.open(SessionSpec {
+        recorder: Some(recorder),
+        agents: Some(swarm_setup(1, 60_000)),
+        ..h.spec(parent)
+    });
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 3);
+    h.engine.shutdown();
+
+    let output = tool_output(&events, parent, "call_s");
+    assert!(
+        output
+            .text
+            .starts_with("completed: 2, failed: 0, cancelled: 0\n"),
+        "{}",
+        output.text
+    );
+    let children = spawned(&events);
+    assert_eq!(children.len(), 2);
+    for ((child, _call), reply) in children.iter().zip(["child a one", "child b one"]) {
+        let path = dir.path().join(format!("{child}.jsonl"));
+        let replay = kage_session::replay(&path).unwrap();
+        assert_eq!(replay.header.parent_session, Some(parent));
+        let texts: Vec<String> = replay
+            .history
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|c| match c {
+                Content::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts.first().map(String::as_str), Some("go"), "{texts:?}");
+        assert!(texts.contains(&reply.to_owned()), "{texts:?}");
+        let entries: Vec<kage_session::SessionEntry> = kage_session::SessionReader::iter(&path)
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(entries.iter().any(|e| matches!(
+            e,
+            kage_session::SessionEntry::Custom(c)
+                if c.kind == kage_session::list::AGENT_ENTRY_KIND
+        )));
+    }
+}
+
+#[test]
+fn a_fork_refuses_when_the_parent_is_not_recorded() {
+    let h = harness(MockProvider::sequence(vec![
+        swarm_turn(&[("call_s", forked_swarm_task(&["a", "b"]))]),
+        text_turn("done"),
+    ]));
+    let parent = h.open_parent(
+        None,
+        PermissionGate::new(PermissionsConfig::default()),
+        Some(swarm_setup(1, 60_000)),
+    );
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    let events = until_runs_end(&h.events, 1);
+    h.engine.shutdown();
+
+    let output = tool_output(&events, parent, "call_s");
+    assert!(output.is_error);
+    assert!(output.text.contains("cannot fork"), "{}", output.text);
+    assert!(output.text.contains("not recorded"), "{}", output.text);
+    assert!(spawned(&events).is_empty(), "nothing spawned");
+}
+
 #[test]
 fn print_mode_text_names_agents_and_how_they_ended() {
     let h = harness(MockProvider::sequence(vec![

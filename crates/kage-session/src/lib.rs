@@ -22,7 +22,7 @@ pub use entry::{
     SessionEntry, SessionId, SessionTitle, ThinkingLevelChange,
 };
 pub use error::SessionError;
-pub use fork::{fork, resolve_entry_prefix};
+pub use fork::{fork, fork_as, resolve_entry_prefix};
 pub use list::{SessionSummary, list};
 pub use reader::SessionReader;
 pub use resume::{ReplayResult, ReplayUsage, find_by_prefix, find_last, replay};

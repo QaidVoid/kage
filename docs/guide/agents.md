@@ -116,6 +116,32 @@ resumed, or kage restarted) is reopened from its file with its
 history, model and agent definition intact, and keeps appending to
 the same file.
 
+### forking children
+
+By default every child starts with zero context, which is why each
+expanded prompt must be self-contained. `fork: true` trades that
+away: each new child starts from a snapshot of this conversation,
+so it can see the plan, the paths and the mistakes already made
+without them being restated:
+
+```json
+{"description": "review each crate with full context",
+ "prompt_template": "Review {{item}} for API mistakes.",
+ "items": ["kage-core", "kage-loop"],
+ "fork": true}
+```
+
+The snapshot is the parent's session file forked into the child's
+own file up to the latest complete message, so the child's
+transcript is self-contained from the first entry and keeps
+appending there. Its model, system prompt and tools still come from
+the agent definition; only the conversation carries over. The copy
+also counts against the child's token budget, and forked children
+resume like any other child. `fork` cannot be combined with
+`resume`, since resume continues children that already exist. Prefer
+zero-context children when the task is self-contained: a fork per
+item multiplies the prompt cost by the item count.
+
 ### the /swarm command
 
 `/swarm on` turns swarm mode on: the next run opens with a block that

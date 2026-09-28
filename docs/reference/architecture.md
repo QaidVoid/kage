@@ -131,6 +131,17 @@ naming the agent and its session id, and prompts the target with
 behind a busy one. The ack tells the sender when the message will
 run; the target's reply lands only in the target's own transcript.
 
+**Forked children.** A `swarm` call with `fork: true` gives each new
+child the parent's conversation instead of zero context. The
+parent's session file is forked into the child's own file (up to the
+latest entry that is not an unanswered tool call) and the child's
+context history and token budget are replayed from that copy, so
+its transcript is self-contained and later resumes see the same
+conversation. Model, system prompt and tools still come from the
+definition, and the `kage:agent` marker is appended after the
+copied history, so marker lookups scan the file rather than its
+first entries.
+
 **The cancel tree.** `CancelFlag` is a node with an optional parent.
 An agent's flag is a child of its parent's, and `is_cancelled` walks up
 the chain. Cancelling a session stops every agent below it through the

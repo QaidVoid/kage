@@ -22,6 +22,9 @@ use crate::writer::SessionWriter;
 /// including the entry whose id equals `at`. The destination's session id
 /// is `new_session`, which the caller is expected to have used when
 /// constructing `dst` (so the file name and the in-file id agree).
+/// The destination's header is derived from the source's: a fresh id
+/// and timestamp, inherited cwd, model and system prompt, and
+/// `parent_session` / `parent_entry` linking back to the source.
 ///
 /// # Errors
 ///
@@ -53,6 +56,35 @@ pub fn fork(
         system_prompt: parent_header.system_prompt.clone(),
         parent_session: Some(parent_header.session),
         parent_entry: Some(at),
+    };
+    fork_as(src, dst, new_header, at)
+}
+
+/// Fork `src` into a new session file at `dst` under the exact header
+/// the caller supplies, copying entries up to and including the entry
+/// whose id equals `at`. The header's `session` should be the id the
+/// caller used for `dst` (so the file name and the in-file id agree).
+/// Use this instead of [`fork`] when the new session needs its own
+/// model or system prompt, as forked agent children do.
+///
+/// # Errors
+///
+/// Errors if `src` cannot be opened, if its first entry is not a header,
+/// if `dst` already exists, or if no entry in `src` has id `at`.
+pub fn fork_as(
+    src: &Path,
+    dst: &Path,
+    new_header: Header,
+    at: EntryId,
+) -> Result<(), SessionError> {
+    let mut reader = SessionReader::iter(src)?;
+    let first = reader.next().ok_or_else(|| SessionError::Empty {
+        path: src.to_path_buf(),
+    })??;
+    let SessionEntry::Header(parent_header) = first else {
+        return Err(SessionError::MissingHeader {
+            path: src.to_path_buf(),
+        });
     };
 
     if at == parent_header.id {

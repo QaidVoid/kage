@@ -34,6 +34,9 @@ pub(super) struct Spawn {
     pub prompt: String,
     /// Receives the child's result once its first run finishes.
     pub reply: crossbeam_channel::Sender<ToolOutput>,
+    /// Start the child from a snapshot of the parent's conversation
+    /// instead of zero context. A plain `agent` call leaves it false.
+    pub fork: bool,
     /// Set when a `swarm` call spawned this child. A plain `agent`
     /// call leaves it `None`.
     pub swarm: Option<SwarmInfo>,
@@ -142,6 +145,7 @@ impl Tool for AgentTool {
             description: input.description,
             prompt: input.prompt,
             reply,
+            fork: false,
             swarm: None,
         };
         if self.engine.send(Input::Spawn(Box::new(spawn))).is_err() {

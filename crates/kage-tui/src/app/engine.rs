@@ -402,12 +402,31 @@ impl App {
         lock(&self.buffer).invalidate_all_heights();
     }
 
+    /// Whether agent `session` shares its call row with sibling
+    /// agents of one swarm batch, so the row belongs to the `swarm`
+    /// call and the children must not write onto it.
+    fn row_is_batch(&self, node: &kage_core::protocol::AgentNode) -> bool {
+        self.agents
+            .under(node.parent)
+            .into_iter()
+            .filter(|(depth, n)| *depth == 1 && n.tool_call_id == node.tool_call_id)
+            .count()
+            > 1
+    }
+
     /// Write agent `session`'s card into the `agent` tool row of its
     /// parent: what the agent does now, then its tool count and tokens.
     fn update_card(&self, session: SessionId) {
         let Some(node) = self.agents.get(session) else {
             return;
         };
+        if self.row_is_batch(node) {
+            // The row belongs to the `swarm` call and stays bare. A
+            // card written before the batch formed, when the first
+            // child still seemed alone, is stale: clear it.
+            lock(&self.buffer_of(node.parent)).set_tool_progress(&node.tool_call_id.0, "");
+            return;
+        }
         let asking = self
             .pending_permission
             .iter()
@@ -439,15 +458,9 @@ impl App {
         let Some(node) = self.agents.get(session) else {
             return;
         };
-        // A batch shares one call row; the row belongs to the `swarm`
-        // call itself, so the children never rewrite its phase or time.
-        let batch = self
-            .agents
-            .under(node.parent)
-            .into_iter()
-            .filter(|(depth, n)| *depth == 1 && n.tool_call_id == node.tool_call_id)
-            .count()
-            > 1;
+        // The row belongs to the `swarm` call, so the children never
+        // rewrite its phase or time.
+        let batch = self.row_is_batch(node);
         if batch {
             return;
         }
@@ -486,15 +499,9 @@ impl App {
         let Some(node) = self.agents.get(session) else {
             return;
         };
-        // A batch shares one call row; child times belong on the
-        // cards, and the row times the whole call.
-        let siblings = self
-            .agents
-            .under(node.parent)
-            .into_iter()
-            .filter(|(depth, n)| *depth == 1 && n.tool_call_id == node.tool_call_id)
-            .count();
-        if siblings > 1 {
+        // The row belongs to the `swarm` call; child times belong on
+        // the cards, and the row times the whole call.
+        if self.row_is_batch(node) {
             return;
         }
         let owner = self

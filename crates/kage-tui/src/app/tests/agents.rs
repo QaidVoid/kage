@@ -335,6 +335,9 @@ fn the_working_row_reports_swarm_batch_progress() {
         ],
     );
     let parent = app.active_session.unwrap();
+    let long_item =
+        "SCOPE: crates/kage-tui ONLY. Do not read or comment on unrelated crates in this pass";
+    let capped: String = format!("{}…", long_item.chars().take(63).collect::<String>());
     let spawned = |_session: SessionId, item: &str, index: u32| HostEvent::AgentSpawned {
         parent,
         tool_call_id: kage_core::ToolCallId::new("s1"),
@@ -349,7 +352,7 @@ fn the_working_row_reports_swarm_batch_progress() {
     let children = [SessionId::new(), SessionId::new(), SessionId::new()];
     for (index, (child, item)) in children
         .iter()
-        .zip(["kage-core", "kage-tui", "kage-mcp"])
+        .zip([long_item, "kage-tui", "kage-mcp"])
         .enumerate()
     {
         let index = u32::try_from(index).unwrap_or(u32::MAX);
@@ -377,9 +380,21 @@ fn the_working_row_reports_swarm_batch_progress() {
         ],
     );
     let label = app.activity_label(&lock(&app.buffer), 200).unwrap();
+    assert!(label.starts_with("Swarm 1/3 done · 1 running"), "{label}");
+    // The batch row stays clean: no child writes its card body onto
+    // the row it shares with its siblings.
+    let rows = rendered(&mut app, 160, 40);
     assert!(
-        label.starts_with("Swarm: review the crates (1/3 done, 1 running)"),
-        "{label}"
+        !rows
+            .iter()
+            .any(|r| r.contains("0 tools") || r.contains(" tok")),
+        "{rows:#?}"
+    );
+    // A long item is capped so the card keeps room for its activity.
+    assert!(rows.iter().any(|r| r.contains(&capped)), "{rows:#?}");
+    assert!(
+        !rows.iter().any(|r| r.contains("in this pass")),
+        "{rows:#?}"
     );
 }
 

@@ -3,6 +3,20 @@
 
 use super::*;
 
+/// The swarm item of `node`, capped so a whole-sentence item leaves
+/// the card's live activity and stats room on the same line.
+fn swarm_item(node: &kage_core::protocol::AgentNode) -> String {
+    const ITEM_CAP: usize = 64;
+    let Some(item) = node.swarm.as_ref().map(|s| s.item.trim()) else {
+        return String::new();
+    };
+    if item.chars().count() <= ITEM_CAP {
+        return item.to_owned();
+    }
+    let cut: String = item.chars().take(ITEM_CAP - 1).collect();
+    format!("{cut}…")
+}
+
 impl App {
     /// Snapshot the slot specs for one frame and report the frame's
     /// width and editor mode to the plugin runtime.
@@ -289,7 +303,7 @@ impl App {
                     phase: ToolPhase::Running,
                     ..
                 } if name == "swarm" => {
-                    return self.swarm_work(call_id, input).unwrap_or_else(|| {
+                    return self.swarm_work(call_id).unwrap_or_else(|| {
                         let label = describe(name, input);
                         format!("{} {}", label.verb_live, label.target)
                             .trim_end()
@@ -322,8 +336,9 @@ impl App {
 
     /// Batch progress for the running `swarm` call `call_id`, from
     /// its children in the agent tree. `None` while no child is known
-    /// yet, so the plain tool label shows instead.
-    fn swarm_work(&self, call_id: &str, input: &serde_json::Value) -> Option<String> {
+    /// yet, so the plain tool label shows instead. The description
+    /// stays off: the call row right above already names the batch.
+    fn swarm_work(&self, call_id: &str) -> Option<String> {
         use kage_core::protocol::AgentState;
         let root = self.view_root()?;
         let children: Vec<_> = self
@@ -349,17 +364,12 @@ impl App {
             .iter()
             .filter(|n| n.state == AgentState::Running)
             .count();
-        let description = input
-            .get("description")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .trim();
-        let progress = format!("{done}/{total} done, {running} running");
-        Some(if description.is_empty() {
-            format!("Swarm: {progress}")
-        } else {
-            format!("Swarm: {description} ({progress})")
-        })
+        let mut text = format!("Swarm {done}/{total} done");
+        if running > 0 {
+            use std::fmt::Write as _;
+            let _ = write!(text, " · {running} running");
+        }
+        Some(text)
     }
 
     /// The pinned list: the queued, running and waiting agents under
@@ -419,11 +429,7 @@ impl App {
                     depth,
                     agent: node.agent.clone(),
                     description: node.description.clone(),
-                    item: node
-                        .swarm
-                        .as_ref()
-                        .map(|s| s.item.clone())
-                        .unwrap_or_default(),
+                    item: swarm_item(node),
                     state,
                     activity,
                     elapsed_ms: node
@@ -498,11 +504,7 @@ impl App {
                 depth,
                 name: node.agent.clone(),
                 title: node.description.clone(),
-                item: node
-                    .swarm
-                    .as_ref()
-                    .map(|s| s.item.clone())
-                    .unwrap_or_default(),
+                item: swarm_item(node),
                 state,
                 activity,
                 elapsed_ms: node.elapsed().map(ms),

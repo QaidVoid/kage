@@ -80,8 +80,8 @@ The children go through the same queue as `agent` calls, so
 `agent_max_running` throttles them, and each child shows up as a live
 card and an agent-tree entry. Cards of one batch name the item their
 child works on instead of repeating the batch description, and while
-the batch runs, the working row shows its progress: `Swarm: review
-the crates (3/12 done, 4 running)`. The call is an error only when
+the batch runs, the working row shows its progress: `Swarm 3/12
+done · 4 running`. The call is an error only when
 every child failed. Each child gets its own budget: it may run for
 `swarm_timeout_ms` from the moment its run starts, and a child still
 running at its deadline is cancelled and renders as cancelled in the

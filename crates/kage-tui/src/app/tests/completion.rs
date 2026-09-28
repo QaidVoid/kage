@@ -81,6 +81,43 @@ fn autocomplete_inert_without_providers() {
 }
 
 #[test]
+fn history_recall_keeps_up_out_of_the_completion_popup() {
+    let buffer = shared_buffer();
+    let (tx, _rx) = mpsc::channel();
+    let mut app = app_with_defaults(buffer, tx);
+    let rt = kage_plugin::PluginRuntime::new().unwrap();
+    rt.eval(
+        r"
+            kage.add_autocomplete_provider({
+                name = 'demo',
+                complete = function(prefix, _ctx)
+                    if prefix == '' or prefix:sub(-3) == 'bar' then return {} end
+                    return { { value = prefix .. 'bar' } }
+                end,
+            })
+            ",
+    )
+    .unwrap();
+    app.set_plugin_autocomplete(rt.registered_autocomplete_providers());
+    app.set_history(vec!["older prompt".into(), "newer".into()]);
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(app.input().text(), "newer");
+    assert!(
+        app.input_completion.is_none(),
+        "a recall must not open the popup"
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE));
+    assert_eq!(
+        app.input().text(),
+        "older prompt",
+        "Up keeps walking history"
+    );
+    // Real editing ends the history walk and the popup returns.
+    app.handle_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+    assert!(app.input_completion.is_some(), "editing reopens the popup");
+}
+
+#[test]
 fn enter_accepts_the_highlighted_completion_before_sending() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("README.md"), "x").unwrap();

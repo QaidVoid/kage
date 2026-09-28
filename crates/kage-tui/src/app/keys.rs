@@ -435,6 +435,13 @@ impl App {
             self.input_completion = None;
             return;
         }
+        // While Up/Down walks the prompt history the arrows belong to
+        // history: a popup opened on a recalled command would swallow
+        // every further Up. It returns once real editing resumes.
+        if self.input.history_browsing() {
+            self.input_completion = None;
+            return;
+        }
         // A draft starting with `/` is a command: the popup offers the
         // same candidates the `:` line gets, so command names carry
         // their argument hints and argument positions complete

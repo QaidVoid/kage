@@ -301,4 +301,12 @@ impl InputState {
         self.history_cursor = None;
         self.history_stash = None;
     }
+
+    /// Whether Up/Down is currently walking the prompt history
+    /// ([`Self::history_prev`]) rather than editing the draft. While
+    /// this holds, the arrow keys belong to history, so the host keeps
+    /// the completion popup out of the way.
+    pub(crate) fn history_browsing(&self) -> bool {
+        self.history_cursor.is_some()
+    }
 }

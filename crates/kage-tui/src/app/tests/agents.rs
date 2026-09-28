@@ -283,6 +283,49 @@ fn agent_state_and_usage_leave_the_footer_alone() {
 }
 
 #[test]
+fn the_usage_snapshot_follows_the_focused_agent() {
+    let (mut app, _rx, events) = app_with_events();
+    let child = spawn_agent(&mut app, &events, "a1", "explore");
+    let state = kage_core::protocol::SessionState {
+        model: "agent:m".into(),
+        ..kage_core::protocol::SessionState::default()
+    };
+    let usage = kage_core::protocol::Usage {
+        total: kage_core::event::TokenUsage {
+            input: 1_000,
+            output: 200,
+            cache_read: 800,
+            cache_write: 0,
+        },
+        context_used: 2_000,
+        context_window: 100_000,
+        cost: 0.05,
+    };
+    send_to(
+        &mut app,
+        &events,
+        child,
+        vec![
+            kage_core::protocol::HostEvent::StateChanged { state }.into(),
+            kage_core::protocol::HostEvent::UsageUpdated { usage }.into(),
+        ],
+    );
+    app.set_focus(Some(child));
+    let snapshot = app.session_usage_snapshot().unwrap();
+    assert_eq!(snapshot.model, "agent:m");
+    assert_eq!(snapshot.input_tokens, 1_000);
+    assert_eq!(snapshot.output_tokens, 200);
+    assert_eq!(snapshot.cache_read_tokens, 800);
+    assert_eq!(snapshot.current_context, 2_000);
+    assert_eq!(snapshot.context_window, 100_000);
+    assert_eq!(snapshot.total_cost, 0.05);
+    app.set_focus(None);
+    let snapshot = app.session_usage_snapshot().unwrap();
+    assert_eq!(snapshot.model, "");
+    assert_eq!(snapshot.current_context, 0);
+}
+
+#[test]
 fn the_working_row_counts_live_agents() {
     let (mut app, _rx, events) = app_with_events();
     app.set_editor_modeless(true);

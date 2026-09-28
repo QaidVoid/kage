@@ -202,9 +202,27 @@ impl App {
     }
 
     /// Snapshot the session-usage handle, returning `None` when the
-    /// host has not registered one.
+    /// host has not registered one. While an agent is on screen, its
+    /// own model and usage stand in for the main session's, so the
+    /// statusline describes the conversation being viewed.
     pub(crate) fn session_usage_snapshot(&self) -> Option<crate::usage::SessionUsage> {
-        self.session_usage.as_ref().map(|h| lock(h).clone())
+        let mut usage = self.session_usage.as_ref().map(|h| lock(h).clone())?;
+        if let Some(node) = self.focus.and_then(|session| self.agents.get(session)) {
+            if !node.model.is_empty() {
+                usage.model.clone_from(&node.model);
+            }
+            usage.input_tokens = node.usage.total.input;
+            usage.output_tokens = node.usage.total.output;
+            usage.cache_read_tokens = node.usage.total.cache_read;
+            usage.cache_write_tokens = node.usage.total.cache_write;
+            usage.current_context = node.usage.context_used;
+            usage.total_cost = node.usage.cost;
+            if node.usage.context_window > 0 {
+                usage.context_window = node.usage.context_window;
+            }
+            usage.working = matches!(node.state, kage_core::protocol::AgentState::Running);
+        }
+        Some(usage)
     }
 
     /// Register the plugin commands the host wants exposed in the

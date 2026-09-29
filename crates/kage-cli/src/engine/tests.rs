@@ -3591,9 +3591,15 @@ fn finishing_a_swarm_child_reaps_it() {
     assert_eq!(children.len(), 2);
 
     let hosted = h.engine.hosted_sessions();
-    assert!(hosted.contains(&parent), "the parent stays hosted");
+    assert!(
+        hosted.iter().any(|(id, _)| *id == parent),
+        "the parent stays hosted"
+    );
     for child in &children {
-        assert!(!hosted.contains(child), "child {child} should be reaped");
+        assert!(
+            !hosted.iter().any(|(id, _)| id == child),
+            "child {child} should be reaped"
+        );
         // The transcript survives in the session file the reaped child
         // was writing.
         let entries: Vec<kage_session::SessionEntry> =
@@ -3630,7 +3636,12 @@ fn a_reaped_swarm_child_resumes_from_its_file() {
     prompt(&h.engine, parent, "go", Delivery::Steer);
     let events = until_runs_end(&h.events, 3);
     let (child, _) = spawned(&events)[0].clone();
-    assert!(!h.engine.hosted_sessions().contains(&child));
+    assert!(
+        !h.engine
+            .hosted_sessions()
+            .iter()
+            .any(|(id, _)| *id == child)
+    );
 
     // Re-prompt the reaped child the way a second swarm call would.
     let (reply, reply_rx) = crossbeam_channel::bounded(1);
@@ -3657,7 +3668,12 @@ fn a_reaped_swarm_child_resumes_from_its_file() {
     let output = reply_rx.recv_timeout(WAIT).expect("no reply");
     assert!(!output.is_error, "{}", output.text);
     assert!(output.text.contains("resumed reply"), "{}", output.text);
-    assert!(!h.engine.hosted_sessions().contains(&child));
+    assert!(
+        !h.engine
+            .hosted_sessions()
+            .iter()
+            .any(|(id, _)| *id == child)
+    );
     h.engine.shutdown();
 }
 
@@ -3686,4 +3702,75 @@ fn a_run_ending_mid_ask_resolves_the_pending_ask() {
         .count();
     assert_eq!(resolved, 1, "the ask is denied once, unprompted");
     h.engine.shutdown();
+}
+
+#[test]
+fn a_queued_fork_child_loads_its_snapshot_at_its_first_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let h = harness(MockProvider::sequence(vec![
+        swarm_turn(&[("call_s", forked_swarm_task(&["a", "b"]))]),
+        tool_turn("gate"),
+        text_turn("child a one"),
+        text_turn("child b one"),
+        text_turn("parent done"),
+    ]));
+    let parent = SessionId::new();
+    let (recorder, _) = recorder_in(dir.path(), parent);
+    h.engine.open(SessionSpec {
+        recorder: Some(recorder),
+        agents: Some(swarm_setup(1, 60_000)),
+        ..h.spec(parent)
+    });
+    prompt(&h.engine, parent, "go", Delivery::Steer);
+    // Child "a" runs and blocks in the gate tool, so child "b" stays
+    // queued behind the running limit. Child ids come from everything
+    // seen so far, since b's spawn card may land before or after a's
+    // tool call.
+    let mut seen = wait_for(&h.events, |e| is_tool_start(e) && e.session != parent);
+    let a = seen.last().unwrap().session;
+    let b = loop {
+        if let Some(b) = spawned(&seen)
+            .into_iter()
+            .map(|(id, _)| id)
+            .find(|id| *id != a)
+        {
+            break b;
+        }
+        let more = wait_for(&h.events, |e| {
+            matches!(e.event, Event::Host(HostEvent::AgentSpawned { .. }))
+        });
+        seen.extend(more);
+    };
+    let hosted = h.engine.hosted_sessions();
+    assert_eq!(
+        hosted.iter().find(|(id, _)| *id == b),
+        Some(&(b, Some(0))),
+        "a queued fork child holds no snapshot"
+    );
+    h.release.send(()).unwrap();
+
+    let events = until_runs_end(&h.events, 3);
+    h.engine.shutdown();
+    let output = tool_output(&events, parent, "call_s");
+    assert!(
+        output
+            .text
+            .starts_with("completed: 2, failed: 0, cancelled: 0\n"),
+        "{}",
+        output.text
+    );
+    // The snapshot was there when the queued child's first prompt
+    // ran: the prompt chains onto the fork notice.
+    let prompt_of_b = events
+        .iter()
+        .find_map(|e| match &e.event {
+            Event::Loop(LoopEvent::MessageAppended { message })
+                if e.session == b && message.role == Role::User =>
+            {
+                Some(message.parent.is_some())
+            }
+            _ => None,
+        })
+        .expect("child b appended its prompt");
+    assert!(prompt_of_b, "the snapshot loaded before the first prompt");
 }

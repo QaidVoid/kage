@@ -23,7 +23,7 @@ mod shell;
 mod swarm_tool;
 
 use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
@@ -202,7 +202,7 @@ enum Input {
     PlanApproved(SessionId),
     /// Test-only: report the hosted session ids.
     #[cfg(test)]
-    HostedSessions(crossbeam_channel::Sender<Vec<SessionId>>),
+    HostedSessions(crossbeam_channel::Sender<Vec<(SessionId, Option<usize>)>>),
 }
 
 /// One verified resume target, from its session marker.
@@ -278,9 +278,10 @@ impl Engine {
         self.commander.send(command);
     }
 
-    /// Test-only: the session ids the dispatcher hosts right now.
+    /// Test-only: the hosted sessions with the length of each idle
+    /// context history, `None` while a run owns the context.
     #[cfg(test)]
-    pub(crate) fn hosted_sessions(&self) -> Vec<SessionId> {
+    pub(crate) fn hosted_sessions(&self) -> Vec<(SessionId, Option<usize>)> {
         let (tx, rx) = crossbeam_channel::bounded(1);
         let _ = self.commander.0.send(Input::HostedSessions(tx));
         rx.recv_timeout(Duration::from_secs(5)).unwrap_or_default()
@@ -428,7 +429,12 @@ impl Dispatcher {
                 Input::RequeueChild { id } => self.requeue_child(id),
                 #[cfg(test)]
                 Input::HostedSessions(reply) => {
-                    let _ = reply.send(self.sessions.keys().copied().collect());
+                    let _ = reply.send(
+                        self.sessions
+                            .iter()
+                            .map(|(id, s)| (*id, s.idle.as_ref().map(|idle| idle.cx.history.len())))
+                            .collect(),
+                    );
                 }
                 Input::McpDone(done) => self.mcp_done(*done),
                 Input::ShellDone(done) => self.shell_done(*done),
@@ -856,6 +862,9 @@ impl Dispatcher {
         else {
             return;
         };
+        if let Some(path) = session.link.as_mut().and_then(|l| l.lazy_history.take()) {
+            apply_forked_snapshot(&self.bus, id, &path, &mut cx);
+        }
         cx.model = bare_model;
         fit_context(&mut cx, &self.registry, &model);
         if std::mem::take(&mut session.thinking_changed) {
@@ -1327,6 +1336,31 @@ fn asker(bus: &Arc<Bus>, asks: &Asks, next: &Arc<AtomicU64>, session: SessionId)
         );
         Some(answer)
     })
+}
+
+/// Load a forked child's copied conversation into `cx` at its first
+/// run start. The snapshot sits in the child's own session file from
+/// spawn on, so a child queued behind the running limit holds
+/// kilobytes instead of the whole parent transcript.
+fn apply_forked_snapshot(bus: &Bus, id: SessionId, path: &Path, cx: &mut AgentContext) {
+    match kage_session::replay(path) {
+        Ok(replay) => {
+            cx.history = replay.history;
+            cx.budget = kage_loop::TokenBudget {
+                used_input: replay.usage_total.input,
+                used_output: replay.usage_total.output,
+                used_cache_read: replay.usage_total.cache_read,
+                used_cache_write: replay.usage_total.cache_write,
+                current_context: replay.usage_total.last_context,
+            };
+        }
+        Err(err) => notice(
+            bus,
+            id,
+            NoticeLevel::Warning,
+            format!("cannot load the forked conversation: {err}"),
+        ),
+    }
 }
 
 /// Tell the user when writing to the session file failed.

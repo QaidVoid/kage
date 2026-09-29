@@ -1,6 +1,6 @@
 //! Agent sessions an `agent` call starts.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use kage_core::agents::AgentDef;
@@ -37,6 +37,11 @@ pub(super) struct AgentLink {
     /// first run that finishes, so later runs a user starts in the
     /// agent never answer the parent twice.
     pub(super) reply: Option<crossbeam_channel::Sender<ToolOutput>>,
+    /// Session file whose conversation loads into the context at the
+    /// first run start instead of at spawn. Set for forked children:
+    /// their copied transcript would otherwise sit in RAM, possibly
+    /// for the whole batch, while the child waits for a run slot.
+    pub(super) lazy_history: Option<PathBuf>,
 }
 
 impl super::Dispatcher {
@@ -83,13 +88,14 @@ impl super::Dispatcher {
             Some(info) => (info.id, Some(info)),
             None => (SessionId::new(), None),
         };
-        let (spec, missing) = if fork {
+        let (spec, missing, lazy_history) = if fork {
             match forked_spec(from, parent, id, def, &setup) {
-                Ok((spec, missing)) => (spec, missing),
+                Ok((spec, missing, path)) => (spec, missing, Some(path)),
                 Err(text) => return fail(text),
             }
         } else {
-            agent_spec(from, parent, id, def, &setup)
+            let (spec, missing) = agent_spec(from, parent, id, def, &setup);
+            (spec, missing, None)
         };
         let cancel = from.cancel.child();
         let batch_id = swarm.as_ref().map(|info| info.batch_id.clone());
@@ -99,6 +105,7 @@ impl super::Dispatcher {
             depth,
             batch_id,
             reply: Some(reply),
+            lazy_history,
         };
         let mut marker = serde_json::json!({
             "parent": parent,
@@ -282,6 +289,7 @@ impl super::Dispatcher {
                 depth: depth_of(from) + 1,
                 batch_id: Some(batch_id.clone()),
                 reply: Some(reply),
+                lazy_history: None,
             };
             (spec, missing, note, cancel, link)
         };
@@ -561,17 +569,20 @@ fn fork_point(path: &Path) -> Option<(kage_session::EntryId, bool)> {
 /// The session spec for a child spawned from a snapshot of `from`'s
 /// conversation instead of zero context: `from`'s session file is
 /// forked into the child's own file up to [`fork_point`], and the
-/// child's context history and token budget come from that copy, so
-/// its transcript is self-contained from the first entry. Model,
-/// system prompt, thinking level and tools still follow the
-/// definition. Errors when `from` does not record, or the fork fails.
+/// child's context history and token budget load from that copy at
+/// the first run start ([`AgentLink::lazy_history`]), so a child
+/// queued behind the running limit holds kilobytes instead of the
+/// whole snapshot. Model, system prompt, thinking level and tools
+/// still follow the definition. Errors when `from` does not record,
+/// or the fork fails. Returns the child's file path for the lazy
+/// load.
 fn forked_spec(
     from: &Session,
     parent: SessionId,
     id: SessionId,
     def: &AgentDef,
     setup: &AgentSetup,
-) -> Result<(SessionSpec, Vec<String>), String> {
+) -> Result<(SessionSpec, Vec<String>, PathBuf), String> {
     let Some(src) = from.path.as_deref() else {
         return Err(
             "cannot fork: this session is not recorded, so there is no conversation \
@@ -628,19 +639,9 @@ fn forked_spec(
             .append(&notice)
             .map_err(|err| format!("cannot write the fork notice into session {id}: {err}"))?;
     }
-    let replay = kage_session::replay(&child_path)
-        .map_err(|err| format!("cannot read the forked session {id}: {err}"))?;
     let mut cx = AgentContext::new(model.clone(), system_prompt).with_workdir(from.workdir.clone());
-    cx.history = replay.history;
     cx.confine_paths = from.confine_paths;
     cx.thinking_level = def.thinking.or(from.state.thinking);
-    cx.budget = TokenBudget {
-        used_input: replay.usage_total.input,
-        used_output: replay.usage_total.output,
-        used_cache_read: replay.usage_total.cache_read,
-        used_cache_write: replay.usage_total.cache_write,
-        current_context: replay.usage_total.last_context,
-    };
     let (tools, missing) = agent_tools(&from.tools, def.tools.as_deref());
     let spec = SessionSpec {
         id,
@@ -657,7 +658,7 @@ fn forked_spec(
         agents: Some(setup.clone()),
         shell: from.shell.clone(),
     };
-    Ok((spec, missing))
+    Ok((spec, missing, child_path))
 }
 
 /// The `kage:agent` marker data of the session file at `path`, from
